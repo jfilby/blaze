@@ -2669,6 +2669,17 @@ class TypeScriptParser {
         if (declaration.offers !== null) defaultExport = declaration.offers;
         continue;
       }
+      // A top-level value is a declaration, not a statement that makes the file
+      // run. The functions of the file read a constant expression where it was
+      // written (see `scanConstants`), and a file of declarations alone is a
+      // library. The declaration stays in the body tokens for a file that does
+      // run, where the program reads it as the value it initialises.
+      if (this.at("const") || this.at("let") || this.at("var")) {
+        this.synchronize();
+        this.accept(";");
+        atTop = false;
+        continue;
+      }
       const before = this.position;
       this.synchronize();
       this.accept(";");
@@ -6260,6 +6271,30 @@ class TypeScriptParser {
     const fields: { name: string; value: Expression }[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
       const key = this.next();
+      if (key.text === "...") {
+        // `{ ...DEFAULT_TARGET }` is the fields of the object it spreads. A
+        // constant object of the file is written out here, at the fields the
+        // source already wrote; an object built at run time has no fields the
+        // parser can name, and is refused rather than read as nothing.
+        const spread = this.readExpression();
+        const constant = spread.k === "ident" ? this.constants.get(spread.name) : undefined;
+        if (constant?.fields !== undefined) {
+          for (const [field, range] of constant.fields) {
+            const value = this.constantExpression(spread.k === "ident" ? spread.name : "", range);
+            if (value !== null) fields.push({ name: field, value });
+          }
+        } else if (spread.k === "object") {
+          fields.push(...spread.fields);
+        } else {
+          this.report(
+            "an object spread reads a constant object",
+            "write the fields out, or spread an object the file already wrote as a constant",
+            key,
+          );
+        }
+        if (!this.accept(",")) break;
+        continue;
+      }
       const name = key.kind === "ident" || key.kind === "string" ? key.text : null;
       if (name === null) {
         this.report("an object field is named", `near "${key.text}"`, key);

@@ -399,6 +399,19 @@ test("a top-level constant a function reads is the value it was written with", a
   assert.equal(output.trim(), "13");
 });
 
+test("an object spread of a constant object is the fields it wrote", async () => {
+  const output = await agreesWithNode([
+    "const BASE = { a: 1, b: 2 };",
+    "export function total(): number {",
+    "  const all = { ...BASE, c: 3 };",
+    "  return all.a + all.b + all.c;",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

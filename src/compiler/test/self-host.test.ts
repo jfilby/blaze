@@ -22,10 +22,14 @@ import { selfHostGap } from "./self-host-gap.ts";
  * It was 6339 when the report was added, 6248 after the type-only slice, and
  * 6313 when the platform boundary added its two sources. Object shorthand and
  * the text methods lowered it to 5856, and reading a module's own top-level
- * values lowered it to 5802. Lower it with every slice; raise it only when the
- * compiler itself starts using a construct the frontend has not learned yet.
+ * values lowered it to 5802. Reading a file of declarations as a library rather
+ * than a program rose it to 6298: functions that used to be read by the program
+ * parser are now module functions, and the gaps in them are the ones the report
+ * should show. Lower it with every slice; raise it only when the measurement
+ * changes which parser reads a body, or when the compiler itself grows a
+ * construct the frontend has not learned yet.
  */
-const REFUSAL_BUDGET = 5802;
+const REFUSAL_BUDGET = 6298;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

@@ -429,6 +429,22 @@ test("a text method lowers to the runtime call that answers it", () => {
   assert.match(ir, /text\.trim/);
 });
 
+test("a library with a top-level constant is a library, not a program", () => {
+  // A top-level value is a declaration, not a statement that makes the file
+  // run. A module the program imports may hold one, and its functions read it
+  // where it was written.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": 'import { f } from "./lib.ts";\nconsole.log(f());\n',
+      "lib.ts": "const BASE = 2;\nexport function f(): number { return BASE * 3; }\n",
+    },
+    "main.ts",
+  );
+  const library = phase.program.files.find((file) => file.path === "lib.ts");
+  assert.ok(library?.functions["f"] !== undefined, "the library's function is a function of the module");
+});
+
 test("a switch is lowered to the comparisons and the fallthrough it writes", () => {
   // The discriminant is read once, each case is the comparison the source
   // wrote, a case with no break falls into the next, and the default is what

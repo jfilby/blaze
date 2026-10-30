@@ -65,7 +65,10 @@ constructs were refused. The type-only slice below lowered the count to 6248.
 The platform boundary added two sources that are values and re-exports, which
 raised it to 6313: the compiler is now 93 sources, and 1 is read. Object
 shorthand and the text methods lowered it to 5856, and reading a module's own
-top-level values lowered it to 5802. The refusals fall into six frontiers:
+top-level values lowered it to 5802. Reading a file of declarations as a library
+rather than as a program rose it to 6298: functions that used to fall to the
+program parser are now module functions, so the report shows the gaps in them.
+The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -147,7 +150,7 @@ below are independent enough to land one at a time, in this order:
   would have written.
 - Spread and destructuring in declarations, parameters, calls, array literals
   and object literals. Object shorthand, `{ line }`, is read as the field it
-  names.
+  names, and spreading a constant object writes out the fields it holds.
 - `switch` (about 200 occurrences), lowered to the chain of comparisons the
   current subset already has.
 - `throw` and `new Error`, plus `error.message` in a catch arm. Try/catch and
@@ -158,9 +161,10 @@ below are independent enough to land one at a time, in this order:
   inheritance model to compile four uses.
 - Module forms: `import * as`, renamed imports, re-exports, and a module value
   another module imports. A top-level constant is already read by the functions
-  of its own file; what is missing is the module graph carrying that value
-  across files. A self-hosting compiler has a module graph, so the linker's "one
-  name per function" rule has to become a module-scoped name.
+  of its own file, and a file of declarations is a library rather than a
+  program; what is missing is the module graph carrying that value across files.
+  A self-hosting compiler has a module graph, so the linker's "one name per
+  function" rule has to become a module-scoped name.
 
 Exit criterion: the source's control flow and expressions parse; only data and
 host refusals remain.
