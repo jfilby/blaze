@@ -526,7 +526,7 @@ class FunctionEmitter {
         if (isSequence(type)) {
           // An array local carries its length beside it, so a later `length`
           // of it and a join of it answer from that hidden variable.
-          this.write([`${pad(depth)}size_t ${name}_length = ${this.arrayLength(statement.value, depth)};`]);
+          this.write([`${pad(depth)}size_t ${name}_length = ${this.boundLength(name, statement.value, type, depth)};`]);
           this.arrayLocals.add(statement.slot.name);
         }
         return;
@@ -904,13 +904,7 @@ class FunctionEmitter {
         ? null
         : (call.signature.params[index] !== undefined ? parseType(call.signature.params[index].type) : null);
       if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr") && !call.builtin) {
-        try {
-          args.push(this.arrayLength(argument, depth));
-        } catch {
-          // If the length cannot be settled, pass 0 and let the callee fail
-          // loudly rather than silently miscompiling.
-          args.push("0");
-        }
+        this.placeLength(argument, targetType, paramType, args, depth);
       }
     });
     if (!call.builtin) {
@@ -1541,7 +1535,7 @@ class FunctionEmitter {
       args.push(this.expression(argument, targetType, depth));
       types.push(declaredType(targetType));
       if (targetType.kind === "slice" || targetType.kind === "array" || targetType.kind === "ptr") {
-        args.push(this.arrayLength(argument, depth));
+        this.placeLength(argument, targetType, targetType, args, depth);
         types.push(declaredType(USIZE));
       }
     });
@@ -1578,7 +1572,7 @@ class FunctionEmitter {
       const block = this.temporary(`${element}_block`);
       return (
         `({ const size_t ${block}_length = (size_t)(${count}); ` +
-        `${element}* ${block} = (${element}*)${RUNTIME_NAME}_allocate((${block}_length == 0 ? 1 : ${block}_length) * sizeof(${element})); ` +
+        `${element}* ${block} = (${element}*)${RUNTIME_NAME}_allocate(${block}_length * sizeof(${element})); ` +
         `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ${block}; })`
       );
     }
@@ -1740,6 +1734,80 @@ class FunctionEmitter {
     );
   }
 
+  /**
+   * Whether a value's length is one the compiler can write down as it stands.
+   *
+   * A name carries its length beside it, an array written out is as long as the
+   * values in it, a sized one says how many it holds, and a join of two is the
+   * sum of theirs. Everything else — a call above all — is a value whose answer
+   * is a block with a length in it and no other way to ask.
+   */
+  private settledLength(value: SemanticValue): boolean {
+    if (value.k === "local") return true;
+    if (value.k === "buffer") return value.view === null;
+    return value.k === "arith" && value.op === "arrayConcat";
+  }
+
+  /**
+   * The length of an array a name now holds.
+   *
+   * A local is bound before its length is asked for, so the answer may be read
+   * out of the value itself: a block the runtime laid out records how many
+   * bytes it holds, and a block of elements holds its count in those bytes. That
+   * is what makes `const b = a.map(f)` a name whose `.length` answers, when the
+   * call that filled it is not a value the compiler can count.
+   */
+  private boundLength(name: string, value: SemanticValue, type: SemanticType, depth: number): string {
+    const block = (): string => {
+      const element = elementTypeOf(type);
+      if (element === null) return "0";
+      return `(${RUNTIME_NAME}_object_size(${name}) / sizeof(${declaredType(element)}))`;
+    };
+    // A value whose length is written down is read for it as it stands. One
+    // whose length is not — a call, whose answer is a block nothing here can
+    // count — is read out of the name it was just bound to, so that the call is
+    // made once rather than once for the value and again for the length.
+    if (!this.settledLength(value)) return block();
+    return this.arrayLength(value, depth);
+  }
+
+  /**
+   * The length that travels beside an array argument.
+   *
+   * A length the compiler can settle on is written down. One it cannot — the
+   * answer of a call, which is what a chained `a.filter(f).map(g)` hands over —
+   * is read out of the block the call answered, and the argument is bound to a
+   * name first so the call is made once rather than once for the value and
+   * again for the length.
+   */
+  private placeLength(
+    value: SemanticValue,
+    targetType: SemanticType,
+    paramType: SemanticType,
+    args: string[],
+    depth: number,
+  ): void {
+    // The argument is written already, and it is the last one placed: a value
+    // whose length is not written down is bound to a name so that the call it
+    // may hold runs once rather than once for the value and again for the
+    // length.
+    if (!this.settledLength(value)) {
+      const element = elementTypeOf(paramType);
+      const bound = this.temporary("blaze_arg");
+      this.pending.push(`${declaredType(targetType)} ${bound} = ${args[args.length - 1]};`);
+      args[args.length - 1] = bound;
+      args.push(element === null ? "0" : `(${RUNTIME_NAME}_object_size(${bound}) / sizeof(${declaredType(element)}))`);
+      return;
+    }
+    let length: string | null = null;
+    try {
+      length = this.arrayLength(value, depth);
+    } catch {
+      length = null;
+    }
+    args.push(length ?? "0");
+  }
+
   /** The length of an array whose length the compiler can settle on. */
   private arrayLength(value: SemanticValue, depth: number): string {
     if (value.k === "local" && this.arrayParamLengths.has(value.name)) {
@@ -1765,6 +1833,13 @@ class FunctionEmitter {
         );
       }
       return String(value.length ?? value.values.length);
+    }
+    // A block of elements a call answered is a block the runtime laid out, and
+    // it records how many bytes it holds: how many elements that is, is the
+    // answer. The value is written once, where the length is asked for.
+    const element = elementTypeOf(value.type);
+    if (element !== null && isSequence(value.type)) {
+      return `(${RUNTIME_NAME}_object_size(${this.raw(value, depth)}) / sizeof(${declaredType(element)}))`;
     }
     throw backendError(
       `${this.fn.symbol} reads the length of an array, which this backend cannot settle`,

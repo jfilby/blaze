@@ -1490,6 +1490,16 @@ export function tokenize(source: string): Token[] {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The name a file's generated functions are marked by: its own, made into
+ * something a C identifier and a symbol may be.
+ */
+function nameStem(path: string): string {
+  const file = path.slice(path.lastIndexOf("/") + 1);
+  const stem = file.replace(/\.(?:ts|tsx|js|mjs|cjs)$/i, "").replace(/[^A-Za-z0-9_]/g, "_");
+  return stem === "" ? "file" : stem;
+}
+
+/**
  * The arrow a name of a body is bound to: the function it was lifted to, the
  * values it captured, and the function that enters it as a value.
  *
@@ -1643,12 +1653,42 @@ class TypeScriptParser {
   /** The function each lifted arrow became, by the name it took. */
   private liftedArrows = new Map<string, TypeScriptFunction>();
   /**
+   * The function each collection method was lowered to, by the shape it walks.
+   *
+   * `a.map(f)` and a later `b.map(g)` over arrays of the same element type and
+   * a callback of the same signature are the same walk, so the second reuses the
+   * function the first wrote.
+   */
+  private collectHelpers = new Map<string, { name: string; returns: TypeExpr }>();
+  /** The suffix the next collection helper takes, so each is a name of its own. */
+  private collectCount = 0;
+  /**
+   * The type of a value the frontend built rather than read.
+   *
+   * `resultType` answers what a name, a literal or an operation is; it cannot
+   * answer for a call, because what a call answers is the callee's to say. The
+   * frontend knows that for the helpers it writes itself, so it is written down
+   * here and read back when the value it produced is walked again — which is
+   * what `a.filter(f).map(g)` does.
+   */
+  private expressionTypes = new Map<Expression, TypeExpr>();
+  /**
    * Whether the file's bigints reach past the machine word. A `bigint` is
    * arbitrary precision in the language; this compiler holds it at the machine
    * word where every value fits, and at the wide whole number where one does
    * not, so the annotation is the width the file's own values reach.
    */
   wideBigint = false;
+  /**
+   * What the functions this file's frontend wrote are named by.
+   *
+   * The names a body generates are functions of the same program as the ones
+   * the source wrote, and every function of a program is linked by its symbol,
+   * so one symbol belongs to one function: `__closure_0` in two files is one
+   * name for two bodies. The file's own name keeps them apart, and keeps the
+   * IR readable besides.
+   */
+  private readonly stem: string;
 
   constructor(
     tokens: Token[],
@@ -1661,6 +1701,7 @@ class TypeScriptParser {
   ) {
     this.tokens = tokens;
     this.path = path;
+    this.stem = nameStem(path);
     this.diagnostics = diagnostics;
     this.classTable = classTable ?? scanClasses(tokens);
     this.allTokens = allTokens ?? tokens;
@@ -3308,7 +3349,7 @@ class TypeScriptParser {
       const held = annotationClass ?? this.classOfExpression(init);
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
-      this.valueTypes.set(name.text, type ?? resultType(init, this.valueTypes));
+      this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
@@ -4541,8 +4582,18 @@ class TypeScriptParser {
         // `p.add(q)`: a method is a function whose first argument is the
         // instance the source called it on.
         if (target.k === "member") {
+          const callLine = this.peek().line;
           const args = this.readCallArguments();
           const receiver = target.base;
+          // `a.map(f)`: a method of a typed array is a function of the file that
+          // walks the array, so it is read before a method of a class is looked
+          // for. A receiver that is not a sequence falls through to the classes
+          // the source declared.
+          const collected = this.collection(receiver, target.field, args, callLine);
+          if (collected !== null) {
+            replace(collected);
+            continue;
+          }
           const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
           if (found === null) {
             this.report(
@@ -4896,7 +4947,7 @@ class TypeScriptParser {
     captures: readonly string[],
     line: number,
   ): ArrowBinding {
-    const name = `__closure_${this.closureCount}`;
+    const name = `__closure_${this.stem}_${this.closureCount}`;
     this.closureCount += 1;
     const captureTypes = captures.map((capture) => this.valueTypes.get(capture) ?? ANY_TYPE);
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
@@ -4973,6 +5024,399 @@ class TypeScriptParser {
     });
     this.liftedArrows.set(code, lifted);
     return code;
+  }
+
+  /**
+   * A collection method called on a typed array: the function of the file that
+   * walks the array and calls the closure.
+   *
+   * `a.map(f)` is not a method this compiler has. It is a function of the file
+   * that walks the elements and hands each to `f`, which is the loop the source
+   * would have written and needs nothing new: the walk is a counted loop, the
+   * call is a call of a value, and the array the answers go into is an
+   * allocation. What the source would not have written is the helper itself, so
+   * that is what the frontend writes.
+   *
+   * A callback is handed the element and, where it says it takes them, the
+   * index and the array. `thisArg` and the ability to leave the callback's
+   * parameters out are not carried: a closure is a function of fixed arity.
+   */
+  private collection(
+    receiver: Expression,
+    method: string,
+    args: readonly Expression[],
+    line: number,
+  ): Expression | null {
+    const sequence = this.valueTypeOf(receiver);
+    if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
+    const callback = args[0];
+    if (callback === undefined) {
+      this.report(`${method} takes a function`, `as in a.${method}((x: number): number => x)`, this.peek());
+      return this.hole();
+    }
+    const signature = this.callbackSignature(callback);
+    if (signature === null) {
+      this.report(
+        `the function handed to ${method} is not one this compiler can call`,
+        "a callback is an arrow, or a name held at a function type, as in f: (x: number) => number",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    if (method === "map" && signature.returns.kind !== "primitive") {
+      this.report(
+        "the function map walks the array with must answer a number or a truth",
+        "a typed array holds numbers, so a map that answers text or a reference builds an array nothing here holds",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const wanted = method === "reduce" ? [1, 2] : [1];
+    if (!wanted.includes(args.length)) {
+      this.report(
+        `${method} takes ${wanted.join(" or ")} argument${wanted.length === 1 && wanted[0] === 1 ? "" : "s"}`,
+        `it was given ${args.length}`,
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const helper = this.collectionHelper(method, sequence.of, signature, args.length === 2, line);
+    const call: Expression = { k: "call", name: helper.name, args: [receiver, callback, ...args.slice(1)] };
+    this.expressionTypes.set(call, helper.returns);
+    return call;
+  }
+
+  /**
+   * The type a value is held at, read with the names of the body and with the
+   * functions the frontend wrote itself.
+   *
+   * `resultType` answers what a name, a literal or an operation is. It cannot
+   * answer for a call, because what a call answers is the callee's to say; the
+   * frontend knows that for the helpers it wrote, so the answer is taken from
+   * there and a helper's answer can be walked again — which is what
+   * `const b = a.map(f); b.reduce(g)` does.
+   */
+  private valueTypeOf(value: Expression): TypeExpr {
+    const recorded = this.expressionTypes.get(value);
+    if (recorded !== undefined) return recorded;
+    if (value.k === "call") {
+      const written = this.liftedArrows.get(value.name);
+      if (written !== undefined) return written.returns;
+    }
+    return resultType(value, this.valueTypes);
+  }
+
+  /** The signature the callback of a collection method is written at. */
+  private callbackSignature(value: Expression): FunctionType | null {
+    if (value.k === "arrow") {
+      const binding = this.arrowBindings.get(value.name);
+      if (binding !== undefined) {
+        return { params: binding.params.map((param) => param.type), returns: binding.returns };
+      }
+    }
+    if (value.k === "ident") {
+      const known = this.valueFunctions.get(value.name);
+      if (known !== undefined) return known;
+    }
+    return null;
+  }
+
+  /**
+   * The helper a collection method is lowered to, written once per shape.
+   *
+   * Every helper is a function of the file and is compiled, linked and validated
+   * like any other. It reads nothing outside its parameters and calls nothing
+   * but the closure it is handed, so it needs no postcondition and states no
+   * buffer bound: what the walk reads is the array its caller handed it.
+   */
+  private collectionHelper(
+    method: string,
+    element: TypeExpr,
+    signature: FunctionType,
+    withInitial: boolean,
+    line: number,
+  ): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify([method, element, signature, withInitial]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: element };
+    const elementText = typeToString(element);
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const length = (): Expression => ({ k: "length", buffer: "items" });
+    const at = (index: Expression): Expression => ({ k: "index", base: ident("items"), index });
+    const plusOne = (value: Expression): Expression => ({ k: "binary", op: "+", left: value, right: number("1") });
+    /** The call of the callback, written with as many arguments as it takes. */
+    const callBack = (all: readonly Expression[]): Expression => {
+      const count = Math.min(signature.params.length, all.length);
+      return {
+        k: "invoke",
+        callee: ident("fn"),
+        args: all.slice(0, count),
+        params: signature.params.slice(0, count),
+        returns: signature.returns,
+      };
+    };
+    const loop = (from: string, body: Statement[], to: Expression = length()): Statement => ({
+      kind: "loop",
+      variable: "i",
+      from: number(from),
+      to,
+      inclusive: false,
+      step: null,
+      down: false,
+      body,
+      line,
+    });
+    const declare = (declared: string, init: Expression): Statement => ({
+      kind: "declare",
+      name: declared,
+      type: null,
+      init,
+      line,
+    });
+    const answer = (value: Expression): Statement => ({ kind: "result", value, line });
+    /** The zero a value of a type is when nothing was found. */
+    const zero = (): Expression =>
+      element.kind === "primitive" ? number("0") : element.kind === "text"
+        ? { k: "text", parts: [{ k: "text", value: "" }] }
+        : { k: "null" };
+
+    let body: Statement[];
+    let returns: TypeExpr;
+    switch (method) {
+      case "map": {
+        // The array a map builds holds what its callback answered, which the
+        // source may have written as a truth where it maps over numbers. A
+        // string or a reference is not an element a typed array holds, and a
+        // map that answers one is refused where it is written.
+        returns = { kind: "slice", of: signature.returns };
+        body = [
+          declare("out", { k: "sized", element: typeToString(signature.returns), count: length() }),
+          loop("0", [
+            {
+              kind: "indexAssign",
+              buffer: "out",
+              index: ident("i"),
+              op: "=",
+              value: callBack([at(ident("i")), ident("i"), ident("items")]),
+              line,
+            },
+          ]),
+          answer(ident("out")),
+        ];
+        break;
+      }
+      case "filter": {
+        returns = { kind: "slice", of: element };
+        // The predicate is called once per element and what it answered is
+        // kept, because calling it twice — once to count and once to fill — is
+        // two calls where the source made one.
+        body = [
+          declare("keep", { k: "sized", element: elementText, count: length() }),
+          declare("n", number("0")),
+          loop("0", [
+            {
+              kind: "if",
+              condition: callBack([at(ident("i")), ident("i"), ident("items")]),
+              then: [
+                { kind: "indexAssign", buffer: "keep", index: ident("n"), op: "=", value: at(ident("i")), line },
+                { kind: "update", name: "n", op: "++", prefix: false, line },
+              ],
+              otherwise: [],
+              line,
+            },
+          ]),
+          declare("out", { k: "sized", element: elementText, count: ident("n") }),
+          loop("0", [
+            { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: { k: "index", base: ident("keep"), index: ident("i") }, line },
+          ], ident("n")),
+          answer(ident("out")),
+        ];
+        break;
+      }
+      case "forEach": {
+        returns = NOTHING;
+        body = [
+          loop("0", [
+            { kind: "expression", value: callBack([at(ident("i")), ident("i"), ident("items")]), line },
+          ]),
+        ];
+        break;
+      }
+      case "every": {
+        returns = BOOLEAN_RESULT;
+        body = [
+          loop("0", [
+            {
+              kind: "if",
+              condition: callBack([at(ident("i")), ident("i"), ident("items")]),
+              then: [],
+              otherwise: [answer(number("0"))],
+              line,
+            },
+          ]),
+          answer(number("1")),
+        ];
+        break;
+      }
+      case "some": {
+        returns = BOOLEAN_RESULT;
+        body = [
+          loop("0", [
+            {
+              kind: "if",
+              condition: callBack([at(ident("i")), ident("i"), ident("items")]),
+              then: [answer(number("1"))],
+              otherwise: [],
+              line,
+            },
+          ]),
+          answer(number("0")),
+        ];
+        break;
+      }
+      case "find": {
+        returns = element;
+        body = [
+          loop("0", [
+            {
+              kind: "if",
+              condition: callBack([at(ident("i")), ident("i"), ident("items")]),
+              then: [answer(at(ident("i")))],
+              otherwise: [],
+              line,
+            },
+          ]),
+          answer(zero()),
+        ];
+        break;
+      }
+      case "findIndex": {
+        returns = NUMBER_RESULT;
+        body = [
+          loop("0", [
+            {
+              kind: "if",
+              condition: callBack([at(ident("i")), ident("i"), ident("items")]),
+              then: [answer(ident("i"))],
+              otherwise: [],
+              line,
+            },
+          ]),
+          answer({ k: "unary", op: "-", operand: number("1") }),
+        ];
+        break;
+      }
+      case "reduce": {
+        const accumulator = signature.params[0] ?? signature.returns;
+        returns = accumulator;
+        body = withInitial
+          ? [
+              declare("acc", ident("initial")),
+              loop("0", [
+                {
+                  kind: "assign",
+                  target: "acc",
+                  op: "=",
+                  value: callBack([ident("acc"), at(ident("i")), ident("i"), ident("items")]),
+                  line,
+                },
+              ]),
+              answer(ident("acc")),
+            ]
+          : [
+              // Without an initial value the walk starts at the second element,
+              // as the language does: the first is the accumulator.
+              declare("acc", at(number("0"))),
+              loop("1", [
+                {
+                  kind: "assign",
+                  target: "acc",
+                  op: "=",
+                  value: callBack([ident("acc"), at(ident("i")), ident("i"), ident("items")]),
+                  line,
+                },
+              ]),
+              answer(ident("acc")),
+            ];
+        break;
+      }
+      case "sort": {
+        returns = { kind: "slice", of: element };
+        // A sort writes the array it was handed, so it answers the array it
+        // wrote. An insertion sort is the walk that needs no second block: the
+        // element on the turn is the one being placed, and the ones before it
+        // are already in order.
+        body = [
+          loop("1", [
+            declare("value", at(ident("i"))),
+            declare("j", { k: "binary", op: "-", left: ident("i"), right: number("1") }),
+            {
+              kind: "while",
+              condition: {
+                k: "binary",
+                op: "&&",
+                left: { k: "binary", op: ">=", left: ident("j"), right: number("0") },
+                right: {
+                  k: "binary",
+                  op: ">",
+                  left: callBack([at(ident("j")), ident("value"), ident("i"), ident("items")]),
+                  right: number("0"),
+                },
+              },
+              body: [
+                {
+                  kind: "indexAssign",
+                  buffer: "items",
+                  index: plusOne(ident("j")),
+                  op: "=",
+                  value: at(ident("j")),
+                  line,
+                },
+                { kind: "update", name: "j", op: "--", prefix: false, line },
+              ],
+              line,
+            },
+            { kind: "indexAssign", buffer: "items", index: plusOne(ident("j")), op: "=", value: ident("value"), line },
+          ]),
+          // The array is sorted where it lies, which is what a source that
+          // writes the call for what it does relies on, and the value it hands
+          // back is a block of its own so that the length of the answer travels
+          // with it. A block the caller lent is one nothing says the length of.
+          declare("out", { k: "sized", element: elementText, count: length() }),
+          loop("0", [
+            { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: at(ident("i")), line },
+          ]),
+          answer(ident("out")),
+        ];
+        break;
+      }
+      default:
+        return { name: "", returns: ANY_TYPE };
+    }
+
+    const params = [
+      { name: "items", type: items },
+      { name: "fn", type: ANY_TYPE },
+      ...(withInitial ? [{ name: "initial", type: signature.params[0] ?? signature.returns }] : []),
+    ];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({
+      name,
+      exported: false,
+      internal: true,
+      params: helper.params,
+      returns,
+      handle: helper,
+    });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
   }
 
   /**
@@ -5219,6 +5663,15 @@ function usageOf(declaration: TypeScriptFunction): {
   accesses: AccessRange[];
 } {
   const parameters = new Set(declaration.params.map((param) => param.name));
+  /**
+   * Whether the ranges this body reads have to be stated.
+   *
+   * A function the frontend wrote is called only from the body that wrote it,
+   * which is what holds the bounds of everything it hands over. Stating them
+   * again would hold a helper to a caller that does not exist, and a helper that
+   * walks an array it was handed reads at a position nothing there can name.
+   */
+  const contractable = declaration.closure !== true;
   const accesses: AccessRange[] = [];
   /** The range a loop index stands for, which its body reads through. */
   const loops = new Map<string, { lo: string; hi: string }>();
@@ -5313,7 +5766,7 @@ function usageOf(declaration: TypeScriptFunction): {
             // parameter rather than as a local holding one. A contract that
             // cannot state the length the body reads is not a contract.
             if (at !== null) access(base.name, at, `(${at} + 1)`);
-            else
+            else if (contractable)
               throw frontendError(
                 `${declaration.name} cannot be contracted: it reads ${base.name} at a position the contract cannot name`,
                 "hold the bound in a parameter, so the contract can state the length the body reads",

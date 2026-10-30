@@ -1267,7 +1267,11 @@ class FunctionBody {
     }
     const args = expression.args.map((argument, at) => this.typed(argument, asType(expression.params[at]), line).value);
     const returns: SemanticType = expression.returns;
-    const argTypes = args.map((argument) => argument.type);
+    // The type each argument is handed over as is the one the call site states,
+    // not the one the value happens to be: a loop counter handed to a parameter
+    // declared as a double is converted where it is passed, exactly as it is in
+    // a call of a named function.
+    const argTypes: SemanticType[] = expression.params.map((type) => type);
     const signature: FunctionSignature = {
       name: "(closure)",
       symbol: "(closure)",
@@ -2250,7 +2254,10 @@ function bound(inferred: Inferred, annotation: Inferred | null): Inferred {
 
 /** Who owns what a call of a type hands back. */
 function ownership(returns: SemanticType): Ownership {
-  if (returns.kind === "ref") return "owned";
+  // A slice is a block the runtime laid out: the call hands one back and the
+  // caller owns it. A pointer is a window into a block someone else owns, and
+  // everything else is a number.
+  if (returns.kind === "ref" || returns.kind === "slice") return "owned";
   if (returns.kind === "ptr") return "borrowed";
   return "none";
 }

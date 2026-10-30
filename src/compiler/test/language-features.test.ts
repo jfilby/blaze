@@ -585,3 +585,197 @@ test("a closure lowers through the C backend, and the machine backend leaves it 
     }
   }
 });
+
+test("map builds the array its callback answers for each element", async () => {
+  // `a.map(f)` is a function of the file that walks the array, which the
+  // frontend writes: the loop, the allocation and the call of the closure are
+  // the ones the source would have written.
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const b = a.map((x: number): number => x * 2);",
+    "  return b[0] + b[1] + b[2] + b.length;",
+    "}",
+    "console.log(g(new Float64Array([1, 2, 3])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "15");
+});
+
+test("filter keeps the elements its callback accepts, and the count is the ones it kept", async () => {
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const b = a.filter((x: number): boolean => x > 2);",
+    "  return b.length * 100 + b[0] + b[1];",
+    "}",
+    "console.log(g(new Float64Array([1, 5, 2, 7])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "212");
+});
+
+test("forEach is handed every element", async () => {
+  const output = await agreesWithNode([
+    "function show(x: number): number { console.log(x); return x; }",
+    "function g(a: Float64Array): number {",
+    "  a.forEach((x: number): void => { show(x); });",
+    "  return 1;",
+    "}",
+    "console.log(g(new Float64Array([4, 5])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "4\n5\n1");
+});
+
+test("every and some answer for the elements they see", async () => {
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const all = a.every((x: number): boolean => x > 0);",
+    "  const any = a.some((x: number): boolean => x > 10);",
+    "  return (all ? 10 : 0) + (any ? 1 : 0);",
+    "}",
+    "console.log(g(new Float64Array([1, 2, 3])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
+test("find answers the element a callback accepted, and findIndex its position", async () => {
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const found = a.find((x: number): boolean => x > 2);",
+    "  const missing = a.findIndex((x: number): boolean => x > 99);",
+    "  return found * 10 + missing;",
+    "}",
+    "console.log(g(new Float64Array([1, 5, 2, 7])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "49");
+});
+
+test("reduce folds the array from an initial value, and from its first element", async () => {
+  const output = await agreesWithNode([
+    "function sum(a: Float64Array): number {",
+    "  return a.reduce((acc: number, x: number): number => acc + x, 0);",
+    "}",
+    "function product(a: Float64Array): number {",
+    "  return a.reduce((acc: number, x: number): number => acc * x);",
+    "}",
+    "console.log(sum(new Float64Array([1, 2, 3, 4])));",
+    "console.log(product(new Float64Array([2, 3, 4])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10\n24");
+});
+
+test("sort orders the array it was handed, and answers an array in that order", async () => {
+  // The array is sorted where it lies, which is what a call written for what it
+  // does relies on, and the value the call answers is an array of its own.
+  const output = await agreesWithNode([
+    "function inPlace(a: Float64Array): number {",
+    "  a.sort((x: number, y: number): number => x - y);",
+    "  return a[0] * 100 + a[1] * 10 + a[2];",
+    "}",
+    "function copied(a: Float64Array): number {",
+    "  const b = a.sort((x: number, y: number): number => y - x);",
+    "  return b[0] * 100 + b[1] * 10 + b[2];",
+    "}",
+    "console.log(inPlace(new Float64Array([3, 1, 2])));",
+    "console.log(copied(new Float64Array([3, 1, 2])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "123\n321");
+});
+
+test("a collection method takes the closure a parameter holds, and chains", async () => {
+  // The callback may be a value the body was handed, and what one method
+  // answers is what the next one walks.
+  const output = await agreesWithNode([
+    "function scale(a: Float64Array, f: (x: number) => number): number {",
+    "  const b = a.map(f).filter((x: number): boolean => x > 2);",
+    "  return b.length * 100 + b[0];",
+    "}",
+    "function g(a: Float64Array): number {",
+    "  return scale(a, (x: number): number => x * 2);",
+    "}",
+    "console.log(g(new Float64Array([1, 2, 3])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "204");
+});
+
+test("a callback is handed the position it is on where it asks for it", async () => {
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const b = a.map((x: number, i: number): number => x + i);",
+    "  return b[0] + b[1] + b[2];",
+    "}",
+    "console.log(g(new Float64Array([1, 2, 3])));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "9");
+});
+
+test("a collection method over an empty array answers with no elements", async () => {
+  const output = await agreesWithNode([
+    "function g(a: Float64Array): number {",
+    "  const kept = a.filter((x: number): boolean => x > 2);",
+    "  const mapped = a.map((x: number): number => x * 2);",
+    "  const all = a.every((x: number): boolean => x > 0);",
+    "  const any = a.some((x: number): boolean => x > 0);",
+    "  return kept.length * 1000 + mapped.length * 100 + (all ? 10 : 0) + (any ? 1 : 0);",
+    "}",
+    "console.log(g(new Float64Array(0)));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10");
+});
+
+test("the functions the frontend writes are named by the file that wrote them", async () => {
+  // Two files that each write an arrow and each walk an array generate a
+  // function of their own, and every function of a program is linked by its
+  // symbol: one name may belong to one function.
+  const directory = await scratch("blaze-language-feature-");
+  await writeFile(
+    join(directory, "lib.ts"),
+    [
+      "export function doubled(a: Float64Array): number {",
+      "  const b = a.map((x: number): number => x * 2);",
+      "  return b[0];",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "main.ts"),
+    [
+      "import { doubled } from './lib.ts';",
+      "function g(a: Float64Array): number {",
+      "  const b = a.map((x: number): number => x + 1);",
+      "  return b[1] + doubled(a);",
+      "}",
+      "console.log(g(new Float64Array([1, 2, 3])));",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "machine",
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    QUIET,
+    "build",
+  );
+  assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
+  const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(outcome.outputPath as string, [], { timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.equal(delivered.stdout.trim(), "5");
+});

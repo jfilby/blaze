@@ -110,6 +110,61 @@ and the build records `backendFallback`.
 - **A parameter with a default.** A default is a second entry point, which the
   module states as an overload; an arrow has no name to hang one on.
 
+## Collection methods that take a callback
+
+`map`, `filter`, `forEach`, `every`, `some`, `find`, `findIndex`, `reduce` and
+`sort` are read on a typed array. None of them is a builtin: each is lowered to
+**a function of the file that walks the array**, which is the loop the source
+would have written.
+
+```ts
+const b = a.map((x: number): number => x * 2);
+```
+
+becomes a call of a function the frontend writes:
+
+```ts
+function __collect_0(items: Float64Array, fn: any): Float64Array {
+  const out = new Float64Array(items.length);
+  for (let i = 0; i < items.length; i++) out[i] = fn(items[i]);
+  return out;
+}
+```
+
+The helper is a declaration of the same module, so it is contracted, validated,
+folded, lowered and linked like any other. Its parameters are the array and the
+closure, and the closure is called through the value it holds — so a callback
+may be an arrow written at the call, a name bound to one, or a parameter of
+function type. A callback is handed the element and, where it declares them, the
+index and the array; `thisArg` is not carried, because a closure has no `this`.
+
+Two consequences of walking with a real loop:
+
+- **`filter` calls its predicate once per element.** The elements it kept are
+  written into a block as they are found, and the answer is a block of exactly
+  the ones kept — a two-pass count-then-fill would call the predicate twice.
+- **`sort` sorts where the array lies and answers a block of its own.** A call
+  written for what it does still writes the array it was handed; what it answers
+  is a block whose length travels with it.
+
+A method call is read only where the receiver is a typed array, so a class that
+declares `map` keeps it. The call is refused where the callback is not a
+function this compiler can call, and where `map`'s callback answers something a
+typed array does not hold.
+
+### The length of what a call answers
+
+An array that reaches a function is a pointer and a length passed beside it, and
+a function that *answers* an array hands back only the pointer. What makes
+`.length` of a collection call answer is the runtime's own header: a block the
+runtime laid out records how many bytes it holds, so a block of elements holds
+its count in those bytes. A name bound to a call therefore reads its length from
+the block, and so does a `.length` written directly on the call.
+
+That is why every helper answers a block of its own. A block the caller lent —
+which is what `sort` would answer if it returned its parameter — has no header
+the answer can trust, so the sorted answer is copied into one.
+
 ## Semantics of a capture
 
 A captured value is read **where the arrow is written** and travels in the
@@ -122,7 +177,14 @@ and it is the same rule the program body's own closures follow.
 
 ## What is next
 
-Collection methods that take a closure — `map`, `filter`, `forEach`, `every`,
-`some`, `find`, `reduce`, `sort` — are the largest remaining user of arrows in
-this compiler's own sources. They need a `builtins.ts` entry per method, and a
-lowering in the C backend that walks the array and calls the closure.
+- `find` answers the zero of its element type where the callback accepts
+  nothing, because a value here has no `undefined`. A source that reads the
+  answer of a `find` must know the element it wants is there.
+- `flatMap` is not carried: it answers an array of arrays, and a value here is
+  one array of numbers.
+- A receiver that is a field of an object is not read as an array: the layout
+  pass does not say what an `any` field holds, so `this.items.map(f)` is not
+  recognised. A local or a parameter is.
+- A collection method is read in a function body. The statements a program runs
+  at the top of its entry module hold numbers and strings, so a name bound to
+  the array a method answers is not a value a program body carries.

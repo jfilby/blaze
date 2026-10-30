@@ -702,7 +702,7 @@ test("an arrow function is lifted into a function of the file, with what it capt
   );
   assert.deepEqual(
     analysis.functions.map((declared) => declared.name),
-    ["add", "__closure_0"],
+    ["add", "__closure_main_0"],
   );
   const lifted = analysis.functions[1];
   assert.equal(lifted?.internal, true, "an arrow is not an export of the file");
@@ -717,7 +717,7 @@ test("an arrow function is lifted into a function of the file, with what it capt
   }).body;
   const call = body[1]?.value;
   assert.equal(call?.k, "call");
-  assert.equal(call?.name, "__closure_0");
+  assert.equal(call?.name, "__closure_main_0");
   assert.deepEqual(
     call?.args?.map((arg) => (arg.k === "ident" ? arg.name : arg.k)),
     ["x", "literal"],
@@ -734,13 +734,13 @@ test("an arrow written where it is called is a call of the function it lifted to
   );
   assert.deepEqual(
     analysis.functions.map((declared) => declared.name),
-    ["f", "__closure_0", "__closure_code_0"],
+    ["f", "__closure_main_0", "__closure_code_main_0"],
   );
   const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
     body: { kind: string; value?: { k: string; name?: string } }[];
   }).body;
   assert.equal(body[0]?.value?.k, "call");
-  assert.equal(body[0]?.value?.name, "__closure_0");
+  assert.equal(body[0]?.value?.name, "__closure_main_0");
 });
 
 test("an arrow that escapes the name it is bound to is a closure value", () => {
@@ -765,8 +765,8 @@ test("an arrow that escapes the name it is bound to is a closure value", () => {
   }).body;
   const passed = body[1]?.value?.args?.[0] as { k: string; name: string; code?: string; captures?: string[] };
   assert.equal(passed?.k, "arrow");
-  assert.equal(passed?.name, "__closure_0");
-  assert.equal(passed?.code, "__closure_code_0");
+  assert.equal(passed?.name, "__closure_main_0");
+  assert.equal(passed?.code, "__closure_code_main_0");
   assert.deepEqual(passed?.captures, ["x"]);
 
   // The entry reads each captured value out of the closure and writes it in
@@ -775,7 +775,7 @@ test("an arrow that escapes the name it is bound to is a closure value", () => {
     body: { kind: string; value?: { k: string; name?: string; args?: { k: string; name?: string; index?: number }[] } }[];
   }).body;
   const call = entry[0]?.value;
-  assert.equal(call?.name, "__closure_0");
+  assert.equal(call?.name, "__closure_main_0");
   assert.deepEqual(call?.args?.map((arg) => arg.k), ["capture", "ident"]);
   assert.equal(call?.args?.[0]?.index, 0);
 });
@@ -878,7 +878,7 @@ test("an arrow's body is a function of its own, so a break leaves a loop of that
   );
   assert.deepEqual(
     analysis.functions.map((declared) => declared.name),
-    ["f", "__closure_0"],
+    ["f", "__closure_main_0"],
   );
 });
 
@@ -932,4 +932,76 @@ test("a closure and a call through one survive being written as IR and read back
     const reread = parseSemanticFunction(text, phase.program);
     assert.equal(printSemanticFunction(reread), text, "the IR the printer wrote reads back as itself");
   }
+});
+
+test("a collection method is a function of the file that walks the array", () => {
+  // `a.map(f)` is not a method this compiler has: the frontend writes a
+  // function that walks the array and calls the closure, and the call is a
+  // call of that function.
+  const analysis = typescript.analyze(
+    [
+      "export function g(a: Float64Array): number {",
+      "  const b = a.map((x: number): number => x * 2);",
+      "  return b[0];",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const names = analysis.functions.map((declared) => declared.name);
+  assert.ok(names.includes("__collect_main_0"), "the walk is a function of the file");
+  const helper = analysis.functions.find((declared) => declared.name === "__collect_main_0");
+  assert.equal(helper?.internal, true, "the walk is not an export of the file");
+  assert.deepEqual(
+    helper?.params.map((param) => param.name),
+    ["items", "fn"],
+    "the walk takes the array and the closure it calls",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; init?: { k: string; name?: string; args?: { k: string }[] } }[];
+  }).body;
+  const call = body[0]?.init;
+  assert.equal(call?.k, "call");
+  assert.equal(call?.name, "__collect_main_0");
+  assert.deepEqual(call?.args?.map((argument) => argument.k), ["ident", "arrow"]);
+});
+
+test("a collection method whose callback is not a function of the compiler's is refused", () => {
+  // A callback is a closure the frontend wrote, so it is an arrow or a name
+  // held at a function type. A plain function name is not one: the compiler
+  // has no value of it to hand over.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "function twice(x: number): number { return x * 2; }",
+          "export function g(a: Float64Array): number {",
+          "  const b = a.map(twice);",
+          "  return b[0];",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /the function handed to map is not one this compiler can call/,
+  );
+});
+
+test("a map that answers text is refused, because a typed array holds numbers", () => {
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "export function g(a: Float64Array): number {",
+          "  const b = a.map((x: number): string => `v`);",
+          "  return b.length;",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /the function map walks the array with must answer a number or a truth/,
+  );
 });

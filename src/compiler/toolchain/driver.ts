@@ -505,13 +505,13 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
 
   /** A function a program calls, declared as the driver links it. */
   private declaration(signature: FunctionSignature): string {
+    // Every function the program was built from is declared here, because the
+    // body being written calls some of them and a declaration costs nothing for
+    // the ones it does not. A function that hands back a buffer is one of those:
+    // the declaration is the same, and what a program cannot do is carry the
+    // length of the array it answers, which is refused where such a call is
+    // written rather than where every call of every function is declared.
     const returns = parseType(signature.returns);
-    if (returns.kind === "ptr" || returns.kind === "slice" || returns.kind === "array") {
-      throw driverError(
-        `a program cannot call ${signature.name}`,
-        `${typeToString(returns)} is returned, and a program holds numbers and strings`,
-      );
-    }
     // A parameter name is source text that has to survive being a C
     // identifier, and a program is free to call a parameter `double`. An
     // extern declaration only needs the names to be well formed, so they are
