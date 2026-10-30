@@ -426,6 +426,62 @@ test("the names and values of a constant object are arrays", async () => {
   assert.equal(output.trim(), "5");
 });
 
+test("a for-of walks a list written where the loop names it", async () => {
+  // The loop names the array it walks, because it reads the length before the
+  // first element and again between elements. A list written where the name
+  // goes is read once into a name of the loop's own before it starts.
+  const output = await agreesWithNode([
+    "function total(): number {",
+    "  let sum = 0;",
+    "  for (const x of [1, 2, 3]) sum += x;",
+    "  return sum;",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
+test("a parameter written as a pattern binds the names it writes", async () => {
+  // `{ a, b: c }` and `[a, b]` name no value of their own: the value is the one
+  // the caller hands over, and each name is a declaration read out of it.
+  const output = await agreesWithNode([
+    "function sum({ a, b: c }: { a: number; b: number }): number {",
+    "  return a + c;",
+    "}",
+    "function pair([a, b]: number[]): number {",
+    "  return a * b;",
+    "}",
+    "console.log(sum({ a: 1, b: 2 }), pair([3, 4]));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3 12");
+});
+
+test("an arrow function's parameter may be written as a pattern", async () => {
+  const output = await agreesWithNode([
+    "function total(): number {",
+    "  const add = ([a]: number[]) => a;",
+    "  const row: number[] = [7, 8];",
+    "  return add(row);",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7");
+});
+
+test("a list may end with a comma, as may a list of parameters", async () => {
+  const output = await agreesWithNode([
+    "function add(a: number, b: number,): number {",
+    "  return a + b;",
+    "}",
+    "console.log(add(1, 2,));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

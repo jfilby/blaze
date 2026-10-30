@@ -69,14 +69,17 @@ top-level values lowered it to 5802. Reading a file of declarations as a library
 rather than as a program rose it to 6298: functions that used to fall to the
 program parser are now module functions, so the report shows the gaps in them.
 Reading `Object.keys` and `Object.values` of a constant object lowered it to
-6280. The refusals fall into six frontiers:
+6280. Reading a `for..of` whose body names an expression rather than an array
+name, a parameter written as a pattern, and a trailing comma in a list lowered
+it to 5194. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
   does not have yet.
 - **The JavaScript expressions the source uses.** Optional chaining (`?.`),
-  nullish coalescing (`??`), spread, destructuring, object shorthand, `switch`,
-  `throw`, class getters, and the module forms (`import * as`, renamed imports,
+  nullish coalescing (`??`), spread, destructuring (declarations, parameters and
+  assignment), object shorthand, `switch`, `throw`, class getters and regular
+  expression literals, and the module forms (`import * as`, renamed imports,
   re-exports).
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. A value another module
@@ -151,7 +154,11 @@ below are independent enough to land one at a time, in this order:
   would have written.
 - Spread and destructuring in declarations, parameters, calls, array literals
   and object literals. Object shorthand, `{ line }`, is read as the field it
-  names, and spreading a constant object writes out the fields it holds.
+  names, and spreading a constant object writes out the fields it holds. A
+  parameter written as `{ a, b: c }` or `[a, b]` is held at a name of the
+  pattern's own and each bound name is a declaration read out of it, so the
+  functions, arrows and methods that take a record or a pair are read as they
+  are written.
 - `switch` (about 200 occurrences), lowered to the chain of comparisons the
   current subset already has.
 - `throw` and `new Error`, plus `error.message` in a catch arm. Try/catch and
@@ -188,7 +195,11 @@ to carry those without a rewrite into numeric arrays:
 - **Arrays.** A length inside the block so `push` is linear, arrays of arrays,
   and `slice`, `splice`, `shift`, `unshift`, `concat`, `Array.from` and
   `Array.isArray`. Text and reference arrays already exist; the growth, the
-  nested shape and an array as a class field do not.
+  nested shape and an array as a class field do not. An empty list written in a
+  slice context, `const xs: string[] = []`, is carried; a function that answers
+  `[]` where it declares a slice is not yet: the literal's block is the frame's,
+  and the caller is handed a pointer into a frame that has returned. That needs
+  the value copied into an owned block before the return.
 - **Maps and sets.** Values that are text or references, keys that are not only
   text, iteration (`for..of`, `keys`, `values`, `entries`) and `Map`/`Set` as
   fields. A compiler's symbol tables are maps of references.

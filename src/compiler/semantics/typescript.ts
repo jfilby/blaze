@@ -542,6 +542,9 @@ function binaryResultType(value: Expression & { k: "binary" }, scope: ReadonlyMa
   const left = resultType(value.left, scope);
   const right = resultType(value.right, scope);
   if (value.op === "&&" || value.op === "||" || value.op === "??") return commonResult(left, right);
+  // Two lists added are one list of the same elements: the values of both are
+  // written into one block, and the block holds what either held.
+  if (left.kind === "slice" && right.kind === "slice") return left;
   if (left.kind === "text" || right.kind === "text") return TEXT_RESULT;
   if (left.kind !== "primitive" || right.kind !== "primitive") return ANY_TYPE;
   const whole = (name: string): boolean => name !== "f32" && name !== "f64" && name !== "bool";
@@ -1693,6 +1696,8 @@ class TypeScriptParser {
   private breakTargets: ("loop" | "switch")[] = [];
   /** Names the lowered switches have taken, so each has a temporary of its own. */
   private switchCount = 0;
+  /** Names the lowered for-of loops have taken, so each walks a name of its own. */
+  private walkCount = 0;
   /** The classes the file declares, whether or not the module parser sees them. */
   private readonly classTable: ClassTable;
   /** The token stream with class declarations still in it, for class bodies. */
@@ -3196,10 +3201,42 @@ class TypeScriptParser {
     });
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
+    /** What a parameter written as a pattern binds, read before the body runs. */
+    const prelude: Statement[] = [];
     if (this.at(")")) {
       this.next();
     } else {
       for (;;) {
+        // `{ a, b: c }` and `[a, b]` are parameters that name no value of their
+        // own: the value is one the caller hands over, and each name the
+        // pattern writes is read out of it where the body starts.
+        const pattern = this.readParameterPattern();
+        if (pattern !== null) {
+          const read = this.accept("?");
+          void read;
+          let patternType: TypeExpr = ANY_TYPE;
+          if (this.accept(":")) {
+            patternType = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
+          }
+          const fallbackPattern = this.accept("=") ? this.readExpression() : undefined;
+          const temp = `__param${this.destructureCount++}`;
+          params.push({
+            name: temp,
+            type: patternType,
+            ...(fallbackPattern === undefined ? {} : { default: fallbackPattern }),
+          });
+          this.valueTypes.set(temp, patternType);
+          prelude.push(...this.patternPrelude(pattern, temp, patternType, name.line));
+          if (this.accept(",")) {
+            if (this.at(")")) {
+              this.next();
+              break;
+            }
+            continue;
+          }
+          this.expect(")");
+          break;
+        }
         const parameter = this.next();
         if (parameter.kind !== "ident") {
           this.report("expected a parameter name", `near "${parameter.text}"`, parameter);
@@ -3242,7 +3279,15 @@ class TypeScriptParser {
         this.valueTypes.set(parameter.text, mapped);
         if (functionType !== null) this.valueFunctions.set(parameter.text, functionType);
         if (collectionType !== null) this.valueCollections.set(parameter.text, collectionType);
-        if (this.accept(",")) continue;
+        if (this.accept(",")) {
+          // A list of parameters may end with a comma, which names nothing: the
+          // `)` that follows it is the end of the list and not a parameter.
+          if (this.at(")")) {
+            this.next();
+            break;
+          }
+          continue;
+        }
         this.expect(")");
         break;
       }
@@ -3252,7 +3297,7 @@ class TypeScriptParser {
       // is read here rather than refused, because the language lets a function
       // omit the annotation and the returns are what say it.
       const body = this.readBlock();
-      return declared(inferredResult(body, params), body);
+      return declared(inferredResult(body, params), [...prelude, ...body]);
     }
     this.next();
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
@@ -3263,7 +3308,94 @@ class TypeScriptParser {
       this.accept(";");
       return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
-    return declared(returnType, this.readBlock());
+    return declared(returnType, [...prelude, ...this.readBlock()]);
+  }
+
+  /**
+   * `{ a, b: c }` or `[a, b]` written where a parameter name goes.
+   *
+   * A pattern binds names rather than naming one value, so the value is held at
+   * a name of the pattern's own and each bound name is a declaration read out
+   * of it. The fields and the positions are the ones the source wrote.
+   */
+  private readParameterPattern(): { name: string; field: string | null; index: number }[] | null {
+    if (this.at("{")) {
+      this.next();
+      const bindings: { name: string; field: string | null; index: number }[] = [];
+      while (!this.at("}") && this.peek().kind !== "end") {
+        const written = this.next();
+        if (written.kind !== "ident") {
+          this.report("a destructured field is named", `near "${written.text}"`, written);
+          this.synchronizeTo("}");
+          break;
+        }
+        let bound = written.text;
+        if (this.accept(":")) {
+          const alias = this.next();
+          if (alias.kind !== "ident") this.report("a destructured field binds a name", `near "${alias.text}"`, alias);
+          else bound = alias.text;
+        }
+        if (this.at("=")) {
+          this.report("a destructured field with a default is not supported", "write the default where the value is made");
+          this.next();
+          this.readExpression();
+        }
+        bindings.push({ name: bound, field: written.text, index: -1 });
+        if (!this.accept(",")) break;
+      }
+      this.expect("}");
+      return bindings;
+    }
+    if (this.at("[")) {
+      this.next();
+      const bindings: { name: string; field: string | null; index: number }[] = [];
+      let at = 0;
+      while (!this.at("]") && this.peek().kind !== "end") {
+        if (this.accept("...")) {
+          this.report("a rest element is not part of the destructuring subset", "write the names the pattern binds");
+          this.synchronizeTo("]");
+          break;
+        }
+        const name = this.next();
+        if (name.kind !== "ident") this.report("a destructured element binds a name", `near "${name.text}"`, name);
+        else bindings.push({ name: name.text, field: null, index: at });
+        at += 1;
+        if (!this.accept(",")) break;
+      }
+      this.expect("]");
+      return bindings;
+    }
+    return null;
+  }
+
+  /**
+   * The declarations a parameter pattern binds, read out of the value it names.
+   *
+   * An array pattern written against an array type binds each name at the
+   * element type, because the name is one element of the value it was handed.
+   */
+  private patternPrelude(
+    bindings: readonly { name: string; field: string | null; index: number }[],
+    temp: string,
+    type: TypeExpr,
+    line: number,
+  ): Statement[] {
+    const base: Expression = { k: "ident", name: temp };
+    const element = type.kind === "slice" || type.kind === "array" ? type.of : null;
+    if (element !== null) {
+      for (const binding of bindings) {
+        if (binding.field === null) this.valueTypes.set(binding.name, element);
+      }
+    }
+    return bindings.map((binding): Statement => ({
+      kind: "declare",
+      name: binding.name,
+      type: null,
+      init: binding.field !== null
+        ? { k: "member", base, field: binding.field }
+        : { k: "index", base, index: { k: "literal", text: String(binding.index) } },
+      line,
+    }));
   }
 
   /**
@@ -3476,6 +3608,19 @@ class TypeScriptParser {
       const payload = this.promisePayload(from, end);
       if (payload !== null) return this.typeFromTokens(payload.start, payload.end, false);
     }
+    // A union that names `undefined` or `null` beside one other member is that
+    // member: a value this compiler holds has no absent value, and a name the
+    // source says may be absent holds the value where it is there. `T | U` of
+    // two values is still read by the widening below.
+    const members = this.unionMembers(from, end);
+    if (members.length > 1) {
+      const present = members.filter((member) => !this.isAbsentType(member.start, member.end));
+      if (present.length === 1) {
+        const only = present[0] as { start: number; end: number };
+        return this.typeFromTokens(only.start, only.end, false);
+      }
+      if (present.length === 0) return ANY_TYPE;
+    }
     const arrays = this.arrayTypeFrom(from, end);
     if (arrays !== null) return arrays;
     const first = this.tokens[from] as Token;
@@ -3526,6 +3671,35 @@ class TypeScriptParser {
     // annotation is the reference a caller reads its fields through.
     if (this.classTable.names.has(name)) return this.referenceTo(name);
     return mapTypeScriptType(name, `line ${first.line} of ${this.path}`);
+  }
+
+  /** The members a union written at `from` names, split at its top-level `|`. */
+  private unionMembers(from: number, end: number): { start: number; end: number }[] {
+    const members: { start: number; end: number }[] = [];
+    let depth = 0;
+    let start = from;
+    for (let at = from; at < end; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      if (text === "(" || text === "[" || text === "{" || text === "<") depth += 1;
+      else if (text === ")" || text === "]" || text === "}" || text === ">") depth -= 1;
+      else if (text === ">>") depth -= 2;
+      else if (text === ">>>") depth -= 3;
+      else if (depth === 0 && text === "|") {
+        members.push({ start, end: at });
+        start = at + 1;
+      }
+    }
+    members.push({ start, end });
+    return members;
+  }
+
+  /** Whether a run of annotation tokens names the absent value of a union. */
+  private isAbsentType(start: number, end: number): boolean {
+    if (end - start !== 1) return false;
+    const text = this.tokens[start]?.text;
+    return text === "undefined" || text === "null" || text === "void";
   }
 
   /** The `<...>` of `Promise<T>`, or null where the run is not a promise. */
@@ -4460,22 +4634,41 @@ class TypeScriptParser {
   /**
    * `for (const x of values)`: it walks the elements of a typed array, whose
    * length the source may name as `values.length`, so nothing else is read.
+   *
+   * The loop names the array it walks rather than writing it, because the walk
+   * reads its length before the first element and again between elements. A
+   * source that writes the array where the name goes, as `of request.files` or
+   * `of Object.keys(TABLE)`, has that value read once into a name of the
+   * loop's own before it starts: the value is the same one however many
+   * elements the loop visits.
    */
   private readForOf(start: Token, variable: string): Statement {
     this.expect("of");
-    const of = this.next();
-    if (of.kind !== "ident") {
-      this.report("a for-of loop walks a typed array by name", `near "${of.text}"`, of);
-      this.skipLoop();
-      return { kind: "expression", value: this.hole(), line: start.line };
+    const of = this.peek();
+    let walked: string;
+    let written: Expression | null = null;
+    if (of.kind === "ident" && this.peek(1).text === ")") {
+      this.next();
+      walked = of.text;
+    } else {
+      written = this.readExpression();
+      walked = `__walk${this.walkCount}`;
+      this.walkCount += 1;
+      this.valueTypes.set(walked, this.valueTypeOf(written));
     }
     this.expect(")");
     // The element a `for..of` binds is one element of the array it walks, so it
     // is held at the element type an arrow capturing it would be handed.
-    const walked = this.valueTypes.get(of.text);
-    const element = walked !== undefined && (walked.kind === "slice" || walked.kind === "array") ? walked.of : ANY_TYPE;
+    const walkedType = this.valueTypes.get(walked);
+    const element = walkedType !== undefined && (walkedType.kind === "slice" || walkedType.kind === "array") ? walkedType.of : ANY_TYPE;
     this.valueTypes.set(variable, element);
-    return { kind: "forOf", variable, of: of.text, body: this.loopBody(), line: start.line };
+    const body = this.loopBody();
+    // The value is read once, before the loop starts. It is recorded after the
+    // body is read, because the body's own pending statements belong inside it.
+    if (written !== null) {
+      this.pendingBefore.push({ kind: "declare", name: walked, type: null, init: written, line: start.line });
+    }
+    return { kind: "forOf", variable, of: walked, body, line: start.line };
   }
 
   private readWhile(): Statement {
@@ -4511,17 +4704,6 @@ class TypeScriptParser {
     this.breakTargets.pop();
     this.loops -= 1;
     return body;
-  }
-
-  /**
-   * Reads past a loop whose header the parser could not finish, so the
-   * statements after it are read from the start of the next one rather than
-   * from somewhere inside a body.
-   */
-  private skipLoop(): void {
-    this.synchronizeTo(")");
-    if (this.at("{")) this.skipBlock();
-    else this.synchronize();
   }
 
   readExpression(): Expression {
@@ -5110,10 +5292,10 @@ class TypeScriptParser {
   private readCallArguments(): Expression[] {
     this.next();
     const args: Expression[] = [];
-    if (!this.at(")")) {
-      do {
-        args.push(this.readExpression());
-      } while (this.accept(","));
+    while (!this.at(")") && this.peek().kind !== "end") {
+      args.push(this.readExpression());
+      // A call may end its arguments with a comma, which names no argument.
+      if (!this.accept(",")) break;
     }
     this.expect(")");
     return args;
@@ -5263,8 +5445,24 @@ class TypeScriptParser {
       functionType: FunctionType | null;
     }
     const params: ArrowParam[] = [];
+    /** What a parameter written as a pattern binds, read where the body starts. */
+    const prelude: Statement[] = [];
     if (this.accept("(")) {
       while (!this.at(")") && this.peek().kind !== "end") {
+        // `([a]) => ...` and `({ n }) => ...`: the value is held at a name of
+        // the pattern's own and each name the pattern writes is read out of it.
+        const pattern = this.readParameterPattern();
+        if (pattern !== null) {
+          let type: TypeExpr = ANY_TYPE;
+          if (this.accept(":")) {
+            type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
+          }
+          const temp = `__param${this.destructureCount++}`;
+          params.push({ name: temp, type, typeName: "", functionType: null });
+          prelude.push(...this.patternPrelude(pattern, temp, type, line));
+          if (!this.accept(",")) break;
+          continue;
+        }
         const name = this.next();
         if (name.kind !== "ident") {
           this.report("expected a parameter name", `near "${name.text}"`, name);
@@ -5292,6 +5490,8 @@ class TypeScriptParser {
         }
         params.push({ name: name.text, type, typeName, functionType });
         if (!this.accept(",")) break;
+        // A list of parameters may end with a comma, as it may on a function.
+        if (this.at(")")) break;
       }
       this.expect(")");
     } else {
@@ -5333,9 +5533,10 @@ class TypeScriptParser {
         this.valueClasses.set(param.name, param.typeName);
       }
     }
-    const body: Statement[] = this.at("{")
-      ? this.readBlock()
-      : [{ kind: "result", value: this.readExpression(), line }];
+    const body: Statement[] = [
+      ...prelude,
+      ...(this.at("{") ? this.readBlock() : [{ kind: "result" as const, value: this.readExpression(), line }]),
+    ];
     this.valueTypes = savedTypes;
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
