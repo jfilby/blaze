@@ -381,6 +381,23 @@ test("a construct outside the subset is named in a function body too", () => {
   }
 });
 
+test("a refusal inside a module function is still the module's when the file runs", () => {
+  // The function is an export, so it is the module's interface even though the
+  // file also carries the statements a program runs. Handing the refused
+  // declaration to the program parser reported the `export` keyword first —
+  // that parser has no export of its own — and the construct the function
+  // actually wrote outside the subset was never named. The module's refusal is
+  // reported where it was read, and the body is read without the declaration.
+  const message = diagnostic(() =>
+    typeScriptFrontend.analyze(
+      ["export function f(n: number): number {", "  yield n;", "}", 'console.log("run");', ""].join("\n"),
+      "main.ts",
+    ),
+  );
+  assert.match(message, /line 2: "yield" is not supported/);
+  assert.doesNotMatch(message, /"export" is not a statement of a program/);
+});
+
 test("a function declared after the program is hoisted, and the statements still run", () => {
   // A function declaration is the module's wherever it is written, while the
   // statements run in the order they are written: the call is the body's, and

@@ -1295,6 +1295,12 @@ interface Declaration extends Span {
   /** The functions the declaration adds, whether the module or the body holds them. */
   entries: DeclaredFunction[];
   /**
+   * True when the declaration is written as an export. An exported function is
+   * the module's interface, so a refusal in it is the module's to report and it
+   * is never handed to the program parser.
+   */
+  exported: boolean;
+  /**
    * True when the body holds the declaration, so it is a function of the
    * program: a construct the module refused, or a function that reads one.
    */
@@ -2572,7 +2578,9 @@ class TypeScriptParser {
    * calls are one source rather than one source reordered. A declaration the
    * module cannot hold is left where it was written, and so is every
    * declaration that calls it: a module function is compiled from a contract,
-   * and a contract names only the functions the module holds.
+   * and a contract names only the functions the module holds. An export is the
+   * exception: it is the module's interface, so what it wrote outside the
+   * subset is the module's refusal and is never read again as a program.
    */
   parseModule(path: string): ModuleAnalysis {
     const imports: ModuleImport[] = [];
@@ -2650,6 +2658,10 @@ class TypeScriptParser {
       moved = false;
       for (const declaration of declarations) {
         if (declaration.program) continue;
+        // An export is the module's interface, and a contract names only the
+        // functions the module holds: it cannot become a function of the
+        // program however its callee is read.
+        if (declaration.exported) continue;
         let callsOne = false;
         for (const name of declaration.calls) {
           if (!staying.has(name)) continue;
@@ -2696,14 +2708,13 @@ class TypeScriptParser {
       at = span.end;
     }
     bodyTokens.push(...this.tokens.slice(at));
-    // A file that runs nothing is a library: it has no body for a function the
-    // module cannot hold to be read in, so the refusal the declaration earned
-    // is the module's, reported where it was written.
-    if (!runs) {
-      for (const declaration of declarations) {
-        if (!declaration.program) continue;
-        for (const entry of declaration.refusal) this.diagnostics.report(entry.message, entry.detail, entry.line);
-      }
+    // A file that runs has a body for a refused function to be read in, unless
+    // the declaration is the module's own and was held out of the body above.
+    // What such a declaration could not hold is reported here, where it was
+    // written, rather than left to a parser that reads a different grammar.
+    for (const declaration of declarations) {
+      if (declaration.program && runs) continue;
+      for (const entry of declaration.refusal) this.diagnostics.report(entry.message, entry.detail, entry.line);
     }
     const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable) : [];
     // `export { f }` may name a function the file declared after it, so the
@@ -2750,12 +2761,21 @@ class TypeScriptParser {
     }
     const end = this.position;
     const entries = functions.slice(before);
-    // Everything the module cannot hold is read by the program instead: a
+    const exported = this.declaresExport(start) || entries.some((entry) => entry.exported);
+    // A declaration the module cannot hold is read by the program instead: a
     // construct the module refused, or a function that reads a value the
-    // running program holds. `export { f }` adds no function and refuses
-    // nothing: it names functions, and is not a statement the body runs.
+    // running program holds. An export is the exception, because it is the
+    // module's interface rather than one of the body's own declarations.
+    // `export { f }` adds no function and refuses nothing: it names functions,
+    // and is not a statement the body runs.
     const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(entry.handle as TypeScriptFunction, this.state));
-    const program = trial.entries.length > 0 || readsProgramState;
+    const refused = trial.entries.length > 0;
+    // An exported function is the module's interface. Handing it to the program
+    // parser would not read the module's own refusal: the program parser does
+    // not know an `export`, so it reports the export keyword first and buries
+    // what the function itself wrote outside the subset. The refusal stays the
+    // module's, and the declaration is held out of the body below.
+    const program = refused ? !exported : readsProgramState;
     if (program) {
       functions.length = before;
       // The arrows the refused declaration wrote are read again, by the parser
@@ -2768,6 +2788,12 @@ class TypeScriptParser {
       // statement it is, so a refusal does not swallow what is written after it.
       if (this.declaresFunction(start)) this.skipFunctionBody(start);
       else this.synchronize();
+    } else if (refused) {
+      // The module offered a function it cannot hold. The entries it read are
+      // not functions of the module after all, and the declaration is not a
+      // statement of the body either, so nothing reads it a second time.
+      functions.length = before;
+      this.closures.length = closuresBefore;
     }
     const calls = new Set<string>();
     if (!program) {
@@ -2779,11 +2805,24 @@ class TypeScriptParser {
       start,
       end: program ? this.position : end,
       entries: [...entries],
+      exported,
       program,
       calls,
       refusal: [...trial.entries],
       offers,
     };
+  }
+
+  /** Whether the declaration at a token writes `export`. */
+  private declaresExport(start: number): boolean {
+    let index = start;
+    while (index < this.tokens.length) {
+      const text = this.tokens[index]?.text;
+      if (text === "export") return true;
+      if (text !== "default" && text !== "async" && text !== "declare") return false;
+      index += 1;
+    }
+    return false;
   }
 
   /** Whether the declaration at a token writes a function, which has a body to skip. */
