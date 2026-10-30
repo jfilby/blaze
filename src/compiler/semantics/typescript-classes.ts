@@ -284,7 +284,14 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
     }
     const memberLine = tokens[index].line;
     let isStatic = false;
-    while (tokens[index]?.kind === "ident" && MEMBER_MODIFIERS.has(tokens[index].text)) {
+    // A modifier is a word in front of another name. A member that is named
+    // with one of these words — a method called `declare` or a field called
+    // `static` — is a member, and the token after it says which one it is.
+    while (
+      tokens[index]?.kind === "ident" &&
+      MEMBER_MODIFIERS.has(tokens[index].text) &&
+      tokens[index + 1]?.kind === "ident"
+    ) {
       if (tokens[index].text === "static") isStatic = true;
       index += 1;
     }

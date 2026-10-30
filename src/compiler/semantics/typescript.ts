@@ -337,8 +337,12 @@ function inferredResult(body: readonly Statement[], params: readonly { name: str
   const scope = new Map<string, TypeExpr>(params.map((param) => [param.name, param.type]));
   describeDeclarations(body, scope);
   const written: Expression[] = [];
-  collectResults(body, written);
+  const bare = { found: false };
+  collectResults(body, written, bare);
   if (written.length === 0) return NOTHING;
+  // A body that returns a value on one path and nothing on another has no one
+  // type the contract can state: the bare return is not a value to unify with.
+  if (bare.found) return ANY_TYPE;
   let found: TypeExpr | null = null;
   for (const value of written) {
     const type = resultType(value, scope);
@@ -385,27 +389,31 @@ function describeDeclarations(statements: readonly Statement[], scope: Map<strin
   walk(statements);
 }
 
-/** Every value a body returns, nested arms included. */
-function collectResults(statements: readonly Statement[], into: Expression[]): void {
+/** Every value a body returns, nested arms included. A bare `return;` is no value. */
+function collectResults(statements: readonly Statement[], into: Expression[], bare?: { found: boolean }): void {
   for (const statement of statements) {
     switch (statement.kind) {
       case "result":
-        into.push(statement.value);
+        if (statement.value === null) {
+          if (bare !== undefined) bare.found = true;
+        } else {
+          into.push(statement.value);
+        }
         break;
       case "if":
-        collectResults(statement.then, into);
-        collectResults(statement.otherwise, into);
+        collectResults(statement.then, into, bare);
+        collectResults(statement.otherwise, into, bare);
         break;
       case "while":
       case "doWhile":
       case "loop":
       case "forOf":
-        collectResults(statement.body, into);
+        collectResults(statement.body, into, bare);
         break;
       case "try":
-        collectResults(statement.body, into);
-        if (statement.catchBody !== null) collectResults(statement.catchBody, into);
-        if (statement.finallyBody !== null) collectResults(statement.finallyBody, into);
+        collectResults(statement.body, into, bare);
+        if (statement.catchBody !== null) collectResults(statement.catchBody, into, bare);
+        if (statement.finallyBody !== null) collectResults(statement.finallyBody, into, bare);
         break;
       default:
         break;
@@ -2500,6 +2508,33 @@ class TypeScriptParser {
   }
 
   /**
+   * Skips the type of an angle-bracket assertion, whose opening `<` was read.
+   *
+   * A nested type closes with `>>` or `>>>` in one token, so the count of open
+   * angles says how many of them the token closes. The closing token is read
+   * with the type it ends, because the value follows it.
+   */
+  private skipTypeAssertion(): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.next();
+      if (token.kind !== "punct") continue;
+      if (token.text === "<") depth += 1;
+      else if (token.text === ">") {
+        if (depth === 0) return;
+        depth -= 1;
+      } else if (token.text === ">>") {
+        if (depth <= 1) return;
+        depth -= 2;
+      } else if (token.text === ">>>") {
+        if (depth <= 2) return;
+        depth -= 3;
+      }
+    }
+    this.report("a type assertion is not closed", "write the type between < and >, as in <number>value", this.peek());
+  }
+
+  /**
    * Skips a run of type tokens, stopping at one of `stops` outside every
    * bracket. Type arguments nest with `<`, which the tokeniser writes as `>>`
    * and `>>>` where two or three close together, so those close as many as
@@ -3039,7 +3074,7 @@ class TypeScriptParser {
     // them would be a second compilation of it.
     if (!this.at("{") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
       this.next();
-      return this.readImportTail(start, this.accept(",") ? this.readImportedNames() : [], true);
+      return this.readImportTail(start, this.accept(",") ? this.readImportedNames(typeOnly) : [], true);
     }
     if (!this.at("{")) {
       this.report(
@@ -3050,11 +3085,11 @@ class TypeScriptParser {
       this.synchronize();
       return { specifier: "", names: [], default: false, line: start.line };
     }
-    return this.readImportTail(start, this.readImportedNames(), false);
+    return this.readImportTail(start, this.readImportedNames(typeOnly), false);
   }
 
   /** `{ f, g }`: the exports an import names, which it binds as they are written. */
-  private readImportedNames(): string[] {
+  private readImportedNames(typeOnly = false): string[] {
     this.expect("{");
     const names: string[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
@@ -3077,12 +3112,20 @@ class TypeScriptParser {
         continue;
       }
       if (this.at("as")) {
-        this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+        if (!typeOnly) {
+          this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
+        }
         // The alias is read even though it is refused: the import is skipped as
         // the statement it is, so the `}` that closes it must be read here and
         // not left to end the statement.
         this.next();
         if (this.peek().kind === "ident") this.next();
+        // A type-only import binds nothing at run time, so a name it renames is
+        // the type's name and not a value of the module.
+        if (typeOnly) {
+          if (!this.accept(",")) break;
+          continue;
+        }
       }
       names.push(name.text);
       if (!this.accept(",")) break;
@@ -3142,7 +3185,11 @@ class TypeScriptParser {
         }
         // A parameter states its type, or states a default and has the type
         // that default is. `function invert(n: bigint, modulo = CURVE.P)` is
-        // the second form: the default says what the parameter holds.
+        // the second form: the default says what the parameter holds. A `?`
+        // says the call may leave the parameter out, and a value model with no
+        // absent value cannot yet say what it holds then: the annotation is
+        // erased and the parameter is the type it was declared.
+        this.accept("?");
         let mapped: TypeExpr | null = null;
         let functionType: FunctionType | null = null;
         let collectionType: CollectionValue | null = null;
@@ -3651,9 +3698,15 @@ class TypeScriptParser {
     if (this.at("return")) {
       this.next();
       if (this.at(";")) {
-        this.report("a return states what the function returns", "return must carry a value", token);
+        // A bare return leaves a function that returns nothing. The IR has a
+        // return with no value, so this is the statement it is rather than a
+        // value the frontend invents; a function declared to return a value is
+        // refused where the two meet.
         this.next();
-        return { kind: "result", value: this.hole(), line: token.line };
+        return { kind: "result", value: null, line: token.line };
+      }
+      if (this.at("}")) {
+        return { kind: "result", value: null, line: token.line };
       }
       const value = this.readExpression();
       this.accept(";");
@@ -4649,6 +4702,14 @@ class TypeScriptParser {
 
   private readUnary(): Expression {
     const token = this.peek();
+    // `<T>value` is a type assertion written before the value. The angle form
+    // is not a comparison here: a value cannot start with `<`, so the type is
+    // erased and the value after it is the value the source wrote.
+    if (token.kind === "punct" && token.text === "<") {
+      this.next();
+      this.skipTypeAssertion();
+      return this.readUnary();
+    }
     if (token.kind === "ident" && token.text === "typeof") {
       this.next();
       const operand = this.readUnary();
@@ -6523,11 +6584,13 @@ function usageOf(declaration: TypeScriptFunction): {
         expression(one.value);
         return;
       case "assign":
-      case "result":
       case "throw":
       case "expression":
       case "memberAssign":
         expression(one.value);
+        return;
+      case "result":
+        if (one.value !== null) expression(one.value);
         return;
       case "indexAssign": {
         // A buffer the body writes is a buffer it writes, and the range it
@@ -6688,7 +6751,7 @@ class BodyAnalysis {
         this.bindings.set(statement.name, this.serialize(statement.init, loop, statement.line));
         return;
       case "result":
-        this.result = this.serialize(statement.value, loop, statement.line);
+        if (statement.value !== null) this.result = this.serialize(statement.value, loop, statement.line);
         return;
       case "assign": {
         const value = this.serialize(statement.value, loop, statement.line);
@@ -7158,7 +7221,7 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
       case "result":
         // A function that returns nothing settles the promise with nothing,
         // which is the call that takes no value.
-        if (payload.kind === "void" || statement.value.k === "null") {
+        if (payload.kind === "void" || statement.value === null || statement.value.k === "null") {
           return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
         }
         return { ...statement, value: { k: "call", name, args: [statement.value] } };

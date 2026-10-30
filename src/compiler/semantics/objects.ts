@@ -202,7 +202,7 @@ class BodyTypes {
         this.expression(statement.value);
         return;
       case "result":
-        this.results.push(this.expression(statement.value));
+        if (statement.value !== null) this.results.push(this.expression(statement.value));
         return;
       case "loop": {
         // The index is what the loop counts with, which is the value it starts
@@ -621,7 +621,7 @@ export function bodyIsWhole(body: readonly Statement[], counter: string, whole: 
         if (!whole.has(statement.name)) return false;
         break;
       case "result":
-        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        if (statement.value !== null && !expressionIsWhole(statement.value, counter, whole)) return false;
         break;
       case "if":
         if (!expressionIsWhole(statement.condition, counter, whole)) return false;
@@ -715,7 +715,11 @@ function statementIgnoresCounter(statement: Statement, counter: string, shadowed
       break;
     case "assign":
     case "memberAssign":
+      values.push(statement.value);
+      break;
     case "result":
+      if (statement.value !== null) values.push(statement.value);
+      break;
     case "print":
       values.push(statement.value);
       break;
@@ -824,7 +828,11 @@ function statementIndexesCounter(statement: Statement, counter: string, shadowed
       break;
     case "assign":
     case "memberAssign":
+      values.push(statement.value);
+      break;
     case "result":
+      if (statement.value !== null) values.push(statement.value);
+      break;
     case "print":
     case "expression":
       values.push(statement.value);

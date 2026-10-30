@@ -345,7 +345,7 @@ type DraftStatement =
   | { kind: "continue"; line: number }
   | { kind: "block"; body: DraftStatement[]; line: number }
   /** What a function hands back, which ends the block it was written in. */
-  | { kind: "result"; value: DraftValue; line: number };
+  | { kind: "result"; value: DraftValue | null; line: number };
 
 /** A program with every name and type resolved, ready to be written down. */
 interface DraftProgram {
@@ -592,7 +592,7 @@ function returnsWideBigint(body: readonly Statement[], written: readonly DraftVa
     for (const statement of statements) {
       switch (statement.kind) {
         case "result":
-          results.push(statement.value);
+          if (statement.value !== null) results.push(statement.value);
           break;
         case "if":
           walk(statement.then);
@@ -658,6 +658,8 @@ function declaredWideBigint(compiled: DraftProgram | null, written: readonly Dra
   if (results.length === 0) return false;
   const marks = results.map((result) => {
     const value = result.value;
+    // A bare return hands back nothing, which is not a wide bigint.
+    if (value === null) return false;
     // A return of a parameter is the one place the call is the answer: `return n`
     // hands back the argument as it arrived, and the argument at this position is
     // what says whether it was written as a bigint.
@@ -880,8 +882,10 @@ function executorPayload(program: DraftProgram, callee?: (name: string) => Draft
       switch (statement.kind) {
         case "declare":
         case "assign":
-        case "result":
           note(statement.value);
+          continue;
+        case "result":
+          if (statement.value !== null) note(statement.value);
           continue;
         case "elementAssign":
           note(statement.index);
@@ -942,7 +946,7 @@ function returnedValues(statements: readonly DraftStatement[]): DraftValue[] {
     for (const statement of list) {
       switch (statement.kind) {
         case "result":
-          values.push(statement.value);
+          if (statement.value !== null) values.push(statement.value);
           continue;
         case "if":
           walk(statement.then);
@@ -1280,7 +1284,7 @@ function calledNames(body: readonly ProgramStatement[]): string[] {
           statement.values.forEach((value) => callsInValue(value, called));
           continue;
         case "result":
-          callsInValue(statement.value, called);
+          if (statement.value !== null) callsInValue(statement.value, called);
           continue;
         case "if":
           callsInValue(statement.condition, called);
@@ -1418,7 +1422,7 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         case "continue":
           continue;
         case "result":
-          value(statement.value);
+          if (statement.value !== null) value(statement.value);
           continue;
         case "function": {
           // A function reads the scope it is declared in when it is *called*,
@@ -2133,7 +2137,7 @@ class ProgramResolver {
       if (first === undefined) {
         // A body with no return at all hands back nothing, and that is the
         // answer a fold over no paths must not invent one for.
-      } else if (results.every((result) => isBigint(result.value))) {
+      } else if (results.every((result) => result.value !== null && isBigint(result.value))) {
         returns = numeric(BIGINT_TYPE);
       } else if (answered.every((type) => isNumberType(type))) {
         // Every number in a program is a double, and the one exception is a wide
@@ -2186,6 +2190,7 @@ class ProgramResolver {
    * returns nothing — which is a different function from the one written.
    */
   private returned(result: DraftStatement & { kind: "result" }): TypeExpr {
+    if (result.value === null) return { kind: "void" };
     const written = draftType(result.value);
     if (written !== null) return written;
     const value = result.value;
@@ -2523,7 +2528,11 @@ class ProgramResolver {
       case "block":
         return { kind: "block", body: this.block(statement.body), line: statement.line };
       case "result":
-        return { kind: "result", value: this.value(statement.value, null, statement.line), line: statement.line };
+        return {
+          kind: "result",
+          value: statement.value === null ? null : this.value(statement.value, null, statement.line),
+          line: statement.line,
+        };
       case "function":
         // A function is a name the program binds, and a name runs when it is
         // called: what is written here is its signature, and its body is
@@ -5442,9 +5451,13 @@ class ProgramLowering {
         return;
       case "result": {
         // What a function hands back ends the block it was written in, and
-        // whatever that value hoisted is written before the block ends.
+        // whatever that value hoisted is written before the block ends. A bare
+        // return hands back nothing.
         this.flush();
-        this.frame().block.terminator = { k: "return", value: this.value(statement.value, null, statement.line) };
+        this.frame().block.terminator = {
+          k: "return",
+          value: statement.value === null ? null : this.value(statement.value, null, statement.line),
+        };
         return;
       }
     }

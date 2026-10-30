@@ -4812,7 +4812,7 @@ function settledPythonBody(statements: readonly Statement[], payload: TypeExpr):
       case "result": {
         // `return None` settles the promise with nothing, which is the call
         // that takes no value.
-        if (payload.kind === "void" || statement.value.k === "null") {
+        if (payload.kind === "void" || statement.value === null || statement.value.k === "null") {
           return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
         }
         return { ...statement, value: { k: "call", name, args: [statement.value] } };

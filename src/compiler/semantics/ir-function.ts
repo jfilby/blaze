@@ -688,6 +688,14 @@ class FunctionBody {
         });
         return;
       case "result": {
+        // A bare return hands back nothing, and a function declared to return
+        // nothing is the one that may write it.
+        if (statement.value === null) {
+          this.flush();
+          this.finallysWritten();
+          this.frame().block.terminator = { k: "return", value: null };
+          return;
+        }
         const value = this.typed(statement.value, this.returns, statement.line).value;
         // Whatever the value hoisted is written before the block ends, and what
         // it hoisted into is what the function hands back.

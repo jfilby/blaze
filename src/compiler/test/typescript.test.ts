@@ -4,7 +4,7 @@ import { frontendFor } from "../semantics/frontend.ts";
 import { pythonFrontend } from "../semantics/python.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf, diagnostic, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
+import { contractOf, diagnostic, irOf, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
 import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
 import type { FunctionContract, ProgramContract } from "../core/types.ts";
 
@@ -358,6 +358,56 @@ test("type-only syntax is erased, and a generic annotation is read to its end", 
   );
   assert.equal(analysis.functions[0]?.params[0]?.type.kind, "ref", "an interface is an opaque reference");
   assert.equal(analysis.functions[0]?.params[1]?.type.kind, "ref", "a generic annotation is an opaque reference");
+});
+
+test("a type-only import may rename the types it names", () => {
+  // The alias of a type-only import names a type and no value, so the module's
+  // functions do not import it and the rename is not a rename of a function.
+  const source = [
+    'import type { Shape as Outline, Width } from "./nowhere.ts";',
+    "export function area(shape: Outline): number {",
+    "  return shape.width as Width;",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(analysis.imports, [], "a type-only import names no module to resolve");
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["area"],
+  );
+});
+
+test("an angle-bracket type assertion is erased", () => {
+  // `<T>value` is the other spelling of `value as T`, and it names no runtime
+  // work: the value after the closing bracket is the value the source wrote.
+  const source = [
+    "export function first(a: Array<number>): number {",
+    "  const b = <Array<number>>a;",
+    "  return <number>b[0];",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["first"],
+  );
+  // The IR of the same body is the element it reads, with no value standing for
+  // the assertion: `a[0]` is the expression the source wrote under the type.
+  const ir = irOf(
+    "typescript",
+    {
+      "module.ts": [
+        "export function first(a: Float64Array): number {",
+        "  return <number>a[0];",
+        "}",
+      ].join("\n"),
+    },
+    "module.ts",
+    "first",
+  );
+  assert.match(ir, /return \[element\[f64\]/);
 });
 
 test("a switch is lowered to the comparisons and the fallthrough it writes", () => {

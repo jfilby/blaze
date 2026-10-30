@@ -264,7 +264,11 @@ test("an async function of a module answers a promise carrying what it returns",
   assert.equal(contract.function.returns, "ref<any>", "the function answers the handle a promise is");
   assert.equal(contract.promise, "f64", "the promise carries the number the body returns");
   const settles = contract.definition.statements.some(
-    (statement) => statement.kind === "result" && statement.value.k === "call" && statement.value.name === "Promise.settle",
+    (statement) =>
+      statement.kind === "result" &&
+      statement.value !== null &&
+      statement.value.k === "call" &&
+      statement.value.name === "Promise.settle",
   );
   assert.ok(settles, "the body settles the promise with the value it returns");
 });

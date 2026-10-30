@@ -378,6 +378,35 @@ test("a type-only declaration is not a value the program carries", async () => {
   assert.equal(output.trim(), "5");
 });
 
+test("a bare return leaves a function that returns nothing", async () => {
+  // `return;` ends a void function where it is written, and the statements
+  // after it in the same arm do not run.
+  const output = await agreesWithNode([
+    "function show(x: number): void {",
+    "  if (x < 0) return;",
+    "  console.log(x);",
+    "}",
+    "show(-1);",
+    "show(2);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2");
+});
+
+test("a class method may be named with a modifier word", async () => {
+  // `declare` is a modifier where a declaration follows it and a member name
+  // where a body follows it, and the token after the name is what says which.
+  const output = await agreesWithNode([
+    "class Counter {",
+    "  value: number = 0;",
+    "  declare(x: number): number { return x + 1; }",
+    "}",
+    "console.log(new Counter().declare(1));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2");
+});
+
 test("an arrow function runs as the function its body lifted to", async () => {
   // An arrow is bound to the name it is declared under and called by that name.
   // Its body becomes a function of the file whose leading parameters are the
