@@ -59,6 +59,12 @@ export interface ClassInfo {
   constructor: ClassMethod | null;
   methods: ClassMethod[];
   staticMethods: ClassMethod[];
+  /**
+   * `get size(): number { ... }` is a member read that runs a body: it is
+   * emitted as a method, and a read of the member is a call of it.
+   */
+  getters: ClassMethod[];
+  staticGetters: ClassMethod[];
   /** The line the class was declared on. */
   line: number;
   /** First token of the declaration, including an `export` before it. */
@@ -274,6 +280,8 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
   const statics: ClassField[] = [];
   const methods: ClassMethod[] = [];
   const staticMethods: ClassMethod[] = [];
+  const getters: ClassMethod[] = [];
+  const staticGetters: ClassMethod[] = [];
   let constructor: ClassMethod | null = null;
 
   index = open + 1;
@@ -353,9 +361,9 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       } else {
         index += 1;
       }
-      if (accessor !== null) {
+      if (accessor === "set") {
         problems.push({
-          message: `a ${accessor} accessor is not supported`,
+          message: "a set accessor is not supported",
           detail: "write the member as a method and call it",
           line: memberLine,
         });
@@ -365,6 +373,19 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
         problems.push({
           message: `method "${memberName}" has no body`,
           detail: "a compiled method is a body of statements",
+          line: memberLine,
+        });
+        continue;
+      }
+      // A getter is a method with no parameters whose name is read as a member:
+      // it is emitted beside the methods and called where the member is read.
+      if (accessor === "get") {
+        (isStatic ? staticGetters : getters).push({
+          name: memberName,
+          params: [],
+          returnTypeName,
+          bodyStart,
+          bodyEnd,
           line: memberLine,
         });
         continue;
@@ -415,6 +436,8 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
     constructor,
     methods,
     staticMethods,
+    getters,
+    staticGetters,
     line,
     start: declarationStart,
     end: close + 1,
@@ -487,6 +510,29 @@ export function findField(
     if (info === undefined) return null;
     const field = (isStatic ? info.statics : info.fields).find((entry) => entry.name === name);
     if (field !== undefined) return { owner: info.name, field };
+    current = info.base;
+  }
+  return null;
+}
+
+/**
+ * A getter of a class, by the member name its read is written with.
+ *
+ * A getter is a member the source reads as a value and the lowering runs as a
+ * body, so a read of it is a call of the function the getter became.
+ */
+export function findGetter(
+  table: ClassTable,
+  className: string,
+  name: string,
+  isStatic: boolean,
+): { owner: string; getter: ClassMethod } | null {
+  let current: string | null = className;
+  while (current !== null) {
+    const info = table.classes.get(current);
+    if (info === undefined) return null;
+    const getter = (isStatic ? info.staticGetters : info.getters).find((entry) => entry.name === name);
+    if (getter !== undefined) return { owner: info.name, getter };
     current = info.base;
   }
   return null;

@@ -94,6 +94,7 @@ import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import {
   findField,
+  findGetter,
   findMethod,
   methodFunctionName,
   scanClasses,
@@ -1310,6 +1311,23 @@ class ProgramParser {
             const field = findField(this.classTable, owner.name, member, true);
             if (field !== null) {
               value = { k: "call", function: `${field.owner}_${field.field.name}`, args: [] };
+              continue;
+            }
+            const getter = findGetter(this.classTable, owner.name, member, true);
+            if (getter !== null) {
+              value = { k: "call", function: `${getter.owner}_${getter.getter.name}`, args: [] };
+              continue;
+            }
+          }
+        }
+        // `c.size`: a member a class reads through a getter is the body the
+        // getter became, called with the instance the read names.
+        if (value.k === "name") {
+          const owner = this.classOfValue(value);
+          if (owner !== null) {
+            const getter = findGetter(this.classTable, owner, member, false);
+            if (getter !== null) {
+              value = { k: "call", function: `${getter.owner}_${getter.getter.name}`, args: [value] };
               continue;
             }
           }

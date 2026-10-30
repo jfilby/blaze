@@ -71,8 +71,8 @@ program parser are now module functions, so the report shows the gaps in them.
 Reading `Object.keys` and `Object.values` of a constant object lowered it to
 6280. Reading a `for..of` whose body names an expression rather than an array
 name, a parameter written as a pattern, and a trailing comma in a list lowered
-it to 5194, and a `for..of` that names the parts of its element lowered it to
-5123. The refusals fall into six frontiers:
+it to 5194, a `for..of` that names the parts of its element lowered it to 5123,
+and a getter to 5121. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -164,9 +164,10 @@ below are independent enough to land one at a time, in this order:
   current subset already has.
 - `throw` and `new Error`, plus `error.message` in a catch arm. Try/catch and
   `finally` are already carried; only the throwing side is missing.
-- Class getters (8 occurrences), either as methods or as the field read they
-  stand for. Inheritance is limited to `extends Error` and one internal reader
-  hierarchy; support it or write those three classes out. Do not carry a general
+- Class getters (8 occurrences) are carried: a getter is a method with no
+  parameters, and a member read of it is the call. A setter is still refused.
+  Inheritance is limited to `extends Error` and one internal reader hierarchy;
+  support it or write those three classes out. Do not carry a general
   inheritance model to compile four uses.
 - Module forms: `import * as`, renamed imports, re-exports, and a module value
   another module imports. A top-level constant is already read by the functions

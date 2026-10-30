@@ -498,6 +498,23 @@ test("a for-of names the parts of the element it walks", async () => {
   assert.equal(output.trim(), "10");
 });
 
+test("a getter is a method a member read calls", async () => {
+  // `get double()` is a body with no parameters whose name is read as a member:
+  // the read is the call, and a getter may read another getter.
+  const output = await agreesWithNode([
+    "class Counter {",
+    "  n: number = 3;",
+    "  get double(): number { return this.n * 2; }",
+    "  get triple(): number { return this.double + this.n; }",
+    "  static get zero(): number { return 0; }",
+    "}",
+    "const counter = new Counter();",
+    "console.log(counter.double, counter.triple, Counter.zero);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6 9 0");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

@@ -73,6 +73,7 @@ import { parseProgramBody } from "./typescript-program.ts";
 import { lowerWideArithmetic } from "./typescript-wide-lowering.ts";
 import {
   findField,
+  findGetter,
   findMethod,
   methodFunctionName,
   requiredParams,
@@ -2296,7 +2297,9 @@ class TypeScriptParser {
     out.push(this.declared(info.name, constructorParams, this.referenceTo(info.name), body, info.exported, info.line));
     out.push(...this.wrappers(info, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, info.name, this.referenceTo(info.name), false, info.exported));
 
-    for (const method of info.methods) {
+    // A getter is a method with no parameters whose name is read as a member,
+    // so it is emitted beside the methods and called where it is read.
+    for (const method of [...info.methods, ...info.getters]) {
       const name = `${info.name}_${method.name}`;
       const returns = this.returnTypeForName(method.returnTypeName, method.line);
       const statements = this.withClassContext(info, method.params, true, () => {
@@ -2319,7 +2322,7 @@ class TypeScriptParser {
       );
       out.push(...this.wrappers(info, method, name, returns, true, info.exported));
     }
-    for (const method of info.staticMethods) {
+    for (const method of [...info.staticMethods, ...info.staticGetters]) {
       const name = `${info.name}_${method.name}`;
       const returns = this.returnTypeForName(method.returnTypeName, method.line);
       const statements = this.withClassContext(info, method.params, false, () => {
@@ -5296,6 +5299,21 @@ class TypeScriptParser {
               replace({ k: "call", name: `${found.owner}_${found.field.name}`, args: [] });
               continue;
             }
+            const getter = findGetter(this.classTable, owner.name, field.text, true);
+            if (getter !== null) {
+              replace({ k: "call", name: `${getter.owner}_${getter.getter.name}`, args: [] });
+              continue;
+            }
+          }
+        }
+        // `this.size`: a member a class reads through a getter is the body the
+        // getter is, and the instance it reads is the receiver.
+        const getterOwner = this.classOfExpression(target);
+        if (getterOwner !== null) {
+          const getter = findGetter(this.classTable, getterOwner, field.text, false);
+          if (getter !== null) {
+            replace({ k: "call", name: `${getter.owner}_${getter.getter.name}`, args: [target] });
+            continue;
           }
         }
         replace({ k: "member", base: target, field: field.text });
