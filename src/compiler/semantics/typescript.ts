@@ -1484,9 +1484,12 @@ export function tokenize(source: string): Token[] {
       continue;
     }
     if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1] ?? ""))) {
-      const match = /^(?:0[xX][0-9a-fA-F]+|[0-9]*\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(source.slice(index));
+      // A number may write `_` between its digits, as `600_000` does: the
+      // separator is for reading and names nothing, so the value is the digits
+      // without it.
+      const match = /^(?:0[xX][0-9a-fA-F_]+|[0-9_]*\.[0-9_]+|[0-9][0-9_]*)(?:[eE][+-]?[0-9_]+)?/.exec(source.slice(index));
       if (match === null) throw frontendError(`malformed number`, `line ${line}`);
-      tokens.push({ kind: "number", text: match[0], line });
+      tokens.push({ kind: "number", text: match[0].replace(/_/g, ""), line });
       index += match[0].length;
       continue;
     }

@@ -515,6 +515,20 @@ test("a getter is a method a member read calls", async () => {
   assert.equal(output.trim(), "6 9 0");
 });
 
+test("a number may write a separator between its digits", async () => {
+  // `600_000` names the value of its digits: the separator is for reading, and
+  // the parser writes the digits without it.
+  const output = await agreesWithNode([
+    "function big(): number { return 600_000; }",
+    "function mask(): number { return 0xF_F; }",
+    "function tenth(): number { return 1e1_0; }",
+    "function wide(): bigint { return 1_000n; }",
+    "console.log(big(), mask(), tenth(), wide());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "600000 255 10000000000 1000n");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

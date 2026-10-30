@@ -28,12 +28,12 @@ import { selfHostGap } from "./self-host-gap.ts";
  * should show. Reading `Object.keys` and `Object.values` of a constant object
  * lowered it to 6280, and a for-of over an expression, a parameter written as a
  * pattern and a trailing comma in a list lowered it to 5194. A for-of that names
- * the parts of its element lowered it to 5123, and a getter lowered it to 5121.
- * Lower it with every slice; raise it only when the measurement changes which parser reads a body,
+ * the parts of its element lowered it to 5123, a getter to 5121, and reading the
+ * `_` separator in a number to 5068. Lower it with every slice; raise it only when the measurement changes which parser reads a body,
  * or when the compiler itself grows a construct the frontend has not learned
  * yet.
  */
-const REFUSAL_BUDGET = 5121;
+const REFUSAL_BUDGET = 5068;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

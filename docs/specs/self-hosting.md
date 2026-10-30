@@ -72,7 +72,8 @@ Reading `Object.keys` and `Object.values` of a constant object lowered it to
 6280. Reading a `for..of` whose body names an expression rather than an array
 name, a parameter written as a pattern, and a trailing comma in a list lowered
 it to 5194, a `for..of` that names the parts of its element lowered it to 5123,
-and a getter to 5121. The refusals fall into six frontiers:
+a getter to 5121, and the `_` separator in a number to 5068. The refusals fall
+into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -162,6 +163,7 @@ below are independent enough to land one at a time, in this order:
   are written, and a `for..of` over `[key, value]` binds each part the same way.
 - `switch` (about 200 occurrences), lowered to the chain of comparisons the
   current subset already has.
+- A number written with `_` between its digits, as `600_000` is.
 - `throw` and `new Error`, plus `error.message` in a catch arm. Try/catch and
   `finally` are already carried; only the throwing side is missing.
 - Class getters (8 occurrences) are carried: a getter is a method with no
