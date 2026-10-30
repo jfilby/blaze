@@ -22,7 +22,10 @@ const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pa
 const QUIET = { stage: () => {} };
 
 /** Builds a program and answers the binary and the directory it was built in. */
-async function build(source: string): Promise<{ directory: string; binary: string }> {
+async function build(
+  source: string,
+  backend?: "c" | "machine",
+): Promise<{ directory: string; binary: string; status: { backend: string; reason?: string } }> {
   const directory = await scratch("blaze-language-feature-");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
@@ -30,6 +33,7 @@ async function build(source: string): Promise<{ directory: string; binary: strin
     sourceFile: "main.ts",
     model: { provider: "replay", file: REPLAY },
     output: "machine",
+    ...(backend === undefined ? {} : { backend }),
   });
   const outcome = await runBuild(
     "blaze.toml",
@@ -38,7 +42,11 @@ async function build(source: string): Promise<{ directory: string; binary: strin
     "build",
   );
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
-  return { directory, binary: outcome.outputPath as string };
+  return {
+    directory,
+    binary: outcome.outputPath as string,
+    status: { backend: outcome.build.backend, reason: outcome.build.backendFallback?.reason },
+  };
 }
 
 /** Builds a program and checks it prints what the source prints under node. */
@@ -458,4 +466,122 @@ test("an arrow reads the buffer length of the text it captured", async () => {
     "",
   ].join("\n"));
   assert.equal(output.trim(), "5");
+});
+
+test("an arrow passed as a value is a closure the callee can call", async () => {
+  // An arrow read where a value is expected travels as a closure: the values it
+  // captured go with it, and a function that only holds a parameter of function
+  // type can still call it.
+  const output = await agreesWithNode([
+    "function apply(f: (x: number) => number, x: number): number {",
+    "  return f(x) + f(x + 1);",
+    "}",
+    "function add(x: number): number {",
+    "  const plus = (y: number): number => y + x;",
+    "  return apply(plus, 2);",
+    "}",
+    "console.log(add(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "25");
+});
+
+test("a closure is built where the arrow is written, not where it was declared", async () => {
+  // The call site of the arrow by its name is a direct call and needs no
+  // closure; the closure is built at the place the value is handed over, which
+  // is where the captured values are read.
+  const output = await agreesWithNode([
+    "function apply(f: (x: number) => number, x: number): number { return f(x); }",
+    "function twice(y: number): number { return y * 2; }",
+    "function g(a: number): number {",
+    "  const inc = (y: number): number => y + a;",
+    "  return apply(inc, 3) + inc(4) + twice(inc(5));",
+    "}",
+    "console.log(g(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "57");
+});
+
+test("a closure captures a buffer and its length", async () => {
+  // A buffer captured by a closure is two values — the block and its length —
+  // and both travel with it, so a callee that walks the array sees the whole
+  // of it.
+  const output = await agreesWithNode([
+    "function each(a: Float64Array, f: (x: number) => number): number {",
+    "  let total = 0;",
+    "  for (let i = 0; i < a.length; i++) total += f(a[i]);",
+    "  return total;",
+    "}",
+    "function g(a: Float64Array, scale: number): number {",
+    "  const weight = (x: number): number => x * scale;",
+    "  return each(a, weight);",
+    "}",
+    "console.log(g(new Float64Array([1, 2, 3]), 3));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "18");
+});
+
+test("a closure that escapes the function that built it still answers", async () => {
+  // The captured values travel in the closure itself, so a closure a function
+  // answers with is called after the call that built it has returned.
+  const output = await agreesWithNode([
+    "function apply(f: (x: number) => number, x: number): number { return f(x); }",
+    "function make(a: number): (y: number) => number {",
+    "  return (b: number): number => a + b;",
+    "}",
+    "function g(): number {",
+    "  const f: (y: number) => number = make(10);",
+    "  return apply(f, 5);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "15");
+});
+
+test("a closure handed on through another arrow keeps what both captured", async () => {
+  // The inner arrow is a closure built inside the outer one, so the value it
+  // captured from the function around them both travels through the outer
+  // closure as well.
+  const output = await agreesWithNode([
+    "function apply(f: (x: number) => number, x: number): number { return f(x); }",
+    "function g(a: number): number {",
+    "  const outer = (b: number): number => {",
+    "    return apply((c: number): number => a + b + c, 1);",
+    "  };",
+    "  return outer(2);",
+    "}",
+    "console.log(g(10));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "13");
+});
+
+test("a closure lowers through the C backend, and the machine backend leaves it to C", async () => {
+  // A closure is a code address beside the values it captured, which is a value
+  // the machine backend does not hold: it refuses and the program is lowered by
+  // the C backend, which does.
+  const source = [
+    "function apply(f: (x: number) => number, x: number): number { return f(x); }",
+    "function g(a: number): number {",
+    "  const inc = (y: number): number => y + a;",
+    "  return apply(inc, 1);",
+    "}",
+    "console.log(g(41));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary, status } = await build(source, backend);
+    const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(original.code, 0, original.stderr);
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, original.stdout, `the ${backend} build answers what node answers`);
+    assert.equal(status.backend, "c", "a closure is lowered by the C backend whichever backend was asked for");
+    if (backend === "machine") {
+      assert.match(status.reason ?? "", /closure|calls a value/, "the machine backend says why it refused");
+    }
+  }
 });

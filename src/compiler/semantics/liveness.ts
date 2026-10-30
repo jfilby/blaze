@@ -422,6 +422,15 @@ class Graph {
       case "loadField":
         this.value(events, value.object);
         return;
+      case "closure":
+        // The block is allocated before the values it captures are read into it,
+        // so the allocation is a call the captured values are live across.
+        events.push({ k: "call" });
+        for (const capture of value.captures) this.value(events, capture);
+        return;
+      case "capture":
+        this.value(events, value.closure);
+        return;
       case "element":
         this.value(events, value.of);
         this.value(events, value.index);

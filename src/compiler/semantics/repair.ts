@@ -325,6 +325,12 @@ function valueChildren(value: SemanticValue): readonly SemanticValue[] {
       return value.fields.map((field) => field.value);
     case "select":
       return [value.condition, value.then, value.otherwise];
+    case "closure":
+      // The values a closure captured are read where the closure is built, so
+      // a name one of them reads is a name the value reads.
+      return value.captures;
+    case "capture":
+      return [value.closure];
     default:
       return [];
   }

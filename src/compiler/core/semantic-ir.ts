@@ -445,7 +445,37 @@ export type SemanticValue =
    * hands the runtime its address. A function the program declares has no
    * symbol here, because the program writes it out in its own file.
    */
-  | { k: "functionRef"; type: SemanticType; name: string; captures: CaptureRef[]; symbol?: string };
+  | { k: "functionRef"; type: SemanticType; name: string; captures: CaptureRef[]; symbol?: string }
+  /**
+   * A closure: a function of the program together with the values it captured.
+   *
+   * `code` is the symbol of a function whose first parameter is the closure
+   * itself and whose remaining parameters are the ones the source wrote, and
+   * `captures` are the values it reads out of itself by position. A closure is
+   * one reference: the code and the captured values travel together in the one
+   * block the value names, so a call site that holds the closure needs nothing
+   * else to make the call.
+   *
+   * `signature` is what `code` is declared as. It is carried here rather than
+   * read from the program because the value may be built in one file and called
+   * in another, and a call written through it names its own signature from its
+   * own arguments.
+   */
+  | {
+      k: "closure";
+      type: SemanticType;
+      code: string;
+      signature: FunctionSignature;
+      captures: SemanticValue[];
+    }
+  /**
+   * One value a closure captured, read out of the closure it travels in.
+   *
+   * The position is where the value sits in the closure's captured values, and
+   * the type is the one it is read at: a number travels as the number it is and
+   * a reference as the address of it, and the type is what says which.
+   */
+  | { k: "capture"; type: SemanticType; closure: SemanticValue; index: number };
 
 /**
  * One value a callback captured: the name it is held under, and the type it is
@@ -474,6 +504,18 @@ export interface CaptureRef {
 export function isCarriedAsAddress(type: SemanticType): boolean {
   if (type.kind === "text") return true;
   return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
+}
+
+/**
+ * Whether a value of a type travels as the address of it in a closure.
+ *
+ * A closure carries its captures as one word each: a number as the number it
+ * is, and everything else — a string, a buffer, an object — as the address of
+ * it. A reference the C backend holds as a double is an address too, and it is
+ * carried as one so that it is not rounded on the way into a `double`.
+ */
+export function isCarriedAsCaptureAddress(type: SemanticType): boolean {
+  return isCarriedAsAddress(type) || type.kind === "ref";
 }
 
 /** What a value is, as printing and truth read it. */
@@ -553,6 +595,15 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       walkValues(value.then, visit);
       walkValues(value.otherwise, visit);
       return;
+    case "closure":
+      // The captured values are read where the closure is built, so a call
+      // written into one is a call the value makes and a name read in one is a
+      // name the body reads.
+      for (const capture of value.captures) walkValues(capture, visit);
+      return;
+    case "capture":
+      walkValues(value.closure, visit);
+      return;
     default:
       return;
   }
@@ -601,6 +652,10 @@ function makesCall(value: SemanticValue): boolean {
     case "buffer":
     case "newObject":
     case "length":
+      return true;
+    case "closure":
+      // A closure is a block the runtime lays out, so building one is a call
+      // like any other allocation.
       return true;
     case "text":
       // A string written out in the source is laid down in the object beside
@@ -659,6 +714,15 @@ export type Ownership =
 export interface SemanticCall {
   /** The function called, as the contract names it. */
   callee: string;
+  /**
+   * The closure a call is made through, when it is not a call of a name.
+   *
+   * A call through a closure names its signature in `signature` all the same,
+   * built from the arguments written at the call site: the value does not carry
+   * the types of the parameters it was declared with, so the call site states
+   * them. `callee` names nothing then.
+   */
+  through?: SemanticValue;
   /** The signature the call is made against. */
   signature: FunctionSignature;
   args: SemanticValue[];

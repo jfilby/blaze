@@ -389,6 +389,12 @@ function callText(call: SemanticCall): string {
   // carries nothing: the text states which of the two the call is, so reading
   // it back answers the call the program made.
   const grid = call.grid === undefined ? "" : ` grid[${printSemanticValue(call.grid)}]`;
+  // A call through a closure names the closure instead of a callee: the value
+  // is what is called, and every type the call is made against is written on
+  // its arguments.
+  if (call.through !== undefined) {
+    return `through ${printSemanticValue(call.through)} [${args}] ownership=${call.ownership} retain=${retain}${grid}`;
+  }
   return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}${grid}`;
 }
 
@@ -447,6 +453,15 @@ export function printSemanticValue(value: SemanticValue): string {
       return value.index === null
         ? `argv[${typeText(value.type)}]`
         : `[argv[${typeText(value.type)}] ${printSemanticValue(value.index)}]`;
+    case "closure": {
+      const params = value.signature.params.map((param) => `[${typeText(parseType(param.type))}]`).join(" ");
+      return (
+        `[closure[${typeText(value.type)}] result[${typeText(parseType(value.signature.returns))}] ` +
+        `code ${value.code} params[${params}] ${value.captures.map(printSemanticValue).join(" ")}]`
+      );
+    }
+    case "capture":
+      return `[capture[${typeText(value.type)}] ${printSemanticValue(value.closure)} at ${value.index}]`;
   }
 }
 
@@ -1368,6 +1383,34 @@ class IrScanner {
         const call = this.call(type);
         return this.closed({ k: "call", type, call });
       }
+      case "closure": {
+        const type = this.typed();
+        this.keyword("result");
+        const returns = this.typed();
+        this.keyword("code");
+        const code = this.word();
+        this.keyword("params");
+        this.expect("[");
+        const params: { name: string; type: string }[] = [];
+        while (this.more()) params.push({ name: `argument${params.length}`, type: contractText(this.typed()) });
+        this.expect("]");
+        const captures: SemanticValue[] = [];
+        while (this.more()) captures.push(this.value());
+        return this.closing(bracketed, {
+          k: "closure",
+          type,
+          code,
+          signature: { name: code, symbol: code, params, returns: contractText(returns) },
+          captures,
+        });
+      }
+      case "capture": {
+        const type = this.typed();
+        const closure = this.value();
+        this.keyword("at");
+        const index = this.integer();
+        return this.closing(bracketed, { k: "capture", type, closure, index });
+      }
       default:
         this.refuse("a value", head);
     }
@@ -1396,6 +1439,45 @@ class IrScanner {
    * did not know it had, so it is refused where it is written.
    */
   call(returns: SemanticType): SemanticCall {
+    // A call through a closure names no callee: the value is what is called,
+    // and the signature is built from the arguments the call is written with.
+    if (this.peekWord() === "through") {
+      this.keyword("through");
+      const through = this.value();
+      const argTypes: SemanticType[] = [];
+      const args: SemanticValue[] = [];
+      this.expect("[");
+      while (this.more()) {
+        this.keyword("arg");
+        argTypes.push(this.typed());
+        args.push(this.value());
+      }
+      this.expect("]");
+      this.keyword("ownership");
+      this.expect("=");
+      const ownership = this.oneOf(this.word(), OWNERSHIPS);
+      this.keyword("retain");
+      this.expect("=");
+      const retain = this.oneOf(this.word(), FLAGS);
+      const signature: FunctionSignature = {
+        name: "(closure)",
+        symbol: "(closure)",
+        params: argTypes.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+        returns: contractText(returns),
+      };
+      return {
+        callee: "(closure)",
+        through,
+        signature,
+        args,
+        argTypes,
+        returns,
+        effects: [],
+        ownership,
+        retain: retain === "yes",
+        builtin: false,
+      };
+    }
     const callee = this.word();
     const bound = this.binder.bind(callee, this.line);
     // A builtin is the compiler's own: it is not one of the program's functions,

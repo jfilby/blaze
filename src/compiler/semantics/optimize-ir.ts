@@ -328,6 +328,10 @@ export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
     // a walk that stops at the call answers "nothing here" for both.
     case "call":
       return value.call.args;
+    case "closure":
+      return value.captures;
+    case "capture":
+      return [value.closure];
     default:
       return [];
   }
@@ -381,6 +385,8 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
         ...value,
         parts: value.parts.map((part) => (part.k === "value" ? { k: "value" as const, value: next() } : part)),
       };
+    case "closure": return { ...value, captures: children };
+    case "capture": return { ...value, closure: next() };
     default: return value;
   }
 }

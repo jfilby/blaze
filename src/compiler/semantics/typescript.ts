@@ -513,6 +513,12 @@ function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): Ty
       return TEXT_RESULT;
     case "update":
       return resultType({ k: "ident", name: value.name }, scope);
+    case "capture":
+      return value.type;
+    case "invoke":
+      return value.returns;
+    case "arrow":
+      return ANY_TYPE;
     default:
       return ANY_TYPE;
   }
@@ -981,6 +987,13 @@ function walkFunction(
         // a name one of them reads is a read of that name here too.
         for (const capture of expression.captures) onName(capture, bound(capture));
         return;
+      case "capture":
+        read(expression.closure);
+        return;
+      case "invoke":
+        read(expression.callee);
+        for (const argument of expression.args) read(argument);
+        return;
     }
   };
   const statements = (body: readonly Statement[]): void => {
@@ -1157,8 +1170,18 @@ function arrowCaptures(
         write(expression.name);
         return;
       case "arrow":
-        // The value is the lifted function, which is a name of the file and not
-        // a value the arrow around it holds.
+        // An arrow written inside this one is a closure built here, and the
+        // values it captured are read from right here: a name of the function
+        // around this arrow is one this arrow captures too, so that it can hand
+        // it on.
+        for (const capture of expression.captures) read({ k: "ident", name: capture });
+        return;
+      case "capture":
+        read(expression.closure);
+        return;
+      case "invoke":
+        read(expression.callee);
+        for (const argument of expression.args) read(argument);
         return;
     }
   };
@@ -1467,15 +1490,34 @@ export function tokenize(source: string): Token[] {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The arrow a name of a body is bound to: the function it was lifted to, and
- * the values it captured, which a call of the name writes in front of its own
- * arguments.
+ * The arrow a name of a body is bound to: the function it was lifted to, the
+ * values it captured, and the function that enters it as a value.
+ *
+ * Called by the name it is bound to, an arrow is a direct call of the function
+ * its body became, with the captured values written in front of the arguments.
+ * Read as a value, it is a closure: the captured values travel with it and the
+ * `code` entry unpacks them, so a holder that never saw the declaration can
+ * still call it.
  */
 interface ArrowBinding {
   /** The name of the function the arrow lifted to. */
   function: string;
   /** The names it captured, in the order the lifted function takes them. */
   captures: string[];
+  /** The type each capture was held at when the arrow was written. */
+  captureTypes: TypeExpr[];
+  /** The parameters the arrow itself was written with. */
+  params: { name: string; type: TypeExpr }[];
+  /** What the arrow answers. */
+  returns: TypeExpr;
+  /** The function a call through the closure enters, once one is needed. */
+  code?: string;
+}
+
+/** The signature a function type annotation names. */
+interface FunctionType {
+  params: TypeExpr[];
+  returns: TypeExpr;
 }
 
 export interface TypeScriptFunction {
@@ -1578,6 +1620,15 @@ class TypeScriptParser {
   private valueTypes = new Map<string, TypeExpr>();
   /** The arrow each name of the function being read is bound to. */
   private valueArrows = new Map<string, ArrowBinding>();
+  /** The arrow each lifted function was made from, by the function's name. */
+  private arrowBindings = new Map<string, ArrowBinding>();
+  /**
+   * Whether the expression being read is the initialiser of a declaration, and
+   * so may be an arrow that is only ever called by the name it is bound to.
+   */
+  private bindingArrow = false;
+  /** The signature each name of the function is a function at, when it holds one. */
+  private valueFunctions = new Map<string, FunctionType>();
   /**
    * The arrows the file's bodies wrote, lifted into functions of the file.
    *
@@ -1759,11 +1810,13 @@ class TypeScriptParser {
     const savedTypes = this.valueClasses;
     const savedValueTypes = this.valueTypes;
     const savedArrows = this.valueArrows;
+    const savedFunctions = this.valueFunctions;
     this.tokens = this.allTokens;
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
     this.valueArrows = new Map();
+    this.valueFunctions = new Map();
     if (self) this.valueClasses.set("self", info.name);
     for (const param of params) {
       const typeName = this.classTypeName(param.typeName);
@@ -1779,6 +1832,7 @@ class TypeScriptParser {
       this.valueClasses = savedTypes;
       this.valueTypes = savedValueTypes;
       this.valueArrows = savedArrows;
+      this.valueFunctions = savedFunctions;
     }
   }
 
@@ -2883,6 +2937,7 @@ class TypeScriptParser {
     this.valueClasses = new Map();
     this.valueTypes = new Map();
     this.valueArrows = new Map();
+    this.valueFunctions = new Map();
     const declared = (returns: TypeExpr, body: Statement[]): TypeScriptFunction => ({
       name: name.text,
       params,
@@ -2907,10 +2962,12 @@ class TypeScriptParser {
         // that default is. `function invert(n: bigint, modulo = CURVE.P)` is
         // the second form: the default says what the parameter holds.
         let mapped: TypeExpr | null = null;
+        let functionType: FunctionType | null = null;
         if (this.accept(":")) {
           // A type may be a named type, a union, a generic, an object or a
           // function type: every one of them is read to its end and erased.
           const head = this.peek().kind === "ident" ? this.peek().text : "";
+          functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           mapped = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
           if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
         }
@@ -2929,6 +2986,7 @@ class TypeScriptParser {
           ...(fallback === undefined ? {} : { default: fallback }),
         });
         this.valueTypes.set(parameter.text, mapped);
+        if (functionType !== null) this.valueFunctions.set(parameter.text, functionType);
         if (this.accept(",")) continue;
         this.expect(")");
         break;
@@ -2950,6 +3008,82 @@ class TypeScriptParser {
       return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
     return declared(returnType, this.readBlock());
+  }
+
+  /**
+   * The signature an annotation names, when the annotation is a function type.
+   *
+   * `(x: number) => number` is a value the source may hold and call, and the
+   * contract has no type for one: the value itself is an opaque reference and
+   * what a call of it is made against is the signature written here. The
+   * annotation is read twice — once for the signature and once as the type the
+   * value is held at — because the two answers are used at different places: a
+   * name is held as a reference and called against the signature.
+   */
+  private annotationFunctionType(stops: ReadonlySet<string>): FunctionType | null {
+    const start = this.position;
+    const end = this.typeEndAt(start, stops);
+    return this.functionTypeFrom(start, end);
+  }
+
+  /** The signature a run of annotation tokens names, or null where it names none. */
+  private functionTypeFrom(start: number, end: number): FunctionType | null {
+    let at = start;
+    while (this.tokens[at]?.text === "readonly") at += 1;
+    // `<T>(x: T) => T` is a function type whose type parameters are erased with
+    // every other type the frontend reads.
+    if (this.tokens[at]?.text === "<") {
+      const close = this.matchingToken(at, "<", ">");
+      if (close < 0 || close >= end) return null;
+      at = close + 1;
+    }
+    if (this.tokens[at]?.text !== "(") return null;
+    const close = this.matchingToken(at, "(", ")");
+    if (close < 0 || close >= end) return null;
+    if (this.tokens[close + 1]?.text !== "=>") return null;
+    const params: TypeExpr[] = [];
+    let cursor = at + 1;
+    while (cursor < close) {
+      // A parameter is `name: type`, `name?: type` or a bare name whose type is
+      // the opaque reference. A destructured parameter names no one type, so
+      // the annotation is not one this can read a call against.
+      while (this.tokens[cursor]?.text === "readonly") cursor += 1;
+      if (this.tokens[cursor]?.text === "this" && this.tokens[cursor + 1]?.text === ":") {
+        // `this: Foo` says what the call is made on, which a value held here is
+        // not: it is read past and names no parameter.
+        cursor += 2;
+        while (cursor < close && this.tokens[cursor]?.text !== ",") cursor += 1;
+        if (this.tokens[cursor]?.text === ",") cursor += 1;
+        continue;
+      }
+      if (this.tokens[cursor]?.text === "{") return null;
+      if (this.tokens[cursor]?.text === "...") cursor += 1;
+      if (this.tokens[cursor]?.kind !== "ident") return null;
+      cursor += 1;
+      if (this.tokens[cursor]?.text === "?") cursor += 1;
+      let type: TypeExpr = ANY_TYPE;
+      if (this.tokens[cursor]?.text === ":") {
+        cursor += 1;
+        const typeStart = cursor;
+        let depth = 0;
+        while (cursor < close) {
+          const text = this.tokens[cursor]?.text;
+          if (this.tokens[cursor]?.kind === "punct") {
+            if (text === "(" || text === "[" || text === "{" || text === "<") depth += 1;
+            else if (text === ")" || text === "]" || text === "}" || text === ">") depth -= 1;
+            else if (text === ">>") depth -= 2;
+            else if (text === ">>>") depth -= 3;
+            else if (text === "," && depth === 0) break;
+          }
+          cursor += 1;
+        }
+        type = this.typeFromTokens(typeStart, cursor, false);
+      }
+      params.push(type);
+      if (this.tokens[cursor]?.text === ",") cursor += 1;
+    }
+    const returns = this.typeFromTokens(close + 2, end, false);
+    return { params, returns };
   }
 
   /**
@@ -3124,8 +3258,10 @@ class TypeScriptParser {
       }
       let type: TypeExpr | null = null;
       let annotationClass: string | null = null;
+      let annotationFunction: FunctionType | null = null;
       if (this.accept(":")) {
         const head = this.peek().kind === "ident" ? this.peek().text : "";
+        annotationFunction = this.annotationFunctionType(new Set(["=", ";", ",", ")"]));
         type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
         if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
       }
@@ -3134,7 +3270,16 @@ class TypeScriptParser {
         this.synchronize();
         return { kind: "expression", value: this.hole(), line: name.line };
       }
-      const init = this.readExpression();
+      // The arrow this declaration binds is a direct call by the name it is
+      // given, so it is not turned into a closure here.
+      const wasBinding = this.bindingArrow;
+      this.bindingArrow = true;
+      let init: Expression;
+      try {
+        init = this.readExpression();
+      } finally {
+        this.bindingArrow = wasBinding;
+      }
       this.accept(";");
       // An arrow is called by the name it is bound to: the function it lifted to
       // already carries the values it captured, so the name is not a slot the
@@ -3151,12 +3296,15 @@ class TypeScriptParser {
             name,
           );
         }
-        this.valueArrows.set(name.text, { function: init.name, captures: init.captures });
+        const binding = this.arrowBindings.get(init.name);
+        if (binding !== undefined) this.valueArrows.set(name.text, binding);
         this.valueTypes.set(name.text, ANY_TYPE);
         this.valueClasses.delete(name.text);
         return { kind: "declare", name: name.text, type: ANY_TYPE, init: { k: "null" }, line: name.line };
       }
       this.valueArrows.delete(name.text);
+      if (annotationFunction !== null) this.valueFunctions.set(name.text, annotationFunction);
+      else this.valueFunctions.delete(name.text);
       const held = annotationClass ?? this.classOfExpression(init);
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
@@ -3987,7 +4135,15 @@ class TypeScriptParser {
   }
 
   readExpression(): Expression {
-    return this.readConditional();
+    // An arrow is a value wherever it is read, except at the one place it is
+    // bound to a name: there the call of that name later is a direct call of
+    // the function the body became, and no closure has to be built for it. The
+    // flag is read and cleared here, so a nested expression of the same
+    // declaration is read as the value it is.
+    const binding = this.bindingArrow;
+    this.bindingArrow = false;
+    const value = this.readConditional();
+    return binding ? value : this.materialized(value);
   }
 
   /** `c ? a : b`, the loosest operator an expression has. */
@@ -4350,6 +4506,17 @@ class TypeScriptParser {
           });
           continue;
         }
+        // `f(x)` where `f` holds a function: the call is made through the
+        // value, and the signature it is made against is the one `f` was
+        // declared with at the place it is named.
+        if (target.k === "ident") {
+          const signature = this.valueFunctions.get(target.name);
+          if (signature !== undefined) {
+            const args = this.readCallArguments();
+            replace({ k: "invoke", callee: target, args, params: signature.params, returns: signature.returns });
+            continue;
+          }
+        }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
@@ -4621,6 +4788,7 @@ class TypeScriptParser {
       name: string;
       type: TypeExpr;
       typeName: string;
+      functionType: FunctionType | null;
     }
     const params: ArrowParam[] = [];
     if (this.accept("(")) {
@@ -4636,8 +4804,10 @@ class TypeScriptParser {
         this.accept("?");
         let type: TypeExpr = ANY_TYPE;
         let typeName = "";
+        let functionType: FunctionType | null = null;
         if (this.accept(":")) {
           typeName = this.peek().kind === "ident" ? this.peek().text : "";
+          functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
         }
         if (this.at("=")) {
@@ -4648,14 +4818,14 @@ class TypeScriptParser {
           this.next();
           this.readExpression();
         }
-        params.push({ name: name.text, type, typeName });
+        params.push({ name: name.text, type, typeName, functionType });
         if (!this.accept(",")) break;
       }
       this.expect(")");
     } else {
       const name = this.next();
       if (name.kind !== "ident") return this.missing("expected a parameter name", name);
-      params.push({ name: name.text, type: ANY_TYPE, typeName: "" });
+      params.push({ name: name.text, type: ANY_TYPE, typeName: "", functionType: null });
     }
     let stated: TypeExpr | null = null;
     if (this.accept(":")) {
@@ -4670,15 +4840,21 @@ class TypeScriptParser {
     const savedTypes = this.valueTypes;
     const savedClasses = this.valueClasses;
     const savedArrows = this.valueArrows;
+    const savedFunctions = this.valueFunctions;
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
     this.valueClasses = new Map(savedClasses);
-    this.valueArrows = new Map();
+    // The arrow body reads the names around it, and a name bound to an arrow is
+    // an arrow here too: a body that passes one on or calls one is reading the
+    // same value the function that wrote it reads.
+    this.valueArrows = new Map(savedArrows);
+    this.valueFunctions = new Map(savedFunctions);
     this.loops = 0;
     this.breakTargets = [];
     for (const param of params) {
       this.valueTypes.set(param.name, param.type);
+      if (param.functionType !== null) this.valueFunctions.set(param.name, param.functionType);
       if (param.typeName !== "" && this.classTable.names.has(param.typeName)) {
         this.valueClasses.set(param.name, param.typeName);
       }
@@ -4689,6 +4865,7 @@ class TypeScriptParser {
     this.valueTypes = savedTypes;
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
+    this.valueFunctions = savedFunctions;
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
     const returns =
@@ -4701,8 +4878,8 @@ class TypeScriptParser {
         start,
       );
     }
-    const name = this.liftArrow(params, returns, body, captures.captures, line);
-    return { k: "arrow", name, captures: captures.captures };
+    const binding = this.liftArrow(params, returns, body, captures.captures, line);
+    return { k: "arrow", name: binding.function, captures: binding.captures };
   }
 
   /**
@@ -4718,16 +4895,15 @@ class TypeScriptParser {
     body: Statement[],
     captures: readonly string[],
     line: number,
-  ): string {
+  ): ArrowBinding {
     const name = `__closure_${this.closureCount}`;
     this.closureCount += 1;
-    const captured = captures.map((capture) => ({
-      name: capture,
-      type: this.valueTypes.get(capture) ?? ANY_TYPE,
-    }));
+    const captureTypes = captures.map((capture) => this.valueTypes.get(capture) ?? ANY_TYPE);
+    const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
+    const written = params.map((param) => ({ name: param.name, type: param.type }));
     const lifted: TypeScriptFunction = {
       name,
-      params: [...captured, ...params.map((param) => ({ name: param.name, type: param.type }))],
+      params: [...captured, ...written],
       returns,
       body,
       line,
@@ -4742,7 +4918,72 @@ class TypeScriptParser {
       handle: lifted,
     });
     this.liftedArrows.set(name, lifted);
-    return name;
+    const binding: ArrowBinding = {
+      function: name,
+      captures: [...captures],
+      captureTypes,
+      params: written,
+      returns,
+    };
+    this.arrowBindings.set(name, binding);
+    return binding;
+  }
+
+  /**
+   * The function a call through an arrow's value enters.
+   *
+   * A lifted body takes the values it captured as leading parameters, which a
+   * call site that holds the arrow in a name does not have. The entry is a
+   * function of the file like any other: its first parameter is the closure
+   * and the rest are the arrow's own, and it reads each captured value out of
+   * the closure and writes it in front of the call.
+   */
+  private closureCode(binding: ArrowBinding): string {
+    if (binding.code !== undefined) return binding.code;
+    const code = binding.function.replace("__closure_", "__closure_code_");
+    binding.code = code;
+    const line = this.liftedArrows.get(binding.function)?.line ?? 0;
+    const args: Expression[] = [
+      ...binding.captures.map((_, index) => ({
+        k: "capture" as const,
+        closure: { k: "ident" as const, name: "self" },
+        index,
+        type: binding.captureTypes[index] ?? ANY_TYPE,
+      })),
+      ...binding.params.map((param) => ({ k: "ident" as const, name: param.name })),
+    ];
+    const call: Expression = { k: "call", name: binding.function, args };
+    const lifted: TypeScriptFunction = {
+      name: code,
+      params: [{ name: "self", type: ANY_TYPE }, ...binding.params],
+      returns: binding.returns,
+      body: binding.returns.kind === "void"
+        ? [{ kind: "expression", value: call, line }]
+        : [{ kind: "result", value: call, line }],
+      line,
+      closure: true,
+    };
+    this.closures.push({
+      name: code,
+      exported: false,
+      internal: true,
+      params: lifted.params,
+      returns: binding.returns,
+      handle: lifted,
+    });
+    this.liftedArrows.set(code, lifted);
+    return code;
+  }
+
+  /**
+   * An arrow read where a value is expected: the closure it is, rather than the
+   * call it would be by the name it is bound to.
+   */
+  private materialized(value: Expression): Expression {
+    if (value.k !== "arrow") return value;
+    const binding = this.arrowBindings.get(value.name);
+    if (binding === undefined) return value;
+    return { k: "arrow", name: value.name, captures: value.captures, code: this.closureCode(binding) };
   }
 
   private readPrimary(): Expression {
@@ -4825,15 +5066,11 @@ class TypeScriptParser {
         const expanded = this.constantExpression(token.text, constant.expression);
         if (expanded !== null) return expanded;
       }
-      // An arrow is called by the name it is bound to and is not a value of its
-      // own: the function it lifted to already holds the values it captured, so
-      // there is nothing here for a name to hold.
-      if (this.valueArrows.has(token.text) && !this.at("(")) {
-        this.report(
-          "an arrow function is called by the name it is bound to, not read as a value",
-          `call ${token.text}(...) where it is written, or declare the function with \`function\` and pass that name`,
-          token,
-        );
+      // A name bound to an arrow is that arrow: read where a value is expected,
+      // it is the closure the arrow is, carrying the values it captured.
+      const arrow = this.valueArrows.get(token.text);
+      if (arrow !== undefined && !this.at("(")) {
+        return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
       }
       return { k: "ident", name: token.text };
     }
@@ -5108,6 +5345,17 @@ function usageOf(declaration: TypeScriptFunction): {
         // The body of the arrow is a function of its own, and its own usage is
         // what says whether it allocates or prints. What it reads around it is
         // a name this body reads, which is a read of a name and nothing more.
+        // Read as a value, the arrow is a closure, and a closure is a block the
+        // runtime lays out.
+        if (value.code !== undefined) allocates = true;
+        return;
+      case "capture":
+        // One value a closure carries, read out of a closure this body was
+        // handed: it reaches no buffer and allocates nothing.
+        return;
+      case "invoke":
+        expression(value.callee);
+        for (const argument of value.args) expression(argument);
         return;
     }
   };
@@ -5571,6 +5819,18 @@ class BodyAnalysis {
           line,
           "a contracted function is computed from its parameters alone; call the function the arrow lifted to where it is declared",
         );
+      case "capture":
+        this.uncontractable(
+          "reads a value a closure captured",
+          line,
+          "the closure is the function the arrow lifted to; call it where it is written",
+        );
+      case "invoke":
+        this.uncontractable(
+          "calls a value",
+          line,
+          "a contracted function is computed from its parameters alone",
+        );
     }
   }
 }
@@ -5624,6 +5884,10 @@ function dependsOn(expression: Expression, name: string): boolean {
       return expression.name === name;
     case "arrow":
       return expression.captures.includes(name);
+    case "capture":
+      return dependsOn(expression.closure, name);
+    case "invoke":
+      return dependsOn(expression.callee, name) || expression.args.some((argument) => dependsOn(argument, name));
   }
 }
 
@@ -5668,6 +5932,10 @@ function describe(expression: Expression): string {
       return "null";
     case "arrow":
       return "an arrow function";
+    case "capture":
+      return "a value a closure captured";
+    case "invoke":
+      return `a call of ${describe(expression.callee)}`;
   }
 }
 

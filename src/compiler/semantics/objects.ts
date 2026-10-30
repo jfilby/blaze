@@ -399,8 +399,22 @@ class BodyTypes {
       case "arrow":
         // An arrow is lifted into a function of the file and called by the name
         // it is bound to, so what it is laid out as is the reference every other
-        // value the layout pass does not shape is.
+        // value the layout pass does not shape is. Read as a value it is a
+        // closure, and the function that enters it is one this body reaches:
+        // the body cannot be built without it, so it is a call the body makes.
+        if (expression.code !== undefined) this.call(expression.code);
         return { kind: "type", type: ANY_REF };
+      case "capture":
+        // One of the values a closure carries, read at the type the arrow that
+        // captured it reads it at.
+        this.expression(expression.closure);
+        return { kind: "type", type: expression.type };
+      case "invoke":
+        // A call of a value: the closure is read and the arguments are read,
+        // and neither names a function of the program.
+        this.expression(expression.callee);
+        for (const argument of expression.args) this.expression(argument);
+        return { kind: "type", type: expression.returns };
     }
   }
 

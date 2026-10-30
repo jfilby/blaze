@@ -1228,6 +1228,21 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         problems.push(`${prefix}an argument is read at a ${typeText(value.index.type)}, which is not a number`);
       }
       return problems;
+    case "closure":
+      if (!isReference(value.type)) {
+        problems.push(`${prefix}a closure is written as a ${typeText(value.type)}, which is not a reference`);
+      }
+      if (value.captures.some((capture) => capture.type.kind === "void")) {
+        problems.push(`${prefix}a closure captures nothing, and nothing is not a value`);
+      }
+      return problems;
+    case "capture": {
+      if (!isReference(value.closure.type)) {
+        problems.push(`${prefix}a value is captured out of a ${typeText(value.closure.type)}, which is not a closure`);
+      }
+      if (value.index < 0) problems.push(`${prefix}a capture is read at ${value.index}`);
+      return problems;
+    }
     default:
       return problems;
   }
@@ -1484,6 +1499,22 @@ function callProblems(context: Context, tree: Tree): string[] {
 /** One call, against the signature the program or the compiler declares it with. */
 function oneCallProblems(prefix: string, call: SemanticCall, context: Context): string[] {
   const problems: string[] = [];
+  // A call through a closure names no callee and is made against the signature
+  // the call site states, so what is checked is the arguments it hands over and
+  // not a signature the program declares.
+  if (call.through !== undefined) {
+    if (call.argTypes.length !== call.args.length) {
+      problems.push(`${prefix}a call through a closure passes ${call.args.length} argument(s) as ${call.argTypes.length} type(s)`);
+    }
+    call.args.forEach((value, at) => {
+      const passed = call.argTypes[at];
+      if (passed === undefined) return;
+      if (!convertibleTo(value.type, passed)) {
+        problems.push(`${prefix}argument ${at + 1} of a closure call is a ${typeText(value.type)} and is read as a ${typeText(passed)}`);
+      }
+    });
+    return problems;
+  }
   const builtin = builtinFor(call.callee);
   const signature = declaredSignature(context, call.callee);
 
@@ -1838,7 +1869,8 @@ function nameProblems(context: Context, tree: Tree): string[] {
       });
     }
     for (const call of statementCalls(statement)) {
-      if (builtinFor(call.callee) === null) checkName(problems, prefix, call.callee);
+      // A call through a closure names no callee: the value is what is called.
+      if (call.through === undefined && builtinFor(call.callee) === null) checkName(problems, prefix, call.callee);
     }
   }
 

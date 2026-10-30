@@ -7234,6 +7234,15 @@ class Machine {
       case "buffer":
         this.buffer(value);
         return;
+      case "closure":
+      case "capture":
+        // A closure is a code address the value carries beside the values it
+        // captured, and this backend has no value that is two words: refusing
+        // here leaves the whole program to the C backend, which carries it.
+        throw machineError(
+          `${this.fn.symbol} builds or reads a closure, which this backend cannot lower`,
+          "a closure is the code that enters it beside the values it captured, and build with --backend c to carry it",
+        );
     }
   }
 
@@ -10094,6 +10103,14 @@ class Machine {
   /* -------------------------------------------------------------------------- */
 
   private callValue(call: SemanticCall, wanted: SemanticType | null, sret: Held | null = null): void {
+    if (call.through !== undefined) {
+      // A call through a closure is a call of an address the value holds, and
+      // this backend makes every call a call of a symbol it names.
+      throw machineError(
+        `${this.fn.symbol} calls a value, which this backend cannot lower`,
+        "a call through a closure goes to the address the closure holds; build with --backend c, which makes it",
+      );
+    }
     if (call.builtin) {
       this.builtin(call);
       if (wanted !== null && wanted.kind !== "void") this.convert(call.returns, wanted);

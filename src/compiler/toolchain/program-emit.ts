@@ -1214,6 +1214,12 @@ class ProgramEmitter {
         );
       case "arith":
         return this.arith(value);
+      case "closure":
+      case "capture":
+        // A closure is a value a body holds, and the program's own statements
+        // are resolved into calls of names rather than into closures. Reaching
+        // here would be a program the resolver never lowered.
+        throw emitError("the emitter cannot write down a closure value here", "a program calls the functions it declares by name");
     }
   }
 

@@ -1202,12 +1202,97 @@ class FunctionBody {
       case "update":
         return this.updated(expression, line);
       case "arrow":
-        throw this.error(
-          `is bound to the arrow function ${expression.name}, which is called by the name it is bound to and never read as a value`,
-          line,
-          "an arrow function is a function of the file once its body is lifted, so a value of it would be a closure with an environment, which this compiler does not carry",
-        );
+        return this.closure(expression, line);
+      case "capture": {
+        // One of the values a closure carries, read at the type the arrow that
+        // captured it reads it at. The closure is the value it travels in, so
+        // it is typed first: a name it reads is a name the body has.
+        const closure = this.typed(expression.closure, null, line).value;
+        return { value: { k: "capture", type: expression.type, closure, index: expression.index }, inferred: asType(expression.type) };
+      }
+      case "invoke":
+        return this.invoke(expression, line);
     }
+  }
+
+  /**
+   * An arrow read as a value: the closure it is.
+   *
+   * The values it captured are read where the arrow is written, which is the
+   * scope the body that wrote it is in, and travel with the closure from there.
+   */
+  private closure(expression: Expression & { k: "arrow" }, line: number): Typed {
+    if (expression.code === undefined) {
+      throw this.error(
+        `reads the arrow function ${expression.name} as a value, which the frontend lowered no closure entry for`,
+        line,
+        "an arrow read as a value is entered through a function the frontend writes beside it",
+      );
+    }
+    const lifted = this.context.functions[expression.code];
+    if (lifted === undefined) {
+      throw this.error(
+        `calls the arrow function ${expression.code}, which the program does not compile`,
+        line,
+        "the function an arrow is entered through is a function of the same file",
+      );
+    }
+    const captures = expression.captures.map(
+      (name) => this.typed({ k: "ident", name }, null, line).value,
+    );
+    return {
+      value: {
+        k: "closure",
+        type: REF_NULL,
+        code: lifted.function.symbol,
+        signature: lifted.function,
+        captures,
+      },
+      inferred: ANY,
+    };
+  }
+
+  /**
+   * A call of a value. The signature is the one the call site is written
+   * against, because the value does not carry the types its parameters were
+   * declared with: the arguments are read at the types the call names.
+   */
+  private invoke(expression: Expression & { k: "invoke" }, line: number): Typed {
+    const callee = this.typed(expression.callee, null, line).value;
+    if (expression.params.length !== expression.args.length) {
+      throw this.error(
+        `calls a value with ${expression.args.length} argument${expression.args.length === 1 ? "" : "s"}, but it takes ${expression.params.length}`,
+        line,
+      );
+    }
+    const args = expression.args.map((argument, at) => this.typed(argument, asType(expression.params[at]), line).value);
+    const returns: SemanticType = expression.returns;
+    const argTypes = args.map((argument) => argument.type);
+    const signature: FunctionSignature = {
+      name: "(closure)",
+      symbol: "(closure)",
+      params: argTypes.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+      returns: contractText(returns),
+    };
+    return {
+      value: {
+        k: "call",
+        type: returns,
+        call: {
+          callee: "(closure)",
+          through: callee,
+          signature,
+          args,
+          argTypes,
+          returns,
+          effects: [],
+          ownership: ownership(returns),
+          retain: false,
+          builtin: false,
+        },
+      },
+      inferred: asType(returns),
+    };
   }
 
   /**

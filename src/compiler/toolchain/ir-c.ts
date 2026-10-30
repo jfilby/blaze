@@ -18,12 +18,13 @@ import { CompilerError } from "../core/errors.ts";
 import { inspectObject } from "./assembler.ts";
 import { run } from "../core/process.ts";
 import { symbolOf } from "../semantics/contract.ts";
-import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
+import type { BuildMode, FunctionContract, FunctionSignature, TargetSpec } from "../core/types.ts";
 import { parseType } from "../semantics/contract.ts";
 import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   elementTypeOf,
   isBoolean,
+  isCarriedAsCaptureAddress,
   isFloat,
   isInteger,
   isNumber,
@@ -49,6 +50,29 @@ import { NameScope } from "./names.ts";
 import { DEFAULT_ALIGNMENT, RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { archOptions, assemblyOptions, cTargetOptions, loweringOptions, threadingOptions } from "../core/target.ts";
 import { entryIsParallel } from "../semantics/parallel.ts";
+
+/**
+ * The C a closure is, written in every function that builds or reads one.
+ *
+ * A closure is one managed block: the address of the code that enters it, and
+ * the values it captured, one word each. The block is what the value is, so a
+ * closure travels as one reference however many values it holds, and a call
+ * site that never saw the declaration can still enter it.
+ *
+ * The captured array is written with one element so that the block has room for
+ * one without a second allocation; a closure that captured more is given a
+ * block whose size says so.
+ */
+const CLOSURE_TYPES = `/* A closure: the code that enters it, and the values it captured. */
+typedef struct blaze_fn_capture_s {
+  void* pointer;
+  double number;
+} blaze_fn_capture_t;
+
+typedef struct blaze_fn_closure_s {
+  void* code;
+  blaze_fn_capture_t captured[1];
+} blaze_fn_closure_t;`;
 
 const NUMBER: SemanticType = { kind: "primitive", name: "f64" };
 const USIZE: SemanticType = { kind: "primitive", name: "usize" };
@@ -378,6 +402,8 @@ class FunctionEmitter {
   private arrayLocals = new Set<string>();
   /** Set once a whole number is written out, which is what the helper is for. */
   private wholeNumbers = false;
+  /** Set once the body builds or reads a closure, which is what the types are for. */
+  private usesClosures = false;
 
   constructor(fn: SemanticFunction) {
     this.fn = fn;
@@ -419,6 +445,7 @@ class FunctionEmitter {
       "",
       `#include "${RUNTIME_NAME}.h"`,
       ...(layouts === "" ? [] : ["", layouts]),
+      ...(this.usesClosures ? ["", CLOSURE_TYPES] : []),
       ...(this.externs.size === 0 ? [] : ["", ...this.externs.values()]),
       ...(this.wholeNumbers ? ["", WHOLE_NUMBER_HELPER] : []),
       "",
@@ -832,6 +859,9 @@ class FunctionEmitter {
   }
 
   private call(call: SemanticCall, depth: number): string {
+    // A call through a value is made by the code the value holds, so it is
+    // written before everything a named callee is looked up for.
+    if (call.through !== undefined) return this.closureCall(call, depth);
     // The HTTP calls carry their handles and their text in their own way, so
     // they are written before the arguments are placed: an argument of the
     // HTTP ABI is a C string and not a dynamic value, and the boxing the
@@ -1408,7 +1438,119 @@ class FunctionEmitter {
 
       case "buffer":
         return this.buffer(value, depth);
+      case "closure":
+        return this.buildClosure(value, depth);
+      case "capture":
+        return this.readCapture(value, depth);
     }
+  }
+
+  /** A closure's block, read out of the double a closure value is held in. */
+  private closurePointer(expression: string): string {
+    return `((blaze_fn_closure_t*)(uintptr_t)(intptr_t)(${expression}))`;
+  }
+
+  /**
+   * A closure built where the source wrote the arrow.
+   *
+   * The block holds the address of the function that enters the arrow and, one
+   * word each, the values it captured: a number as the number it is, and
+   * everything else as the address of it, so a capture that is not a whole
+   * number arrives as it was written.
+   */
+  private buildClosure(value: SemanticValue & { k: "closure" }, depth: number): string {
+    this.usesClosures = true;
+    this.declareClosureCode(value.signature);
+    const count = value.captures.length;
+    const room = count > 1 ? `sizeof(blaze_fn_closure_t) + ${count - 1} * sizeof(blaze_fn_capture_t)` : "sizeof(blaze_fn_closure_t)";
+    const slot = this.temporary("blaze_closure");
+    const lines = [
+      `blaze_fn_closure_t *${slot} = (blaze_fn_closure_t*)${RUNTIME_NAME}_object_new(${room}, 16);`,
+      `${slot}->code = (void*)(${cSymbolName(value.code)});`,
+    ];
+    value.captures.forEach((capture, index) => {
+      lines.push(`${slot}->captured[${index}] = ${this.captureEntry(capture, depth)};`);
+    });
+    return `({ ${lines.join(" ")} (double)(uintptr_t)${slot}; })`;
+  }
+
+  /** One captured value, as the block it travels in holds it. */
+  private captureEntry(capture: SemanticValue, depth: number): string {
+    if (!isCarriedAsCaptureAddress(capture.type)) {
+      return `(blaze_fn_capture_t){ .pointer = NULL, .number = (double)(${this.raw(capture, depth)}) }`;
+    }
+    const bits = capture.type.kind === "ref" && capture.type.of === null && capture.type.name === undefined
+      ? `(void*)(uintptr_t)(intptr_t)(${this.raw(capture, depth)})`
+      : `(void*)(uintptr_t)(${this.raw(capture, depth)})`;
+    // A buffer is one value and its length is another: the block carries the
+    // length beside the pointer, so the function that enters the closure is
+    // handed both.
+    const length = capture.type.kind === "slice" || capture.type.kind === "array" || capture.type.kind === "ptr"
+      ? `(double)(${this.arrayLength(capture, depth)})`
+      : "0.0";
+    return `(blaze_fn_capture_t){ .pointer = ${bits}, .number = ${length} }`;
+  }
+
+  /** One value a closure captured, read out of the block it travels in. */
+  private readCapture(value: SemanticValue & { k: "capture" }, depth: number): string {
+    this.usesClosures = true;
+    const block = this.closurePointer(this.raw(value.closure, depth));
+    const held = `(${block}->captured[${value.index}])`;
+    if (!isCarriedAsCaptureAddress(value.type)) return `(${held}.number)`;
+    const pointer = `(${held}.pointer)`;
+    if (isTextType(value.type)) return `((const char*)(uintptr_t)${pointer})`;
+    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+      return `((double)(uintptr_t)${pointer})`;
+    }
+    return `((${declaredType(value.type)})(uintptr_t)${pointer})`;
+  }
+
+  /** The declaration of the function a closure is entered through. */
+  private declareClosureCode(signature: FunctionSignature): void {
+    const symbol = signature.symbol;
+    if (symbol === this.fn.symbol || this.externs.has(symbol)) return;
+    const parameters = signature.params.flatMap((param) => {
+      const type = parseType(param.type);
+      const base = `${declaredType(type)} ${cEscape(param.name, TAKEN)}`;
+      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") {
+        return [base, `${declaredType(USIZE)} ${cEscape(param.name, TAKEN)}_length`];
+      }
+      return [base];
+    }).join(", ");
+    this.externs.set(
+      symbol,
+      `/* the function a closure of this program is entered through */\nextern ${declaredType(parseType(signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
+    );
+  }
+
+  /**
+   * A call through a closure.
+   *
+   * The code the closure holds is called with the closure itself first, so the
+   * function that enters it can read the values it captured, and then the
+   * arguments the call wrote. The signature is the one the call states: a value
+   * does not carry the types its parameters were declared with.
+   */
+  private closureCall(call: SemanticCall, depth: number): string {
+    this.usesClosures = true;
+    const through = call.through as SemanticValue;
+    const args: string[] = [];
+    const types: string[] = ["double"];
+    call.args.forEach((argument, index) => {
+      const targetType = call.argTypes[index] ?? argument.type;
+      args.push(this.expression(argument, targetType, depth));
+      types.push(declaredType(targetType));
+      if (targetType.kind === "slice" || targetType.kind === "array" || targetType.kind === "ptr") {
+        args.push(this.arrayLength(argument, depth));
+        types.push(declaredType(USIZE));
+      }
+    });
+    const slot = this.temporary("blaze_closure");
+    const forwarded = args.length === 0 ? "" : `, ${args.join(", ")}`;
+    return (
+      `({ blaze_fn_closure_t *${slot} = ${this.closurePointer(this.raw(through, depth))}; ` +
+      `((${declaredType(call.returns)} (*)(${types.join(", ")}))${slot}->code)((double)(uintptr_t)${slot}${forwarded}); })`
+    );
   }
 
   /**

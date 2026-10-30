@@ -85,14 +85,10 @@ export type Expression =
   /**
    * An arrow function the source wrote, and the function it was lifted to.
    *
-   * An arrow is bound to the name it is declared under and called by that
-   * name. The frontend lifts its body into a function of the file whose leading
-   * parameters are the values the arrow captured, so a call of the name is a
-   * call of that function with those values written in front. The value itself
-   * is not one this IR carries: an arrow that escapes the function it was
-   * written in would have to be a closure with an environment, and it is
-   * refused where it is written rather than lowered to something no backend
-   * would read the same way.
+   * The frontend lifts an arrow's body into a function of the file. Called by
+   * the name it is bound to, the call is rewritten to a call of that function
+   * with the values it captured written in front; read as a value, it is a
+   * closure carrying those values, which `code` enters.
    */
   | {
       k: "arrow";
@@ -103,7 +99,36 @@ export type Expression =
        * lifted function takes them.
        */
       captures: string[];
-    };
+      /**
+       * The function an arrow is entered by when it is called as a value.
+       *
+       * A lifted body takes the values it captured as leading parameters, which
+       * a call site that has them can write. A call site that holds the arrow in
+       * a name only has the arrow, so the captured values travel with it and are
+       * unpacked here: `code` is a function of the file whose first parameter is
+       * the closure and whose remaining parameters are the arrow's own.
+       *
+       * It is absent where the arrow is only ever called by the name it is bound
+       * to, which needs no closure at all.
+       */
+      code?: string;
+    }
+  /**
+   * One value a closure captured, read out of the closure it travels in.
+   *
+   * `closure` is the closure as a value, `index` is the position of the capture
+   * in the order the arrow first read it, and `type` is the type it is read at.
+   */
+  | { k: "capture"; closure: Expression; index: number; type: TypeExpr }
+  /**
+   * A call of a value, as `f(x)` where `f` holds a function rather than naming
+   * one.
+   *
+   * The signature is the one written at the call site, because a value does not
+   * carry the types of its parameters: `params[i]` is the type the argument at
+   * `i` is handed over as, and `returns` is what the call answers.
+   */
+  | { k: "invoke"; callee: Expression; args: Expression[]; params: TypeExpr[]; returns: TypeExpr };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
 

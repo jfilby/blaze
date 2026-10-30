@@ -4,7 +4,8 @@ import { frontendFor } from "../semantics/frontend.ts";
 import { pythonFrontend } from "../semantics/python.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
-import { contractOf, diagnostic, phaseOf, programOf } from "./phase.ts";
+import { contractOf, diagnostic, phaseOf, programOf, semanticsOf } from "./phase.ts";
+import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
 import type { FunctionContract, ProgramContract } from "../core/types.ts";
 
 /**
@@ -725,13 +726,15 @@ test("an arrow function is lifted into a function of the file, with what it capt
 });
 
 test("an arrow written where it is called is a call of the function it lifted to", () => {
+  // The call itself is the direct one, and the entry a value would be called
+  // through is written beside it because the arrow is a value at the call.
   const analysis = typescript.analyze(
     "export function f(x: number): number {\n  return ((a: number): number => a + x)(2);\n}\n",
     "main.ts",
   );
   assert.deepEqual(
     analysis.functions.map((declared) => declared.name),
-    ["f", "__closure_0"],
+    ["f", "__closure_0", "__closure_code_0"],
   );
   const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
     body: { kind: string; value?: { k: string; name?: string } }[];
@@ -740,19 +743,55 @@ test("an arrow written where it is called is a call of the function it lifted to
   assert.equal(body[0]?.value?.name, "__closure_0");
 });
 
-test("an arrow that escapes the name it is bound to is refused", () => {
-  // A value of an arrow would be a closure with an environment, which this
-  // compiler does not carry. Passing one is refused where it is written rather
-  // than lowered to something no backend would read the same way.
-  assert.match(
-    diagnostic(() =>
-      typescript.analyze(
-        "export function f(x: number): number {\n  const g = (y: number): number => y + 1;\n  return h(g);\n}\n",
-        "main.ts",
-      ),
-    ),
-    /an arrow function is called by the name it is bound to, not read as a value/,
+test("an arrow that escapes the name it is bound to is a closure value", () => {
+  // Read where a value is expected, an arrow is a closure: the values it
+  // captured travel with it and the entry the frontend writes unpacks them, so
+  // a holder that never saw the declaration can still call it.
+  const analysis = typescript.analyze(
+    [
+      "export function take(f: (y: number) => number): number {",
+      "  return f(1);",
+      "}",
+      "export function f(x: number): number {",
+      "  const g = (y: number): number => y + x;",
+      "  return take(g);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
   );
+  const body = ((analysis.functions[1]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; name?: string; args?: { k: string; name: string; code?: string; captures?: string[] }[] } }[];
+  }).body;
+  const passed = body[1]?.value?.args?.[0] as { k: string; name: string; code?: string; captures?: string[] };
+  assert.equal(passed?.k, "arrow");
+  assert.equal(passed?.name, "__closure_0");
+  assert.equal(passed?.code, "__closure_code_0");
+  assert.deepEqual(passed?.captures, ["x"]);
+
+  // The entry reads each captured value out of the closure and writes it in
+  // front of the call, so the body itself needs no environment.
+  const entry = ((analysis.functions[3]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; name?: string; args?: { k: string; name?: string; index?: number }[] } }[];
+  }).body;
+  const call = entry[0]?.value;
+  assert.equal(call?.name, "__closure_0");
+  assert.deepEqual(call?.args?.map((arg) => arg.k), ["capture", "ident"]);
+  assert.equal(call?.args?.[0]?.index, 0);
+});
+
+test("a call of a value is a call through the closure, not of a name", () => {
+  const analysis = typescript.analyze(
+    "export function take(f: (y: number) => number): number {\n  return f(2);\n}\n",
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; callee?: { k: string; name?: string }; returns?: { kind: string } } }[];
+  }).body;
+  const call = body[0]?.value;
+  assert.equal(call?.k, "invoke");
+  assert.equal(call?.callee?.name, "f");
+  assert.equal(call?.returns?.kind, "primitive");
 });
 
 test("an arrow that writes a name of the function around it is refused", () => {
@@ -864,4 +903,33 @@ test("an arrow that writes through a value it captured is still a capture", () =
     lifted?.params.map((param) => param.name),
     ["o", "v"],
   );
+});
+
+test("a closure and a call through one survive being written as IR and read back", () => {
+  // The IR is what a model is shown and what a candidate is read back from, so
+  // a closure has to be in the text as the value it is: the function that
+  // enters it, the signature that function is declared with, and the values it
+  // captured.
+  const source = [
+    "export function apply(f: (x: number) => number, x: number): number {",
+    "  return f(x);",
+    "}",
+    "export function g(a: number): number {",
+    "  const inc = (y: number): number => y + a;",
+    "  return apply(inc, 2);",
+    "}",
+    "",
+  ].join("\n");
+  // The functions are exports of a module that runs, so the program is the
+  // oracle they are resolved against.
+  const phase = phaseOf("typescript", { "main.ts": `${source}console.log("run");\n` }, "main.ts");
+  const semantics = semanticsOf(phase);
+  const g = printSemanticFunction(semantics["g"] as never);
+  assert.match(g, /closure\[/, "the arrow is a closure value in the IR");
+  const apply = printSemanticFunction(semantics["apply"] as never);
+  assert.match(apply, /through /, "the call of the parameter is a call through the closure");
+  for (const text of [g, apply]) {
+    const reread = parseSemanticFunction(text, phase.program);
+    assert.equal(printSemanticFunction(reread), text, "the IR the printer wrote reads back as itself");
+  }
 });
