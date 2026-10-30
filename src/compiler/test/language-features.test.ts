@@ -529,6 +529,34 @@ test("a number may write a separator between its digits", async () => {
   assert.equal(output.trim(), "600000 255 10000000000 1000n");
 });
 
+test("a block written as a statement is the statements it holds", async () => {
+  // A nested block is a scope of the source, not a construct the program runs:
+  // the body it belongs to holds its statements in order. A switch case may
+  // write its statements in a block the same way.
+  const output = await agreesWithNode([
+    "function pick(n: number): number {",
+    "  switch (n) {",
+    "    case 1: {",
+    "      const base = 10;",
+    "      return base + 2;",
+    "    }",
+    "    default: {",
+    "      return 0;",
+    "    }",
+    "  }",
+    "}",
+    "function scoped(n: number): number {",
+    "  {",
+    "    const twice = n * 2;",
+    "    return twice;",
+    "  }",
+    "}",
+    "console.log(pick(1), pick(2), scoped(5));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12 0 10");
+});
+
 test("a type-only declaration is not a value the program carries", async () => {
   // An interface, a type alias, an `as` and a generic parameter say what the
   // values are, not what they compute, so the program is the one without them.

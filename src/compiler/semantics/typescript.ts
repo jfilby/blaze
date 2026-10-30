@@ -3750,6 +3750,13 @@ class TypeScriptParser {
         this.skipTypeOnlyDeclaration();
         continue;
       }
+      // A block written as a statement is the statements it holds: a compiled
+      // body has one list of statements, and a nested block is a scope of the
+      // source rather than a construct the program runs.
+      if (this.at("{")) {
+        statements.push(...this.readBlock());
+        continue;
+      }
       statements.push(...this.withPending(this.readStatement()));
     }
     this.expect("}");
@@ -4553,6 +4560,12 @@ class TypeScriptParser {
           this.accept(";");
           breaks = true;
           break;
+        }
+        // A case may write its statements in a block, which is the statements
+        // it holds.
+        if (this.at("{")) {
+          body.push(...this.readBlock());
+          continue;
         }
         body.push(...this.withPending(this.readStatement()));
       }

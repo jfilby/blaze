@@ -72,8 +72,8 @@ Reading `Object.keys` and `Object.values` of a constant object lowered it to
 6280. Reading a `for..of` whose body names an expression rather than an array
 name, a parameter written as a pattern, and a trailing comma in a list lowered
 it to 5194, a `for..of` that names the parts of its element lowered it to 5123,
-a getter to 5121, and the `_` separator in a number to 5068. The refusals fall
-into six frontiers:
+a getter to 5121, the `_` separator in a number to 5068, and a block statement
+to 4723. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
