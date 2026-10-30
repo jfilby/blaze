@@ -368,7 +368,16 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       let returnTypeName = "any";
       if (isPunct(tokens[index], ":")) {
         returnTypeName = typeNameAt(tokens, index + 1);
-        index = skipType(tokens, index + 1, close, new Set(["{", ";"]));
+        // A result written as an object type, `{ line: number; text: string }`,
+        // starts with the same brace a method body does. The brace is part of
+        // the type when it is the first token after the colon, and the body is
+        // the brace that follows the type's own closing one.
+        if (isPunct(tokens[index + 1], "{")) {
+          const typeClose = matching(tokens, index + 1);
+          index = typeClose < 0 ? index + 1 : typeClose + 1;
+        } else {
+          index = skipType(tokens, index + 1, close, new Set(["{", ";"]));
+        }
       }
       while (index < close && !isPunct(tokens[index], "{") && !isPunct(tokens[index], ";")) index += 1;
       let bodyStart = index;

@@ -1116,6 +1116,28 @@ test("an array of text is a slice of text, and its literal is a block written ou
   assert.deepEqual(f?.returns, { kind: "primitive", name: "f64" });
 });
 
+test("a method whose result is written as an object type does not hide the methods after it", () => {
+  // The `{` of `{ line: number }` is the first token after the result's colon,
+  // and the `{` of the body is the one after the type's own closing brace. A
+  // scanner that took the first one for the body read the type's fields as
+  // members and lost every method written after it.
+  const analysis = typescript.analyze(
+    [
+      "class Box {",
+      "  pair(): { a: number; b: number } { return { a: 1, b: 2 }; }",
+      "  next(): number { return 3; }",
+      "  get size(): number { return 2; }",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["Box", "Box_pair", "Box_next", "Box_size"],
+  );
+});
+
 test("Array<T> and ReadonlyArray<T> name the same array as T[]", () => {
   for (const written of ["Array<string>", "ReadonlyArray<string>", "string[]", "readonly string[]"]) {
     const analysis = typescript.analyze(
