@@ -275,7 +275,7 @@ test("a construct outside the subset is named, with what to write instead", () =
   // `function*` said the same. They are named where they were written.
   for (const [source, what] of [
     ["const x = yield 1;\n", /"yield" is not part of a program[\s\S]*hands back with return/],
-    ["class C { get x(): number { return 1; } }\n", /a get accessor is not supported[\s\S]*write the member as a method and call it/],
+    ["class C { set x(value: number) {} }\n", /a set accessor is not supported[\s\S]*write the member as a method and call it/],
     ["enum E { A }\n", /"enum" is not part of a program[\s\S]*const RED = 0/],
     ["function* g(): number { yield 1; }\n", /a generator is not supported/],
   ] as const) {
