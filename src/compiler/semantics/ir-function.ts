@@ -59,7 +59,7 @@ import { contractText, parseType } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
-import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric } from "./objects.ts";
+import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric, saysNothing } from "./objects.ts";
 import { isInteger, isNumber, isWhole, isWide, isWideType, wholeOf } from "../core/semantic-ir.ts";
 import { foldWhole, modularReduction, wholeConstant, wholePower, wholeText, wholeType } from "./whole-arithmetic.ts";
 import type { Inferred } from "./objects.ts";
@@ -1611,8 +1611,19 @@ class FunctionBody {
       const left = this.decide(expression.left, line);
       const right = this.typed(expression.right, null, line);
       const held = coalesce(left.inferred, right.inferred);
+      // `a ?? b` answers `a` where it is there and `b` where it is not, so the
+      // whole is the arm that names the value. A text is inferred as the
+      // unshaped reference a string is, so a text read out of a field would
+      // lose its type here where the source wrote `field ?? ""`; the value
+      // itself says it is a text. A left arm that says nothing leaves the
+      // right arm to answer, which is the rule the frontend and `coalesce`
+      // state.
+      const unshaped = saysNothing(left.inferred);
+      const type = isText(left.value.type) || (unshaped && isText(right.value.type))
+        ? TEXT
+        : this.typeOf(held, line);
       return {
-        value: { k: "coalesce", type: this.typeOf(held, line), left: left.value, right: right.value },
+        value: { k: "coalesce", type, left: left.value, right: right.value },
         inferred: held,
       };
     }

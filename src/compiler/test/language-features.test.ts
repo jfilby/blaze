@@ -1306,6 +1306,23 @@ test("a text split answers the fields the separator cuts", async () => {
   assert.equal(output.trim(), "3ac201abc3yz2b");
 });
 
+test("a nullish fallback keeps the type of the value it falls back from", async () => {
+  // The field is a text the interface declares, and the fallback is a text:
+  // the value the declaration binds is a text, so the trim written after it
+  // is a text method rather than an unknown one.
+  const output = await agreesWithNode([
+    "interface Box { value?: string }",
+    "function f(): string {",
+    "  const box: Box = { value: `  x  ` };",
+    "  const s = box.value ?? ``;",
+    "  return s.trim();",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "x");
+});
+
 test("a template string that calls a collection helper uses the file's helper", async () => {
   // The expression inside `${...}` is part of the same file, so the walk and
   // the arrow it calls are functions of the file and not of a little file the

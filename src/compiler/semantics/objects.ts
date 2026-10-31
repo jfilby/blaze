@@ -1025,8 +1025,17 @@ export function numeric(left: Inferred, right: Inferred): TypeExpr {
  */
 export function coalesce(left: Inferred, right: Inferred): Inferred {
   if (left.kind === "object") return left;
-  if (left.type.kind === "ref" && left.type.of === null && left.type.name === undefined) return right;
+  if (saysNothing(left)) return right;
   return left;
+}
+
+/**
+ * Whether an inferred value says nothing about what it holds: the unshaped
+ * reference `null` is, and the `any` the source declared is. A named
+ * reference names an object, so it says something.
+ */
+export function saysNothing(value: Inferred): boolean {
+  return value.kind === "type" && value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
 }
 
 /** A reference that says nothing about what it points at: `null`, or an `any`. */

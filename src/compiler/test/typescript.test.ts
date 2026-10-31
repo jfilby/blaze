@@ -587,6 +587,57 @@ test("an optional access guards the accesses written after it", () => {
   assert.equal((guard.then as { k?: string }).k, "conditional", "the second ?. is a second guard");
 });
 
+test("a `??` keeps the type of the arm that names one", () => {
+  // `a ?? b` hands back `a` where it is there and `b` where it is not, so the
+  // arm that names a type is the type of the whole. A member the interface
+  // types is a text, and the method written after the fallback is a text
+  // method.
+  const analysis = typescript.analyze(
+    [
+      "interface Result { stderr: string }",
+      "export function f(result: Result): boolean {",
+      "  const s = result.stderr ?? ``;",
+      "  return s.startsWith(`x`);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; op?: string; left?: { k: string; name?: string } } }[];
+  }).body;
+  const value = body[body.length - 1]?.value;
+  assert.equal(value?.k, "binary");
+  assert.equal(value?.op, "===");
+  assert.equal(value?.left?.k, "call");
+  assert.equal(value?.left?.name, "text.indexOf", "the fallback is a text, so startsWith asks where the needle is");
+});
+
+test("a `??` keeps the shape of the arm that names one", () => {
+  // The contract erases an interface to a reference, so the fields are kept
+  // beside the type. A fallback whose left arm is an interface keeps that
+  // shape, and a `null` on the left leaves the right arm to name it.
+  const shapeOfFallback = (left: string): { name?: string } | undefined => {
+    const analysis = typescript.analyze(
+      [
+        "interface Info { name: string }",
+        "export function f(b: Info): string {",
+        `  const chosen = ${left} ?? b;`,
+        "  return chosen.name.trim();",
+        "}",
+        "",
+      ].join("\n"),
+      "main.ts",
+    );
+    const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+      body: { kind: string; value?: { k: string; name?: string } }[];
+    }).body;
+    return body[body.length - 1]?.value;
+  };
+  assert.equal(shapeOfFallback("b")?.name, "text.trim", "the record's field is a text");
+  assert.equal(shapeOfFallback("null")?.name, "text.trim", "a left arm that says nothing takes the right");
+});
+
 test("a function that states no result has the one its returns are", () => {
   // The language lets a function leave the annotation off, and the returns say
   // it: a body that hands back a number is a number, and a body with no return

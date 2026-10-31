@@ -2287,9 +2287,19 @@ class TypeScriptParser {
         break;
       }
       case "unary":
-      case "binary":
+      case "binary": {
+        // `a ?? b` is `a` where it is there and `b` where it is not, so the
+        // arm that names a shape is the shape. Only a value that says nothing
+        // (`null`, or an `any` the source declared) leaves the other arm to
+        // answer, which is the rule the IR's `coalesce` states.
+        if (value.k === "binary" && value.op === "??") {
+          const held = this.shapeOf(value.left);
+          shape = held !== null && held.kind !== "any" ? held : this.shapeOf(value.right);
+          break;
+        }
         shape = this.shapeOfTypeExpr(resultType(value, this.valueTypes));
         break;
+      }
       default:
         break;
     }

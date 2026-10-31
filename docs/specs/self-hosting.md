@@ -84,8 +84,9 @@ graph to 5091, reference-valued maps and sets to 4824, expected types for
 empty lists to 4680, the type of each name a destructuring pattern binds to
 4595, and the type of a collection callback's parameters from the array it
 walks to 4584, splitting a text into the fields a separator cuts and pushing
-several values at once to 4579, with `semantics/module.ts` read as a whole. The
-refusals fall into six frontiers:
+several values at once to 4579, the type and shape a `??` keeps to 4542,
+with `semantics/module.ts` read as a whole. The refusals fall into six
+frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
