@@ -80,8 +80,9 @@ after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
 Reading `at` and `slice` of an array lowered it to 5496, reading regular
 expressions to 5319, carrying interfaces and type aliases through the module
-graph to 5091, reference-valued maps and sets to 4824, and expected types for
-empty lists to 4680. The refusals fall into six frontiers:
+graph to 5091, reference-valued maps and sets to 4824, expected types for
+empty lists to 4680, and the type of each name a destructuring pattern binds to
+4595. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -92,7 +93,10 @@ empty lists to 4680. The refusals fall into six frontiers:
   nullish coalescing (`??`), spread, destructuring (declarations, parameters and
   assignment), object shorthand, `switch`, `throw`, class getters and regular
   expression literals, and the module forms (`import * as`, renamed imports,
-  re-exports).
+  re-exports). A destructured name is now held at the element or field type of
+  the value it reads, so the methods written on it are read too; a rest element
+  and a nested pattern are still refused because they need a slice or a shape
+  the pattern does not name yet.
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. A value another module
   imports is not carried: the module graph still offers functions only, and
@@ -176,6 +180,10 @@ below are independent enough to land one at a time, in this order:
   pattern's own and each bound name is a declaration read out of it, so the
   functions, arrows and methods that take a record or a pair are read as they
   are written, and a `for..of` over `[key, value]` binds each part the same way.
+  An array pattern reads any list, not only a literal, and a name is held at the
+  element type of that list and a field at the type its object declares. A gap
+  (`[, name]`) names the position after it, and a rest element still needs the
+  slice it denotes.
 - `switch` (about 200 occurrences), lowered to the chain of comparisons the
   current subset already has.
 - A number written with `_` between its digits, as `600_000` is.

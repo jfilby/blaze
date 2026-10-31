@@ -78,6 +78,7 @@ import {
   resolveAnnotation,
   resolveTypeName,
   scanTypeTable,
+  type ResolvedField,
   type ResolvedType,
   type TypeTable,
 } from "./typescript-types.ts";
@@ -1692,6 +1693,11 @@ export interface TypeScriptFunction {
    */
   params: { name: string; type: TypeExpr; default?: Expression }[];
   returns: TypeExpr;
+  /**
+   * What the declared result holds, where the contract type erased it: the
+   * fields of an interface, the elements of a list.
+   */
+  returnsShape?: ResolvedType;
   body: Statement[];
   line: number;
   /**
@@ -1813,6 +1819,14 @@ class TypeScriptParser {
    * answers one.
    */
   private declaredReturns = new Map<string, TypeExpr>();
+  /**
+   * What a function's declared result holds, when the contract type erased it.
+   *
+   * An interface is an opaque reference to the contract, so a call that answers
+   * one carries no field the frontend can read. The shape is the declaration's,
+   * and it is what a destructuring of that call reads its fields from.
+   */
+  private declaredReturnShapes = new Map<string, ResolvedType>();
   /**
    * What each function of the file takes, by its name.
    *
@@ -2215,7 +2229,22 @@ class TypeScriptParser {
         shape = { kind: "list", of: element };
         break;
       }
+      case "object": {
+        // An object literal is a record the file wrote field by field, so each
+        // field is the shape of the value written for it.
+        const fields = new Map<string, ResolvedField>();
+        for (const field of value.fields) {
+          fields.set(field.name, { type: this.shapeOf(field.value) ?? { kind: "any" }, optional: false });
+        }
+        shape = { kind: "record", fields, index: null };
+        break;
+      }
       case "call": {
+        const declared = this.declaredReturnShapes.get(value.name);
+        if (declared !== undefined) {
+          shape = declared;
+          break;
+        }
         const answer = this.valueTypeOf(value);
         shape = this.shapeOfTypeExpr(answer);
         break;
@@ -3581,10 +3610,12 @@ class TypeScriptParser {
     });
     this.declaredReturns.set(parsed.name, parsed.returns);
     this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+    if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(parsed.name, parsed.returnsShape);
     if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
     for (const wrapper of this.defaultWrappers(parsed, exported)) {
       this.declaredReturns.set(wrapper.name, wrapper.returns);
       this.declaredParams.set(wrapper.name, wrapper.params.map((param) => param.type));
+      if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(wrapper.name, parsed.returnsShape);
       functions.push(wrapper);
     }
     return isDefault ? parsed.name : null;
@@ -3764,10 +3795,11 @@ class TypeScriptParser {
     this.valueCollections = new Map();
     this.iteratedCollections = new Map();
     let answered: CollectionValue | null = null;
-    const declared = (returns: TypeExpr, body: Statement[]): TypeScriptFunction => ({
+    const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => ({
       name: name.text,
       params,
       returns,
+      ...(shape === null ? {} : { returnsShape: shape }),
       body,
       line: name.line,
       ...(isAsync ? { async: true } : {}),
@@ -3892,11 +3924,12 @@ class TypeScriptParser {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readAt(returnType, () => this.readExpression(), returnShape);
       this.accept(";");
-      return declared(returnType, [{ kind: "result", value, line: name.line }]);
+      return declared(returnType, [{ kind: "result", value, line: name.line }], returnShape);
     }
     return declared(
       returnType,
       [...prelude, ...this.readReturning(returnType, () => this.readBlock(), returnShape)],
+      returnShape,
     );
   }
 
@@ -3940,6 +3973,12 @@ class TypeScriptParser {
       const bindings: { name: string; field: string | null; index: number }[] = [];
       let at = 0;
       while (!this.at("]") && this.peek().kind !== "end") {
+        // `[a, , b]`: a gap names no element, so the positions after it move
+        // by one all the same.
+        if (this.accept(",")) {
+          at += 1;
+          continue;
+        }
         if (this.accept("...")) {
           this.report("a rest element is not part of the destructuring subset", "write the names the pattern binds");
           this.synchronizeTo("]");
@@ -4698,12 +4737,18 @@ class TypeScriptParser {
       if (!direct) {
         const temp = `__destructure${this.destructureCount++}`;
         head = { kind: "declare", name: temp, type: null, init, line };
+        this.valueTypes.set(temp, this.valueTypeOf(init));
         if (baseShape !== null) this.valueShapes.set(temp, baseShape);
         base = { k: "ident", name: temp };
       }
       fields.forEach((entry) => {
         const expanded = direct ? this.constantExpression(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
-        const fieldShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
+        const read: Expression = expanded ?? { k: "member", base, field: entry.field };
+        const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
+        // The value the file wrote for a constant field is the value the name
+        // reads, so its shape is the one that field holds even where the
+        // object itself was never written with an annotation.
+        const fieldShape = declaredShape ?? this.shapeOf(read);
         if (fieldShape !== null) {
           this.valueShapes.set(entry.name, fieldShape);
           this.valueTypes.set(entry.name, this.typeExprOfShape(fieldShape));
@@ -4712,7 +4757,7 @@ class TypeScriptParser {
           kind: "declare",
           name: entry.name,
           type: null,
-          init: expanded ?? { k: "member", base, field: entry.field },
+          init: read,
           line,
         });
       });
@@ -4720,11 +4765,19 @@ class TypeScriptParser {
       return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
     }
 
-    // `[a, b] = [x, y]`: the value is the array literal the source wrote, and
-    // each name is the element at its position. A value that is not an array
-    // literal is not an array this subset carries.
-    const names: string[] = [];
+    // `[a, b] = ...`: each name is the element at its position. A literal is
+    // read apart where it stands; every other value is read once into a name
+    // of the pattern's own, because the pattern may read the same element more
+    // than once and a call is not a value that reads the same twice.
+    const bindings: { name: string; index: number }[] = [];
+    let at = 0;
     while (!this.at("]") && this.peek().kind !== "end") {
+      // `[a, , b]`: a gap names no element, and the positions move past it all
+      // the same.
+      if (this.accept(",")) {
+        at += 1;
+        continue;
+      }
       if (this.accept("...")) {
         this.report("a rest element is not part of the destructuring subset", "write the names the pattern binds");
         this.synchronizeTo("]");
@@ -4732,7 +4785,8 @@ class TypeScriptParser {
       }
       const name = this.next();
       if (name.kind !== "ident") this.report("a destructured element binds a name", `near "${name.text}"`, name);
-      else names.push(name.text);
+      else bindings.push({ name: name.text, index: at });
+      at += 1;
       if (this.at("=")) {
         this.report("a destructured element with a default is not supported", "write the default where the value is made");
         this.next();
@@ -4745,37 +4799,66 @@ class TypeScriptParser {
       this.report("a destructuring declaration needs a value", "as in const [a, b] = [x, y];", open);
       return { kind: "expression", value: this.hole(), line };
     }
-    if (!this.at("[")) {
-      this.report("an array pattern reads an array literal", `near "${this.peek().text}"`, this.peek());
-      this.readExpression();
-      this.accept(";");
-      return { kind: "expression", value: this.hole(), line };
-    }
-    this.next();
-    const values: Expression[] = [];
-    while (!this.at("]") && this.peek().kind !== "end") {
-      values.push(this.readExpression());
-      if (!this.accept(",")) break;
-    }
-    this.expect("]");
+    const init = this.readExpression();
     this.accept(";");
-    if (values.length !== names.length) {
-      this.report(
-        `the pattern binds ${names.length} names and the value holds ${values.length} elements`,
-        "write one value for each name",
-        open,
-      );
-    }
-    names.forEach((name, index) => {
-      const value = values[index];
-      if (value === undefined) return;
-      const shape = this.shapeOf(value);
-      if (shape !== null) {
-        this.valueShapes.set(name, shape);
-        this.valueTypes.set(name, this.typeExprOfShape(shape));
+    if (init.k === "buffer") {
+      const values = init.values;
+      const highest = bindings.reduce((most, binding) => Math.max(most, binding.index), -1);
+      if (highest >= values.length) {
+        this.report(
+          `the pattern reads element ${highest} and the value holds ${values.length} elements`,
+          "write one value for each name",
+          open,
+        );
       }
-      this.pending.push({ kind: "declare", name, type: null, init: value, line });
+      bindings.forEach((binding) => {
+        const value = values[binding.index];
+        if (value === undefined) return;
+        const shape = this.shapeOf(value);
+        if (shape !== null) {
+          this.valueShapes.set(binding.name, shape);
+          this.valueTypes.set(binding.name, this.typeExprOfShape(shape));
+        }
+        this.pending.push({ kind: "declare", name: binding.name, type: null, init: value, line });
+      });
+      const first = this.pending.shift();
+      return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
+    }
+    // A value that is not a literal is held at a name of its own, and each
+    // name the pattern binds is an element of it. The element type is what
+    // makes `const [, , argument] = re.exec(text)` an untyped name no longer:
+    // `argument` is the text the list holds. A name is its own base, so the
+    // elements are read from it where it stands and the contract the source
+    // wrote stays one expression; anything else is read once into a name.
+    const initType = this.valueTypeOf(init);
+    const elementType = initType.kind === "slice" || initType.kind === "array" ? initType.of : ANY_TYPE;
+    const baseShape = this.shapeOf(init);
+    const elementShape = baseShape !== null && baseShape.kind === "list" ? baseShape.of : null;
+    let base: Expression = init;
+    let head: Statement | null = null;
+    if (init.k !== "ident") {
+      const temp = `__destructure${this.destructureCount++}`;
+      this.valueTypes.set(temp, initType);
+      if (baseShape !== null) this.valueShapes.set(temp, baseShape);
+      head = { kind: "declare", name: temp, type: null, init, line };
+      base = { k: "ident", name: temp };
+    }
+    bindings.forEach((binding) => {
+      this.valueTypes.set(binding.name, elementType);
+      if (elementShape !== null) this.valueShapes.set(binding.name, elementShape);
+      this.pending.push({
+        kind: "declare",
+        name: binding.name,
+        type: null,
+        init: {
+          k: "index",
+          base,
+          index: { k: "literal", text: String(binding.index) },
+        },
+        line,
+      });
     });
+    if (head !== null) return head;
     const first = this.pending.shift();
     return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
   }
@@ -5472,17 +5555,30 @@ class TypeScriptParser {
     if (collection.kind === "set") {
       if (pattern === null) {
         body.push(bind(variable, collection.key, keyRead));
-      } else if (pattern.length === 2) {
-        // A set's entries are the same value twice, which is what the language
-        // answers for `for (const [a, b] of set)`.
-        body.push(bind((pattern[0] as { name: string }).name, collection.key, keyRead));
-        body.push(bind((pattern[1] as { name: string }).name, collection.key, keyRead));
       } else {
-        this.report("a set entry is one value written twice", "write for (const [a, b] of set)", start);
+        // A set's entries are the same value twice, which is what the language
+        // answers for `for (const [a, b] of set)`. A gap names no value and
+        // the positions around it are the ones the source wrote.
+        for (const binding of pattern) {
+          body.push(bind(binding.name, collection.key, keyRead));
+        }
       }
-    } else if (pattern !== null && pattern.length === 2) {
-      body.push(bind((pattern[0] as { name: string }).name, collection.key, keyRead));
-      body.push(bind((pattern[1] as { name: string }).name, collection.value, this.valueReadName(collection.value)));
+    } else if (pattern !== null) {
+      // A map entry is a key and a value, so position 0 reads the key and
+      // position 1 the value; a gap names neither and is read past.
+      for (const binding of pattern) {
+        const key = binding.index === 0;
+        const value = binding.index === 1;
+        if (key) body.push(bind(binding.name, collection.key, keyRead));
+        else if (value) body.push(bind(binding.name, collection.value, this.valueReadName(collection.value)));
+        else {
+          this.report(
+            "a map entry is a key and a value",
+            "write for (const [key, value] of map), or walk map.keys() or map.values()",
+            start,
+          );
+        }
+      }
     } else {
       this.report(
         "a map entry is a key and a value",
@@ -9124,7 +9220,15 @@ class BodyAnalysis {
         const base = expression.base;
         const param = this.declaration.params.find((entry) => entry.name === base.name);
         if (param === undefined) {
-          throw frontendError(`indexing unknown parameter "${expression.base.name}"`, `line ${line}`);
+          // The contract states the result as one expression over the
+          // parameters. An element read from a value the body built is a value
+          // the contract cannot name, and the body is contracted by what it
+          // does instead.
+          this.uncontractable(
+            `reads "${base.name}", which the body built rather than received`,
+            line,
+            "a contract is one expression over the parameters; a body that reads a value it built is contracted by what it does",
+          );
         }
         const index = this.serialize(expression.index, loop, line);
         if (loop !== null && dependsOn(expression.index, loop.variable)) {

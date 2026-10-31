@@ -839,6 +839,80 @@ test("a regular expression reads, cuts, replaces and walks the texts it matches"
   }
 });
 
+test("destructuring binds each name at the type of the value it reads", async () => {
+  // A pattern names parts of a value rather than the value itself: an element
+  // is the type the list holds, and a field is the type the object declares.
+  // The two names therefore read text methods, whichever way the value was
+  // written.
+  const output = await agreesWithNode([
+    "function second(parts: string[]): string {",
+    "  const [, head, argument] = parts;",
+    "  return head.trim() + `|` + argument.trim();",
+    "}",
+    "function both(text: string): string {",
+    "  const parts = text.split(/\\s+/);",
+    "  const [left, right] = parts;",
+    "  return left.trim() + right.trim() + `|` + second(parts);",
+    "}",
+    "console.log(both(`left   a   b`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "lefta|a|b");
+});
+
+test("a match a regular expression answers is read apart by the names the source binds", async () => {
+  // `exec` answers the whole match and its groups as a list of texts, so a
+  // pattern written over it reads each group at the text type the runtime
+  // answers.
+  const output = await agreesWithNode([
+    "const PAIR = /^(\\w+)=(\\S+)$/;",
+    "function read(text: string): string {",
+    "  const match = PAIR.exec(text);",
+    "  if (match === null) return ``;",
+    "  const [, name, value] = match;",
+    "  return `${name.trim()}:${value.trim()}`;",
+    "}",
+    "console.log(read(`who=blaze`), read(`none`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "who:blaze");
+});
+
+test("a destructured field is typed by the result an interface declares", async () => {
+  // The contract holds an interface as a reference and erases its fields, so
+  // the shape the declaration writes is what keeps `left` a text. An object
+  // literal is a record the file wrote field by field, and its fields are the
+  // same way.
+  const output = await agreesWithNode([
+    "interface Pair { left: string; right: string }",
+    "function pair(): Pair { return { left: ` a `, right: `b` }; }",
+    "function read(): string {",
+    "  const { left, right } = pair();",
+    "  const { text } = { text: ` c ` };",
+    "  return left.trim() + right + text.trim();",
+    "}",
+    "console.log(read());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "abc");
+});
+
+test("a text field of an object literal is a text when it is read", async () => {
+  // The layout pass types a string literal as the text it is, so a field the
+  // body wrote with one reads as text: `obj.text.trim()` is a text method and
+  // `+` concatenates it. Typing the literal as a number made every such field
+  // a number and refused the body.
+  const output = await agreesWithNode([
+    "function read(): string {",
+    "  const pair = { left: ` a `, right: `b` };",
+    "  return pair.left.trim() + pair.right;",
+    "}",
+    "console.log(read());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "ab");
+});
+
 test("a closure lowers through the C backend, and the machine backend leaves it to C", async () => {
   // A closure is a code address beside the values it captured, which is a value
   // the machine backend does not hold: it refuses and the program is lowered by

@@ -23,6 +23,14 @@ function contractOfExport(source: string, name: string): FunctionContract {
 
 const typescript = frontendFor("typescript");
 
+/** The statements one function of a module body was lowered to. */
+function analyzedBody(source: string, name: string): unknown[] {
+  const analysis = typescript.analyze(source, "module.ts");
+  const handle = analysis.functions.find((entry) => entry.name === name)?.handle as { body: unknown[] } | undefined;
+  assert.ok(handle !== undefined, `${name} must be a function of the module`);
+  return handle.body;
+}
+
 test("a body that reads a buffer at a position the contract cannot name is refused", () => {
   // The same loop, once bounded by the parameter and once by a local holding
   // it. Naming the bound in a local used to drop the whole length requirement
@@ -1387,4 +1395,89 @@ test("a map holds a reference, and a set keys by the reference itself", () => {
     "blaze_rt_dict_has_refkey",
     "and asks for the handle it was given",
   );
+});
+
+test("an array pattern binds each name at the element type of the value", () => {
+  // `const [, head, argument] = parts` names elements rather than the array,
+  // so each name is the text the elements are: `argument.trim()` is a text
+  // method, and the gap names the position the next name is read at.
+  const source = [
+    "export function read(parts: string[]): string {",
+    "  const [, head, argument] = parts;",
+    "  return argument.trim() + head;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"k":"index"/);
+  assert.match(body, /text\.trim/);
+  const contract = contractOfExport(source, "read");
+  assert.deepEqual(
+    contract.requires,
+    ["parts != null", "len(parts) >= (1 + 1)", "len(parts) >= (2 + 1)"],
+    "the gap counts as a position",
+  );
+});
+
+test("an array pattern reads a value that is not an array literal", () => {
+  // The value is one a call answered, read once into a name of the pattern's
+  // own: each name is an element of it at the type the list holds.
+  const source = [
+    "function pair(): string[] { return [`left`, `right`]; }",
+    "export function read(): string {",
+    "  const [left, right] = pair();",
+    "  return left.trim() + right;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"k":"index"/, "each name is an element of the value");
+  assert.match(body, /text\.trim/, "the element is the text the list holds");
+});
+
+test("a destructured field is the type the function's result declares", () => {
+  // An interface is an opaque reference to the contract, so the declared result
+  // of `pair()` is erased by the time its call is read. The shape of the
+  // declaration is what keeps `left` a text, and it is what `left.trim()` is a
+  // method of.
+  const source = [
+    "interface Pair { left: string; right: string }",
+    "function pair(): Pair { return { left: ` a `, right: `b` }; }",
+    "export function read(): string {",
+    "  const { left, right } = pair();",
+    "  return left.trim() + right;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"left"/);
+  assert.match(body, /"name":"right"/);
+  assert.match(body, /text\.trim/);
+});
+
+test("a destructured field of an object literal is the value written for it", () => {
+  const source = [
+    "export function read(): string {",
+    "  const { text } = { text: ` a ` };",
+    "  return text.trim();",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"text"/);
+  assert.match(body, /text\.trim/);
+});
+
+test("a map entry read through a gap binds the value at its position", () => {
+  const source = [
+    "export function read(m: Map<string, string>): string {",
+    "  let out = ``;",
+    "  for (const [, value] of m) { out += value.trim(); }",
+    "  return out;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"value"/);
+  assert.match(body, /text\.trim/);
 });
