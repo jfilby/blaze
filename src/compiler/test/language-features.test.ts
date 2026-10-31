@@ -897,6 +897,33 @@ test("a destructured field is typed by the result an interface declares", async 
   assert.equal(output.trim(), "abc");
 });
 
+test("a text folds to lower or upper case", async () => {
+  // The runtime folds the ASCII letters of the bytes the source wrote and
+  // copies every other byte as it is, which is what the text helpers count.
+  const source = [
+    "function parse(word: string): number {",
+    "  if (word.toLowerCase() === `yes`) return 1;",
+    "  if (word.toUpperCase() === `NO`) return 2;",
+    "  return 0;",
+    "}",
+    "function fold(word: string): string {",
+    "  return word.toUpperCase() + word.toLowerCase();",
+    "}",
+    "console.log(parse(`YES`) * 10 + parse(`no`));",
+    "console.log(fold(`aB_9!`));",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source);
+  assert.equal(output.trim(), "12\nAB_9!ab_9!");
+  // The C backend calls the same runtime helper, so the same program lands on
+  // the same text.
+  const { directory, binary } = await build(source, "c");
+  const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});
+
 test("a text field of an object literal is a text when it is read", async () => {
   // The layout pass types a string literal as the text it is, so a field the
   // body wrote with one reads as text: `obj.text.trim()` is a text method and

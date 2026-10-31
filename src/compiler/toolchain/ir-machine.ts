@@ -10628,7 +10628,13 @@ class Machine {
     // at a time, because evaluating one takes the accumulator the other is
     // read into, and the runtime is called with the two of them where the
     // convention puts them.
-    if (call.callee === "text.indexOf" || call.callee === "text.slice" || call.callee === "text.trim") {
+    if (
+      call.callee === "text.indexOf" ||
+      call.callee === "text.slice" ||
+      call.callee === "text.trim" ||
+      call.callee === "text.toLowerCase" ||
+      call.callee === "text.toUpperCase"
+    ) {
       const text = (at: number): Held => {
         const value = call.args[at];
         if (isTextType(value.type)) {
@@ -10670,8 +10676,16 @@ class Machine {
         this.callSymbol("blaze_rt_text_slice", [sliced, start, ...(stop === null ? [] : [stop])], TEXT);
         return;
       }
-      const trimmed = text(0);
-      this.callSymbol("blaze_rt_text_trim", [trimmed], TEXT);
+      const folded = text(0);
+      if (call.callee === "text.toLowerCase") {
+        this.callSymbol("blaze_rt_text_lower", [folded], TEXT);
+        return;
+      }
+      if (call.callee === "text.toUpperCase") {
+        this.callSymbol("blaze_rt_text_upper", [folded], TEXT);
+        return;
+      }
+      this.callSymbol("blaze_rt_text_trim", [folded], TEXT);
       return;
     }
     if (call.callee.startsWith("blaze_rt_regex_")) {

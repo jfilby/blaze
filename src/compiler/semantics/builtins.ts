@@ -156,6 +156,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `text.trim()` answers the text with the whitespace at both ends gone:
    *  the ends of a line a file is read with arrive still attached to it. */
   "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
+  /** `text.toLowerCase()` and `text.toUpperCase()` fold the ASCII letters of
+   *  the text and copy every other byte as it is. */
+  "text.toLowerCase": { params: [TEXT], returns: TEXT, arity: 1 },
+  "text.toUpperCase": { params: [TEXT], returns: TEXT, arity: 1 },
   /** A regular expression is the pattern and the flags it was written with,
    *  and the runtime compiles it once per shape. `test` answers whether the
    *  text holds a match, `exec` and `match` answer the groups, `match_all`

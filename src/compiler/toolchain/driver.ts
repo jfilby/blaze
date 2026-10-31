@@ -1051,6 +1051,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       }
       case "text.trim":
         return `${RUNTIME_NAME}_text_trim(${argument(0)})`;
+      case "text.toLowerCase":
+        return `${RUNTIME_NAME}_text_lower(${argument(0)})`;
+      case "text.toUpperCase":
+        return `${RUNTIME_NAME}_text_upper(${argument(0)})`;
       case "crypto.createHash":
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":

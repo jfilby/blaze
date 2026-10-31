@@ -3583,6 +3583,16 @@ class Body {
         this.callService("blaze_rt_text_trim");
         return TEXT;
       }
+      case "text.toLowerCase": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_lower");
+        return TEXT;
+      }
+      case "text.toUpperCase": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_upper");
+        return TEXT;
+      }
       case "process.env": {
         // The environment variable a program reads: the host asks for it by
         // its name, and the answer is the text it is set to, empty where the

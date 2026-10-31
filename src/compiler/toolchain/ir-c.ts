@@ -942,7 +942,13 @@ class FunctionEmitter {
     // are placed, so these are written before the generic path too. A text
     // argument is the pointer to the bytes it names, and anything else is
     // what the runtime renders as one — the wall a dynamic value crosses.
-    if (call.callee === "text.indexOf" || call.callee === "text.slice" || call.callee === "text.trim") {
+    if (
+      call.callee === "text.indexOf" ||
+      call.callee === "text.slice" ||
+      call.callee === "text.trim" ||
+      call.callee === "text.toLowerCase" ||
+      call.callee === "text.toUpperCase"
+    ) {
       const textOf = (value: SemanticValue): string => {
         const raw = this.expression(value, isTextType(value.type) ? TEXT : null, depth);
         return isTextType(value.type) || value.k === "text" ? raw : `${RUNTIME_NAME}_to_text(${raw})`;
@@ -957,6 +963,8 @@ class FunctionEmitter {
         const stop = call.args.length > 2 ? `(long long)(${this.expression(call.args[2], null, depth)})` : "9223372036854775807LL";
         return `${RUNTIME_NAME}_text_slice(${textOf(call.args[0])}, (long long)(${this.expression(call.args[1], null, depth)}), ${stop})`;
       }
+      if (call.callee === "text.toLowerCase") return `${RUNTIME_NAME}_text_lower(${textOf(call.args[0])})`;
+      if (call.callee === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf(call.args[0])})`;
       return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
     }
     const args: string[] = [];

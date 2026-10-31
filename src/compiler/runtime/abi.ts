@@ -1688,6 +1688,8 @@ const TEXT_DECLARATIONS: readonly string[] = [
   "long long blaze_rt_text_index_of(const char* text, const char* needle)",
   "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
   "const char* blaze_rt_text_trim(const char* text)",
+  "const char* blaze_rt_text_lower(const char* text)",
+  "const char* blaze_rt_text_upper(const char* text)",
   "double blaze_rt_regex_test(const char* pattern, const char* flags, const char* text)",
   "double blaze_rt_regex_search(const char* pattern, const char* flags, const char* text)",
   "char** blaze_rt_regex_exec(const char* pattern, const char* flags, const char* text)",
@@ -3957,6 +3959,33 @@ const char* blaze_rt_text_trim(const char* text) {
   while (start < stop && blaze_rt_text_is_space(text[start])) start += 1;
   while (stop > start && blaze_rt_text_is_space(text[stop - 1])) stop -= 1;
   return blaze_rt_string_new((const unsigned char*)text + start, (size_t)(stop - start));
+}
+
+/* The text with its ASCII letters folded. A text is the bytes the source
+   wrote, and every other text helper counts those bytes, so the fold is the
+   ASCII one: a byte that is not a letter is copied as it is. */
+const char* blaze_rt_text_lower(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const size_t length = blaze_rt_text_length(text);
+  char* out = (char*)blaze_rt_allocate_uninitialized(length + 1);
+  for (size_t at = 0; at < length; at += 1) {
+    const unsigned char byte = (unsigned char)text[at];
+    out[at] = (char)(byte >= 'A' && byte <= 'Z' ? byte + ('a' - 'A') : byte);
+  }
+  out[length] = '\\0';
+  return out;
+}
+
+const char* blaze_rt_text_upper(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const size_t length = blaze_rt_text_length(text);
+  char* out = (char*)blaze_rt_allocate_uninitialized(length + 1);
+  for (size_t at = 0; at < length; at += 1) {
+    const unsigned char byte = (unsigned char)text[at];
+    out[at] = (char)(byte >= 'a' && byte <= 'z' ? byte - ('a' - 'A') : byte);
+  }
+  out[length] = '\\0';
+  return out;
 }
 
 ${REGEX_RUNTIME_SOURCE}

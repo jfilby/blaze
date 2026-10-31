@@ -172,6 +172,18 @@ test("two texts are joined by the runtime, which owns the answer", async () => {
   await compute("n: number", ["  let t = `a` + `b`;", "  console.log(t);", "  return n;"], "run\n1\n\n", "ab\nRESULT 1\n");
 });
 
+test("a text folds to lower or upper case in the host's runtime", async () => {
+  // The module asks the host for the folded text, because the service over the
+  // text is the host's: a module that wrote its own fold would be a second
+  // answer to the same question.
+  await compute(
+    "n: number",
+    ["  console.log(`Yes`.toLowerCase() + `no`.toUpperCase());", "  return n;"],
+    "run\n1\n\n",
+    "yesNO\nRESULT 1\n",
+  );
+});
+
 test("a raise stops the program with the message it names", async () => {
   // The host throws where the C runtime does not come back, and the module
   // says so itself: the instruction after the call is an `unreachable`, since

@@ -640,6 +640,28 @@ test("a text method lowers to the runtime call that answers it", () => {
   assert.match(ir, /text\.trim/);
 });
 
+test("a text folds with the case helpers the runtime carries", () => {
+  // `toLowerCase` and `toUpperCase` are calls of the runtime over the text,
+  // like `trim`, so the value after one is still a text.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "module.ts": [
+        "export function fold(s: string): number {",
+        "  if (s.toLowerCase() === `yes`) return s.toUpperCase().length;",
+        "  return 0;",
+        "}",
+        "console.log(fold(`YES`));",
+        "",
+      ].join("\n"),
+    },
+    "module.ts",
+  );
+  const ir = printSemanticFunction(semanticsOf(phase)["fold"]);
+  assert.match(ir, /text\.toLowerCase/);
+  assert.match(ir, /text\.toUpperCase/);
+});
+
 test("a library with a top-level constant is a library, not a program", () => {
   // A top-level value is a declaration, not a statement that makes the file
   // run. A module the program imports may hold one, and its functions read it

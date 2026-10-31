@@ -87,9 +87,9 @@ walks to 4584, splitting a text into the fields a separator cuts and pushing
 several values at once to 4579, the type and shape a `??` keeps to 4542, and
 object spread of a typed object, `Omit`/`Pick`, a class field's annotation in
 every form the language writes, a field assignment read at the field's type,
-and an empty list at a type an import declares to 4251, with
-`semantics/contract-build.ts` read as a whole. The refusals fall into six
-frontiers:
+an empty list at a type an import declares to 4251, and folding a text to
+lower or upper case to 4245, with `semantics/contract-build.ts` and
+`semantics/language.ts` read as wholes. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written

@@ -169,6 +169,8 @@ const TEXT_SERVICES: readonly HostService[] = [
   { symbol: "blaze_rt_text_index_of", params: ["i32", "i32"], result: "f64" },
   { symbol: "blaze_rt_text_slice", params: ["i32", "f64", "f64"], result: "i32" },
   { symbol: "blaze_rt_text_trim", params: ["i32"], result: "i32" },
+  { symbol: "blaze_rt_text_lower", params: ["i32"], result: "i32" },
+  { symbol: "blaze_rt_text_upper", params: ["i32"], result: "i32" },
 ];
 
 /**
@@ -1196,6 +1198,34 @@ export function blaze_rt_text_trim(text) {
   while (start < stop && blaze_rt_text_is_space(bytes[start])) start += 1;
   while (stop > start && blaze_rt_text_is_space(bytes[stop - 1])) stop -= 1;
   return makeText(bytes.slice(start, stop));
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_lower",
+    source: `
+export function blaze_rt_text_lower(text) {
+  const bytes = textBytes(text);
+  const out = new Uint8Array(bytes.length);
+  for (let at = 0; at < bytes.length; at += 1) {
+    const byte = bytes[at];
+    out[at] = byte >= 65 && byte <= 90 ? byte + 32 : byte;
+  }
+  return makeText(out);
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_upper",
+    source: `
+export function blaze_rt_text_upper(text) {
+  const bytes = textBytes(text);
+  const out = new Uint8Array(bytes.length);
+  for (let at = 0; at < bytes.length; at += 1) {
+    const byte = bytes[at];
+    out[at] = byte >= 97 && byte <= 122 ? byte - 32 : byte;
+  }
+  return makeText(out);
 }
 `,
   },

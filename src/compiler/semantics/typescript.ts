@@ -7236,6 +7236,8 @@ class TypeScriptParser {
     }
     const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
     if (method === "trim" && args.length === 0) return call("text.trim", [receiver]);
+    if (method === "toLowerCase" && args.length === 0) return call("text.toLowerCase", [receiver]);
+    if (method === "toUpperCase" && args.length === 0) return call("text.toUpperCase", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
     if (method === "split" && args.length === 1) {
       // An empty separator and a separator of several characters are both
