@@ -1409,6 +1409,68 @@ test("a push written for a value is refused, because it answers the array the na
   );
 });
 
+test("a push of several values is one function of the file with every value", () => {
+  // Several values are one more element each, and the block is grown once for
+  // all of them: the helper takes the array and the values, not one copy per
+  // value.
+  const analysis = typescript.analyze(
+    [
+      "export function f(): number {",
+      "  const a: number[] = [];",
+      "  a.push(1, 2, 3);",
+      "  return a.length;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const helper = analysis.functions.find((declared) => declared.name === "__collect_main_0");
+  assert.deepEqual(
+    helper?.params.map((param) => param.name),
+    ["items", "value0", "value1", "value2"],
+    "the helper takes the array and one parameter per value",
+  );
+  const statement = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; name?: string; value?: { k: string; name?: string; args?: { k: string }[] } }[];
+  }).body.find((one) => one.kind === "assign");
+  assert.equal(statement?.value?.k, "call");
+  assert.equal(statement?.value?.name, "__collect_main_0");
+  assert.deepEqual(
+    statement?.value?.args?.map((argument) => argument.k),
+    ["ident", "literal", "literal", "literal"],
+    "the call hands the array and every value to the helper",
+  );
+});
+
+test("a text split is a function of the file that walks the text", () => {
+  // A text knows where a needle is and what lies between two indexes, and a
+  // split is those two questions asked until the text ends: the frontend
+  // writes the walk once rather than the runtime carrying another service.
+  const analysis = typescript.analyze(
+    [
+      "export function f(s: string): number {",
+      "  const parts = s.split(`-`);",
+      "  return parts.length;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const helper = analysis.functions.find((declared) => declared.name === "__collect_main_0");
+  assert.equal(helper?.internal, true, "the walk is not an export of the file");
+  assert.deepEqual(
+    helper?.params.map((param) => param.name),
+    ["text", "sep"],
+    "the walk takes the text and the separator",
+  );
+  assert.deepEqual(helper?.returns, { kind: "slice", of: { kind: "text" } });
+  const call = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; init?: { k: string; name?: string } }[];
+  }).body[0]?.init;
+  assert.equal(call?.k, "call");
+  assert.equal(call?.name, "__collect_main_0");
+});
+
 test("a map and a set are one handle on the runtime's dictionary", () => {
   const analysis = typescript.analyze(
     [

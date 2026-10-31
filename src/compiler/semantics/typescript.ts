@@ -1040,7 +1040,7 @@ function walkFunction(
         return;
       case "append":
         read(appendArray(expression));
-        read(expression.value);
+        for (const value of expression.values) read(value);
         return;
     }
   };
@@ -1236,7 +1236,7 @@ function arrowCaptures(
         return;
       case "append":
         read(appendArray(expression));
-        read(expression.value);
+        for (const value of expression.values) read(value);
         return;
     }
   };
@@ -5196,7 +5196,7 @@ class TypeScriptParser {
       const call: Expression = {
         k: "call",
         name: value.helper,
-        args: [array, ...(value.value === null ? [] : [value.value])],
+        args: [array, ...value.values],
       };
       if (value.base === null) {
         return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
@@ -6209,16 +6209,16 @@ class TypeScriptParser {
               place !== null &&
               sequence !== null &&
               (sequence.kind === "slice" || sequence.kind === "array") &&
-              args.length === (target.field === "push" ? 1 : 0)
+              (target.field === "push" ? args.length >= 1 : args.length === 0)
             ) {
-              const helper = this.appendHelper(target.field, sequence.of, callLine);
+              const helper = this.appendHelper(target.field, sequence.of, args.length, callLine);
               replace({
                 k: "append",
                 target: place.target,
                 base: place.base,
                 helper: helper.name,
                 op: target.field,
-                value: args[0] ?? null,
+                values: args,
               });
               continue;
             }
@@ -7092,6 +7092,12 @@ class TypeScriptParser {
     const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
     if (method === "trim" && args.length === 0) return call("text.trim", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
+    if (method === "split" && args.length === 1) {
+      // An empty separator and a separator of several characters are both
+      // fields the helper cuts, and a regular expression was taken above.
+      const helper = this.splitHelper(this.peek().line);
+      return call(helper.name, [receiver, args[0] as Expression]);
+    }
     if (method === "slice" && (args.length === 1 || args.length === 2)) {
       return call("text.slice", [receiver, ...args]);
     }
@@ -7352,17 +7358,144 @@ class TypeScriptParser {
   }
 
   /**
-   * The function a `push` or a `pop` becomes: an array of one more element or
-   * one fewer, with the elements it keeps written into it.
+   * `text.split(separator)`: the fields the separator cuts the text into.
+   *
+   * The runtime says where a needle is and answers the text between two
+   * indexes, so the split is a function of the file: it walks the text once to
+   * count the fields and once to write them. An empty separator cuts the text
+   * into its characters, as the language does, and the last field is the text
+   * after the last separator, which is empty where the text ends with one.
+   * `text.indexOf` has no start index, so each step searches the rest of the
+   * text from where the last separator ended.
+   */
+  private splitHelper(line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["split"]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const call = (callee: string, args: Expression[]): Expression => ({ k: "call", name: callee, args });
+    const lengthOf = (value: Expression): Expression => ({ k: "lengthOf", of: value });
+    const add = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "+", left, right });
+    const less = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
+    const equal = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "===", left, right });
+    const slice = (value: Expression, start: Expression, stop: Expression | null): Expression =>
+      call("text.slice", stop === null ? [value, start] : [value, start, stop]);
+    const search = (from: Expression): Expression => call("text.indexOf", [slice(ident("text"), from, null), ident("sep")]);
+    const emptySeparator = (): Expression => equal(lengthOf(ident("sep")), number("0"));
+    const loop = (to: Expression, body: Statement[]): Statement => ({
+      kind: "loop", variable: "i", from: number("0"), to, inclusive: false, step: null, down: false, body, line,
+    });
+
+    // The field a search from `at` starts: it ends where the separator is, or
+    // at the end of the text when there is no separator left.
+    const writeField = (): Statement[] => [
+      { kind: "declare", name: "found", type: null, init: search(ident("at")), line },
+      {
+        kind: "if",
+        condition: less(ident("found"), number("0")),
+        then: [
+          { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: slice(ident("text"), ident("at"), null), line },
+        ],
+        otherwise: [
+          {
+            kind: "indexAssign",
+            buffer: "out",
+            index: ident("i"),
+            op: "=",
+            value: slice(ident("text"), ident("at"), add(ident("at"), ident("found"))),
+            line,
+          },
+          { kind: "assign", target: "at", op: "+=", value: add(ident("found"), lengthOf(ident("sep"))), line },
+        ],
+        line,
+      },
+    ];
+
+    const body: Statement[] = [
+      { kind: "declare", name: "count", type: null, init: number("0"), line },
+      { kind: "declare", name: "at", type: null, init: number("0"), line },
+      {
+        kind: "if",
+        condition: emptySeparator(),
+        then: [{ kind: "assign", target: "count", op: "=", value: lengthOf(ident("text")), line }],
+        otherwise: [
+          {
+            kind: "while",
+            condition: number("1"),
+            body: [
+              { kind: "assign", target: "count", op: "+=", value: number("1"), line },
+              { kind: "declare", name: "found", type: null, init: search(ident("at")), line },
+              { kind: "if", condition: less(ident("found"), number("0")), then: [{ kind: "break", line }], otherwise: [], line },
+              { kind: "assign", target: "at", op: "+=", value: add(ident("found"), lengthOf(ident("sep"))), line },
+            ],
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "declare", name: "out", type: null, init: { k: "sized", element: "text", count: ident("count") }, line },
+      {
+        kind: "if",
+        condition: emptySeparator(),
+        then: [
+          loop(lengthOf(ident("text")), [
+            {
+              kind: "indexAssign",
+              buffer: "out",
+              index: ident("i"),
+              op: "=",
+              value: slice(ident("text"), ident("i"), add(ident("i"), number("1"))),
+              line,
+            },
+          ]),
+        ],
+        otherwise: [
+          { kind: "assign", target: "at", op: "=", value: number("0"), line },
+          loop(ident("count"), writeField()),
+        ],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+
+    const params = [
+      { name: "text", type: TEXT_RESULT },
+      { name: "sep", type: TEXT_RESULT },
+    ];
+    const returns: TypeExpr = { kind: "slice", of: TEXT_RESULT };
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
+  }
+
+  /**
+   * The function a `push` or a `pop` becomes: an array of the elements it
+   * keeps and the values it adds, or one fewer, with the kept elements written
+   * into it.
    *
    * An array is a block and a length, and the length travels beside the block,
    * so `a.push(x)` is `a = __push(a, x)` and not a write into the block the name
    * already holds. That is a copy of the elements on every push; a compiler that
    * grew a block in place would be a compiler that carried the length inside it,
    * which is a different representation than the one a parameter is passed as.
+   * A push written with several values is one block and one copy, not one copy
+   * per value: the helper takes them all and writes them after the elements it
+   * keeps.
    */
-  private appendHelper(method: "push" | "pop", element: TypeExpr, line: number): { name: string; returns: TypeExpr } {
-    const key = JSON.stringify(["append", method, element]);
+  private appendHelper(
+    method: "push" | "pop",
+    element: TypeExpr,
+    written: number,
+    line: number,
+  ): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["append", method, element, written]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
@@ -7379,12 +7512,29 @@ class TypeScriptParser {
 
     let body: Statement[];
     if (method === "push") {
+      // One value is one more element, and several values are several more:
+      // the block is made once at the length the source would have after the
+      // push, and the values are written after the elements it keeps.
+      const values = Array.from({ length: written }, (_, index) => `value${index}`);
       body = [
-        { kind: "declare", name: "out", type: null, init: { k: "sized", element: elementText, count: { k: "binary", op: "+", left: length(), right: number("1") } }, line },
+        {
+          kind: "declare",
+          name: "out",
+          type: null,
+          init: { k: "sized", element: elementText, count: { k: "binary", op: "+", left: length(), right: number(String(written)) } },
+          line,
+        },
         loop([
           { kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: { k: "index", base: ident("items"), index: ident("i") }, line },
         ], length()),
-        { kind: "indexAssign", buffer: "out", index: length(), op: "=", value: ident("value"), line },
+        ...values.map((value, index): Statement => ({
+          kind: "indexAssign",
+          buffer: "out",
+          index: { k: "binary", op: "+", left: length(), right: number(String(index)) },
+          op: "=",
+          value: ident(value),
+          line,
+        })),
         { kind: "result", value: ident("out"), line },
       ];
     } else {
@@ -7412,7 +7562,10 @@ class TypeScriptParser {
     }
 
     const params = method === "push"
-      ? [{ name: "items", type: items }, { name: "value", type: element }]
+      ? [
+          { name: "items", type: items },
+          ...Array.from({ length: written }, (_, index): { name: string; type: TypeExpr } => ({ name: `value${index}`, type: element })),
+        ]
       : [{ name: "items", type: items }];
     const returns: TypeExpr = { kind: "slice", of: element };
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
@@ -8744,6 +8897,63 @@ class TypeScriptParser {
     return { k: "sized", element, count };
   }
 
+  /**
+   * A parser for a stretch of this file's text, sharing what the file has
+   * written so far.
+   *
+   * A template string interpolates an expression the same file reads, so a
+   * name, a helper or an arrow the stretch writes belongs to the file and not
+   * to a little file of its own. Sharing the tables by reference means the
+   * helpers and closures the stretch lifts are the file's, and `adopt` carries
+   * the counters back so the next name the file takes is still its own.
+   */
+  private nested(tokens: Token[]): TypeScriptParser {
+    const child = new TypeScriptParser(
+      tokens,
+      this.path,
+      this.diagnostics,
+      this.classTable,
+      this.allTokens,
+      this.constants,
+      this.state,
+      this.typeTable,
+    );
+    child.currentClass = this.currentClass;
+    child.wideBigint = this.wideBigint;
+    child.valueTypes = this.valueTypes;
+    child.valueShapes = this.valueShapes;
+    child.valueClasses = this.valueClasses;
+    child.valueArrows = this.valueArrows;
+    child.arrowBindings = this.arrowBindings;
+    child.valueFunctions = this.valueFunctions;
+    child.declaredReturns = this.declaredReturns;
+    child.declaredReturnShapes = this.declaredReturnShapes;
+    child.declaredParams = this.declaredParams;
+    child.valueCollections = this.valueCollections;
+    child.declaredCollections = this.declaredCollections;
+    child.collectionExpressions = this.collectionExpressions;
+    child.iteratedCollections = this.iteratedCollections;
+    child.closures = this.closures;
+    child.liftedArrows = this.liftedArrows;
+    child.collectHelpers = this.collectHelpers;
+    child.expressionTypes = this.expressionTypes;
+    child.closureCount = this.closureCount;
+    child.collectCount = this.collectCount;
+    child.destructureCount = this.destructureCount;
+    child.switchCount = this.switchCount;
+    child.walkCount = this.walkCount;
+    return child;
+  }
+
+  /** The counters a nested parser advanced, taken back by the file. */
+  private adopt(child: TypeScriptParser): void {
+    this.closureCount = child.closureCount;
+    this.collectCount = child.collectCount;
+    this.destructureCount = child.destructureCount;
+    this.switchCount = child.switchCount;
+    this.walkCount = child.walkCount;
+  }
+
   /** The text of a template string, split where it interpolates a value. */
   private text(token: Token): TextPart[] {
     const parts: TextPart[] = [];
@@ -8762,15 +8972,12 @@ class TypeScriptParser {
       }
       const inner = rest.slice(open + 2, close);
       rest = rest.slice(close + 1);
-      const parser = new TypeScriptParser(tokenize(inner), this.path, this.diagnostics, this.classTable);
-      parser.currentClass = this.currentClass;
-      parser.valueClasses = new Map(this.valueClasses);
-      parser.valueTypes = new Map(this.valueTypes);
-      parser.wideBigint = this.wideBigint;
+      const parser = this.nested(tokenize(inner));
       const value = parser.readExpression();
       if (parser.peek().kind !== "end") {
         this.report(`"${parser.peek().text}" follows a complete value`, `in the text of line ${token.line}`, parser.peek());
       }
+      this.adopt(parser);
       parts.push({ k: "value", value });
     }
     return parts;
@@ -8956,7 +9163,7 @@ function usageOf(declaration: TypeScriptFunction): {
         for (const argument of value.args) expression(argument);
         return;
       case "append":
-        expression(value.value ?? { k: "null" });
+        for (const one of value.values) expression(one);
         return;
     }
   };
@@ -9514,7 +9721,7 @@ function dependsOn(expression: Expression, name: string): boolean {
     case "invoke":
       return dependsOn(expression.callee, name) || expression.args.some((argument) => dependsOn(argument, name));
     case "append":
-      return dependsOn(appendArray(expression), name) || (expression.value !== null && dependsOn(expression.value, name));
+      return dependsOn(appendArray(expression), name) || expression.values.some((value) => dependsOn(value, name));
   }
 }
 

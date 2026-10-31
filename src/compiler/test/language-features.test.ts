@@ -1271,6 +1271,56 @@ test("push and pop change the array a name holds", async () => {
   assert.equal(output.trim(), "402");
 });
 
+test("a push of several values keeps every element in the order it was written", async () => {
+  // The values are one more element each and the block grows once, so the
+  // elements it keeps stay in front and the values follow in order.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const a: string[] = [];",
+    "  a.push(`a`, `b`, `c`);",
+    "  const b: number[] = [9];",
+    "  b.push(1, 2);",
+    "  return `${a.length}${a.join(``)}${b.length}${b[0]}${b[2]}`;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3abc392");
+});
+
+test("a text split answers the fields the separator cuts", async () => {
+  // The separator may be absent, may end the text, and may be several
+  // characters; an empty one cuts the text into its characters.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const a = `a,b,c`.split(`,`);",
+    "  const b = `a,`.split(`,`);",
+    "  const c = `abc`.split(`;`);",
+    "  const d = `xyz`.split(``);",
+    "  const e = `a::b`.split(`::`);",
+    "  return `${a.length}${a[0]}${a[2]}${b.length}${b[1].length}${c.length}${c[0]}${d.length}${d[1]}${d[2]}${e.length}${e[1]}`;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3ac201abc3yz2b");
+});
+
+test("a template string that calls a collection helper uses the file's helper", async () => {
+  // The expression inside `${...}` is part of the same file, so the walk and
+  // the arrow it calls are functions of the file and not of a little file the
+  // interpolation wrote for itself.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const a: number[] = [1, 2, 3];",
+    "  return `${a.map((x) => x * 2).join(`-`)}`;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2-4-6");
+});
+
 test("a declaration without a value starts at the zero of its type", async () => {
   // `let text: string;` states the type and leaves the value to the assignment
   // the source writes next. A value here has no absent one, so the name starts

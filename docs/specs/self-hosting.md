@@ -83,8 +83,9 @@ expressions to 5319, carrying interfaces and type aliases through the module
 graph to 5091, reference-valued maps and sets to 4824, expected types for
 empty lists to 4680, the type of each name a destructuring pattern binds to
 4595, and the type of a collection callback's parameters from the array it
-walks to 4584, with `semantics/module.ts` read as a whole. The refusals fall
-into six frontiers:
+walks to 4584, splitting a text into the fields a separator cuts and pushing
+several values at once to 4579, with `semantics/module.ts` read as a whole. The
+refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -239,7 +240,8 @@ to carry those without a rewrite into numeric arrays:
   of a conditional, the right side of `??`, an object field, a call argument and
   a nested list, so `condition ? [] : [1]` is a list of numbers without a
   separate annotation. `this.items.push(x)` writes the field back into the
-  object it was read from, and `at` and `slice` read one element and copy a
+  object it was read from, and `a.push(x, y)` is one block and one copy for
+  every value. `at` and `slice` read one element and copy a
   range. What is still missing is `splice`, `shift`, `unshift`, `concat`, the
   `Array` constructors, and a list whose element is itself a list as a field of
   a class.
@@ -252,10 +254,12 @@ to carry those without a rewrite into numeric arrays:
   pair. A map is built empty, from an array of pairs and from another map; a set
   from its elements. Still missing: keys that are numbers or arrays, values that
   are arrays, and `Object.fromEntries`.
-- **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `indexOf` and `slice`
-  are carried. Still missing: `replace`, `split`, `toLowerCase`, `repeat` and
-  `padStart`/`padEnd`, except where the first argument of `replace` or `split`
-  is a regular expression.
+- **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `slice`
+  and `split` are carried. A split is a function of the file, not a runtime
+  service: it counts the fields with `text.indexOf`/`text.slice` and then writes
+  them, and an empty separator cuts the text into its characters. Still missing:
+  `replace`, `toLowerCase`, `repeat` and `padStart`/`padEnd`, except where the
+  first argument of `replace` is a regular expression.
 
   Regular expressions are carried by a small backtracking engine in the
   compiler runtime (`runtime/abi.ts`), reachable through the text helpers so it

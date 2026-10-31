@@ -150,7 +150,8 @@ export type Expression =
       base: string | null;
       helper: string;
       op: "push" | "pop";
-      value: Expression | null;
+      /** The values a push adds, in the order it writes them; a pop adds none. */
+      values: Expression[];
     };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";
