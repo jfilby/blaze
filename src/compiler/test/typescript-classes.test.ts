@@ -52,6 +52,27 @@ test("the constructor builds one layout, and a method reads it at its offsets", 
   assert.match(ir, /load_field\[f64\].* Object1 x/);
 });
 
+test("a field names its type in every form the language writes", () => {
+  // `readonly`, an object type, a tuple and a union of string literals are all
+  // annotations a field may write, and `= []` is built at the element type each
+  // one names. A field whose type was read as `any` would leave the empty list
+  // without an element.
+  const source = [
+    "class Ledger {",
+    "  private readonly rows: { name: string; count: number }[] = [];",
+    "  private readonly turns: [number, number][] = [];",
+    "  private readonly states: (\"open\" | \"closed\")[] = [];",
+    "  total(): number {",
+    "    return this.rows.length + this.turns.length + this.states.length;",
+    "  }",
+    "}",
+    "console.log(new Ledger().total());",
+    "",
+  ].join("\n");
+  const program = programOf("typescript", { "main.ts": source }, "main.ts");
+  assert.ok(Object.keys(program.files[0].functions).includes("Ledger_total"));
+});
+
 test("a call of a method passes the instance as its first argument", () => {
   const body = typeScriptFrontend.analyze(VECTOR, "main.ts").body;
   const q = body.find((statement) => statement.kind === "declare" && statement.name === "q");

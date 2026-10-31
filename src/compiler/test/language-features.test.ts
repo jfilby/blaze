@@ -1427,6 +1427,25 @@ test("an empty list takes its element type from the use", async () => {
   assert.equal(output.trim(), "20002");
 });
 
+test("an object spread copies the fields of a typed object", async () => {
+  // `{ ...p, y: p.y + 1 }` is the fields of `p` copied into a new object, with
+  // the field written after the spread replacing the one it copied: the value
+  // `p` holds is not changed, and the copy is an object of its own.
+  const output = await agreesWithNode([
+    "interface Point { x: number; y: number }",
+    "function moved(p: Point): Point {",
+    "  const copy = { ...p, y: p.y + 1 };",
+    "  return copy;",
+    "}",
+    "const a: Point = { x: 1, y: 2 };",
+    "const b = moved(a);",
+    "b.x = 7;",
+    "console.log(`${a.x} ${a.y} ${b.x} ${b.y}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1 2 7 3");
+});
+
 test("a class field holds a list and grows it", async () => {
   // `private items: number[] = []` is a field whose type is the list the
   // initialiser writes, and `this.items.push(x)` writes the field back into the

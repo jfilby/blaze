@@ -432,6 +432,163 @@ test("a type alias names the primitive a contract holds it at", () => {
   assert.deepEqual(analysis.functions[0]?.returns, { kind: "primitive", name: "f64" });
 });
 
+test("an object spread copies the fields of a typed object", () => {
+  // `{ ...base }` is the record's fields read out of the value it names, and a
+  // field written after the spread replaces the one copied. The value is read
+  // once, so the fields are loads from the same name rather than a second
+  // evaluation of it.
+  const analysis = typescript.analyze(
+    [
+      "interface Base { a: string; b: number }",
+      "export function f(base: Base): Base {",
+      "  return { ...base, b: 2 };",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; fields?: { name: string; value: { k: string; field?: string } }[] } }[];
+  }).body;
+  const returned = body.find((statement) => statement.kind === "result")?.value;
+  assert.equal(returned?.k, "object");
+  assert.deepEqual(
+    returned?.fields?.map((field) => field.name),
+    ["a", "b"],
+    "the copied field is replaced, not written twice",
+  );
+  assert.equal(returned?.fields?.[0]?.value.k, "member");
+  assert.equal(returned?.fields?.[0]?.value.field, "a", "the field is read out of the value spread");
+  assert.equal(returned?.fields?.[1]?.value.k, "literal", "the field after the spread is the one held");
+});
+
+test("an object spread of a value whose reads would repeat is refused", () => {
+  // A call written under a spread would run once per field, which is not the
+  // value the source wrote. A name or a field of one is the value the spread
+  // needs, and anything else is refused where it is written.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "interface Base { a: string; b: number }",
+          "function make(): Base { return { a: `x`, b: 1 }; }",
+          "export function f(): Base {",
+          "  return { ...make() };",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /an object spread reads a constant object/,
+  );
+});
+
+test("`Omit` and `Pick` are the fields they keep", () => {
+  // The keys are string literals, so a record's fields are selected by name:
+  // `Omit` removes them and `Pick` keeps them. What is left is a record the
+  // member chain after it reads field by field.
+  const source = [
+    "interface Full { a: string; b: number; c: boolean }",
+    "export function kept(value: Pick<Full, `b`>): number {",
+    "  return value.b + 1;",
+    "}",
+    "export function left(value: Omit<Full, `b` | `c`>): string {",
+    "  return value.a.trim();",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(
+    analysis.functions.map((declared) => declared.name),
+    ["kept", "left"],
+  );
+});
+
+test("an empty list written into a field is built at the field's elements", () => {
+  // The field says what the value written into it holds, so `shelf.names = []`
+  // is a list of the field's element type and not a list with no type at all.
+  const analysis = typescript.analyze(
+    [
+      "interface Shelf { names: string[]; }",
+      "export function clear(shelf: Shelf): number {",
+      "  shelf.names = [];",
+      "  return shelf.names.length;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: Lowered }[];
+  }).body;
+  type Lowered = { k: string; element?: string; left?: Lowered; right?: Lowered };
+  // A list is its own block, so the empty list is a buffer of no values; the
+  // frontend writes two of them so the one a caller keeps is not the one the
+  // frame wrote, and the element type is on each.
+  const firstBuffer = (value: Lowered | undefined): Lowered | undefined => {
+    if (value === undefined) return undefined;
+    if (value.k === "buffer") return value;
+    return firstBuffer(value.left) ?? firstBuffer(value.right);
+  };
+  const written = body.find((statement) => statement.kind === "memberAssign")?.value;
+  assert.equal(firstBuffer(written)?.element, "text", "the field's element type is the list's");
+});
+
+test("an empty list in a field of an imported type is built at the type's elements", () => {
+  // The field is declared in another module, so the read that first parses this
+  // file has not linked the declaration the field belongs to. The module graph
+  // reads the file again once the imports are bound, and that read settles the
+  // empty list at the field's element type.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import type { Box } from "./types.ts";',
+        "function width(box: Box): number { return box.values.length; }",
+        "const empty: Box = { values: [] };",
+        "",
+      ].join("\n"),
+      "types.ts": "export interface Box { values: number[] }\n",
+    },
+    "main.ts",
+  );
+  const declared = (
+    (phase.body?.statements ?? []) as {
+      kind: string;
+      name?: string;
+      value?: { k: string; fields?: { name: string; value: { k: string; element?: string } }[] };
+    }[]
+  ).find((statement) => statement.kind === "declare" && statement.name === "empty");
+  const field = declared?.value?.fields?.find((one) => one.name === "values");
+  assert.equal(field?.value.k, "buffer");
+  assert.equal(field?.value.element, "f64", "the imported field's element type is the list's");
+});
+
+test("an object spread of an imported type reads the fields its declaration names", () => {
+  // The type and the fields are in another module, and the function takes a
+  // subset of them: the spread copies what `Omit` kept and the field after it
+  // writes over the one it copied.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import type { Full } from "./types.ts";',
+        "export function copy(value: Omit<Full, `c`>): Omit<Full, `c`> {",
+        "  return { ...value, b: 2 };",
+        "}",
+        "console.log(1);",
+        "",
+      ].join("\n"),
+      "types.ts": "export interface Full { a: number; b: number; c: string }\n",
+    },
+    "main.ts",
+  );
+  const ir = printSemanticFunction(semanticsOf(phase)["copy"]);
+  assert.match(ir, /a \[load_field\[[^\]]+\] local\[[^\]]+\] value [^\]]+ a\]/);
+  assert.match(ir, /b const\[f64\] 2/);
+});
+
 test("an angle-bracket type assertion is erased", () => {
   // `<T>value` is the other spelling of `value as T`, and it names no runtime
   // work: the value after the closing bracket is the value the source wrote.

@@ -78,6 +78,7 @@ import {
   resolveAnnotation,
   resolveTypeName,
   scanTypeTable,
+  typeText,
   type ResolvedField,
   type ResolvedType,
   type TypeTable,
@@ -485,6 +486,30 @@ function numberValue(value: Expression): bigint | null {
 /** Whether a value is the literal number it is written as. */
 function isNumberLiteral(value: Expression, text: string): boolean {
   return (value.k === "literal" || value.k === "bigint") && value.text.replace(/n$/, "") === text;
+}
+
+/**
+ * Whether reading a value again does the same work again: a name, a literal, a
+ * field of one, or an element of one. An object spread that names a record is
+ * written out field by field, so the value it spreads is read once per field;
+ * a call or an update written there would run as many times as the record has
+ * fields.
+ */
+function readsOnce(value: Expression): boolean {
+  switch (value.k) {
+    case "ident":
+    case "literal":
+    case "bigint":
+    case "text":
+    case "null":
+      return true;
+    case "member":
+      return readsOnce(value.base);
+    case "index":
+      return readsOnce(value.base) && readsOnce(value.index);
+    default:
+      return false;
+  }
 }
 
 /** The element type of a sequence type, or null where the type is not one. */
@@ -909,6 +934,53 @@ function localNames(tokens: readonly Token[]): Set<string> {
       if (name?.kind === "ident") names.add(name.text);
     }
     if (token.kind === "ident" && tokens[index + 1]?.text === ":") names.add(token.text);
+  }
+  return names;
+}
+
+/**
+ * The names a file's imports bind.
+ *
+ * An import that names a type is the only way a type declared in another module
+ * reaches this one, and a plain `import { Box }` binds a type as readily as a
+ * value: the source does not say which, so both are kept. The names are read
+ * from the tokens rather than from the parse, because classes are lowered
+ * before the imports are read and their fields may name an imported type.
+ */
+function importedNames(tokens: readonly Token[]): Set<string> {
+  const names = new Set<string>();
+  let index = 0;
+  while (index < tokens.length) {
+    if (tokens[index]?.text === ";") {
+      index += 1;
+      continue;
+    }
+    if (tokens[index]?.text !== "import") break;
+    index += 1;
+    if (tokens[index]?.text === "type") index += 1;
+    if (tokens[index]?.text === "*") {
+      while (index < tokens.length && tokens[index]?.kind !== "string") index += 1;
+      index += 1;
+      continue;
+    }
+    if (tokens[index]?.text === "{") {
+      index += 1;
+      while (index < tokens.length && tokens[index]?.text !== "}") {
+        const token = tokens[index] as Token;
+        if (token.kind === "ident" && token.text !== "type" && token.text !== "as") names.add(token.text);
+        index += 1;
+      }
+      index += 1;
+    } else if (tokens[index]?.kind === "ident") {
+      // `import d from "./x.ts"` and `import d, { a } from "./x.ts"`.
+      names.add((tokens[index] as Token).text);
+      index += 1;
+      if (tokens[index]?.text === ",") index += 1;
+    }
+    while (index < tokens.length && tokens[index]?.text !== "from") index += 1;
+    if (index < tokens.length) index += 1;
+    if (tokens[index]?.kind === "string") index += 1;
+    if (tokens[index]?.text === ";") index += 1;
   }
   return names;
 }
@@ -1899,6 +1971,19 @@ class TypeScriptParser {
    * settles is reported once, after the whole expression has been read.
    */
   private readonly unsettledArrays = new Map<Expression, Token>();
+  /**
+   * The names this file's imports bind.
+   *
+   * A file is read before the module graph links the declarations its imports
+   * name, so an annotation written as an imported type resolves to `any` on
+   * that first read. An empty list written at such a type is not a list the
+   * source left untyped: the read that follows the link settles it, and that
+   * read reports whatever is still empty. `pendingType` is set when an imported
+   * name is used before it is bound.
+   */
+  private readonly importedTypeNames: Set<string>;
+  /** Shared with the nested parser a template string reads through. */
+  private pendingType = { value: false };
   /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
@@ -2007,8 +2092,10 @@ class TypeScriptParser {
     constants: ReadonlyMap<string, ConstantInfo> = new Map(),
     state: ReadonlySet<string> = new Set(),
     typeTable?: TypeTable,
+    importedTypeNames: ReadonlySet<string> = new Set(),
   ) {
     this.tokens = tokens;
+    this.importedTypeNames = new Set(importedTypeNames);
     this.path = path;
     this.stem = nameStem(path);
     this.diagnostics = diagnostics;
@@ -2117,6 +2204,7 @@ class TypeScriptParser {
       shape = null;
     }
     if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape);
+    if (shape === null || shape.kind === "any") this.notePendingType(text);
     // A field or a class parameter names its type as one text, so `T[]` and
     // `Array<T>` are read here rather than by the token walk an annotation in a
     // body goes through.
@@ -2418,10 +2506,37 @@ class TypeScriptParser {
   private shapeOfNamedType(type: TypeExpr | null): ResolvedType | null {
     if (type === null || type.kind !== "ref" || type.name === undefined) return null;
     try {
-      return resolveTypeName(this.typeTable, type.name);
+      const shape = resolveTypeName(this.typeTable, type.name);
+      if (shape.kind === "any") this.notePendingType(type.name);
+      return shape;
     } catch {
+      this.notePendingType(type.name);
       return null;
     }
+  }
+
+  /**
+   * Records that an annotation named a type this file imports, before the
+   * module graph bound the declaration the name stands for.
+   */
+  private notePendingType(name: string): void {
+    // A name may be written inside a generic, as `Omit<Full, "c">` is, so every
+    // name the annotation mentions is asked, not only the one it starts with.
+    for (const one of name.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
+      if (!this.importedTypeNames.has(one)) continue;
+      if (this.typeTable.declarations.has(one) || this.typeTable.imported.has(one)) continue;
+      this.pendingType.value = true;
+      return;
+    }
+  }
+
+  /**
+   * Whether this read names a type its imports declare and the module graph has
+   * not linked. What is written at such a type — an empty list, the fields an
+   * object spread copies — is settled by the read that follows the link.
+   */
+  private typeReadIsPending(): boolean {
+    return this.pendingType.value && this.typeTable.imported.size === 0;
   }
 
   /**
@@ -2492,6 +2607,14 @@ class TypeScriptParser {
 
   /** Reports the empty arrays no use of the expression settled. */
   private reportUnsettledArrays(): void {
+    // A read that names an imported type the module graph has not linked yet
+    // cannot tell a list the source left empty from a list written at that
+    // type: the type is simply not in this table. The file is read again once
+    // the imports are bound, and that read answers what is still unsettled.
+    if (this.typeReadIsPending()) {
+      this.unsettledArrays.clear();
+      return;
+    }
     for (const [value, token] of this.unsettledArrays) {
       if (value.k !== "buffer" || value.values.length !== 0) continue;
       this.report(
@@ -4291,8 +4414,13 @@ class TypeScriptParser {
     const range = this.lastTypeRange;
     if (range === null) return null;
     try {
-      return resolveAnnotation(this.tokens, range.start, range.end, this.typeTable);
+      const shape = resolveAnnotation(this.tokens, range.start, range.end, this.typeTable);
+      // An imported declaration the module graph has not linked resolves to
+      // the `any` this read cannot tell from a type the source spelled as one.
+      if (shape.kind === "any") this.notePendingType(typeText(this.tokens, range.start, range.end));
+      return shape;
     } catch {
+      this.notePendingType(typeText(this.tokens, range.start, range.end));
       return null;
     }
   }
@@ -5156,9 +5284,16 @@ class TypeScriptParser {
       };
     }
     this.next();
-    const value = this.readExpression();
-    this.accept(";");
     const writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
+    // The field says what the value written into it holds, so `this.pending =
+    // []` is a list of the field's elements where the field is a list. The
+    // shape is the field the class declares or the one the value's type names.
+    const written: Expression = { k: "member", base: { k: "ident", name: writtenBase }, field: field.text };
+    const shape = this.shapeOf(written);
+    const value = shape === null
+      ? this.readExpression()
+      : this.readAt(this.typeExprOfShape(shape), () => this.readExpression(), shape);
+    this.accept(";");
     if (operator.text === "??=") {
       return {
         kind: "memberAssign",
@@ -8286,28 +8421,54 @@ class TypeScriptParser {
     const expected = this.expectedShape !== null && this.expectedShape.kind === "record"
       ? this.expectedShape
       : null;
+    // A field a spread writes is replaced by a field written later, as an
+    // object literal's last write is the one it holds, and the position stays
+    // the first one the field was written at. Two fields the source names
+    // itself are the duplicate the object pass refuses, so only a spread
+    // replaces anything.
+    const spreadFields = new Set<string>();
+    const put = (name: string, value: Expression, spread = false): void => {
+      const at = fields.findIndex((field) => field.name === name);
+      if (at >= 0 && (spread || spreadFields.has(name))) {
+        fields[at] = { name, value };
+        if (spread) spreadFields.add(name);
+        else spreadFields.delete(name);
+        return;
+      }
+      fields.push({ name, value });
+      if (spread) spreadFields.add(name);
+    };
     while (!this.at("}") && this.peek().kind !== "end") {
       const key = this.next();
       if (key.text === "...") {
         // `{ ...DEFAULT_TARGET }` is the fields of the object it spreads. A
         // constant object of the file is written out here, at the fields the
-        // source already wrote; an object built at run time has no fields the
-        // parser can name, and is refused rather than read as nothing.
+        // source already wrote; an object a name holds is copied field by
+        // field, at the shape its type declares, so `{ ...base, b: 2 }` reads
+        // `base.a` and writes `2` over the `base.b` it copied. A value whose
+        // work would run once per field is refused rather than read as many.
         const spread = this.readExpression();
         const constant = spread.k === "ident" ? this.constants.get(spread.name) : undefined;
         if (constant?.fields !== undefined) {
           for (const [field, range] of constant.fields) {
             const value = this.constantExpression(spread.k === "ident" ? spread.name : "", range);
-            if (value !== null) fields.push({ name: field, value });
+            if (value !== null) put(field, value, true);
           }
         } else if (spread.k === "object") {
-          fields.push(...spread.fields);
+          for (const field of spread.fields) put(field.name, field.value, true);
         } else {
-          this.report(
-            "an object spread reads a constant object",
-            "write the fields out, or spread an object the file already wrote as a constant",
-            key,
-          );
+          const shape = this.shapeOf(spread);
+          if (shape !== null && shape.kind === "record" && readsOnce(spread)) {
+            for (const name of shape.fields.keys()) {
+              put(name, { k: "member", base: spread, field: name }, true);
+            }
+          } else if (!this.typeReadIsPending()) {
+            this.report(
+              "an object spread reads a constant object",
+              "write the fields out, or spread an object the file already wrote as a constant",
+              key,
+            );
+          }
         }
         if (!this.accept(",")) break;
         continue;
@@ -8322,11 +8483,11 @@ class TypeScriptParser {
         const value = declared === undefined
           ? this.readExpression()
           : this.readAt(this.typeExprOfShape(declared.type), () => this.readExpression(), declared.type);
-        fields.push({ name, value });
+        put(name, value);
       } else if (key.kind === "ident") {
         // `{ line }` is `{ line: line }`: the field is named by the name the
         // value is held at, and the value is that name.
-        fields.push({ name, value: { k: "ident", name } });
+        put(name, { k: "ident", name });
       } else {
         this.report("an object field needs a value", `write ${name}: value`, key);
       }
@@ -8927,8 +9088,10 @@ class TypeScriptParser {
       this.constants,
       this.state,
       this.typeTable,
+      this.importedTypeNames,
     );
     child.currentClass = this.currentClass;
+    child.pendingType = this.pendingType;
     child.wideBigint = this.wideBigint;
     child.valueTypes = this.valueTypes;
     child.valueShapes = this.valueShapes;
@@ -9903,7 +10066,7 @@ export const typeScriptFrontend: Frontend = {
     const shared = (context as { table?: TypeTable } | undefined)?.table;
     const typeTable = shared ?? scanTypeTable(tokens);
     typeTable.classes = classTable.names;
-    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable);
+    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable, importedNames(tokens));
     parser.wideBigint = wideBigint;
     const analysis = parser.parseModule(path, entry);
     // A file read as a program has its whole text readable as statements, so a

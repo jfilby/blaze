@@ -84,15 +84,24 @@ graph to 5091, reference-valued maps and sets to 4824, expected types for
 empty lists to 4680, the type of each name a destructuring pattern binds to
 4595, and the type of a collection callback's parameters from the array it
 walks to 4584, splitting a text into the fields a separator cuts and pushing
-several values at once to 4579, the type and shape a `??` keeps to 4542,
-with `semantics/module.ts` read as a whole. The refusals fall into six
+several values at once to 4579, the type and shape a `??` keeps to 4542, and
+object spread of a typed object, `Omit`/`Pick`, a class field's annotation in
+every form the language writes, a field assignment read at the field's type,
+and an empty list at a type an import declares to 4251, with
+`semantics/contract-build.ts` read as a whole. The refusals fall into six
 frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
   through it, and a declaration imported from another module is read in the
-  module that wrote it. The remaining type-shaped refusal is the optional
-  parameter, which needs an absent value the value model does not have yet.
+  module that wrote it. A file is first read before its imports are linked, so
+  an empty list or an object spread written at an imported type is left to the
+  read the module graph makes once the declarations are bound; that read settles
+  it, and reports what is still unsettled. `Omit<T, "k">` and `Pick<T, "k">`
+  select the fields of the record they name, which is how a type is written when
+  a function takes a subset of a declaration's fields. The remaining
+  type-shaped refusal is the optional parameter, which needs an absent value the
+  value model does not have yet.
 - **The JavaScript expressions the source uses.** Optional chaining (`?.`),
   nullish coalescing (`??`), spread, destructuring (declarations, parameters and
   assignment), object shorthand, `switch`, `throw`, class getters and regular

@@ -16,6 +16,7 @@
  */
 
 import type { Token } from "./typescript.ts";
+import { typeText } from "./typescript-types.ts";
 
 /** One parameter of a method or constructor, as the source declared it. */
 export interface ClassParam {
@@ -151,7 +152,13 @@ function skipAngles(tokens: readonly Token[], open: number): number {
  * the name rather than being cut off where the identifier ends.
  */
 function typeNameAt(tokens: readonly Token[], index: number): string {
-  const token = tokens[index];
+  let token = tokens[index];
+  // `readonly T[]` is the list `T[]` is, and the word says nothing a type
+  // reader needs to see beside it.
+  if (token?.kind === "ident" && token.text === "readonly" && tokens[index + 1]?.kind === "ident") {
+    index += 1;
+    token = tokens[index];
+  }
   if (token === undefined || token.kind !== "ident") return "any";
   let name = token.text;
   let at = index + 1;
@@ -167,6 +174,38 @@ function typeNameAt(tokens: readonly Token[], index: number): string {
     at += 2;
   }
   return name;
+}
+
+/**
+ * The text of a type annotation from `from` to the token that ends it.
+ *
+ * A member may name its type in any form the language writes: `readonly Row[]`,
+ * a union in parentheses, or an object type whose own `;` separates fields. The
+ * text is what the type reader parses, so it travels whole rather than being
+ * cut at the first name; `typeNameAt` answers only a leading name and its
+ * suffix, which is enough for the annotations written as one name.
+ */
+function annotationType(
+  tokens: readonly Token[],
+  from: number,
+  limit: number,
+  stops: ReadonlySet<string>,
+): { text: string; end: number } {
+  let depth = 0;
+  for (let at = from; at < limit; at += 1) {
+    const token = tokens[at];
+    if (token.kind !== "punct") continue;
+    if (token.text === "(" || token.text === "[" || token.text === "{" || token.text === "<") depth += 1;
+    else if (token.text === ")" || token.text === "]" || token.text === "}" || token.text === ">") {
+      if (depth === 0) return { text: typeText(tokens, from, at), end: at };
+      depth -= 1;
+    } else if (token.text === ">>" && depth >= 2) {
+      depth -= 2;
+    } else if (depth === 0 && stops.has(token.text)) {
+      return { text: typeText(tokens, from, at), end: at };
+    }
+  }
+  return { text: typeText(tokens, from, limit), end: limit };
 }
 
 /**
@@ -244,8 +283,9 @@ function readParams(
     if (isPunct(tokens[index], "?")) index += 1;
     let typeName = "any";
     if (isPunct(tokens[index], ":")) {
-      typeName = typeNameAt(tokens, index + 1);
-      index = skipType(tokens, index + 1, limit, new Set([",", ")", "="]));
+      const annotation = annotationType(tokens, index + 1, limit, new Set([",", ")", "="]));
+      typeName = annotation.text;
+      index = annotation.end;
     }
     let defaultStart = -1;
     let defaultEnd = -1;
@@ -431,8 +471,9 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
     }
     let typeName = "any";
     if (isPunct(tokens[index], ":")) {
-      typeName = typeNameAt(tokens, index + 1);
-      index = skipType(tokens, index + 1, close, new Set(["=", ";"]));
+      const annotation = annotationType(tokens, index + 1, close, new Set(["=", ";"]));
+      typeName = annotation.text;
+      index = annotation.end;
     }
     let initStart = -1;
     let initEnd = -1;

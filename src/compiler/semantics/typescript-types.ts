@@ -761,6 +761,33 @@ class TypeText {
     }
     if (lower in PRIMITIVES) return { kind: "primitive", name: PRIMITIVES[lower] as PrimitiveTypeName };
     if (lower in TYPED_ARRAYS) return { kind: "list", of: { kind: "primitive", name: TYPED_ARRAYS[lower] as PrimitiveTypeName } };
+    // `Omit<T, "k">` and `Pick<T, "k">` are the record they name with fields
+    // left out or kept. The keys are written as string literals, so they are
+    // read from the text of the argument list rather than through the type
+    // reader, which keeps a string literal as the text it is.
+    if ((lower === "Omit" || lower === "Pick") && this.text[this.at] === "<") {
+      const close = this.findBalanced(this.at, "<", ">");
+      if (close < 0) {
+        this.at += 1;
+        return ANY_TYPE;
+      }
+      const parts = this.splitMembers(this.text.slice(this.at + 1, close));
+      this.at = close + 1;
+      const base = resolveTypeText(this.table, parts[0] ?? "", this.params, this.seen);
+      const keys = new Set<string>();
+      for (const part of parts.slice(1)) {
+        for (const piece of part.split("|")) {
+          const key = piece.trim().replace(/^['"`]/, "").replace(/['"`]$/, "");
+          if (key !== "") keys.add(key);
+        }
+      }
+      if (base.kind !== "record") return base;
+      const fields = new Map<string, ResolvedField>();
+      for (const [name, field] of base.fields) {
+        if (lower === "Omit" ? !keys.has(name) : keys.has(name)) fields.set(name, field);
+      }
+      return { kind: "record", fields, index: base.index };
+    }
     const args = this.arguments();
     const first = args[0] ?? ANY_TYPE;
     switch (lower) {
