@@ -477,6 +477,11 @@ function isNumberLiteral(value: Expression, text: string): boolean {
   return (value.k === "literal" || value.k === "bigint") && value.text.replace(/n$/, "") === text;
 }
 
+/** The element type of a sequence type, or null where the type is not one. */
+function elementOfSequenceType(type: TypeExpr): TypeExpr | null {
+  return type.kind === "slice" || type.kind === "array" ? type.of : null;
+}
+
 /** The type a value is held at, read with the names the body declared. */
 function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
   switch (value.k) {
@@ -1809,6 +1814,13 @@ class TypeScriptParser {
    */
   private declaredReturns = new Map<string, TypeExpr>();
   /**
+   * What each function of the file takes, by its name.
+   *
+   * An argument written as an empty list is built at the parameter's type, and
+   * the callee's declaration is what says what that is.
+   */
+  private declaredParams = new Map<string, readonly TypeExpr[]>();
+  /**
    * Whether the expression being read is the initialiser of a declaration, and
    * so may be an arrow that is only ever called by the name it is bound to.
    */
@@ -1822,6 +1834,30 @@ class TypeScriptParser {
    * the array is built with.
    */
   private expecting: TypeExpr | null = null;
+  /**
+   * The type the expression being read is held at.
+   *
+   * The element type above says what an array literal holds; this says what the
+   * whole value is. An empty list in the arm of a conditional or on the right
+   * of `??` is read at the type the other side names, which is a type of the
+   * expression and not of one of its elements.
+   */
+  private expectedType: TypeExpr | null = null;
+  /** The shape the expression being read is held at, where it is an object. */
+  private expectedShape: ResolvedType | null = null;
+  /**
+   * Empty arrays read before the use says what they hold.
+   *
+   * `condition ? [] : [1]` is read from left to right, so the empty arm is
+   * written before the other arm names the element type. The list is held here
+   * with the token it was written at until the use settles it; a list no use
+   * settles is reported once, after the whole expression has been read.
+   */
+  private readonly unsettledArrays = new Map<Expression, Token>();
+  /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
+  private expressionReads = 0;
+  /** How many reads are waiting to settle their value against the type of the use. */
+  private expectedReads = 0;
   /** The lists that are a regular expression's pattern and flags. */
   private readonly regexValues = new Set<Expression>();
   /** The names bound to a regular expression, read by the methods of one. */
@@ -1832,6 +1868,8 @@ class TypeScriptParser {
    * function's result type is the one the source wrote to say what it holds.
    */
   private returns: TypeExpr | null = null;
+  /** The shape the function being read hands back, where it is an object. */
+  private returnsShape: ResolvedType | null = null;
   /** The signature each name of the function is a function at, when it holds one. */
   private valueFunctions = new Map<string, FunctionType>();
   /** The map or the set each name of the function holds, when it holds one. */
@@ -2050,6 +2088,16 @@ class TypeScriptParser {
     }
   }
 
+  /** The shape a type name declares, or null where it names none. */
+  private shapeForName(typeName: string): ResolvedType | null {
+    try {
+      const shape = resolveTypeName(this.typeTable, typeName.trim());
+      return shape.kind === "any" ? null : shape;
+    } catch {
+      return null;
+    }
+  }
+
   /** The contract type a resolved shape is held at. */
   private typeExprOfShape(shape: ResolvedType): TypeExpr {
     switch (shape.kind) {
@@ -2225,13 +2273,20 @@ class TypeScriptParser {
    * so a `return []` written anywhere in the body is built at the type the
    * function declares, and a nested block or an if arm reads it the same way.
    */
-  private readReturning(returns: TypeExpr | null, read: () => Statement[]): Statement[] {
+  private readReturning(
+    returns: TypeExpr | null,
+    read: () => Statement[],
+    shape: ResolvedType | null = null,
+  ): Statement[] {
     const saved = this.returns;
+    const savedShape = this.returnsShape;
     this.returns = returns;
+    this.returnsShape = shape;
     try {
       return read();
     } finally {
       this.returns = saved;
+      this.returnsShape = savedShape;
     }
   }
 
@@ -2262,14 +2317,120 @@ class TypeScriptParser {
    * An expression read as the type a use fixes it at, which is what says what
    * an empty list written there holds.
    */
-  private readAt(type: TypeExpr | null, read: () => Expression): Expression {
-    const saved = this.expecting;
-    this.expecting = type !== null && type.kind === "slice" ? type.of : null;
+  private readAt(type: TypeExpr | null, read: () => Expression, shape: ResolvedType | null = null): Expression {
+    const savedExpecting = this.expecting;
+    const savedType = this.expectedType;
+    const savedShape = this.expectedShape;
+    this.expecting = type === null ? null : elementOfSequenceType(type);
+    this.expectedType = type;
+    this.expectedShape = shape ?? this.shapeOfNamedType(type);
+    this.expectedReads += 1;
     try {
-      return read();
+      const value = read();
+      if (type !== null) this.applyExpected(value, type, this.expectedShape);
+      return value;
     } finally {
-      this.expecting = saved;
+      this.expecting = savedExpecting;
+      this.expectedType = savedType;
+      this.expectedShape = savedShape;
+      this.expectedReads -= 1;
+      if (this.expectedReads === 0 && this.expressionReads === 0) this.reportUnsettledArrays();
     }
+  }
+
+  /**
+   * The type an array literal is held at, when it is the whole expression.
+   *
+   * The element type is what an array literal already reads. The type of the
+   * value itself says the same thing, and is what an arm of a conditional or
+   * the right side of `??` passes on.
+   */
+  private shapeOfNamedType(type: TypeExpr | null): ResolvedType | null {
+    if (type === null || type.kind !== "ref" || type.name === undefined) return null;
+    try {
+      return resolveTypeName(this.typeTable, type.name);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Settles the empty arrays a value holds at the type the use fixes it at.
+   *
+   * A list read before its use was known is a block of no values with no
+   * element type. The value around it may be a conditional arm, the right side
+   * of `??`, an object field, or the list itself, so the type travels through
+   * those forms until it reaches the list.
+   */
+  private applyExpected(value: Expression, type: TypeExpr, shape: ResolvedType | null = null): void {
+    if (type.kind === "slice" || type.kind === "array") {
+      const elementShape = shape !== null && shape.kind === "list" ? shape.of : null;
+      if (value.k === "buffer") {
+        if (value.values.length === 0) {
+          if (this.unsettledArrays.has(value)) {
+            value.element = typeToString(type.of);
+            this.unsettledArrays.delete(value);
+          }
+          return;
+        }
+        for (const written of value.values) this.applyExpected(written, type.of, elementShape);
+        return;
+      }
+      if (value.k === "conditional") {
+        this.applyExpected(value.then, type, shape);
+        this.applyExpected(value.otherwise, type, shape);
+        return;
+      }
+      if (value.k === "binary" && value.op === "??") {
+        this.applyExpected(value.left, type, shape);
+        this.applyExpected(value.right, type, shape);
+      }
+      return;
+    }
+    if (shape !== null && shape.kind === "record" && value.k === "object") {
+      for (const field of value.fields) {
+        const declared = shape.fields.get(field.name);
+        if (declared === undefined) continue;
+        this.applyExpected(field.value, this.typeExprOfShape(declared.type), declared.type);
+      }
+    }
+  }
+
+  /** Whether a value still holds a list whose use has not said what it holds. */
+  private holdsUnsettledArray(value: Expression): boolean {
+    if (this.unsettledArrays.has(value)) return true;
+    switch (value.k) {
+      case "conditional":
+        return this.holdsUnsettledArray(value.then) || this.holdsUnsettledArray(value.otherwise);
+      case "binary":
+        return this.holdsUnsettledArray(value.left) || this.holdsUnsettledArray(value.right);
+      case "buffer":
+        return value.values.some((written) => this.holdsUnsettledArray(written));
+      case "object":
+        return value.fields.some((field) => this.holdsUnsettledArray(field.value));
+      default:
+        return false;
+    }
+  }
+
+  /** The array type a value names, where its use has settled every empty list in it. */
+  private settledArrayType(value: Expression): TypeExpr | null {
+    if (this.holdsUnsettledArray(value)) return null;
+    const type = this.valueTypeOf(value);
+    return type.kind === "slice" || type.kind === "array" ? type : null;
+  }
+
+  /** Reports the empty arrays no use of the expression settled. */
+  private reportUnsettledArrays(): void {
+    for (const [value, token] of this.unsettledArrays) {
+      if (value.k !== "buffer" || value.values.length !== 0) continue;
+      this.report(
+        "an empty array needs the type of its elements",
+        "write the declaration with the element type, as in const names: string[] = []",
+        token,
+      );
+    }
+    this.unsettledArrays.clear();
   }
 
   /** Reads an expression written in the class token stream, between two tokens. */
@@ -2564,6 +2725,16 @@ class TypeScriptParser {
     }));
   }
 
+  /** The types a method's written arguments are read at, when a class answers it. */
+  private expectedMethodArguments(receiver: Expression, method: string): readonly TypeExpr[] {
+    // A map or a set answers the method itself, and its arguments are not the
+    // parameters of a class method that happens to share the name.
+    if (this.collectionOfExpression(receiver) !== null) return [];
+    const found = this.methodOwner(this.classOfExpression(receiver), method, false);
+    if (found === null) return [];
+    return this.methodParams(found.method.params).map((param) => param.type);
+  }
+
   /** An instance of a class, as the reference the layout pass names. */
   private referenceTo(className: string): TypeExpr {
     return { kind: "ref", of: null, name: className };
@@ -2637,8 +2808,10 @@ class TypeScriptParser {
       // The field's declared type is what an empty list in its initialiser is
       // built at: `private seen: string[] = []` names no element itself.
       const value = this.withClassContext(info, params, true, () =>
-        this.readAt(this.typeForName(field.typeName, field.line), () =>
-          this.readRange(field.initStart, field.initEnd),
+        this.readAt(
+          this.typeForName(field.typeName, field.line),
+          () => this.readRange(field.initStart, field.initEnd),
+          this.shapeForName(field.typeName),
         ),
       );
       body.push({ kind: "memberAssign", base: "self", field: field.name, op: "=", value, line: field.line });
@@ -2673,7 +2846,7 @@ class TypeScriptParser {
             this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
           }
           return read;
-        }),
+        }, this.shapeForName(method.returnTypeName)),
       );
       out.push(
         this.declared(
@@ -2698,7 +2871,7 @@ class TypeScriptParser {
             this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
           }
           return read;
-        }),
+        }, this.shapeForName(method.returnTypeName)),
       );
       out.push(this.declared(name, this.methodParams(method.params), returns, statements, info.exported, method.line));
       out.push(...this.wrappers(info, method, name, returns, false, info.exported));
@@ -2708,7 +2881,7 @@ class TypeScriptParser {
       const value =
         field.initStart >= 0 && field.initEnd >= field.initStart
           ? this.withClassContext(info, [], false, () =>
-              this.readAt(fieldType, () => this.readRange(field.initStart, field.initEnd)),
+              this.readAt(fieldType, () => this.readRange(field.initStart, field.initEnd), this.shapeForName(field.typeName)),
             )
           : ({ k: "null" } satisfies Expression);
       out.push(
@@ -3407,9 +3580,11 @@ class TypeScriptParser {
       handle: parsed,
     });
     this.declaredReturns.set(parsed.name, parsed.returns);
+    this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
     if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
     for (const wrapper of this.defaultWrappers(parsed, exported)) {
       this.declaredReturns.set(wrapper.name, wrapper.returns);
+      this.declaredParams.set(wrapper.name, wrapper.params.map((param) => param.type));
       functions.push(wrapper);
     }
     return isDefault ? parsed.name : null;
@@ -3619,7 +3794,9 @@ class TypeScriptParser {
             patternType = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
             patternShape = this.lastAnnotationShape();
           }
-          const fallbackPattern = this.accept("=") ? this.readExpression() : undefined;
+          const fallbackPattern = this.accept("=")
+            ? this.readAt(patternType, () => this.readExpression(), patternShape)
+            : undefined;
           const temp = `__param${this.destructureCount++}`;
           params.push({
             name: temp,
@@ -3667,7 +3844,9 @@ class TypeScriptParser {
           if (collectionType === null) collectionType = this.collectionOfShape(shape);
           if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
         }
-        const fallback = this.accept("=") ? this.readExpression() : undefined;
+        const fallback = this.accept("=")
+          ? this.readAt(mapped, () => this.readExpression(), shape)
+          : undefined;
         if (mapped === null) {
           if (fallback === undefined) {
             this.report("expected a parameter type", `near "${this.peek().text}"`, this.peek());
@@ -3708,13 +3887,17 @@ class TypeScriptParser {
     this.next();
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
     const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
+    const returnShape = this.lastAnnotationShape();
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
-      const value = this.readExpression();
+      const value = this.readAt(returnType, () => this.readExpression(), returnShape);
       this.accept(";");
       return declared(returnType, [{ kind: "result", value, line: name.line }]);
     }
-    return declared(returnType, [...prelude, ...this.readReturning(returnType, () => this.readBlock())]);
+    return declared(
+      returnType,
+      [...prelude, ...this.readReturning(returnType, () => this.readBlock(), returnShape)],
+    );
   }
 
   /**
@@ -4265,13 +4448,10 @@ class TypeScriptParser {
         // given, so it is not turned into a closure here.
         const wasBinding = this.bindingArrow;
         this.bindingArrow = true;
-        const wasExpecting = this.expecting;
-        this.expecting = type !== null && type.kind === "slice" ? type.of : null;
         try {
-          init = this.readExpression();
+          init = this.readAt(type, () => this.readExpression(), annotationShape);
         } finally {
           this.bindingArrow = wasBinding;
-          this.expecting = wasExpecting;
         }
         this.accept(";");
       } else if (type === null) {
@@ -4381,14 +4561,7 @@ class TypeScriptParser {
       }
       // A returned list is the value the function declares, and an empty one
       // is built at the element type that declaration names.
-      const wasExpecting = this.expecting;
-      this.expecting = this.returns !== null && this.returns.kind === "slice" ? this.returns.of : null;
-      let value: Expression;
-      try {
-        value = this.readExpression();
-      } finally {
-        this.expecting = wasExpecting;
-      }
+      const value = this.readAt(this.returns, () => this.readExpression(), this.returnsShape);
       this.accept(";");
       return { kind: "result", value, line: token.line };
     }
@@ -4691,7 +4864,7 @@ class TypeScriptParser {
     // assignment: the value is not computed where x holds one.
     if (operator.text === "??=") {
       this.next();
-      const value = this.readExpression();
+      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression());
       this.accept(";");
       this.valueArrows.delete(target.text);
       // The write is the `??` the operator names: `x ??= value` is `x = x ??
@@ -4711,7 +4884,7 @@ class TypeScriptParser {
         return null;
       }
       this.next();
-      const value = this.readExpression();
+      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression());
       this.accept(";");
       // What the name holds is what it was just written with, so a name that
       // held an arrow no longer does: a later `g(x)` would call a function the
@@ -5378,10 +5551,16 @@ class TypeScriptParser {
     // the function the body became, and no closure has to be built for it. The
     // flag is read and cleared here, so a nested expression of the same
     // declaration is read as the value it is.
-    const binding = this.bindingArrow;
-    this.bindingArrow = false;
-    const value = this.readConditional();
-    return binding ? value : this.materialized(value);
+    this.expressionReads += 1;
+    try {
+      const binding = this.bindingArrow;
+      this.bindingArrow = false;
+      const value = this.readConditional();
+      return binding ? value : this.materialized(value);
+    } finally {
+      this.expressionReads -= 1;
+      if (this.expressionReads === 0 && this.expectedReads === 0) this.reportUnsettledArrays();
+    }
   }
 
   /** `c ? a : b`, the loosest operator an expression has. */
@@ -5392,6 +5571,16 @@ class TypeScriptParser {
     const then = this.readExpression();
     this.expect(":");
     const otherwise = this.readExpression();
+    // An empty arm is built at the type of the arm that has values, or at the
+    // type the use of the whole conditional states. A use that states a
+    // number says nothing about a list written inside the conditional.
+    const expected = this.expectedType !== null &&
+      (this.expectedType.kind === "slice" || this.expectedType.kind === "array")
+      ? this.expectedType
+      : null;
+    const type = expected ?? this.settledArrayType(then) ?? this.settledArrayType(otherwise);
+    if (type !== null) this.applyExpected(then, type, this.expectedShape);
+    if (type !== null) this.applyExpected(otherwise, type, this.expectedShape);
     return { k: "conditional", condition, then, otherwise };
   }
 
@@ -5423,7 +5612,23 @@ class TypeScriptParser {
   }
 
   private readNullish(): Expression {
-    return this.readBinaryLevel(["??"], () => this.readLogicalOr());
+    let left = this.readLogicalOr();
+    while (this.at("??")) {
+      this.next();
+      const right = this.readLogicalOr();
+      // `values ?? []`: the list on the right holds the element type the value
+      // on the left names, which is what the language infers there too. A use
+      // that expects a number says nothing about the list written inside.
+      const expected = this.expectedType !== null &&
+        (this.expectedType.kind === "slice" || this.expectedType.kind === "array")
+        ? this.expectedType
+        : null;
+      const type = expected ?? this.settledArrayType(left) ?? this.settledArrayType(right);
+      if (type !== null) this.applyExpected(left, type, this.expectedShape);
+      if (type !== null) this.applyExpected(right, type, this.expectedShape);
+      left = { k: "binary", op: "??", left, right };
+    }
+    return left;
   }
 
   private readLogicalAnd(): Expression {
@@ -5731,7 +5936,8 @@ class TypeScriptParser {
         // a call of the function the body became, with what it captured in
         // front of the arguments.
         if (target.k === "arrow") {
-          const args = this.readCallArguments();
+          const written = this.arrowBindings.get(target.name);
+          const args = this.readCallArguments(written?.params.map((param) => param.type) ?? []);
           replace({
             k: "call",
             name: target.name,
@@ -5744,7 +5950,7 @@ class TypeScriptParser {
         // the arguments the source wrote.
         if (target.k === "ident" && this.valueArrows.has(target.name)) {
           const binding = this.valueArrows.get(target.name) as ArrowBinding;
-          const args = this.readCallArguments();
+          const args = this.readCallArguments(binding.params.map((param) => param.type));
           replace({
             k: "call",
             name: binding.function,
@@ -5758,7 +5964,7 @@ class TypeScriptParser {
         if (target.k === "ident") {
           const signature = this.valueFunctions.get(target.name);
           if (signature !== undefined) {
-            const args = this.readCallArguments();
+            const args = this.readCallArguments(signature.params);
             replace({ k: "invoke", callee: target, args, params: signature.params, returns: signature.returns });
             continue;
           }
@@ -5792,7 +5998,7 @@ class TypeScriptParser {
           if (owner !== undefined && !this.valueClasses.has(target.base.name)) {
             const found = this.methodOwner(owner.name, target.field, true);
             if (found !== null) {
-              const args = this.readCallArguments();
+              const args = this.readCallArguments(this.methodParams(found.method.params).map((param) => param.type));
               replace({ k: "call", name: methodFunctionName(found.owner, found.method, args.length), args });
               continue;
             }
@@ -5802,7 +6008,7 @@ class TypeScriptParser {
         // instance the source called it on.
         if (target.k === "member") {
           const callLine = this.peek().line;
-          const args = this.readCallArguments();
+          const args = this.readCallArguments(this.expectedMethodArguments(target.base, target.field));
           const receiver = target.base;
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
@@ -5891,7 +6097,7 @@ class TypeScriptParser {
           continue;
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
-        const args = this.readCallArguments();
+        const args = this.readCallArguments(this.declaredParams.get(target.name) ?? []);
         // `String(x)` is the text the value is written as, which is the value a
         // template string interpolates: the builder is the same one.
         if (target.name === "String") {
@@ -5914,10 +6120,12 @@ class TypeScriptParser {
       // These follow a value, and none of them changes it: `as` and
       // `satisfies` assert a type the value already has, and `!` says a value
       // that may be null is not. The type they write is erased like every
-      // other annotation, and the value is the one before them.
+      // other annotation, but an empty list still reads it: `[] as string[]`
+      // names the element type the list holds.
       if (this.at("as") || this.at("satisfies")) {
         this.next();
-        this.skipBalancedTypeTokens(EXPRESSION_TYPE_STOPS);
+        const type = this.readTypeAnnotation("a type assertion", EXPRESSION_TYPE_STOPS);
+        this.applyExpected(current(), type, this.lastAnnotationShape());
         continue;
       }
       if (this.at("!")) {
@@ -6007,11 +6215,12 @@ class TypeScriptParser {
   }
 
   /** The arguments of a call, from the `(` the parser is at to its `)`. */
-  private readCallArguments(): Expression[] {
+  private readCallArguments(expected: readonly TypeExpr[] = []): Expression[] {
     this.next();
     const args: Expression[] = [];
     while (!this.at(")") && this.peek().kind !== "end") {
-      args.push(this.readExpression());
+      const type = expected[args.length] ?? null;
+      args.push(type === null ? this.readExpression() : this.readAt(type, () => this.readExpression()));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
@@ -6223,8 +6432,10 @@ class TypeScriptParser {
       params.push({ name: name.text, type: ANY_TYPE, typeName: "", functionType: null, shape: null });
     }
     let stated: TypeExpr | null = null;
+    let statedShape: ResolvedType | null = null;
     if (this.accept(":")) {
       stated = this.readTypeAnnotation("an arrow function's result type", ARROW_RETURN_STOPS, isAsync);
+      statedShape = this.lastAnnotationShape();
     }
     if (!this.accept("=>")) this.report('expected "=>"', `near "${this.peek().text}"`);
     // The body is a scope of its own: a name it declares is not the function's,
@@ -6264,14 +6475,8 @@ class TypeScriptParser {
       if (this.at("{")) return [...prelude, ...this.readBlock()];
       // A concise body is the return the source wrote without the word, so an
       // empty list it answers is built at the type the arrow declares.
-      const wasExpecting = this.expecting;
-      this.expecting = stated !== null && stated.kind === "slice" ? stated.of : null;
-      try {
-        return [...prelude, { kind: "result" as const, value: this.readExpression(), line }];
-      } finally {
-        this.expecting = wasExpecting;
-      }
-    });
+      return [...prelude, { kind: "result" as const, value: this.readAt(stated, () => this.readExpression(), statedShape), line }];
+    }, statedShape);
     this.valueTypes = savedTypes;
     this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
@@ -7678,6 +7883,9 @@ class TypeScriptParser {
   /** `{ left: a, right: b }`: an object allocated where it is written. */
   private readObject(): Expression {
     const fields: { name: string; value: Expression }[] = [];
+    const expected = this.expectedShape !== null && this.expectedShape.kind === "record"
+      ? this.expectedShape
+      : null;
     while (!this.at("}") && this.peek().kind !== "end") {
       const key = this.next();
       if (key.text === "...") {
@@ -7708,7 +7916,13 @@ class TypeScriptParser {
       if (name === null) {
         this.report("an object field is named", `near "${key.text}"`, key);
       } else if (this.accept(":")) {
-        fields.push({ name, value: this.readExpression() });
+        // A field written as an empty list is built at the field's declared
+        // type, which the object's own annotation or result type states.
+        const declared = expected?.fields.get(name);
+        const value = declared === undefined
+          ? this.readExpression()
+          : this.readAt(this.typeExprOfShape(declared.type), () => this.readExpression(), declared.type);
+        fields.push({ name, value });
       } else if (key.kind === "ident") {
         // `{ line }` is `{ line: line }`: the field is named by the name the
         // value is held at, and the value is that name.
@@ -7744,8 +7958,17 @@ class TypeScriptParser {
    * operation two lists added are.
    */
   private arrayLiteral(open: Token): Expression {
-    const expected = this.expecting;
+    const savedExpecting = this.expecting;
+    const savedType = this.expectedType;
+    const savedShape = this.expectedShape;
+    const expected = savedExpecting;
+    const expectedArray = savedType !== null && (savedType.kind === "slice" || savedType.kind === "array")
+      ? savedType
+      : null;
+    const expectedElementShape = savedShape !== null && savedShape.kind === "list" ? savedShape.of : null;
     this.expecting = null;
+    this.expectedType = null;
+    this.expectedShape = null;
     /** The values written since the last spread, in the order they were. */
     let run: Expression[] = [];
     /** The list so far, when a spread has joined one. */
@@ -7753,6 +7976,34 @@ class TypeScriptParser {
     /** How many pieces have been joined, so a list of one is still a copy. */
     let pieces = 0;
     let element: TypeExpr | null = expected;
+    /**
+     * Reads one written value at the type the list holds it at.
+     *
+     * A list of lists is one list whose elements are lists, so the inner list
+     * is built at the outer element's type before its own first value is read.
+     * A spread is a list already, and is read at the type of the list instead.
+     */
+    const readWritten = (spread: boolean): Expression => {
+      const valueType = spread ? expectedArray : element;
+      const valueShape = spread ? savedShape : expectedElementShape;
+      const savedReadExpecting = this.expecting;
+      const savedReadType = this.expectedType;
+      const savedReadShape = this.expectedShape;
+      this.expecting = valueType === null ? null : elementOfSequenceType(valueType);
+      this.expectedType = valueType;
+      this.expectedShape = valueShape;
+      try {
+        return this.readExpression();
+      } finally {
+        this.expecting = savedReadExpecting;
+        this.expectedType = savedReadType;
+        this.expectedShape = savedReadShape;
+      }
+    };
+    const settleRun = (): void => {
+      if (element === null) return;
+      for (const written of run) this.applyExpected(written, { kind: "slice", of: element }, expectedElementShape);
+    };
     const flush = (): void => {
       if (run.length === 0) return;
       const written = this.bufferValue(element, run, open);
@@ -7763,25 +8014,41 @@ class TypeScriptParser {
     while (!this.at("]") && this.peek().kind !== "end") {
       if (this.accept("...")) {
         flush();
-        const spread = this.readExpression();
+        const spread = readWritten(true);
         const type = this.valueTypeOf(spread);
-        if (element === null) element = type.kind === "slice" || type.kind === "array" ? type.of : type;
+        if (element === null && !this.holdsUnsettledArray(spread)) {
+          element = type.kind === "slice" || type.kind === "array" ? type.of : type;
+          settleRun();
+        }
         joined = joined === null ? spread : { k: "binary", op: "+", left: joined, right: spread };
         pieces += 1;
       } else {
-        const value = this.readExpression();
-        if (element === null) element = this.valueTypeOf(value);
+        const value = readWritten(false);
+        if (element === null && !this.holdsUnsettledArray(value)) {
+          element = this.valueTypeOf(value);
+          settleRun();
+        }
         run.push(value);
       }
       if (!this.accept(",")) break;
     }
     this.expect("]");
+    // A list whose only values are themselves unsettled lists still has an
+    // element type the outer list can be built at. The inner list is the one
+    // the use has not settled, and it reports itself once.
+    if (element === null && run.length > 0) element = this.valueTypeOf(run[0] as Expression);
     flush();
     // An empty list joins the empty list in front of it for the same reason a
     // list with elements does: the block it answers is its own, so a list a
     // caller or a field keeps is not a window into the frame that wrote it.
     // The element type comes from the use, which is what says what the list
     // holds before any element has been written.
+    const answer = (value: Expression): Expression => {
+      this.expecting = savedExpecting;
+      this.expectedType = savedType;
+      this.expectedShape = savedShape;
+      return value;
+    };
     if (joined === null && element !== null) {
       joined = { k: "buffer", element: typeToString(element), values: [] };
       pieces = 1;
@@ -7791,16 +8058,22 @@ class TypeScriptParser {
       // that hold one block are one array, and a write through either is a
       // write both see. Joining the list against an empty one copies it.
       if (pieces === 1 && element !== null) {
-        return { k: "binary", op: "+", left: joined, right: { k: "buffer", element: typeToString(element), values: [] } };
+        return answer({
+          k: "binary",
+          op: "+",
+          left: joined,
+          right: { k: "buffer", element: typeToString(element), values: [] },
+        });
       }
-      return joined;
+      return answer(joined);
     }
-    this.report(
-      "an empty array needs the type of its elements",
-      "write the declaration with the element type, as in const names: string[] = []",
-      open,
-    );
-    return this.hole();
+    // The use of the list has not been read yet: `condition ? [] : [1]` reads
+    // the empty arm first. It is kept as a list with no element type and
+    // settled when the other arm, the declaration, or the assertion says what
+    // it holds. A list no use settles is reported after the expression is read.
+    const empty: Expression = { k: "buffer", element: typeToString(ANY_TYPE), values: [] };
+    this.unsettledArrays.set(empty, open);
+    return answer(empty);
   }
 
   /** An array of values written out, at the element type it is held at. */
@@ -8179,8 +8452,8 @@ class TypeScriptParser {
           this.report("a class is constructed with its arguments", `as in new ${view.text}()`, view);
           return { k: "call", name: info.name, args: [] };
         }
-        const args = this.readCallArguments();
         const params = info.constructor?.params ?? [];
+        const args = this.readCallArguments(this.methodParams(params).map((param) => param.type));
         return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
     }

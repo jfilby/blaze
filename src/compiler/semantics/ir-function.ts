@@ -1199,18 +1199,24 @@ class FunctionBody {
         const condition = this.truth(this.typed(expression.condition, null, line).value);
         const then = this.typed(expression.then, expect, line);
         const otherwise = this.typed(expression.otherwise, expect, line);
+        const type = this.common(then.value.type, otherwise.value.type, line);
         return {
           value: {
             k: "select",
-            type: this.common(then.value.type, otherwise.value.type, line),
+            type,
             condition,
             then: then.value,
             otherwise: otherwise.value,
           },
           // Both arms are walked so both objects are laid out, but a choice is
           // whichever arm it takes: two arms that name the same thing, or a
-          // reference the source left unshaped.
-          inferred: describe(then.inferred) === describe(otherwise.inferred) ? then.inferred : ANY,
+          // reference the source left unshaped. Two lists are one list type
+          // even when one arm is empty and the other is not.
+          inferred: describe(then.inferred) === describe(otherwise.inferred)
+            ? then.inferred
+            : type.kind === "slice" || type.kind === "array"
+              ? asType(type)
+              : ANY,
         };
       }
       case "update":
@@ -2148,6 +2154,17 @@ class FunctionBody {
     if (isText(left) && isText(right)) return TEXT;
     const number = commonNumber(left, right);
     if (number !== null) return number;
+    // Two arrays of one element type are one array, and a conditional of two
+    // lengths is an array whose length the branch decides: `flag ? [] : [1, 2]`
+    // is a list of numbers, not two lists of different types. The fixed length
+    // survives only where both arms have it.
+    if ((left.kind === "slice" || left.kind === "array") && (right.kind === "slice" || right.kind === "array")) {
+      const of = this.common(left.of, right.of, line);
+      if (left.kind === "array" && right.kind === "array" && left.length === right.length) {
+        return { kind: "array", of, length: left.length };
+      }
+      return { kind: "slice", of };
+    }
     // A reference is what the expression is about whenever one side is one: the
     // other side is the test that decides whether to hand it back, and a truth
     // or a number beside a reference is that and nothing more. A reference to a

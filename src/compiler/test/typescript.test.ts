@@ -1190,6 +1190,108 @@ test("Array<T> and ReadonlyArray<T> name the same array as T[]", () => {
   }
 });
 
+test("an empty array is built at the type the use writes it at", () => {
+  // The list has no element to read a type from, so the declaration, the
+  // result, the other arm of the conditional, the right side of `??`, the
+  // object field, or the argument's parameter is what says what it holds.
+  const analysis = typescript.analyze(
+    [
+      "interface Box { values: number[]; }",
+      "function takes(values: number[]): number { return values.length; }",
+      "export function condition(flag: boolean): number[] {",
+      "  return flag ? [] : [1];",
+      "}",
+      "export function assertion(): number[] {",
+      "  return [] as number[];",
+      "}",
+      "export function object(): Box {",
+      "  return { values: [] };",
+      "}",
+      "export function argument(): number {",
+      "  const box: Box = { values: [] };",
+      "  return takes(box.values) + takes([]);",
+      "}",
+      "export function inferred(flag: boolean): number {",
+      "  const chosen = flag ? [] : [1, 2];",
+      "  return chosen.length;",
+      "}",
+      "export function nested(): number[][] {",
+      "  return [[], [1]];",
+      "}",
+      "export function nullish(values: number[] | null): number[] {",
+      "  return values ?? [];",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  interface Lowered {
+    k: string;
+    element?: string;
+    values?: Lowered[];
+    then?: Lowered;
+    otherwise?: Lowered;
+    fields?: { name: string; value: Lowered }[];
+    args?: Lowered[];
+    left?: Lowered;
+    right?: Lowered;
+  }
+  const body = (name: string): { kind: string; value?: Lowered; init?: Lowered }[] =>
+    ((analysis.functions.find((declared) => declared.name === name)?.handle ?? { body: [] }) as {
+      body: { kind: string; value?: Lowered; init?: Lowered }[];
+    }).body;
+  /** The first list a written value builds, past the copy it joins against. */
+  const firstBuffer = (value: Lowered | undefined): Lowered | undefined => {
+    if (value === undefined) return undefined;
+    if (value.k === "buffer") return value;
+    return firstBuffer(value.left) ?? firstBuffer(value.right) ?? firstBuffer(value.then) ?? firstBuffer(value.otherwise);
+  };
+
+  const conditional = body("condition")[0]?.value;
+  assert.equal(firstBuffer(conditional?.then)?.element, "f64", "the empty arm is the other arm's element");
+  assert.equal(firstBuffer(conditional?.otherwise)?.element, "f64");
+
+  assert.equal(firstBuffer(body("assertion")[0]?.value)?.element, "f64", "an assertion names the element type");
+
+  const field = body("object")[0]?.value?.fields?.find((entry) => entry.name === "values");
+  assert.equal(firstBuffer(field?.value)?.element, "f64", "an object field is declared by the object's type");
+
+  const argument = body("argument");
+  const declaredBox = argument[0]?.init?.fields?.find((entry) => entry.name === "values");
+  assert.equal(firstBuffer(declaredBox?.value)?.element, "f64", "a local object's field is declared by its type");
+  assert.equal(firstBuffer(argument[1]?.value?.right?.args?.[0])?.element, "f64", "an argument is read at its parameter's type");
+
+  const inferred = body("inferred")[0]?.init;
+  assert.equal(firstBuffer(inferred?.then)?.element, "f64", "an unannotated conditional takes the element from its other arm");
+  assert.equal(firstBuffer(inferred?.otherwise)?.element, "f64");
+
+  const nested = firstBuffer(body("nested")[0]?.value);
+  assert.equal(nested?.element, "slice<f64>", "a list of lists is a list of their element type");
+  assert.equal(firstBuffer(nested?.values?.[0])?.element, "f64", "the inner empty list is read at the outer element's type");
+
+  const nullish = body("nullish")[0]?.value;
+  assert.equal(nullish?.k, "binary");
+  assert.equal(firstBuffer(nullish?.right)?.element, "f64", "the fallback is read at the type of the value it falls back from");
+});
+
+test("a conditional of an empty list and a list keeps the one element type", () => {
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "export function f(flag: boolean): number {",
+        "  return (flag ? [] : [1, 2]).length;",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "f",
+  );
+  assert.match(ir, /select\[\[\]f64\]/, "the two lengths are one list type");
+});
+
 test("a push written for a value is refused, because it answers the array the name holds", () => {
   // The refusal is the lowering's rather than the parser's: the push is read,
   // and what it answers is what nothing here can give.

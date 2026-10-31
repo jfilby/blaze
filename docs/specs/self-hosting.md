@@ -80,8 +80,8 @@ after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
 Reading `at` and `slice` of an array lowered it to 5496, reading regular
 expressions to 5319, carrying interfaces and type aliases through the module
-graph to 5091, and reference-valued maps and sets to 4824. The refusals fall
-into six frontiers:
+graph to 5091, reference-valued maps and sets to 4824, and expected types for
+empty lists to 4680. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -219,10 +219,14 @@ to carry those without a rewrite into numeric arrays:
   backend as in the machine backend, so a list a function returns or a
   constructor stores in a field outlives the frame that wrote it; an empty list
   is built the same way when the declaration, field or return type names its
-  element. `this.items.push(x)` writes the field back into the object it was
-  read from, and `at` and `slice` read one element and copy a range. What is
-  still missing is `splice`, `shift`, `unshift`, `concat` and the `Array`
-  constructors, and a list whose element is itself a list as a field of a class.
+  element. The element type now travels through `as` and `satisfies`, the arms
+  of a conditional, the right side of `??`, an object field, a call argument and
+  a nested list, so `condition ? [] : [1]` is a list of numbers without a
+  separate annotation. `this.items.push(x)` writes the field back into the
+  object it was read from, and `at` and `slice` read one element and copy a
+  range. What is still missing is `splice`, `shift`, `unshift`, `concat`, the
+  `Array` constructors, and a list whose element is itself a list as a field of
+  a class.
 - **Maps and sets.** A value is a number, a text, a truth or a reference, and a
   key is text or a reference: a reference key is the handle itself, written as
   the address it carries, so two names for one object are one key. `get`, `set`,

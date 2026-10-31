@@ -1211,6 +1211,51 @@ test("an empty list a function answers is a block of its own", async () => {
   assert.equal(output.trim(), "12");
 });
 
+test("an empty list takes its element type from the use", async () => {
+  // The ways the source writes an untyped list — a conditional arm, a `??`
+  // fallback, an assertion, an object field, a nested list, and a call
+  // argument — are built at the element type the use names, and an
+  // unannotated conditional takes the element type of its other arm.
+  const output = await agreesWithNode([
+    "interface Box { values: number[]; }",
+    "function takes(values: number[]): number { return 0; }",
+    "function choose(flag: boolean): number {",
+    "  const values: number[] = flag ? [] : [1, 2];",
+    "  return values.length;",
+    "}",
+    "function fallback(values: number[] | null): number {",
+    "  const kept = values ?? [];",
+    "  return kept.length;",
+    "}",
+    "function asserted(): number {",
+    "  const values = [] as number[];",
+    "  return values.length;",
+    "}",
+    "function made(): Box { return { values: [] }; }",
+    "function nested(): number {",
+    "  const grid: number[][] = [[], [1]];",
+    "  const row = grid[0];",
+    "  return row.length;",
+    "}",
+    "function g(): number {",
+    "  const box: Box = { values: [] };",
+    "  const madeBox = made();",
+    "  const inferred = false ? [] : [3, 4];",
+    "  return choose(false) * 10000",
+    "    + fallback(null) * 1000",
+    "    + asserted() * 100",
+    "    + madeBox.values.length * 10",
+    "    + nested()",
+    "    + inferred.length",
+    "    + takes([])",
+    "    + box.values.length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "20002");
+});
+
 test("a class field holds a list and grows it", async () => {
   // `private items: number[] = []` is a field whose type is the list the
   // initialiser writes, and `this.items.push(x)` writes the field back into the
