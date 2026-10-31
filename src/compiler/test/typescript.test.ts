@@ -378,6 +378,40 @@ test("a type-only import may rename the types it names", () => {
   );
 });
 
+test("an interface's fields type the member chain the source writes through it", () => {
+  // An interface is erased, but the fields it names are not: the next member of
+  // a chain is read through the field the interface declares, so a list field
+  // is an array and a text field is a text method's receiver.
+  const source = [
+    "interface Call { callee: string; }",
+    "interface Definition { calls: Call[]; }",
+    "interface Contract { definition: Definition; name: string; }",
+    "type Names = string[];",
+    "export function first(contract: Contract, names: Names): string {",
+    "  return contract.definition.calls[0].callee + names.join(\",\");",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.equal(analysis.functions[0]?.params[0]?.type.kind, "ref", "an interface is still the reference a contract holds");
+  assert.equal(analysis.functions[0]?.params[1]?.type.kind, "slice", "an alias is the list it names");
+});
+
+test("a type alias names the primitive a contract holds it at", () => {
+  const source = [
+    "type Count = number;",
+    "type Label = string;",
+    "export function scaled(count: Count, label: Label): Count {",
+    "  return count;",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(analysis.functions[0]?.params[0]?.type, { kind: "primitive", name: "f64" });
+  assert.deepEqual(analysis.functions[0]?.params[1]?.type, { kind: "text" });
+  assert.deepEqual(analysis.functions[0]?.returns, { kind: "primitive", name: "f64" });
+});
+
 test("an angle-bracket type assertion is erased", () => {
   // `<T>value` is the other spelling of `value as T`, and it names no runtime
   // work: the value after the closing bracket is the value the source wrote.

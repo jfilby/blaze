@@ -63,6 +63,46 @@ test("modules that import each other are contracted once, as one program", () =>
   assert.deepEqual(program.edges.map((edge) => `${edge.from} -> ${edge.to}`), ["a.ts -> b.ts", "b.ts -> a.ts"]);
 });
 
+test("a type an import names types the annotations of the file that imports it", () => {
+  // A type is not a runtime import: the file that declares an interface offers
+  // no function to link, and the file that names it reads the field types the
+  // declaration wrote. The alias `Names` is the list `string[]` and the
+  // interface is still the opaque reference a contract holds.
+  const program = contract(
+    {
+      "types.ts": [
+        "export interface Call { callee: string; }",
+        "export interface Definition { calls: Call[]; }",
+        "export interface Contract { definition: Definition; }",
+        "export type Names = string[];",
+        "",
+      ].join("\n"),
+      "main.ts": [
+        'import type { Contract, Names } from "./types.ts";',
+        "export function entry(n: number): number {",
+        "  return n;",
+        "}",
+        "export function count(contract: Contract, names: Names): number {",
+        "  return names.length + contract.definition.calls.length;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+
+  const main = program.files.find((file) => file.path === "main.ts");
+  assert.ok(main !== undefined);
+  assert.deepEqual(main.functions.count?.function.params, [
+    { name: "contract", type: "ref<any>" },
+    { name: "names", type: "slice<text>" },
+  ]);
+  const types = program.files.find((file) => file.path === "types.ts");
+  assert.ok(types !== undefined, "the file that only declares types is part of the graph");
+  assert.deepEqual(Object.keys(types.functions), [], "it offers no function to link");
+  assert.deepEqual(program.edges, [], "a type import is not a call edge");
+});
+
 test("a file the program cannot reach takes no part in the contract", () => {
   const program = contract({ "dot.ts": DOT, "scale.ts": SCALE, "unused.ts": SQUARE }, "dot.ts");
   assert.deepEqual(program.files.map((file) => file.path), ["dot.ts", "scale.ts"]);

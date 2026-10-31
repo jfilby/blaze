@@ -26,7 +26,9 @@ import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";
-import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
+import type { Frontend, ModuleAnalysis, ProgramBody } from "./module.ts";
+import { bindImportedTypes } from "./typescript-types.ts";
+import type { TypeTable } from "./typescript-types.ts";
 import { resolveObjects } from "./objects.ts";
 import { programShapes } from "./program-objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
@@ -94,6 +96,8 @@ interface ModuleRecord {
   analysis: ModuleAnalysis;
   /** Resolved import targets, in the order the imports are written. */
   resolved: string[];
+  /** Resolved type imports, in the order `analysis.typeImports` writes them. */
+  typeResolved: string[];
 }
 
 /** Reads each file at most once, so a diamond import costs one read. */
@@ -120,13 +124,65 @@ function discover(request: ContractPhaseRequest, read: (path: string) => string 
     if (source === null) throw contractPhaseError(`cannot read module ${path}`);
     if (source.trim() === "") throw contractPhaseError(`module ${path} is empty`);
 
-    const record: ModuleRecord = { path, source, analysis: request.frontend.analyze(source, path, path === request.entry.path), resolved: [] };
+    const record: ModuleRecord = { path, source, analysis: request.frontend.analyze(source, path, path === request.entry.path), resolved: [], typeResolved: [] };
     records.set(path, record);
     for (const entry of record.analysis.imports) {
       const resolved = resolveImport(request, read, path, entry);
       record.resolved.push(resolved);
       pending.push(resolved);
     }
+    // A type import names a file the program may not otherwise reach, and the
+    // file that writes the declaration is where its fields resolve. It is
+    // followed beside the runtime imports but is never checked for a symbol.
+    for (const entry of record.analysis.typeImports ?? []) {
+      const resolved = resolveImport(request, read, path, entry);
+      record.typeResolved.push(resolved);
+      pending.push(resolved);
+    }
+  }
+
+  // The types are linked after every file is read, because a declaration may
+  // import one from a file that is discovered later. The table object is the
+  // one the first read built, and the second read reuses it: a declaration an
+  // importer already holds keeps resolving through the module that wrote it.
+  const tables = new Map<string, TypeTable>();
+  for (const record of records.values()) {
+    if (record.analysis.types !== undefined) tables.set(record.path, record.analysis.types);
+  }
+  for (const record of records.values()) {
+    const types = record.analysis.types;
+    const imports = record.analysis.typeImports;
+    if (types === undefined || imports === undefined) continue;
+    const targets = new Map<string, TypeTable>();
+    for (let index = 0; index < imports.length; index += 1) {
+      const target = tables.get(record.typeResolved[index] as string);
+      if (target !== undefined) targets.set((imports[index] as { specifier: string }).specifier, target);
+    }
+    bindImportedTypes(types, imports, targets);
+  }
+  // A file is read again with the table its imports now fill. Its runtime
+  // imports were resolved by the first read and are unchanged, so only the
+  // analysis is replaced.
+  for (const record of records.values()) {
+    if (record.analysis.types === undefined) continue;
+    const imports = record.analysis.typeImports;
+    if (imports === undefined) continue;
+    // A second read is only needed when an import names a module that actually
+    // declares a type. A runtime import binds no type, and most files have one:
+    // reading every file twice for nothing would double the parse of the whole
+    // tree.
+    let namesAType = false;
+    for (let index = 0; index < imports.length; index += 1) {
+      const target = tables.get(record.typeResolved[index] as string);
+      if (target !== undefined && target.declarations.size > 0) {
+        namesAType = true;
+        break;
+      }
+    }
+    if (!namesAType) continue;
+    record.analysis = request.frontend.analyze(record.source, record.path, record.path === request.entry.path, {
+      table: record.analysis.types,
+    });
   }
 
   return [...records.values()];
@@ -137,7 +193,7 @@ function resolveImport(
   request: ContractPhaseRequest,
   read: (path: string) => string | null,
   from: string,
-  entry: ModuleImport,
+  entry: { specifier: string; line: number },
 ): string {
   // A project that pastes its source has no directory to resolve against.
   if (from === INLINE_MODULE) {
@@ -370,7 +426,11 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const contracts = new Map<string, FileContract>();
   for (const record of records) {
     const file = contractFile(request, record, record.path === request.entry.path && body !== undefined);
-    if (Object.keys(file.functions).length === 0 && !(record.path === request.entry.path && body !== undefined)) {
+    // A file of declarations is a library whether it declares a function or a
+    // type. A module that only writes interfaces is reached by the type imports
+    // of the files that name them, and it offers nothing to link.
+    const declaredTypes = record.analysis.types?.declarations.size ?? 0;
+    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);

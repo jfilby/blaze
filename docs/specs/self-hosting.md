@@ -50,7 +50,7 @@ frontend, IR and backends.
 
 ## Where the source stands
 
-The compiler is 93 non-test, non-benchmark, non-scratch TypeScript sources, about
+The compiler is 94 non-test, non-benchmark, non-scratch TypeScript sources, about
 100,000 lines. It is already written as **erasable TypeScript**:
 `erasableSyntaxOnly` is on in `src/compiler/tsconfig.json`, so no `enum`,
 `namespace`, parameter property or `import =` carries runtime behaviour. Every
@@ -78,12 +78,15 @@ held in a class field to 4513, and a declaration that states its type and no
 value to 4489, and a `for (;;)` loop to 4405. Reading the class methods written
 after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
-Reading `at` and `slice` of an array lowered it to 5496, and reading regular
-expressions to 5319. The refusals fall into six frontiers:
+Reading `at` and `slice` of an array lowered it to 5496, reading regular
+expressions to 5319, and carrying interfaces and type aliases through the module
+graph to 5091. The refusals fall into six frontiers:
 
-- **Type-only syntax.** Most of it is already carried. The remaining type-shaped
-  refusal is the optional parameter, which needs an absent value the value model
-  does not have yet.
+- **Type-only syntax.** Most of it is already carried, and an interface or an
+  alias is no longer just erased: its fields type the member chain written
+  through it, and a declaration imported from another module is read in the
+  module that wrote it. The remaining type-shaped refusal is the optional
+  parameter, which needs an absent value the value model does not have yet.
 - **The JavaScript expressions the source uses.** Optional chaining (`?.`),
   nullish coalescing (`??`), spread, destructuring (declarations, parameters and
   assignment), object shorthand, `switch`, `throw`, class getters and regular
@@ -146,9 +149,14 @@ Read and discard the type-only syntax the source already uses:
 This is not a semantic change. The source does not rely on any type at run time,
 and the compiler's own type checker is what enforces the source's types today.
 The type-only import alias, the angle assertion, the bare return and the
-modifier-named member are carried now. The remaining type-shaped construct is the
-optional parameter, `x?: T`: an absent value is not the zero of the type, and the
-value model has no absent value until slice 3.
+modifier-named member are carried now. So is the information the type text
+carries: an interface is a record of fields, a type alias is the type it names,
+and an annotation in one module resolves an imported declaration through the
+module that wrote it. A field of a `Contract` is a `Definition`, its `calls` is
+a list of `Call`, and a text field is the receiver of a text method. The
+remaining type-shaped construct is the optional parameter, `x?: T`: an absent
+value is not the zero of the type, and the value model has no absent value until
+slice 3.
 
 Exit criterion: every compiler source is read to its last line, and the report
 holds only runtime constructs.

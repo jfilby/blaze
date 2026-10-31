@@ -13,6 +13,7 @@
  */
 
 import type { FunctionContract, PrimitiveTypeName, SourceInput, TypeExpr } from "../core/types.ts";
+import type { TypeTable } from "./typescript-types.ts";
 
 /**
  * One import as the source wrote it. `names` is the list of symbols it binds,
@@ -25,6 +26,29 @@ export interface ModuleImport {
   specifier: string;
   names: string[] | null;
   default: boolean;
+  line: number;
+  /** The type names the statement binds, as local name to imported name. */
+  types?: ModuleTypeBinding[];
+}
+
+/** One type name an import binds, under the name the importing file uses. */
+export interface ModuleTypeBinding {
+  local: string;
+  imported: string;
+}
+
+/**
+ * A type the file imports from another module.
+ *
+ * A type is not a value: it is loaded by nothing and linked by nothing, and the
+ * statement that names it may be `import type`, which is not a runtime import
+ * at all. It still has to reach the file that reads the type, so the module
+ * graph follows these beside the imports and binds each name to the declaration
+ * the module it names exports.
+ */
+export interface ModuleTypeImport {
+  specifier: string;
+  names: ModuleTypeBinding[];
   line: number;
 }
 
@@ -234,6 +258,14 @@ export interface ModuleAnalysis {
   /** Project-relative path, so a diagnostic can name the file it came from. */
   path: string;
   imports: ModuleImport[];
+  /**
+   * The types the file imports from another module. They are not runtime
+   * imports: they travel beside the imports so the module graph can bind each
+   * name to the declaration the other file writes.
+   */
+  typeImports?: ModuleTypeImport[];
+  /** The interfaces, aliases and imports the file's annotations resolve in. */
+  types?: TypeTable;
   functions: DeclaredFunction[];
   /** The name the file exports as its default, or null where it exports none. */
   default: string | null;
@@ -265,8 +297,14 @@ export interface Frontend {
    * value in the entry module is a statement the program runs; the same value in
    * a module the program imports is a declaration the module holds, and a file
    * of declarations is a library.
+   *
+   * `context` is the frontend's own way of carrying what another module says
+   * about a type. The module graph reads every file once to learn its imports,
+   * binds the type declarations those imports name, and reads the file again
+   * with the same table so an imported interface resolves through the module
+   * that wrote it. A frontend with no such notion ignores it.
    */
-  analyze(source: string, path: string, entry?: boolean): ModuleAnalysis;
+  analyze(source: string, path: string, entry?: boolean, context?: unknown): ModuleAnalysis;
 
   /**
    * Contracts one declared function. The contract describes the semantics the

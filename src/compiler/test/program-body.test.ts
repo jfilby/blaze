@@ -2782,6 +2782,22 @@ test("a text a program reads apart is read apart in the body and in a function",
   assert.equal(delivered.stdout.trimEnd().split("\n")[0], "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B");
 });
 
+test("a program reads a type alias from a module that offers only types", async () => {
+  // A type is erased where it is declared, and the module that declares it
+  // offers no function to link. The file that imports it still resolves the
+  // alias, so `Name` is the text `trim` is a method of and the build delivers
+  // what Node answers.
+  const source = [
+    'import type { Name } from "./lib.ts";',
+    "function measure(name: Name): number {",
+    "  return name.trim().length;",
+    "}",
+    "console.log(measure(` ab `));",
+    "",
+  ].join("\n");
+  await agreesWithNodeLib(source, "export type Name = string;\n");
+});
+
 test("a program constructs classes and runs their methods", async () => {
   // A class is a constructor, methods that take the instance, and static
   // members that take none. The program builds one, calls a method that

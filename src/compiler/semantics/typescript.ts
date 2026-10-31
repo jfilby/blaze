@@ -68,9 +68,19 @@ export { ARGV, ARGV_LENGTH };
 import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { isCompilerError } from "../core/errors.ts";
 import { Diagnostics, frontendError, type Diagnostic } from "./diagnostics.ts";
-import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport, ModuleTypeBinding, ModuleTypeImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
 import { lowerWideArithmetic } from "./typescript-wide-lowering.ts";
+import {
+  collectionOfType,
+  elementOfType,
+  fieldOfType,
+  resolveAnnotation,
+  resolveTypeName,
+  scanTypeTable,
+  type ResolvedType,
+  type TypeTable,
+} from "./typescript-types.ts";
 import {
   findField,
   findGetter,
@@ -1880,6 +1890,18 @@ class TypeScriptParser {
    * IR readable besides.
    */
   private readonly stem: string;
+  /**
+   * The interfaces, aliases and imported type names the file's annotations
+   * resolve in. A name that is not a class is still a value with fields, and
+   * this is what the member chain after it is read through.
+   */
+  readonly typeTable: TypeTable;
+  /** The shape each name of the body is declared at. */
+  private valueShapes = new Map<string, ResolvedType>();
+  /** The shape a member chain has already answered for a value it built. */
+  private readonly expressionShapes = new Map<Expression, ResolvedType>();
+  /** The token run the last annotation read, so its shape can be read after it. */
+  private lastTypeRange: { start: number; end: number } | null = null;
 
   constructor(
     tokens: Token[],
@@ -1889,6 +1911,7 @@ class TypeScriptParser {
     allTokens?: Token[],
     constants: ReadonlyMap<string, ConstantInfo> = new Map(),
     state: ReadonlySet<string> = new Set(),
+    typeTable?: TypeTable,
   ) {
     this.tokens = tokens;
     this.path = path;
@@ -1898,6 +1921,8 @@ class TypeScriptParser {
     this.allTokens = allTokens ?? tokens;
     this.constants = constants;
     this.state = state;
+    this.typeTable = typeTable ?? scanTypeTable(tokens);
+    this.typeTable.classes = this.classTable.names;
     this.position = 0;
   }
 
@@ -1983,21 +2008,166 @@ class TypeScriptParser {
   /** A type annotation, where a class is a reference the layout pass settles. */
   private typeForName(typeName: string, line: number): TypeExpr {
     if (typeName === "void") return NOTHING;
+    const text = typeName.trim();
+    if (text === "any") return ANY_TYPE;
+    if (text === "bigint" && this.wideBigint) return parseType("u256");
+    // An interface, an alias and an imported type name are read by the type
+    // table before the text is treated as an unknown name: what a contract can
+    // hold of an interface is its fields, and what it can hold of an alias is
+    // whatever the alias names.
+    let shape: ResolvedType | null = null;
+    try {
+      shape = resolveTypeName(this.typeTable, text);
+    } catch {
+      shape = null;
+    }
+    if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape);
     // A field or a class parameter names its type as one text, so `T[]` and
     // `Array<T>` are read here rather than by the token walk an annotation in a
     // body goes through.
-    const text = typeName.trim();
     if (text.endsWith("[]")) return { kind: "slice", of: this.typeForName(text.slice(0, -2).trim(), line) };
     const generic = /^(?:Readonly)?Array<(.+)>$/.exec(text);
     if (generic !== null) return { kind: "slice", of: this.typeForName(generic[1] as string, line) };
-    if (typeName === "any" || this.classTable.names.has(typeName)) return ANY_TYPE;
-    if (typeName === "bigint" && this.wideBigint) return parseType("u256");
+    if (this.classTable.names.has(text)) return ANY_TYPE;
     try {
       return mapTypeScriptType(typeName, `line ${line} of ${this.path}`);
     } catch (error) {
       if (!isCompilerError(error)) throw error;
       this.report(error.message, error.detail ?? "", { kind: "ident", text: typeName, line });
       return ANY_TYPE;
+    }
+  }
+
+  /** The contract type a resolved shape is held at. */
+  private typeExprOfShape(shape: ResolvedType): TypeExpr {
+    switch (shape.kind) {
+      case "primitive":
+        return { kind: "primitive", name: shape.name };
+      case "text":
+        return TEXT_RESULT;
+      case "list":
+        return { kind: "slice", of: this.typeExprOfShape(shape.of) };
+      case "absent":
+        return NOTHING;
+      case "ref":
+        return shape.name === null ? ANY_TYPE : { kind: "ref", of: null, name: shape.name };
+      case "function":
+        return ANY_TYPE;
+      case "map":
+      case "set":
+      case "record":
+        // An object of fields is a reference; the fields themselves are read
+        // through `shapeOf`, which keeps the record the contract cannot spell.
+        return ANY_TYPE;
+      default:
+        return ANY_TYPE;
+    }
+  }
+
+  /** The collection a shape names, in the form the map and set methods read. */
+  private collectionOfShape(shape: ResolvedType | null): CollectionValue | null {
+    if (shape === null) return null;
+    const collection = collectionOfType(shape);
+    if (collection === null) return null;
+    if (collection.kind === "set") {
+      return { kind: "set", key: TEXT_RESULT, value: this.typeExprOfShape(collection.of) };
+    }
+    return {
+      kind: "map",
+      key: this.typeExprOfShape(collection.key),
+      value: this.typeExprOfShape(collection.value),
+    };
+  }
+
+  /**
+   * The shape a value is read at.
+   *
+   * `valueTypes` answers the contract type, which erases an interface to a
+   * reference. The shape keeps the fields that reference names, so a member
+   * chain written through an imported interface is read field by field rather
+   * than stopping at the first member.
+   */
+  private shapeOf(value: Expression): ResolvedType | null {
+    const recorded = this.expressionShapes.get(value);
+    if (recorded !== undefined) return recorded;
+    let shape: ResolvedType | null = null;
+    switch (value.k) {
+      case "ident": {
+        const known = this.valueShapes.get(value.name);
+        if (known !== undefined) shape = known;
+        else if (this.valueRegexes.has(value.name)) shape = { kind: "record", fields: new Map(), index: null };
+        break;
+      }
+      case "member": {
+        const base = this.shapeOf(value.base);
+        if (base !== null) {
+          const field = fieldOfType(this.typeTable, base, value.field);
+          if (field !== null) shape = field.type;
+        }
+        if (shape === null) {
+          const owner = this.classOfExpression(value.base);
+          if (owner !== null) {
+            const field = findField(this.classTable, owner, value.field, true) ??
+              findField(this.classTable, owner, value.field, false);
+            if (field !== null) shape = resolveTypeName(this.typeTable, field.field.typeName);
+          }
+        }
+        break;
+      }
+      case "index": {
+        const base = this.shapeOf(value.base);
+        if (base !== null) shape = elementOfType(this.typeTable, base);
+        break;
+      }
+      case "literal":
+        shape = { kind: "primitive", name: "f64" };
+        break;
+      case "text":
+        shape = { kind: "text" };
+        break;
+      case "buffer": {
+        const element = resolveTypeName(this.typeTable, value.element);
+        shape = { kind: "list", of: element };
+        break;
+      }
+      case "call": {
+        const answer = this.valueTypeOf(value);
+        shape = this.shapeOfTypeExpr(answer);
+        break;
+      }
+      case "conditional": {
+        const then = this.shapeOf(value.then);
+        const otherwise = this.shapeOf(value.otherwise);
+        shape = then ?? otherwise;
+        break;
+      }
+      case "unary":
+      case "binary":
+        shape = this.shapeOfTypeExpr(resultType(value, this.valueTypes));
+        break;
+      default:
+        break;
+    }
+    if (shape !== null) this.expressionShapes.set(value, shape);
+    return shape;
+  }
+
+  /** The shape a contract type stands for, which keeps only what it says. */
+  private shapeOfTypeExpr(type: TypeExpr): ResolvedType {
+    switch (type.kind) {
+      case "primitive":
+        return { kind: "primitive", name: type.name };
+      case "text":
+        return { kind: "text" };
+      case "slice":
+      case "array":
+        return { kind: "list", of: this.shapeOfTypeExpr(type.of) };
+      case "ref":
+        return type.name === undefined ? { kind: "any" } : { kind: "ref", name: type.name };
+      case "void":
+        return { kind: "absent" };
+      default:
+        return { kind: "any" };
     }
   }
 
@@ -2102,6 +2272,7 @@ class TypeScriptParser {
     const savedClass = this.currentClass;
     const savedTypes = this.valueClasses;
     const savedValueTypes = this.valueTypes;
+    const savedShapes = this.valueShapes;
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
     const savedCollections = this.valueCollections;
@@ -2110,6 +2281,7 @@ class TypeScriptParser {
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
@@ -2128,6 +2300,7 @@ class TypeScriptParser {
       this.currentClass = savedClass;
       this.valueClasses = savedTypes;
       this.valueTypes = savedValueTypes;
+      this.valueShapes = savedShapes;
       this.valueArrows = savedArrows;
       this.valueFunctions = savedFunctions;
       this.valueCollections = savedCollections;
@@ -2142,6 +2315,10 @@ class TypeScriptParser {
     } catch {
       this.valueTypes.set(name, ANY_TYPE);
     }
+    const shape = resolveTypeName(this.typeTable, typeName);
+    this.valueShapes.set(name, shape);
+    const collection = this.collectionOfShape(shape);
+    if (collection !== null) this.valueCollections.set(name, collection);
   }
 
   /** The fields a class holds, including the property parameters of its constructor. */
@@ -2784,6 +2961,7 @@ class TypeScriptParser {
    */
   parseModule(path: string, entry = true): ModuleAnalysis {
     const imports: ModuleImport[] = [];
+    const typeImports: ModuleTypeImport[] = [];
     // A class is lowered before anything else is read: its constructor and
     // methods are declarations of the module, wherever the class was written,
     // and every use of the class is read against the same table.
@@ -2815,8 +2993,17 @@ class TypeScriptParser {
         if (typeOnly) this.next();
         const imported = this.readImport(typeOnly);
         importsWritten.push({ start, end: this.position });
-        if (!typeOnly && !(imported.names !== null && imported.names.length === 0 && !imported.default)) {
-          imports.push(imported);
+        if (typeOnly) {
+          if (imported.types !== undefined && imported.types.length > 0) {
+            typeImports.push({ specifier: imported.specifier, names: imported.types, line: imported.line });
+          }
+        } else {
+          if (!(imported.names !== null && imported.names.length === 0 && !imported.default)) {
+            imports.push(imported);
+          }
+          if (imported.types !== undefined && imported.types.length > 0) {
+            typeImports.push({ specifier: imported.specifier, names: imported.types, line: imported.line });
+          }
         }
         continue;
       }
@@ -2947,7 +3134,7 @@ class TypeScriptParser {
         );
       }
     }
-    return { path, imports, functions, default: defaultExport, body };
+    return { path, imports, typeImports, types: this.typeTable, functions, default: defaultExport, body };
   }
 
   /**
@@ -3235,6 +3422,7 @@ class TypeScriptParser {
    */
   private readImport(typeOnly = false): ModuleImport {
     const start = this.peek();
+    const types: ModuleTypeBinding[] = [];
     // `import * as ns from "./x.ts"` binds every export under one name. This
     // linker is by function name, so a namespace has no name to bind: the form
     // is read and the names it brings in are not. A type-only namespace names
@@ -3252,7 +3440,7 @@ class TypeScriptParser {
           start,
         );
       }
-      return this.readImportTail(start, [], false);
+      return this.readImportTail(start, [], false, types);
     }
     // `import d from "./x.ts"` and `import d, { a, b } from "./x.ts"`. The
     // local name a default import writes is not carried, because the programs
@@ -3261,7 +3449,7 @@ class TypeScriptParser {
     // them would be a second compilation of it.
     if (!this.at("{") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
       this.next();
-      return this.readImportTail(start, this.accept(",") ? this.readImportedNames(typeOnly) : [], true);
+      return this.readImportTail(start, this.accept(",") ? this.readImportedNames(typeOnly, types) : [], true, types);
     }
     if (!this.at("{")) {
       this.report(
@@ -3272,11 +3460,11 @@ class TypeScriptParser {
       this.synchronize();
       return { specifier: "", names: [], default: false, line: start.line };
     }
-    return this.readImportTail(start, this.readImportedNames(typeOnly), false);
+    return this.readImportTail(start, this.readImportedNames(typeOnly, types), false, types);
   }
 
   /** `{ f, g }`: the exports an import names, which it binds as they are written. */
-  private readImportedNames(typeOnly = false): string[] {
+  private readImportedNames(typeOnly = false, types: ModuleTypeBinding[] = []): string[] {
     this.expect("{");
     const names: string[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
@@ -3290,11 +3478,14 @@ class TypeScriptParser {
       // where the source wrote it. `{ type as alias }` imports the value named
       // `type`, so an `as` after it is not the type modifier.
       if (name.text === "type" && this.peek().kind === "ident" && this.peek().text !== "as") {
-        this.next();
+        const typeName = this.next();
+        let local = typeName.text;
         if (this.at("as")) {
           this.next();
-          if (this.peek().kind === "ident") this.next();
+          const alias = this.next();
+          if (alias.kind === "ident") local = alias.text;
         }
+        types.push({ local, imported: typeName.text });
         if (!this.accept(",")) break;
         continue;
       }
@@ -3306,13 +3497,17 @@ class TypeScriptParser {
         // the statement it is, so the `}` that closes it must be read here and
         // not left to end the statement.
         this.next();
-        if (this.peek().kind === "ident") this.next();
-        // A type-only import binds nothing at run time, so a name it renames is
-        // the type's name and not a value of the module.
+        const alias = this.next();
         if (typeOnly) {
+          // A type-only import binds nothing at run time, so a name it renames
+          // is the type's name and not a value of the module.
+          if (alias.kind === "ident") types.push({ local: alias.text, imported: name.text });
           if (!this.accept(",")) break;
           continue;
         }
+        if (alias.kind === "ident") types.push({ local: alias.text, imported: name.text });
+      } else {
+        types.push({ local: name.text, imported: name.text });
       }
       names.push(name.text);
       if (!this.accept(",")) break;
@@ -3322,21 +3517,27 @@ class TypeScriptParser {
   }
 
   /** The `from "./other.ts"` every import ends with, and the module it names. */
-  private readImportTail(start: Token, names: string[], isDefault: boolean): ModuleImport {
+  private readImportTail(
+    start: Token,
+    names: string[],
+    isDefault: boolean,
+    types: ModuleTypeBinding[] = [],
+  ): ModuleImport {
+    const withTypes = types.length === 0 ? {} : { types };
     if (!this.at("from")) {
       this.report('expected "from" after the imported names', `near "${this.peek().text}"`);
       this.synchronize();
-      return { specifier: "", names, default: isDefault, line: start.line };
+      return { specifier: "", names, default: isDefault, line: start.line, ...withTypes };
     }
     this.next();
     const specifier = this.next();
     if (specifier.kind !== "string") {
       this.report("expected the imported module as a string", `near "${specifier.text}"`, specifier);
       this.synchronize();
-      return { specifier: "", names, default: isDefault, line: start.line };
+      return { specifier: "", names, default: isDefault, line: start.line, ...withTypes };
     }
     this.expect(";");
-    return { specifier: specifier.text, names, default: isDefault, line: start.line };
+    return { specifier: specifier.text, names, default: isDefault, line: start.line, ...withTypes };
   }
 
   private parseFunction(name: Token, isAsync = false): TypeScriptFunction | null {
@@ -3345,6 +3546,7 @@ class TypeScriptParser {
     this.currentClass = null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
@@ -3374,8 +3576,10 @@ class TypeScriptParser {
           const read = this.accept("?");
           void read;
           let patternType: TypeExpr = ANY_TYPE;
+          let patternShape: ResolvedType | null = null;
           if (this.accept(":")) {
             patternType = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
+            patternShape = this.lastAnnotationShape();
           }
           const fallbackPattern = this.accept("=") ? this.readExpression() : undefined;
           const temp = `__param${this.destructureCount++}`;
@@ -3385,7 +3589,8 @@ class TypeScriptParser {
             ...(fallbackPattern === undefined ? {} : { default: fallbackPattern }),
           });
           this.valueTypes.set(temp, patternType);
-          prelude.push(...this.patternPrelude(pattern, temp, patternType, name.line));
+          if (patternShape !== null) this.valueShapes.set(temp, patternShape);
+          prelude.push(...this.patternPrelude(pattern, temp, patternType, name.line, patternShape));
           if (this.accept(",")) {
             if (this.at(")")) {
               this.next();
@@ -3412,6 +3617,7 @@ class TypeScriptParser {
         let mapped: TypeExpr | null = null;
         let functionType: FunctionType | null = null;
         let collectionType: CollectionValue | null = null;
+        let shape: ResolvedType | null = null;
         if (this.accept(":")) {
           // A type may be a named type, a union, a generic, an object or a
           // function type: every one of them is read to its end and erased.
@@ -3419,6 +3625,8 @@ class TypeScriptParser {
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           collectionType = this.annotationCollection(new Set([",", ")", "="]));
           mapped = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
+          shape = this.lastAnnotationShape();
+          if (collectionType === null) collectionType = this.collectionOfShape(shape);
           if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
         }
         const fallback = this.accept("=") ? this.readExpression() : undefined;
@@ -3436,6 +3644,7 @@ class TypeScriptParser {
           ...(fallback === undefined ? {} : { default: fallback }),
         });
         this.valueTypes.set(parameter.text, mapped);
+        if (shape !== null) this.valueShapes.set(parameter.text, shape);
         if (functionType !== null) this.valueFunctions.set(parameter.text, functionType);
         if (collectionType !== null) this.valueCollections.set(parameter.text, collectionType);
         if (this.accept(",")) {
@@ -3538,12 +3747,24 @@ class TypeScriptParser {
     temp: string,
     type: TypeExpr,
     line: number,
+    shape: ResolvedType | null = null,
   ): Statement[] {
     const base: Expression = { k: "ident", name: temp };
     const element = type.kind === "slice" || type.kind === "array" ? type.of : null;
     if (element !== null) {
       for (const binding of bindings) {
         if (binding.field === null) this.valueTypes.set(binding.name, element);
+      }
+    }
+    if (shape !== null) {
+      for (const binding of bindings) {
+        const bound = binding.field === null
+          ? elementOfType(this.typeTable, shape)
+          : (fieldOfType(this.typeTable, shape, binding.field)?.type ?? null);
+        if (bound !== null) {
+          this.valueShapes.set(binding.name, bound);
+          this.valueTypes.set(binding.name, this.typeExprOfShape(bound));
+        }
       }
     }
     return bindings.map((binding): Statement => ({
@@ -3715,11 +3936,23 @@ class TypeScriptParser {
     const start = this.position;
     this.skipBalancedTypeTokens(stops);
     const end = this.position;
+    this.lastTypeRange = { start, end };
     if (start === end) {
       this.report(`expected ${what}`, `near "${this.peek().text}"`, this.peek());
       return ANY_TYPE;
     }
     return this.typeFromTokens(start, end, promisePayload);
+  }
+
+  /** The shape of the annotation the last read consumed, or null. */
+  private lastAnnotationShape(): ResolvedType | null {
+    const range = this.lastTypeRange;
+    if (range === null) return null;
+    try {
+      return resolveAnnotation(this.tokens, range.start, range.end, this.typeTable);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -3763,6 +3996,18 @@ class TypeScriptParser {
     // already the one its declaration states.
     while (this.tokens[from]?.text === "readonly") from += 1;
     if (from >= end) return ANY_TYPE;
+    // A name the file or its imports declare as a type is read by the type
+    // table: an alias is the type it names, and an interface is the fields the
+    // member chain after it reads. A class is the reference it already was.
+    const head = this.tokens[from];
+    if (head !== undefined && head.kind === "ident") {
+      const declared = this.typeTable.declarations.has(head.text) || this.typeTable.imported.has(head.text);
+      if (declared) {
+        const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
+        return this.typeExprOfShape(shape);
+      }
+      if (this.typeTable.classes.has(head.text) && end - from === 1) return this.referenceTo(head.text);
+    }
     if (promisePayload) {
       const payload = this.promisePayload(from, end);
       if (payload !== null) return this.typeFromTokens(payload.start, payload.end, false);
@@ -3956,11 +4201,14 @@ class TypeScriptParser {
       let annotationClass: string | null = null;
       let annotationFunction: FunctionType | null = null;
       let annotationMap: CollectionValue | null = null;
+      let annotationShape: ResolvedType | null = null;
       if (this.accept(":")) {
         const head = this.peek().kind === "ident" ? this.peek().text : "";
         annotationFunction = this.annotationFunctionType(new Set(["=", ";", ",", ")"]));
         annotationMap = this.annotationCollection(new Set(["=", ";", ",", ")"]));
         type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
+        annotationShape = this.lastAnnotationShape();
+        if (annotationMap === null) annotationMap = this.collectionOfShape(annotationShape);
         if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
       }
       let init: Expression;
@@ -4027,6 +4275,9 @@ class TypeScriptParser {
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
       this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      const declaredShape = annotationShape ?? this.shapeOf(init);
+      if (declaredShape !== null) this.valueShapes.set(name.text, declaredShape);
+      else this.valueShapes.delete(name.text);
       if (init.k === "buffer" && this.regexValues.has(init)) this.valueRegexes.add(name.text);
       else this.valueRegexes.delete(name.text);
       return { kind: "declare", name: name.text, type, init, line: name.line };
@@ -4220,15 +4471,22 @@ class TypeScriptParser {
       this.accept(";");
       const constant = init.k === "ident" ? this.constants.get(init.name) : undefined;
       const direct = init.k === "ident" && constant?.fields !== undefined;
+      const baseShape = this.shapeOf(init);
       let base: Expression = init;
       let head: Statement | null = null;
       if (!direct) {
         const temp = `__destructure${this.destructureCount++}`;
         head = { kind: "declare", name: temp, type: null, init, line };
+        if (baseShape !== null) this.valueShapes.set(temp, baseShape);
         base = { k: "ident", name: temp };
       }
       fields.forEach((entry) => {
         const expanded = direct ? this.constantExpression(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
+        const fieldShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
+        if (fieldShape !== null) {
+          this.valueShapes.set(entry.name, fieldShape);
+          this.valueTypes.set(entry.name, this.typeExprOfShape(fieldShape));
+        }
         this.pending.push({
           kind: "declare",
           name: entry.name,
@@ -4290,6 +4548,11 @@ class TypeScriptParser {
     names.forEach((name, index) => {
       const value = values[index];
       if (value === undefined) return;
+      const shape = this.shapeOf(value);
+      if (shape !== null) {
+        this.valueShapes.set(name, shape);
+        this.valueTypes.set(name, this.typeExprOfShape(shape));
+      }
       this.pending.push({ kind: "declare", name, type: null, init: value, line });
     });
     const first = this.pending.shift();
@@ -4847,10 +5110,12 @@ class TypeScriptParser {
   private discardedBody(): Statement[] {
     const saved = this.diagnostics;
     const savedTypes = this.valueTypes;
+    const savedShapes = this.valueShapes;
     const savedClasses = this.valueClasses;
     const savedPending = this.pending;
     this.diagnostics = new Diagnostics();
     this.valueTypes = new Map(savedTypes);
+    this.valueShapes = new Map(savedShapes);
     this.valueClasses = new Map(savedClasses);
     this.pending = [];
     try {
@@ -4858,6 +5123,7 @@ class TypeScriptParser {
     } finally {
       this.diagnostics = saved;
       this.valueTypes = savedTypes;
+      this.valueShapes = savedShapes;
       this.valueClasses = savedClasses;
       this.pending = savedPending;
     }
@@ -4897,11 +5163,15 @@ class TypeScriptParser {
     // is held at the element type an arrow capturing it would be handed.
     const walkedType = this.valueTypes.get(walked);
     const element = walkedType !== undefined && (walkedType.kind === "slice" || walkedType.kind === "array") ? walkedType.of : ANY_TYPE;
+    const walkedShape = written !== null ? this.shapeOf(written) : (this.valueShapes.get(walked) ?? null);
+    const elementShape = walkedShape !== null && walkedShape.kind === "list" ? walkedShape.of : null;
     // A pattern binds the parts of the element, so the loop walks a name of its
     // own and the body reads each name out of that one.
     const item = pattern === null ? variable : `__item${this.destructureCount++}`;
     this.valueTypes.set(item, element);
-    const prelude = pattern === null ? [] : this.patternPrelude(pattern, item, element, start.line);
+    if (elementShape !== null) this.valueShapes.set(item, elementShape);
+    else this.valueShapes.delete(item);
+    const prelude = pattern === null ? [] : this.patternPrelude(pattern, item, element, start.line, elementShape);
     const body = [...prelude, ...this.loopBody()];
     // The value is read once, before the loop starts. It is recorded after the
     // body is read, because the body's own pending statements belong inside it.
@@ -5435,6 +5705,19 @@ class TypeScriptParser {
             replace(collected);
             continue;
           }
+          // A map or a set held in an interface field is a handle the same way
+          // a name is: `index.cache.get(key)` is the dictionary method of the
+          // field the interface declares.
+          if (receiver.k === "ident" || receiver.k === "member") {
+            const shapedCollection = this.collectionOfShape(this.shapeOf(receiver));
+            if (shapedCollection !== null) {
+              const lowered = this.collectionMethod(receiver, shapedCollection, target.field, args);
+              if (lowered !== null) {
+                replace(lowered);
+                continue;
+              }
+            }
+          }
           // A text method is a call of the runtime over the text. The three
           // helpers the runtime already carries are used directly, and the
           // three that ask where a needle is are written over `text.indexOf`
@@ -5730,6 +6013,7 @@ class TypeScriptParser {
       type: TypeExpr;
       typeName: string;
       functionType: FunctionType | null;
+      shape: ResolvedType | null;
     }
     const params: ArrowParam[] = [];
     /** What a parameter written as a pattern binds, read where the body starts. */
@@ -5741,12 +6025,14 @@ class TypeScriptParser {
         const pattern = this.readParameterPattern();
         if (pattern !== null) {
           let type: TypeExpr = ANY_TYPE;
+          let shape: ResolvedType | null = null;
           if (this.accept(":")) {
             type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
+            shape = this.lastAnnotationShape();
           }
           const temp = `__param${this.destructureCount++}`;
-          params.push({ name: temp, type, typeName: "", functionType: null });
-          prelude.push(...this.patternPrelude(pattern, temp, type, line));
+          params.push({ name: temp, type, typeName: "", functionType: null, shape });
+          prelude.push(...this.patternPrelude(pattern, temp, type, line, shape));
           if (!this.accept(",")) break;
           continue;
         }
@@ -5762,10 +6048,12 @@ class TypeScriptParser {
         let type: TypeExpr = ANY_TYPE;
         let typeName = "";
         let functionType: FunctionType | null = null;
+        let shape: ResolvedType | null = null;
         if (this.accept(":")) {
           typeName = this.peek().kind === "ident" ? this.peek().text : "";
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
+          shape = this.lastAnnotationShape();
         }
         if (this.at("=")) {
           this.report(
@@ -5775,7 +6063,7 @@ class TypeScriptParser {
           this.next();
           this.readExpression();
         }
-        params.push({ name: name.text, type, typeName, functionType });
+        params.push({ name: name.text, type, typeName, functionType, shape });
         if (!this.accept(",")) break;
         // A list of parameters may end with a comma, as it may on a function.
         if (this.at(")")) break;
@@ -5784,7 +6072,7 @@ class TypeScriptParser {
     } else {
       const name = this.next();
       if (name.kind !== "ident") return this.missing("expected a parameter name", name);
-      params.push({ name: name.text, type: ANY_TYPE, typeName: "", functionType: null });
+      params.push({ name: name.text, type: ANY_TYPE, typeName: "", functionType: null, shape: null });
     }
     let stated: TypeExpr | null = null;
     if (this.accept(":")) {
@@ -5797,6 +6085,7 @@ class TypeScriptParser {
     // body leaves a loop of that body, and one written around the arrow is a
     // loop the function the arrow lifted to is not inside.
     const savedTypes = this.valueTypes;
+    const savedShapes = this.valueShapes;
     const savedClasses = this.valueClasses;
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
@@ -5805,6 +6094,7 @@ class TypeScriptParser {
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
+    this.valueShapes = new Map(savedShapes);
     this.valueClasses = new Map(savedClasses);
     // The arrow body reads the names around it, and a name bound to an arrow is
     // an arrow here too: a body that passes one on or calls one is reading the
@@ -5816,6 +6106,7 @@ class TypeScriptParser {
     this.breakTargets = [];
     for (const param of params) {
       this.valueTypes.set(param.name, param.type);
+      if (param.shape !== null) this.valueShapes.set(param.name, param.shape);
       if (param.functionType !== null) this.valueFunctions.set(param.name, param.functionType);
       if (param.typeName !== "" && this.classTable.names.has(param.typeName)) {
         this.valueClasses.set(param.name, param.typeName);
@@ -5834,6 +6125,7 @@ class TypeScriptParser {
       }
     });
     this.valueTypes = savedTypes;
+    this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
     this.valueFunctions = savedFunctions;
@@ -6033,6 +6325,14 @@ class TypeScriptParser {
   private valueTypeOf(value: Expression): TypeExpr {
     const recorded = this.expressionTypes.get(value);
     if (recorded !== undefined) return recorded;
+    // A member read through an interface is typed by the field the interface
+    // declares, which is what keeps `contract.definition.calls` an array. A
+    // call is not asked here: the shape of a call asks what the call answers,
+    // and that is this method's question.
+    if (value.k !== "call") {
+      const shape = this.shapeOf(value);
+      if (shape !== null) return this.typeExprOfShape(shape);
+    }
     if (value.k === "call") {
       const written = this.liftedArrows.get(value.name);
       if (written !== undefined) return written.returns;
@@ -6542,7 +6842,7 @@ class TypeScriptParser {
    * what it answers is the same zero an element read outside a buffer answers.
    */
   private collectionMethod(
-    receiver: Expression & { k: "ident" },
+    receiver: Expression,
     collection: CollectionValue,
     method: string,
     args: readonly Expression[],
@@ -8183,7 +8483,7 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
 }
 
 export const typeScriptFrontend: Frontend = {
-  analyze(source, path, entry = true) {
+  analyze(source, path, entry = true, context?: unknown) {
     if (typeof source !== "string" || source.trim() === "") {
       throw frontendError(`module ${path} is empty`);
     }
@@ -8205,7 +8505,14 @@ export const typeScriptFrontend: Frontend = {
     const wideBigint = fileHoldsWideBigint(tokens);
     const classTable = scanClasses(tokens);
     const scanned = scanConstants(tokens);
-    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state);
+    // The interfaces and aliases are read before the bodies that name them.
+    // A file read again after its imports are bound keeps the table the first
+    // read built, so the declarations the importing files already hold keep
+    // resolving against it.
+    const shared = (context as { table?: TypeTable } | undefined)?.table;
+    const typeTable = shared ?? scanTypeTable(tokens);
+    typeTable.classes = classTable.names;
+    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable);
     parser.wideBigint = wideBigint;
     const analysis = parser.parseModule(path, entry);
     // A file read as a program has its whole text readable as statements, so a
@@ -8224,6 +8531,8 @@ export const typeScriptFrontend: Frontend = {
           return {
             path,
             imports: analysis.imports,
+            typeImports: analysis.typeImports,
+            types: analysis.types,
             functions: analysis.functions.filter((entry) => entry.internal === true),
             default: null,
             body: statements,
