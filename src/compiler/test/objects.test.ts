@@ -873,6 +873,29 @@ test("a field read is refused where the name is not a reference to an object", (
   assert.match(missing, /has no field "b"/);
 });
 
+test("a field written as a string literal is the text it is", () => {
+  // The layout pass types the value the body writes, and a string literal is a
+  // text: its field is a pointer the body reads as text, so `pair.left.trim()`
+  // is a text method and `+` concatenates it. A literal typed as a number made
+  // every such field a number and refused the body that read one.
+  const contracts = contractsOf(
+    {
+      "1.ts": [
+        "function read(): string {",
+        "  const pair = { left: ` a `, right: `b` };",
+        "  return pair.left.trim() + pair.right;",
+        "}",
+        "console.log(read());",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  const objects = contracts.read?.definition?.objects ?? {};
+  const fields = Object.values(objects)[0]?.fields ?? [];
+  assert.deepEqual(fields.map((field) => field.type), ["text", "text"]);
+});
+
 test("a counter a nested loop of its own shadows is not a read of the outer one", () => {
   // The inner loop declares its own `i`, so the two reads inside it are of that
   // one and the outer counter is read by neither — which is the shadowing the

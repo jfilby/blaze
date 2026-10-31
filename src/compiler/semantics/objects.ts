@@ -29,6 +29,8 @@ const POINTER_SIZE = 8;
 
 export const F64: TypeExpr = { kind: "primitive", name: "f64" };
 export const I64: TypeExpr = { kind: "primitive", name: "i64" };
+/** The text a string literal holds: a pointer, like every other reference. */
+const TEXT: TypeExpr = { kind: "text" };
 /** The wide number a whole value too large for a machine word is held at. */
 const U256: TypeExpr = { kind: "primitive", name: "u256" };
 
@@ -370,7 +372,7 @@ class BodyTypes {
         for (const part of expression.parts) {
           if (part.k === "value") this.expression(part.value);
         }
-        return { kind: "type", type: F64 };
+        return { kind: "type", type: TEXT };
       case "binary": {
         const left = this.expression(expression.left);
         const right = this.expression(expression.right);
