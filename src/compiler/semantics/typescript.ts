@@ -1841,6 +1841,18 @@ class TypeScriptParser {
   /** The map or the set a `new Map(...)` written out is, by the expression. */
   private collectionExpressions = new Map<Expression, CollectionValue>();
   /**
+   * The map or the set a `for..of` is about to walk, by the expression that
+   * names it.
+   *
+   * `entries()` written where a loop walks it does not answer an array: a map
+   * entry is a key and a value, which is not an element a typed array holds.
+   * The loop reads the pair straight out of the dictionary instead, and this
+   * table is what says which collection the expression it read names.
+   */
+  private iteratedCollections = new Map<Expression, CollectionValue>();
+  /** True while the source of a `for..of` is being read. */
+  private readingIteration = false;
+  /**
    * The arrows the file's bodies wrote, lifted into functions of the file.
    *
    * An arrow is a function of its own, so it is a declaration the module holds
@@ -2055,6 +2067,10 @@ class TypeScriptParser {
         return ANY_TYPE;
       case "map":
       case "set":
+        // A map is one handle, which is the number the runtime's dictionary is:
+        // a contract can spell that, and what the map holds is kept beside the
+        // name the handle is bound to.
+        return NUMBER_RESULT;
       case "record":
         // An object of fields is a reference; the fields themselves are read
         // through `shapeOf`, which keeps the record the contract cannot spell.
@@ -2077,6 +2093,27 @@ class TypeScriptParser {
       key: this.typeExprOfShape(collection.key),
       value: this.typeExprOfShape(collection.value),
     };
+  }
+
+  /**
+   * The map or the set an expression names, when it names one.
+   *
+   * A name holds what it was declared with, a call answers what the function
+   * declares, and a field of an interface names the collection its field is:
+   * the three ways a collection reaches a method call.
+   */
+  private collectionOfExpression(value: Expression): CollectionValue | null {
+    if (value.k === "ident") {
+      const known = this.valueCollections.get(value.name);
+      if (known !== undefined) return known;
+    }
+    if (value.k === "call") {
+      const made = this.collectionExpressions.get(value);
+      if (made !== undefined) return made;
+      const answered = this.declaredCollections.get(value.name);
+      if (answered !== undefined) return answered;
+    }
+    return this.collectionOfShape(this.shapeOf(value));
   }
 
   /**
@@ -3550,6 +3587,7 @@ class TypeScriptParser {
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
+    this.iteratedCollections = new Map();
     let answered: CollectionValue | null = null;
     const declared = (returns: TypeExpr, body: Statement[]): TypeScriptFunction => ({
       name: name.text,
@@ -3810,7 +3848,7 @@ class TypeScriptParser {
     if (!this.isTextKey(key)) {
       this.report(
         `a ${head.text} here is keyed by text, not by ${typeToString(key)}`,
-        "a key is a string: write the key as the text it is, as in m.set(`${id}`, value)",
+        "a key is a string or a reference: write the key as the text it is, as in m.set(`${id}`, value)",
         head,
       );
       return null;
@@ -3818,9 +3856,9 @@ class TypeScriptParser {
     return { kind, key, value };
   }
 
-  /** Whether a key type is the text this frontend keys a map by. */
+  /** Whether a key type is one the runtime's dictionary is keyed by. */
   private isTextKey(type: TypeExpr): boolean {
-    return type.kind === "text";
+    return type.kind === "text" || type.kind === "ref";
   }
 
   /** The type arguments written between two angle brackets, one per argument. */
@@ -4028,6 +4066,16 @@ class TypeScriptParser {
     const arrays = this.arrayTypeFrom(from, end);
     if (arrays !== null) return arrays;
     const first = this.tokens[from] as Token;
+    // A map or a set is the handle the runtime's dictionary is. What it holds
+    // is kept beside the name it is bound to, and the contract spells the
+    // handle: a double the runtime owns.
+    if (
+      first.kind === "ident" &&
+      (first.text === "Map" || first.text === "Set" || first.text === "WeakMap" ||
+        first.text === "WeakSet" || first.text === "ReadonlyMap" || first.text === "ReadonlySet")
+    ) {
+      return NUMBER_RESULT;
+    }
     // A function type, an object type, a tuple and a literal type all describe
     // something the contract can hold only as an opaque reference.
     if (first.text === "(" || first.text === "{" || first.text === "[" || first.kind !== "ident") return ANY_TYPE;
@@ -5149,16 +5197,32 @@ class TypeScriptParser {
     const of = this.peek();
     let walked: string;
     let written: Expression | null = null;
-    if (of.kind === "ident" && this.peek(1).text === ")") {
-      this.next();
-      walked = of.text;
-    } else {
-      written = this.readExpression();
-      walked = `__walk${this.walkCount}`;
-      this.walkCount += 1;
-      this.valueTypes.set(walked, this.valueTypeOf(written));
+    // The source of a loop is read with the iteration flag raised, so an
+    // `entries()` written where a loop walks it is marked rather than refused:
+    // the pair it names is not an element a typed array holds.
+    const savedIteration = this.readingIteration;
+    this.readingIteration = true;
+    try {
+      if (of.kind === "ident" && this.peek(1).text === ")") {
+        this.next();
+        walked = of.text;
+      } else {
+        written = this.readExpression();
+        walked = `__walk${this.walkCount}`;
+        this.walkCount += 1;
+        this.valueTypes.set(walked, this.valueTypeOf(written));
+      }
+    } finally {
+      this.readingIteration = savedIteration;
     }
     this.expect(")");
+    // A map or a set is walked by its entries, not by a typed array's elements:
+    // the two values of one entry are read out of the dictionary by position.
+    const source: Expression = written ?? { k: "ident", name: walked };
+    const collection = this.iteratedCollections.get(source) ?? this.collectionOfExpression(source);
+    if (collection !== null) {
+      return this.readCollectionForOf(start, variable, pattern, source, collection);
+    }
     // The element a `for..of` binds is one element of the array it walks, so it
     // is held at the element type an arrow capturing it would be handed.
     const walkedType = this.valueTypes.get(walked);
@@ -5179,6 +5243,98 @@ class TypeScriptParser {
       this.pendingBefore.push({ kind: "declare", name: walked, type: null, init: written, line: start.line });
     }
     return { kind: "forOf", variable: item, of: walked, body, line: start.line };
+  }
+
+  /**
+   * `for (const [k, v] of map)`: the entries of a dictionary, read by position.
+   *
+   * The dictionary keeps its entries in the order they were written, so a loop
+   * from zero to its length walks them in that order. A map binds a key and a
+   * value; a set binds the key it stores, which is the element the source added.
+   */
+  private readCollectionForOf(
+    start: Token,
+    variable: string,
+    pattern: { name: string; field: string | null; index: number }[] | null,
+    source: Expression,
+    collection: CollectionValue,
+  ): Statement {
+    let receiver: Expression = source;
+    if (source.k === "call" && source.name === "__collection_entries") {
+      receiver = source.args[0] as Expression;
+    }
+    let held: string;
+    if (receiver.k === "ident") {
+      held = receiver.name;
+    } else {
+      held = `__walk${this.walkCount}`;
+      this.walkCount += 1;
+    }
+    this.valueTypes.set(held, NUMBER_RESULT);
+    const count = (): Expression => ({
+      k: "call",
+      name: "blaze_rt_dict_len",
+      args: [{ k: "ident", name: held }],
+    });
+    const index = `__at${this.walkCount}`;
+    this.walkCount += 1;
+    this.valueTypes.set(index, NUMBER_RESULT);
+    const body: Statement[] = [];
+    const bind = (name: string, type: TypeExpr, readName: string): Statement => {
+      const shape = this.shapeOfTypeExpr(type);
+      this.valueTypes.set(name, type);
+      if (shape.kind !== "any") this.valueShapes.set(name, shape);
+      else this.valueShapes.delete(name);
+      const read: Expression = {
+        k: "call",
+        name: readName,
+        args: [{ k: "ident", name: held }, { k: "ident", name: index }],
+      };
+      const value = type.kind === "primitive" && type.name === "bool"
+        ? { k: "binary" as const, op: "!=" as const, left: read, right: { k: "literal" as const, text: "0" } }
+        : read;
+      return { kind: "declare", name, type: null, init: value, line: start.line };
+    };
+    const keyRead = this.keyReadName(collection);
+    if (collection.kind === "set") {
+      if (pattern === null) {
+        body.push(bind(variable, collection.key, keyRead));
+      } else if (pattern.length === 2) {
+        // A set's entries are the same value twice, which is what the language
+        // answers for `for (const [a, b] of set)`.
+        body.push(bind((pattern[0] as { name: string }).name, collection.key, keyRead));
+        body.push(bind((pattern[1] as { name: string }).name, collection.key, keyRead));
+      } else {
+        this.report("a set entry is one value written twice", "write for (const [a, b] of set)", start);
+      }
+    } else if (pattern !== null && pattern.length === 2) {
+      body.push(bind((pattern[0] as { name: string }).name, collection.key, keyRead));
+      body.push(bind((pattern[1] as { name: string }).name, collection.value, this.valueReadName(collection.value)));
+    } else {
+      this.report(
+        "a map entry is a key and a value",
+        "write for (const [key, value] of map), or walk map.keys() or map.values()",
+        start,
+      );
+    }
+    for (const statement of this.loopBody()) body.push(statement);
+    // The receiver is read once, before the loop starts, and the source body
+    // may have written pending declarations of its own: this one is recorded
+    // after it, where it belongs in front of the loop rather than in it.
+    if (receiver.k !== "ident") {
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: receiver, line: start.line });
+    }
+    return {
+      kind: "loop",
+      variable: index,
+      from: { k: "literal", text: "0" },
+      to: count(),
+      inclusive: false,
+      step: null,
+      down: false,
+      body,
+      line: start.line,
+    };
   }
 
   private readWhile(): Statement {
@@ -5649,9 +5805,11 @@ class TypeScriptParser {
           const args = this.readCallArguments();
           const receiver = target.base;
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
-          // dictionary, and its methods are the dictionary's.
-          if (receiver.k === "ident" && this.valueCollections.has(receiver.name)) {
-            const lowered = this.collectionMethod(receiver, this.valueCollections.get(receiver.name) as CollectionValue, target.field, args);
+          // dictionary, and its methods are the dictionary's. The receiver may
+          // be a name, a field of an interface, or the map a function answered.
+          const heldCollection = this.collectionOfExpression(receiver);
+          if (heldCollection !== null) {
+            const lowered = this.collectionMethod(receiver, heldCollection, target.field, args);
             if (lowered !== null) {
               replace(lowered);
               continue;
@@ -5704,19 +5862,6 @@ class TypeScriptParser {
           if (collected !== null) {
             replace(collected);
             continue;
-          }
-          // A map or a set held in an interface field is a handle the same way
-          // a name is: `index.cache.get(key)` is the dictionary method of the
-          // field the interface declares.
-          if (receiver.k === "ident" || receiver.k === "member") {
-            const shapedCollection = this.collectionOfShape(this.shapeOf(receiver));
-            if (shapedCollection !== null) {
-              const lowered = this.collectionMethod(receiver, shapedCollection, target.field, args);
-              if (lowered !== null) {
-                replace(lowered);
-                continue;
-              }
-            }
           }
           // A text method is a call of the runtime over the text. The three
           // helpers the runtime already carries are used directly, and the
@@ -5795,11 +5940,14 @@ class TypeScriptParser {
             continue;
           }
         }
-        if (field.text === "size" && target.k === "ident" && this.valueCollections.has(target.name)) {
-          const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [target] };
-          this.expressionTypes.set(counted, NUMBER_RESULT);
-          replace(counted);
-          continue;
+        if (field.text === "size") {
+          const sized = this.collectionOfExpression(target);
+          if (sized !== null) {
+            const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [target] };
+            this.expressionTypes.set(counted, NUMBER_RESULT);
+            replace(counted);
+            continue;
+          }
         }
         if (field.text === "length" && target.k === "ident") {
           replace({ k: "length", buffer: target.name });
@@ -6848,47 +6996,245 @@ class TypeScriptParser {
     args: readonly Expression[],
   ): Expression | null {
     const one: Expression = { k: "literal", text: "1" };
+    const refKey = collection.key.kind === "ref";
+    const call = (name: string, args_: Expression[], returns: TypeExpr): Expression => {
+      const made: Expression = { k: "call", name, args: args_ };
+      this.expressionTypes.set(made, returns);
+      return made;
+    };
     const take = (): { name: string; args: Expression[]; returns: TypeExpr } | null => {
       if (collection.kind === "set") {
-        if (method === "add" && args.length === 1) return { name: "blaze_rt_dict_set", args: [receiver, args[0] as Expression, one], returns: NUMBER_RESULT };
-        if (method === "has" && args.length === 1) return { name: "blaze_rt_dict_has", args: [receiver, args[0] as Expression], returns: BOOLEAN_RESULT };
-        if (method === "delete" && args.length === 1) return { name: "blaze_rt_dict_delete", args: [receiver, args[0] as Expression], returns: NUMBER_RESULT };
+        if (method === "add" && args.length === 1) {
+          return {
+            name: refKey ? "blaze_rt_dict_set_refkey" : "blaze_rt_dict_set",
+            args: [receiver, args[0] as Expression, one],
+            returns: NUMBER_RESULT,
+          };
+        }
+        if (method === "has" && args.length === 1) {
+          return {
+            name: refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+            args: [receiver, args[0] as Expression],
+            returns: BOOLEAN_RESULT,
+          };
+        }
+        if (method === "delete" && args.length === 1) {
+          return {
+            name: refKey ? "blaze_rt_dict_delete_refkey" : "blaze_rt_dict_delete",
+            args: [receiver, args[0] as Expression],
+            returns: NUMBER_RESULT,
+          };
+        }
         return null;
       }
-      if ((method === "set" || method === "has" || method === "delete") && args.length === (method === "set" ? 2 : 1)) {
-        const name = method === "set" ? "blaze_rt_dict_set" : method === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete";
-        return { name, args: [receiver, ...args], returns: method === "has" ? BOOLEAN_RESULT : NUMBER_RESULT };
+      if (method === "set" && args.length === 2) {
+        const name = this.collectionSetNameFor(collection);
+        if (name === null) return null;
+        return { name, args: [receiver, ...args], returns: NUMBER_RESULT };
+      }
+      if ((method === "has" || method === "delete") && args.length === 1) {
+        return {
+          name: method === "has"
+            ? (refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has")
+            : (refKey ? "blaze_rt_dict_delete_refkey" : "blaze_rt_dict_delete"),
+          args: [receiver, ...args],
+          returns: method === "has" ? BOOLEAN_RESULT : NUMBER_RESULT,
+        };
       }
       return null;
     };
     if (method === "get" && collection.kind === "map" && args.length === 1) {
-      if (collection.value.kind !== "primitive" || !(collection.value.name === "f64" || collection.value.name === "f32")) {
+      const kind = this.storedKind(collection.value);
+      if (kind === "other" || kind === "sequence") {
         this.report(
-          `a map here holds a number, and this one holds a ${typeToString(collection.value)}`,
-          "a key is text and a value is a number: hold a text or a reference in a map of its own",
+          `a map here holds a ${typeToString(collection.value)}, which a key cannot answer`,
+          "a map value is a number, a text, a truth or a reference",
           this.peek(),
         );
         return this.hole();
       }
       // The key is asked for before the value is read, so an absent one answers
       // zero rather than the NaN the dictionary uses to say it holds nothing.
-      const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, args[0] as Expression] };
-      const held: Expression = { k: "call", name: "blaze_rt_dict_get", args: [receiver, args[0] as Expression] };
-      const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise: { k: "literal", text: "0" } };
-      this.expressionTypes.set(chosen, collection.value);
+      const has: Expression = {
+        k: "call",
+        name: refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+        args: [receiver, args[0] as Expression],
+      };
+      const heldName = refKey
+        ? kind === "text"
+          ? "blaze_rt_dict_get_refkey_text"
+          : "blaze_rt_dict_get_refkey"
+        : kind === "text"
+          ? "blaze_rt_dict_get_text"
+          : kind === "reference"
+            ? "blaze_rt_dict_get_ref"
+            : "blaze_rt_dict_get";
+      const read = call(heldName, [receiver, args[0] as Expression], collection.value);
+      const held: Expression = kind === "bool"
+        ? { k: "binary", op: "!=", left: read, right: { k: "literal", text: "0" } }
+        : read;
+      const otherwise: Expression = kind === "text"
+        ? { k: "text", parts: [{ k: "text", value: "" }] }
+        : { k: "literal", text: "0" };
+      const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise };
+      const answer = kind === "reference" ? ANY_TYPE : kind === "bool" ? BOOLEAN_RESULT : collection.value;
+      this.expressionTypes.set(chosen, answer);
+      // A map whose value the source named keeps the fields that name holds,
+      // so a member chain written through the value reads them.
+      if (kind === "reference") {
+        const shape = this.shapeOfTypeExpr(collection.value);
+        if (shape.kind !== "any") this.expressionShapes.set(chosen, shape);
+      }
       return chosen;
+    }
+    // `m.keys()` and `m.values()` are the entries read out by position. The
+    // helper is a function of the file, written once per element type, so the
+    // block it answers is the element type's own and not a block of handles.
+    if (method === "keys" || method === "values") {
+      if (args.length !== 0) return null;
+      const helper = this.collectionListHelper(collection, method === "keys" ? "keys" : "values", this.peek().line);
+      if (helper === null) {
+        const held = method === "keys" ? collection.key : collection.value;
+        this.report(
+          `a ${collection.kind} here holds a ${typeToString(held)}, which cannot be read out by position`,
+          "the entries of a collection are numbers, texts, truths and references",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      return call(helper.name, [receiver], helper.returns);
+    }
+    // `for (const [k, v] of m.entries())` names the two parts of an entry. The
+    // pair is not an element a typed array holds, so the loop reads the two
+    // straight out of the dictionary and this marks the expression it read.
+    if (method === "entries" && args.length === 0 && this.readingIteration) {
+      const marker: Expression = { k: "call", name: "__collection_entries", args: [receiver] };
+      this.iteratedCollections.set(marker, collection);
+      this.expressionTypes.set(marker, ANY_TYPE);
+      return marker;
     }
     const lowered = take();
     if (lowered === null) return null;
-    const call: Expression = { k: "call", name: lowered.name, args: lowered.args };
+    const made = call(lowered.name, lowered.args, lowered.returns);
     // The runtime answers a truth with the number one, and a body says what it
     // means by it: `!s.has(k)` is a question about a truth, and a number is not
     // one.
     const answer: Expression = lowered.returns === BOOLEAN_RESULT
-      ? { k: "binary", op: "===", left: call, right: { k: "literal", text: "1" } }
-      : call;
+      ? { k: "binary", op: "===", left: made, right: { k: "literal", text: "1" } }
+      : made;
     this.expressionTypes.set(answer, lowered.returns);
     return answer;
+  }
+
+  /**
+   * The dictionary call that writes one value of a map, by what the value is.
+   * A value with no entry here is one the dictionary cannot hold.
+   */
+  private collectionSetName(type: TypeExpr): string | null {
+    const kind = this.storedKind(type);
+    if (kind === "number" || kind === "bool") return "blaze_rt_dict_set";
+    if (kind === "text") return "blaze_rt_dict_set_text";
+    if (kind === "reference") return "blaze_rt_dict_set_ref";
+    return null;
+  }
+
+  /** The dictionary call that writes a map entry, by what its key and value are. */
+  private collectionSetNameFor(collection: CollectionValue): string | null {
+    const kind = this.storedKind(collection.value);
+    if (collection.key.kind === "ref") {
+      if (kind === "text") return "blaze_rt_dict_set_refkey_text";
+      if (kind === "reference") return "blaze_rt_dict_set_refkey_ref";
+      if (kind === "number" || kind === "bool") return "blaze_rt_dict_set_refkey";
+      return null;
+    }
+    return this.collectionSetName(collection.value);
+  }
+
+  /**
+   * How one value a collection holds is read and written.
+   *
+   * A dictionary entry is a double, so a number and a reference are the entry
+   * itself and a text is the pointer the double carries. A narrowed number is
+   * read back as the type the map was declared with, and a sequence is a block
+   * the handle names rather than a value of its own.
+   */
+  private storedKind(type: TypeExpr): "number" | "text" | "reference" | "bool" | "sequence" | "other" {
+    if (type.kind === "text") return "text";
+    if (type.kind === "ref") return "reference";
+    if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return "sequence";
+    if (type.kind === "primitive") {
+      if (type.name === "bool") return "bool";
+      if (type.name === "i256" || type.name === "u256") return "other";
+      return "number";
+    }
+    return "other";
+  }
+
+  /** The dictionary call that reads the key of an entry, by what the key is. */
+  private keyReadName(collection: CollectionValue): string {
+    return collection.key.kind === "ref" ? "blaze_rt_dict_key_ref_at" : "blaze_rt_dict_key_at";
+  }
+
+  /** The dictionary call that reads a value entry, by what the value is. */
+  private valueReadName(type: TypeExpr): string {
+    const kind = this.storedKind(type);
+    if (kind === "text") return "blaze_rt_dict_value_at_text";
+    if (kind === "reference" || kind === "sequence") return "blaze_rt_dict_value_at_ref";
+    return "blaze_rt_dict_value_at";
+  }
+
+  /**
+   * The function a `keys()` or a `values()` of a collection is lowered to.
+   *
+   * The entries are read one by one into a block of the element type, because
+   * an entry is a double and a narrow element — a truth, a four byte number —
+   * is not: the block the runtime holds at the element type is the one the
+   * source declared, and the reads are written into it one at a time.
+   */
+  private collectionListHelper(
+    collection: CollectionValue,
+    list: "keys" | "values",
+    line: number,
+  ): { name: string; returns: TypeExpr } | null {
+    const element = list === "keys"
+      ? collection.key
+      : collection.kind === "set" ? collection.key : collection.value;
+    const kind = this.storedKind(element);
+    if (kind === "sequence" || kind === "other") return null;
+    const key = JSON.stringify(["list", list, collection.kind, collection.key, collection.value, element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const readName = list === "keys" ? this.keyReadName(collection) : this.valueReadName(element);
+    const returns: TypeExpr = { kind: "slice", of: element };
+    const params = [{ name: "items", type: NUMBER_RESULT }];
+    const read = (): Expression => ({ k: "call", name: readName, args: [ident("items"), ident("i")] });
+    const body: Statement[] = [
+      { kind: "declare", name: "n", type: null, init: { k: "call", name: "blaze_rt_dict_len", args: [ident("items")] }, line },
+      { kind: "declare", name: "out", type: null, init: { k: "sized", element: typeToString(element), count: ident("n") }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: ident("n"),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [{ kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: read(), line }],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
   }
 
   /** The signature the callback of a collection method is written at. */
@@ -7481,7 +7827,7 @@ class TypeScriptParser {
   private readCollectionAllocation(view: Token): Expression {
     const kind = view.text === "Map" || view.text === "WeakMap" ? "map" as const : "set" as const;
     let collection: CollectionValue = { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
-    if (this.tokens[this.position]?.text === "<") {
+    if (this.at("<")) {
       const open = this.position;
       const close = this.matchingToken(open, "<", ">");
       if (close < 0) {
@@ -7498,18 +7844,328 @@ class TypeScriptParser {
       this.report(`a ${view.text} is created with its arguments`, `as in new ${view.text}()`, view);
       return this.hole();
     }
-    if (!this.at(")")) {
-      this.report(`a ${view.text} is created empty`, "a map is filled with set, and a set with add", this.peek());
-      while (!this.at(")") && this.peek().kind !== "end") {
-        this.readExpression();
-        if (!this.accept(",")) break;
-      }
+    let call: Expression;
+    if (this.at(")")) {
+      this.next();
+      call = { k: "call", name: "blaze_rt_dict_new", args: [] };
+    } else if (kind === "map" && this.at("[") && this.peek(1).text === "[") {
+      call = this.readCollectionPairs(collection, view);
+    } else {
+      const source = this.readExpression();
+      this.expect(")");
+      call = this.collectionFromSource(collection, source, view);
     }
-    this.expect(")");
-    const call: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
     this.collectionExpressions.set(call, collection);
-    this.expressionTypes.set(call, ANY_TYPE);
+    this.expressionTypes.set(call, NUMBER_RESULT);
     return call;
+  }
+
+  /** The `new Map([...])` written as pairs of values, lowered to one helper. */
+  private readCollectionPairs(collection: CollectionValue, view: Token): Expression {
+    this.expect("[");
+    const pairs: { key: Expression; value: Expression }[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      this.expect("[");
+      const key = this.readExpression();
+      this.expect(",");
+      const value = this.readExpression();
+      this.expect("]");
+      pairs.push({ key, value });
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    this.expect(")");
+    if (pairs.length === 0) {
+      return { k: "call", name: "blaze_rt_dict_new", args: [] };
+    }
+    if (collection.key.kind !== "text" && collection.key.kind !== "ref") {
+      this.report(
+        `a ${view.text} here is keyed by text, not by ${typeToString(collection.key)}`,
+        "a key is a string or a reference: write the key as the text it is",
+        view,
+      );
+      return this.hole();
+    }
+    // A map written out without a generic states its key and value types with
+    // the first entry it holds.
+    const firstKey = this.valueTypeOf((pairs[0] as { key: Expression }).key);
+    if (collection.key.kind === "text" && firstKey.kind === "ref") collection.key = firstKey;
+    if (collection.value.kind === "primitive" && collection.value.name === "f64") {
+      const first = this.valueTypeOf((pairs[0] as { value: Expression }).value);
+      if (first.kind !== "primitive" || first.name !== "f64") collection.value = first;
+    }
+    return this.collectionPairsHelper(collection, pairs, view.line);
+  }
+
+  /** The function a `new Map([[...], ...])` becomes, by the pair types it holds. */
+  private collectionPairsHelper(
+    collection: CollectionValue,
+    pairs: readonly { key: Expression; value: Expression }[],
+    line: number,
+  ): Expression {
+    const key = JSON.stringify(["pairs", collection.key, collection.value, pairs.length]);
+    const known = this.collectHelpers.get(key);
+    const arguments_: Expression[] = [];
+    for (const pair of pairs) arguments_.push(pair.key, pair.value);
+    if (known !== undefined) return { k: "call", name: known.name, args: arguments_ };
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const params: { name: string; type: TypeExpr }[] = [];
+    const body: Statement[] = [
+      { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+    ];
+    const setName = this.collectionSetNameFor(collection) as string;
+    for (let index = 0; index < pairs.length; index += 1) {
+      params.push({ name: `k${index}`, type: collection.key }, { name: `v${index}`, type: collection.value });
+      body.push({
+        kind: "expression",
+        value: {
+          k: "call",
+          name: setName,
+          args: [
+            { k: "ident", name: "m" },
+            { k: "ident", name: `k${index}` },
+            { k: "ident", name: `v${index}` },
+          ],
+        },
+        line,
+      });
+    }
+    body.push({ kind: "result", value: { k: "ident", name: "m" }, line });
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { k: "call", name, args: arguments_ };
+  }
+
+  /** `new Set(values)` or `new Map(other)`: the source filled entry by entry. */
+  private collectionFromSource(collection: CollectionValue, source: Expression, view: Token): Expression {
+    const sourceCollection = this.collectionOfExpression(source);
+    if (sourceCollection !== null) {
+      // A collection built from another states its key and value with the one
+      // it copies where the source wrote no generic.
+      if (collection.key.kind === "text" && sourceCollection.key.kind === "ref") collection.key = sourceCollection.key;
+      if (collection.value.kind === "primitive" && collection.value.name === "f64" && sourceCollection.value.kind !== "primitive") {
+        collection.value = sourceCollection.value;
+      }
+      return this.collectionCopyHelper(collection, source, sourceCollection, view.line);
+    }
+    if (collection.kind !== "set") {
+      this.report(
+        `a ${view.text} is built from entries`,
+        "write the entries as an array of pairs, as in new Map([[`a`, 1]])",
+        view,
+      );
+      return this.hole();
+    }
+    const held = this.valueTypeOf(source);
+    const element = held.kind === "slice" || held.kind === "array" ? held.of : ANY_TYPE;
+    if (collection.key.kind === "text" && element.kind !== "text") {
+      collection.key = element;
+    }
+    // A list written out is filled from the values themselves, one parameter
+    // each. A helper that took the block would take a `ref<any>*`, which is the
+    // one buffer the probe cannot build at the element type the C backend
+    // declares: a reference is carried as a double there and as a pointer in
+    // the probe. A written-out list is the block joined against the empty one,
+    // so the values are read out of the block it joins.
+    const written = this.writtenListValues(source);
+    if (written !== null) {
+      return this.collectionFromLiteralHelper(collection, collection.key, written, view.line);
+    }
+    return this.collectionFromArrayHelper(collection, element, source, view.line);
+  }
+
+  /** The values a written-out list holds, or null when the source is not one. */
+  private writtenListValues(value: Expression): Expression[] | null {
+    if (value.k === "buffer" && value.values.length > 0) return value.values;
+    if (value.k !== "binary" || value.op !== "+") return null;
+    const left = value.left.k === "buffer" && value.left.values.length > 0 ? value.left.values : null;
+    const right = value.right.k === "buffer" && value.right.values.length > 0 ? value.right.values : null;
+    if (left !== null && right === null && value.right.k === "buffer") return left;
+    if (right !== null && left === null && value.left.k === "buffer") return right;
+    return null;
+  }
+
+  /** The function a `new Set([...])` written out becomes. */
+  private collectionFromLiteralHelper(
+    collection: CollectionValue,
+    element: TypeExpr,
+    values: readonly Expression[],
+    line: number,
+  ): Expression {
+    const key = JSON.stringify(["fromLiteral", collection.kind, element, values.length]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return { k: "call", name: known.name, args: [...values] };
+    const kind = this.storedKind(element);
+    const setName = kind === "reference" ? "blaze_rt_dict_set_refkey" : kind === "text" ? "blaze_rt_dict_set" : null;
+    if (setName === null) {
+      this.report(
+        `a set of ${typeToString(element)} is keyed by text, not by ${typeToString(element)}`,
+        "a set holds texts, or references keyed by the handle they are",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const params: { name: string; type: TypeExpr }[] = [];
+    const body: Statement[] = [
+      { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+    ];
+    for (let index = 0; index < values.length; index += 1) {
+      params.push({ name: `v${index}`, type: element });
+      body.push({
+        kind: "expression",
+        value: {
+          k: "call",
+          name: setName,
+          args: [
+            { k: "ident", name: "m" },
+            { k: "ident", name: `v${index}` },
+            { k: "literal", text: "1" },
+          ],
+        },
+        line,
+      });
+    }
+    body.push({ kind: "result", value: { k: "ident", name: "m" }, line });
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { k: "call", name, args: [...values] };
+  }
+
+  /** The function a `new Set(array)` becomes: a dictionary of its elements. */
+  private collectionFromArrayHelper(
+    collection: CollectionValue,
+    element: TypeExpr,
+    source: Expression,
+    line: number,
+  ): Expression {
+    const key = JSON.stringify(["fromArray", collection.kind, element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) {
+      return { k: "call", name: known.name, args: [source] };
+    }
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: element };
+    const refKey = element.kind === "ref";
+    const setName = refKey ? "blaze_rt_dict_set_refkey" : null;
+    if (setName === null && element.kind !== "text") {
+      this.report(
+        `a set of ${typeToString(element)} is keyed by text, not by ${typeToString(element)}`,
+        "a set holds texts, or references keyed by the handle they are",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const body: Statement[] = [
+      { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: { k: "literal", text: "0" },
+        to: { k: "length", buffer: "items" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          {
+            kind: "expression",
+            value: {
+              k: "call",
+              name: setName ?? "blaze_rt_dict_set",
+              args: [ident("m"), { k: "index", base: ident("items"), index: ident("i") }, { k: "literal", text: "1" }],
+            },
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: ident("m"), line },
+    ];
+    const params = [{ name: "items", type: items }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { k: "call", name, args: [source] };
+  }
+
+  /** The function a `new Set(other)` or `new Map(other)` copies into. */
+  private collectionCopyHelper(
+    collection: CollectionValue,
+    source: Expression,
+    sourceCollection: CollectionValue,
+    line: number,
+  ): Expression {
+    const key = JSON.stringify(["copy", collection.kind, collection.key, collection.value, sourceCollection.kind, sourceCollection.key, sourceCollection.value]);
+    const known = this.collectHelpers.get(key);
+    const name = known === undefined ? `__collect_${this.stem}_${this.collectCount}` : known.name;
+    if (known !== undefined) return { k: "call", name, args: [source] };
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const refKey = sourceCollection.key.kind === "ref";
+    const keyRead = refKey ? "blaze_rt_dict_key_ref_at" : "blaze_rt_dict_key_at";
+    const body: Statement[] = [
+      { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      { kind: "declare", name: "n", type: null, init: { k: "call", name: "blaze_rt_dict_len", args: [ident("source")] }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: { k: "literal", text: "0" },
+        to: ident("n"),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [],
+        line,
+      },
+      { kind: "result", value: ident("m"), line },
+    ];
+    const loop = body[2] as Statement & { kind: "loop" };
+    if (collection.kind === "set") {
+      const setName = refKey ? "blaze_rt_dict_set_refkey" : "blaze_rt_dict_set";
+      loop.body = [{
+        kind: "expression",
+        value: {
+          k: "call",
+          name: setName,
+          args: [ident("m"), { k: "call", name: keyRead, args: [ident("source"), ident("i")] }, { k: "literal", text: "1" }],
+        },
+        line,
+      }];
+    } else {
+      const setName = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
+      loop.body = [{
+        kind: "expression",
+        value: {
+          k: "call",
+          name: setName,
+          args: [
+            ident("m"),
+            { k: "call", name: keyRead, args: [ident("source"), ident("i")] },
+            { k: "call", name: this.valueReadName(collection.value), args: [ident("source"), ident("i")] },
+          ],
+        },
+        line,
+      }];
+    }
+    const params = [{ name: "source", type: NUMBER_RESULT }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { k: "call", name, args: [source] };
   }
 
   private readAllocation(): Expression {

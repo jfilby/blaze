@@ -1186,6 +1186,76 @@ proc blaze_rt_dict_delete*(dict: float64, key: cstring): float64 {.exportc, cdec
     blazeDynValues[at].entries.delete(position)
   dict
 
+## A reference is a handle this runtime carries as a float64, so the reference
+## entry points are the number ones under a name that says which the source
+## meant. A text entry is the pointer the float64 carries, which is the same
+## address the C runtime writes.
+
+proc blaze_rt_dict_get_ref*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_get(dict, key)
+
+proc blaze_rt_dict_set_ref*(dict: float64, key: cstring, value: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set(dict, key, value)
+
+proc blaze_rt_dict_get_text*(dict: float64, key: cstring): cstring {.exportc, cdecl.} =
+  let at = blazeDictIndex(dict)
+  if at < 0 or key == nil: return ""
+  let position = blazeDictFind(at, $key)
+  if position < 0: return ""
+  cast[cstring](uint(blazeDynValues[at].entries[position][1]))
+
+proc blaze_rt_dict_set_text*(dict: float64, key: cstring, value: cstring): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set(dict, key, float64(cast[uint](value)))
+
+proc blaze_rt_dict_key_at*(dict: float64, index: float64): cstring {.exportc, cdecl.} =
+  let at = blazeDictIndex(dict)
+  let position = int(index)
+  if at < 0 or position < 0 or position >= blazeDynValues[at].entries.len: return ""
+  blazeDynValues[at].entries[position][0].cstring
+
+proc blaze_rt_dict_value_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
+  let at = blazeDictIndex(dict)
+  let position = int(index)
+  if at < 0 or position < 0 or position >= blazeDynValues[at].entries.len: return 0.0
+  blazeDynValues[at].entries[position][1]
+
+proc blaze_rt_dict_value_at_ref*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_value_at(dict, index)
+
+proc blaze_rt_dict_value_at_text*(dict: float64, index: float64): cstring {.exportc, cdecl.} =
+  cast[cstring](uint(blaze_rt_dict_value_at(dict, index)))
+
+## A reference key is the address the handle carries, written as the whole
+## number it is: one reference is one address, so the address is the key. The C
+## runtime writes the same address in base sixteen; the two dictionaries do not
+## cross runtimes, so what each writes is what it reads.
+
+proc blaze_rt_dict_set_refkey*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set(dict, $uint64(key), value)
+
+proc blaze_rt_dict_get_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_get(dict, $uint64(key))
+
+proc blaze_rt_dict_get_refkey_text*(dict: float64, key: float64): cstring {.exportc, cdecl.} =
+  blaze_rt_dict_get_text(dict, $uint64(key))
+
+proc blaze_rt_dict_set_refkey_text*(dict: float64, key: float64, value: cstring): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set_text(dict, $uint64(key), value)
+
+proc blaze_rt_dict_set_refkey_ref*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set_refkey(dict, key, value)
+
+proc blaze_rt_dict_has_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_has(dict, $uint64(key))
+
+proc blaze_rt_dict_delete_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_delete(dict, $uint64(key))
+
+proc blaze_rt_dict_key_ref_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
+  let key = blaze_rt_dict_key_at(dict, index)
+  if key == nil or ord(key[0]) == 0: return 0.0
+  float64(parseUInt($key))
+
 proc blaze_rt_random*(): float64 {.exportc, cdecl.} =
   ## A pseudo-random double in [0, 1), which is what the C runtime answers.
   ## Nim's own is in [0, 1) as well, and it is seeded the same way: a program

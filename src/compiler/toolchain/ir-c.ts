@@ -322,10 +322,42 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_get(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_set":
       return `blaze_rt_dict_set(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_get_ref":
+      return `blaze_rt_dict_get_ref(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_ref":
+      return `blaze_rt_dict_set_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_get_text":
+      return `blaze_rt_dict_get_text(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_text":
+      return `blaze_rt_dict_set_text(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_has":
       return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_len":
       return `blaze_rt_dict_len(${args[0]})`;
+    case "blaze_rt_dict_key_at":
+      return `blaze_rt_dict_key_at(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_value_at":
+      return `blaze_rt_dict_value_at(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_value_at_ref":
+      return `blaze_rt_dict_value_at_ref(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_value_at_text":
+      return `blaze_rt_dict_value_at_text(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_refkey":
+      return `blaze_rt_dict_set_refkey(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_get_refkey":
+      return `blaze_rt_dict_get_refkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_get_refkey_text":
+      return `blaze_rt_dict_get_refkey_text(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_refkey_text":
+      return `blaze_rt_dict_set_refkey_text(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_set_refkey_ref":
+      return `blaze_rt_dict_set_refkey_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_has_refkey":
+      return `blaze_rt_dict_has_refkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_delete_refkey":
+      return `blaze_rt_dict_delete_refkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_key_ref_at":
+      return `blaze_rt_dict_key_ref_at(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_delete":
       return `blaze_rt_dict_delete(${args[0]}, ${args[1]})`;
     // The regular-expression helpers. The pattern and the flags are texts, and
@@ -1222,6 +1254,12 @@ class FunctionEmitter {
     const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
     if (fromDynamic && isNumber(as)) {
       return `${RUNTIME_NAME}_to_number(${written})`;
+    }
+    if (fromDynamic && isReference(as)) {
+      // A dynamic reference is the handle a pointer is carried in, so reading
+      // it as a shaped one is the cast back the ABI makes in the other
+      // direction. A cast straight from a double is not a C conversion.
+      return `(${declaredType(as)})(uintptr_t)(${written})`;
     }
     if (isNumber(value.type) && isNumber(as)) {
       return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name

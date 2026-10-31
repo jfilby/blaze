@@ -79,8 +79,9 @@ value to 4489, and a `for (;;)` loop to 4405. Reading the class methods written
 after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
 Reading `at` and `slice` of an array lowered it to 5496, reading regular
-expressions to 5319, and carrying interfaces and type aliases through the module
-graph to 5091. The refusals fall into six frontiers:
+expressions to 5319, carrying interfaces and type aliases through the module
+graph to 5091, and reference-valued maps and sets to 4824. The refusals fall
+into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -222,9 +223,15 @@ to carry those without a rewrite into numeric arrays:
   read from, and `at` and `slice` read one element and copy a range. What is
   still missing is `splice`, `shift`, `unshift`, `concat` and the `Array`
   constructors, and a list whose element is itself a list as a field of a class.
-- **Maps and sets.** Values that are text or references, keys that are not only
-  text, iteration (`for..of`, `keys`, `values`, `entries`) and `Map`/`Set` as
-  fields. A compiler's symbol tables are maps of references.
+- **Maps and sets.** A value is a number, a text, a truth or a reference, and a
+  key is text or a reference: a reference key is the handle itself, written as
+  the address it carries, so two names for one object are one key. `get`, `set`,
+  `has`, `delete` and `add` read and write each. A `for..of` walks the entries in
+  the order they were written, `keys()` and `values()` answer a block of the
+  element type, and `entries()` names the key and the value without building the
+  pair. A map is built empty, from an array of pairs and from another map; a set
+  from its elements. Still missing: keys that are numbers or arrays, values that
+  are arrays, and `Object.fromEntries`.
 - **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `indexOf` and `slice`
   are carried. Still missing: `replace`, `split`, `toLowerCase`, `repeat` and
   `padStart`/`padEnd`, except where the first argument of `replace` or `split`

@@ -1363,3 +1363,154 @@ test("a map is a value a function is handed and a value it answers", async () =>
   ].join("\n"));
   assert.equal(output.trim(), "10");
 });
+
+test("a map holds a reference, and a read answers the fields it names", async () => {
+  const output = await agreesWithNode([
+    "class Box {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "function g(): number {",
+    "  const m = new Map<string, Box>();",
+    "  const a = new Box(7);",
+    "  const b = new Box(3);",
+    "  m.set(`a`, a);",
+    "  m.set(`b`, b);",
+    "  const found = m.get(`a`);",
+    "  return found.value * 10 + m.size;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "72");
+});
+
+test("a set holds references, and asks for the one it was given", async () => {
+  const output = await agreesWithNode([
+    "class Box {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "function g(): number {",
+    "  const s = new Set<Box>();",
+    "  const a = new Box(1);",
+    "  const b = new Box(2);",
+    "  const from = new Set<Box>([a, b, a]);",
+    "  s.add(a);",
+    "  s.add(b);",
+    "  s.add(a);",
+    "  return s.size * 10 + from.size + (s.has(a) ? 1 : 0) + (s.has(b) ? 2 : 0);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "25");
+});
+
+test("a map is built from entries and walked in the order they were written", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const m = new Map<string, number>([[`a`, 1], [`b`, 2], [`c`, 3]]);",
+    "  let total = 0;",
+    "  for (const [k, v] of m) total += v;",
+    "  for (const k of m.keys()) total += k.length;",
+    "  for (const v of m.values()) total += v;",
+    "  return total;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "15");
+});
+
+test("a set is built from the elements written out", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const s = new Set<string>([`a`, `b`, `a`]);",
+    "  return s.size * 10 + (s.has(`a`) ? 1 : 0) + (s.has(`b`) ? 2 : 0);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "23");
+});
+
+test("a map and a set are copied into collections of their own", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a = new Map<string, number>([[`a`, 1], [`b`, 2]]);",
+    "  const b = new Map(a);",
+    "  b.set(`c`, 3);",
+    "  const first = new Set<string>([`a`, `b`]);",
+    "  const second = new Set(first);",
+    "  second.add(`c`);",
+    "  return a.size * 100 + b.size * 10 + second.size;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "233");
+});
+
+test("the values of a map of references are walked one by one", async () => {
+  const output = await agreesWithNode([
+    "class Box {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "function g(): number {",
+    "  const m = new Map<string, Box>();",
+    "  m.set(`a`, new Box(2));",
+    "  m.set(`b`, new Box(5));",
+    "  let total = 0;",
+    "  for (const b of m.values()) total += b.value;",
+    "  return total;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7");
+});
+
+test("a map a function is handed is walked by its entries", async () => {
+  const output = await agreesWithNode([
+    "function read(m: Map<string, number>): number {",
+    "  let total = 0;",
+    "  for (const v of m.values()) total += v;",
+    "  for (const k of m.keys()) total += k.length;",
+    "  for (const [key, value] of m) total += value;",
+    "  return total;",
+    "}",
+    "function g(): number {",
+    "  const m = new Map<string, number>();",
+    "  m.set(`a`, 2);",
+    "  m.set(`bb`, 3);",
+    "  return read(m);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "13");
+});
+
+test("a map is keyed by a reference, and answers the text it holds", async () => {
+  const output = await agreesWithNode([
+    "class Box {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "function g(): number {",
+    "  const m = new Map<Box, string>();",
+    "  const a = new Box(1);",
+    "  const b = new Box(2);",
+    "  m.set(a, `one`);",
+    "  m.set(b, `two`);",
+    "  let seen = 0;",
+    "  for (const [box, text] of m) seen += box.value + text.length;",
+    "  return (m.get(a) === `one` ? 10 : 0) + m.size + seen;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "21");
+});

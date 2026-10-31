@@ -357,7 +357,11 @@ test("type-only syntax is erased, and a generic annotation is read to its end", 
     ["area"],
   );
   assert.equal(analysis.functions[0]?.params[0]?.type.kind, "ref", "an interface is an opaque reference");
-  assert.equal(analysis.functions[0]?.params[1]?.type.kind, "ref", "a generic annotation is an opaque reference");
+  assert.deepEqual(
+    analysis.functions[0]?.params[1]?.type,
+    { kind: "primitive", name: "f64" },
+    "a map is the handle the runtime's dictionary is",
+  );
 });
 
 test("a type-only import may rename the types it names", () => {
@@ -1246,5 +1250,39 @@ test("a map keyed by anything but text is refused, because a key is a string", (
       ),
     ),
     /a Set here is keyed by text, not by f64/,
+  );
+});
+
+test("a map holds a reference, and a set keys by the reference itself", () => {
+  const analysis = typescript.analyze(
+    [
+      "class Box { value: number; constructor(value: number) { this.value = value; } }",
+      "export function g(): number {",
+      "  const m = new Map<string, Box>();",
+      "  const a = new Box(1);",
+      "  m.set(`a`, a);",
+      "  const found = m.get(`a`);",
+      "  const s = new Set<Box>();",
+      "  s.add(a);",
+      "  return (s.has(a) ? 1 : 0) + found.value;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions.find((entry) => entry.name === "g")?.handle ?? { body: [] }) as {
+    body: {
+      kind: string;
+      init?: { k: string; condition?: { name?: string }; then?: { name?: string } };
+      value?: { k: string; name?: string; left?: { name?: string; condition?: { left?: { name?: string } } } };
+    }[];
+  }).body;
+  assert.equal(body[2]?.value?.name, "blaze_rt_dict_set_ref", "a reference value is written as one");
+  assert.equal(body[3]?.init?.then?.name, "blaze_rt_dict_get_ref", "a reference value is read as one");
+  assert.equal(body[5]?.value?.name, "blaze_rt_dict_set_refkey", "a set of references keys by the handle");
+  assert.equal(
+    body[6]?.value?.left?.condition?.left?.name,
+    "blaze_rt_dict_has_refkey",
+    "and asks for the handle it was given",
   );
 });

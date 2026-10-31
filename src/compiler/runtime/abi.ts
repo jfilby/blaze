@@ -1079,8 +1079,36 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_new", "double", [], "Creates an empty dictionary.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_dict_get", "double", [["dict", "double"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  /**
+   * A value a program holds a reference in. A reference is carried as a double
+   * like every other handle this runtime answers, so the entry is the same one
+   * a number is written in: the two names say which the source meant, and let
+   * the frontend type the read without a cast the generated C cannot write.
+   */
+  entry("blaze_rt_dict_get_ref", "double", [["dict", "double"], ["key", "const char*"]], "Reads one reference of a dictionary by its string key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_ref", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one reference of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_text", "const char*", [["dict", "double"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_at", "const char*", [["dict", "double"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at", "double", [["dict", "double"], ["index", "double"]], "Reads the value of one entry of a dictionary by its position.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_ref", "double", [["dict", "double"], ["index", "double"]], "Reads the reference held by one entry of a dictionary by its position.", "Returns the reference, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_text", "const char*", [["dict", "double"], ["index", "double"]], "Reads the text held by one entry of a dictionary by its position.", "Returns the text, or the empty text when the position names no entry.", { tags: ["object"] }),
+  /**
+   * A dictionary keyed by a reference. A reference is a handle, and an entry key
+   * is the text the runtime keeps, so the handle is written as the hexadecimal
+   * of the address it carries: one reference is one key, and a reference the
+   * program no longer holds is not one another entry already has.
+   */
+  entry("blaze_rt_dict_set_refkey", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey", "double", [["dict", "double"], ["key", "double"]], "Reads one value of a dictionary by a reference key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_text", "const char*", [["dict", "double"], ["key", "double"]], "Reads one text of a dictionary by a reference key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_text", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_ref", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_refkey", "double", [["dict", "double"], ["key", "double"]], "Asks whether a dictionary holds a reference key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_refkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_ref_at", "double", [["dict", "double"], ["index", "double"]], "Reads the reference key of one entry of a dictionary by its position.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
   entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
@@ -4035,6 +4063,105 @@ double blaze_rt_dict_delete(double dict, const char* key) {
   if (e != last) *e = *last;
   d->count--;
   return (double)(uintptr_t)d;
+}
+
+/* A reference is a handle this runtime carries as a double, so the reference
+   entry points are the number ones under a name that says which the source
+   meant: the frontend types the read without casting a double to a pointer in
+   the C it writes. */
+double blaze_rt_dict_get_ref(double dict, const char* key) {
+  return blaze_rt_dict_get(dict, key);
+}
+
+double blaze_rt_dict_set_ref(double dict, const char* key, double value) {
+  return blaze_rt_dict_set(dict, key, value);
+}
+
+/* A text is a pointer held in the same double an entry carries, and the two
+   directions are the casts the ABI spells once here rather than at every use. */
+const char* blaze_rt_dict_get_text(double dict, const char* key) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return "";
+  blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
+  if (e == NULL) return "";
+  return (const char*)(uintptr_t)e->value;
+}
+
+double blaze_rt_dict_set_text(double dict, const char* key, const char* value) {
+  return blaze_rt_dict_set(dict, key, (double)(uintptr_t)value);
+}
+
+const char* blaze_rt_dict_key_at(double dict, double index) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  size_t at = (size_t)index;
+  if (d == NULL || at >= d->count) return "";
+  return d->entries[at].key;
+}
+
+double blaze_rt_dict_value_at(double dict, double index) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  size_t at = (size_t)index;
+  if (d == NULL || at >= d->count) return 0.0;
+  return d->entries[at].value;
+}
+
+double blaze_rt_dict_value_at_ref(double dict, double index) {
+  return blaze_rt_dict_value_at(dict, index);
+}
+
+const char* blaze_rt_dict_value_at_text(double dict, double index) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  size_t at = (size_t)index;
+  if (d == NULL || at >= d->count) return "";
+  return (const char*)(uintptr_t)d->entries[at].value;
+}
+
+/* A reference key is the address the handle carries, written in base sixteen:
+   the dictionary already keeps a text for every key, and one reference is one
+   address, so the address is the key. */
+static const char* blaze_rt_dict_refkey(double key, char* buffer, size_t size) {
+  snprintf(buffer, size, "%llx", (unsigned long long)(uintptr_t)key);
+  return buffer;
+}
+
+double blaze_rt_dict_set_refkey(double dict, double key, double value) {
+  char buffer[32];
+  return blaze_rt_dict_set(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
+}
+
+double blaze_rt_dict_get_refkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_get(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+}
+
+const char* blaze_rt_dict_get_refkey_text(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_get_text(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_set_refkey_text(double dict, double key, const char* value) {
+  char buffer[32];
+  return blaze_rt_dict_set_text(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
+}
+
+double blaze_rt_dict_set_refkey_ref(double dict, double key, double value) {
+  return blaze_rt_dict_set_refkey(dict, key, value);
+}
+
+double blaze_rt_dict_has_refkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_has(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_delete_refkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_delete(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_key_ref_at(double dict, double index) {
+  const char* key = blaze_rt_dict_key_at(dict, index);
+  if (key == NULL || key[0] == '\0') return 0.0;
+  return (double)(uintptr_t)strtoull(key, NULL, 16);
 }
 
 static const double* blaze_rt_arguments = NULL;
