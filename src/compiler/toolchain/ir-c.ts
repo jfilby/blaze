@@ -328,6 +328,23 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_len(${args[0]})`;
     case "blaze_rt_dict_delete":
       return `blaze_rt_dict_delete(${args[0]}, ${args[1]})`;
+    // The regular-expression helpers. The pattern and the flags are texts, and
+    // so is the text they are matched against; a match is a block of texts, and
+    // a match of matches is a block of those.
+    case "blaze_rt_regex_test":
+      return `blaze_rt_regex_test(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_regex_search":
+      return `blaze_rt_regex_search(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_regex_exec":
+      return `((char**)blaze_rt_regex_exec(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "blaze_rt_regex_match":
+      return `((char**)blaze_rt_regex_match(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "blaze_rt_regex_match_all":
+      return `((char***)blaze_rt_regex_match_all(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "blaze_rt_regex_replace":
+      return `blaze_rt_regex_replace(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]})`;
+    case "blaze_rt_regex_split":
+      return `((char**)blaze_rt_regex_split(${args[0]}, ${args[1]}, ${args[2]}))`;
     default:
       throw backendError(
         `this backend cannot lower ${name}`,

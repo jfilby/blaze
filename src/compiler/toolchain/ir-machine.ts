@@ -10674,6 +10674,40 @@ class Machine {
       this.callSymbol("blaze_rt_text_trim", [trimmed], TEXT);
       return;
     }
+    if (call.callee.startsWith("blaze_rt_regex_")) {
+      // The pattern, the flags and the text are texts, and the replacement of
+      // a replace is one too. Each is held before the next is read: reading one
+      // takes the accumulator the next is read into.
+      const text = (at: number): Held => {
+        const value = call.args[at];
+        if (isTextType(value.type)) {
+          this.at(value, TEXT);
+        } else {
+          this.value(value);
+          this.runtime("_to_text");
+        }
+        const held = this.hold(TEXT, "blaze_text");
+        this.store(held);
+        return held;
+      };
+      if (call.callee === "blaze_rt_regex_replace") {
+        const pattern = text(0);
+        const flags = text(1);
+        const subject = text(2);
+        const replacement = text(3);
+        this.callSymbol("blaze_rt_regex_replace", [pattern, flags, subject, replacement], TEXT);
+        return;
+      }
+      const pattern = text(0);
+      const flags = text(1);
+      const subject = text(2);
+      if (call.callee === "blaze_rt_regex_test" || call.callee === "blaze_rt_regex_search") {
+        this.callSymbol(call.callee, [pattern, flags, subject], NUMBER);
+        return;
+      }
+      this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
+      return;
+    }
     if (call.callee === "process.env") {
       // The environment variable is read by its name, and the answer is the
       // text it is set to: a pointer to the bytes, which is what a text is.

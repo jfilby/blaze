@@ -32,6 +32,960 @@ export const RUNTIME_NAME = "blaze_rt";
  */
 export const DEFAULT_ALIGNMENT = 16;
 
+/**
+ * The regular-expression engine, embedded as C beside the rest of the
+ * compiler runtime. It is reachable through the text helpers below rather
+ * than through a host entry: the patterns are the compiler's own, and matching
+ * one is an operation over a text the runtime already lays out.
+ */
+const REGEX_RUNTIME_SOURCE = String.raw`/* A small backtracking regular expression engine for the patterns a source
+   writes. Bytes, not codepoints: a text is bytes and every pattern the
+   compiler writes is ASCII. The engine is reachable through the compiler's
+   text helpers, so it needs no host service and no new ABI entry. */
+
+enum {
+  BRX_CHAR,
+  BRX_ANY,
+  BRX_CLASS,
+  BRX_BOL,
+  BRX_EOL,
+  BRX_BOUNDARY,
+  BRX_GROUP,
+  BRX_REPEAT,
+  BRX_ALT,
+};
+
+typedef struct BrxNode BrxNode;
+struct BrxNode {
+  int kind;
+  int capture;
+  int ch;
+  int min;
+  int max;
+  int greedy;
+  unsigned char cls[32];
+  BrxNode* child;
+  BrxNode* next;
+  BrxNode** branches;
+  int branch_count;
+};
+
+typedef struct {
+  char* pattern_text;
+  char* flags_text;
+  int groups;
+  int icase;
+  int multiline;
+  int dotall;
+  int global;
+  BrxNode* root;
+} BrxRegex;
+
+typedef struct {
+  const char* text;
+  int length;
+  const BrxRegex* re;
+} BrxCtx;
+
+#define BRX_MAX_GROUPS 32
+typedef struct {
+  int caps[BRX_MAX_GROUPS * 2];
+} BrxState;
+
+typedef struct {
+  const char* p;
+  int groups;
+} BrxParser;
+
+typedef struct BrxCont BrxCont;
+enum {
+  BRX_C_NODE,
+  BRX_C_REPEAT,
+  BRX_C_GROUP_END,
+};
+struct BrxCont {
+  int kind;
+  BrxNode* node;
+  BrxNode* repeat;
+  int count;
+  int capture;
+  BrxCont* next;
+};
+
+static char* brx_strdup(const char* s) {
+  size_t n = strlen(s) + 1;
+  char* out = (char*)malloc(n);
+  memcpy(out, s, n);
+  return out;
+}
+
+static BrxNode* brx_node(int kind) {
+  BrxNode* node = (BrxNode*)calloc(1, sizeof(BrxNode));
+  node->kind = kind;
+  node->capture = -1;
+  node->min = 0;
+  node->max = -1;
+  node->greedy = 1;
+  return node;
+}
+
+static void brx_class_add(unsigned char* cls, unsigned char c) {
+  cls[c >> 3] |= (unsigned char)(1u << (c & 7));
+}
+
+static int brx_class_has(const unsigned char* cls, unsigned char c) {
+  return (cls[c >> 3] & (unsigned char)(1u << (c & 7))) != 0;
+}
+
+static void brx_class_range(unsigned char* cls, int from, int to) {
+  int c;
+  if (from > to) {
+    int t = from;
+    from = to;
+    to = t;
+  }
+  for (c = from; c <= to; c++) brx_class_add(cls, (unsigned char)c);
+}
+
+static void brx_class_word(unsigned char* cls) {
+  int c;
+  for (c = 'a'; c <= 'z'; c++) brx_class_add(cls, (unsigned char)c);
+  for (c = 'A'; c <= 'Z'; c++) brx_class_add(cls, (unsigned char)c);
+  for (c = '0'; c <= '9'; c++) brx_class_add(cls, (unsigned char)c);
+  brx_class_add(cls, '_');
+}
+
+static void brx_class_space(unsigned char* cls) {
+  brx_class_add(cls, ' ');
+  brx_class_add(cls, '\t');
+  brx_class_add(cls, '\n');
+  brx_class_add(cls, '\r');
+  brx_class_add(cls, '\f');
+  brx_class_add(cls, '\v');
+}
+
+static void brx_class_digit(unsigned char* cls) {
+  int c;
+  for (c = '0'; c <= '9'; c++) brx_class_add(cls, (unsigned char)c);
+}
+
+static void brx_class_invert(unsigned char* cls) {
+  int i;
+  for (i = 0; i < 32; i++) cls[i] = (unsigned char)~cls[i];
+}
+
+static int brx_hex_value(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static int brx_read_hex(BrxParser* p, int count) {
+  int value = 0;
+  int i;
+  for (i = 0; i < count; i++) {
+    int digit = brx_hex_value((unsigned char)p->p[i]);
+    if (digit < 0) return -1;
+    value = value * 16 + digit;
+  }
+  p->p += count;
+  return value;
+}
+
+static int brx_class_escape(BrxParser* p, unsigned char* cls) {
+  int c = (unsigned char)*p->p++;
+  unsigned char tmp[32];
+  int i;
+  switch (c) {
+    case 'd': brx_class_digit(cls); return 0;
+    case 'D':
+      memset(tmp, 0, sizeof(tmp));
+      brx_class_digit(tmp);
+      brx_class_invert(tmp);
+      for (i = 0; i < 32; i++) cls[i] |= tmp[i];
+      return 0;
+    case 'w': brx_class_word(cls); return 0;
+    case 'W':
+      memset(tmp, 0, sizeof(tmp));
+      brx_class_word(tmp);
+      brx_class_invert(tmp);
+      for (i = 0; i < 32; i++) cls[i] |= tmp[i];
+      return 0;
+    case 's': brx_class_space(cls); return 0;
+    case 'S':
+      memset(tmp, 0, sizeof(tmp));
+      brx_class_space(tmp);
+      brx_class_invert(tmp);
+      for (i = 0; i < 32; i++) cls[i] |= tmp[i];
+      return 0;
+    case 'n': brx_class_add(cls, '\n'); return 0;
+    case 'r': brx_class_add(cls, '\r'); return 0;
+    case 't': brx_class_add(cls, '\t'); return 0;
+    case 'f': brx_class_add(cls, '\f'); return 0;
+    case 'v': brx_class_add(cls, '\v'); return 0;
+    case '0': brx_class_add(cls, 0); return 0;
+    case 'x': {
+      int value = brx_read_hex(p, 2);
+      brx_class_add(cls, (unsigned char)(value < 0 ? 'x' : value));
+      return 0;
+    }
+    case 'u': {
+      int value = brx_read_hex(p, 4);
+      brx_class_add(cls, (unsigned char)(value < 0 ? 'u' : (value & 0xff)));
+      return 0;
+    }
+    default:
+      brx_class_add(cls, (unsigned char)c);
+      return 0;
+  }
+}
+
+static BrxNode* brx_alternation(BrxParser* p);
+
+static BrxNode* brx_class(BrxParser* p) {
+  BrxNode* node = brx_node(BRX_CLASS);
+  int negate = 0;
+  int first = 1;
+  if (*p->p == '^') {
+    negate = 1;
+    p->p++;
+  }
+  while (*p->p != '\0' && (*p->p != ']' || first)) {
+    int from;
+    int to;
+    first = 0;
+    if (*p->p == '\\') {
+      p->p++;
+      if (*p->p == 'd' || *p->p == 'D' || *p->p == 'w' || *p->p == 'W' || *p->p == 's' || *p->p == 'S') {
+        brx_class_escape(p, node->cls);
+        continue;
+      }
+      from = (int)(unsigned char)*p->p;
+      if (*p->p == 'n') from = '\n';
+      else if (*p->p == 'r') from = '\r';
+      else if (*p->p == 't') from = '\t';
+      else if (*p->p == 'f') from = '\f';
+      else if (*p->p == 'v') from = '\v';
+      else if (*p->p == '0') from = 0;
+      else if (*p->p == 'x') {
+        p->p++;
+        from = brx_read_hex(p, 2);
+        if (from < 0) from = 'x';
+      } else if (*p->p == 'u') {
+        p->p++;
+        from = brx_read_hex(p, 4);
+        if (from < 0) from = 'u';
+        from &= 0xff;
+      } else {
+        p->p++;
+      }
+    } else {
+      from = (int)(unsigned char)*p->p++;
+    }
+    if (*p->p == '-' && p->p[1] != ']' && p->p[1] != '\0') {
+      p->p++;
+      if (*p->p == '\\') {
+        int kind;
+        p->p++;
+        kind = (unsigned char)*p->p++;
+        if (kind == 'n') to = '\n';
+        else if (kind == 'r') to = '\r';
+        else if (kind == 't') to = '\t';
+        else if (kind == 'f') to = '\f';
+        else if (kind == 'v') to = '\v';
+        else if (kind == '0') to = 0;
+        else if (kind == 'x') { to = brx_read_hex(p, 2); if (to < 0) to = 'x'; }
+        else if (kind == 'u') { to = brx_read_hex(p, 4); if (to < 0) to = 'u'; to &= 0xff; }
+        else to = kind;
+      } else {
+        to = (int)(unsigned char)*p->p++;
+      }
+      brx_class_range(node->cls, from, to);
+    } else {
+      brx_class_add(node->cls, (unsigned char)from);
+    }
+  }
+  if (*p->p == ']') p->p++;
+  if (negate) brx_class_invert(node->cls);
+  return node;
+}
+
+static BrxNode* brx_atom(BrxParser* p) {
+  BrxNode* node;
+  if (*p->p == '(') {
+    int capture = -1;
+    p->p++;
+    if (p->p[0] == '?' && p->p[1] == ':') {
+      p->p += 2;
+    } else {
+      capture = ++p->groups;
+    }
+    node = brx_node(BRX_GROUP);
+    node->capture = capture;
+    node->child = brx_alternation(p);
+    if (*p->p == ')') p->p++;
+    return node;
+  }
+  if (*p->p == '[') {
+    p->p++;
+    return brx_class(p);
+  }
+  if (*p->p == '.') {
+    p->p++;
+    return brx_node(BRX_ANY);
+  }
+  if (*p->p == '^') {
+    p->p++;
+    return brx_node(BRX_BOL);
+  }
+  if (*p->p == '$') {
+    p->p++;
+    return brx_node(BRX_EOL);
+  }
+  if (*p->p == '\\') {
+    int c;
+    p->p++;
+    c = (unsigned char)*p->p++;
+    if (c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S') {
+      node = brx_node(BRX_CLASS);
+      p->p -= 1;
+      brx_class_escape(p, node->cls);
+      return node;
+    }
+    if (c == 'b' || c == 'B') {
+      node = brx_node(BRX_BOUNDARY);
+      node->ch = c == 'b' ? 1 : 0;
+      return node;
+    }
+    node = brx_node(BRX_CHAR);
+    if (c == 'n') node->ch = '\n';
+    else if (c == 'r') node->ch = '\r';
+    else if (c == 't') node->ch = '\t';
+    else if (c == 'f') node->ch = '\f';
+    else if (c == 'v') node->ch = '\v';
+    else if (c == '0') node->ch = 0;
+    else if (c == 'x') {
+      int value = brx_read_hex(p, 2);
+      node->ch = value < 0 ? 'x' : value;
+    } else if (c == 'u') {
+      int value = brx_read_hex(p, 4);
+      node->ch = value < 0 ? 'u' : (value & 0xff);
+    } else node->ch = c;
+    return node;
+  }
+  node = brx_node(BRX_CHAR);
+  node->ch = (unsigned char)*p->p++;
+  return node;
+}
+
+static BrxNode* brx_repeat(BrxParser* p) {
+  BrxNode* atom = brx_atom(p);
+  int min = 0;
+  int max = -1;
+  int quantifier = 0;
+  if (*p->p == '*') {
+    p->p++;
+    quantifier = 1;
+    min = 0;
+    max = -1;
+  } else if (*p->p == '+') {
+    p->p++;
+    quantifier = 1;
+    min = 1;
+    max = -1;
+  } else if (*p->p == '?') {
+    p->p++;
+    quantifier = 1;
+    min = 0;
+    max = 1;
+  } else if (*p->p == '{') {
+    const char* save = p->p;
+    int low = 0;
+    int high = -1;
+    int any = 0;
+    p->p++;
+    while (isdigit((unsigned char)*p->p)) {
+      low = low * 10 + (*p->p - '0');
+      p->p++;
+      any = 1;
+    }
+    if (any) {
+      if (*p->p == ',') {
+        p->p++;
+        if (isdigit((unsigned char)*p->p)) {
+          high = 0;
+          while (isdigit((unsigned char)*p->p)) {
+            high = high * 10 + (*p->p - '0');
+            p->p++;
+          }
+        }
+      } else {
+        high = low;
+      }
+      if (*p->p == '}') {
+        p->p++;
+        quantifier = 1;
+        min = low;
+        max = high;
+      } else {
+        p->p = save;
+      }
+    } else {
+      p->p = save;
+    }
+  }
+  if (!quantifier) return atom;
+  {
+    BrxNode* repeat = brx_node(BRX_REPEAT);
+    repeat->child = atom;
+    repeat->min = min;
+    repeat->max = max;
+    repeat->greedy = *p->p == '?' ? 0 : 1;
+    if (*p->p == '?') p->p++;
+    return repeat;
+  }
+}
+
+static BrxNode* brx_sequence(BrxParser* p) {
+  BrxNode* head = NULL;
+  BrxNode* tail = NULL;
+  while (*p->p != '\0' && *p->p != '|' && *p->p != ')') {
+    BrxNode* atom = brx_repeat(p);
+    if (head == NULL) head = atom;
+    else tail->next = atom;
+    tail = atom;
+  }
+  return head;
+}
+
+static BrxNode* brx_alternation(BrxParser* p) {
+  BrxNode* first = brx_sequence(p);
+  BrxNode** branches = NULL;
+  int count = 0;
+  if (*p->p != '|') return first;
+  branches = (BrxNode**)malloc(sizeof(BrxNode*) * 8);
+  branches[count++] = first;
+  while (*p->p == '|') {
+    p->p++;
+    if (count % 8 == 0) branches = (BrxNode**)realloc(branches, sizeof(BrxNode*) * (size_t)(count + 8));
+    branches[count++] = brx_sequence(p);
+  }
+  {
+    BrxNode* node = brx_node(BRX_ALT);
+    node->branches = branches;
+    node->branch_count = count;
+    return node;
+  }
+}
+
+static int brx_is_word(int c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int brx_char_equal(const BrxCtx* ctx, int pattern, int text) {
+  if (pattern == text) return 1;
+  if (!ctx->re->icase) return 0;
+  return tolower((unsigned char)pattern) == tolower((unsigned char)text);
+}
+
+static int brx_class_match(const BrxCtx* ctx, const unsigned char* cls, int c) {
+  if (brx_class_has(cls, (unsigned char)c)) return 1;
+  if (!ctx->re->icase) return 0;
+  if (c >= 'a' && c <= 'z') return brx_class_has(cls, (unsigned char)toupper(c));
+  if (c >= 'A' && c <= 'Z') return brx_class_has(cls, (unsigned char)tolower(c));
+  return 0;
+}
+
+static int brx_boundary(const BrxCtx* ctx, int pos) {
+  int before = pos > 0 && brx_is_word((unsigned char)ctx->text[pos - 1]);
+  int after = pos < ctx->length && brx_is_word((unsigned char)ctx->text[pos]);
+  return before != after;
+}
+
+static int brx_match(BrxNode* node, int pos, const BrxCtx* ctx, BrxState* state, BrxCont* cont);
+
+static int brx_continue(BrxCont* cont, int pos, const BrxCtx* ctx, BrxState* state);
+
+static int brx_repeat_match(BrxNode* node, int count, int pos, const BrxCtx* ctx, BrxState* state, BrxCont* cont) {
+  if (node->greedy) {
+    if (node->max < 0 || count < node->max) {
+      BrxState copy = *state;
+      BrxCont again;
+      again.kind = BRX_C_REPEAT;
+      again.node = node;
+      again.repeat = node;
+      again.count = count + 1;
+      again.capture = -1;
+      again.next = cont;
+      {
+        int end = brx_match(node->child, pos, ctx, &copy, &again);
+        if (end >= 0) {
+          *state = copy;
+          return end;
+        }
+      }
+    }
+    if (count >= node->min) return brx_continue(cont, pos, ctx, state);
+    return -1;
+  }
+  if (count >= node->min) {
+    BrxState copy = *state;
+    int end = brx_continue(cont, pos, ctx, &copy);
+    if (end >= 0) {
+      *state = copy;
+      return end;
+    }
+  }
+  if (node->max < 0 || count < node->max) {
+    BrxState copy = *state;
+    BrxCont again;
+    again.kind = BRX_C_REPEAT;
+    again.node = node;
+    again.repeat = node;
+    again.count = count + 1;
+    again.capture = -1;
+    again.next = cont;
+    {
+      int end = brx_match(node->child, pos, ctx, &copy, &again);
+      if (end >= 0) {
+        *state = copy;
+        return end;
+      }
+    }
+  }
+  return -1;
+}
+
+static int brx_continue(BrxCont* cont, int pos, const BrxCtx* ctx, BrxState* state) {
+  if (cont == NULL) return pos;
+  switch (cont->kind) {
+    case BRX_C_NODE:
+      return brx_match(cont->node, pos, ctx, state, cont->next);
+    case BRX_C_REPEAT:
+      return brx_repeat_match(cont->repeat, cont->count, pos, ctx, state, cont->next);
+    case BRX_C_GROUP_END:
+      if (cont->capture >= 0 && cont->capture < BRX_MAX_GROUPS) state->caps[cont->capture * 2 + 1] = pos;
+      return brx_continue(cont->next, pos, ctx, state);
+  }
+  return -1;
+}
+
+static int brx_match(BrxNode* node, int pos, const BrxCtx* ctx, BrxState* state, BrxCont* cont) {
+  BrxCont after;
+  if (node == NULL) return brx_continue(cont, pos, ctx, state);
+  switch (node->kind) {
+    case BRX_CHAR:
+      if (pos < ctx->length && brx_char_equal(ctx, node->ch, (unsigned char)ctx->text[pos])) {
+        return brx_match(node->next, pos + 1, ctx, state, cont);
+      }
+      return -1;
+    case BRX_ANY:
+      if (pos < ctx->length && (ctx->re->dotall || ctx->text[pos] != '\n')) {
+        return brx_match(node->next, pos + 1, ctx, state, cont);
+      }
+      return -1;
+    case BRX_CLASS:
+      if (pos < ctx->length && brx_class_match(ctx, node->cls, (unsigned char)ctx->text[pos])) {
+        return brx_match(node->next, pos + 1, ctx, state, cont);
+      }
+      return -1;
+    case BRX_BOL:
+      if (pos == 0 || (ctx->re->multiline && ctx->text[pos - 1] == '\n')) {
+        return brx_match(node->next, pos, ctx, state, cont);
+      }
+      return -1;
+    case BRX_EOL:
+      if (pos == ctx->length ||
+          (ctx->re->multiline && ctx->text[pos] == '\n') ||
+          (!ctx->re->multiline && pos == ctx->length - 1 && ctx->text[pos] == '\n')) {
+        return brx_match(node->next, pos, ctx, state, cont);
+      }
+      return -1;
+    case BRX_BOUNDARY:
+      if ((brx_boundary(ctx, pos) ? 1 : 0) == node->ch) return brx_match(node->next, pos, ctx, state, cont);
+      return -1;
+    case BRX_ALT: {
+      int i;
+      for (i = 0; i < node->branch_count; i++) {
+        BrxState copy = *state;
+        after.kind = BRX_C_NODE;
+        after.node = node->next;
+        after.repeat = NULL;
+        after.count = 0;
+        after.capture = -1;
+        after.next = cont;
+        {
+          int end = brx_match(node->branches[i], pos, ctx, &copy, node->next != NULL ? &after : cont);
+          if (end >= 0) {
+            *state = copy;
+            return end;
+          }
+        }
+      }
+      return -1;
+    }
+    case BRX_GROUP: {
+      BrxState copy = *state;
+      BrxCont end;
+      BrxCont afterGroup;
+      if (node->capture >= 0 && node->capture < BRX_MAX_GROUPS) copy.caps[node->capture * 2] = pos;
+      end.kind = BRX_C_GROUP_END;
+      end.node = NULL;
+      end.repeat = NULL;
+      end.count = 0;
+      end.capture = node->capture;
+      if (node->next != NULL) {
+        afterGroup.kind = BRX_C_NODE;
+        afterGroup.node = node->next;
+        afterGroup.repeat = NULL;
+        afterGroup.count = 0;
+        afterGroup.capture = -1;
+        afterGroup.next = cont;
+        end.next = &afterGroup;
+      } else {
+        end.next = cont;
+      }
+      {
+        int answer = brx_match(node->child, pos, ctx, &copy, &end);
+        if (answer < 0) return -1;
+        *state = copy;
+        return answer;
+      }
+    }
+    case BRX_REPEAT: {
+      BrxCont afterRepeat;
+      if (node->next != NULL) {
+        afterRepeat.kind = BRX_C_NODE;
+        afterRepeat.node = node->next;
+        afterRepeat.repeat = NULL;
+        afterRepeat.count = 0;
+        afterRepeat.capture = -1;
+        afterRepeat.next = cont;
+        return brx_repeat_match(node, 0, pos, ctx, state, &afterRepeat);
+      }
+      return brx_repeat_match(node, 0, pos, ctx, state, cont);
+    }
+  }
+  return -1;
+}
+
+static BrxRegex* brx_compile(const char* pattern, const char* flags) {
+  BrxRegex* re;
+  BrxParser parser;
+  int i;
+  if (pattern == NULL) pattern = "";
+  if (flags == NULL) flags = "";
+  re = (BrxRegex*)calloc(1, sizeof(BrxRegex));
+  for (i = 0; flags[i] != '\0'; i++) {
+    if (flags[i] == 'i') re->icase = 1;
+    else if (flags[i] == 'm') re->multiline = 1;
+    else if (flags[i] == 's') re->dotall = 1;
+    else if (flags[i] == 'g') re->global = 1;
+  }
+  parser.p = pattern;
+  parser.groups = 0;
+  re->root = brx_alternation(&parser);
+  re->groups = parser.groups;
+  return re;
+}
+
+#define BRX_CACHE 64
+static BrxRegex* brx_cache[BRX_CACHE];
+static int brx_cache_count = 0;
+static pthread_mutex_t brx_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static BrxRegex* brx_cached(const char* pattern, const char* flags) {
+  int i;
+  BrxRegex* made;
+  if (pattern == NULL) pattern = "";
+  if (flags == NULL) flags = "";
+  pthread_mutex_lock(&brx_cache_lock);
+  for (i = 0; i < brx_cache_count; i++) {
+    BrxRegex* one = brx_cache[i];
+    if (strcmp(one->pattern_text, pattern) == 0 && strcmp(one->flags_text, flags) == 0) {
+      pthread_mutex_unlock(&brx_cache_lock);
+      return one;
+    }
+  }
+  made = brx_compile(pattern, flags);
+  made->pattern_text = brx_strdup(pattern);
+  made->flags_text = brx_strdup(flags);
+  if (brx_cache_count < BRX_CACHE) brx_cache[brx_cache_count++] = made;
+  pthread_mutex_unlock(&brx_cache_lock);
+  return made;
+}
+
+static int brx_at(const BrxRegex* re, const char* text, int length, int at, BrxState* out) {
+  BrxCtx ctx;
+  BrxState state;
+  int i;
+  int end;
+  ctx.text = text;
+  ctx.length = length;
+  ctx.re = re;
+  for (i = 0; i < BRX_MAX_GROUPS * 2; i++) state.caps[i] = -1;
+  end = brx_match(re->root, at, &ctx, &state, NULL);
+  if (end < 0) return -1;
+  state.caps[0] = at;
+  state.caps[1] = end;
+  *out = state;
+  return at;
+}
+
+static int brx_search(const BrxRegex* re, const char* text, int length, int from, BrxState* out) {
+  int at;
+  for (at = from; at <= length; at++) {
+    if (brx_at(re, text, length, at, out) >= 0) return at;
+  }
+  return -1;
+}
+
+static char* brx_slice(const char* text, int from, int to) {
+  if (from < 0) from = 0;
+  if (to < from) to = from;
+  return (char*)blaze_rt_string_new((const unsigned char*)text + from, (size_t)(to - from));
+}
+
+static char** brx_match_array(const BrxRegex* re, const char* text, int length, const BrxState* state) {
+  (void)length;
+  int count = re->groups + 1;
+  char** out = (char**)blaze_rt_array_new((size_t)count, sizeof(char*));
+  int i;
+  for (i = 0; i < count; i++) {
+    int from = state->caps[i * 2];
+    int to = state->caps[i * 2 + 1];
+    out[i] = from >= 0 && to >= from ? brx_slice(text, from, to) : (char*)blaze_rt_string_new(NULL, 0);
+  }
+  return out;
+}
+
+double blaze_rt_regex_test(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  if (text == NULL) text = "";
+  return brx_search(re, text, (int)strlen(text), 0, &state) >= 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_regex_search(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  if (text == NULL) text = "";
+  return (double)brx_search(re, text, (int)strlen(text), 0, &state);
+}
+
+char** blaze_rt_regex_exec(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  int length;
+  if (text == NULL) text = "";
+  length = (int)strlen(text);
+  if (brx_search(re, text, length, 0, &state) < 0) return NULL;
+  return brx_match_array(re, text, length, &state);
+}
+
+char** blaze_rt_regex_match(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  int length;
+  int at;
+  if (text == NULL) text = "";
+  length = (int)strlen(text);
+  if (!re->global) {
+    if (brx_search(re, text, length, 0, &state) < 0) return NULL;
+    return brx_match_array(re, text, length, &state);
+  }
+  {
+    int count = 0;
+    int from = 0;
+    while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+      count++;
+      at = state.caps[1];
+      from = at == state.caps[0] ? at + 1 : at;
+    }
+    if (count == 0) return NULL;
+    {
+      char** out = (char**)blaze_rt_array_new((size_t)count, sizeof(char*));
+      int index = 0;
+      from = 0;
+      while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+        out[index++] = brx_slice(text, state.caps[0], state.caps[1]);
+        at = state.caps[1];
+        from = at == state.caps[0] ? at + 1 : at;
+      }
+      return out;
+    }
+  }
+}
+
+/* A text built a piece at a time, so a replacement does not copy the whole
+   answer for every match. */
+typedef struct {
+  char* data;
+  size_t length;
+  size_t room;
+} BrxBuilder;
+
+static void brx_put(BrxBuilder* out, const char* text, size_t length) {
+  if (out->length + length + 1 > out->room) {
+    size_t room = out->room * 2 + length + 32;
+    out->data = (char*)realloc(out->data, room);
+    out->room = room;
+  }
+  memcpy(out->data + out->length, text, length);
+  out->length += length;
+  out->data[out->length] = '\0';
+}
+
+static void brx_putc(BrxBuilder* out, char c) {
+  brx_put(out, &c, 1);
+}
+
+static void brx_replacement(BrxBuilder* out, const char* replacement, const char* text, int length, const BrxState* state) {
+  int i = 0;
+  while (replacement[i] != '\0') {
+    if (replacement[i] != '$') {
+      brx_putc(out, replacement[i++]);
+      continue;
+    }
+    i++;
+    if (replacement[i] == '$') {
+      brx_putc(out, '$');
+      i++;
+    } else if (replacement[i] == '&' || replacement[i] == '0') {
+      brx_put(out, text + state->caps[0], (size_t)(state->caps[1] - state->caps[0]));
+      i++;
+    } else if (replacement[i] >= '1' && replacement[i] <= '9') {
+      int group = replacement[i] - '0';
+      int from = state->caps[group * 2];
+      int to = state->caps[group * 2 + 1];
+      if (from >= 0 && to >= from) brx_put(out, text + from, (size_t)(to - from));
+      i++;
+    } else if (replacement[i] == 96) {
+      brx_put(out, text, (size_t)state->caps[0]);
+      i++;
+    } else if (replacement[i] == '\'') {
+      brx_put(out, text + state->caps[1], (size_t)(length - state->caps[1]));
+      i++;
+    } else {
+      brx_putc(out, '$');
+    }
+  }
+}
+
+char*** blaze_rt_regex_match_all(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  int length;
+  int count = 0;
+  int from = 0;
+  int at;
+  char*** out;
+  int index;
+  if (text == NULL) text = "";
+  length = (int)strlen(text);
+  while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+    count++;
+    at = state.caps[1];
+    from = at == state.caps[0] ? at + 1 : at;
+  }
+  out = (char***)blaze_rt_array_new((size_t)count, sizeof(char**));
+  if (count == 0) return out;
+  index = 0;
+  from = 0;
+  while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+    out[index++] = brx_match_array(re, text, length, &state);
+    at = state.caps[1];
+    from = at == state.caps[0] ? at + 1 : at;
+  }
+  return out;
+}
+
+const char* blaze_rt_regex_replace(const char* pattern, const char* flags, const char* text, const char* replacement) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  BrxBuilder out;
+  int length;
+  int from;
+  int last = 0;
+  int at;
+  if (text == NULL) text = "";
+  if (replacement == NULL) replacement = "";
+  length = (int)strlen(text);
+  out.data = NULL;
+  out.length = 0;
+  out.room = 0;
+  from = 0;
+  while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+    at = state.caps[0];
+    brx_put(&out, text + last, (size_t)(at - last));
+    brx_replacement(&out, replacement, text, length, &state);
+    last = state.caps[1];
+    if (!re->global) break;
+    if (last == at) {
+      if (last < length) {
+        brx_putc(&out, text[last]);
+        last++;
+        from = last;
+      } else {
+        break;
+      }
+    } else {
+      from = last;
+    }
+  }
+  brx_put(&out, text + last, (size_t)(length - last));
+  {
+    const char* answer = blaze_rt_string_new((const unsigned char*)out.data, out.length);
+    free(out.data);
+    return answer;
+  }
+}
+
+char** blaze_rt_regex_split(const char* pattern, const char* flags, const char* text) {
+  BrxRegex* re = brx_cached(pattern, flags);
+  BrxState state;
+  char** parts;
+  int length;
+  int count = 0;
+  int last = 0;
+  int from = 0;
+  int at;
+  int i;
+  if (text == NULL) text = "";
+  length = (int)strlen(text);
+  parts = (char**)malloc(sizeof(char*) * (size_t)(length + 1));
+  while (from <= length && brx_search(re, text, length, from, &state) >= 0) {
+    at = state.caps[0];
+    parts[count++] = (char*)brx_slice(text, last, at);
+    for (i = 1; i <= re->groups; i++) {
+      int groupFrom = state.caps[i * 2];
+      int groupTo = state.caps[i * 2 + 1];
+      parts[count++] = groupFrom >= 0 && groupTo >= groupFrom
+        ? brx_slice(text, groupFrom, groupTo)
+        : (char*)blaze_rt_string_new(NULL, 0);
+    }
+    last = state.caps[1];
+    if (last == at) {
+      if (last < length) {
+        from = last + 1;
+      } else {
+        break;
+      }
+    } else {
+      from = last;
+    }
+  }
+  parts[count++] = (char*)brx_slice(text, last, length);
+  {
+    char** out = (char**)blaze_rt_array_new((size_t)count, sizeof(char*));
+    for (i = 0; i < count; i++) out[i] = parts[i];
+    free(parts);
+    return out;
+  }
+}
+`;
+
 /** Every runtime the compiler knows about, by the kind that selects it. */
 export const RUNTIME_TITLES: Record<RuntimeKind, string> = {
   none: "the compiler runtime",
@@ -706,6 +1660,13 @@ const TEXT_DECLARATIONS: readonly string[] = [
   "long long blaze_rt_text_index_of(const char* text, const char* needle)",
   "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
   "const char* blaze_rt_text_trim(const char* text)",
+  "double blaze_rt_regex_test(const char* pattern, const char* flags, const char* text)",
+  "double blaze_rt_regex_search(const char* pattern, const char* flags, const char* text)",
+  "char** blaze_rt_regex_exec(const char* pattern, const char* flags, const char* text)",
+  "char** blaze_rt_regex_match(const char* pattern, const char* flags, const char* text)",
+  "char*** blaze_rt_regex_match_all(const char* pattern, const char* flags, const char* text)",
+  "const char* blaze_rt_regex_replace(const char* pattern, const char* flags, const char* text, const char* replacement)",
+  "char** blaze_rt_regex_split(const char* pattern, const char* flags, const char* text)",
 ];
 
 /**
@@ -2301,6 +3262,7 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <ctype.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -2968,6 +3930,8 @@ const char* blaze_rt_text_trim(const char* text) {
   while (stop > start && blaze_rt_text_is_space(text[stop - 1])) stop -= 1;
   return blaze_rt_string_new((const unsigned char*)text + start, (size_t)(stop - start));
 }
+
+${REGEX_RUNTIME_SOURCE}
 
 void* blaze_rt_array_new(size_t count, size_t elementSize) {
   /* Cleared, and deliberately so. A program is allowed to read past what it

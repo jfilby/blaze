@@ -801,6 +801,44 @@ test("a closure handed on through another arrow keeps what both captured", async
   assert.equal(output.trim(), "13");
 });
 
+test("a regular expression reads, cuts, replaces and walks the texts it matches", async () => {
+  // A pattern and its flags are the two texts a variable holds, and the
+  // runtime compiles the pair: `test` and `exec` are the expression's own
+  // methods, and `replace`, `split`, `matchAll` and `search` are the text's.
+  const source = [
+    "const ID = /^([A-Za-z_][A-Za-z0-9_]*)/;",
+    "function check(s: string): number {",
+    "  let n = 0;",
+    "  if (ID.test(s)) n += 1;",
+    "  const m = ID.exec(s);",
+    "  if (m !== null && m[1] === `abc`) n += 10;",
+    "  if (/^\\d+$/.test(s)) n += 100;",
+    "  return n;",
+    "}",
+    "function parts(s: string): number { return s.split(/\\s+/).length; }",
+    "function swap(s: string): string { return s.replace(/([a-z]+)-([a-z]+)/, `$2 $1`); }",
+    "function letters(s: string): number {",
+    "  let n = 0;",
+    "  for (const match of s.matchAll(/[a-z]+/g)) n += match[0].length;",
+    "  return n;",
+    "}",
+    "function where(s: string): number { return s.search(/[0-9]/); }",
+    "function dynamic(s: string): boolean { return new RegExp(`^\\\\d+$`).test(s); }",
+    "function insensitive(s: string): boolean { return /^abc$/i.test(s); }",
+    "console.log(check(`abc`), check(`123`), parts(`a  b c`), swap(`one-two`), letters(`ab cd e`), where(`ab12`), dynamic(`42`), insensitive(`ABC`));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await build(source, backend);
+    const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(original.code, 0, original.stderr);
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, original.stdout, `the ${backend} build answers what node answers`);
+    assert.equal(delivered.stdout.trim(), "11 100 3 two one 5 2 true true");
+  }
+});
+
 test("a closure lowers through the C backend, and the machine backend leaves it to C", async () => {
   // A closure is a code address beside the values it captured, which is a value
   // the machine backend does not hold: it refuses and the program is lowered by

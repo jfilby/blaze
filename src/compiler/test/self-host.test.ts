@@ -37,11 +37,13 @@ import { selfHostGap } from "./self-host-gap.ts";
  * after one whose result is an object type raised it to 5505: the class scanner
  * had taken the type's brace for the body, so those methods were never read and
  * the gaps inside them were never counted. Reading `at` and `slice` of an array
- * lowered it to 5496. Lower it with every slice; raise it only when the
- * measurement changes which parser reads a body, or when the compiler itself
- * grows a construct the frontend has not learned yet.
+ * lowered it to 5496, and reading a regular expression — its pattern, its
+ * flags, and the methods that read a text with it — to 5319. Lower it with
+ * every slice; raise it only when the measurement changes which parser reads a
+ * body, or when the compiler itself grows a construct the frontend has not
+ * learned yet.
  */
-const REFUSAL_BUDGET = 5496;
+const REFUSAL_BUDGET = 5319;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

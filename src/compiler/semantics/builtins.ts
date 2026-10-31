@@ -140,6 +140,35 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `text.trim()` answers the text with the whitespace at both ends gone:
    *  the ends of a line a file is read with arrive still attached to it. */
   "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
+  /** A regular expression is the pattern and the flags it was written with,
+   *  and the runtime compiles it once per shape. `test` answers whether the
+   *  text holds a match, `exec` and `match` answer the groups, `match_all`
+   *  answers every match, `replace` builds the text with the matches
+   *  replaced, `split` cuts the text where they lie, and `search` answers
+   *  where the first one starts. */
+  "blaze_rt_regex_test": { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 },
+  "blaze_rt_regex_search": { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 },
+  "blaze_rt_regex_exec": {
+    params: [TEXT, TEXT, TEXT],
+    returns: { kind: "slice", of: TEXT },
+    arity: 3,
+  },
+  "blaze_rt_regex_match": {
+    params: [TEXT, TEXT, TEXT],
+    returns: { kind: "slice", of: TEXT },
+    arity: 3,
+  },
+  "blaze_rt_regex_match_all": {
+    params: [TEXT, TEXT, TEXT],
+    returns: { kind: "slice", of: { kind: "slice", of: TEXT } },
+    arity: 3,
+  },
+  "blaze_rt_regex_replace": { params: [TEXT, TEXT, TEXT, TEXT], returns: TEXT, arity: 4 },
+  "blaze_rt_regex_split": {
+    params: [TEXT, TEXT, TEXT],
+    returns: { kind: "slice", of: TEXT },
+    arity: 3,
+  },
   "JSON.stringify": { params: [ANY], returns: ANY, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
   /** `JSON.get(value, key)` reads one field of a dynamic object the runtime

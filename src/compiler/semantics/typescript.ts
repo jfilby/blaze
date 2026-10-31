@@ -1375,7 +1375,7 @@ function constantRange(tokens: readonly Token[], start: number, end: number): bo
   const operators: ReadonlySet<string> = new Set(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", "(", ")"]);
   for (let index = start; index < end; index += 1) {
     const token = tokens[index] as Token;
-    if (token.kind === "number" || token.kind === "bigint" || token.kind === "string") continue;
+    if (token.kind === "number" || token.kind === "bigint" || token.kind === "string" || token.kind === "regex") continue;
     if (token.kind === "punct" && operators.has(token.text)) continue;
     if (token.kind === "ident" && token.text === "BigInt") continue;
     return false;
@@ -1387,7 +1387,7 @@ function constantRange(tokens: readonly Token[], start: number, end: number): bo
 /* Lexer                                                                      */
 /* -------------------------------------------------------------------------- */
 
-export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "unknown" | "end";
+export type TokenKind = "number" | "bigint" | "ident" | "punct" | "string" | "regex" | "unknown" | "end";
 
 export interface Token {
   kind: TokenKind;
@@ -1397,8 +1397,49 @@ export interface Token {
   template?: boolean;
   /** The character the string was written with. */
   quote?: string;
+  /** Set on a regular expression, whose text is the pattern it matches. */
+  flags?: string;
 }
 const PUNCTUATION = ["...", "===", "!==", "**=", "**", "==", "!=", "<=", ">=", ">>>=", ">>=", "<<=", "<<", ">>>", ">>", "&&", "||", "??=", "??", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "=>", "{", "}", "(", ")", "[", "]", ";", ",", ":", "?", "=", "<", ">", "+", "-", "*", "/", "%", ".", "!", "~", "&", "|", "^"];
+
+/**
+ * Whether a slash where the scanner stands starts a regular expression rather
+ * than divides.
+ *
+ * A slash is division after a value: a name, a number, a string, a call, an
+ * index or a literal regular expression. It is the start of one everywhere an
+ * expression starts, and after the keywords a body writes before a value. The
+ * two forms share a character, so this is the one question the scanner asks of
+ * the token before it.
+ */
+const REGEX_PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
+  "return",
+  "case",
+  "throw",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "do",
+  "else",
+  "yield",
+  "await",
+  "default",
+]);
+
+function regexAllowed(tokens: readonly Token[]): boolean {
+  const last = tokens[tokens.length - 1];
+  if (last === undefined) return true;
+  if (last.kind === "number" || last.kind === "bigint" || last.kind === "string" || last.kind === "regex") return false;
+  if (last.kind === "ident") return REGEX_PREFIX_KEYWORDS.has(last.text);
+  if (last.kind === "punct") {
+    return last.text !== ")" && last.text !== "]" && last.text !== "}" && last.text !== "++" && last.text !== "--";
+  }
+  return true;
+}
 
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
@@ -1426,6 +1467,36 @@ export function tokenize(source: string): Token[] {
       if (end < 0) throw frontendError("unterminated block comment", `line ${line}`);
       line += (source.slice(index, end).match(/\n/g) ?? []).length;
       index = end + 2;
+      continue;
+    }
+    // A slash that starts an expression is a regular expression, and its
+    // pattern runs to the next slash outside a character class. A backslash
+    // covers the character after it, so a slash written as `\/` is part of the
+    // pattern and not its end; a slash inside `[...]` is part of the class.
+    if (character === "/" && !source.startsWith("/=", index) && regexAllowed(tokens)) {
+      const startLine = line;
+      let end = index + 1;
+      let inClass = false;
+      for (;;) {
+        if (end >= source.length || source[end] === "\n") {
+          throw frontendError("unterminated regular expression", `line ${startLine}`);
+        }
+        const next = source[end];
+        if (next === "\\") {
+          end += 2;
+          continue;
+        }
+        if (next === "[") inClass = true;
+        else if (next === "]") inClass = false;
+        else if (next === "/" && !inClass) break;
+        end += 1;
+      }
+      const pattern = source.slice(index + 1, end);
+      let after = end + 1;
+      const flagStart = after;
+      while (after < source.length && /[a-z]/.test(source[after] as string)) after += 1;
+      tokens.push({ kind: "regex", text: pattern, flags: source.slice(flagStart, after), line: startLine });
+      index = after;
       continue;
     }
     if (character === '"' || character === "'" || character === "`") {
@@ -1741,6 +1812,10 @@ class TypeScriptParser {
    * the array is built with.
    */
   private expecting: TypeExpr | null = null;
+  /** The lists that are a regular expression's pattern and flags. */
+  private readonly regexValues = new Set<Expression>();
+  /** The names bound to a regular expression, read by the methods of one. */
+  private valueRegexes = new Set<string>();
   /**
    * The type the function being read hands back, which is what a returned list
    * is built at. A bare `return []` names no element of its own, and the
@@ -2030,6 +2105,7 @@ class TypeScriptParser {
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
     const savedCollections = this.valueCollections;
+    const savedRegexes = this.valueRegexes;
     this.tokens = this.allTokens;
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
@@ -2037,6 +2113,7 @@ class TypeScriptParser {
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
+    this.valueRegexes = new Set();
     if (self) this.valueClasses.set("self", info.name);
     for (const param of params) {
       const typeName = this.classTypeName(param.typeName);
@@ -2054,6 +2131,7 @@ class TypeScriptParser {
       this.valueArrows = savedArrows;
       this.valueFunctions = savedFunctions;
       this.valueCollections = savedCollections;
+      this.valueRegexes = savedRegexes;
     }
   }
 
@@ -3949,6 +4027,8 @@ class TypeScriptParser {
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
       this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      if (init.k === "buffer" && this.regexValues.has(init)) this.valueRegexes.add(name.text);
+      else this.valueRegexes.delete(name.text);
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
@@ -5338,6 +5418,14 @@ class TypeScriptParser {
               continue;
             }
           }
+          // `re.test(text)` and `re.exec(text)`: a regular expression answers
+          // the two methods itself, before the array and text methods are
+          // asked and before a class is looked for.
+          const regexed = this.regexMethod(receiver, target.field, args);
+          if (regexed !== null) {
+            replace(regexed);
+            continue;
+          }
           // `a.map(f)`: a method of a typed array is a function of the file that
           // walks the array, so it is read before a method of a class is looked
           // for. A receiver that is not a sequence falls through to the classes
@@ -5713,6 +5801,7 @@ class TypeScriptParser {
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
     const savedCollections = this.valueCollections;
+    const savedRegexes = this.valueRegexes;
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
@@ -5749,6 +5838,7 @@ class TypeScriptParser {
     this.valueArrows = savedArrows;
     this.valueFunctions = savedFunctions;
     this.valueCollections = savedCollections;
+    this.valueRegexes = savedRegexes;
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
     const returns =
@@ -6016,11 +6106,99 @@ class TypeScriptParser {
    * A needle an `endsWith` reads twice must be a value that reads the same
    * twice; a call would run twice, which is not what the source wrote.
    */
+  /** The pattern and flags of a regular expression, or null where it is not one. */
+  private regexOf(value: Expression): { pattern: Expression; flags: Expression } | null {
+    if (value.k === "buffer" && this.regexValues.has(value) && value.values.length >= 2) {
+      return { pattern: value.values[0] as Expression, flags: value.values[1] as Expression };
+    }
+    if (value.k === "ident" && this.valueRegexes.has(value.name)) {
+      return {
+        pattern: { k: "index", base: { k: "ident", name: value.name }, index: { k: "literal", text: "0" } },
+        flags: { k: "index", base: { k: "ident", name: value.name }, index: { k: "literal", text: "1" } },
+      };
+    }
+    return null;
+  }
+
+  /**
+   * `re.test(text)` and `re.exec(text)`: the two methods a regular expression
+   * itself answers. A match is the list of the whole match and its groups, so
+   * `exec` is typed as a list of texts, and `test` is the truth of whether the
+   * list is there at all.
+   */
+  private regexMethod(
+    receiver: Expression,
+    method: string,
+    args: readonly Expression[],
+  ): Expression | null {
+    const regex = this.regexOf(receiver);
+    if (regex === null) return null;
+    if (method === "test" && args.length === 1) {
+      const call: Expression = {
+        k: "call",
+        name: "blaze_rt_regex_test",
+        args: [regex.pattern, regex.flags, args[0] as Expression],
+      };
+      this.expressionTypes.set(call, NUMBER_RESULT);
+      const answer: Expression = { k: "binary", op: "!==", left: call, right: { k: "literal", text: "0" } };
+      this.expressionTypes.set(answer, BOOLEAN_RESULT);
+      return answer;
+    }
+    if (method === "exec" && args.length === 1) {
+      const call: Expression = {
+        k: "call",
+        name: "blaze_rt_regex_exec",
+        args: [regex.pattern, regex.flags, args[0] as Expression],
+      };
+      this.expressionTypes.set(call, { kind: "slice", of: TEXT_RESULT });
+      return call;
+    }
+    if (method === "source" && args.length === 0) return regex.pattern;
+    if (method === "flags" && args.length === 0) return regex.flags;
+    return null;
+  }
+
+  /** A text method whose first argument is a regular expression. */
+  private regexTextMethod(
+    receiver: Expression,
+    method: string,
+    args: readonly Expression[],
+    regex: { pattern: Expression; flags: Expression },
+  ): Expression | null {
+    const call = (name: string, values: Expression[], type: TypeExpr): Expression => {
+      const value: Expression = { k: "call", name, args: values };
+      this.expressionTypes.set(value, type);
+      return value;
+    };
+    const head = [regex.pattern, regex.flags, receiver];
+    if (method === "replace" && args.length === 2) {
+      return call("blaze_rt_regex_replace", [...head, args[1] as Expression], TEXT_RESULT);
+    }
+    if (method === "split" && args.length === 1) {
+      return call("blaze_rt_regex_split", head, { kind: "slice", of: TEXT_RESULT });
+    }
+    if (method === "match" && args.length === 1) {
+      return call("blaze_rt_regex_match", head, { kind: "slice", of: TEXT_RESULT });
+    }
+    if (method === "matchAll" && args.length === 1) {
+      return call("blaze_rt_regex_match_all", head, { kind: "slice", of: { kind: "slice", of: TEXT_RESULT } });
+    }
+    if (method === "search" && args.length === 1) {
+      return call("blaze_rt_regex_search", head, NUMBER_RESULT);
+    }
+    return null;
+  }
+
   private textMethod(
     receiver: Expression,
     method: string,
     args: readonly Expression[],
   ): Expression | null {
+    const regex = args[0] === undefined ? null : this.regexOf(args[0]);
+    if (regex !== null) {
+      const lowered = this.regexTextMethod(receiver, method, args, regex);
+      if (lowered !== null) return lowered;
+    }
     const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
     if (method === "trim" && args.length === 0) return call("text.trim", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
@@ -6748,6 +6926,22 @@ class TypeScriptParser {
       this.synchronize(false);
       return this.hole();
     }
+    if (token.kind === "regex") {
+      // A regular expression is the pattern and the flags it was written with,
+      // in the two texts every regular-expression operation is handed. The
+      // runtime compiles the pair, and a variable holds the pair like any other
+      // list of texts.
+      const value: Expression = {
+        k: "buffer",
+        element: "text",
+        values: [
+          { k: "text", parts: [{ k: "text", value: token.text }] },
+          { k: "text", parts: [{ k: "text", value: token.flags ?? "" }] },
+        ],
+      };
+      this.regexValues.add(value);
+      return value;
+    }
     if (token.kind === "number") return { k: "literal", text: token.text };
     if (token.kind === "bigint") return { k: "bigint", text: token.text };
     if (token.kind === "string") {
@@ -7033,6 +7227,23 @@ class TypeScriptParser {
         const params = info.constructor?.params ?? [];
         return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
+    }
+    // `new RegExp(pattern, flags)`: the same pair a written-out regular
+    // expression is, with the pattern and the flags the source computed.
+    if (view.kind === "ident" && view.text === "RegExp") {
+      if (!this.at("(")) {
+        this.report("a regular expression is created from its pattern", "as in new RegExp(`^\\\\d+$`)", view);
+        return this.hole();
+      }
+      const args = this.readCallArguments();
+      const empty: Expression = { k: "text", parts: [] };
+      const value: Expression = {
+        k: "buffer",
+        element: "text",
+        values: [args[0] ?? empty, args[1] ?? empty],
+      };
+      this.regexValues.add(value);
+      return value;
     }
     if (view.kind === "ident" && (view.text === "Map" || view.text === "Set" || view.text === "WeakMap" || view.text === "WeakSet")) {
       return this.readCollectionAllocation(view);

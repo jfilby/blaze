@@ -1431,6 +1431,14 @@ class ProgramParser {
   /** A value on its own. */
   private primary(): ProgramValue {
     const token = this.peek();
+    // A regular expression is a value a function reads, and the module frontend
+    // carries the two texts it is made of. A program body holds it as the text
+    // it was written as, which is enough to skip a constant the program does
+    // not read.
+    if (token.kind === "regex") {
+      this.next();
+      return { k: "text", parts: [{ k: "text", value: `/${token.text}/${token.flags ?? ""}` }] };
+    }
     if (token.kind === "ident" && token.text === "async") {
       this.next();
       // `async (...) => body` and `async x => body`: an arrow function whose

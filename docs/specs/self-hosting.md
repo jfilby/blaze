@@ -78,8 +78,8 @@ held in a class field to 4513, and a declaration that states its type and no
 value to 4489, and a `for (;;)` loop to 4405. Reading the class methods written
 after one whose result is an object type raised it to 5505: the scanner had
 taken the type's brace for the method body, so those methods were never read.
-Reading `at` and `slice` of an array lowered it to 5496. The refusals fall into
-six frontiers:
+Reading `at` and `slice` of an array lowered it to 5496, and reading regular
+expressions to 5319. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried. The remaining type-shaped
   refusal is the optional parameter, which needs an absent value the value model
@@ -219,10 +219,20 @@ to carry those without a rewrite into numeric arrays:
   fields. A compiler's symbol tables are maps of references.
 - **Text.** `trim`, `includes`, `startsWith`, `endsWith`, `indexOf` and `slice`
   are carried. Still missing: `replace`, `split`, `toLowerCase`, `repeat` and
-  `padStart`/`padEnd`. A runtime regular-expression engine is a decision of its
-  own: the source has about 180 regex literals, and rewriting them as
-  hand-written scanners is a larger and more fragile change than carrying a
-  small engine. Choose the engine before porting `semantics/contract.ts`.
+  `padStart`/`padEnd`, except where the first argument of `replace` or `split`
+  is a regular expression.
+
+  Regular expressions are carried by a small backtracking engine in the
+  compiler runtime (`runtime/abi.ts`), reachable through the text helpers so it
+  needs no host service: it supports literals, `.`, character classes and
+  ranges, the `\d \w \s \b` escapes, `\n \r \t \xHH \uHHHH`, anchors, groups,
+  non-capturing groups, alternation, greedy and lazy `* + ? {m,n}` quantifiers,
+  and the `g`, `i`, `m` and `s` flags. A literal is the pattern and flags it was
+  written with, held as the two texts a variable of `RegExp` type holds;
+  `new RegExp(text, flags)` builds the same pair at run time. `test` and `exec`
+  are the expression's methods, and `replace`, `split`, `match`, `matchAll` and
+  `search` are the text's. Lookaround and backreferences are not carried,
+  because no pattern in the compiler's own source writes one.
 
 Exit criterion: a compiler module that does no host I/O runs natively and its
 existing tests pass.
