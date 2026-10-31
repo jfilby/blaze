@@ -344,8 +344,17 @@ const WIDE_RESULT: TypeExpr = { kind: "primitive", name: "u256" };
  * over two `u256` names is a `u256` and not the `any` a reader without the
  * scope would have to guess. A body whose returns disagree is the `any` a
  * value no annotation pinned holds.
+ *
+ * `known` is a reader that types a value the body wrote from what the frontend
+ * knows and `resultType` does not — a call answers what its callee answers, and
+ * a field of a parameter is the field its shape declares. It answers null where
+ * it has nothing better than `resultType`.
  */
-function inferredResult(body: readonly Statement[], params: readonly { name: string; type: TypeExpr }[]): TypeExpr {
+function inferredResult(
+  body: readonly Statement[],
+  params: readonly { name: string; type: TypeExpr }[],
+  known?: (value: Expression, scope: ReadonlyMap<string, TypeExpr>) => TypeExpr | null,
+): TypeExpr {
   const scope = new Map<string, TypeExpr>(params.map((param) => [param.name, param.type]));
   describeDeclarations(body, scope);
   const written: Expression[] = [];
@@ -357,7 +366,7 @@ function inferredResult(body: readonly Statement[], params: readonly { name: str
   if (bare.found) return ANY_TYPE;
   let found: TypeExpr | null = null;
   for (const value of written) {
-    const type = resultType(value, scope);
+    const type = known?.(value, scope) ?? resultType(value, scope);
     if (found === null) {
       found = type;
       continue;
@@ -1657,6 +1666,18 @@ interface FunctionType {
 }
 
 /**
+ * A type a use fixes an arrow's parameter at.
+ *
+ * The type is what the contract can carry, and the shape is what a record the
+ * contract erases still says: `a.map((r) => r.name)` over an array of an
+ * interface reads `name` through the shape, not through the type.
+ */
+interface ArrowParameterType {
+  type: TypeExpr;
+  shape: ResolvedType | null;
+}
+
+/**
  * What a name holds when it is a map or a set.
  *
  * A map is a value of this compiler like any other: one handle, which is the
@@ -1808,6 +1829,16 @@ class TypeScriptParser {
   private valueTypes = new Map<string, TypeExpr>();
   /** The arrow each name of the function being read is bound to. */
   private valueArrows = new Map<string, ArrowBinding>();
+  /**
+   * The types an arrow written at the cursor is read at, when the use says them.
+   *
+   * A collection method walks the elements of the array it is called on, so
+   * `a.map((x) => x.trim())` reads `x` as the element type without the source
+   * writing it. The hint is the callback's parameters in order, and it is read
+   * by the arrow at the cursor and cleared there: an arrow written inside the
+   * body is a callback of a call of its own.
+   */
+  private arrowParameters: readonly ArrowParameterType[] | null = null;
   /** The arrow each lifted function was made from, by the function's name. */
   private arrowBindings = new Map<string, ArrowBinding>();
   /**
@@ -2752,6 +2783,47 @@ class TypeScriptParser {
       name: param.name,
       type: this.classTable.names.has(param.typeName) ? this.referenceTo(param.typeName) : this.typeForName(param.typeName, param.line),
     }));
+  }
+
+  /**
+   * The parameters of the callback a collection method walks its elements with.
+   *
+   * The element type of the receiver is what the callback's first parameter is,
+   * so `a.map((x) => x.trim())` reads `x` as the text the array holds. The
+   * position follows, and then the array itself, for the callbacks that ask for
+   * them. A `sort` compares two elements, and a `reduce` starts from one.
+   *
+   * A method that takes no callback, or a receiver whose elements have no type
+   * this frontend knows, says nothing and the callback keeps the type it was
+   * written at.
+   */
+  private collectionCallbackParameters(receiver: Expression, method: string): readonly ArrowParameterType[] | null {
+    if (!COLLECTION_METHODS.has(method)) return null;
+    if (method === "join" || method === "includes" || method === "indexOf" || method === "at" || method === "slice") return null;
+    const sequence = this.valueTypeOf(receiver);
+    if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
+    const element: ArrowParameterType = { type: sequence.of, shape: this.elementShapeOf(receiver, sequence.of) };
+    const index: ArrowParameterType = { type: NUMBER_RESULT, shape: null };
+    const list: ArrowParameterType = {
+      type: { kind: "slice", of: sequence.of },
+      shape: { kind: "list", of: element.shape ?? { kind: "any" } },
+    };
+    if (method === "sort") return [element, element];
+    if (method === "reduce") return [element, element, index, list];
+    return [element, index, list];
+  }
+
+  /**
+   * What an element of a receiver's array holds when the contract erased it.
+   *
+   * An array of an interface is an array of references the contract cannot name
+   * a field of, and the shape of the array is what says the fields. Where the
+   * receiver's own declaration has no shape, the element type names one.
+   */
+  private elementShapeOf(receiver: Expression, element: TypeExpr): ResolvedType | null {
+    const sequence = this.shapeOf(receiver);
+    if (sequence !== null && sequence.kind === "list") return sequence.of;
+    return this.shapeOfNamedType(element);
   }
 
   /** The types a method's written arguments are read at, when a class answers it. */
@@ -6104,7 +6176,10 @@ class TypeScriptParser {
         // instance the source called it on.
         if (target.k === "member") {
           const callLine = this.peek().line;
-          const args = this.readCallArguments(this.expectedMethodArguments(target.base, target.field));
+          const args = this.readCallArguments(
+            this.expectedMethodArguments(target.base, target.field),
+            this.collectionCallbackParameters(target.base, target.field),
+          );
           const receiver = target.base;
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
@@ -6310,18 +6385,43 @@ class TypeScriptParser {
     }
   }
 
-  /** The arguments of a call, from the `(` the parser is at to its `)`. */
-  private readCallArguments(expected: readonly TypeExpr[] = []): Expression[] {
+  /**
+   * The arguments of a call, from the `(` the parser is at to its `)`.
+   *
+   * `expected` is the type each argument is held at, and `callback` is the
+   * parameters of the arrow the first argument writes, when the call is a
+   * collection method that walks the elements of its receiver.
+   */
+  private readCallArguments(
+    expected: readonly TypeExpr[] = [],
+    callback: readonly ArrowParameterType[] | null = null,
+  ): Expression[] {
     this.next();
     const args: Expression[] = [];
     while (!this.at(")") && this.peek().kind !== "end") {
       const type = expected[args.length] ?? null;
-      args.push(type === null ? this.readExpression() : this.readAt(type, () => this.readExpression()));
+      args.push(this.readArgument(type, args.length === 0 ? callback : null));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
     this.expect(")");
     return args;
+  }
+
+  /** One argument of a call, read at the type its use says and its arrow hints. */
+  private readArgument(type: TypeExpr | null, callback: readonly ArrowParameterType[] | null): Expression {
+    const read = (): Expression => (type === null ? this.readExpression() : this.readAt(type, () => this.readExpression()));
+    // A hint applies only to the arrow written at the cursor. A hint on a value
+    // that is not an arrow names no parameter, and is not passed on to an arrow
+    // the value contains.
+    if (callback === null || this.arrowAt() === null) return read();
+    const saved = this.arrowParameters;
+    this.arrowParameters = callback;
+    try {
+      return read();
+    } finally {
+      this.arrowParameters = saved;
+    }
   }
 
   /**
@@ -6395,8 +6495,18 @@ class TypeScriptParser {
    * closes on an `=>` begins one, and so does a name with an `=>` after it.
    */
   private arrowPrimary(): Expression | null {
-    const at = this.position;
-    let head = at;
+    const arrow = this.arrowAt();
+    return arrow === null ? null : this.readArrow(arrow.async);
+  }
+
+  /**
+   * Whether the tokens at the cursor begin an arrow, and whether it is async.
+   *
+   * This reads ahead and consumes nothing, so a caller that has a type for the
+   * arrow's parameters can say so before the arrow is read.
+   */
+  private arrowAt(): { async: boolean } | null {
+    let head = this.position;
     let isAsync = false;
     if (this.tokens[head]?.text === "async") {
       const next = this.tokens[head + 1];
@@ -6418,7 +6528,7 @@ class TypeScriptParser {
     } else if (!(token.kind === "ident" && this.tokens[head + 1]?.text === "=>")) {
       return null;
     }
-    return this.readArrow(isAsync);
+    return { async: isAsync };
   }
 
   /** The index of the bracket that closes the one at `from`, or -1. */
@@ -6461,6 +6571,10 @@ class TypeScriptParser {
     const start = this.peek();
     if (isAsync) this.next();
     const line = start.line;
+    // The types the use wrote for this arrow's parameters. A nested arrow is a
+    // callback of a call of its own, so the hint is taken and cleared here.
+    const hints = this.arrowParameters;
+    this.arrowParameters = null;
     interface ArrowParam {
       name: string;
       type: TypeExpr;
@@ -6477,8 +6591,11 @@ class TypeScriptParser {
         // the pattern's own and each name the pattern writes is read out of it.
         const pattern = this.readParameterPattern();
         if (pattern !== null) {
-          let type: TypeExpr = ANY_TYPE;
-          let shape: ResolvedType | null = null;
+          // A pattern read at the type the use fixes it at: `([a, b]) => ...`
+          // handed a list of pairs binds its names at the fields of the pair.
+          const hinted = hints?.[params.length] ?? null;
+          let type: TypeExpr = hinted?.type ?? ANY_TYPE;
+          let shape: ResolvedType | null = hinted?.shape ?? null;
           if (this.accept(":")) {
             type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
             shape = this.lastAnnotationShape();
@@ -6498,10 +6615,14 @@ class TypeScriptParser {
         // decided where the arrow is called, and the type it is written at is
         // the one the annotation states.
         this.accept("?");
-        let type: TypeExpr = ANY_TYPE;
-        let typeName = "";
+        // A callback's parameter is the element the collection method walks
+        // where the method says so, and the annotation still wins where the
+        // source writes one.
+        const hinted = hints?.[params.length] ?? null;
+        let type: TypeExpr = hinted?.type ?? ANY_TYPE;
+        let typeName = type.kind === "ref" && type.name !== undefined ? type.name : "";
         let functionType: FunctionType | null = null;
-        let shape: ResolvedType | null = null;
+        let shape: ResolvedType | null = hinted?.shape ?? null;
         if (this.accept(":")) {
           typeName = this.peek().kind === "ident" ? this.peek().text : "";
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
@@ -6525,7 +6646,15 @@ class TypeScriptParser {
     } else {
       const name = this.next();
       if (name.kind !== "ident") return this.missing("expected a parameter name", name);
-      params.push({ name: name.text, type: ANY_TYPE, typeName: "", functionType: null, shape: null });
+      const hinted = hints?.[0] ?? null;
+      const type: TypeExpr = hinted?.type ?? ANY_TYPE;
+      params.push({
+        name: name.text,
+        type,
+        typeName: type.kind === "ref" && type.name !== undefined ? type.name : "",
+        functionType: null,
+        shape: hinted?.shape ?? null,
+      });
     }
     let stated: TypeExpr | null = null;
     let statedShape: ResolvedType | null = null;
@@ -6573,6 +6702,20 @@ class TypeScriptParser {
       // empty list it answers is built at the type the arrow declares.
       return [...prelude, { kind: "result" as const, value: this.readAt(stated, () => this.readExpression(), statedShape), line }];
     }, statedShape);
+    // What the arrow answers is read while its parameters are still in scope: a
+    // body that calls a method answers what the method answers, and a field it
+    // reads through a parameter answers what the parameter's shape declares.
+    // Neither is a name `resultType` alone can type.
+    const returns =
+      stated ??
+      inferredResult(
+        body,
+        params.map((param) => ({ name: param.name, type: param.type })),
+        (value) => {
+          const known = this.valueTypeOf(value);
+          return known.kind === "ref" && known.of === null && known.name === undefined ? null : known;
+        },
+      );
     this.valueTypes = savedTypes;
     this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
@@ -6582,8 +6725,6 @@ class TypeScriptParser {
     this.valueRegexes = savedRegexes;
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
-    const returns =
-      stated ?? inferredResult(body, params.map((param) => ({ name: param.name, type: param.type })));
     const captures = arrowCaptures(params, body);
     if (captures.written.length > 0) {
       this.report(

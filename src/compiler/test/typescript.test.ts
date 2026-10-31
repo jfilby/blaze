@@ -31,6 +31,14 @@ function analyzedBody(source: string, name: string): unknown[] {
   return handle.body;
 }
 
+/** The first arrow the frontend lifted, which is the callback a call walks with. */
+function liftedArrow(source: string): { params: { name: string; type: unknown }[]; body: unknown[] } {
+  const analysis = typescript.analyze(source, "module.ts");
+  const closure = analysis.functions.find((entry) => entry.name.startsWith("__closure_"));
+  assert.ok(closure !== undefined, "the callback is a function of the file");
+  return closure.handle as { params: { name: string; type: unknown }[]; body: unknown[] };
+}
+
 test("a body that reads a buffer at a position the contract cannot name is refused", () => {
   // The same loop, once bounded by the parameter and once by a local holding
   // it. Naming the bound in a local used to drop the whole length requirement
@@ -1135,6 +1143,82 @@ test("a map that answers a list is refused, because a list of lists is not a val
     ),
     /the function map walks the array with must answer a number, a truth, a text or a reference/,
   );
+});
+
+test("a collection callback's parameter is the element its array holds", () => {
+  // `xs.map((s) => s.trim())` names no type for `s`: the array is what says it.
+  // The callback is a function of the file, so its parameter is read there.
+  const arrow = liftedArrow([
+    "export function trimmed(xs: string[]): string[] {",
+    "  return xs.map((s) => s.trim());",
+    "}",
+    "",
+  ].join("\n"));
+  assert.deepEqual(arrow.params.map((param) => param.name), ["s"]);
+  assert.deepEqual(arrow.params[0]?.type, { kind: "text" }, "the array's element type is the parameter's");
+  assert.match(JSON.stringify(arrow.body), /text\.trim/);
+});
+
+test("a collection callback over records reads the fields the interface declares", () => {
+  // An array of an interface is an array of references the contract cannot name
+  // a field of, and the shape of the array is what the callback reads through.
+  const arrow = liftedArrow([
+    "interface Entry { name: string }",
+    "export function names(entries: Entry[]): string[] {",
+    "  return entries.map((entry) => entry.name.trim());",
+    "}",
+    "",
+  ].join("\n"));
+  assert.match(JSON.stringify(arrow.body), /"field":"name"/);
+  assert.match(JSON.stringify(arrow.body), /text\.trim/);
+});
+
+test("a destructured callback binds its names at the element's fields", () => {
+  const arrow = liftedArrow([
+    "export function heads(xs: [string, number][]): string[] {",
+    "  return xs.map(([head]) => head.trim());",
+    "}",
+    "",
+  ].join("\n"));
+  assert.match(JSON.stringify(arrow.body), /"name":"head"/);
+  assert.match(JSON.stringify(arrow.body), /text\.trim/);
+});
+
+test("sort compares elements and reduce folds them, without the source writing their types", () => {
+  const compared = liftedArrow([
+    "export function ordered(xs: number[]): number[] {",
+    "  return xs.sort((a, b) => a - b);",
+    "}",
+    "",
+  ].join("\n"));
+  assert.deepEqual(compared.params.map((param) => param.name), ["a", "b"]);
+  assert.deepEqual(compared.params.map((param) => param.type), [
+    { kind: "primitive", name: "f64" },
+    { kind: "primitive", name: "f64" },
+  ]);
+  const folded = liftedArrow([
+    "export function total(xs: number[]): number {",
+    "  return xs.reduce((acc, x) => acc + x, 0);",
+    "}",
+    "",
+  ].join("\n"));
+  assert.deepEqual(folded.params.map((param) => param.name), ["acc", "x"]);
+  assert.deepEqual(folded.params.map((param) => param.type), [
+    { kind: "primitive", name: "f64" },
+    { kind: "primitive", name: "f64" },
+  ]);
+});
+
+test("a callback's written annotation is the type it is read at", () => {
+  // The receiver holds no element type here, and the annotation is what `s` is.
+  const arrow = liftedArrow([
+    "export function trimmed(xs: any[]): string[] {",
+    "  return xs.map((s: string): string => s.trim());",
+    "}",
+    "",
+  ].join("\n"));
+  assert.deepEqual(arrow.params[0]?.type, { kind: "text" });
+  assert.match(JSON.stringify(arrow.body), /text\.trim/);
 });
 
 test("an array of text is a slice of text, and its literal is a block written out", () => {

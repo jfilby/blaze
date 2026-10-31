@@ -81,8 +81,10 @@ taken the type's brace for the method body, so those methods were never read.
 Reading `at` and `slice` of an array lowered it to 5496, reading regular
 expressions to 5319, carrying interfaces and type aliases through the module
 graph to 5091, reference-valued maps and sets to 4824, expected types for
-empty lists to 4680, and the type of each name a destructuring pattern binds to
-4595. The refusals fall into six frontiers:
+empty lists to 4680, the type of each name a destructuring pattern binds to
+4595, and the type of a collection callback's parameters from the array it
+walks to 4584, with `semantics/module.ts` read as a whole. The refusals fall
+into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -173,6 +175,12 @@ below are independent enough to land one at a time, in this order:
 
 - `?.` and `??`, which lower to the conditional and the null check the source
   would have written.
+- A collection method (`map`, `filter`, `forEach`, `every`, `some`, `find`,
+  `findIndex`, `reduce`, `sort`) is a function of the file that walks the array,
+  and the callback's parameters are the element type the array holds, the
+  position and the array itself. A callback therefore needs no annotation, and
+  the element type of a record still reaches its fields through the shape the
+  contract erases. An explicit annotation is what the parameter is read at.
 - Spread and destructuring in declarations, parameters, calls, array literals
   and object literals. Object shorthand, `{ line }`, is read as the field it
   names, and spreading a constant object writes out the fields it holds. A

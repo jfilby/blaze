@@ -1222,6 +1222,36 @@ test("the walking methods read an array of text", async () => {
   assert.equal(output.trim(), "321");
 });
 
+test("a collection callback reads its parameter as the element the array holds", async () => {
+  // The element type of the array is the callback's parameter, so the source
+  // writes no annotation and the body still reads a text.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: string[] = [` ab `, `cde`, ` f `];",
+    "  const trimmed = a.map((s) => s.trim());",
+    "  const long = a.filter((s) => s.length > 1);",
+    "  return trimmed[0].length * 100 + long.length * 10 + trimmed[2].length;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "231");
+});
+
+test("sort and reduce read their parameters as the elements the array holds", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const a: number[] = [3, 1, 2];",
+    "  const ordered = a.sort((x, y) => x - y);",
+    "  const sum = a.reduce((acc, x) => acc + x, 0);",
+    "  return ordered[0] * 100 + ordered[2] * 10 + sum;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "136");
+});
+
 test("push and pop change the array a name holds", async () => {
   const output = await agreesWithNode([
     "function build(n: number): string[] {",
