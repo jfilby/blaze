@@ -314,6 +314,20 @@ name or any expression, which is read into a name of the loop's own the same
 way a walked collection is. A pattern that names anything else is refused where
 it is written. This took the total from 1890 to 1879.
 
+**A list built from a call's result.** `[...rest.map(f)]` was refused wherever
+a method followed it: the pieces of a literal are joined with `+`, and the type
+of a join is read from a name table that cannot see what a call answers. The
+literal now records the element type it joined — and the shape that goes with
+it, so a reference element is still read field by field — on the expression it
+answers. A spread whose value is not a list (a call the module graph has not
+linked yet reads as a deferred hole) states no element type, because a hole is
+not evidence of what the list holds; the other pieces or the use settle it.
+
+A set spread into a list is the keys it holds, read out by position with the
+helper `keys()` already uses: a set is a dictionary, and the handle a name
+holds is not an element a list holds. `new Set<string>([...seen, next])` is the
+keys seen plus one more. This took the total from 1879 to 1855.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

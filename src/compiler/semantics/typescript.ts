@@ -9772,10 +9772,26 @@ class TypeScriptParser {
     while (!this.at("]") && this.peek().kind !== "end") {
       if (this.accept("...")) {
         flush();
-        const spread = readWritten(true);
+        let spread = readWritten(true);
+        // A set spread into a list is its keys read out by position. A set is
+        // a dictionary, and the handle a name holds is not an element a list
+        // holds: `[...seen, other]` is the keys seen plus one more.
+        const collection = this.collectionOfExpression(spread);
+        if (collection !== null && collection.kind === "set") {
+          const helper = this.collectionListHelper(collection, "keys", this.peek().line);
+          if (helper !== null) {
+            spread = { k: "call", name: helper.name, args: [spread] };
+            this.expressionTypes.set(spread, helper.returns);
+          }
+        }
+        // A spread stands for the elements of a list, so the list's element
+        // type is the one the spread holds. A value that is not a list — a call
+        // the module graph has not linked yet reads as a deferred hole — says
+        // nothing about the elements it stands for, and the literal is settled
+        // by the values beside it or by the use that reads it.
         const type = this.valueTypeOf(spread);
-        if (element === null && !this.holdsUnsettledArray(spread)) {
-          element = type.kind === "slice" || type.kind === "array" ? type.of : type;
+        if (element === null && (type.kind === "slice" || type.kind === "array") && !this.holdsUnsettledArray(spread)) {
+          element = type.of;
           settleRun();
         }
         joined = joined === null ? spread : { k: "binary", op: "+", left: joined, right: spread };
@@ -9815,15 +9831,32 @@ class TypeScriptParser {
       // `[...a]` is a list of its own and not the list `a` holds: two names
       // that hold one block are one array, and a write through either is a
       // write both see. Joining the list against an empty one copies it.
+      /**
+       * The list the pieces made, held at the element type they were joined at.
+       *
+       * A piece may be a call whose result the frontend recorded but whose
+       * operands `resultType` cannot see: `[...a.map(f)]` is a call joined with
+       * an empty list, and the join of two lists is read from the list on the
+       * left. What the expression is is written here, where both halves are
+       * known, so a method written after the literal is a method of a list.
+       */
+      const settle = (value: Expression): Expression => {
+        if (element !== null) {
+          this.expressionTypes.set(value, { kind: "slice", of: element });
+          const shape = expectedElementShape ?? this.shapeOfTypeExpr(element);
+          this.expressionShapes.set(value, { kind: "list", of: shape });
+        }
+        return answer(value);
+      };
       if (pieces === 1 && element !== null) {
-        return answer({
+        return settle({
           k: "binary",
           op: "+",
           left: joined,
           right: { k: "buffer", element: typeToString(element), values: [] },
         });
       }
-      return answer(joined);
+      return settle(joined);
     }
     // The use of the list has not been read yet: `condition ? [] : [1]` reads
     // the empty arm first. It is kept as a list with no element type and

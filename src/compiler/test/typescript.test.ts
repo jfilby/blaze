@@ -2049,3 +2049,22 @@ test("an entry of a list names no part a list does not have", () => {
     /an entry of a list is an index and an element/,
   );
 });
+
+test("a list built from the result of a call holds the call's elements", () => {
+  // The spread piece is a call, and what a call answers is recorded where it is
+  // written rather than read back from the text: `resultType` cannot see the
+  // list the call answers, so the literal records the element type it joined.
+  // The callback of the method written after the literal reads a text, which is
+  // the element the joined list holds.
+  const source = [
+    "export function read(rest: string[]): string[] {",
+    "  return [...rest.map((line) => line)].map((line) => line.trim());",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "module.ts");
+  const walkers = analysis.functions.filter((entry) => entry.name.startsWith("__closure_") && !entry.name.includes("_code_"));
+  const second = walkers[1]?.handle as { params: { name: string; type: unknown }[] } | undefined;
+  assert.ok(second !== undefined, "the second callback is a function of the file");
+  assert.deepEqual(second.params[0]?.type, { kind: "text" });
+});

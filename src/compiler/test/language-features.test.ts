@@ -2213,6 +2213,40 @@ test("an entry of a list read through a field names the element's fields", async
   assert.equal(output.trim(), "6");
 });
 
+test("a list spread from a call is joined with the values around it", async () => {
+  // `[...rest.map(f)]` is a call's list joined with the empty list the copy
+  // starts from, and the join is a list of the same elements: the method
+  // written after it reads what the call answered.
+  const output = await agreesWithNode([
+    "function lines(): string {",
+    "  const rest: string[] = [`a`, `b`];",
+    "  return [`- head`, ...rest.map((line) => `  ${line}`)].join(`|`);",
+    "}",
+    "console.log(lines());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "- head|  a|  b");
+});
+
+test("a set spread into a list adds the keys it holds", async () => {
+  // A set is a dictionary, so the handle a name holds is not an element a list
+  // holds: the spread reads the keys it has out by position.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const seen = new Set<string>();",
+    "  seen.add(`a`);",
+    "  seen.add(`b`);",
+    "  const all = new Set<string>([...seen, `c`]);",
+    "  let out = ``;",
+    "  for (const key of all.keys()) out += key;",
+    "  return out;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "abc");
+});
+
 test("a map is keyed by a reference, and answers the text it holds", async () => {
   const output = await agreesWithNode([
     "class Box {",
