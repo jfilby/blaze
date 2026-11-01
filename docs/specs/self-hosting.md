@@ -328,6 +328,14 @@ helper `keys()` already uses: a set is a dictionary, and the handle a name
 holds is not an element a list holds. `new Set<string>([...seen, next])` is the
 keys seen plus one more. This took the total from 1879 to 1855.
 
+**A value asserted as a collection.** `groups.get(name) as Set<string>` names a
+collection the value already is, and a map whose value is a set answers a
+handle that says nothing about what it holds. The assertion is recorded as the
+collection it names, so `has`, `add`, `delete` and `size` written after it are
+the dictionary's own. An assertion written as a list records the element type
+the same way, so `(record.names as string[]).join(…)` reads texts. This took the
+total to 1851.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

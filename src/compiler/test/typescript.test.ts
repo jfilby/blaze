@@ -2068,3 +2068,31 @@ test("a list built from the result of a call holds the call's elements", () => {
   assert.ok(second !== undefined, "the second callback is a function of the file");
   assert.deepEqual(second.params[0]?.type, { kind: "text" });
 });
+
+test("a value asserted as a set is read as the collection it names", () => {
+  // A map whose value is a set answers a handle, and the assertion is what says
+  // what the handle holds: `has`, `add` and `size` after it are the dictionary's
+  // own methods rather than methods of a class nothing declared.
+  const source = [
+    "export function read(groups: Map<string, Set<string>>, name: string): boolean {",
+    "  const found = groups.get(name) as Set<string>;",
+    "  found.add(`x`);",
+    "  return found.has(`y`) && found.size > 0;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /blaze_rt_dict_has/);
+  assert.match(body, /blaze_rt_dict_len/);
+});
+
+test("a value asserted as a list is joined by the elements the assertion names", () => {
+  const source = [
+    "export function read(record: { names: unknown }): string {",
+    "  return (record.names as string[]).join(`,`);",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"__collect_/);
+});

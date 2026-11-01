@@ -2700,13 +2700,15 @@ class TypeScriptParser {
    * the three ways a collection reaches a method call.
    */
   private collectionOfExpression(value: Expression): CollectionValue | null {
+    // A value the read itself recorded as a collection: a `new Map(...)`, an
+    // object literal at a record, or a value asserted as a set or a map.
+    const recorded = this.collectionExpressions.get(value);
+    if (recorded !== undefined) return recorded;
     if (value.k === "ident") {
       const known = this.valueCollections.get(value.name);
       if (known !== undefined) return known;
     }
     if (value.k === "call") {
-      const made = this.collectionExpressions.get(value);
-      if (made !== undefined) return made;
       const answered = this.declaredCollections.get(value.name);
       if (answered !== undefined) return answered;
     }
@@ -7359,7 +7361,18 @@ class TypeScriptParser {
       if (this.at("as") || this.at("satisfies")) {
         this.next();
         const type = this.readTypeAnnotation("a type assertion", EXPRESSION_TYPE_STOPS);
-        this.applyExpected(current(), type, this.lastAnnotationShape());
+        const shape = this.lastAnnotationShape();
+        this.applyExpected(current(), type, shape);
+        // `m.get(k) as Set<string>` names a collection the value already is: a
+        // map whose value is a set answers a handle, and the assertion is what
+        // says what the handle holds. The value is recorded as that collection,
+        // so `has`, `add` and `size` written after it are the dictionary's own.
+        const collection = this.collectionOfShape(shape);
+        if (collection !== null) this.collectionExpressions.set(current(), collection);
+        // A list is asserted at the type it says: `(o.fields as string[])`
+        // names texts, so `join` written after it reads the elements the cast
+        // states rather than the `unknown` the field was declared at.
+        if (type.kind === "slice" || type.kind === "array") this.expressionTypes.set(current(), type);
         continue;
       }
       if (this.at("!")) {

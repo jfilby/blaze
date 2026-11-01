@@ -2247,6 +2247,25 @@ test("a set spread into a list adds the keys it holds", async () => {
   assert.equal(output.trim(), "abc");
 });
 
+test("a map whose value is a set is read through the assertion that names it", async () => {
+  // The value a map answers is a handle, and a handle says nothing about what
+  // it holds: the assertion is what makes `add`, `has` and `size` the set's.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const groups = new Map<string, Set<string>>();",
+    "  const one = new Set<string>();",
+    "  one.add(`x`);",
+    "  groups.set(`a`, one);",
+    "  const found = groups.get(`a`) as Set<string>;",
+    "  found.add(`y`);",
+    "  return (groups.get(`a`) as Set<string>).size * 10 + found.size;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "22");
+});
+
 test("a map is keyed by a reference, and answers the text it holds", async () => {
   const output = await agreesWithNode([
     "class Box {",
