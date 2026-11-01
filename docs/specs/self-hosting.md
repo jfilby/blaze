@@ -650,6 +650,21 @@ the program the self-build is:
   second guard prints `NaN` for `n`); the same call written into a name first is
   right, and so are two guards over a number.
 
+The second one is understood, and it is worse than the reproducer suggests:
+`VECTOR_CALLEE_SAVED` in `toolchain/ir-machine.ts` is `xmm6` to `xmm15`, on the
+comment that "ten is what the convention has". That is the Windows rule. The
+target here is System V AMD64, where **no** vector register is preserved by a
+call: every one of `xmm0`–`xmm15` is the caller's to save. The allocator pinned
+`n` in `xmm6` across a call into the C runtime, `strstr` wrote it, and the
+function returned `NaN`. Machine code calling machine code is unharmed, because
+both sides save the same registers; every call the runtime serves is exposed.
+
+Fixing it is not a one-line change: the temporaries an expression holds across
+the call on its other side are drawn from the same file, so the caller has to
+save what it holds across a call into anything not built by this backend — or
+the temporaries have to come from the frame. That is the next slice, and it is
+the first one that is a wrong answer rather than a refusal.
+
 ### The roadmap
 
 The order below is the order of leverage. The first three slices — the gap
