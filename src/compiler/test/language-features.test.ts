@@ -453,6 +453,27 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("startsWith reads the field the text holds from a position", async () => {
+  // `text.startsWith(needle, at)` is the field the text holds from `at`: the
+  // slice that runs as far as the needle is long, compared with the needle.
+  // One argument is the field the text holds from the beginning.
+  const output = await agreesWithNode([
+    "export function demo(): string {",
+    "  const text = `xxabyy`;",
+    "  let n = 0;",
+    "  if (text.startsWith(`ab`, 2)) n += 1;",
+    "  if (text.startsWith(`ab`, 0)) n += 10;",
+    "  if (text.startsWith(``, 3)) n += 100;",
+    "  if (text.startsWith(`y`, 20)) n += 1000;",
+    "  if (text.startsWith(`xx`)) n += 10000;",
+    "  return String(n);",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "10101");
+});
+
 test("a method on a field of an imported type waits for the link", async () => {
   // A local interface may write a field at a type another module declares, and
   // the first read does not hold that declaration: what the field holds is the

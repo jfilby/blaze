@@ -9111,11 +9111,32 @@ class TypeScriptParser {
       };
     }
     if (method === "startsWith" && args.length === 1) {
+      // The field the text holds from the beginning, which is the text the
+      // needle is long compared with the needle: one reading for both forms,
+      // so a chain that asks both is the same two slices it is.
+      const needle = args[0] as Expression;
+      if (!repeatableExpression(needle)) return null;
       return {
         k: "binary",
         op: "===",
-        left: call("text.indexOf", [receiver, args[0] as Expression]),
-        right: { k: "literal", text: "0" },
+        left: call("text.slice", [receiver, { k: "literal", text: "0" }, { k: "lengthOf", of: needle }]),
+        right: needle,
+      };
+    }
+    // `text.startsWith(needle, at)` is the field the text holds from `at`: the
+    // slice that runs as far as the needle is long, compared with the needle.
+    // Both the position and the needle are read more than once, so each has to
+    // read the same way twice.
+    if (method === "startsWith" && args.length === 2) {
+      const needle = args[0] as Expression;
+      const at = args[1] as Expression;
+      if (!repeatableExpression(needle) || !repeatableExpression(at)) return null;
+      const stop: Expression = { k: "binary", op: "+", left: at, right: { k: "lengthOf", of: needle } };
+      return {
+        k: "binary",
+        op: "===",
+        left: call("text.slice", [receiver, at, stop]),
+        right: needle,
       };
     }
     if (method === "endsWith" && args.length === 1) {

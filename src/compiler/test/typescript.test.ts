@@ -887,7 +887,7 @@ test("a `??` keeps the type of the arm that names one", () => {
   assert.equal(value?.k, "binary");
   assert.equal(value?.op, "===");
   assert.equal(value?.left?.k, "call");
-  assert.equal(value?.left?.name, "text.indexOf", "the fallback is a text, so startsWith asks where the needle is");
+  assert.equal(value?.left?.name, "text.slice", "the fallback is a text, so startsWith reads the field the text holds");
 });
 
 test("a `??` keeps the shape of the arm that names one", () => {

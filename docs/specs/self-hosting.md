@@ -592,6 +592,23 @@ construct they were hiding. `semantics/ir-validate.ts` rises by four — four
 text, both of which were standing behind a `map` over a field of an imported
 type — and that is the reading-further artefact, not a new gap.
 
+### 4p. `text.startsWith(needle, at)`
+
+The compiler's scanners ask whether a text starts with something at a position —
+`source.startsWith(candidate, index)` — and `startsWith` was carried for one
+argument only. The two-argument form is the field the text holds from `at`: the
+slice that runs as far as the needle is long, compared with the needle. Both
+read the needle, which has to read the same way twice.
+
+The one-argument form now takes the same reading, as the field from the
+beginning, rather than asking where the needle is. That is not for the gap: two
+`text.indexOf` calls in one function's conditions answer garbage on the machine
+backend, and two `text.slice` calls in one function's conditions answer garbage
+in the C backend. Neither is new — `endsWith` has had the second shape since it
+was added — and both are recorded as the next things to fix, because a compiler
+whose scanners compare two texts in two guards is exactly the program the
+self-build is. This took the total from 1529 to 1521.
+
 ## The next slices
 
 ### What the measurement says now
