@@ -94,6 +94,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_print_newline",
   "blaze_rt_raise",
   "blaze_rt_to_text",
+  "blaze_rt_type_of",
   "blaze_rt_to_number",
   "blaze_rt_format_number",
   "blaze_rt_format_number_fixed",
@@ -784,8 +785,42 @@ export function blaze_rt_to_text(value) {
     return makeText("[" + parts.join(",") + "]");
   }
   if (boxed.kind === "object") return makeText(jsonText(value));
-  if (boxed.kind === "value") return makeText(jsonText(value));
+  if (boxed.kind === "value") {
+    /* A value a parse read is the JavaScript value it parsed to, and the text
+       the language writes it as is that value's own: a string is its text and
+       not the quoted JSON of it, a number its digits. What is left is a tree,
+       which is the JSON it was read from. */
+    const inner = boxed.value;
+    if (inner === null) return makeText(textStyle === 1 ? "None" : "null");
+    if (typeof inner === "string") return makeText(inner);
+    if (typeof inner === "number") return makeText(formatNumber(inner));
+    if (typeof inner === "boolean") return makeText(inner ? (textStyle === 1 ? "True" : "true") : (textStyle === 1 ? "False" : "false"));
+    return makeText(jsonText(value));
+  }
   return makeText("null");
+}
+`,
+  },
+  {
+    service: "blaze_rt_type_of",
+    source: `
+export function blaze_rt_type_of(value) {
+  const boxed = dynLookup(value);
+  if (boxed === null) return makeText(value >= 4096 ? "string" : "number");
+  if (boxed.kind === "number") return makeText("number");
+  if (boxed.kind === "bool") return makeText("boolean");
+  if (boxed.kind === "text") return makeText("string");
+  if (boxed.kind === "value") {
+    /* A value a parse read is the JavaScript value it parsed to, so its kind
+       is the one the language would answer for that value. */
+    const inner = boxed.value;
+    if (inner === null) return makeText("object");
+    if (typeof inner === "number") return makeText("number");
+    if (typeof inner === "boolean") return makeText("boolean");
+    if (typeof inner === "string") return makeText("string");
+    return makeText("object");
+  }
+  return makeText("object");
 }
 `,
   },

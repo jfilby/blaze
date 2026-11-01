@@ -1023,6 +1023,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // it is carried in, and the field is the text it is spelled with.
       case "JSON.get":
         return `${RUNTIME_NAME}_json_get(${argument(0)}, ${argument(1)})`;
+      // The name `typeof` answers for a value the read could not type.
+      case "JSON.typeof":
+        return `${RUNTIME_NAME}_type_of(${argument(0)})`;
       case "JSON.stringify": {
         // An object literal is serialized where it is written: the field names
         // are the source's and the values are rendered as text one by one, so no

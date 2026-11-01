@@ -336,6 +336,54 @@ the dictionary's own. An assertion written as a list records the element type
 the same way, so `(record.names as string[]).join(…)` reads texts. This took the
 total to 1851.
 
+**`typeof` of a value the read cannot type.** `typeof` was answered from the
+declared type, and a value the read has no type for — a field of an interface
+the module graph has not linked, a parameter the source wrote `unknown` — was
+called an object. That folded `typeof value === "string"` to false and compiled
+no arm of the branch at all, which is the worst of both: no refusal, and no
+code. The question is now asked at run time, of the value: the runtime answers
+the kind it registered the value as, and a value it does not hold is a number,
+or a text where the number is the pointer the text sits at. The answer is a
+text, so the comparison the source wrote is the comparison the program makes.
+
+The answer is only asked of a value whose *shape* the read does not hold: an
+interface erases to a reference with no name, and so does `unknown`, but the
+shape keeps the name of the interface a value was declared at. A concrete
+`typeof named === "object"` is still answered where it is read.
+
+**A test settles the branch it guards.** `if (typeof entry !== "string") throw
+…; entries.push(entry)` is only code a compiler can type if the test is
+remembered: past the guard the value is a text, and `entry.trim()` is a text
+method. The tests a source writes over a value it does not know are
+`typeof x === "kind"` and the two ways two of them are joined — a conjunction
+settles both when it holds, a disjunction both when it does not — and a
+negation swaps the two sides. The settled types are kept by the way the source
+spells the chain (`entry`, `input.source`, `cb.name`), because a member read is
+a new expression every time it is written, so the value itself cannot be the
+key. Three places read them: the arms of a conditional, the right side of `&&`
+and `||`, and — where the branch leaves the block by a `return`, a `throw`, a
+`break` or a `continue` — the statements after the `if`. A block hands back the
+table it was read with when it ends, and a name written to forgets what was
+known about it.
+
+Two things a narrowed value needed on the way to the backends. The machine
+backend handed a dynamic value to the text runtime without carrying it as the
+double the convention hands one over as, which read the bytes of nothing; and
+the host of the WebAssembly backend wrote a parsed string as the quoted JSON of
+it rather than as its text. Both are the same claim as the frontend's: a text
+method reads the text the value holds.
+
+**A name spelled `type`.** `type` is not a word the language keeps, but a
+statement that began with the identifier of that spelling was refused as a type
+declaration. Only a statement that writes a type alias is one; `type = null` and
+`type.kind` read a value like any other name.
+
+**`x.toString()` with no radix.** The hexadecimal form is `x.toString(16)`; with
+no argument at all the value is written the way a template string writes it,
+which is the digits of a bigint and the shortest decimal of a number.
+
+This took the total from 1851 to 1779.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

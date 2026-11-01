@@ -1018,6 +1018,24 @@ proc blaze_rt_to_number*(value: float64): float64 {.exportc, cdecl.} =
   else:
     value
 
+proc blaze_rt_type_of*(value: float64): cstring {.exportc, cdecl.} =
+  ## The name typeof answers for a value the compiler could not read the type
+  ## of: the kind the runtime registered the value as, or the number or the text
+  ## the value itself is.
+  let index = blazeDynIndex(value)
+  if index < 0:
+    if value >= 4096.0: return blazeTextOf("string")
+    return blazeTextOf("number")
+  case blazeDynValues[index].kind
+  of dynNumber:
+    blazeTextOf("number")
+  of dynBool:
+    blazeTextOf("boolean")
+  of dynText:
+    blazeTextOf("string")
+  else:
+    blazeTextOf("object")
+
 proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} =
   ## The text a value is written as, which is the way the language writes it.
   let index = blazeDynIndex(value)

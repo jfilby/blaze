@@ -519,6 +519,46 @@ function typeofName(type: TypeExpr): string {
   }
 }
 
+/** Whether a type is the reference the read has no name for. */
+function unknownReference(type: TypeExpr): boolean {
+  return type.kind === "ref" && type.of === null && type.name === undefined;
+}
+
+/**
+ * Whether every path through a list of statements leaves the block it is in.
+ *
+ * A body that ends in a `return`, a `throw`, a `break` or a `continue` runs
+ * nothing after it, and neither does a body whose every arm ends in one. Only
+ * the statements a source writes that way say anything about the code after
+ * them, which is why narrowing past a guard is asked of the body rather than
+ * assumed of it.
+ */
+function leavesEveryPath(statements: readonly Statement[]): boolean {
+  const last = statements[statements.length - 1];
+  if (last === undefined) return false;
+  if (last.kind === "result" || last.kind === "throw" || last.kind === "break" || last.kind === "continue") return true;
+  if (last.kind === "if") return last.otherwise.length > 0 && leavesEveryPath(last.then) && leavesEveryPath(last.otherwise);
+  return false;
+}
+
+/** The type a `typeof` name stands for, or null where it settles no type. */
+function typeOfTypeofName(name: string): TypeExpr | null {
+  switch (name) {
+    case "string":
+      return TEXT_RESULT;
+    case "number":
+      return NUMBER_RESULT;
+    case "boolean":
+      return BOOLEAN_RESULT;
+    case "bigint":
+      return BIGINT_RESULT;
+    default:
+      // `"object"`, `"undefined"` and `"function"` say no type a value here can
+      // be held at, so a branch they guard reads the value as it was declared.
+      return null;
+  }
+}
+
 /** The text a value written as one string holds, or null where it is not one. */
 function textValue(value: Expression): string | null {
   if (value.k !== "text" || value.parts.length !== 1) return null;
@@ -2344,6 +2384,21 @@ class TypeScriptParser {
    * says which list and which element type the expression it read names.
    */
   private iteratedSequences = new Map<Expression, TypeExpr>();
+  /**
+   * The type a name, or a chain of fields read from one, is known to hold after
+   * a test of it, by the way the source spells the chain.
+   *
+   * `if (typeof entry !== "string") throw …; out.push(entry)` is only code a
+   * compiler can type if the test is remembered: past the guard the value is
+   * the type the test left it, and `entry.trim()` is a text method. The key is
+   * the path — `entry`, `input.source`, `cb.name` — because a member read is a
+   * new expression object every time it is written, so the value itself cannot
+   * be the key. A block saves the table it was read with and hands it back when
+   * it ends, and a name written to forgets what was known about it.
+   */
+  private narrowed = new Map<string, TypeExpr>();
+  /** The type of each test `typeof` wrote at run time, by the path it read. */
+  private typeofPaths = new Map<Expression, string>();
   /** True while the source of a `for..of` is being read. */
   private readingIteration = false;
   /**
@@ -4678,6 +4733,9 @@ class TypeScriptParser {
     shape: ResolvedType | null = null,
   ): Statement[] {
     const base: Expression = { k: "ident", name: temp };
+    // A pattern binds names of its own, and a test that settled a name of the
+    // same spelling in the scope around it says nothing about them.
+    for (const binding of bindings) this.forgetNarrowing(binding.name);
     const element = type.kind === "slice" || type.kind === "array" ? type.of : null;
     if (element !== null) {
       for (const binding of bindings) {
@@ -5083,29 +5141,43 @@ class TypeScriptParser {
       this.report('expected "{"', "a function body is written in braces");
       return [];
     }
+    // A block reads the values a test settled in the block around it, and
+    // everything it settles itself is forgotten where the block ends.
+    const outer = this.narrowed;
+    this.narrowed = new Map(outer);
     const statements: Statement[] = [];
-    while (!this.at("}") && this.peek().kind !== "end") {
-      // An empty statement is not one the body does. A lone `;` read as a
-      // call is a call the body never makes, which cost a function its
-      // postcondition and left the build reporting a function it could not
-      // check.
-      if (this.accept(";")) continue;
-      // A type declared in a body names nothing the body runs, so it is
-      // skipped where it is written.
-      if (this.typeOnlyDeclarationAt()) {
-        this.skipTypeOnlyDeclaration();
-        continue;
+    try {
+      while (!this.at("}") && this.peek().kind !== "end") {
+        // An empty statement is not one the body does. A lone `;` read as a
+        // call is a call the body never makes, which cost a function its
+        // postcondition and left the build reporting a function it could not
+        // check.
+        if (this.accept(";")) continue;
+        // A type declared in a body names nothing the body runs, so it is
+        // skipped where it is written.
+        if (this.typeOnlyDeclarationAt()) {
+          this.skipTypeOnlyDeclaration();
+          continue;
+        }
+        // A block written as a statement is the statements it holds: a compiled
+        // body has one list of statements, and a nested block is a scope of the
+        // source rather than a construct the program runs.
+        if (this.at("{")) {
+          statements.push(...this.readBlock());
+          continue;
+        }
+        const read = this.guardedStatement();
+        statements.push(...read);
+        // A guard the statement leaves the block by is what the statements
+        // after it know: `if (typeof x !== "string") return;` leaves `x` a
+        // text for the rest of the block.
+        const last = read[read.length - 1];
+        if (last !== undefined) this.narrowAfter(last);
       }
-      // A block written as a statement is the statements it holds: a compiled
-      // body has one list of statements, and a nested block is a scope of the
-      // source rather than a construct the program runs.
-      if (this.at("{")) {
-        statements.push(...this.readBlock());
-        continue;
-      }
-      statements.push(...this.guardedStatement());
+      this.expect("}");
+    } finally {
+      this.narrowed = outer;
     }
-    this.expect("}");
     return statements;
   }
 
@@ -5221,6 +5293,9 @@ class TypeScriptParser {
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
       this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      // A name declared again is the value it was declared with, and nothing a
+      // test settled about a name of the same spelling still holds.
+      this.forgetNarrowing(name.text);
       if (this.pendingNote) this.pendingValues.add(name.text);
       else this.pendingValues.delete(name.text);
       const declaredShape = annotationShape ?? this.shapeOf(init);
@@ -5304,7 +5379,10 @@ class TypeScriptParser {
     // expression, so reading it as the expression it is keeps the two apart.
     if (this.at("await")) return this.readEffect();
 
-    const refused = REFUSED_KEYWORDS[token.text];
+    // `type` is an identifier the language allows anywhere a name goes: only a
+    // statement that writes a type alias declares a type, and every other use
+    // of the name — `type = null`, `type.kind` — reads a value like any name.
+    const refused = token.text === "type" && !this.typeOnlyDeclarationAt() ? undefined : REFUSED_KEYWORDS[token.text];
     if (refused !== undefined) {
       this.report(`"${token.text}" is not supported`, refused, token);
       // A refused construct that carries a body is skipped as the body it
@@ -5654,6 +5732,7 @@ class TypeScriptParser {
       // held an arrow no longer does: a later `g(x)` would call a function the
       // call no longer reaches.
       this.valueArrows.delete(target.text);
+      this.forgetNarrowing(target.text);
       const assigned = this.collectionExpressions.get(value);
       if (assigned !== undefined) this.valueCollections.set(target.text, assigned);
       else this.valueCollections.delete(target.text);
@@ -5667,8 +5746,10 @@ class TypeScriptParser {
     this.accept(";");
     // A compound assignment keeps the type the name already holds: `p = q` may
     // change what a name is, but `p += q` is a number operation on it. A name
-    // that held an arrow is no longer one either way.
+    // that held an arrow is no longer one either way, and a test settled before
+    // the write no longer says what the name holds.
     this.valueArrows.delete(target.text);
+    this.forgetNarrowing(target.text);
     return {
       kind: "assign",
       target: target.text,
@@ -5764,6 +5845,7 @@ class TypeScriptParser {
     if (operator.text === "++" || operator.text === "--") {
       this.next();
       this.accept(";");
+      this.forgetNarrowing(`${base.text}.${field.text}`);
       return {
         kind: "memberAssign",
         base: base.text === "this" && this.currentClass !== null ? "self" : base.text,
@@ -5775,6 +5857,9 @@ class TypeScriptParser {
     }
     this.next();
     const writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
+    // A field written to is the value it was written with, so nothing a test
+    // settled about the field still holds.
+    this.forgetNarrowing(`${writtenBase}.${field.text}`);
     // The field says what the value written into it holds, so `this.pending =
     // []` is a list of the field's elements where the field is a list. The
     // shape is the field the class declares or the one the value's type names.
@@ -6134,14 +6219,30 @@ class TypeScriptParser {
     // A branch whose condition is written false is not code the program runs,
     // and what it holds is not a construct the build should refuse.
     const dead = isNumberLiteral(condition, "0");
-    const then = dead ? this.discardedBody() : this.readBody();
+    const then = dead ? this.discardedBody() : this.withNarrowing(this.narrowingOf(condition, true), () => this.readBody());
     const otherwise: Statement[] = [];
     if (this.accept("else")) {
-      if (this.at("if")) otherwise.push(this.readIf());
-      else otherwise.push(...this.readBody());
+      const settled = this.narrowingOf(condition, false);
+      const read = (): Statement[] => (this.at("if") ? [this.readIf()] : this.readBody());
+      otherwise.push(...this.withNarrowing(settled, read));
     }
     if (dead && otherwise.length === 0) return { kind: "expression", value: { k: "literal", text: "0" }, line: start.line };
     return { kind: "if", condition, then, otherwise, line: start.line };
+  }
+
+  /**
+   * What an `if` that leaves the block says about the statements after it.
+   *
+   * `if (typeof entry !== "string") throw …` runs the rest of the block only
+   * where the test did not hold, so the test's other side is what the rest of
+   * the block reads the value at. A branch that leaves in some of its own arms
+   * says nothing about the rest, so only a body whose every arm leaves settles
+   * anything.
+   */
+  private narrowAfter(statement: Statement): void {
+    if (statement.kind !== "if" || statement.otherwise.length > 0) return;
+    if (!leavesEveryPath(statement.then)) return;
+    for (const [path, type] of this.narrowingOf(statement.condition, false)) this.narrowed.set(path, type);
   }
 
   /** A body the condition proves never runs, read without its diagnostics. */
@@ -6485,9 +6586,9 @@ class TypeScriptParser {
     const condition = this.readNullish();
     if (!this.at("?")) return condition;
     this.next();
-    const then = this.readExpression();
+    const then = this.withNarrowing(this.narrowingOf(condition, true), () => this.readExpression());
     this.expect(":");
-    const otherwise = this.readExpression();
+    const otherwise = this.withNarrowing(this.narrowingOf(condition, false), () => this.readExpression());
     // An empty arm is built at the type of the arm that has values, or at the
     // type the use of the whole conditional states. A use that states a
     // number says nothing about a list written inside the conditional.
@@ -6523,7 +6624,7 @@ class TypeScriptParser {
         left = this.readLogicalAnd();
         continue;
       }
-      left = { k: "binary", op: "||", left, right: this.readLogicalAnd() };
+      left = { k: "binary", op: "||", left, right: this.withNarrowing(this.narrowingOf(left, false), () => this.readLogicalAnd()) };
     }
     return left;
   }
@@ -6560,7 +6661,7 @@ class TypeScriptParser {
         left = this.readBitwiseOr();
         continue;
       }
-      left = { k: "binary", op: "&&", left, right: this.readBitwiseOr() };
+      left = { k: "binary", op: "&&", left, right: this.withNarrowing(this.narrowingOf(left, true), () => this.readBitwiseOr()) };
     }
     return left;
   }
@@ -6709,7 +6810,7 @@ class TypeScriptParser {
     if (token.kind === "ident" && token.text === "typeof") {
       this.next();
       const operand = this.readUnary();
-      return this.typeofValue(operand, token);
+      return this.typeofValue(operand);
     }
     if (token.kind === "punct" && UNARY_OPERATORS.includes(token.text)) {
       this.next();
@@ -6790,9 +6891,19 @@ class TypeScriptParser {
    * type the value is held at rather than from a tag a value carries at run
    * time. A name the body declared is that declaration's type; a value written
    * out is its literal's type.
+   *
+   * A value the read cannot type — a field of an interface the module graph has
+   * not linked, or a value the source declared `unknown` — is the one case the
+   * type does not answer. The name the runtime registered it as does, so the
+   * question is asked there instead of answered here: the alternative was to
+   * call the value an object, which folded `typeof value === "string"` to false
+   * and compiled no arm of the branch at all.
    */
-  private typeofValue(operand: Expression, token: Token): Expression {
+  private typeofValue(operand: Expression): Expression {
     let type: TypeExpr | null = null;
+    // A name is held at the type its declaration states: a contract type and
+    // the shape beside it do not always agree, and the declaration is the one
+    // the value was typed at.
     if (operand.k === "ident") type = this.valueTypes.get(operand.name) ?? null;
     if (operand.k === "bigint") type = BIGINT_RESULT;
     if (operand.k === "literal") type = NUMBER_RESULT;
@@ -6802,19 +6913,114 @@ class TypeScriptParser {
     // the field the interface declares, the element the array holds, or what
     // the function answers. The answer is read from that type rather than
     // refused because the value is not a name.
-    if (type === null) {
+    if (type === null || unknownReference(type)) {
+      type = null;
       const held = this.valueTypeOf(operand);
-      if (!(held.kind === "ref" && held.of === null && held.name === undefined)) type = held;
+      if (!unknownReference(held)) type = held;
+    }
+    // An interface erases to a reference with no name, which is the same form a
+    // value the read does not know takes: `unknown`, `any`, and the field of a
+    // type the module graph has not linked all erase to it. The shape says which
+    // of the two the value is, because a declaration the read holds keeps the
+    // name of the interface it was written at.
+    if (type === null) {
+      const shape = this.shapeOf(operand);
+      if (shape !== null && shape.kind !== "any") type = this.typeExprOfShape(shape);
     }
     if (type === null) {
-      this.report(
-        "typeof reads the type a name is declared at",
-        `write the value into a name with the type it holds, near line ${token.line}`,
-        token,
-      );
-      return { k: "text", parts: [{ k: "text", value: "undefined" }] };
+      const asked: Expression = { k: "call", name: "JSON.typeof", args: [operand] };
+      this.expressionTypes.set(asked, TEXT_RESULT);
+      // The name the test is about, so a branch the test guards reads it at the
+      // type the test asked about rather than at the type it was declared at.
+      const path = this.narrowedPath(operand);
+      if (path !== null) this.typeofPaths.set(asked, path);
+      return asked;
     }
     return { k: "text", parts: [{ k: "text", value: typeofName(type) }] };
+  }
+
+  /**
+   * The way the source spells a name or a chain of fields read from one, which
+   * is the key a narrowing is remembered under, or null for a value written
+   * another way.
+   */
+  private narrowedPath(value: Expression): string | null {
+    if (value.k === "ident") return value.name;
+    if (value.k === "member") {
+      const base = this.narrowedPath(value.base);
+      return base === null ? null : `${base}.${value.field}`;
+    }
+    return null;
+  }
+
+  /**
+   * The types a test settles, by the path it tested, read one branch at a time.
+   *
+   * The tests a source writes over a value it does not know the type of are
+   * `typeof x === "kind"` and the two ways two of them are joined: a
+   * conjunction settles both when it holds, and a disjunction settles both when
+   * it does not. A negation swaps the two. The kind is the one `typeofName`
+   * answers for, so the branch reads the value at the type its own type would
+   * have named.
+   */
+  private narrowingOf(condition: Expression, holds: boolean): Map<string, TypeExpr> {
+    const settled = new Map<string, TypeExpr>();
+    const collect = (value: Expression, truth: boolean): void => {
+      if (value.k === "unary" && value.op === "!") {
+        collect(value.operand, !truth);
+        return;
+      }
+      if (value.k === "binary" && (value.op === "&&" || value.op === "||")) {
+        // A conjunction settles what holds when it is true; a disjunction
+        // settles what holds when it is false. The other side of either says
+        // nothing about the values it tested.
+        const wanted = value.op === "&&" ? truth : !truth;
+        if (!wanted) return;
+        collect(value.left, truth);
+        collect(value.right, truth);
+        return;
+      }
+      if (value.k !== "binary" || (value.op !== "===" && value.op !== "!==" && value.op !== "==" && value.op !== "!=")) return;
+      const positive = value.op === "===" || value.op === "==";
+      const tested = positive === truth ? value.right : value.left;
+      const kind = textValue(tested);
+      if (kind === null) return;
+      const other = positive === truth ? value.left : value.right;
+      const path = this.typeofPaths.get(other);
+      if (path === undefined) return;
+      const type = typeOfTypeofName(kind);
+      if (type !== null) settled.set(path, type);
+    };
+    collect(condition, holds);
+    return settled;
+  }
+
+  /**
+   * Reads an expression with the types a test settled in place, and hands the
+   * table back afterwards.
+   */
+  private withNarrowing<T>(settled: Map<string, TypeExpr>, read: () => T): T {
+    if (settled.size === 0) return read();
+    const saved = this.narrowed;
+    this.narrowed = new Map(saved);
+    for (const [path, type] of settled) this.narrowed.set(path, type);
+    try {
+      return read();
+    } finally {
+      this.narrowed = saved;
+    }
+  }
+
+  /**
+   * Forgets what is known about a path and everything read from it, which is
+   * what writing to it or declaring it again does.
+   */
+  private forgetNarrowing(path: string): void {
+    this.narrowed.delete(path);
+    const prefix = `${path}.`;
+    for (const key of [...this.narrowed.keys()]) {
+      if (key.startsWith(prefix)) this.narrowed.delete(key);
+    }
   }
 
   /**
@@ -7437,6 +7643,17 @@ class TypeScriptParser {
           continue;
         }
         if (field.text === "toString" && this.at("(")) {
+          // `x.toString()` with no radix is the value written as the text a
+          // template string writes: the digits of a whole number, the shortest
+          // decimal of a fraction, and a text as itself.
+          if (this.peek(1).text === ")") {
+            this.next();
+            this.next();
+            const written: Expression = { k: "text", parts: [{ k: "value", value: target }] };
+            this.expressionTypes.set(written, TEXT_RESULT);
+            replace(written);
+            continue;
+          }
           replace(this.hexadecimal(target));
           continue;
         }
@@ -8165,6 +8382,14 @@ class TypeScriptParser {
   private valueTypeOf(value: Expression): TypeExpr {
     const recorded = this.expressionTypes.get(value);
     if (recorded !== undefined) return recorded;
+    // A value a test has settled is the type the test settled, whatever the
+    // declaration wrote: `if (typeof entry !== "string") continue;` leaves
+    // `entry` a text for the rest of the block.
+    const path = this.narrowedPath(value);
+    if (path !== null) {
+      const settled = this.narrowed.get(path);
+      if (settled !== undefined) return settled;
+    }
     // A member read through an interface is typed by the field the interface
     // declares, which is what keeps `contract.definition.calls` an array. A
     // call is not asked here: the shape of a call asks what the call answers,
@@ -10344,6 +10569,9 @@ class TypeScriptParser {
     child.pendingType = this.pendingType;
     child.wideBigint = this.wideBigint;
     child.valueTypes = this.valueTypes;
+    // A template string interpolates a value the block around it settled: the
+    // text it writes is read with the same table the block was read with.
+    child.narrowed = this.narrowed;
     child.valueShapes = this.valueShapes;
     child.pendingValues = this.pendingValues;
     child.pendingFields = this.pendingFields;

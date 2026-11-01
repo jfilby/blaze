@@ -10464,6 +10464,14 @@ class Machine {
       this.dynamicResult();
       return;
     }
+    if (call.callee === "JSON.typeof" && argument !== undefined) {
+      // The name `typeof` answers for a value the read could not type. The
+      // value goes down as the handle or the number it is, and the runtime
+      // answers the text that names its kind.
+      const value = this.dynamicArgument(argument);
+      this.callSymbol("blaze_rt_type_of", [value], TEXT);
+      return;
+    }
     if (call.callee === SHARED) {
       // A block of bytes the program lays out is the allocator's answer: the
       // count is read as a size and the block is handed back, which is what
@@ -10682,9 +10690,12 @@ class Machine {
         if (isTextType(value.type)) {
           this.at(value, TEXT);
         } else {
-          // A dynamic value crosses as the runtime's own text: the value is
-          // the box it is held in, and the runtime reads the bytes out of it.
+          // A dynamic value crosses as the runtime's own text: the value is the
+          // handle it is held as, carried as the number the convention hands a
+          // double over as, and the runtime reads the bytes out of the box it
+          // names.
           this.value(value);
+          this.code.movdXmm(XMM0, RAX);
           this.runtime("_to_text");
         }
         const held = this.hold(TEXT, "blaze_text");

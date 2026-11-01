@@ -3532,6 +3532,14 @@ class Body {
         this.callService("blaze_rt_json_get");
         return DYNAMIC_TYPE;
       }
+      case "JSON.typeof": {
+        // The name `typeof` answers for a value the read could not type: the
+        // value goes down as the handle or the number it is, and the host
+        // answers the text that names its kind.
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_type_of");
+        return TEXT;
+      }
       case "crypto.createHash":
         this.callService("blaze_rt_md5_create");
         return DYNAMIC_TYPE;
@@ -3668,6 +3676,14 @@ class Body {
     }
     if (value.k === "nothing") {
       this.i32(0);
+      return;
+    }
+    // A value the read could not type is the handle it is held as: the value
+    // goes down as that handle and the host reads the text out of the box it
+    // names. A value a test narrowed to a text arrives here.
+    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+      this.dynamicValue(value);
+      this.callService("blaze_rt_to_text");
       return;
     }
     unreachable("hand the runtime a text where a text is wanted", this.name, this.candidate);

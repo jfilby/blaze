@@ -2096,3 +2096,47 @@ test("a value asserted as a list is joined by the elements the assertion names",
   const body = JSON.stringify(analyzedBody(source, "read"));
   assert.match(body, /"name":"__collect_/);
 });
+
+test("typeof of a value the read cannot type is asked at run time", () => {
+  // A value the module graph has not linked is a reference with no name, and
+  // the type cannot answer for it: the answer is the kind the runtime holds.
+  // Folding it to "object" compiled no arm of the branch at all.
+  const source = [
+    "export function read(value: unknown): string {",
+    "  if (typeof value === `string`) return `text`;",
+    "  return `other`;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /JSON\.typeof/);
+});
+
+test("a test of a value settles what the branch reads it as", () => {
+  // Past the guard the value is a text, so the body reads a text method: the
+  // narrowing is what makes the branch typeable at all.
+  const source = [
+    "export function read(entry: unknown): string {",
+    "  if (typeof entry !== `string`) return ``;",
+    "  return entry.trim();",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /text\.trim/);
+});
+
+test("a name spelled type holds a value like any other name", () => {
+  // `type` is not a word the language keeps: only a statement that writes a
+  // type alias declares a type, and `type = value` reads a value.
+  const source = [
+    "export function read(entry: { type: string }): string {",
+    "  let type = entry.type;",
+    "  if (type === `x`) type = `y`;",
+    "  return type;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"type"/);
+});

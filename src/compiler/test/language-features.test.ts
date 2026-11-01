@@ -2266,6 +2266,70 @@ test("a map whose value is a set is read through the assertion that names it", a
   assert.equal(output.trim(), "22");
 });
 
+test("a value whose type the source did not write is tested at run time", async () => {
+  // `typeof` of a value the read cannot type is the kind the runtime holds:
+  // answering it from the type folded the test to a constant and compiled none
+  // of the arms.
+  const output = await agreesWithNode([
+    "function kind(text: string): number {",
+    "  const value = JSON.parse(text);",
+    "  if (typeof value === `string`) return 1;",
+    "  if (typeof value === `number`) return 2;",
+    "  if (typeof value === `boolean`) return 3;",
+    "  return 4;",
+    "}",
+    "console.log(kind(`\"a\"`) * 1000 + kind(`7`) * 100 + kind(`true`) * 10 + kind(`null`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1234");
+});
+
+test("a test of a value settles what the branch reads it as", async () => {
+  // A guard that leaves the block, an arm of a conditional, and the right side
+  // of a disjunction all read the value at the type their own test asked for.
+  const output = await agreesWithNode([
+    "function describe(text: string): string {",
+    "  const value = JSON.parse(text);",
+    "  if (typeof value === `string`) {",
+    "    if (value.trim() === ``) return `blank`;",
+    "    return value.trim();",
+    "  }",
+    "  return typeof value === `number` ? `number` : `other`;",
+    "}",
+    "function required(text: string): string {",
+    "  const value = JSON.parse(text);",
+    "  if (typeof value !== `string`) return `missing`;",
+    "  return value.trim();",
+    "}",
+    "function blank(text: string): string {",
+    "  const value = JSON.parse(text);",
+    "  return typeof value !== `string` || value.trim() === `` ? `blank` : `text`;",
+    "}",
+    "function g(): string {",
+    "  return [describe(`\"  \"`), describe(`\" hi \"`), describe(`4`), required(`\" a\"`), required(`[]`), blank(`\" \"`), blank(`\"b\"`)].join(`|`);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "blank|hi|number|a|missing|blank|text");
+});
+
+test("toString with no radix writes a value as the text it is", async () => {
+  // The radix sixteen form writes hexadecimal; with no radix at all the value
+  // is written the way a template string writes it, which is what a bigint and
+  // a number are asked for here.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const n = 12;",
+    "  const big = 255n;",
+    "  return n.toString() + `,` + big.toString();",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12,255");
+});
+
 test("a map is keyed by a reference, and answers the text it holds", async () => {
   const output = await agreesWithNode([
     "class Box {",

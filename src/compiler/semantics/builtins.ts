@@ -201,6 +201,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  parsed, and answers the value the field names. A field the object does
    *  not carry, and a value that is not an object at all, answer nothing. */
   "JSON.get": { params: [ANY, TEXT], returns: ANY, arity: 2 },
+  /** `JSON.typeof(value)` is the name `typeof` answers for a value the
+   *  compiler could not read the type of: the kind the runtime registered the
+   *  value as, or the number or the text the value itself is. */
+  "JSON.typeof": { params: [ANY], returns: TEXT, arity: 1 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
   "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
   /** `process.env.NAME` reads an environment variable as the text it is set

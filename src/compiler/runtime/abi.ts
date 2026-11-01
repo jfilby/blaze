@@ -1111,6 +1111,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_key_ref_at", "double", [["dict", "double"], ["index", "double"]], "Reads the reference key of one entry of a dictionary by its position.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
   entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_type_of",
+    "const char*",
+    [["value", "double"]],
+    "The name `typeof` answers for a value whose type the compiler does not know.",
+    "A value the runtime registered answers the kind it was registered as; a value that is not one is a number, or a text where the number is a pointer.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_null", "double", [], "Boxes null as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
@@ -4867,6 +4875,19 @@ double blaze_rt_to_number(double value) {
   if (d->kind == BLAZE_DYN_NUMBER || d->kind == BLAZE_DYN_BOOL) return d->number;
   if (d->kind == BLAZE_DYN_TEXT && d->text) return atof(d->text);
   return value;
+}
+/* The name typeof answers for a value the compiler could not read the type
+   of. A value the registry holds answers the kind it was registered as; a value
+   it does not hold is a number, or a text where the number is the pointer the
+   text sits at. A null is an object in the language, and every other kind a
+   program can hold is one too. */
+const char* blaze_rt_type_of(double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (!d) return value >= 4096.0 ? "string" : "number";
+  if (d->kind == BLAZE_DYN_NUMBER) return "number";
+  if (d->kind == BLAZE_DYN_BOOL) return "boolean";
+  if (d->kind == BLAZE_DYN_TEXT) return "string";
+  return "object";
 }
 const char* blaze_rt_to_text(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);

@@ -307,14 +307,56 @@ test("a build of a program delivers one module and one host, and the program pri
   assert.equal(result.stdout, original.stdout);
 });
 
+test("a test of what a value holds names the kind the host parsed, and narrows", async () => {
+  // The kind of a value a parse read is the JavaScript type it parsed to, and
+  // the text it is written as is that value's own: a parsed string is its text
+  // and not the quoted JSON of it. A branch a test guards reads the value at
+  // the type the test asked about.
+  const source = [
+    "function first(pick: number): number {",
+    "  let text = `null`;",
+    "  if (pick === 1) text = `\" a\"`;",
+    "  const value = JSON.parse(text);",
+    "  if (typeof value !== `string`) return 0;",
+    "  return value.trim().length;",
+    "}",
+    "console.log(first(1) * 10 + first(2));",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-wasm-narrow-");
+  await writeFile(join(directory, "main.ts"), source, "utf8");
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "replay", file: REPLAY },
+    output: "wasm",
+  });
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
+    quiet,
+    "build",
+  );
+  const module = outcome.outputPath;
+  assert.ok(module !== null, "a program build delivers its module");
+  const original = run("node", ["--experimental-transform-types", join(directory, "main.ts")], {
+    cwd: directory,
+    timeoutMs: 60_000,
+  });
+  assert.equal(original.code, 0, original.stderr);
+  const delivered = await readHost(module);
+  const result = run(process.execPath, [delivered, module], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, original.stdout);
+});
+
 /**
  * The host delivered beside a module, which is what runs it.
  *
  * The build writes the host into the store beside the module, and the store is
  * where the build's own outputs live, so the host is found there.
  */
-async function readHost(module: string): Promise<string> {
-  const directory = module.replace(/\/[^/]+\.wasm$/, "");
+async function readHost(module: string): Promise<string> {  const directory = module.replace(/\/[^/]+\.wasm$/, "");
   const { readdir } = await import("node:fs/promises");
   const files = await readdir(directory);
   const host = files.find((name) => name.endsWith(".host.mjs"));

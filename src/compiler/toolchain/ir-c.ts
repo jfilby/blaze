@@ -247,6 +247,11 @@ function builtinExpression(name: string, args: string[]): string {
       // One field of a dynamic object: the object is the handle it is carried
       // in, and the field is the text it is spelled with.
       return `${RUNTIME_NAME}_json_get(${args[0]}, ${args[1]})`;
+    case "JSON.typeof":
+      // The name `typeof` answers for a value the read could not type: the
+      // runtime holds the kind, and a value it does not hold is a number or a
+      // text.
+      return `${RUNTIME_NAME}_type_of(${args[0]})`;
     case "process.env":
       // The environment variable a module function reads is the runtime's to
       // ask for: the name is the text it is spelled with, and the answer is
