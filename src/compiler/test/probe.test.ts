@@ -90,8 +90,11 @@ test("a reference the contract lays out is built, and the call is made once", ()
   // contract says its fields are, and its fields default to null.
   const built = plan.statements.join("\n");
   assert.match(built, /blaze_rt_object_new\(16, 8\)/);
-  assert.match(built, /node_probe->left = \(void\*\)\(NULL\);/);
-  assert.match(built, /node_probe->right = \(void\*\)\(NULL\);/);
+  // An unshaped reference is the dynamic handle the C side carries as a
+  // double, so the default the harness writes is the number zero: a null
+  // pointer written into that slot is not the value the slot holds.
+  assert.match(built, /node_probe->left = \(double\)\(0.0\);/);
+  assert.match(built, /node_probe->right = \(double\)\(0.0\);/);
 
   const harness = generateProbeHarness(contract, plan);
   assert.match(harness, /extern double measure\(struct Object1\* node\);/);

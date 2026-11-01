@@ -72,7 +72,12 @@ function cType(type: TypeExpr): string {
     };
     return scalars[type.name];
   }
-  if (type.kind === "ref") return type.name === undefined ? "void*" : `struct ${type.name}*`;
+  if (type.kind === "ref") {
+    // A reference with no shape is the dynamic handle the C side carries as a
+    // double, which is what the contract's C declaration says too.
+    if (type.of === null && type.name === undefined) return "double";
+    return type.name === undefined ? "void*" : `struct ${type.name}*`;
+  }
   // A buffer of a type is a pointer to the elements, so a probe hands the
   // candidate a block whose element is the one the contract names: a buffer of
   // text is a block of string pointers and not a block of `void*`.
@@ -129,7 +134,12 @@ function buildValue(
     }
     return pointer;
   }
-  if (type.kind === "ref") return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
+  if (type.kind === "ref") {
+    // An unshaped reference is the dynamic handle the C side carries as a
+    // double, so its default is the number zero. Only a pointer is null.
+    if (type.of === null && type.name === undefined) return "0.0";
+    return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
+  }
   if (type.kind === "primitive") return defaultScalar(type);
   if (type.kind === "void") return "NULL";
   // A text is a real empty string rather than a null pointer, for the reason a
