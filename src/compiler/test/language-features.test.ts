@@ -608,6 +608,35 @@ test("a bare return leaves a function that returns nothing", async () => {
   assert.equal(output.trim(), "2");
 });
 
+test("a text a method answers is a text", async () => {
+  // What a call answers is the callee's to say, and a method is a function the
+  // class scan wrote rather than a declaration of the body. Without the type
+  // the declaration writes for its result, `this.read().trim()` was a text
+  // method written on nothing and was refused.
+  const output = await agreesWithNode([
+    "class Reader {",
+    "  private label: string;",
+    "  constructor(label: string) { this.label = label; }",
+    "  text(): string { return this.label; }",
+    "  static empty(): string { return `  `; }",
+    "  get banner(): string { return `[${this.label}]`; }",
+    "}",
+    "class Trimmed {",
+    "  private reader: Reader;",
+    "  constructor(reader: Reader) { this.reader = reader; }",
+    "  run(): string {",
+    "    const first = this.reader.text().trim().toUpperCase();",
+    "    const second = Reader.empty().trim();",
+    "    const third = this.reader.banner.trim();",
+    "    return `${first}:${second.length}:${third}`;",
+    "  }",
+    "}",
+    "console.log(new Trimmed(new Reader(`  hi  `)).run());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "HI:0:[  hi  ]");
+});
+
 test("a class method may be named with a modifier word", async () => {
   // `declare` is a modifier where a declaration follows it and a member name
   // where a body follows it, and the token after the name is what says which.

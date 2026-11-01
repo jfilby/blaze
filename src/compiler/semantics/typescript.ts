@@ -6694,7 +6694,7 @@ class TypeScriptParser {
             const found = this.methodOwner(owner.name, target.field, true);
             if (found !== null) {
               const args = this.readCallArguments(this.methodParams(found.method.params).map((param) => param.type));
-              replace({ k: "call", name: methodFunctionName(found.owner, found.method, args.length), args });
+              replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), args, found.method.returnTypeName, found.method.line));
               continue;
             }
           }
@@ -6797,11 +6797,7 @@ class TypeScriptParser {
             );
             return this.hole();
           }
-          replace({
-            k: "call",
-            name: methodFunctionName(found.owner, found.method, args.length),
-            args: [receiver, ...args],
-          });
+          replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), [receiver, ...args], found.method.returnTypeName, found.method.line));
           continue;
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
@@ -6912,12 +6908,12 @@ class TypeScriptParser {
           if (owner !== undefined) {
             const found = findField(this.classTable, owner.name, field.text, true);
             if (found !== null) {
-              replace({ k: "call", name: `${found.owner}_${found.field.name}`, args: [] });
+              replace(this.typedCall(`${found.owner}_${found.field.name}`, [], found.field.typeName, found.field.line));
               continue;
             }
             const getter = findGetter(this.classTable, owner.name, field.text, true);
             if (getter !== null) {
-              replace({ k: "call", name: `${getter.owner}_${getter.getter.name}`, args: [] });
+              replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [], getter.getter.returnTypeName, getter.getter.line));
               continue;
             }
           }
@@ -6928,7 +6924,7 @@ class TypeScriptParser {
         if (getterOwner !== null) {
           const getter = findGetter(this.classTable, getterOwner, field.text, false);
           if (getter !== null) {
-            replace({ k: "call", name: `${getter.owner}_${getter.getter.name}`, args: [target] });
+            replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [target], getter.getter.returnTypeName, getter.getter.line));
             continue;
           }
         }
@@ -7474,6 +7470,25 @@ class TypeScriptParser {
       current = current.base;
     }
     return current.k === "ident" && this.pendingValues.has(current.name);
+  }
+
+  /**
+   * A call of a method or a class member, held at the type the declaration
+   * writes for its result.
+   *
+   * A call is the one value the parser cannot type from the text it is written
+   * as: what it answers is the callee's to say. A module function says it in
+   * `declaredReturns`, but a method is a function the class scan wrote and no
+   * declaration of the body names, so the type is recorded where the call is
+   * built. Without it `this.read(t).trim()` was a method of nothing, and the
+   * text methods written after a call were refused.
+   */
+  private typedCall(name: string, args: readonly Expression[], returnTypeName: string, line: number): Expression {
+    const call: Expression = { k: "call", name, args: [...args] };
+    if (returnTypeName.trim() === "" || returnTypeName.trim() === "void") return call;
+    const type = this.typeForName(returnTypeName, line);
+    if (type.kind !== "void") this.expressionTypes.set(call, type);
+    return call;
   }
 
   private valueTypeOf(value: Expression): TypeExpr {
