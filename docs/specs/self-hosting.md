@@ -384,6 +384,45 @@ which is the digits of a bigint and the shortest decimal of a number.
 
 This took the total from 1851 to 1779.
 
+### 4f. A chain of methods on an imported type
+
+An imported interface is the largest remaining source of refusals, and the
+module graph already carries it: a file is read before its imports are linked,
+the read that follows the link holds the declaration, and a method written on a
+field of it is read against the field's own type. What did not survive the
+link was a *chain*:
+
+    driver.bodies.filter((body) => !covered.has(body.name)).map((body) => body.symbol)
+
+`filter` was deferred, because `driver` is held at a declaration the read does
+not have. What `filter` answers is a value of that same declaration — a list
+whose element type is in the other module — and a method written on it was
+refused as a method of nothing. Three things were missing.
+
+**What a deferred method answers is deferred too.** The hole a deferral leaves
+is marked as deferred, and `pendingHolds` answers true for a value that is one.
+A method written on that answer waits for the same link.
+
+**The callback waits with it.** A callback handed to such a method is handed the
+element of a list whose element type the read does not hold: an element type
+that erases to a reference with no name. A parameter the source did not annotate
+is then a value the link will name, so it is marked pending and a text method
+written on it is not refused here. This is also why an annotation is now read for
+*every* name it mentions rather than for the name it starts with: `Name[]`,
+`Record<string, Name>` and `Omit<Full, "c">` all name a declaration in another
+module, and `Name[]` used to leave the file looking as if it imported no type at
+all.
+
+**A walked list keeps its element's shape.** `filter(f).map(g)` reads the fields
+of an element twice, the second time through the list `filter` answered. The
+type of that answer was recorded but its *shape* was not, so the second step was
+field by field only for the element type it could still resolve by name — which
+is nothing, for an element read out of another module. `collection` now records
+the shape its answer holds: the receiver's element shape for `filter` and
+`sort`, and what the callback answered for `map`.
+
+This took the total from 1779 to 1719.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

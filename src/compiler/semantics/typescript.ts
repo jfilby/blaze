@@ -2340,6 +2340,25 @@ class TypeScriptParser {
   private pendingValues = new Set<string>();
   /** The class fields whose declared type is a name this file imports, unlinked. */
   private pendingFields = new Set<string>();
+  /**
+   * The values a read deferred because their type is not settled yet.
+   *
+   * A method written on a value of an unlinked imported type is not refused:
+   * the read that follows the link holds the declaration and refuses it there
+   * if the method really is not one. What that method answers is a value of the
+   * same unlinked declaration — `driver.bodies.filter(f).map(g)` reads a list
+   * whose element type is in another module — so the answer is deferred too,
+   * and a method written on it waits for the same link rather than being called
+   * a method of nothing.
+   */
+  private deferred = new Set<unknown>();
+  /**
+   * True while the arrow at the cursor is a callback whose element type the
+   * read does not hold: a `map` over a list whose element is in a module the
+   * graph has not linked yet. A parameter the source did not annotate is then
+   * the element that link will name.
+   */
+  private pendingArrow = false;
   /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
@@ -4931,7 +4950,25 @@ class TypeScriptParser {
       this.report(`expected ${what}`, `near "${this.peek().text}"`, this.peek());
       return ANY_TYPE;
     }
+    // A name this file imports may be written inside a larger annotation as
+    // readily as on its own: `Name[]`, `Record<string, Name>` and
+    // `Omit<Full, "c">` all name a declaration in another module. Until the
+    // graph links it, every one of them is a type this read does not hold.
+    this.notePendingAnnotation(start, end);
     return this.typeFromTokens(start, end, promisePayload);
+  }
+
+  /**
+   * Records that an annotation mentions a type this file imports, whatever else
+   * it writes, so the reads that wait for the link wait for it here too.
+   */
+  private notePendingAnnotation(start: number, end: number): void {
+    const written = this.tokens.slice(start, end).map((token) => token.text).join(" ");
+    // The file-level verdict is what this read needs; the note about the
+    // declaration just read belongs to the caller that asked for it.
+    const note = this.pendingNote;
+    this.notePendingType(written);
+    this.pendingNote = note;
   }
 
   /** The shape of the annotation the last read consumed, or null. */
@@ -7376,10 +7413,18 @@ class TypeScriptParser {
         // instance the source called it on.
         if (target.k === "member") {
           const callLine = this.peek().line;
+          const callback = this.collectionCallbackParameters(target.base, target.field);
+          // A callback handed to a method of a value whose type this read does
+          // not hold is handed the element of a list whose element type is in
+          // a module the graph has not linked: a parameter the use does not fix
+          // waits for that link too. An element the read holds as a reference
+          // with no name is one the link will name.
+          const waitsForLink = this.typeReadIsPending();
           const args = this.readCallArguments(
             this.expectedMethodArguments(target.base, target.field),
-            this.collectionCallbackParameters(target.base, target.field),
+            callback,
             target.field === "push",
+            waitsForLink,
           );
           const spreads = target.field === "push" ? this.argumentSpreads : null;
           const receiver = target.base;
@@ -7487,7 +7532,12 @@ class TypeScriptParser {
             // there where there really is none. A method written on anything
             // else is refused here, whatever else the file imports.
             if (this.typeReadIsPending() && this.pendingHolds(receiver)) {
-              replace(this.hole());
+              // What the method answers is a value of the same unlinked
+              // declaration, so it waits for the link too: a method written on
+              // it is a method of a value this read cannot type yet.
+              const answered = this.hole();
+              this.deferred.add(answered);
+              replace(answered);
               continue;
             }
             this.report(
@@ -7716,6 +7766,7 @@ class TypeScriptParser {
     expected: readonly TypeExpr[] = [],
     callback: readonly ArrowParameterType[] | null = null,
     spreadsAllowed = false,
+    callbackWaitsForLink = false,
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
@@ -7736,7 +7787,7 @@ class TypeScriptParser {
       } else {
         spreads.push(false);
       }
-      args.push(this.readArgument(type, args.length === 0 ? callback : null));
+      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
@@ -7746,18 +7797,29 @@ class TypeScriptParser {
   }
 
   /** One argument of a call, read at the type its use says and its arrow hints. */
-  private readArgument(type: TypeExpr | null, callback: readonly ArrowParameterType[] | null): Expression {
+  private readArgument(
+    type: TypeExpr | null,
+    callback: readonly ArrowParameterType[] | null,
+    waitsForLink = false,
+  ): Expression {
     const read = (): Expression => (type === null ? this.readExpression() : this.readAt(type, () => this.readExpression()));
     // A hint applies only to the arrow written at the cursor. A hint on a value
     // that is not an arrow names no parameter, and is not passed on to an arrow
     // the value contains.
-    if (callback === null || this.arrowAt() === null) return read();
-    const saved = this.arrowParameters;
-    this.arrowParameters = callback;
+    if (this.arrowAt() === null) return read();
+    const savedHint = this.arrowParameters;
+    const savedPending = this.pendingArrow;
+    if (callback !== null) this.arrowParameters = callback;
+    // The element the callback is handed is the element of a list this read
+    // cannot type yet, so a parameter nothing else fixes is a value the link
+    // will type: a method written on it waits for the link rather than being
+    // refused here.
+    if (waitsForLink) this.pendingArrow = true;
     try {
       return read();
     } finally {
-      this.arrowParameters = saved;
+      this.arrowParameters = savedHint;
+      this.pendingArrow = savedPending;
     }
   }
 
@@ -7920,6 +7982,9 @@ class TypeScriptParser {
     // callback of a call of its own, so the hint is taken and cleared here.
     const hints = this.arrowParameters;
     this.arrowParameters = null;
+    // Whether the element this callback is handed is one the link will name.
+    const waitsForLink = this.pendingArrow;
+    this.pendingArrow = false;
     interface ArrowParam {
       name: string;
       type: TypeExpr;
@@ -8033,14 +8098,23 @@ class TypeScriptParser {
     this.valueCollections = new Map(savedCollections);
     this.loops = 0;
     this.breakTargets = [];
-    for (const param of params) {
+    // A parameter the source did not annotate and the use did not fix is a
+    // value the link names: what the body writes on it is not a construct this
+    // read can refuse, and the read that follows the link refuses it where it
+    // really is not one.
+    const savedPendingValues = this.pendingValues;
+    this.pendingValues = new Set(savedPendingValues);
+    params.forEach((param, at) => {
       this.valueTypes.set(param.name, param.type);
       if (param.shape !== null) this.valueShapes.set(param.name, param.shape);
       if (param.functionType !== null) this.valueFunctions.set(param.name, param.functionType);
       if (param.typeName !== "" && this.classTable.names.has(param.typeName)) {
         this.valueClasses.set(param.name, param.typeName);
       }
-    }
+      if (waitsForLink && (hints?.[at] === undefined || unknownReference(hints[at].type))) {
+        this.pendingValues.add(param.name);
+      }
+    });
     const body: Statement[] = this.readReturning(stated, () => {
       if (this.at("{")) return [...prelude, ...this.readBlock()];
       // A concise body is the return the source wrote without the word, so an
@@ -8070,6 +8144,7 @@ class TypeScriptParser {
     this.valueRegexes = savedRegexes;
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
+    this.pendingValues = savedPendingValues;
     const captures = arrowCaptures(params, body);
     if (captures.written.length > 0) {
       this.report(
@@ -8254,6 +8329,19 @@ class TypeScriptParser {
     const helper = this.collectionHelper(method, elements, signature, args.length === 2, line);
     const call: Expression = { k: "call", name: helper.name, args: [receiver, callback, ...args.slice(1)] };
     this.expressionTypes.set(call, helper.returns);
+    // A method that walks the array answers a list of what it read, so the
+    // element keeps the shape it was read at: a chain `names.filter(f).map(g)`
+    // reads the fields of an element a second time, and the second step is only
+    // field by field where the shape travelled with the list. `map` answers a
+    // list of what the callback answered, so its element shape is that answer.
+    const returns = helper.returns;
+    if (returns.kind === "slice" || returns.kind === "array") {
+      const keepsElement = method === "filter" || method === "sort";
+      const element = keepsElement
+        ? this.elementShapeOf(receiver, elements) ?? { kind: "any" as const }
+        : this.shapeOfTypeExpr(returns.of);
+      this.expressionShapes.set(call, { kind: "list", of: element });
+    }
     return call;
   }
 
@@ -8270,7 +8358,9 @@ class TypeScriptParser {
   /** Whether the name a member chain is rooted at holds a pending type. */
   private pendingHolds(value: Expression): boolean {
     let current = value;
-    while (current.k === "member" || current.k === "index") {
+    for (;;) {
+      if (this.deferred.has(current)) return true;
+      if (current.k !== "member" && current.k !== "index") break;
       if (current.k === "member" && this.pendingFields.has(current.field)) return true;
       current = current.base;
     }

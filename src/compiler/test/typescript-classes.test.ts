@@ -99,6 +99,33 @@ test("a method on a field of an imported type waits for the link", () => {
   assert.match(ir, /text\.trim/);
 });
 
+test("a chain of methods on an imported type waits for the link, callback and all", () => {
+  // A method on a value of an unlinked imported type is not refused, and what
+  // it answers is a value of the same declaration: the method written on that
+  // answer waits too. The callback it hands the method is handed the element of
+  // a list whose element type is in the other module, so a parameter the source
+  // did not annotate waits for the link as well — a text method written on the
+  // element is not this read's to refuse.
+  const program = programOf(
+    "typescript",
+    {
+      "names.ts": "export interface Name { text: string }\n",
+      "holder.ts": [
+        'import { type Name } from "./names.ts";',
+        "export function read(names: Name[]): string {",
+        "  return names.filter((name) => name.text.length > 0).map((name) => name.text.trim()).join(`,`);",
+        "}",
+        "",
+      ].join("\n"),
+      "main.ts": 'import { read } from "./holder.ts";\nconsole.log(0);\n',
+    },
+    "main.ts",
+  );
+  const holder = program.files.find((file) => file.path === "holder.ts");
+  assert.ok(holder !== undefined, "the file that reads the chain is a module of the program");
+  assert.ok(Object.keys(holder.functions).includes("read"), "the chain is a function the program compiles");
+});
+
 test("`extends Error` adds the message field and `super` writes it", () => {
   // The one base a class may name is Error, and the one field it brings is the
   // message: `super(message)` is the write of that field, and the class's own

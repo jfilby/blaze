@@ -1318,6 +1318,35 @@ test("a method on a field of an imported interface waits for the link", async ()
   assert.equal(output.trim(), "hello ada");
 });
 
+test("a chain of methods over an imported element type reads and runs", async () => {
+  // The element type of the list is declared in another module, so the first
+  // read does not know its fields: the methods written on it wait for the link,
+  // and the read that follows the link reads the chain against the fields the
+  // interface declares. What it answers is compared with what the source prints.
+  const output = await agreesWithNode(
+    [
+      'import { demo } from "./holder.ts";',
+      "console.log(demo());",
+      "",
+    ].join("\n"),
+    {
+      "names.ts": "export interface Name {\n  text: string;\n}\n",
+      "holder.ts": [
+        'import { type Name } from "./names.ts";',
+        "export function read(names: Name[]): string {",
+        "  return names.filter((name) => name.text.length > 0).map((name) => name.text.trim()).join(`,`);",
+        "}",
+        "export function demo(): string {",
+        "  const names: Name[] = [{ text: ` a ` }, { text: `b` }];",
+        "  return read(names);",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "a,b");
+});
+
 test("a text folds to lower or upper case", async () => {
   // The runtime folds the ASCII letters of the bytes the source wrote and
   // copies every other byte as it is, which is what the text helpers count.
