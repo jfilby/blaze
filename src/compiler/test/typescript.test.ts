@@ -347,6 +347,104 @@ test("every construct outside the subset is reported at once", () => {
   assert.match(message, /line 9: "class" is not supported/);
 });
 
+test("a regular expression inside an interpolation does not end the text it is written in", () => {
+  // The brace that closes an interpolation is found by reading the expression
+  // between `${` and `}`. A regular expression may hold a quote of either kind
+  // — `x.replace(/"/g, "a")` does — and reading that quote as the start of a
+  // text desynchronised every quote after it, so the `}` was never found and
+  // the whole file failed with "unterminated string".
+  const analysis = typescript.analyze(
+    'export function f(x: string): string { return `a ${x.replace(/"/g, "b")} c`; }',
+    "module.ts",
+    false,
+  );
+
+  assert.deepEqual(analysis.functions.map((entry) => entry.name), ["f"]);
+});
+
+test("a statement outside the subset is reported once, whatever the rest of it reads", () => {
+  // The parser reads on after a construct it cannot read, and what it reads is
+  // the construct's own statement read as the junk around it. One statement is
+  // one refusal: three methods of a value the module does not declare are three
+  // readings of one gap, and the build names the first of them.
+  const message = diagnostic(() =>
+    contractOf(
+      "typescript",
+      [
+        "export function f(x: number): number {",
+        "  const a = x.foo(1).bar(2).baz(3);",
+        "  return 0;",
+        "}",
+      ].join("\n"),
+    ),
+  );
+
+  assert.match(message, /1 construct of module\.ts is outside the subset the compiler reads/);
+  assert.match(message, /"foo" is not a method this program compiles/);
+});
+
+test("a refused function's return type is not read as its body", () => {
+  // The body of a declaration the module cannot hold is skipped by its braces,
+  // and the return type is written before them. A return type with an object in
+  // it — `(): { a: string } | null {` — put the type's brace where the body's
+  // was looked for, so the declaration ended at its type and the rest of the
+  // signature was read as a statement of the file: `"a" is not a statement of a
+  // program`, and then the `export` after it.
+  const message = diagnostic(() =>
+    typescript.analyze(
+      [
+        "function broken(x: number): { a: string } | null {",
+        "  return x.mystery(1);",
+        "}",
+        "export function g(): number { return 1; }",
+      ].join("\n"),
+      "module.ts",
+    ),
+  );
+
+  assert.match(message, /1 construct of module\.ts is outside the subset the compiler reads/);
+  assert.match(message, /line 2: "mystery" is not a method this program compiles/);
+  assert.doesNotMatch(message, /is not a statement of a program/);
+});
+
+test("a statement of a program outside the subset is reported once", () => {
+  // The program body recovers at the statement it was reading, so the rest of
+  // the pattern is not read as the statements that follow it.
+  const message = diagnostic(() =>
+    programOf(
+      "typescript",
+      {
+        "main.ts": [
+          "const pair = [1, 2];",
+          "const [head, ...rest] = pair;",
+          'console.log(head);',
+        ].join("\n"),
+      },
+      "main.ts",
+    ),
+  );
+
+  assert.match(message, /1 construct of main\.ts is outside the subset the compiler reads/);
+  assert.match(message, /line 2: expected the name of a declared value/);
+});
+
+test("a missing closing bracket ends its own construct, not the rest of the line", () => {
+  // `if ("a" in x)` writes a condition the expression grammar does not carry.
+  // The `)` is missing where the header expected it, and reading on to the one
+  // the source wrote ends the header there: without it the body and the `in`
+  // were read as statements of their own.
+  const message = diagnostic(() =>
+    programOf(
+      "typescript",
+      { "main.ts": ['const x = 1;', 'if ("a" in x) console.log(1);', 'console.log(2);'].join("\n") },
+      "main.ts",
+    ),
+  );
+
+  assert.match(message, /1 construct of main\.ts is outside the subset the compiler reads/);
+  assert.match(message, /line 2: expected "\)"/);
+});
+
 test("type-only syntax is erased, and a generic annotation is read to its end", () => {
   // A module is written in TypeScript, and the types it declares are not
   // values: an interface, a type alias, an ambient declaration, an `import

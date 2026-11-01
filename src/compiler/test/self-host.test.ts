@@ -41,11 +41,19 @@ import { selfHostGap } from "./self-host-gap.ts";
  * the methods that read a text with it — to 5319, and carrying an interface or a
  * type alias through the module graph to 5091: a field of a named interface is
  * the type its declaration gives it, so the member chain after it is read.
- * Lower it with every slice; raise it only when the measurement changes which
- * parser reads a body, or when the compiler itself grows a construct the
- * frontend has not learned yet.
+ * Reading a call at the type its declaration writes for the result, `JSON`,
+ * an optional chain over a computed position and a nested type argument lowered
+ * it to 3162. Diagnostic recovery — one refusal per statement, and reading on to
+ * the end of a refused statement — lowered it to 1927, because the number had
+ * been measuring how far a parse got rather than what was missing. The two
+ * parser bugs the recovery made landable — a return type's brace read as the
+ * body, and a regular expression in an interpolation read as text — raise it to
+ * 1981: both let a file be read that was not read before, and what they expose
+ * is real work. Lower it with every slice; raise it only when the measurement
+ * changes which parser reads a body, or when the compiler itself grows a
+ * construct the frontend has not learned yet.
  */
-const REFUSAL_BUDGET = 3162;
+const REFUSAL_BUDGET = 2004;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

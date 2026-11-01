@@ -158,6 +158,30 @@ export function closingBrace(text: string, open: number): number {
       index = end;
       continue;
     }
+    // A regular expression may hold a quote of either kind, and reading it as
+    // a string ends a text the expression never opened: `x.replace(/"/g, "a")`
+    // desynchronised every quote after it, so the `}` the interpolation ends
+    // with was never found. A slash where a value is expected is the pattern's
+    // own, and it runs to the next slash outside a class.
+    if (character === "/" && text[index + 1] !== "/" && text[index + 1] !== "*" && valueExpected(text, index)) {
+      let end = index + 1;
+      let inClass = false;
+      for (;;) {
+        if (end >= text.length || text[end] === "\n") return -1;
+        const next = text[end];
+        if (next === "\\") {
+          end += 2;
+          continue;
+        }
+        if (next === "[") inClass = true;
+        else if (next === "]") inClass = false;
+        else if (next === "/" && !inClass) break;
+        end += 1;
+      }
+      while (end + 1 < text.length && /[a-z]/.test(text[end + 1] as string)) end += 1;
+      index = end;
+      continue;
+    }
     if (character === "{") depth += 1;
     else if (character === "}") {
       depth -= 1;
@@ -165,6 +189,33 @@ export function closingBrace(text: string, open: number): number {
     }
   }
   return -1;
+}
+
+/** The words a regular expression may follow without being a division. */
+const REGEX_AFTER_WORD: ReadonlySet<string> = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "case", "do", "else", "yield", "await",
+]);
+
+/**
+ * Whether a `/` at one place starts a pattern rather than a division.
+ *
+ * The same question the tokenizer asks of its own token stream, over the
+ * characters between: a pattern starts where a value is expected, which is the
+ * beginning, after an operator or an opening bracket, or after a word that is
+ * followed by an expression.
+ */
+function valueExpected(text: string, at: number): boolean {
+  let index = at - 1;
+  while (index >= 0 && /\s/.test(text[index] as string)) index -= 1;
+  if (index < 0) return true;
+  const character = text[index] as string;
+  if (/[A-Za-z0-9_$]/.test(character)) {
+    let start = index;
+    while (start >= 0 && /[A-Za-z0-9_$]/.test(text[start] as string)) start -= 1;
+    return REGEX_AFTER_WORD.has(text.slice(start + 1, index + 1));
+  }
+  if (character === ")" || character === "]" || character === "}" || character === "`" || character === '"' || character === "'") return false;
+  return true;
 }
 
 /**
@@ -225,6 +276,15 @@ const CONTRACT_OPERATORS: readonly BinaryOp[] = [
 
 /** The operators a value an index is built from may use, as a contract states it. */
 const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
+
+/**
+ * Where a function's return type ends and its body begins.
+ *
+ * `{` is both the start of an object type and the body's own brace, so the type
+ * reader decides it by what precedes it; `=` and `;` are the ends of a form
+ * that writes no brace at all.
+ */
+const FUNCTION_BODY_STOPS: ReadonlySet<string> = new Set(["{", "=", ";"]);
 
 /**
  * Where an `as` or `satisfies` type ends. A type is followed by the rest of the
@@ -2298,8 +2358,83 @@ class TypeScriptParser {
     return this.next();
   }
 
+
+  /**
+   * How many refusals the statement being read has written.
+   *
+   * A construct outside the subset is one refusal, not the run of them that
+   * reading the rest of its statement can earn: the parser reads on after it,
+   * and what it reads is what the construct would have meant, so every refusal
+   * after the first is the same one wearing the shape of the junk around it.
+   * The count is reset when a statement begins, so two statements that are each
+   * outside the subset are still reported as two.
+   */
+  private reporting = 0;
+
   private report(message: string, detail: string, token: Token = this.peek()): void {
+    this.reporting += 1;
+    if (this.reporting > 1) return;
     this.diagnostics.report(message, detail, token.line);
+  }
+
+  /**
+   * Reads one statement of a body, and recovers to the end of it when it was
+   * refused.
+   *
+   * Without the recovery the rest of the refused statement is read as
+   * statements of its own, so one construct outside the subset is reported as
+   * the run of fragments the parser made of what was left. The end is the one
+   * the source wrote, found from where the statement began, so a `;` written
+   * inside a nested bracket is not the end of it.
+   */
+  private guardedStatement(): Statement[] {
+    const start = this.position;
+    const outer = this.reporting;
+    this.reporting = 0;
+    const statements = this.withPending(this.readStatement());
+    const refused = this.reporting > 0;
+    this.reporting = outer;
+    if (refused) this.readPastStatement(start);
+    return statements;
+  }
+
+  /** Reads on to the end of the statement that begins at a token. */
+  private readPastStatement(start: number): void {
+    const end = this.statementEnd(start);
+    if (end > this.position) this.position = end;
+  }
+
+  /**
+   * Where the statement beginning at a token ends, as the token after its last.
+   *
+   * The scan is over the source's own brackets, so a `;` inside a call or a
+   * loop header is not the end. A block the statement opens closes at depth
+   * zero, and the `else`, `catch`, `finally` and `while` that may follow it are
+   * part of the same statement.
+   */
+  private statementEnd(start: number): number {
+    let depth = 0;
+    for (let at = start; at < this.tokens.length; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      if (text === "(" || text === "[" || text === "{") {
+        depth += 1;
+        continue;
+      }
+      if (text === ")" || text === "]" || text === "}") {
+        if (depth === 0) return at;
+        depth -= 1;
+        if (depth === 0 && text === "}") {
+          const next = this.tokens[at + 1]?.text;
+          if (next === "else" || next === "catch" || next === "finally" || next === "while") continue;
+          return this.tokens[at + 1]?.text === ";" ? at + 2 : at + 1;
+        }
+        continue;
+      }
+      if (text === ";" && depth === 0) return at + 1;
+    }
+    return this.tokens.length;
   }
 
   /** A value standing in for one the parser could not read. */
@@ -3486,19 +3621,26 @@ class TypeScriptParser {
 
   /**
    * Skips a run of type tokens, stopping at one of `stops` outside every
-   * bracket. Type arguments nest with `<`, which the tokeniser writes as `>>`
-   * and `>>>` where two or three close together, so those close as many as
-   * they name.
+   * bracket.
    */
   private skipBalancedTypeTokens(stops: ReadonlySet<string>): void {
+    this.position = this.typeTokensEnd(this.position, stops);
+  }
+
+  /**
+   * Where a run of type tokens beginning at a token ends, as a token index.
+   *
+   * Type arguments nest with `<`, which the tokeniser writes as `>>` and `>>>`
+   * where two or three close together, so those close as many as they name.
+   */
+  private typeTokensEnd(start: number, stops: ReadonlySet<string>): number {
     let parens = 0;
     let brackets = 0;
     let braces = 0;
     let angles = 0;
-    const first = this.position;
-    let at = first;
-    while (this.peek().kind !== "end") {
-      const token = this.peek();
+    let at = start;
+    while (at < this.tokens.length && this.tokens[at]?.kind !== "end") {
+      const token = this.tokens[at] as Token;
       const text = token.text;
       // A literal type such as `">>"` is a string token with the brackets in
       // its text: the brackets are punctuation, and only punctuation nests.
@@ -3518,39 +3660,38 @@ class TypeScriptParser {
           previous === "=>" ||
           previous === "," ||
           previous === "<";
-        if (!opener || (at > first && !continues)) return;
+        if (!opener || (at > start && !continues)) return at;
       }
       if (!punctuated) {
-        this.next();
         at += 1;
         continue;
       }
       if (text === "(") parens += 1;
       else if (text === ")") {
-        if (parens === 0) return;
+        if (parens === 0) return at;
         parens -= 1;
       } else if (text === "[") brackets += 1;
       else if (text === "]") {
-        if (brackets === 0) return;
+        if (brackets === 0) return at;
         brackets -= 1;
       } else if (text === "{") braces += 1;
       else if (text === "}") {
-        if (braces === 0) return;
+        if (braces === 0) return at;
         braces -= 1;
       } else if (text === "<") angles += 1;
       else if (text === ">") {
-        if (angles === 0) return;
+        if (angles === 0) return at;
         angles -= 1;
       } else if (text === ">>") {
-        if (angles < 2) return;
+        if (angles < 2) return at;
         angles -= 2;
       } else if (text === ">>>") {
-        if (angles < 3) return;
+        if (angles < 3) return at;
         angles -= 3;
       }
-      this.next();
       at += 1;
     }
+    return at;
   }
 
   /**
@@ -3592,6 +3733,10 @@ class TypeScriptParser {
     /** Whether the file runs anything: a file that runs nothing is a library. */
     let runs = false;
     while (this.peek().kind !== "end") {
+      // One refusal for each declaration or statement of the file, as one for
+      // each statement of a body: the count a statement left behind is the
+      // last statement's, not this one's.
+      this.reporting = 0;
       if (atTop && this.at("import")) {
         const start = this.position;
         this.next();
@@ -3758,13 +3903,16 @@ class TypeScriptParser {
     const before = functions.length;
     const closuresBefore = this.closures.length;
     const saved = this.diagnostics;
+    const savedReporting = this.reporting;
     const trial = new Diagnostics();
     this.diagnostics = trial;
+    this.reporting = 0;
     let offers: string | null = null;
     try {
       offers = this.readFunctionDeclaration(functions, namesExported);
     } finally {
       this.diagnostics = saved;
+      this.reporting = savedReporting;
     }
     const end = this.position;
     const entries = functions.slice(before);
@@ -3861,6 +4009,14 @@ class TypeScriptParser {
           break;
         }
       }
+    }
+    // A return type is written between the `)` and the body, and it may hold a
+    // brace of its own: `(): { buffer: string } | null {` writes the type's
+    // brace where the body's was looked for, so the declaration ended at its
+    // type and the rest of the signature was read as a statement of the file.
+    // The annotation is skipped as a type, and the body is the brace after it.
+    if (this.tokens[index]?.text === ":") {
+      index = this.typeTokensEnd(index, FUNCTION_BODY_STOPS);
     }
     while (index < this.tokens.length && this.tokens[index].text !== "{") index += 1;
     let depth = 0;
@@ -4809,7 +4965,7 @@ class TypeScriptParser {
         statements.push(...this.readBlock());
         continue;
       }
-      statements.push(...this.withPending(this.readStatement()));
+      statements.push(...this.guardedStatement());
     }
     this.expect("}");
     return statements;
@@ -4821,7 +4977,7 @@ class TypeScriptParser {
       this.skipTypeOnlyDeclaration();
       return [];
     }
-    return this.at("{") ? this.readBlock() : this.withPending(this.readStatement());
+    return this.at("{") ? this.readBlock() : this.guardedStatement();
   }
 
   /**
@@ -5767,7 +5923,7 @@ class TypeScriptParser {
           body.push(...this.readBlock());
           continue;
         }
-        body.push(...this.withPending(this.readStatement()));
+        body.push(...this.guardedStatement());
       }
       this.breakTargets.pop();
       // The statements after a break are unreachable. They are read past so

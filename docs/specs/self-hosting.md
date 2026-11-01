@@ -173,30 +173,61 @@ parser. That is the right shape to keep: the goal is to grow the subset by
 measured slices, not to become a second TypeScript implementation.
 
 Two things about the number are worth knowing before a slice is measured
-against it. **A refusal cascades**: the parser recovers at the next statement,
-so one construct outside the subset is often reported several times, and the
-top two messages (`expected ")"`, `unexpected ")"`) are mostly fallout from
-something else. **Reading further raises the number**: a file whose functions
-used to fall to the program parser is read as a library once the construct that
-sent them there is carried, and its functions then report the gaps they always
-had. A slice that reads more of a file can therefore raise the total while
-removing real work, which is why the budget is a ratchet rather than a score and
-why a per-file delta is read before a slice is accepted.
+against it. **A refusal cascades**: the parser reads on after a construct it
+cannot read, so one gap was often reported several times as the junk around it.
+**Reading further raises the number**: a file whose functions used to fall to
+the program parser is read as a library once the construct that sent them there
+is carried, and its functions then report the gaps they always had. A slice that
+reads more of a file can therefore raise the total while removing real work,
+which is why the budget is a ratchet rather than a score and why a per-file
+delta is read before a slice is accepted.
 
-One such fix is written and held back for that reason. When a declaration the
-module cannot hold is handed to the program parser, `skipFunctionBody` finds the
-body at the first `{` after the `)` — which is the *return type's* brace when the
-return type is an inline object, so `function f(): { buffer: string } | null {`
-ends the declaration at its type and the rest of the signature is read as a
-statement of the file, which makes the file run and hides every function in it
-from the module reader. Skipping the annotation first instead (`skipBalancedTypeTokens`
-with the `{`/`=`/`;` stops) reads `semantics/typescript-classes.ts` almost
-whole — 147 refusals down to 6 — and `toolchain/ir-wasm.ts`, `ir-machine.ts`,
-`ir-resolve.ts` and `semantics/liveness.ts` down by 16 to 43 each, but it exposes
-the gaps in `semantics/repair.ts`, `optimize-ir.ts`, `compiler.ts` and
-`semantics/ir-validate.ts` at the same time and raises the total by 49. It lands
-when diagnostic recovery makes the total a measure of work rather than of how
-far the parse got.
+### 4a. Recover at the statement
+
+Both parsers now recover at the statement, which is what makes the number a
+measure of work rather than of how far the parse got:
+
+- a statement reports **once**. `TypeScriptParser` and `ProgramParser` each keep
+  a per-statement count, reset at the beginning of every statement and kept
+  around the statements nested inside it, so a parent's refusal does not hide a
+  child's and a child's does not repeat the parent's. The third method of a
+  chain the module does not declare is the same gap as the first, read again;
+- after a refused statement, the parser reads on to the **end of that
+  statement**, found from where it began over the source's own brackets, so the
+  next statement starts where the source wrote it. A `}` that closes a block the
+  statement opened ends the statement, and the `else`, `catch`, `finally` and
+  `while` after it are part of the same one;
+- `ProgramParser.expect` reads on to the closing bracket it expected when it is
+  missing where the source wrote it, so a header the expression grammar does not
+  carry ends at its own `)` instead of leaving the body to be read as statements.
+
+This took the total from 3162 to 1927. The same recovery in the module parser's
+`expect` was measured too: it reads `cli.ts` almost whole (14 refusals to 3) but
+raises the total by 189, because `toolchain/ir-machine.ts` and
+`semantics/ir-function.ts` then report what was hidden from them. It is written
+and held back until the gaps it exposes are carried.
+
+Two parser bugs that the recovery made landable are fixed with it:
+
+- `skipFunctionBody` found the body at the first `{` after the `)`, which is the
+  *return type's* brace when the return type is an inline object, so
+  `function f(): { buffer: string } | null {` ended the declaration at its type
+  and the rest of the signature was read as a statement of the file, which made
+  the file run and hid every function in it from the module reader. The
+  annotation is now skipped as a type first (`FUNCTION_BODY_STOPS`: `{`, `=`,
+  `;`). It reads `semantics/typescript-classes.ts` almost whole (12 refusals to
+  6) and `compiler.ts`, `optimize-ir.ts`, `ir-machine.ts` and `ir-wasm.ts` by 19
+  to 40 each; the files whose functions become readable report their own gaps
+  (`ir-validate.ts`, `python.ts`, `repair.ts`) and the net is +2, which is the
+  reading-further artefact just described.
+- `closingBrace` desynchronised on a regular expression containing a quote:
+  `x.replace(/"/g, …)` inside an interpolation made the brace matcher read the
+  pattern's `"` as the start of a text, so the interpolation's `}` was never
+  found and the file failed with `unterminated string`. A `/` where a value is
+  expected is now read as the pattern it is. `toolchain/linker.ts` goes from 1
+  refusal (`unterminated string`) to 15 real ones, and the frontend reading its
+  own `semantics/typescript.ts` goes from 191 to 231; the net is +54, all of it
+  the reading-further artefact.
 
 ## The next slices
 

@@ -219,6 +219,8 @@ class ProgramParser {
   private position = 0;
   /** Set when the construct read was reported, so it is not reported twice. */
   private refused = false;
+  /** How many refusals the statement being read has written. */
+  private reporting = 0;
   /** Set while the value being read is the operand of a unary operator. */
   private unaryOperand = false;
   /** The classes the file declares, lowered by the module frontend. */
@@ -346,10 +348,97 @@ class ProgramParser {
     if (this.accept(text)) return;
     const token = this.peek();
     this.fail(`expected "${text}"`, token);
+    // A closing bracket the parser expected and did not find ends the
+    // construct somewhere the source did not. Reading on to the bracket of the
+    // same kind ends the construct where the source wrote it, so what follows
+    // it is read as the statement it is rather than as the rest of this one.
+    if (text === ")" || text === "]" || text === "}") this.recoverToClosing(text);
+  }
+
+  /**
+   * Reads on to the closing bracket of one kind, and consumes it.
+   *
+   * A closer of another kind at depth zero is one this construct does not own:
+   * it is left for the construct that opened it.
+   */
+  private recoverToClosing(text: string): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      if (token.kind === "punct") {
+        if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+        else if (token.text === ")" || token.text === "]" || token.text === "}") {
+          if (depth === 0) {
+            if (token.text === text) this.next();
+            return;
+          }
+          depth -= 1;
+        }
+      }
+      this.next();
+    }
   }
 
   private fail(message: string, token: Token = this.peek(), detail = PROGRAM_BODY): void {
+    this.reporting += 1;
+    if (this.reporting > 1) return;
     this.diagnostics.report(message, `near "${token.text}"; ${detail}`, token.line);
+  }
+
+  /**
+   * Reads one statement, reporting at most one refusal for it and reading past
+   * what it could not read to the end of the statement.
+   *
+   * A statement is the unit the recovery is at: the first construct outside the
+   * subset is what the build names, and what the rest of the statement earns is
+   * the same construct read as the junk it is. The enclosing statement keeps its
+   * own count, so a nested statement's refusal is not hidden by its parent's.
+   */
+  private guardedStatement(): ProgramStatement | null {
+    const start = this.position;
+    const outer = this.reporting;
+    this.reporting = 0;
+    const statement = this.statement();
+    const refused = this.reporting > 0;
+    this.reporting = outer;
+    if (refused) {
+      const end = this.statementEnd(start);
+      if (end > this.position) this.position = end;
+    }
+    return statement;
+  }
+
+  /**
+   * Where the statement beginning at a token ends, as the token after its last.
+   *
+   * The scan is over the source's own brackets, so a `;` inside a call or a
+   * loop header is not the end. A block the statement opens closes at depth
+   * zero, and the `else`, `catch`, `finally` and `while` that may follow it are
+   * part of the same statement.
+   */
+  private statementEnd(start: number): number {
+    let depth = 0;
+    for (let at = start; at < this.tokens.length; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      if (text === "(" || text === "[" || text === "{") {
+        depth += 1;
+        continue;
+      }
+      if (text === ")" || text === "]" || text === "}") {
+        if (depth === 0) return at;
+        depth -= 1;
+        if (depth === 0 && text === "}") {
+          const next = this.tokens[at + 1]?.text;
+          if (next === "else" || next === "catch" || next === "finally" || next === "while") continue;
+          return this.tokens[at + 1]?.text === ";" ? at + 2 : at + 1;
+        }
+        continue;
+      }
+      if (text === ";" && depth === 0) return at + 1;
+    }
+    return this.tokens.length;
   }
 
   /**
@@ -389,7 +478,7 @@ class ProgramParser {
   body(): ProgramStatement[] {
     const statements: ProgramStatement[] = [];
     while (this.peek().kind !== "end") {
-      const statement = this.statement();
+      const statement = this.guardedStatement();
       if (statement !== null) statements.push(statement);
       this.accept(";");
     }
@@ -399,7 +488,7 @@ class ProgramParser {
   /** The statements a keyword is followed by, as a block or as one statement. */
   private statements(): ProgramStatement[] {
     if (this.at("{")) return this.braces();
-    const statement = this.statement();
+    const statement = this.guardedStatement();
     return statement === null ? [] : [statement];
   }
 
@@ -517,7 +606,7 @@ class ProgramParser {
     this.expect("{");
     const body: ProgramStatement[] = [];
     while (this.peek().kind !== "end" && !this.at("}")) {
-      const statement = this.statement();
+      const statement = this.guardedStatement();
       if (statement !== null) body.push(statement);
       this.accept(";");
     }
