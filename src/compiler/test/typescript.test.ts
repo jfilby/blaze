@@ -1727,6 +1727,29 @@ test("a map and a set are one handle on the runtime's dictionary", () => {
   assert.equal(result?.condition?.name, "blaze_rt_dict_has");
 });
 
+test("a map states a type that names a type of its own", () => {
+  // `Map<string, Set<string>>` closes with one `>>` token, which is the token
+  // the shift operators are written with. The count of open angles says how
+  // many of them the token closes, so the collection is read rather than the
+  // map falling back to its default and the `<` being read as a comparison.
+  const body = analyzedBody(
+    [
+      "class Node { name: string; constructor(name: string) { this.name = name; } }",
+      "export function g(): number {",
+      "  const m = new Map<Node, Set<string>>();",
+      "  const s = new Set<Node>();",
+      "  s.add(new Node(`a`));",
+      "  m.set(new Node(`b`), s);",
+      "  return m.size;",
+      "}",
+      "",
+    ].join("\n"),
+    "g",
+  ) as { kind: string; init?: { k: string; name?: string } }[];
+  assert.equal(body[0]?.init?.name, "blaze_rt_dict_new", "a map of sets is the dictionary the runtime lays out");
+  assert.equal(body[1]?.init?.name, "blaze_rt_dict_new", "and so is the set it holds");
+});
+
 test("a record keyed by text is the dictionary a map is", () => {
   // `Record<string, V>` is the same handle `Map<string, V>` is: what the
   // contract can spell is the handle, and the key and value stay beside it. A

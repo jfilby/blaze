@@ -4463,6 +4463,8 @@ class TypeScriptParser {
       if (token?.kind !== "punct") continue;
       if (token.text === "<" || token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
       else if (token.text === ">" || token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+      else if (token.text === ">>") depth -= 2;
+      else if (token.text === ">>>") depth -= 3;
       else if (token.text === "," && depth === 0) {
         out.push(this.typeFromTokens(from, at, false));
         from = at + 1;
@@ -7143,6 +7145,14 @@ class TypeScriptParser {
       else if (token.text === close) {
         depth -= 1;
         if (depth === 0) return at;
+      } else if (open === "<" && (token.text === ">>" || token.text === ">>>")) {
+        // A nested type closes with `>>` or `>>>` in one token, so the count of
+        // open angles says how many of them the token closes.
+        const closed = token.text === ">>" ? 2 : 3;
+        if (depth >= closed) {
+          depth -= closed;
+          if (depth === 0) return at;
+        }
       }
     }
     return -1;
