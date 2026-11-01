@@ -152,6 +152,14 @@ export type Expression =
       op: "push" | "pop";
       /** The values a push adds, in the order it writes them; a pop adds none. */
       values: Expression[];
+      /**
+       * Which of the values the source spread with `...`, aligned with
+       * `values`. A spread value is a list already and joins the ones in front
+       * of it, which is the concatenation two lists added are.
+       */
+      spreads?: readonly boolean[];
+      /** The element type of the array, which a written value is joined at. */
+      element?: TypeExpr;
     };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";

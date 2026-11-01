@@ -251,6 +251,27 @@ function that is already a program function, so they cost nothing today; a
 module-scoped global is the slice that would carry them, and it needs a slot
 the linker can name.
 
+### 4c. Spread a list into the call that takes it
+
+A spread is the elements of a list written where values go, and the two places
+the compiler writes one are a push and a call:
+
+- `a.push(x, ...b)` is the list joined with each written value as a one-element
+  list and each spread as the list it is, in the order the source wrote them —
+  the concatenation two lists added are, which both backends already lower.
+  `a.push(...b)` needs no helper at all. A spread anywhere else in a call is
+  refused where it is, because the arguments it stands for are not known until
+  the program runs;
+- `f(...xs)` hands the function the elements of the list read by position, one
+  per parameter the declaration states. A function whose parameters the read
+  does not hold — one another module declares — cannot say how many elements
+  the call takes, and is refused.
+
+This took the total from 1989 to 1898. A rest element in a destructuring
+pattern (`const [head, ...tail] = xs`) is still refused: the three in the
+compiler are all in files with a bigger gap, and the bound name needs the
+element type of a slice the pattern's own annotation states.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

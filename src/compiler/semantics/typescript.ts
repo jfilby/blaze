@@ -5823,11 +5823,22 @@ class TypeScriptParser {
         value.base === null
           ? { k: "ident", name: value.target }
           : { k: "member", base: { k: "ident", name: value.base }, field: value.target };
-      const call: Expression = {
-        k: "call",
-        name: value.helper,
-        args: [array, ...value.values],
-      };
+      let call: Expression;
+      if (value.spreads === undefined) {
+        call = { k: "call", name: value.helper, args: [array, ...value.values] };
+      } else {
+        // A value written out joins the list as a list of one, and a spread
+        // joins the list it already is: both are the concatenation two lists
+        // added are, in the order the source wrote them.
+        const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
+        call = array;
+        value.values.forEach((written, at) => {
+          const joined: Expression = value.spreads?.[at] === true
+            ? written
+            : { k: "buffer", element, values: [written] };
+          call = { k: "binary", op: "+", left: call, right: joined };
+        });
+      }
       if (value.base === null) {
         return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
       }
@@ -7038,7 +7049,9 @@ class TypeScriptParser {
           const args = this.readCallArguments(
             this.expectedMethodArguments(target.base, target.field),
             this.collectionCallbackParameters(target.base, target.field),
+            target.field === "push",
           );
+          const spreads = target.field === "push" ? this.argumentSpreads : null;
           const receiver = target.base;
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
@@ -7082,15 +7095,28 @@ class TypeScriptParser {
               (sequence.kind === "slice" || sequence.kind === "array") &&
               (target.field === "push" ? args.length >= 1 : args.length === 0)
             ) {
-              const helper = this.appendHelper(target.field, sequence.of, args.length, callLine);
+              // A push of written values is the helper that makes a longer
+              // block; a push of a list with `...` is the concatenation the two
+              // lists added are, so it needs no helper at all.
+              const helper = spreads === null ? this.appendHelper(target.field, sequence.of, args.length, callLine) : null;
               replace({
                 k: "append",
                 target: place.target,
                 base: place.base,
-                helper: helper.name,
+                helper: helper?.name ?? "",
                 op: target.field,
                 values: args,
+                ...(spreads === null ? {} : { spreads, element: sequence.of }),
               });
+              continue;
+            }
+            if (spreads !== null) {
+              this.report(
+                "a spread argument joins a list a name or a field holds",
+                "write the value into a list first, as in const all = a.concat(b); all.push(...c)",
+                this.peek(),
+              );
+              replace(this.hole());
               continue;
             }
           }
@@ -7145,7 +7171,31 @@ class TypeScriptParser {
           continue;
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
-        const args = this.readCallArguments(this.declaredParams.get(target.name) ?? []);
+        // `f(...xs)` hands the function the elements of the list, and the
+        // number of them is the number of parameters the declaration states.
+        // The list is written where the arguments were, so each one is an
+        // element of it read by position. A function whose parameters this
+        // read does not hold — one another module declares — cannot say how
+        // many to read, and the spread is refused where it is.
+        const declared = this.declaredParams.get(target.name) ?? [];
+        const spreadCall = declared.length > 0 && this.at("(") && this.peek(1).text === "...";
+        let args = this.readCallArguments(spreadCall ? [] : declared, null, spreadCall);
+        if (spreadCall) {
+          if (args.length === 1 && this.argumentSpreads?.[0] === true) {
+            const list = args[0] as Expression;
+            args = declared.map((_, at): Expression => ({
+              k: "index",
+              base: list,
+              index: { k: "literal", text: String(at) },
+            }));
+          } else {
+            this.report(
+              "a spread argument stands for every argument of the call",
+              "write it as the only argument, as in f(...xs)",
+              this.peek(),
+            );
+          }
+        }
         // `String(x)` is the text the value is written as, which is the value a
         // template string interpolates: the builder is the same one.
         if (target.name === "String") {
@@ -7287,24 +7337,52 @@ class TypeScriptParser {
   }
 
   /**
+   * Which of the last call's arguments the source spread with `...`, or null
+   * when it spread none. A spread is not a value the call can take as it is —
+   * the arguments it stands for are the elements of what was written — so the
+   * call that can use one reads this beside the list it was handed.
+   */
+  private argumentSpreads: readonly boolean[] | null = null;
+
+  /**
    * The arguments of a call, from the `(` the parser is at to its `)`.
    *
    * `expected` is the type each argument is held at, and `callback` is the
    * parameters of the arrow the first argument writes, when the call is a
-   * collection method that walks the elements of its receiver.
+   * collection method that walks the elements of its receiver. `spreads` says
+   * whether the call can use a spread argument; one written elsewhere is
+   * refused where it is, because the arguments it stands for are not known
+   * until the program runs.
    */
   private readCallArguments(
     expected: readonly TypeExpr[] = [],
     callback: readonly ArrowParameterType[] | null = null,
+    spreadsAllowed = false,
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
+    const spreads: boolean[] = [];
+    let spread = false;
     while (!this.at(")") && this.peek().kind !== "end") {
       const type = expected[args.length] ?? null;
+      if (this.accept("...")) {
+        if (!spreadsAllowed) {
+          this.report(
+            "a spread argument is not part of the call subset",
+            "pass the elements by name, or push them onto the list they join",
+            this.peek(),
+          );
+        }
+        spread = true;
+        spreads.push(true);
+      } else {
+        spreads.push(false);
+      }
       args.push(this.readArgument(type, args.length === 0 ? callback : null));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
+    this.argumentSpreads = spread ? spreads : null;
     this.expect(")");
     return args;
   }

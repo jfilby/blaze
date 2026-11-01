@@ -401,6 +401,27 @@ test("a top-level constant a function reads is the value it was written with", a
   assert.equal(output.trim(), "13");
 });
 
+test("a push with a spread joins the list it names", async () => {
+  // The elements a spread stands for are the ones the list holds, so the push
+  // is the list it appends to joined with the one it was handed: the
+  // concatenation two lists added are. Values written beside a spread join as
+  // one-element lists, in the order the source wrote them.
+  const output = await agreesWithNode([
+    "function total(): number {",
+    "  const all: number[] = [1];",
+    "  const more: number[] = [2, 3];",
+    "  all.push(...more);",
+    "  all.push(4, ...more);",
+    "  let sum = 0;",
+    "  for (const x of all) sum += x;",
+    "  return sum;",
+    "}",
+    "console.log(total());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "15");
+});
+
 test("a set written at the top of a module answers its membership", async () => {
   // The keys are written down, so the membership is the comparisons it means
   // and no dictionary is allocated: a function of the module reads the name
