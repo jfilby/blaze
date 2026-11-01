@@ -298,6 +298,22 @@ value that the runtime's dynamic kind could answer; neither is written yet, and
 
 This took the total from 1898 to 1890.
 
+### 4e. The element type through a chain
+
+The walking methods — `map`, `filter`, `join`, `some`, `find` and the rest —
+are all written as functions of the file; what refused them was never the
+method but the receiver's element type. A chain is read left to right, so each
+step has to answer the type the next one asks about. Three steps did not:
+
+**`entries()` of a list.** `for (const [index, element] of list.entries())`
+names two values, and a pair is not an element a typed array holds. The loop
+now reads the list once before it starts and walks its positions from zero to
+its length: position 0 of an entry is the index, held at a number, and position
+1 is the element, held at the element type of the list. The receiver may be a
+name or any expression, which is read into a name of the loop's own the same
+way a walked collection is. A pattern that names anything else is refused where
+it is written. This took the total from 1890 to 1879.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

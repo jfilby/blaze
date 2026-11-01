@@ -2334,6 +2334,16 @@ class TypeScriptParser {
    * table is what says which collection the expression it read names.
    */
   private iteratedCollections = new Map<Expression, CollectionValue>();
+  /**
+   * The list a `for..of` is about to walk by its entries, by the expression
+   * that names it, and the element the list holds.
+   *
+   * `list.entries()` written where a loop walks it does not answer an array:
+   * an entry is an index and an element, which is not an element a typed array
+   * holds. The loop walks the list by position instead, and this table is what
+   * says which list and which element type the expression it read names.
+   */
+  private iteratedSequences = new Map<Expression, TypeExpr>();
   /** True while the source of a `for..of` is being read. */
   private readingIteration = false;
   /**
@@ -4446,6 +4456,7 @@ class TypeScriptParser {
     // what each of them holds is carried into the function being read.
     this.valueCollections = new Map(this.valueCollections);
     this.iteratedCollections = new Map();
+    this.iteratedSequences = new Map();
     let answered: CollectionValue | null = null;
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => ({
       name: name.text,
@@ -6200,6 +6211,13 @@ class TypeScriptParser {
     if (collection !== null) {
       return this.readCollectionForOf(start, variable, pattern, source, collection);
     }
+    // `for (const [index, element] of list.entries())`: a list's entries are its
+    // positions, so the loop walks the list by index and the two parts of an
+    // entry are the index and the element written there.
+    const entriesOf = this.iteratedSequences.get(source);
+    if (entriesOf !== undefined) {
+      return this.readSequenceEntriesForOf(start, pattern, source, entriesOf);
+    }
     // The element a `for..of` binds is one element of the array it walks, so it
     // is held at the element type an arrow capturing it would be handed.
     const walkedType = this.valueTypes.get(walked);
@@ -6319,6 +6337,86 @@ class TypeScriptParser {
       variable: index,
       from: { k: "literal", text: "0" },
       to: count(),
+      inclusive: false,
+      step: null,
+      down: false,
+      body,
+      line: start.line,
+    };
+  }
+
+  /**
+   * `for (const [index, element] of list.entries())`: one position of a list
+   * and the element written there.
+   *
+   * The list is read once, before the loop starts, and the loop walks its
+   * positions from zero to its length. Position 0 of an entry is the index and
+   * position 1 is the element; a list has no other part, so a pattern that
+   * names anything else is refused where it is written.
+   */
+  private readSequenceEntriesForOf(
+    start: Token,
+    pattern: { name: string; field: string | null; index: number }[] | null,
+    source: Expression,
+    element: TypeExpr,
+  ): Statement {
+    const receiver: Expression = source.k === "call" ? (source.args[0] as Expression) : source;
+    let held: string;
+    if (receiver.k === "ident") {
+      held = receiver.name;
+    } else {
+      held = `__walk${this.walkCount}`;
+      this.walkCount += 1;
+      this.valueTypes.set(held, { kind: "slice", of: element });
+    }
+    const index = `__at${this.walkCount}`;
+    this.walkCount += 1;
+    this.valueTypes.set(index, NUMBER_RESULT);
+    const body: Statement[] = [];
+    const bind = (name: string, type: TypeExpr, read: Expression): Statement => {
+      const shape = this.shapeOfTypeExpr(type);
+      this.valueTypes.set(name, type);
+      if (shape.kind !== "any") this.valueShapes.set(name, shape);
+      else this.valueShapes.delete(name);
+      return { kind: "declare", name, type: null, init: read, line: start.line };
+    };
+    const elementRead: Expression = {
+      k: "index",
+      base: { k: "ident", name: held },
+      index: { k: "ident", name: index },
+    };
+    this.expressionTypes.set(elementRead, element);
+    if (pattern === null) {
+      this.report(
+        "an entry of a list is an index and an element",
+        "write for (const [index, element] of list.entries())",
+        start,
+      );
+    } else {
+      for (const binding of pattern) {
+        if (binding.index === 0) body.push(bind(binding.name, NUMBER_RESULT, { k: "ident", name: index }));
+        else if (binding.index === 1) body.push(bind(binding.name, element, elementRead));
+        else {
+          this.report(
+            "an entry of a list is an index and an element",
+            "write for (const [index, element] of list.entries())",
+            start,
+          );
+        }
+      }
+    }
+    for (const statement of this.loopBody()) body.push(statement);
+    // The list is read once, before the loop starts, and the source body may
+    // have written pending declarations of its own: this one is recorded after
+    // it, where it belongs in front of the loop rather than in it.
+    if (receiver.k !== "ident") {
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: receiver, line: start.line });
+    }
+    return {
+      kind: "loop",
+      variable: index,
+      from: { k: "literal", text: "0" },
+      to: { k: "length", buffer: held },
       inclusive: false,
       step: null,
       down: false,
@@ -7870,9 +7968,19 @@ class TypeScriptParser {
   ): Expression | null {
     // A method this frontend has no reading of is a method of a class, and the
     // class is what says what it is.
-    if (!COLLECTION_METHODS.has(method)) return null;
     const sequence = this.valueTypeOf(receiver);
-    if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
+    const elements = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+    // `for (const [index, element] of list.entries())` names the two parts of
+    // an entry. A pair is not an element a typed array holds, so the loop walks
+    // the list by position and this marks the expression it read.
+    if (method === "entries" && args.length === 0 && elements !== null && this.readingIteration) {
+      const marker: Expression = { k: "call", name: "__sequence_entries", args: [receiver] };
+      this.iteratedSequences.set(marker, elements);
+      this.expressionTypes.set(marker, ANY_TYPE);
+      return marker;
+    }
+    if (!COLLECTION_METHODS.has(method)) return null;
+    if (elements === null) return null;
     if (
       method === "join" ||
       method === "includes" ||
@@ -7880,7 +7988,7 @@ class TypeScriptParser {
       method === "at" ||
       method === "slice"
     ) {
-      return this.sequenceMethod(method, sequence.of, receiver, args, line);
+      return this.sequenceMethod(method, elements, receiver, args, line);
     }
     const callback = args[0];
     if (callback === undefined) {
@@ -7913,7 +8021,7 @@ class TypeScriptParser {
       );
       return this.hole();
     }
-    const helper = this.collectionHelper(method, sequence.of, signature, args.length === 2, line);
+    const helper = this.collectionHelper(method, elements, signature, args.length === 2, line);
     const call: Expression = { k: "call", name: helper.name, args: [receiver, callback, ...args.slice(1)] };
     this.expressionTypes.set(call, helper.returns);
     return call;
@@ -10204,6 +10312,7 @@ class TypeScriptParser {
     child.declaredCollections = this.declaredCollections;
     child.collectionExpressions = this.collectionExpressions;
     child.iteratedCollections = this.iteratedCollections;
+    child.iteratedSequences = this.iteratedSequences;
     child.closures = this.closures;
     child.liftedArrows = this.liftedArrows;
     child.collectHelpers = this.collectHelpers;

@@ -2016,3 +2016,36 @@ test("a map entry read through a gap binds the value at its position", () => {
   assert.match(body, /"name":"value"/);
   assert.match(body, /text\.trim/);
 });
+
+test("a list walked by its entries binds the index and the element", () => {
+  // An entry of a list is a position and the element written there. Neither is
+  // an element a typed array holds, so the loop walks the list by index and the
+  // body reads the index as a number and the element as a text.
+  const source = [
+    "export function read(names: string[]): string {",
+    "  let out = ``;",
+    "  for (const [index, name] of names.entries()) { out += String(index) + name.trim(); }",
+    "  return out;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"name":"index"/);
+  assert.match(body, /"name":"name"/);
+  assert.match(body, /text\.trim/);
+});
+
+test("an entry of a list names no part a list does not have", () => {
+  const source = [
+    "export function read(names: string[]): number {",
+    "  let total = 0;",
+    "  for (const [index, name, other] of names.entries()) { total += index; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.match(
+    diagnostic(() => typescript.analyze(source, "module.ts")),
+    /an entry of a list is an index and an element/,
+  );
+});

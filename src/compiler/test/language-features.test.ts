@@ -2176,6 +2176,43 @@ test("a map a function is handed is walked by its entries", async () => {
   assert.equal(output.trim(), "13");
 });
 
+test("a list walked by its entries names the index and the element", async () => {
+  // `entries()` of a list is a pair the source reads as position and element,
+  // which no typed array holds: the loop walks the list by index instead.
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  const names: string[] = [`ab`, `cde`, `f`];",
+    "  let out = ``;",
+    "  for (const [index, name] of names.entries()) out += String(index) + name;",
+    "  return out;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "0ab1cde2f");
+});
+
+test("an entry of a list read through a field names the element's fields", async () => {
+  const output = await agreesWithNode([
+    "class Item {",
+    "  name: string;",
+    "  constructor(name: string) { this.name = name; }",
+    "}",
+    "function g(items: Item[]): number {",
+    "  let total = 0;",
+    "  for (const [at, item] of items.entries()) total += at + item.name.length;",
+    "  return total;",
+    "}",
+    "function main(): number {",
+    "  const items: Item[] = [new Item(`ab`), new Item(`cde`)];",
+    "  return g(items);",
+    "}",
+    "console.log(main());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
 test("a map is keyed by a reference, and answers the text it holds", async () => {
   const output = await agreesWithNode([
     "class Box {",
