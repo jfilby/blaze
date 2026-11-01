@@ -1694,6 +1694,24 @@ test("an empty array is built at the type the use writes it at", () => {
   assert.equal(firstBuffer(nullish?.right)?.element, "f64", "the fallback is read at the type of the value it falls back from");
 });
 
+test("Array.isArray is settled where the type is written and asked where it is not", () => {
+  // A list is a block of one element type, so a value the read holds at a list
+  // type is one and a number is not. A value the read does not type is asked of
+  // the runtime, which carries the kind.
+  const settled = JSON.stringify(analyzedBody([
+    "export function ask(list: number[], count: number): boolean {",
+    "  return Array.isArray(list) && !Array.isArray(count);",
+    "}",
+    "",
+  ].join("\n"), "ask"));
+  assert.doesNotMatch(settled, /blaze_rt_is_array/, "a list and a number are answered where they are read");
+  const asked = JSON.stringify(analyzedBody(
+    "export function ask(value: unknown): boolean { return Array.isArray(value); }",
+    "ask",
+  ));
+  assert.match(asked, /blaze_rt_is_array/, "a value the read does not type is asked of the runtime");
+});
+
 test("a field of a field is written through a name of its own", () => {
   // The IR writes one field of one name, so `a.b.c = value` reads `a.b` into a
   // name first: an object is a reference, and writing through the name is

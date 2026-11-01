@@ -1076,6 +1076,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_set", "void", [["array", "double"], ["index", "double"], ["value", "double"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
   entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_is_array", "double", [["value", "double"]], "Asks whether a dynamic value is an array.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_new", "double", [], "Creates an empty dictionary.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_dict_get", "double", [["dict", "double"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
@@ -4881,6 +4882,11 @@ double blaze_rt_to_number(double value) {
    it does not hold is a number, or a text where the number is the pointer the
    text sits at. A null is an object in the language, and every other kind a
    program can hold is one too. */
+double blaze_rt_is_array(double value) {
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (!d) return 0.0;
+  return d->kind == BLAZE_DYN_ARRAY ? 1.0 : 0.0;
+}
 const char* blaze_rt_type_of(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) return value >= 4096.0 ? "string" : "number";

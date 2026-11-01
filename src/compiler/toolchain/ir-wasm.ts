@@ -3540,6 +3540,14 @@ class Body {
         this.callService("blaze_rt_type_of");
         return TEXT;
       }
+      case "blaze_rt_is_array": {
+        // Whether a dynamic value is an array: the value goes down as the
+        // handle it is carried in, and the host answers one or nothing, which
+        // the source reads as the truth it compares to one.
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_is_array");
+        return F64_TYPE;
+      }
       case "crypto.createHash":
         this.callService("blaze_rt_md5_create");
         return DYNAMIC_TYPE;

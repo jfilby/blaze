@@ -453,6 +453,35 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("Array.isArray asks whether a value is a list", async () => {
+  // A list the read holds is one where it is read; a value the read does not
+  // type — the parameter of a function that takes anything — is asked of the
+  // runtime, which carries the kind a value was registered as.
+  const output = await agreesWithNode(
+    [
+      'import { demo } from "./lib.ts";',
+      "console.log(demo());",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        "export function tag(value: unknown): string {",
+        "  if (Array.isArray(value)) return `list`;",
+        "  if (typeof value === `number`) return `number`;",
+        "  if (typeof value === `string`) return `text`;",
+        "  return `other`;",
+        "}",
+        "export function demo(): string {",
+        "  const list: number[] = [1, 2];",
+        "  return tag(list) + ` ` + tag(7) + ` ` + tag(`x`);",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "list number text");
+});
+
 test("a field of a field a call answered is written through a name", async () => {
   // The IR writes one field of one name, and the value the field belongs to may
   // be the answer of a call: `this.frame().block.terminator = value` reads the

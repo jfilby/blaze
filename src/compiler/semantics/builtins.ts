@@ -76,6 +76,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_dict_get_text": { params: [F64, TEXT], returns: TEXT, arity: 2 },
   "blaze_rt_dict_set_text": { params: [F64, TEXT, TEXT], returns: F64, arity: 3 },
   "blaze_rt_dict_has": { params: [F64, TEXT], returns: F64, arity: 2 },
+  /** `Array.isArray(value)` over a value the read does not type: the runtime
+   *  holds the kind, and answers one for the array it holds and nothing
+   *  otherwise. */
+  "blaze_rt_is_array": { params: [ANY], returns: F64, arity: 1 },
   "blaze_rt_dict_len": { params: [F64], returns: F64, arity: 1 },
   "blaze_rt_dict_key_at": { params: [F64, F64], returns: TEXT, arity: 2 },
   "blaze_rt_dict_value_at": { params: [F64, F64], returns: F64, arity: 2 },

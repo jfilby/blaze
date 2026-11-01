@@ -1018,6 +1018,14 @@ proc blaze_rt_to_number*(value: float64): float64 {.exportc, cdecl.} =
   else:
     value
 
+proc blaze_rt_is_array*(value: float64): float64 {.exportc, cdecl.} =
+  ## Whether a dynamic value is an array: the kind the runtime registered the
+  ## value as, and nothing for a value it does not hold.
+  let index = blazeDynIndex(value)
+  if index < 0: return 0.0
+  if blazeDynValues[index].kind == dynArray: return 1.0
+  return 0.0
+
 proc blaze_rt_type_of*(value: float64): cstring {.exportc, cdecl.} =
   ## The name typeof answers for a value the compiler could not read the type
   ## of: the kind the runtime registered the value as, or the number or the text

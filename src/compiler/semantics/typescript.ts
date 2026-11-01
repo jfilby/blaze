@@ -7032,6 +7032,34 @@ class TypeScriptParser {
   }
 
   /**
+   * `Array.isArray(value)`: whether the value is a list.
+   *
+   * A list is a block of one element type, and a value the read holds at a list
+   * type is one of those; a number, a truth, a text and an object are not. What
+   * the read cannot type — a tree a parse read, a field of a module the graph
+   * has not linked — is asked of the runtime, which carries the kind.
+   */
+  private isArrayTest(value: Expression): Expression {
+    const type = this.valueTypeOf(value);
+    const answer = (isOne: boolean): Expression => {
+      const literal: Expression = { k: "literal", text: isOne ? "1" : "0" };
+      this.expressionTypes.set(literal, BOOLEAN_RESULT);
+      return literal;
+    };
+    if (type.kind === "slice" || type.kind === "array") return answer(true);
+    if (type.kind === "primitive" || type.kind === "text" || type.kind === "void") return answer(false);
+    if (type.kind === "ref" && type.name !== undefined) return answer(false);
+    const asked: Expression = {
+      k: "binary",
+      op: "===",
+      left: { k: "call", name: "blaze_rt_is_array", args: [value] },
+      right: { k: "literal", text: "1" },
+    };
+    this.expressionTypes.set(asked, BOOLEAN_RESULT);
+    return asked;
+  }
+
+  /**
    * `key in value`: whether an object has the field the key names.
    *
    * A record the file wrote out — a top-level constant of its own or one an
@@ -7735,6 +7763,21 @@ class TypeScriptParser {
           // Anything else is the runtime's own stringify, which the backends
           // lower for a text, a number and a value the runtime holds.
           replace({ k: "call", name: "JSON.stringify", args: [written] });
+          continue;
+        }
+        // `Array.isArray(value)`: whether the value is a list. An array is a
+        // block of one element type, so a value the read holds at a list type is
+        // one, and a number, a text or an object is not. A value the read does
+        // not type — a tree a parse read, a field of a module the graph has not
+        // linked — is asked of the runtime, which holds the kind.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Array" &&
+          target.field === "isArray"
+        ) {
+          const args = this.readCallArguments([ANY_TYPE]);
+          replace(this.isArrayTest(args[0] ?? this.hole()));
           continue;
         }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {

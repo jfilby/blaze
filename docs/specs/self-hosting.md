@@ -560,6 +560,18 @@ call is evaluated once, which is what the source wrote.
 What is still refused is a write to the `length` of a list or a text, which is
 the list's size rather than its elements. This took the total from 1548 to 1540.
 
+### 4n. `Array.isArray`
+
+The compiler asks whether a value it read from a build record or parsed from a
+file is a list, and the question had no reading at all. It is settled where the
+type is: a value the read holds at a list type is one, and a number, a truth, a
+text or an object is not. What the read does not type — a tree a parse read, a
+field of a module the graph has not linked — is asked of the runtime, which
+already carries the kind and now has one entry that answers whether the handle
+is an array. The C driver, the C backend, the wasm service and the Nim adapter
+each answer it, the way they answer `blaze_rt_type_of`. This took the total from
+1540 to 1529.
+
 ## The next slices
 
 ### What the measurement says now

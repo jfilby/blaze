@@ -106,6 +106,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_json_stringify",
   "blaze_rt_json_get",
   "blaze_rt_dyn_array_new",
+  "blaze_rt_is_array",
   "blaze_rt_box_number",
   "blaze_rt_box_string",
   "blaze_rt_box_null",
@@ -935,6 +936,20 @@ export function blaze_rt_json_get(value, field) {
     source: `
 export function blaze_rt_dyn_array_new() {
   return dynRegister({ kind: "array", items: [] });
+}
+`,
+  },
+  {
+    service: "blaze_rt_is_array",
+    source: `
+export function blaze_rt_is_array(value) {
+  const boxed = dynLookup(value);
+  if (boxed === null) return 0;
+  if (boxed.kind === "array") return 1;
+  /* A value a parse read is the JavaScript value it parsed to, so the array it
+     is is the array the language would answer for. */
+  if (boxed.kind === "value") return Array.isArray(boxed.value) ? 1 : 0;
+  return 0;
 }
 `,
   },
