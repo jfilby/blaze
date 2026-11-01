@@ -967,6 +967,29 @@ class FunctionEmitter {
       if (call.callee === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf(call.args[0])})`;
       return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
     }
+    // `JSON.stringify(value)` writes a value as the JSON text that holds it.
+    // The runtime renders it as the dynamic string it holds, and the text it
+    // says is the answer: a text the program wrote is boxed so the runtime can
+    // render it, a number and a dynamic value are already the value it reads.
+    if (call.callee === "JSON.stringify" && call.args[0] !== undefined) {
+      // The runtime reads a dynamic value, and a handle is what it is: a text
+      // and a number are boxed into one, and a value the runtime already holds
+      // is the handle it is. A raw number is not a handle — a small one is the
+      // index of a value some other part of the program registered.
+      const value = call.args[0];
+      const written =
+        isTextType(value.type) || value.k === "text" ? `${RUNTIME_NAME}_box_string(${this.expression(value, TEXT, depth)})`
+          : isNumber(value.type) ? `${RUNTIME_NAME}_box_number(${this.expression(value, NUMBER, depth)})`
+            : this.expression(value, null, depth);
+      return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_json_stringify(${written}))`;
+    }
+    // `JSON.parse(text)` reads a document as the dynamic value it holds. The
+    // text crosses the wall as the pointer to its bytes, which the ABI carries
+    // as the number a value is.
+    if (call.callee === "JSON.parse" && call.args[0] !== undefined) {
+      const text = this.expression(call.args[0], isTextType(call.args[0].type) ? TEXT : null, depth);
+      return `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${text}))`;
+    }
     const args: string[] = [];
     call.args.forEach((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;

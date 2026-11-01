@@ -10437,6 +10437,33 @@ class Machine {
       this.runtime("_array_new");
       return;
     }
+    // The dynamic values the runtime holds. A handle is a number the runtime
+    // answers and a text is a pointer to the bytes it says, so the wall between
+    // them is crossed here: a text is boxed into the handle the runtime reads,
+    // and the handle a stringify answers is the text it says.
+    if (call.callee === "JSON.stringify" && argument !== undefined) {
+      const held = this.dynamicArgument(argument);
+      this.callSymbol("blaze_rt_json_stringify", [held], NUMBER);
+      const json = this.hold(NUMBER, "blaze_json");
+      this.store(json);
+      this.callSymbol("blaze_rt_to_text", [json], TEXT);
+      return;
+    }
+    if (call.callee === "JSON.parse" && argument !== undefined) {
+      const text = this.dynamicArgument(argument);
+      this.callSymbol("blaze_rt_json_parse", [text], NUMBER);
+      this.dynamicResult();
+      return;
+    }
+    if (call.callee === "JSON.get" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      const object = this.dynamicArgument(call.args[0]);
+      this.at(call.args[1], TEXT);
+      const field = this.hold(TEXT, "blaze_field");
+      this.store(field);
+      this.callSymbol("blaze_rt_json_get", [object, field], NUMBER);
+      this.dynamicResult();
+      return;
+    }
     if (call.callee === SHARED) {
       // A block of bytes the program lays out is the allocator's answer: the
       // count is read as a size and the block is handed back, which is what
@@ -11021,6 +11048,55 @@ class Machine {
   }
 
   /** A call the body makes for what it does, with nothing of its own to pass. */
+  /**
+   * A value as the number the runtime carries a dynamic value in.
+   *
+   * The runtime holds a dynamic value as a handle, which is a double: a number
+   * is itself, a text is the handle the runtime makes of it, and a value the
+   * runtime already holds is the handle it is. This backend keeps a handle as
+   * the bits of the double in a whole-number register, which is what the move
+   * into a vector register turns back into the number.
+   */
+  private dynamicArgument(value: SemanticValue): Held {
+    if (isTextType(value.type) || value.k === "text") {
+      this.at(value, TEXT);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_box_string");
+      const boxed = this.hold(NUMBER, "blaze_boxed");
+      this.store(boxed);
+      return boxed;
+    }
+    if (isDynamicType(value.type)) {
+      this.value(value);
+      this.code.movdXmm(XMM0, RAX);
+      const handle = this.hold(NUMBER, "blaze_handle");
+      this.store(handle);
+      return handle;
+    }
+    // A number is not a handle: a small one is the index of a value the
+    // runtime registered, so it is boxed into a handle of its own first.
+    this.at(value, NUMBER);
+    this.external("blaze_rt_box_number");
+    this.code.call("blaze_rt_box_number");
+    const number = this.hold(NUMBER, "blaze_number");
+    this.store(number);
+    return number;
+  }
+
+  /**
+   * The handle the runtime just answered, held the way this backend holds one.
+   *
+   * A service answers a dynamic value as the double a handle is, in the vector
+   * register the convention returns a float in. A handle this backend keeps is
+   * the bits of that double in the accumulator, so the eight bytes the answer
+   * is are written down and read back into it.
+   */
+  private dynamicResult(): void {
+    const answer = this.hold(NUMBER, "blaze_dynamic");
+    this.store(answer);
+    this.code.movRegMem(RAX, frame(answer.offset));
+  }
+
   private runtime(entry: string): void {
     this.library(`${RUNTIME_NAME}${entry}`);
   }
@@ -11048,6 +11124,19 @@ class Machine {
   private convert(from: SemanticType, to: SemanticType): void {
     if (to.kind === "void") return;
     if (typeEquals(from, to)) return;
+    // A handle this backend keeps is the bits of the double the runtime holds
+    // it as, so reading it as a number is moving those bits into the register
+    // a number is read in. The runtime's own reading of the handle is what
+    // `Number(v)` asks for; this is the value the handle is.
+    if (isDynamicType(from) && isNumber(to)) {
+      // A handle this backend keeps is the bits of the double the runtime holds
+      // it as, and the number the value says is the runtime's own reading of
+      // it: a document that holds `17` is the number 17, not the index of the
+      // value that holds it.
+      this.code.movdXmm(XMM0, RAX);
+      this.runtime("_to_number");
+      return;
+    }
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;
     // Two wide types are the same four limbs, so one is the other as it is. A

@@ -608,6 +608,51 @@ test("a bare return leaves a function that returns nothing", async () => {
   assert.equal(output.trim(), "2");
 });
 
+test("JSON writes a value as the text it is", async () => {
+  // `JSON.stringify` is a text in the language: a map key, a template and a
+  // concatenation all read it as one. A list and an object written where the
+  // call is are the text their values spell, so a list may hold a text and a
+  // number in the same call and needs no dynamic array.
+  const files = {
+    "json.ts": [
+      "export function number(x: number): string { return JSON.stringify(x); }",
+      "export function text(x: string): string { return JSON.stringify(x); }",
+      "export function list(name: string, at: number): string { return JSON.stringify([name, at]); }",
+      "export function shape(): string { return JSON.stringify({ a: 1, b: `two` }); }",
+      "export function both(x: string): string { return JSON.stringify(JSON.parse(x)); }",
+      "export function keyed(): number {",
+      "  const seen = new Map<string, number>();",
+      "  seen.set(JSON.stringify([`k`, 1]), 7);",
+      "  return seen.get(JSON.stringify([`k`, 1]));",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const source = [
+    'import { number, text, list, shape, both, keyed } from "./json.ts";',
+    "console.log(number(42));",
+    'console.log(text("hi"));',
+    'console.log(list("a", 2));',
+    "console.log(shape());",
+    'console.log(both("[1,2,3]"));',
+    'console.log(both("{\\"a\\":1}"));',
+    "console.log(keyed());",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source, files);
+  assert.equal(
+    output.trim(),
+    ['42', '"hi"', '["a",2]', '{"a":1,"b":"two"}', "[1,2,3]", '{"a":1}', "7"].join("\n"),
+  );
+  // The C backend reads the same IR, so the same program lands on the same
+  // text there too.
+  const { directory, binary } = await build(source, "c", files);
+  const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});
+
 test("a text a method answers is a text", async () => {
   // What a call answers is the callee's to say, and a method is a function the
   // class scan wrote rather than a declaration of the body. Without the type

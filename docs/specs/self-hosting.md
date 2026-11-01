@@ -94,7 +94,8 @@ type — which waits for the read that follows the link rather than being refuse
 on the first — to 3918, a record keyed by text and a generic annotation in a
 program to 3879, an array the file writes down to 3853, a loop over the entries
 of a record to 3852, a method on a class field written at an imported type to
-3322, and the number questions to 3299, with `core/errors.ts`,
+3322, the number questions to 3299, a call of a method at the type its
+declaration writes to 3265, and `JSON` to 3234, with `core/errors.ts`,
 `semantics/contract-build.ts`, `semantics/diagnostics.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
 The refusals fall into six frontiers:
@@ -127,14 +128,23 @@ The refusals fall into six frontiers:
   answers from the type of a member, an element or a call as well as a name.
   `Number.isNaN`, `isFinite`, `isInteger` and `isSafeInteger` are written out
   of comparisons and a floor, and `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER` and
-  `EPSILON` are numbers the source writes down.
+  `EPSILON` are numbers the source writes down. A call of a method, a getter or
+  a static field is held at the type the declaration writes for its result, so
+  the text methods written after one are read.
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. An array whose every
   element is written down is one of these, unless a body writes the name: a
   value a program changes is state rather than a constant. A value another
   module imports is not carried: the module graph still offers functions only,
   and `export const` in another file is refused at the import that names it.
-- **The value model.** The compiler relies on `undefined`/absence, dynamic
+- **The value model.** `JSON.stringify(value)` is the text a value is written
+  as, and `JSON.parse(text)` is the dynamic value a document holds, which a
+  number or a text position reads as the runtime's own reading of it. A list or
+  an object written where the call is needs no dynamic value at all: the text is
+  built from the values the source wrote, so a list may hold a text and a number
+  in the same call and an object's field names are the ones it names. A list
+  built while the program runs is still refused, because its JSON is not a text
+  the parser can write. The compiler relies on `undefined`/absence, dynamic
   objects with text keys, maps and sets of references as well as numbers,
   arrays that grow, arrays of arrays, and text methods including regular
   expressions. A `Record<string, V>` is the dictionary a `Map<string, V>` is:

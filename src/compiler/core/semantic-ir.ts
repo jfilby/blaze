@@ -315,6 +315,10 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // reading the language itself answers, which is how a body of a request
   // arrives as the text it is.
   if (isTextType(to) && from.kind === "ref" && from.of === null && from.name === undefined) return true;
+  // The other reading of a value the runtime holds: the number it says. It is
+  // the same reading the language gives `Number(v)` and `+v`, and a parsed
+  // document read at a number is that reading.
+  if (isNumber(to) && from.kind === "ref" && from.of === null && from.name === undefined) return true;
   if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;

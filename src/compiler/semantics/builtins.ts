@@ -189,7 +189,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
     returns: { kind: "slice", of: TEXT },
     arity: 3,
   },
-  "JSON.stringify": { params: [ANY], returns: ANY, arity: 1 },
+  /** `JSON.stringify(value)` writes a value as the JSON text that holds it: the
+   *  answer is a text, which is what a map key, a template and a hash are. */
+  "JSON.stringify": { params: [ANY], returns: TEXT, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
   /** `JSON.get(value, key)` reads one field of a dynamic object the runtime
    *  parsed, and answers the value the field names. A field the object does

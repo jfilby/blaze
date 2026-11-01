@@ -1026,13 +1026,19 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "JSON.stringify": {
         // An object literal is serialized where it is written: the field names
         // are the source's and the values are rendered as text one by one, so no
-        // object the program laid out is boxed into a dynamic value first.
+        // object the program laid out is boxed into a dynamic value first. That
+        // text is the answer itself, because the answer is a text.
         if (call.args[0]?.k === "newObject") {
-          return `(double)(uintptr_t)blaze_rt_box_string(${this.objectJson(call.args[0], expression)})`;
+          return this.objectJson(call.args[0], expression);
         }
-        return isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
+        // The runtime answers the JSON as the dynamic string it holds, and the
+        // text it says is what the source wrote `JSON.stringify` to get.
+        const rendered = isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
           ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_string(${argument(0)}))`
-          : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+          : call.args[0] !== undefined && isNumber(call.args[0].type)
+            ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_number(${argument(0)}))`
+            : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+        return `${RUNTIME_NAME}_to_text(${rendered})`;
       }
       // The text the program reads apart. A text argument is the pointer to
       // the bytes it names; anything else is what the runtime renders it as,

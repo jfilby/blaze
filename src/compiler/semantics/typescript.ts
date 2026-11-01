@@ -195,7 +195,7 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
  * A namespace is a namespace and not a value: nothing reads one, and a call of
  * one is the only thing that may be written of it.
  */
-const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http"]);
+const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON"]);
 
 
 /** Statements the parser reads to the end of the statement and reports. */
@@ -6678,6 +6678,46 @@ class TypeScriptParser {
           );
           return this.hole();
         }
+        // `JSON.stringify([a, b])` of a list written out is the list the
+        // language writes: `[`, the JSON of each value between commas, and `]`.
+        // The values are written where the list is, so the text is built from
+        // them without a dynamic array: a list of texts and a list of numbers
+        // are one lowering, and so is a list of lists.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "JSON" &&
+          target.field === "stringify"
+        ) {
+          const args = this.readCallArguments();
+          const written = args[0];
+          if (written === undefined || args.length !== 1) {
+            this.report(
+              "JSON.stringify writes one value",
+              "the indent a third argument names is not part of the text this compiler writes",
+              this.peek(),
+            );
+            return this.hole();
+          }
+          const listed = this.jsonOfValue(written);
+          if (listed !== null) {
+            replace(listed);
+            continue;
+          }
+          const type = this.valueTypeOf(written);
+          if (type.kind === "slice" || type.kind === "array") {
+            this.report(
+              "JSON.stringify writes a list whose values are written where the list is",
+              "a list built while the program runs is a block of one element type, and its JSON is not a text the parser can build here",
+              this.peek(),
+            );
+            return this.hole();
+          }
+          // Anything else is the runtime's own stringify, which the backends
+          // lower for a text, a number and a value the runtime holds.
+          replace({ k: "call", name: "JSON.stringify", args: [written] });
+          continue;
+        }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
@@ -7489,6 +7529,89 @@ class TypeScriptParser {
     const type = this.typeForName(returnTypeName, line);
     if (type.kind !== "void") this.expressionTypes.set(call, type);
     return call;
+  }
+
+  /**
+   * The JSON text a list or an object written out is, or null where the value
+   * is neither.
+   *
+   * `JSON.stringify([a, b])` is the JSON of an array — `[`, the JSON of each
+   * value between commas, and `]` — and `JSON.stringify({ a: 1 })` is the JSON
+   * of an object, its field names quoted and each value beside its name. Every
+   * value is written where the container is, so the text is built out of them
+   * and no dynamic value is needed: a list may hold a text and a number in the
+   * same call, and an object's fields are the ones the source wrote.
+   *
+   * The field name is escaped the way JSON escapes one, which the compiler's
+   * own `JSON.stringify` answers here rather than at run time: a name is
+   * written by the source, so it is known.
+   */
+  private jsonOfValue(value: Expression): Expression | null {
+    const text = (parts: TextPart[]): Expression => {
+      const answer: Expression = { k: "text", parts };
+      this.expressionTypes.set(answer, TEXT_RESULT);
+      return answer;
+    };
+    const piece = (written: Expression): TextPart => {
+      const nested = this.jsonOfValue(written);
+      if (nested !== null) return { k: "value", value: nested };
+      const stringified: Expression = { k: "call", name: "JSON.stringify", args: [written] };
+      this.expressionTypes.set(stringified, TEXT_RESULT);
+      return { k: "value", value: stringified };
+    };
+    const values = this.listElements(value);
+    if (values !== null) {
+      const parts: TextPart[] = [{ k: "text", value: "[" }];
+      for (const [index, written] of values.entries()) {
+        if (index > 0) parts.push({ k: "text", value: "," });
+        parts.push(piece(written));
+      }
+      parts.push({ k: "text", value: "]" });
+      // The list is written into the text, so nothing is left for a use to say
+      // about the elements it holds: an empty list is the text `[]`.
+      this.forgetList(value);
+      return text(parts);
+    }
+    if (value.k === "object") {
+      const parts: TextPart[] = [{ k: "text", value: "{" }];
+      for (const [index, field] of value.fields.entries()) {
+        if (index > 0) parts.push({ k: "text", value: "," });
+        parts.push({ k: "text", value: `${JSON.stringify(field.name)}:` });
+        parts.push(piece(field.value));
+      }
+      parts.push({ k: "text", value: "}" });
+      return text(parts);
+    }
+    return null;
+  }
+
+  /**
+   * The values a list written out holds, in the order they are.
+   *
+   * A list of one piece is joined against an empty list so that the block it
+   * answers is its own, so the value the source wrote as `[a, b]` is a `+` of
+   * two blocks. What the JSON of it needs is the values, whatever block they
+   * were gathered into.
+   */
+  private listElements(value: Expression): Expression[] | null {
+    if (value.k === "buffer") return value.values;
+    if (value.k === "binary" && value.op === "+") {
+      const left = this.listElements(value.left);
+      const right = this.listElements(value.right);
+      if (left === null || right === null) return null;
+      return [...left, ...right];
+    }
+    return null;
+  }
+
+  /** Drops the note that a list is still waiting for its element type. */
+  private forgetList(value: Expression): void {
+    this.unsettledArrays.delete(value);
+    if (value.k === "buffer") for (const written of value.values) this.forgetList(written);
+    if (value.k === "binary" && value.op === "+") {
+      this.forgetList(value.left);
+      this.forgetList(value.right);
+    }
   }
 
   private valueTypeOf(value: Expression): TypeExpr {
