@@ -157,14 +157,25 @@ test("a dynamic array answers how many elements it holds", async () => {
 
 test("a JSON is parsed and written back as the runtime writes it", async () => {
   // The JSON is the runtime's own: it is parsed by the runtime's parser and
-  // written by the runtime's writer, and the module asks it for both.
+  // written by the runtime's writer, and the module asks it for both. What a
+  // stringify answers is a text — the language writes a value as one — so the
+  // answer is printed as the text it is.
   const parsed = builtin("JSON.parse", DYNAMIC, [literal('{"a":1}')], [DYNAMIC]);
-  const written = builtin("JSON.stringify", DYNAMIC, [local("v", DYNAMIC)], [DYNAMIC]);
+  const written = builtin("JSON.stringify", TEXT, [local("v", DYNAMIC)], [DYNAMIC]);
   const { stdout } = await compute([
     { k: "let", slot: { kind: "value", name: "v", mutable: true, type: DYNAMIC }, value: parsed, line: 1 },
-    { k: "printText", value: { k: "toText", type: TEXT, of: written, digits: null }, line: 2 },
+    { k: "printText", value: written, line: 2 },
   ]);
   assert.equal(stdout, '{"a":1}', "the JSON is written the way the runtime writes it");
+});
+
+test("a number is written as the JSON text that holds it", async () => {
+  // The runtime reads a dynamic value, so a number is boxed into a handle of
+  // its own first: a raw number is not a handle, and a small one is the index
+  // of a value some other part of the module registered.
+  const written = builtin("JSON.stringify", TEXT, [number("7")], [F64]);
+  const { stdout } = await compute([{ k: "printText", value: written, line: 1 }]);
+  assert.equal(stdout, "7", "the number is the JSON text that holds it");
 });
 
 test("a hasher answers the digest of what it was fed", async () => {

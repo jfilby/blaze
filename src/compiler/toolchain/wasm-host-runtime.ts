@@ -876,7 +876,7 @@ export function blaze_rt_json_parse(text) {
     source: `
 export function blaze_rt_json_stringify(value) {
   const boxed = dynLookup(value);
-  return dynRegister({ kind: "text", text: JSON.stringify(boxed === null ? value : boxed.value) });
+  return dynRegister({ kind: "text", text: JSON.stringify(boxed === null ? value : plainValue(boxed)) });
 }
 `,
   },
@@ -1384,7 +1384,25 @@ function jsonValue(value) {
 
 function jsonText(value) {
   const boxed = dynLookup(value);
-  return JSON.stringify(boxed === null ? value : boxed.value);
+  return JSON.stringify(boxed === null ? value : plainValue(boxed));
+}
+
+/* The value a dynamic value holds, as the tree JSON writes.
+ *
+ * The entry a number is registered under carries the number in its number
+ * field, and one an object is registered under carries the object in its
+ * value field. Reading value alone wrote undefined for every number, so a
+ * stringify of a boxed number answered nothing at all. */
+function plainValue(boxed) {
+  if (boxed === null || boxed === undefined) return null;
+  if (boxed.kind === "number") return boxed.number;
+  if (boxed.kind === "bool") return boxed.number !== 0;
+  if (boxed.kind === "text") return boxed.text;
+  if (boxed.kind === "null") return null;
+  if (boxed.kind === "array") return boxed.items.map((item) => plainValue(dynLookup(item)));
+  if (boxed.kind === "value") return boxed.value;
+  if (boxed.kind === "object") return boxed.value === undefined ? null : boxed.value;
+  return null;
 }
 `;
 

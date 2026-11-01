@@ -11124,18 +11124,17 @@ class Machine {
   private convert(from: SemanticType, to: SemanticType): void {
     if (to.kind === "void") return;
     if (typeEquals(from, to)) return;
-    // A handle this backend keeps is the bits of the double the runtime holds
-    // it as, so reading it as a number is moving those bits into the register
-    // a number is read in. The runtime's own reading of the handle is what
-    // `Number(v)` asks for; this is the value the handle is.
+    // A value the runtime holds is a handle this backend carries in a whole
+    // number register, and the number it says is the runtime's own reading of
+    // it. Some of the values of that type this backend produces are pointers
+    // the runtime answered rather than handles it made, so reading one as a
+    // number is not a conversion the accumulator has: the C backend reads the
+    // number the value says, and this one refuses.
     if (isDynamicType(from) && isNumber(to)) {
-      // A handle this backend keeps is the bits of the double the runtime holds
-      // it as, and the number the value says is the runtime's own reading of
-      // it: a document that holds `17` is the number 17, not the index of the
-      // value that holds it.
-      this.code.movdXmm(XMM0, RAX);
-      this.runtime("_to_number");
-      return;
+      throw machineError(
+        `a value the runtime holds is read as a ${typeText(to)}, which this backend has no lowering for`,
+        "the C backend reads the number the value says; write the program so the value is read where it is made, or build it with the C backend",
+      );
     }
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;

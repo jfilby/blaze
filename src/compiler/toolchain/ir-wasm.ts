@@ -3502,14 +3502,27 @@ class Body {
         this.callService("blaze_rt_json_parse");
         return DYNAMIC_TYPE;
       }
-      case "JSON.stringify":
+      case "JSON.stringify": {
         // The runtime renders the value as the dynamic string it holds, and the
         // text it says is the answer: `JSON.stringify` is a text in the source,
-        // so a map key or a template reads it as one without a cast.
-        this.dynamicValue(argument(0));
+        // so a map key or a template reads it as one without a cast. The
+        // runtime reads a dynamic value, so a text and a number are boxed into
+        // one first — a raw number is not a handle, and a small one is the
+        // index of a value some other part of the program registered.
+        const value = argument(0);
+        if (isTextType(value.type)) {
+          this.value(value, TEXT);
+          this.callService("blaze_rt_box_string");
+        } else if (isNumber(value.type)) {
+          this.value(value, F64_TYPE);
+          this.callService("blaze_rt_box_number");
+        } else {
+          this.dynamicValue(value);
+        }
         this.callService("blaze_rt_json_stringify");
         this.callService("blaze_rt_to_text");
         return TEXT;
+      }
       case "JSON.get": {
         // One field of a dynamic object: the object goes down as the handle
         // it is carried in, the field as the text it is spelled with, and the
@@ -3629,11 +3642,7 @@ class Body {
       this.callService("blaze_rt_box_string");
       return;
     }
-    // A number is a number the runtime has no handle for, and a small one is
-    // the index of a value it does: the number is boxed into a handle of its
-    // own before the runtime is asked to read it as one.
     this.value(value, F64_TYPE);
-    if (isNumber(type)) this.callService("blaze_rt_box_number");
   }
 
   /**
