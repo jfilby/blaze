@@ -999,7 +999,7 @@ test("a record keyed by text is the runtime's dictionary", async () => {
   // map's entries into one.
   const output = await agreesWithNode(
     [
-      'import { make, get, count, has, copy } from "./record.ts";',
+      'import { make, get, count, has, copy, sum } from "./record.ts";',
       "const t = make();",
       'console.log(get(t, "a"));',
       'console.log(get(t, "c"));',
@@ -1008,6 +1008,7 @@ test("a record keyed by text is the runtime's dictionary", async () => {
       'console.log(has(t, "z"));',
       'const c = copy();',
       'console.log(get(c, "x") + get(c, "y"));',
+      "console.log(sum(t));",
       "",
     ].join("\n"),
     {
@@ -1028,11 +1029,16 @@ test("a record keyed by text is the runtime's dictionary", async () => {
         '  m.set("y", 8);',
         "  return Object.fromEntries(m);",
         "}",
+        "export function sum(t: Record<string, number>): number {",
+        "  let total = 0;",
+        "  for (const [key, value] of Object.entries(t)) total += value;",
+        "  return total;",
+        "}",
         "",
       ].join("\n"),
     },
   );
-  assert.equal(output.trim(), "1\n3\n3\ntrue\nfalse\n15");
+  assert.equal(output.trim(), "1\n3\n3\ntrue\nfalse\n15\n6");
 });
 
 test("a method on a field of an imported interface waits for the link", async () => {

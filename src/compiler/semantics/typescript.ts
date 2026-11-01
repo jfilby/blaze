@@ -6527,6 +6527,33 @@ class TypeScriptParser {
           );
           return this.hole();
         }
+        // `Object.entries(record)` names the entries of a dictionary: a
+        // `for (const [key, value] of ...)` reads the two values of one entry
+        // straight out of it, and a `new Map(...)` copies the entries it names.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Object" &&
+          target.field === "entries"
+        ) {
+          const args = this.readCallArguments();
+          const source = args[0];
+          const collection = source === undefined ? null : this.collectionOfExpression(source);
+          if (source !== undefined && collection !== null && collection.kind === "map" && this.readingIteration) {
+            const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
+            this.collectionExpressions.set(entries, collection);
+            this.iteratedCollections.set(entries, collection);
+            this.expressionTypes.set(entries, ANY_TYPE);
+            replace(entries);
+            continue;
+          }
+          this.report(
+            "Object.entries reads a record or a map in a loop that names the two values",
+            "an entry is two values of two types, which a list does not hold unless the loop reads them",
+            this.peek(),
+          );
+          return this.hole();
+        }
         // `Object.prototype.hasOwnProperty.call(record, key)` asks whether a
         // record holds a key of its own. A record keyed by text is the
         // runtime's dictionary, so the question is the dictionary's.

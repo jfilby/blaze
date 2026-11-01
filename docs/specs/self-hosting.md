@@ -92,8 +92,9 @@ upper case to 4245, `extends Error`/`super`, `instanceof Error` and a class
 another module declares to 4179, a method written on a field of an imported
 type — which waits for the read that follows the link rather than being refused
 on the first — to 3918, a record keyed by text and a generic annotation in a
-program to 3879, and an array the file writes down to 3853, with
-`core/errors.ts`, `semantics/contract-build.ts`,
+program to 3879, an array the file writes down to 3853, and a loop over the
+entries of a record to 3852, with `core/errors.ts`,
+`semantics/contract-build.ts`,
 `semantics/diagnostics.ts` and `semantics/language.ts` read as wholes. The
 refusals fall into six frontiers:
 
@@ -134,9 +135,10 @@ refusals fall into six frontiers:
   an object literal at that type is one entry per field, `r[key]` reads one
   entry, `r[key] = value` writes one, `Object.keys`/`Object.values` walk the
   entries, `hasOwnProperty.call` asks the dictionary, and `Object.fromEntries`
-  copies a map's entries. An array of `[key, value]` pairs is still refused,
-  because a compiled list holds one element type and a pair is two values of
-  two types.
+  copies a map's entries. A `for (const [key, value] of Object.entries(record))`
+  reads the two values of one entry straight out of the dictionary. An array of
+  `[key, value]` pairs outside such a loop is still refused, because a compiled
+  list holds one element type and a pair is two values of two types.
 - **The host.** Before the boundary, 28 of the sources imported `node:*`
   directly: 66 imports, led by `fs/promises` (23), `path` (14), `fs` (8),
   `crypto` (8), `url` (6), `os` (3), `child_process` and a few others. They now
