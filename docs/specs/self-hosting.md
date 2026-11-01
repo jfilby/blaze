@@ -118,7 +118,8 @@ refusals fall into six frontiers:
   the pattern does not name yet. A class may name `Error` as its one base:
   `super(message)` writes the message the base holds, `instanceof Error` is the
   class check it is for a class of the module, and `new C(...)` of a class
-  another module declares calls the constructor that module lowered.
+  another module declares calls the constructor that module lowered. `typeof`
+  answers from the type of a member, an element or a call as well as a name.
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. A value another module
   imports is not carried: the module graph still offers functions only, and

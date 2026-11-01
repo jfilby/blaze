@@ -6205,6 +6205,14 @@ class TypeScriptParser {
     if (operand.k === "literal") type = NUMBER_RESULT;
     if (operand.k === "text") type = TEXT_RESULT;
     if (operand.k === "null") return { k: "text", parts: [{ k: "text", value: "object" }] };
+    // A member, an index or a call states its type the same way a name does:
+    // the field the interface declares, the element the array holds, or what
+    // the function answers. The answer is read from that type rather than
+    // refused because the value is not a name.
+    if (type === null) {
+      const held = this.valueTypeOf(operand);
+      if (!(held.kind === "ref" && held.of === null && held.name === undefined)) type = held;
+    }
     if (type === null) {
       this.report(
         "typeof reads the type a name is declared at",

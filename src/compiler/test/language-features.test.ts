@@ -933,6 +933,38 @@ test("a class another module declares is constructed by its name", async () => {
   assert.equal(output.trim(), "bad");
 });
 
+test("typeof reads the type of a member, an element and a call", async () => {
+  // A value that is not a name is typed by what it reads: the field an
+  // interface declares, the element an array holds, and the result a function
+  // answers. `typeof` reads that type instead of asking for a name.
+  const output = await agreesWithNode(
+    [
+      'import { check } from "./typeof.ts";',
+      "console.log(check(10, 20, 30));",
+      "",
+    ].join("\n"),
+    {
+      "typeof.ts": [
+        "interface Named { name: string; count: number }",
+        "function total(): number { return 42; }",
+        "export function check(a: number, b: number, c: number): number {",
+        "  const named: Named = { name: `x`, count: a };",
+        "  const xs: string[] = [`a`, `b`];",
+        "  let n = 0;",
+        '  if (typeof named.name === "string") n += b;',
+        '  if (typeof xs[0] === "string") n += c;',
+        '  if (typeof total() === "number") n += 1;',
+        '  if (typeof named.count === "number") n += 2;',
+        '  if (typeof named === "object") n += 4;',
+        "  return n;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "57");
+});
+
 test("a record keyed by text is the runtime's dictionary", async () => {
   // `Record<string, V>` is the same dictionary `Map<string, V>` is: a field
   // written as a literal is one entry, `r[key]` reads one entry, and the own
