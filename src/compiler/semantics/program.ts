@@ -237,7 +237,7 @@ function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isPro
     }
     // A malformed contract fails here, before a backend is ever asked for code.
     const contract = request.frontend.contractFor(record.analysis, declared, request.input);
-    try { parseContract(contract); } catch (e) { console.error("CONTRACT FAIL", declared.name, contract.function.params, contract.function.returns); throw e; }
+    parseContract(contract);
     declaredNames.add(declared.name);
     entries.push([declared.name, contract]);
   }
