@@ -6856,14 +6856,22 @@ class Machine {
       //
       // This is the same order the value below asks in, so what a name read
       // here is live across is what the census said it was.
+      // The sense of an arm that settles the whole: false for `&&`, true for
+      // `||`. Where that sense is the one the caller asked the branch for, both
+      // arms branch to the label on their own sense, and a left arm that
+      // settles it goes there directly. Asking a left arm that settles the
+      // whole for the *other* sense is the short circuit: it skips the right
+      // arm and falls through, because the whole is already the other value.
+      const settling = value.op === "or";
+      if (settling === whenTrue) {
+        this.truthBranch(value.left, settling, label);
+        this.truthBranch(value.right, whenTrue, label);
+        return;
+      }
       const settled = this.code.label("Lsettled");
-      this.truthBranch(value.left, value.op === "or", settled);
+      this.truthBranch(value.left, settling, settled);
       this.truthBranch(value.right, whenTrue, label);
       this.code.bind(settled);
-      // The arm that settled it left the whole at the value the operator
-      // answers with when an arm settles: false for `&&`, true for `||`.
-      // The label is reached when that value is the sense asked for.
-      if ((value.op === "or") === whenTrue) this.code.jcc(whenTrue ? "ne" : "e", label);
       return;
     }
     const underNot = value.k === "unary" && value.op === "not" ? flagComparison(value.operand) : null;
@@ -6916,7 +6924,10 @@ class Machine {
     const immediate = this.literalOf(comparison.right, type);
     if (immediate !== null) {
       this.at(comparison.left, type);
-      this.comparedBranch(type, op, immediate, sense, label);
+      // A float comparison reads both sides in vector registers, and the left
+      // one has just been written into the accumulator: naming `RAX` there
+      // made the literal overwrite the side it was to be compared against.
+      this.comparedBranch(type, op, immediate, sense, label, isFloatType(type) ? XMM0 : RAX);
       this.noteCompared(comparison.left, type);
       return;
     }
@@ -6936,7 +6947,9 @@ class Machine {
     this.at(comparison.right, type);
     this.store(right);
     this.at(comparison.left, type);
-    this.comparedBranch(type, op, right, sense, label);
+    // The left side is in the accumulator, which is a vector register for a
+    // float and the whole-number register otherwise.
+    this.comparedBranch(type, op, right, sense, label, isFloatType(type) ? XMM0 : RAX);
     this.noteCompared(comparison.left, type);
   }
 

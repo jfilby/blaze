@@ -992,6 +992,33 @@ test("typeof reads the type of a member, an element and a call", async () => {
   assert.equal(output.trim(), "57");
 });
 
+test("a short-circuited comparison holds at equality", async () => {
+  // The branch on `a && b` asks each arm for its own sense, and the arm that
+  // settles the whole reaches the branch directly. Reading the arm that did not
+  // settle it through the flags the other comparison left answered `<=` and
+  // `===` the wrong way at equality.
+  const source = [
+    "function classify(n: number): string {",
+    "  if (n === n && n <= 100) return `at most`;",
+    "  if (n === n && n === 100) return `equal`;",
+    "  return `above`;",
+    "}",
+    "console.log(classify(100));",
+    "console.log(classify(50));",
+    "console.log(classify(101));",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source);
+  assert.equal(output.trim(), "at most\nat most\nabove");
+  // The C backend reads the same IR, so the same program lands on the same
+  // text there too.
+  const { directory, binary } = await build(source, "c");
+  const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+});
+
 test("a record keyed by text is the runtime's dictionary", async () => {
   // `Record<string, V>` is the same dictionary `Map<string, V>` is: a field
   // written as a literal is one entry, `r[key]` reads one entry, and the own
