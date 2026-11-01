@@ -172,6 +172,32 @@ The frontend is a parser for a small program language, not a general JavaScript
 parser. That is the right shape to keep: the goal is to grow the subset by
 measured slices, not to become a second TypeScript implementation.
 
+Two things about the number are worth knowing before a slice is measured
+against it. **A refusal cascades**: the parser recovers at the next statement,
+so one construct outside the subset is often reported several times, and the
+top two messages (`expected ")"`, `unexpected ")"`) are mostly fallout from
+something else. **Reading further raises the number**: a file whose functions
+used to fall to the program parser is read as a library once the construct that
+sent them there is carried, and its functions then report the gaps they always
+had. A slice that reads more of a file can therefore raise the total while
+removing real work, which is why the budget is a ratchet rather than a score and
+why a per-file delta is read before a slice is accepted.
+
+One such fix is written and held back for that reason. When a declaration the
+module cannot hold is handed to the program parser, `skipFunctionBody` finds the
+body at the first `{` after the `)` — which is the *return type's* brace when the
+return type is an inline object, so `function f(): { buffer: string } | null {`
+ends the declaration at its type and the rest of the signature is read as a
+statement of the file, which makes the file run and hides every function in it
+from the module reader. Skipping the annotation first instead (`skipBalancedTypeTokens`
+with the `{`/`=`/`;` stops) reads `semantics/typescript-classes.ts` almost
+whole — 147 refusals down to 6 — and `toolchain/ir-wasm.ts`, `ir-machine.ts`,
+`ir-resolve.ts` and `semantics/liveness.ts` down by 16 to 43 each, but it exposes
+the gaps in `semantics/repair.ts`, `optimize-ir.ts`, `compiler.ts` and
+`semantics/ir-validate.ts` at the same time and raises the total by 49. It lands
+when diagnostic recovery makes the total a measure of work rather than of how
+far the parse got.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap
