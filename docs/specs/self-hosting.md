@@ -601,13 +601,21 @@ slice that runs as far as the needle is long, compared with the needle. Both
 read the needle, which has to read the same way twice.
 
 The one-argument form now takes the same reading, as the field from the
-beginning, rather than asking where the needle is. That is not for the gap: two
-`text.indexOf` calls in one function's conditions answer garbage on the machine
-backend, and two `text.slice` calls in one function's conditions answer garbage
-in the C backend. Neither is new — `endsWith` has had the second shape since it
-was added — and both are recorded as the next things to fix, because a compiler
-whose scanners compare two texts in two guards is exactly the program the
-self-build is. This took the total from 1529 to 1521.
+beginning, rather than asking where the needle is. That is not for the gap. A
+guard that asks a text's index and is followed by another statement answers
+garbage on the machine backend:
+
+    let n = 0;
+    if (text.includes("xx")) n += 1;   // the index in a condition
+    if (n > 10) n += 10;
+    return n;                          // the program answers NaN
+
+The same guard with the call written into a name first is right, and so is the
+same two guards over a number, so it is the call inside the condition rather
+than the guards. `includes` is the one method that still asks the index; the two
+`startsWith` forms now compare a slice. The bug is recorded as the next slice to
+take, because a compiler whose scanners ask a text's index in a guard is exactly
+the program the self-build is. This took the total from 1529 to 1521.
 
 ## The next slices
 
