@@ -6958,6 +6958,69 @@ class TypeScriptParser {
     return { k: "literal", text: answer ? "1" : "0" };
   }
 
+  /**
+   * `key in value`: whether an object has the field the key names.
+   *
+   * A record the file wrote out — a top-level constant of its own or one an
+   * import binds — has the keys the source wrote, so the question is the chain
+   * of comparisons those keys are, exactly as a written set's `has` is. A value
+   * the read holds at a record type answers for a field its type declares: the
+   * object was laid out with every field the declaration writes.
+   *
+   * What is not carried is the test a union of shapes is discriminated by. A
+   * union erases to the first arm, so the field of another arm is not a field
+   * this read knows the object has, and a run-time tag is what would answer it.
+   */
+  private membership(key: Expression, object: Expression): Expression {
+    const constant = object.k === "ident" ? this.constants.get(object.name) : undefined;
+    if (constant?.fields !== undefined) {
+      if (!repeatableExpression(key)) {
+        this.report(
+          "a record's keys read the key once",
+          "write the key into a name first, as in const k = f(); k in TABLE",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      // The chain asks the last key first, so the comparisons run in the order
+      // the source wrote them.
+      const keys = [...constant.fields.keys()];
+      let answer: Expression = { k: "literal", text: "0" };
+      for (let at = keys.length - 1; at >= 0; at -= 1) {
+        answer = {
+          k: "conditional",
+          condition: { k: "binary", op: "===", left: key, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
+          then: { k: "literal", text: "1" },
+          otherwise: answer,
+        };
+      }
+      this.expressionTypes.set(answer, BOOLEAN_RESULT);
+      return answer;
+    }
+    const name = textValue(key);
+    if (name !== null) {
+      const shape = this.shapeOf(object);
+      if (shape !== null && shape.kind === "record" && shape.fields.has(name)) {
+        const answer: Expression = { k: "literal", text: "1" };
+        this.expressionTypes.set(answer, BOOLEAN_RESULT);
+        return answer;
+      }
+    }
+    this.report(
+      "`in` asks a value whose fields the type does not write down",
+      "a record the file writes out as a constant is read key by key; the field of a value of a union of shapes needs a tag the value does not carry",
+      this.peek(),
+    );
+    return this.hole();
+  }
+
+  /**
+   * `&`, `^` and `|`, loosest of the three in that order, which is where
+   * JavaScript puts them: `a & b ^ c` is `(a & b) ^ c`, and `a ^ b | c` is
+   * `(a ^ b) | c`. They bind looser than a shift and tighter than a
+   * comparison, and the program body has always read them in exactly this
+   * place — a function the module declared could not use one at all.
+   */
   private readBitwiseOr(): Expression {
     return this.readBinaryLevel(["|"], () => this.readBitwiseXor());
   }
@@ -6972,6 +7035,13 @@ class TypeScriptParser {
 
   private readComparison(): Expression {
     let left = this.readBinaryLevel(["<", "<=", ">", ">="], () => this.readShift());
+    // `k in value` binds where a comparison does, and asks whether the object
+    // has the field. What the answer is depends on what the object is, and the
+    // reading is the one `membership` writes.
+    while (this.at("in")) {
+      this.next();
+      left = this.membership(left, this.readShift());
+    }
     // `x instanceof C` asks whether the value is an instance of a class. A
     // compiled instance is the object itself, so the answer is whether it is
     // there at all; the declared class is what says what it is when it is.

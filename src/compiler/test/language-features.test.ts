@@ -476,6 +476,27 @@ test("a brace written inside a text is not a brace of the module", async () => {
   assert.equal(output.trim(), "ab}");
 });
 
+test("`in` asks whether a written record has a key", async () => {
+  // A record the file writes out has the keys the source wrote, so the question
+  // is the chain of comparisons those keys are — the same reading a written
+  // set's membership gets. A key nothing wrote is the fallback, which is false.
+  const output = await agreesWithNode(
+    [
+      'import { has } from "./lib.ts";',
+      "console.log(has(`a`), has(`z`), has(`b`));",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        "const TABLE: Record<string, string> = { a: `x`, b: `y` };",
+        "export function has(key: string): boolean { return key in TABLE; }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "true false true");
+});
+
 test("a set written at the top of a module answers its membership", async () => {
   // The keys are written down, so the membership is the comparisons it means
   // and no dictionary is allocated: a function of the module reads the name

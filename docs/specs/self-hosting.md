@@ -507,6 +507,27 @@ checked a token's kind. The scans now ask `mark(token)`, which answers the
 punctuation a token is and nothing for a value. This took the total from 1674 to
 1591.
 
+### 4k. `key in record`
+
+`in` is one of the operators the source's control flow is built from — the
+frontend's own scanner reads `source in PRIMITIVES` to decide what a type
+annotation is — and it was not read at all: `return key in TABLE` was three
+statements, a `return key`, a value named `in`, and a value named `TABLE`. That
+was worse than a refusal, because it compiled.
+
+`in` now binds where a comparison does, and asks the question an object's keys
+answer. A record the file writes out — its own top-level constant, or one an
+import binds — has the keys the source wrote, so the answer is the chain of
+comparisons those keys are, exactly as a written set's `has` is. A value the
+read holds at a record type answers `true` for a field its type declares, which
+is the object it was laid out as.
+
+What is not carried is the test a union of shapes is discriminated by. A union
+erases to its first arm, so the field of another arm is not a field the read
+knows the object has; answering `false` there would be a silent wrong answer, so
+the construct is refused with that reason instead. `"k" in value` over a value
+the read does not type is the same case. This took the total from 1591 to 1584.
+
 ## The next slices
 
 ### What the measurement says now
