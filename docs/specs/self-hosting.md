@@ -95,7 +95,8 @@ on the first — to 3918, a record keyed by text and a generic annotation in a
 program to 3879, an array the file writes down to 3853, a loop over the entries
 of a record to 3852, a method on a class field written at an imported type to
 3322, the number questions to 3299, a call of a method at the type its
-declaration writes to 3265, and `JSON` to 3234, with `core/errors.ts`,
+declaration writes to 3265, `JSON` to 3234, and an optional chain over a
+computed position to 3201, with `core/errors.ts`,
 `semantics/contract-build.ts`, `semantics/diagnostics.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
 The refusals fall into six frontiers:

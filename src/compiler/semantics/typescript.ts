@@ -682,6 +682,17 @@ function repeatableExpression(value: Expression): boolean {
       return repeatableExpression(value.base);
     case "index":
       return repeatableExpression(value.base) && repeatableExpression(value.index);
+    // An operation over values that read the same way twice reads the same way
+    // twice: `tokens[at + 1]?.kind` asks for one number and reads one element,
+    // and asking for the number again is the same number.
+    case "binary":
+      return repeatableExpression(value.left) && repeatableExpression(value.right);
+    case "unary":
+      return repeatableExpression(value.operand);
+    case "conditional":
+      return repeatableExpression(value.condition) && repeatableExpression(value.then) && repeatableExpression(value.otherwise);
+    case "lengthOf":
+      return repeatableExpression(value.of);
     default:
       return false;
   }

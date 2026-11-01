@@ -608,6 +608,32 @@ test("a bare return leaves a function that returns nothing", async () => {
   assert.equal(output.trim(), "2");
 });
 
+test("an optional element is read once and holds the element's type", async () => {
+  // The value before `?.` is the condition and the value inside the branch, so
+  // a position it computes is written into a name first rather than computed
+  // twice. A chain that answers a number is the number beside the absence of
+  // one, not a dynamic value beside it: a choice of a number and `NULL` is not
+  // a conditional expression, and every backend refused it.
+  const output = await agreesWithNode(
+    ["import { report } from `./optional.ts`;", "report();", ""].join("\n").replace(/`/g, '"'),
+    {
+      "optional.ts": [
+        "export function has(names: string[], at: number): number {",
+        "  return names[at + 1]?.length ? 1 : 0;",
+        "}",
+        "export function report(): void {",
+        "  const names = [`a`, `bb`];",
+        "  console.log(has(names, 0));",
+        "  console.log(has(names, 5));",
+        "  console.log(has(names, 1));",
+        "}",
+        "",
+      ].join("\n").replace(/`/g, '"'),
+    },
+  );
+  assert.equal(output.trim(), "1\n0\n0");
+});
+
 test("JSON writes a value as the text it is", async () => {
   // `JSON.stringify` is a text in the language: a map key, a template and a
   // concatenation all read it as one. A list and an object written where the

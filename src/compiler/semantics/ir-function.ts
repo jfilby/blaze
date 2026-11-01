@@ -1199,7 +1199,14 @@ class FunctionBody {
         const condition = this.truth(this.typed(expression.condition, null, line).value);
         const then = this.typed(expression.then, expect, line);
         const otherwise = this.typed(expression.otherwise, expect, line);
-        const type = this.common(then.value.type, otherwise.value.type, line);
+        // An arm written `null` is the absence of the other arm's value, not a
+        // value of another type: `a?.[i]` is the element or nothing, and the
+        // conditional is a number where the element is one. Two absences are
+        // still the unshaped reference a null is.
+        const absent = (one: Typed): boolean => one.value.k === "nothing";
+        const type = absent(otherwise) && !absent(then) ? then.value.type
+          : absent(then) && !absent(otherwise) ? otherwise.value.type
+            : this.common(then.value.type, otherwise.value.type, line);
         return {
           value: {
             k: "select",

@@ -1340,7 +1340,10 @@ class FunctionEmitter {
       case "bool":
         return value.value ? "1" : "0";
       case "nothing":
-        return "NULL";
+        // Nothing read as a value of a scalar type is that type's zero, which
+        // is what a conditional arm that wrote `null` beside a number is: the
+        // absence of a number is no number, and `NULL` is not one in C.
+        return isNumber(value.type) || isBoolean(value.type) ? "0.0" : "NULL";
       case "functionRef":
         return (value as { k: "functionRef"; name: string }).name;
       case "local":
@@ -1544,6 +1547,13 @@ class FunctionEmitter {
         // number boxed as a string is a pointer the compiler wrote where four
         // limbs belong.
         const arm = (one: SemanticValue): string => {
+          // An arm written `null` is the absence of the value the other arm
+          // wrote, so it is the zero of the type the choice is. `NULL` is not
+          // that zero in C: it is a `void*`, and a choice of numbers with one
+          // arm of `NULL` is not a conditional expression at all.
+          if (one.k === "nothing") {
+            return isNumber(value.type) || isBoolean(value.type) ? "0.0" : isTextType(value.type) ? '""' : "NULL";
+          }
           if (!isTextType(value.type) && (isTextType(one.type) || one.k === "text")) {
             return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
           }
