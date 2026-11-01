@@ -497,6 +497,28 @@ test("`in` asks whether a written record has a key", async () => {
   assert.equal(output.trim(), "true false true");
 });
 
+test("a written set answers a membership of a text method's answer", async () => {
+  // The membership is the comparisons the written keys are, and each one reads
+  // the value it was handed. A text's own method names the same text however
+  // often it is asked, so `WORDS.has(text.trim())` reads it once per key
+  // without the source writing the answer into a name first.
+  const output = await agreesWithNode(
+    [
+      'import { isWord } from "./lib.ts";',
+      "console.log(isWord(`  return  `), isWord(`  iffy  `));",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        "const WORDS: ReadonlySet<string> = new Set([`return`, `if`]);",
+        "export function isWord(text: string): boolean { return WORDS.has(text.trim()); }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "true false");
+});
+
 test("a set written at the top of a module answers its membership", async () => {
   // The keys are written down, so the membership is the comparisons it means
   // and no dictionary is allocated: a function of the module reads the name

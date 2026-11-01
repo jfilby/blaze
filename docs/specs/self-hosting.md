@@ -528,6 +528,23 @@ knows the object has; answering `false` there would be a silent wrong answer, so
 the construct is refused with that reason instead. `"k" in value` over a value
 the read does not type is the same case. This took the total from 1591 to 1584.
 
+### 4l. A value read twice
+
+A written set's membership is the chain of comparisons its keys are, and every
+comparison reads the value it was handed: `WORDS.has(x)` is `x === "return" ||
+x === "if"`. That needs `x` to read the same way twice, which is why the parser
+refuses a value it cannot read twice and asks the source to write it into a name
+first. A text's own methods were not on that list, so the compiler's own scanner
+could not write `WORDS.has(text.slice(start + 1, index + 1))` — a shape the
+frontend's source is built from.
+
+A call whose name is a text method's, over arguments that read the same way
+twice, now does. No text method writes the text it reads, and the call is built
+by the file's own helper, so asking one of them twice is asking the same
+question; a method whose name is a helper's — `split`, or a regular
+expression's `replace` — is not on the list. This took the total from 1584 to
+1548.
+
 ## The next slices
 
 ### What the measurement says now

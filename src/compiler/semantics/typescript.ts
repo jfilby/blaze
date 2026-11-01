@@ -807,6 +807,12 @@ function repeatableExpression(value: Expression): boolean {
       return repeatableExpression(value.condition) && repeatableExpression(value.then) && repeatableExpression(value.otherwise);
     case "lengthOf":
       return repeatableExpression(value.of);
+    // A text's own methods read the text and answer a new one: `text.slice(a,
+    // b)` and `text.trim()` name the same text twice, so a value that asks one
+    // of them twice is asking the same question. A compiled function is where
+    // the call goes, and no text method writes the text it reads.
+    case "call":
+      return value.name.startsWith("text.") && value.args.every((arg) => repeatableExpression(arg));
     default:
       return false;
   }
