@@ -1665,6 +1665,12 @@ export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   let line = 1;
+  // A file may open with `#!` and the interpreter that runs it, which is the
+  // host's line rather than the program's: it is skipped the way a comment is.
+  if (source.startsWith("#!")) {
+    const end = source.indexOf("\n");
+    index = end < 0 ? source.length : end;
+  }
 
   while (index < source.length) {
     const character = source[index];

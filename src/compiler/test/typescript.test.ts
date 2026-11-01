@@ -1727,6 +1727,17 @@ test("a map and a set are one handle on the runtime's dictionary", () => {
   assert.equal(result?.condition?.name, "blaze_rt_dict_has");
 });
 
+test("a file opens with the interpreter that runs it", () => {
+  // `#!/usr/bin/env node` is the host's line rather than the program's, and the
+  // entry source is the one an interpreter runs: a source that opens with it is
+  // read from the line after it.
+  const analysis = typescript.analyze(
+    ["#!/usr/bin/env node", "export function f(): number { return 1; }", ""].join("\n"),
+    "cli.ts",
+  );
+  assert.equal(analysis.functions[0]?.name, "f");
+});
+
 test("a map states a type that names a type of its own", () => {
   // `Map<string, Set<string>>` closes with one `>>` token, which is the token
   // the shift operators are written with. The count of open angles says how
