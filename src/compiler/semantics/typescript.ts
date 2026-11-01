@@ -2261,9 +2261,11 @@ class TypeScriptParser {
         // name the handle is bound to.
         return NUMBER_RESULT;
       case "record":
-        // An object of fields is a reference; the fields themselves are read
-        // through `shapeOf`, which keeps the record the contract cannot spell.
-        return ANY_TYPE;
+        // A record with an index is keyed by text, which is the dictionary the
+        // runtime holds: the contract spells the handle. An object of fields is
+        // a reference; the fields themselves are read through `shapeOf`, which
+        // keeps the record the contract cannot spell.
+        return shape.index !== null ? NUMBER_RESULT : ANY_TYPE;
       default:
         return ANY_TYPE;
     }
@@ -2272,6 +2274,11 @@ class TypeScriptParser {
   /** The collection a shape names, in the form the map and set methods read. */
   private collectionOfShape(shape: ResolvedType | null): CollectionValue | null {
     if (shape === null) return null;
+    // `Record<string, V>` is the same dictionary `Map<string, V>` is: the keys
+    // are texts and the value is what the index states.
+    if (shape.kind === "record" && shape.index !== null) {
+      return { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(shape.index) };
+    }
     const collection = collectionOfType(shape);
     if (collection === null) return null;
     if (collection.kind === "set") {
@@ -4014,7 +4021,9 @@ class TypeScriptParser {
     this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
-    this.valueCollections = new Map();
+    // A collection a file declares at the top is a name its functions read, so
+    // what each of them holds is carried into the function being read.
+    this.valueCollections = new Map(this.valueCollections);
     this.iteratedCollections = new Map();
     let answered: CollectionValue | null = null;
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => ({
@@ -4280,7 +4289,7 @@ class TypeScriptParser {
   private annotationCollectionAt(start: number, stops: ReadonlySet<string>): CollectionValue | null {
     const end = this.typeEndAt(start, stops);
     const head = this.tokens[start];
-    const kind = head?.text === "Map" || head?.text === "WeakMap"
+    const kind = head?.text === "Map" || head?.text === "WeakMap" || head?.text === "Record"
       ? "map" as const
       : head?.text === "Set" || head?.text === "WeakSet"
         ? "set" as const
@@ -4290,6 +4299,8 @@ class TypeScriptParser {
     const close = this.matchingToken(start + 1, "<", ">");
     if (close < 0 || close >= end) return { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
     const arguments_ = this.typeArguments(start + 2, close);
+    // `Record<string, V>` writes the key it is keyed by and the value it holds;
+    // a map writes the same two arguments.
     const key = arguments_[0] ?? TEXT_RESULT;
     const value = kind === "map" ? (arguments_[1] ?? NUMBER_RESULT) : NUMBER_RESULT;
     if (!this.isTextKey(key)) {
@@ -4524,7 +4535,8 @@ class TypeScriptParser {
     if (
       first.kind === "ident" &&
       (first.text === "Map" || first.text === "Set" || first.text === "WeakMap" ||
-        first.text === "WeakSet" || first.text === "ReadonlyMap" || first.text === "ReadonlySet")
+        first.text === "WeakSet" || first.text === "ReadonlyMap" || first.text === "ReadonlySet" ||
+        first.text === "Record")
     ) {
       return NUMBER_RESULT;
     }
@@ -5248,6 +5260,25 @@ class TypeScriptParser {
     this.next();
     const value = this.readExpression();
     this.accept(";");
+    // `record[name] = value` writes one entry of the dictionary the record is.
+    // The write is the dictionary's own, by the value the entry holds.
+    const heldCollection = operator.text === "="
+      ? this.collectionOfExpression({ k: "ident", name: buffer.text })
+      : null;
+    if (heldCollection !== null && heldCollection.kind === "map") {
+      const setName = this.collectionSetNameFor(heldCollection);
+      if (setName !== null) {
+        return {
+          kind: "expression",
+          value: {
+            k: "call",
+            name: setName,
+            args: [{ k: "ident", name: buffer.text }, index, value],
+          },
+          line: buffer.line,
+        };
+      }
+    }
     if (operator.text === "??=") {
       return {
         kind: "indexAssign",
@@ -6282,6 +6313,16 @@ class TypeScriptParser {
         this.next();
         const index = this.readExpression();
         this.expect("]");
+        // `m[key]` on a record or a map is one entry of the dictionary, read
+        // the way `m.get(key)` reads it.
+        const indexed = this.collectionOfExpression(target);
+        if (indexed !== null && indexed.kind === "map") {
+          const got = this.collectionMethod(target, indexed, "get", [index]);
+          if (got !== null) {
+            replace(got);
+            continue;
+          }
+        }
         replace(target.k === "argv" ? { k: "argv", index } : { k: "index", base: target, index });
         continue;
       }
@@ -6337,6 +6378,69 @@ class TypeScriptParser {
           const args = this.readCallArguments();
           replace(this.objectMembers(target.field, args));
           continue;
+        }
+        // `Object.fromEntries(entries)` is a record built from the entries of
+        // a map: the dictionary's own entries, copied into a dictionary of the
+        // same key and value. An array of pairs is not one of these: a compiled
+        // list holds one element type, and a pair is two values of two types.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Object" &&
+          target.field === "fromEntries"
+        ) {
+          const args = this.readCallArguments();
+          const source = args[0];
+          const sourceCollection = source === undefined ? null : this.collectionOfExpression(source);
+          if (source !== undefined && sourceCollection !== null && sourceCollection.kind === "map") {
+            const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: sourceCollection.value };
+            const copied = this.collectionCopyHelper(collection, source, sourceCollection, this.peek().line);
+            this.expressionTypes.set(copied, NUMBER_RESULT);
+            this.collectionExpressions.set(copied, collection);
+            replace(copied);
+            continue;
+          }
+          this.report(
+            "Object.fromEntries copies a map or a record",
+            "an array of pairs is a list of two values of two types, which a compiled list does not hold",
+            this.peek(),
+          );
+          return this.hole();
+        }
+        // `Object.prototype.hasOwnProperty.call(record, key)` asks whether a
+        // record holds a key of its own. A record keyed by text is the
+        // runtime's dictionary, so the question is the dictionary's.
+        if (
+          target.k === "member" &&
+          target.field === "call" &&
+          target.base.k === "member" &&
+          target.base.field === "hasOwnProperty" &&
+          target.base.base.k === "member" &&
+          target.base.base.field === "prototype" &&
+          target.base.base.base.k === "ident" &&
+          target.base.base.base.name === "Object"
+        ) {
+          const args = this.readCallArguments();
+          const receiver = args[0];
+          const key = args[1];
+          const collection = receiver === undefined ? null : this.collectionOfExpression(receiver);
+          if (collection !== null && collection.kind === "map" && key !== undefined) {
+            const has: Expression = {
+              k: "call",
+              name: collection.key.kind === "ref" ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+              args: [receiver, key],
+            };
+            const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
+            this.expressionTypes.set(answer, BOOLEAN_RESULT);
+            replace(answer);
+            continue;
+          }
+          this.report(
+            "hasOwnProperty asks a record keyed by text",
+            "a record keyed by text is the runtime's dictionary; a compiled object is one layout",
+            this.peek(),
+          );
+          return this.hole();
         }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
@@ -7160,6 +7264,15 @@ class TypeScriptParser {
    */
   private objectMembers(method: "keys" | "values", args: readonly Expression[]): Expression {
     const value = args[0];
+    // A record or a map built while the program runs is a dictionary, and its
+    // entries are read by position: `Object.keys` is the keys it holds.
+    if (args.length === 1 && value !== undefined) {
+      const collection = this.collectionOfExpression(value);
+      if (collection !== null && collection.kind === "map") {
+        const read = this.collectionMethod(value, collection, method, []);
+        if (read !== null) return read;
+      }
+    }
     const constant = args.length === 1 && value !== undefined && value.k === "ident"
       ? this.constants.get(value.name)
       : undefined;
@@ -8555,6 +8668,22 @@ class TypeScriptParser {
       if (!this.accept(",")) break;
     }
     this.expect("}");
+    // An object literal written at a `Record<string, V>` is the dictionary its
+    // type names: each field is one entry of the dictionary, keyed by the name
+    // the source wrote. A literal at a record of fields is laid out as fields.
+    if (expected !== null && expected.index !== null) {
+      const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(expected.index) };
+      const pairs = fields.map((field) => ({
+        key: { k: "text", parts: [{ k: "text", value: field.name }] } as Expression,
+        value: field.value,
+      }));
+      const call = pairs.length === 0
+        ? { k: "call", name: "blaze_rt_dict_new", args: [] } as Expression
+        : this.collectionPairsHelper(collection, pairs, this.peek().line);
+      this.collectionExpressions.set(call, collection);
+      this.expressionTypes.set(call, NUMBER_RESULT);
+      return call;
+    }
     return { k: "object", fields };
   }
 

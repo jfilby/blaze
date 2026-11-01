@@ -1727,6 +1727,33 @@ test("a map and a set are one handle on the runtime's dictionary", () => {
   assert.equal(result?.condition?.name, "blaze_rt_dict_has");
 });
 
+test("a record keyed by text is the dictionary a map is", () => {
+  // `Record<string, V>` is the same handle `Map<string, V>` is: what the
+  // contract can spell is the handle, and the key and value stay beside it. A
+  // read by key is the dictionary's read, guarded so an absent key answers the
+  // zero of the value rather than the NaN the dictionary uses.
+  const ir = irOf(
+    "typescript",
+    { "main.ts": "export function read(r: Record<string, number>, k: string): number { return r[k]; }\nconsole.log(`run`);\n" },
+    "main.ts",
+    "read",
+  );
+  assert.match(ir, /blaze_rt_dict_has/);
+  assert.match(ir, /blaze_rt_dict_get/);
+});
+
+test("an object literal at a record is the dictionary its type names", () => {
+  // A field the literal names is one entry of the dictionary, written by the
+  // helper the collection pair reader builds.
+  const body = analyzedBody(
+    "export function f(): number { const t: Record<string, number> = { a: 1, b: 2 }; return t[`a`]; }",
+    "f",
+  );
+  const declared = body[0] as { init?: { k: string; name?: string } };
+  assert.equal(declared.init?.k, "call");
+  assert.match(declared.init?.name ?? "", /^__collect_/);
+});
+
 test("a map keyed by anything but text is refused, because a key is a string", () => {
   assert.match(
     diagnostic(() =>

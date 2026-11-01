@@ -933,6 +933,49 @@ test("a class another module declares is constructed by its name", async () => {
   assert.equal(output.trim(), "bad");
 });
 
+test("a record keyed by text is the runtime's dictionary", async () => {
+  // `Record<string, V>` is the same dictionary `Map<string, V>` is: a field
+  // written as a literal is one entry, `r[key]` reads one entry, and the own
+  // keys of the record are the entries it holds. `Object.fromEntries` copies a
+  // map's entries into one.
+  const output = await agreesWithNode(
+    [
+      'import { make, get, count, has, copy } from "./record.ts";',
+      "const t = make();",
+      'console.log(get(t, "a"));',
+      'console.log(get(t, "c"));',
+      "console.log(count(t));",
+      'console.log(has(t, "b"));',
+      'console.log(has(t, "z"));',
+      'const c = copy();',
+      'console.log(get(c, "x") + get(c, "y"));',
+      "",
+    ].join("\n"),
+    {
+      "record.ts": [
+        "export function make(): Record<string, number> {",
+        "  const t: Record<string, number> = { a: 1, b: 2 };",
+        '  t["c"] = 3;',
+        "  return t;",
+        "}",
+        "export function get(t: Record<string, number>, k: string): number { return t[k]; }",
+        "export function count(t: Record<string, number>): number { return Object.keys(t).length; }",
+        "export function has(t: Record<string, number>, k: string): boolean {",
+        "  return Object.prototype.hasOwnProperty.call(t, k);",
+        "}",
+        "export function copy(): Record<string, number> {",
+        "  const m = new Map<string, number>();",
+        '  m.set("x", 7);',
+        '  m.set("y", 8);',
+        "  return Object.fromEntries(m);",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "1\n3\n3\ntrue\nfalse\n15");
+});
+
 test("a method on a field of an imported interface waits for the link", async () => {
   // A file is read before its imports are linked, so a parameter written at an
   // imported type is `any` on that read. A method written on a field of it is

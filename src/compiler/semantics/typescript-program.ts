@@ -615,11 +615,12 @@ class ProgramParser {
       return "";
     }
     this.next();
-    // `Array<f64>` and the like name a type with more than one token; a
-    // program has no such type, but the value that carries it still parses.
+    // `Array<f64>` and the like name a type with more than one token. A program
+    // has no such type of its own, so the annotation is erased: the value keeps
+    // the type it is written with and the name states nothing the program reads.
     if (this.at("<")) {
-      this.fail("a program names a type with one word, as in const n: usize = 0", token);
       this.skipAngles();
+      return "any";
     }
     // A class names a value the program holds as a reference, which is the one
     // type the source needs no fields spelled for.

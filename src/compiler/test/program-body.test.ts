@@ -269,6 +269,15 @@ test("a list of values holds numbers, and a text among them is refused", () => {
   );
 });
 
+test("a generic annotation in a program is erased, not refused", () => {
+  // A program has no type of its own for `Array<T>` or `Record<string, T>`, and
+  // a type is erased: the annotation names nothing the program reads, so it is
+  // read and skipped rather than reported as a type of several words.
+  const body = bodyOf("const counts: Record<string, number> = { a: 1 };\nconsole.log(counts.a);\n");
+  assert.ok(body.length > 0);
+  assert.doesNotThrow(() => bodyOf("function f(x: Array<number>): number { return 1; }\nconsole.log(f([1]));\n"));
+});
+
 test("a construct outside the subset is named, with what to write instead", () => {
   // Each of these used to be reported as whatever token the parser lost its
   // place at, so a `catch` said "expected the name of a function" and a

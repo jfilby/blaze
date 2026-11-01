@@ -89,9 +89,10 @@ object spread of a typed object, `Omit`/`Pick`, a class field's annotation in
 every form the language writes, a field assignment read at the field's type,
 an empty list at a type an import declares to 4251, folding a text to lower or
 upper case to 4245, `extends Error`/`super`, `instanceof Error` and a class
-another module declares to 4179, and a method written on a field of an imported
+another module declares to 4179, a method written on a field of an imported
 type — which waits for the read that follows the link rather than being refused
-on the first — to 3918, with `core/errors.ts`, `semantics/contract-build.ts`,
+on the first — to 3918, and a record keyed by text and a generic annotation in
+a program to 3879, with `core/errors.ts`, `semantics/contract-build.ts`,
 `semantics/diagnostics.ts` and `semantics/language.ts` read as wholes. The
 refusals fall into six frontiers:
 
@@ -125,7 +126,13 @@ refusals fall into six frontiers:
 - **The value model.** The compiler relies on `undefined`/absence, dynamic
   objects with text keys, maps and sets of references as well as numbers,
   arrays that grow, arrays of arrays, and text methods including regular
-  expressions.
+  expressions. A `Record<string, V>` is the dictionary a `Map<string, V>` is:
+  an object literal at that type is one entry per field, `r[key]` reads one
+  entry, `r[key] = value` writes one, `Object.keys`/`Object.values` walk the
+  entries, `hasOwnProperty.call` asks the dictionary, and `Object.fromEntries`
+  copies a map's entries. An array of `[key, value]` pairs is still refused,
+  because a compiled list holds one element type and a pair is two values of
+  two types.
 - **The host.** Before the boundary, 28 of the sources imported `node:*`
   directly: 66 imports, led by `fs/promises` (23), `path` (14), `fs` (8),
   `crypto` (8), `url` (6), `os` (3), `child_process` and a few others. They now
