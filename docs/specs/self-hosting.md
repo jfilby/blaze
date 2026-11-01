@@ -493,6 +493,29 @@ This took the total from 1688 to 1674.
 
 ## The next slices
 
+### What the measurement says now
+
+1674 refusals over 94 sources, 9 of them read whole. The largest buckets, in
+order, and what each of them is:
+
+| refusals | refusal | what it needs |
+| --- | --- | --- |
+| 53 | `"map"` is not a method | the element type of a receiver that came from a map or a record *read at run time* — a list inside a dictionary is a handle, and its methods need the dynamic array the runtime already carries |
+| 43 | `expected ")"` | `"k" in value` (8), `new Array(n)` (3), and cascade from a refused statement before them |
+| 34 | `unexpected "=" in an expression` | the rest of the nested-field writes: `x.length = n`, and `+=` used as a value inside a template (`${this.builds += 1}`, 10) |
+| 22 | `"push"` | the same element-type story as `map` |
+| 22 | `"startsWith"` | a text whose type the read does not hold |
+| 19 | `an optional chain reads the value before ?. twice` | an assignment-expression node, so `f()?.x` can bind `f()` once without reordering the statement |
+| 18 | `Object.entries` in a loop | a list of pairs, which the value model has not |
+| 18 | `"filter"`, 15 `"flatMap"`, 13 `"some"` | the element type through an imported interface, which the link now carries; what is left is the callback's *own* result type |
+| 9 | `"isArray"` | `Array.isArray` over a value the read does not type: the runtime's dynamic kind answers it |
+
+The three that would move the most with one change are the pair `map`/`push`
+and the optional chain, and each of them needs something the value model does
+not have yet rather than another special case in the parser.
+
+### The roadmap
+
 The order below is the order of leverage. The first three slices — the gap
 report (0), the type layer (1) and the platform boundary (4) — have landed what
 they can without the value model: the report and the boundary are in place, and
