@@ -933,6 +933,33 @@ test("a class another module declares is constructed by its name", async () => {
   assert.equal(output.trim(), "bad");
 });
 
+test("a top-level array of written values is read where a function uses it", async () => {
+  // A function is compiled on its own and has no environment to read the
+  // file's scope from, so an array the file wrote down — every element a value
+  // the compiler can read without running anything — is written into the body
+  // where the function uses it, unless a body writes the name.
+  const output = await agreesWithNode(
+    [
+      'import { has, joined, count } from "./names.ts";',
+      'console.log(has("ada"));',
+      'console.log(has("bob"));',
+      "console.log(joined());",
+      "console.log(count());",
+      "",
+    ].join("\n"),
+    {
+      "names.ts": [
+        'const NAMES: readonly string[] = ["ada", "grace"];',
+        "export function has(name: string): boolean { return NAMES.includes(name); }",
+        'export function joined(): string { return NAMES.join(","); }',
+        "export function count(): number { return NAMES.length; }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "true\nfalse\nada,grace\n2");
+});
+
 test("typeof reads the type of a member, an element and a call", async () => {
   // A value that is not a name is typed by what it reads: the field an
   // interface declares, the element an array holds, and the result a function

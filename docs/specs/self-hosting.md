@@ -91,8 +91,9 @@ an empty list at a type an import declares to 4251, folding a text to lower or
 upper case to 4245, `extends Error`/`super`, `instanceof Error` and a class
 another module declares to 4179, a method written on a field of an imported
 type — which waits for the read that follows the link rather than being refused
-on the first — to 3918, and a record keyed by text and a generic annotation in
-a program to 3879, with `core/errors.ts`, `semantics/contract-build.ts`,
+on the first — to 3918, a record keyed by text and a generic annotation in a
+program to 3879, and an array the file writes down to 3853, with
+`core/errors.ts`, `semantics/contract-build.ts`,
 `semantics/diagnostics.ts` and `semantics/language.ts` read as wholes. The
 refusals fall into six frontiers:
 
@@ -121,9 +122,11 @@ refusals fall into six frontiers:
   another module declares calls the constructor that module lowered. `typeof`
   answers from the type of a member, an element or a call as well as a name.
 - **Values a module exports.** A top-level constant is read by the functions of
-  its own file, where the value is written into the body. A value another module
-  imports is not carried: the module graph still offers functions only, and
-  `export const` in another file is refused at the import that names it.
+  its own file, where the value is written into the body. An array whose every
+  element is written down is one of these, unless a body writes the name: a
+  value a program changes is state rather than a constant. A value another
+  module imports is not carried: the module graph still offers functions only,
+  and `export const` in another file is refused at the import that names it.
 - **The value model.** The compiler relies on `undefined`/absence, dynamic
   objects with text keys, maps and sets of references as well as numbers,
   arrays that grow, arrays of arrays, and text methods including regular

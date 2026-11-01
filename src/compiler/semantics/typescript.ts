@@ -822,6 +822,81 @@ function nameCount(tokens: readonly Token[], name: string): number {
   return count;
 }
 
+
+/** The index just past the bracket that closes the one at `open`. */
+function closingBracket(tokens: readonly Token[], open: number): number {
+  let depth = 0;
+  for (let index = open; index < tokens.length; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.text === "[" || token.text === "{" || token.text === "(") depth += 1;
+    else if (token.text === "]" || token.text === "}" || token.text === ")") {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return tokens.length;
+}
+
+/**
+ * Whether an array written at the top of a file is a value the compiler can
+ * read without running anything: every element is a number, a text, a whole
+ * number, or an array of those.
+ */
+function constantList(tokens: readonly Token[], open: number, close: number): boolean {
+  let depth = 0;
+  let from = open + 1;
+  const elements: (readonly [number, number])[] = [];
+  for (let index = open + 1; index < close; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.text === "[" || token.text === "{" || token.text === "(") depth += 1;
+    else if (token.text === "]" || token.text === "}" || token.text === ")") depth -= 1;
+    else if (token.text === "," && depth === 0) {
+      elements.push([from, index]);
+      from = index + 1;
+    }
+  }
+  elements.push([from, close]);
+  if (elements.length === 1 && elements[0]?.[0] === elements[0]?.[1]) return true;
+  for (const [start, end] of elements) {
+    // The list may end with a comma, which names no element.
+    if (start === end && start === close) continue;
+    if (start === end) return false;
+    if (tokens[start]?.text === "[") {
+      const nested = closingBracket(tokens, start);
+      if (nested !== end + 1 || !constantList(tokens, start, nested - 1)) return false;
+      continue;
+    }
+    if (!constantRange(tokens, start, end)) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether a top-level name is written somewhere, so its value cannot be read
+ * where it is used. A name a function pushes to, or writes an element of, is
+ * state the program holds rather than a value the file wrote.
+ */
+function writtenName(tokens: readonly Token[], name: string): boolean {
+  const changing: ReadonlySet<string> = new Set([
+    "push", "pop", "shift", "unshift", "splice", "sort", "reverse", "fill", "copyWithin",
+  ]);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.kind !== "ident" || token.text !== name) continue;
+    // The declaration itself is not a write of the name.
+    const before = tokens[index - 1]?.text;
+    if (before === "const" || before === "let" || before === "var") continue;
+    const next = tokens[index + 1];
+    if (next?.text === "=" || next?.text === "++" || next?.text === "--") return true;
+    if (next?.text === "." && changing.has(tokens[index + 2]?.text ?? "")) return true;
+    if (next?.text === "[") {
+      const close = closingBracket(tokens, index + 1);
+      if (tokens[close]?.text === "=") return true;
+    }
+  }
+  return false;
+}
+
 function scanConstants(tokens: readonly Token[]): ScannedFile {
   const found = new Map<string, ConstantInfo>();
   const state = new Set<string>();
@@ -860,12 +935,43 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
     }
     if (
       (token.text === "const" || token.text === "let" || token.text === "var") &&
-      tokens[index + 1]?.kind === "ident" &&
-      tokens[index + 2]?.text === "="
+      tokens[index + 1]?.kind === "ident"
     ) {
       const name = (tokens[index + 1] as Token).text;
       const mutable = token.text !== "const";
-      const start = index + 3;
+      // `const NAME: Type = value` writes the type between the name and the
+      // value, and the type is erased: what the scan needs is where the value
+      // starts.
+      let equals = index + 2;
+      if (tokens[equals]?.text === ":") {
+        let depth = 0;
+        equals += 1;
+        while (equals < tokens.length) {
+          const written = tokens[equals] as Token;
+          if (written.text === "<" || written.text === "(" || written.text === "[" || written.text === "{") depth += 1;
+          else if (written.text === ">" || written.text === ")" || written.text === "]" || written.text === "}") depth -= 1;
+          else if (written.text === "=" && depth === 0) break;
+          equals += 1;
+        }
+      }
+      if (tokens[equals]?.text !== "=") {
+        index += 1;
+        continue;
+      }
+      const start = equals + 1;
+      if (tokens[start]?.text === "[") {
+        const end = closingBracket(tokens, start);
+        // An array whose every element is written down is the file's constant,
+        // inlined where it is read, unless a body writes the name: a value a
+        // program changes is state rather than a constant.
+        if (!mutable && constantList(tokens, start, end - 1) && !locals.has(name) && !writtenName(tokens, name)) {
+          found.set(name, { expression: { start, end } });
+        } else {
+          state.add(name);
+        }
+        index = end;
+        continue;
+      }
       if (tokens[start]?.text === "{") {
         const end = closing(start);
         const object = objectConstants(tokens, start, end);
@@ -933,7 +1039,13 @@ function localNames(tokens: readonly Token[]): Set<string> {
       const name = tokens[index + 1];
       if (name?.kind === "ident") names.add(name.text);
     }
-    if (token.kind === "ident" && tokens[index + 1]?.text === ":") names.add(token.text);
+    if (token.kind === "ident" && tokens[index + 1]?.text === ":") {
+      // A top-level `const NAME: Type` is the file's name, not a body's: the
+      // annotation is what made it look like a parameter here.
+      const before = tokens[index - 1]?.text;
+      if (depth === 0 && (before === "const" || before === "let" || before === "var")) continue;
+      names.add(token.text);
+    }
   }
   return names;
 }
