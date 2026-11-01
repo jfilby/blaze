@@ -279,6 +279,22 @@ export interface ModuleAnalysis {
    *  annotation in a program function is the wide whole number. */
   wideBigint?: boolean;
   /**
+   * The top-level values the file offers, in the frontend's own form.
+   *
+   * A value is not a type: the module that imports the name compiles a function
+   * that reads it, and a compiled function has no environment to read the
+   * file's scope from. What crosses is the value itself, read where the file
+   * that wrote it wrote it. The form is the frontend's own, like a
+   * declaration's `handle`, so the phase carries it and never reads it.
+   */
+  constants?: unknown;
+  /**
+   * True when the read waited for the module graph to link a declaration an
+   * import names. The graph reads such a file again once its imports are bound,
+   * which is the read that answers what this one deferred.
+   */
+  awaitingLink?: boolean;
+  /**
    * True when the body is only the language's entry guard, which names the
    * entry module and runs nowhere else. Python writes
    * `if __name__ == "__main__":` at the top of a file, and a module the

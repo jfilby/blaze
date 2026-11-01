@@ -1694,6 +1694,39 @@ test("an empty array is built at the type the use writes it at", () => {
   assert.equal(firstBuffer(nullish?.right)?.element, "f64", "the fallback is read at the type of the value it falls back from");
 });
 
+test("a constant one module exports is the value the module that imports it reads", () => {
+  // A compiled function has no environment to read another module's scope from,
+  // so the value crosses the link: the list another module wrote is the list
+  // the importing file reads, with the elements that file wrote.
+  const ir = irOf(
+    "typescript",
+    {
+      "kinds.ts": "export const KINDS: readonly string[] = [`c`, `asm`];\n",
+      "check.ts": 'import { KINDS } from "./kinds.ts";\nexport function isKind(name: string): boolean { return KINDS.includes(name); }\n',
+      "main.ts": 'import { isKind } from "./check.ts";\nconsole.log(0);\n',
+    },
+    "main.ts",
+    "isKind",
+  );
+  assert.match(ir, /\[text "c"\] \[text "asm"\]/, "the elements the other module wrote are the ones the list holds");
+});
+
+test("a module that offers only a constant is a library the program may import", () => {
+  // A file of declarations is a library whether it declares a function, a type
+  // or a value, and a value is imported the same way a function is.
+  const program = programOf(
+    "typescript",
+    {
+      "kinds.ts": "export const KINDS: readonly string[] = [`c`, `asm`];\n",
+      "check.ts": 'import { KINDS } from "./kinds.ts";\nexport function isKind(name: string): boolean { return KINDS.includes(name); }\n',
+      "main.ts": 'import { isKind } from "./check.ts";\nconsole.log(isKind(`c`) ? 1 : 0);\n',
+    },
+    "main.ts",
+  );
+  const kinds = program.files.find((file) => file.path === "kinds.ts");
+  assert.ok(kinds !== undefined, "the module that only writes a constant is a module of the program");
+});
+
 test("a conditional of an empty list and a list keeps the one element type", () => {
   const ir = irOf(
     "typescript",

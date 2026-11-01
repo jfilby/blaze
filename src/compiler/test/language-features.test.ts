@@ -1318,6 +1318,32 @@ test("a method on a field of an imported interface waits for the link", async ()
   assert.equal(output.trim(), "hello ada");
 });
 
+test("a constant another module exports is read and run by the module that imports it", async () => {
+  // The list is written in one module and read in another, and a compiled
+  // function has no environment to read it from: the value crosses the link.
+  const output = await agreesWithNode(
+    [
+      'import { describe, prefix } from "./check.ts";',
+      "console.log(describe(`asm`) + ` ` + describe(`ir`) + ` ` + prefix(`about`));",
+      "",
+    ].join("\n"),
+    {
+      "kinds.ts": "export const KINDS: readonly string[] = [`c`, `asm`, `machine`];\nexport const PREFIX = `ab`;\nexport function unused(): number { return 0; }\n",
+      "check.ts": [
+        'import { KINDS, PREFIX } from "./kinds.ts";',
+        "export function describe(name: string): string {",
+        "  return KINDS.includes(name) ? `yes` : `no`;",
+        "}",
+        "export function prefix(word: string): string {",
+        "  return word.startsWith(PREFIX) ? `starts` : `other`;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "yes no starts");
+});
+
 test("a chain of methods over an imported element type reads and runs", async () => {
   // The element type of the list is declared in another module, so the first
   // read does not know its fields: the methods written on it wait for the link,

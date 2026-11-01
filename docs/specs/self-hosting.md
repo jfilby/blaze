@@ -423,6 +423,47 @@ the shape its answer holds: the receiver's element shape for `filter` and
 
 This took the total from 1779 to 1719.
 
+### 4g. The value a module offers
+
+`OUTPUT_KINDS.includes(x)` reads a list another module wrote, and there was no
+way for it to: a compiled function has no environment to read another module's
+scope from, and an import brought in a name with nothing behind it. Types
+already crossed the module graph; values now cross it the same way.
+
+**What crosses is the value, not the name.** The file that writes
+`export const KINDS: readonly string[] = ["c", "asm"]` reads the value where the
+source wrote it — the scan already records every top-level `const` whose value
+is written down rather than computed — and offers it to each module that imports
+the name. A token range names nothing in a file that did not write it, so the
+part that crosses is the expression, not the span: a constant carries either the
+tokens this file wrote (`{ range }`) or the value the writing module already read
+(`{ value }`), and never both.
+
+**A constructor is the file's own.** `const CURVE = new Curve(…)` is inlined
+where the file that wrote it reads it, and the constructor is a function of that
+module: another module does not compile it, so the value is not offered. Only a
+value written down crosses.
+
+**The read that follows the link is the one that answers.** A name an import
+binds is a value another module holds, so a method written on it is not a method
+this read can say does not exist, and the read waits for the link. The graph
+reads such a file again once its imports are bound — including the file whose
+imports turned out to hold nothing, because what it deferred is the link's to
+answer one way or the other — and that read refuses what is really absent. A
+read that stands alone, which is what the gap measurement makes, waits for a
+link that may never come.
+
+**A module of constants is a library.** A file that declares no function was
+refused unless it wrote a type; a file that only writes constants is reached by
+the imports that read them in the same way, and a name an import binds may be a
+value the module offers.
+
+Two files rise by one construct each — `core/terminal-title.ts` and
+`toolchain/csource.ts` — and both are the reading-further artefact: a deferred
+member read let the parser past a construct it used to stop at, and what it
+reached is a real gap that was hidden behind the first refusal. This took the
+total from 1719 to 1697.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

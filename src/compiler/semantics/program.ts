@@ -26,7 +26,7 @@ import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { byName } from "../core/named-record.ts";
 import { parseContract } from "./contract.ts";
-import type { Frontend, ModuleAnalysis, ProgramBody } from "./module.ts";
+import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { bindImportedTypes } from "./typescript-types.ts";
 import type { TypeTable } from "./typescript-types.ts";
 import { resolveObjects } from "./objects.ts";
@@ -100,6 +100,30 @@ interface ModuleRecord {
   typeResolved: string[];
 }
 
+/**
+ * The values one module offers, by the name each is read under.
+ *
+ * A module that writes `export const KINDS = [...]` offers a value, and the
+ * module that imports the name reads the value itself: a compiled function has
+ * no environment to read another module's scope from. This is the shape the
+ * phase carries it in, so a module is found by its path and the names it offers
+ * are read without asking the frontend what its analysis is.
+ */
+interface OfferedValues {
+  path: string;
+  values: ReadonlyMap<string, unknown>;
+}
+
+/** The values every module of the program offers, in discovery order. */
+function offeredValues(records: readonly ModuleRecord[]): OfferedValues[] {
+  const offered: OfferedValues[] = [];
+  for (const record of records) {
+    const values = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
+    if (values !== undefined) offered.push({ path: record.path, values });
+  }
+  return offered;
+}
+
 /** Reads each file at most once, so a diamond import costs one read. */
 function cachingReader(read: (path: string) => string | null): (path: string) => string | null {
   const cache = new Map<string, string | null>();
@@ -160,17 +184,19 @@ function discover(request: ContractPhaseRequest, read: (path: string) => string 
     }
     bindImportedTypes(types, imports, targets);
   }
-  // A file is read again with the table its imports now fill. Its runtime
-  // imports were resolved by the first read and are unchanged, so only the
-  // analysis is replaced.
+  // A file is read again with the table its imports now fill, and with the
+  // values its imports bind. Its runtime imports were resolved by the first
+  // read and are unchanged, so only the analysis is replaced.
+  const offered = offeredValues([...records.values()]);
   for (const record of records.values()) {
     if (record.analysis.types === undefined) continue;
-    const imports = record.analysis.typeImports;
-    if (imports === undefined) continue;
+    const imports = record.analysis.typeImports ?? [];
     // A second read is only needed when an import names a module that actually
-    // declares a type. A runtime import binds no type, and most files have one:
-    // reading every file twice for nothing would double the parse of the whole
-    // tree.
+    // declares a type or offers a value. A runtime import binds neither, and
+    // most files have one: reading every file twice for nothing would double
+    // the parse of the whole tree. A file that waited for the link is read again
+    // whatever its imports turned out to hold, because what it deferred is the
+    // link's to answer one way or the other.
     let namesAType = false;
     for (let index = 0; index < imports.length; index += 1) {
       const target = tables.get(record.typeResolved[index] as string);
@@ -179,13 +205,42 @@ function discover(request: ContractPhaseRequest, read: (path: string) => string 
         break;
       }
     }
-    if (!namesAType) continue;
+    const values = importedValuesOf(record.analysis.imports, record.resolved, offered);
+    if (!namesAType && values.size === 0 && record.analysis.awaitingLink !== true) continue;
     record.analysis = request.frontend.analyze(record.source, record.path, record.path === request.entry.path, {
       table: record.analysis.types,
+      values,
+      linked: true,
     });
   }
 
   return [...records.values()];
+}
+
+/**
+ * The values one file's runtime imports bind, by the name this file writes.
+ *
+ * A module that imports a value compiles a function that reads it, and a
+ * compiled function has no environment to read another module's scope from:
+ * what crosses is the value itself, and the module that wrote it read it where
+ * the source wrote it.
+ */
+function importedValuesOf(
+  imports: readonly ModuleImport[],
+  resolved: readonly string[],
+  offered: readonly OfferedValues[],
+): Map<string, unknown> {
+  const values = new Map<string, unknown>();
+  imports.forEach((entry, index) => {
+    if (entry.default) return;
+    const target = offered.find((one) => one.path === resolved[index]);
+    if (target === undefined) return;
+    for (const name of entry.names ?? []) {
+      const held = target.values.get(name);
+      if (held !== undefined) values.set(name, held);
+    }
+  });
+  return values;
 }
 
 /** The file an import names, resolved against the project, or refused. */
@@ -260,13 +315,19 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
     internal[record.path] = new Set(record.analysis.functions.filter((entry) => entry.internal === true).map((entry) => entry.name));
   }
   const edges: ContractEdge[] = [];
+  const offeredValuesByPath = offeredValues(records);
   for (const record of records) {
     const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
     const bound = new Map<string, { specifier: string; to: string }>();
     for (const [index, entry] of record.analysis.imports.entries()) {
       const to = record.resolved[index];
       const target = contracts.get(to) as FileContract;
+      // A module offers the functions it exports and the values it declares at
+      // the top of the file: a name bound to a value is a name this file may
+      // import, and what crosses the link is the value itself.
+      const named = offeredValuesByPath.find((one) => one.path === to);
       const available = Object.keys(target.functions).filter((name) => internal[to]?.has(name) !== true);
+      if (named !== undefined) for (const name of named.values.keys()) available.push(name);
       if (available.length === 0) {
         throw contractPhaseError(`${record.path} imports "${entry.specifier}" (line ${entry.line}), which exports nothing`);
       }
@@ -426,11 +487,15 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   const contracts = new Map<string, FileContract>();
   for (const record of records) {
     const file = contractFile(request, record, record.path === request.entry.path && body !== undefined);
-    // A file of declarations is a library whether it declares a function or a
-    // type. A module that only writes interfaces is reached by the type imports
-    // of the files that name them, and it offers nothing to link.
+    // A file of declarations is a library whether it declares a function, a
+    // type or a value. A module that only writes interfaces is reached by the
+    // type imports of the files that name them, and a module that only writes
+    // constants is reached by the imports that read them: neither offers
+    // anything to link, and both offer something to the file that names them.
     const declaredTypes = record.analysis.types?.declarations.size ?? 0;
-    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && !(record.path === request.entry.path && body !== undefined)) {
+    const offered = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
+    const declaredValues = offered === undefined ? 0 : offered.size;
+    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);

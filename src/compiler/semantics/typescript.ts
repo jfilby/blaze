@@ -861,6 +861,22 @@ interface ConstantRange {
 }
 
 /**
+ * The value a constant, or one field of one, was written as.
+ *
+ * A constant of the file is read from the tokens the source wrote it with. A
+ * constant another module offers carries the value itself, because a range of
+ * tokens names nothing in a file that did not write them: the part that
+ * crosses the module boundary is what the exporting file already read. One of
+ * the two is written, never both.
+ */
+interface ConstantValue {
+  /** The tokens this file wrote the value with. */
+  range?: ConstantRange;
+  /** The value itself, where the module that wrote it already read it. */
+  value?: Expression;
+}
+
+/**
  * A top-level constant a function may read: the expression it is written as, or
  * the fields of an object literal it is written as.
  *
@@ -871,17 +887,26 @@ interface ConstantRange {
  * at run time is not one of these and is left as the name it is.
  */
 interface ConstantInfo {
-  expression?: ConstantRange;
-  fields?: ReadonlyMap<string, ConstantRange>;
+  expression?: ConstantValue;
+  fields?: ReadonlyMap<string, ConstantValue>;
   /**
    * The literal keys a top-level `ReadonlySet` or `ReadonlyMap` is written
    * with, in the order the source wrote them. A set is the keys alone; a map
    * keeps the value each one is written with beside it.
    */
   keys?: readonly string[];
-  values?: readonly ConstantRange[];
+  values?: readonly ConstantValue[];
   /** What a key is written as, which is how a comparison reads it. */
   keyKind?: "text" | "number";
+  /**
+   * True where the value is a `new C(...)`: the constructor is a function of
+   * the module that wrote it, so the value is the file's own and is not offered
+   * to a module that imports the name.
+   */
+  constructed?: boolean;
+  /** True where the file offers the name: `export const NAME = ...`, or an
+   *  `export { NAME }` list that names it. */
+  exported?: boolean;
 }
 
 /**
@@ -944,7 +969,7 @@ function constructorRange(tokens: readonly Token[], start: number, end: number):
 function collectionLiteral(
   tokens: readonly Token[],
   start: number,
-): { keys: string[]; values: ConstantRange[] | null; keyKind: "text" | "number"; end: number } | null {
+): { keys: string[]; values: ConstantValue[] | null; keyKind: "text" | "number"; end: number } | null {
   if (tokens[start]?.text !== "new") return null;
   const kind = tokens[start + 1]?.text;
   if (kind !== "Set" && kind !== "Map") return null;
@@ -968,7 +993,7 @@ function collectionLiteral(
   const after = closingBracket(tokens, at);
   const inner = at + 1;
   const keys: string[] = [];
-  const values: ConstantRange[] = [];
+  const values: ConstantValue[] = [];
   let keyKind: "text" | "number" = "text";
   if (tokens[inner]?.text === "[") {
     const close = closingBracket(tokens, inner) - 1;
@@ -1002,7 +1027,7 @@ function collectionLiteral(
           if (tokens[valueStart]?.text !== ",") return null;
           if (!constantRange(tokens, valueStart + 1, pairClose)) return null;
           keys.push(key.kind === "string" ? unescape(key.text, key.line) : key.text);
-          values.push({ start: valueStart + 1, end: pairClose });
+          values.push({ range: { start: valueStart + 1, end: pairClose } });
         }
         from = index + 1;
       }
@@ -1151,6 +1176,9 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
     ) {
       const name = (tokens[index + 1] as Token).text;
       const mutable = token.text !== "const";
+      // `export const NAME = ...` offers the value to a module that imports the
+      // name, and what it offers is the value itself.
+      const offered = tokens[index - 1]?.text === "export";
       // `const NAME: Type = value` writes the type between the name and the
       // value, and the type is erased: what the scan needs is where the value
       // starts.
@@ -1179,8 +1207,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       if (written !== null) {
         if (!mutable && !locals.has(name) && !mutatesCollection(tokens, name)) {
           found.set(name, written.values === null
-            ? { keys: written.keys, keyKind: written.keyKind }
-            : { keys: written.keys, values: written.values, keyKind: written.keyKind });
+            ? { keys: written.keys, keyKind: written.keyKind, exported: offered }
+            : { keys: written.keys, values: written.values, keyKind: written.keyKind, exported: offered });
         } else {
           state.add(name);
         }
@@ -1193,7 +1221,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         // inlined where it is read, unless a body writes the name: a value a
         // program changes is state rather than a constant.
         if (!mutable && constantList(tokens, start, end - 1) && !locals.has(name) && !writtenName(tokens, name)) {
-          found.set(name, { expression: { start, end } });
+          found.set(name, { expression: { range: { start, end } }, exported: offered });
         } else {
           state.add(name);
         }
@@ -1209,7 +1237,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         // running program holds, and a function that reads it is read where the
         // program is.
         if (!mutable && object.all) {
-          if (!locals.has(name)) found.set(name, { fields: object.fields });
+          if (!locals.has(name)) found.set(name, { fields: object.fields, exported: offered });
         } else {
           state.add(name);
         }
@@ -1231,13 +1259,47 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // a name are two reads of one object, and two allocations are two.
       const shared = construction && nameCount(tokens, name) > 2;
       if (!constant || shared) state.add(name);
-      else if (!locals.has(name)) found.set(name, { expression: { start, end } });
+      else if (!locals.has(name)) found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) });
       index = end + 1;
       continue;
     }
     index += 1;
   }
+  // `export { NAME };` offers a constant the declarations above wrote, under
+  // the name the list writes. A list with a `from` names another module and
+  // offers nothing of this one's.
+  exportConstantLists(tokens, found);
   return { constants: found, state };
+}
+
+/** Marks the constants an `export { ... }` list of this file offers. */
+function exportConstantLists(tokens: readonly Token[], found: Map<string, ConstantInfo>): void {
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index]?.text !== "export") continue;
+    let at = index + 1;
+    if (tokens[at]?.text === "type") at += 1;
+    if (tokens[at]?.text !== "{") continue;
+    let close = at + 1;
+    let depth = 1;
+    while (close < tokens.length && depth > 0) {
+      const written = tokens[close]?.text;
+      if (written === "{") depth += 1;
+      else if (written === "}") depth -= 1;
+      close += 1;
+    }
+    if (tokens[close]?.text === "from") continue;
+    for (let one = at + 1; one < close; one += 1) {
+      const token = tokens[one];
+      if (token === undefined || token.kind !== "ident") continue;
+      // `export { NAME as other }` offers the value under a name this file does
+      // not hold; the list itself is refused where the import is read, so only
+      // the plain name is marked here.
+      const next = tokens[one + 1];
+      if (next?.text === "as") continue;
+      const held = found.get(token.text);
+      if (held !== undefined) held.exported = true;
+    }
+  }
 }
 
 /**
@@ -1764,8 +1826,8 @@ interface Declaration extends Span {
 }
 
 /** The constant fields of an object literal, by the name each is written under. */
-function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantRange>; all: boolean } {
-  const fields = new Map<string, ConstantRange>();
+function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantValue>; all: boolean } {
+  const fields = new Map<string, ConstantValue>();
   let total = 0;
   let depth = 0;
   let index = open + 1;
@@ -1793,7 +1855,7 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
         else if (written.text === "," && nested === 0) break;
         end += 1;
       }
-      if (constantRange(tokens, start, end)) fields.set(token.text, { start, end });
+      if (constantRange(tokens, start, end)) fields.set(token.text, { range: { start, end } });
       index = end + 1;
       continue;
     }
@@ -2353,6 +2415,16 @@ class TypeScriptParser {
    */
   private deferred = new Set<unknown>();
   /**
+   * True once the module graph has bound what this file's imports name.
+   *
+   * A read that stands alone — the gap measurement, a test that reads one file —
+   * does not know what an imported name holds, and what it cannot type waits
+   * for a link that may never come. The read the graph makes after binding is
+   * the one that answers: past it, a name nothing declares is a name the module
+   * really does not offer, and the construct written on it is refused there.
+   */
+  linked = false;
+  /**
    * True while the arrow at the cursor is a callback whose element type the
    * read does not hold: a `map` over a list whose element is in a module the
    * graph has not linked yet. A parameter the source did not annotate is then
@@ -2504,6 +2576,10 @@ class TypeScriptParser {
     this.constants = constants;
     this.state = state;
     this.typeTable = typeTable ?? scanTypeTable(tokens);
+    // A name this file imports is a value another module holds. Until the graph
+    // binds the declaration, a method written on the name is not a method this
+    // read can say does not exist.
+    for (const name of this.importedTypeNames) this.pendingValues.add(name);
     this.typeTable.classes = this.classTable.names;
     this.position = 0;
   }
@@ -3033,6 +3109,19 @@ class TypeScriptParser {
   }
 
   /**
+   * Whether this read is missing a declaration its imports name.
+   *
+   * A type an annotation mentions is one such declaration, and so is a value a
+   * body reads: `OUTPUT_KINDS.includes(x)` reads a list another module wrote,
+   * and this read has neither the list nor its element type. Both wait for the
+   * read that follows the link.
+   */
+  private importsArePending(): boolean {
+    if (this.linked || this.typeTable.imported.size > 0) return false;
+    return this.pendingType.value || this.importedTypeNames.size > 0;
+  }
+
+  /**
    * Settles the empty arrays a value holds at the type the use fixes it at.
    *
    * A list read before its use was known is a block of no values with no
@@ -3135,8 +3224,14 @@ class TypeScriptParser {
   }
 
   /** A constant's expression, read in place of the name that holds it. */
-  private constantExpression(name: string, range: ConstantRange | undefined): Expression | null {
-    if (range === undefined || this.expanding.has(name)) return null;
+  private constantValue(name: string, written: ConstantValue | undefined): Expression | null {
+    if (written === undefined) return null;
+    // A value that came from the module that wrote it is already the expression
+    // the file read: there is no range of this file's tokens to read it from.
+    if (written.value !== undefined) return written.value;
+    const range = written.range;
+    if (range === undefined) return null;
+    if (this.expanding.has(name)) return null;
     this.expanding.add(name);
     try {
       return this.readRange(range.start, range.end);
@@ -4098,7 +4193,67 @@ class TypeScriptParser {
         );
       }
     }
-    return { path, imports, typeImports, types: this.typeTable, functions, default: defaultExport, body };
+    return {
+      path,
+      imports,
+      typeImports,
+      types: this.typeTable,
+      functions,
+      default: defaultExport,
+      body,
+      constants: this.exportedConstants(),
+      awaitingLink: this.deferred.size > 0,
+    };
+  }
+
+  /**
+   * The top-level constants this file offers, with the value of each read where
+   * the source wrote it.
+   *
+   * A module that imports a constant binds a value of this file, and a compiled
+   * function of the importing module has no environment to read it from: the
+   * value itself is what crosses. It is read here because these are the tokens
+   * that write it — a range of tokens names nothing in the file that imports.
+   * A value built by a constructor is the file's own and is not offered: the
+   * constructor is a function of the module that wrote it, and the module that
+   * imports the name does not compile it.
+   */
+  private exportedConstants(): Map<string, ConstantInfo> {
+    const values = new Map<string, ConstantInfo>();
+    for (const [name, constant] of this.constants) {
+      if (constant.exported !== true) continue;
+      const read = this.settledConstant(name, constant);
+      if (read !== null) values.set(name, read);
+    }
+    return values;
+  }
+
+  /** One constant as the value a module that imports it can read in place of the name. */
+  private settledConstant(name: string, constant: ConstantInfo): ConstantInfo | null {
+    if (constant.constructed === true) return null;
+    if (constant.keys !== undefined) {
+      const values: ConstantValue[] = [];
+      for (const written of constant.values ?? []) {
+        const value = this.constantValue(name, written);
+        if (value === null) return null;
+        values.push({ value });
+      }
+      const written: ConstantInfo = { keys: constant.keys, values };
+      if (constant.keyKind !== undefined) written.keyKind = constant.keyKind;
+      return written;
+    }
+    if (constant.fields !== undefined) {
+      const fields = new Map<string, ConstantValue>();
+      for (const [field, written] of constant.fields) {
+        const value = this.constantValue(name, written);
+        if (value === null) return null;
+        fields.set(field, { value });
+      }
+      return { fields };
+    }
+    const value = this.constantValue(name, constant.expression);
+    if (value === null) return null;
+    return { expression: { value } };
   }
 
   /**
@@ -5538,7 +5693,7 @@ class TypeScriptParser {
         base = { k: "ident", name: temp };
       }
       fields.forEach((entry) => {
-        const expanded = direct ? this.constantExpression(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
+        const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
         const read: Expression = expanded ?? { k: "member", base, field: entry.field };
         const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
         // The value the file wrote for a constant field is the value the name
@@ -7419,7 +7574,7 @@ class TypeScriptParser {
           // a module the graph has not linked: a parameter the use does not fix
           // waits for that link too. An element the read holds as a reference
           // with no name is one the link will name.
-          const waitsForLink = this.typeReadIsPending();
+          const waitsForLink = this.importsArePending();
           const args = this.readCallArguments(
             this.expectedMethodArguments(target.base, target.field),
             callback,
@@ -7531,7 +7686,7 @@ class TypeScriptParser {
             // follows the link holds the declaration, and refuses the method
             // there where there really is none. A method written on anything
             // else is refused here, whatever else the file imports.
-            if (this.typeReadIsPending() && this.pendingHolds(receiver)) {
+            if (this.importsArePending() && this.pendingHolds(receiver)) {
               // What the method answers is a value of the same unlinked
               // declaration, so it waits for the link too: a method written on
               // it is a method of a value this read cannot type yet.
@@ -7645,7 +7800,7 @@ class TypeScriptParser {
         // asks for is one the source already answered.
         if (target.k === "ident") {
           const constant = this.constants.get(target.name);
-          const expanded = this.constantExpression(target.name, constant?.fields?.get(field.text));
+          const expanded = this.constantValue(target.name, constant?.fields?.get(field.text));
           if (expanded !== null) {
             replace(expanded);
             continue;
@@ -8551,7 +8706,7 @@ class TypeScriptParser {
     }
     const values: Expression[] = [];
     for (const name of names) {
-      const read = this.constantExpression(value.k === "ident" ? value.name : "", constant.fields.get(name));
+      const read = this.constantValue(value.k === "ident" ? value.name : "", constant.fields.get(name));
       if (read !== null) values.push(read);
     }
     const element = values.length === 0 ? typeToString(ANY_TYPE) : typeToString(this.valueTypeOf(values[0] as Expression));
@@ -9212,13 +9367,13 @@ class TypeScriptParser {
       return this.hole();
     }
     const name = receiver.k === "ident" ? receiver.name : "";
-    const first = written.values[0] === undefined ? null : this.constantExpression(name, written.values[0]);
+    const first = written.values[0] === undefined ? null : this.constantValue(name, written.values[0]);
     const firstType = first === null ? ANY_TYPE : this.valueTypeOf(first);
     let answer: Expression = firstType.kind === "text"
       ? { k: "text", parts: [{ k: "text", value: "" }] }
       : { k: "literal", text: "0" };
     for (let at = keys.length - 1; at >= 0; at -= 1) {
-      const read = this.constantExpression(name, written.values[at]) ?? this.hole();
+      const read = this.constantValue(name, written.values[at]) ?? this.hole();
       answer = {
         k: "conditional",
         condition: { k: "binary", op: "===", left: value, right: textOf(keys[at] as string) },
@@ -9903,7 +10058,7 @@ class TypeScriptParser {
       // it to read the file's scope from.
       const constant = this.constants.get(token.text);
       if (constant !== undefined) {
-        const expanded = this.constantExpression(token.text, constant.expression);
+        const expanded = this.constantValue(token.text, constant.expression);
         if (expanded !== null) return expanded;
       }
       // A name bound to an arrow is that arrow: read where a value is expected,
@@ -9960,7 +10115,7 @@ class TypeScriptParser {
         const constant = spread.k === "ident" ? this.constants.get(spread.name) : undefined;
         if (constant?.fields !== undefined) {
           for (const [field, range] of constant.fields) {
-            const value = this.constantExpression(spread.k === "ident" ? spread.name : "", range);
+            const value = this.constantValue(spread.k === "ident" ? spread.name : "", range);
             if (value !== null) put(field, value, true);
           }
         } else if (spread.k === "object") {
@@ -10658,6 +10813,7 @@ class TypeScriptParser {
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
     child.wideBigint = this.wideBigint;
+    child.linked = this.linked;
     child.valueTypes = this.valueTypes;
     // A template string interpolates a value the block around it settled: the
     // text it writes is read with the same table the block was read with.
@@ -11637,8 +11793,18 @@ export const typeScriptFrontend: Frontend = {
     const shared = (context as { table?: TypeTable } | undefined)?.table;
     const typeTable = shared ?? scanTypeTable(tokens);
     typeTable.classes = classTable.names;
+    // The values the imports of this file bind, once the graph has read the
+    // modules that write them. They are read in place of the names that hold
+    // them, exactly as the file's own constants are.
+    const imported = (context as { values?: ReadonlyMap<string, ConstantInfo> } | undefined)?.values;
+    if (imported !== undefined) {
+      for (const [name, constant] of imported) scanned.constants.set(name, constant);
+    }
     const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable, importedNames(tokens));
     parser.wideBigint = wideBigint;
+    // The read the graph makes after binding says every name its imports bind;
+    // a read that stands alone waits for a link that may never come.
+    parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
     const analysis = parser.parseModule(path, entry);
     // A file read as a program has its whole text readable as statements, so a
     // nested function inside a function that the module parser stopped for is
