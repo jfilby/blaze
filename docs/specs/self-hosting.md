@@ -491,6 +491,22 @@ a list's size is the block the runtime allocated, and the source writes its
 elements rather than its size. That is refused where it is written, as before.
 This took the total from 1688 to 1674.
 
+### 4j. A brace written inside a text
+
+A string token's `text` is what the string *holds*, so `"}"` is a token whose
+text is a brace. The scans that walk the tokens rather than parsing them —
+`localNames`, the constant scan's bracket matching, `objectConstants`,
+`constantList`, `collectionLiteral` — asked every token for its text and counted
+that brace as one of the file's. The compiler's own source writes those texts in
+`valueExpected`, where the depth left the file at `-1` at line 219 and never
+came back: every top-level `const` after it was taken for a body's own name, so
+the constants were not the file's and the function that reads one was refused.
+
+Nothing that asks what a token *is* needed changing: the parser has always
+checked a token's kind. The scans now ask `mark(token)`, which answers the
+punctuation a token is and nothing for a value. This took the total from 1674 to
+1591.
+
 ## The next slices
 
 ### What the measurement says now

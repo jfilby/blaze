@@ -868,6 +868,18 @@ function tokensAfterImports(tokens: Token[]): Token[] {
 /* Constants                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The punctuation mark a token is, or "" where it holds a value.
+ *
+ * A string token's text is what the string holds, so a text `"}"` reads as a
+ * brace to anything that asks a token for its text alone. A scan that walks the
+ * tokens rather than parsing them has to ask what kind of token it holds: the
+ * compiler's own source is full of texts that spell the brackets it is made of.
+ */
+function mark(token: Token | undefined): string {
+  return token !== undefined && token.kind === "punct" ? token.text : "";
+}
+
 /** One value written in the source, as the tokens it spans. */
 interface ConstantRange {
   start: number;
@@ -1014,7 +1026,7 @@ function collectionLiteral(
     let depth = 0;
     let from = inner + 1;
     for (let index = inner + 1; index <= close; index += 1) {
-      const text = tokens[index]?.text;
+      const text = mark(tokens[index]);
       if (index < close && (text === "[" || text === "{" || text === "(")) depth += 1;
       else if (index < close && (text === "]" || text === "}" || text === ")")) depth -= 1;
       else if (index === close || (text === "," && depth === 0)) {
@@ -1078,9 +1090,9 @@ function nameCount(tokens: readonly Token[], name: string): number {
 function closingBracket(tokens: readonly Token[], open: number): number {
   let depth = 0;
   for (let index = open; index < tokens.length; index += 1) {
-    const token = tokens[index] as Token;
-    if (token.text === "[" || token.text === "{" || token.text === "(") depth += 1;
-    else if (token.text === "]" || token.text === "}" || token.text === ")") {
+    const token = mark(tokens[index]);
+    if (token === "[" || token === "{" || token === "(") depth += 1;
+    else if (token === "]" || token === "}" || token === ")") {
       depth -= 1;
       if (depth === 0) return index + 1;
     }
@@ -1098,10 +1110,10 @@ function constantList(tokens: readonly Token[], open: number, close: number): bo
   let from = open + 1;
   const elements: (readonly [number, number])[] = [];
   for (let index = open + 1; index < close; index += 1) {
-    const token = tokens[index] as Token;
-    if (token.text === "[" || token.text === "{" || token.text === "(") depth += 1;
-    else if (token.text === "]" || token.text === "}" || token.text === ")") depth -= 1;
-    else if (token.text === "," && depth === 0) {
+    const token = mark(tokens[index]);
+    if (token === "[" || token === "{" || token === "(") depth += 1;
+    else if (token === "]" || token === "}" || token === ")") depth -= 1;
+    else if (token === "," && depth === 0) {
       elements.push([from, index]);
       from = index + 1;
     }
@@ -1160,8 +1172,9 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const closing = (open: number): number => {
     let depth = 0;
     for (let index = open; index < tokens.length; index += 1) {
-      if (tokens[index].text === "{") depth += 1;
-      else if (tokens[index].text === "}") {
+      const text = mark(tokens[index]);
+      if (text === "{") depth += 1;
+      else if (text === "}") {
         depth -= 1;
         if (depth === 0) return index + 1;
       }
@@ -1201,10 +1214,10 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         let depth = 0;
         equals += 1;
         while (equals < tokens.length) {
-          const written = tokens[equals] as Token;
-          if (written.text === "<" || written.text === "(" || written.text === "[" || written.text === "{") depth += 1;
-          else if (written.text === ">" || written.text === ")" || written.text === "]" || written.text === "}") depth -= 1;
-          else if (written.text === "=" && depth === 0) break;
+          const written = mark(tokens[equals]);
+          if (written === "<" || written === "(" || written === "[" || written === "{") depth += 1;
+          else if (written === ">" || written === ")" || written === "]" || written === "}") depth -= 1;
+          else if (written === "=" && depth === 0) break;
           equals += 1;
         }
       }
@@ -1261,10 +1274,10 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       let end = start;
       let depth = 0;
       while (end < tokens.length && tokens[end].kind !== "end") {
-        const written = tokens[end] as Token;
-        if (written.text === "(" || written.text === "[" || written.text === "{") depth += 1;
-        else if (written.text === ")" || written.text === "]" || written.text === "}") depth -= 1;
-        else if (written.text === ";" && depth === 0) break;
+        const written = mark(tokens[end]);
+        if (written === "(" || written === "[" || written === "{") depth += 1;
+        else if (written === ")" || written === "]" || written === "}") depth -= 1;
+        else if (written === ";" && depth === 0) break;
         end += 1;
       }
       const construction = !mutable && constructorRange(tokens, start, end);
@@ -1331,11 +1344,11 @@ function localNames(tokens: readonly Token[]): Set<string> {
   let depth = 0;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] as Token;
-    if (token.text === "{") {
+    if (mark(token) === "{") {
       depth += 1;
       continue;
     }
-    if (token.text === "}") {
+    if (mark(token) === "}") {
       depth -= 1;
       continue;
     }
@@ -1847,12 +1860,12 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
   let index = open + 1;
   while (index < close - 1) {
     const token = tokens[index] as Token;
-    if (token.text === "{" || token.text === "(" || token.text === "[") {
+    if (mark(token) === "{" || mark(token) === "(" || mark(token) === "[") {
       depth += 1;
       index += 1;
       continue;
     }
-    if (token.text === "}" || token.text === ")" || token.text === "]") {
+    if (mark(token) === "}" || mark(token) === ")" || mark(token) === "]") {
       depth -= 1;
       index += 1;
       continue;
@@ -1863,10 +1876,10 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
       let end = start;
       let nested = 0;
       while (end < close - 1) {
-        const written = tokens[end] as Token;
-        if (written.text === "{" || written.text === "(" || written.text === "[") nested += 1;
-        else if (written.text === "}" || written.text === ")" || written.text === "]") nested -= 1;
-        else if (written.text === "," && nested === 0) break;
+        const written = mark(tokens[end]);
+        if (written === "{" || written === "(" || written === "[") nested += 1;
+        else if (written === "}" || written === ")" || written === "]") nested -= 1;
+        else if (written === "," && nested === 0) break;
         end += 1;
       }
       if (constantRange(tokens, start, end)) fields.set(token.text, { range: { start, end } });
@@ -6945,13 +6958,6 @@ class TypeScriptParser {
     return { k: "literal", text: answer ? "1" : "0" };
   }
 
-  /**
-   * `&`, `^` and `|`, loosest of the three in that order, which is where
-   * JavaScript puts them: `a & b ^ c` is `(a & b) ^ c`, and `a ^ b | c` is
-   * `(a ^ b) | c`. They bind looser than a shift and tighter than a
-   * comparison, and the program body has always read them in exactly this
-   * place — a function the module declared could not use one at all.
-   */
   private readBitwiseOr(): Expression {
     return this.readBinaryLevel(["|"], () => this.readBitwiseXor());
   }

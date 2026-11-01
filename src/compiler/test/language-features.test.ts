@@ -453,6 +453,29 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a brace written inside a text is not a brace of the module", async () => {
+  // A string token's text is what the string holds, so a scan that asks a
+  // token for its text alone reads `"}"` as a brace of the file: the depth of
+  // the body around it never returns to zero, and every top-level constant
+  // written after it is taken for a body's own name.
+  const output = await agreesWithNode(
+    [
+      'import { read } from "./lib.ts";',
+      "console.log(read());",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        'export function brace(): string { return "}"; }',
+        'const PREFIX: string = "ab";',
+        "export function read(): string { return PREFIX + brace(); }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "ab}");
+});
+
 test("a set written at the top of a module answers its membership", async () => {
   // The keys are written down, so the membership is the comparisons it means
   // and no dictionary is allocated: a function of the module reads the name
