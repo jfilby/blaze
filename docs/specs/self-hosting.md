@@ -545,6 +545,21 @@ question; a method whose name is a helper's — `split`, or a regular
 expression's `replace` — is not on the list. This took the total from 1584 to
 1548.
 
+### 4m. The value a write goes through may be a call
+
+The IR writes one field of one name, and a chain of fields was lowered through a
+name of its own; a chain with a *call* in it was not, so
+`this.frame().block.terminator = value` — the shape the IR builder is written in
+— was refused twenty times over. The write names the last field, and everything
+before it is the value the field belongs to; that value is now read as the
+expression it is, over the tokens before the last field, so a call and the
+fields after it are read by the one reader that can build them. The value is
+read into a name of the loop's own and the write goes into that name, so the
+call is evaluated once, which is what the source wrote.
+
+What is still refused is a write to the `length` of a list or a text, which is
+the list's size rather than its elements. This took the total from 1548 to 1540.
+
 ## The next slices
 
 ### What the measurement says now

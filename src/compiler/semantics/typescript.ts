@@ -3277,6 +3277,30 @@ class TypeScriptParser {
   }
 
   /**
+   * The value a write goes into, read from the tokens before its last field.
+   *
+   * A chain of fields is built from the names themselves, but a chain with a
+   * call in it — `this.frame().block` — is the value the call answered, and only
+   * the reader that parses a call can build that. The tokens up to the last
+   * field are read as the expression they are, and the parser is left where it
+   * was so the write is read from the field.
+   */
+  private readOwner(start: number, end: number): Expression {
+    const savedTokens = this.tokens;
+    const savedPosition = this.position;
+    const owner = this.tokens.slice(start, end);
+    owner.push({ kind: "end", text: "", line: this.tokens[end]?.line ?? 0 });
+    this.tokens = owner;
+    this.position = 0;
+    try {
+      return this.readExpression();
+    } finally {
+      this.tokens = savedTokens;
+      this.position = savedPosition;
+    }
+  }
+
+  /**
    * Reads a class body or a default value with the class's own names in scope.
    * `self` is the instance a method was called on; a static member has no
    * instance, so `this` there is refused where it is written.
@@ -6056,17 +6080,55 @@ class TypeScriptParser {
       this.position = start;
       return null;
     }
+    // The chain the write goes through: the fields it names and the calls
+    // written between them. The last field is the one written, and everything
+    // before it is the value it belongs to — which may be the answer of a
+    // call, as `this.frame().block.terminator = value` writes the block a
+    // method answered.
+    let lastDot = this.position;
+    let calls = false;
     const chain: Token[] = [];
-    while (this.at(".") && this.peek(1).kind === "ident") {
-      this.next();
-      chain.push(this.next());
+    let at = lastDot + 1;
+    while (at < this.tokens.length) {
+      const token = this.tokens[at] as Token | undefined;
+      if (token === undefined) break;
+      if (token.kind === "ident") {
+        if (at === lastDot + 1) chain.push(token);
+        at += 1;
+        continue;
+      }
+      const text = mark(token);
+      if (text === "." && this.tokens[at + 1]?.kind === "ident") {
+        lastDot = at;
+        at += 1;
+        continue;
+      }
+      if (text === "(") {
+        calls = true;
+        let depth = 0;
+        while (at < this.tokens.length) {
+          const inner = mark(this.tokens[at]);
+          if (inner === "(" || inner === "[" || inner === "{") depth += 1;
+          else if (inner === ")" || inner === "]" || inner === "}") {
+            depth -= 1;
+            if (depth === 0) {
+              at += 1;
+              break;
+            }
+          }
+          at += 1;
+        }
+        continue;
+      }
+      break;
     }
     let writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
-    const field = chain[chain.length - 1] as Token;
-    const operator = this.peek();
+    const field = this.tokens[lastDot + 1] as Token | undefined;
+    const operator = this.tokens[lastDot + 2] as Token | undefined;
     if (
       field === undefined ||
       field.kind !== "ident" ||
+      operator === undefined ||
       (operator.text !== "=" &&
         operator.text !== "??=" &&
         operator.text !== "++" &&
@@ -6076,14 +6138,19 @@ class TypeScriptParser {
       this.position = start;
       return null;
     }
+    this.position = lastDot + 2;
     // A field of a field is written the same way a field is: the value the
     // field belongs to is read into a name of its own first, and the write goes
     // into that name. An object is a reference, so writing through the name is
     // writing the object the source named, and the value before the last field
     // is read once, which is what the source wrote.
-    if (chain.length > 1) {
-      let owner: Expression = { k: "ident", name: writtenBase };
-      for (const one of chain.slice(0, -1)) owner = { k: "member", base: owner, field: one.text };
+    if (chain.length > 1 || calls) {
+      const owner: Expression = calls
+        ? this.readOwner(start, lastDot)
+        : chain.slice(0, -1).reduce<Expression>(
+            (inner, one) => ({ k: "member", base: inner, field: one.text }),
+            { k: "ident", name: writtenBase },
+          );
       const ownerType = this.valueTypeOf(owner);
       // A list has no writable length: what it holds is a block the runtime
       // allocated, and the source writes the elements of it rather than its

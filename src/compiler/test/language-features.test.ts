@@ -453,6 +453,40 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a field of a field a call answered is written through a name", async () => {
+  // The IR writes one field of one name, and the value the field belongs to may
+  // be the answer of a call: `this.frame().block.terminator = value` reads the
+  // block once and writes into it, and the object is a reference, so the write
+  // is the one the source named.
+  const output = await agreesWithNode([
+    "class Block {",
+    "  terminator: number;",
+    "  constructor() { this.terminator = 0; }",
+    "}",
+    "class Frame {",
+    "  block: Block;",
+    "  constructor() { this.block = new Block(); }",
+    "}",
+    "class Builder {",
+    "  held: Frame;",
+    "  constructor() { this.held = new Frame(); }",
+    "  frame(): Frame { return this.held; }",
+    "  mark(value: number): number {",
+    "    this.frame().block.terminator = value;",
+    "    return this.frame().block.terminator;",
+    "  }",
+    "  count(): number {",
+    "    this.frame().block.terminator += 5;",
+    "    return this.frame().block.terminator;",
+    "  }",
+    "}",
+    "const builder = new Builder();",
+    "console.log(builder.mark(7), builder.count());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7 12");
+});
+
 test("a brace written inside a text is not a brace of the module", async () => {
   // A string token's text is what the string holds, so a scan that asks a
   // token for its text alone reads `"}"` as a brace of the file: the depth of
