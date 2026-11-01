@@ -621,24 +621,34 @@ the program the self-build is. This took the total from 1529 to 1521.
 
 ### What the measurement says now
 
-1674 refusals over 94 sources, 9 of them read whole. The largest buckets, in
+1521 refusals over 94 sources, 10 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 53 | `"map"` is not a method | the element type of a receiver that came from a map or a record *read at run time* — a list inside a dictionary is a handle, and its methods need the dynamic array the runtime already carries |
-| 43 | `expected ")"` | `"k" in value` (8), `new Array(n)` (3), and cascade from a refused statement before them |
-| 34 | `unexpected "=" in an expression` | the rest of the nested-field writes: `x.length = n`, and `+=` used as a value inside a template (`${this.builds += 1}`, 10) |
-| 22 | `"push"` | the same element-type story as `map` |
-| 22 | `"startsWith"` | a text whose type the read does not hold |
+| 57 | `"map"` is not a method | the element type of a receiver read out of a dictionary at run time — a list inside a dictionary is a handle, and its methods need the dynamic array the runtime already carries — and the callback's own result type |
+| 25 | `expected ")"` | `new Array(n)` (3), an optional parameter with a default (`cli.ts`), `??=`, and cascade from a refused statement before them |
+| 23 | `"push"` | the same element-type story as `map` |
+| 19 | `Object.entries` in a loop | a list of pairs, which the value model has not |
 | 19 | `an optional chain reads the value before ?. twice` | an assignment-expression node, so `f()?.x` can bind `f()` once without reordering the statement |
-| 18 | `Object.entries` in a loop | a list of pairs, which the value model has not |
-| 18 | `"filter"`, 15 `"flatMap"`, 13 `"some"` | the element type through an imported interface, which the link now carries; what is left is the callback's *own* result type |
-| 9 | `"isArray"` | `Array.isArray` over a value the read does not type: the runtime's dynamic kind answers it |
+| 18 | `"filter"`, 15 `"flatMap"`, 14 `"some"`, 13 `"find"` | the callback's own result type, and a receiver read out of a dictionary |
+| 18 | `"has"` | a `Map`/`Set` read out of a dictionary, and `hasOwnProperty` of a record keyed by text |
+| 16 | `"trim"`, 11 `"startsWith"` | a text whose type is a union of a text and the absent value, which erases to the absent one |
+| 15 | `in` | the test a union of shapes is discriminated by: a tag the value does not carry |
+| 14 | `unexpected "="` | `x.length = n`, and `+=` used as a value inside a template (`${this.builds += 1}`) |
 
-The three that would move the most with one change are the pair `map`/`push`
-and the optional chain, and each of them needs something the value model does
-not have yet rather than another special case in the parser.
+The three that would move the most with one change are still the pair
+`map`/`push` and the optional chain, and each of them needs something the value
+model does not have yet rather than another special case in the parser.
+
+Two miscompilations found while reading the source are the next slice of their
+own, because a compiler whose scanners ask a text's index in a guard is exactly
+the program the self-build is:
+
+- a `text.indexOf` call in a guard, followed by another statement, answers
+  garbage on the machine backend (`if (text.includes("xx")) n += 1;` then any
+  second guard prints `NaN` for `n`); the same call written into a name first is
+  right, and so are two guards over a number.
 
 ### The roadmap
 
