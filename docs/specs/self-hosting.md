@@ -94,9 +94,9 @@ type — which waits for the read that follows the link rather than being refuse
 on the first — to 3918, a record keyed by text and a generic annotation in a
 program to 3879, an array the file writes down to 3853, and a loop over the
 entries of a record to 3852, with `core/errors.ts`,
-`semantics/contract-build.ts`,
-`semantics/diagnostics.ts` and `semantics/language.ts` read as wholes. The
-refusals fall into six frontiers:
+`semantics/contract-build.ts`, `semantics/diagnostics.ts`,
+`semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
+The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
@@ -105,8 +105,9 @@ refusals fall into six frontiers:
   an empty list, an object spread or a method written on a field of an imported
   type is left to the read the module graph makes once the declarations are
   bound; that read settles it, and reports what is still unsettled. A refusal
-  written on any other value is still refused by the first read. `Omit<T, "k">` and `Pick<T, "k">`
-  select the fields of the record they name, which is how a type is written when
+  written on any other value is still refused by the first read.
+  `Omit<T, "k">` and `Pick<T, "k">` select the fields of the record they name,
+  which is how a type is written when
   a function takes a subset of a declaration's fields. The remaining
   type-shaped refusal is the optional parameter, which needs an absent value the
   value model does not have yet.
