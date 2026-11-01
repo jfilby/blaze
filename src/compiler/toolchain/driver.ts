@@ -1057,6 +1057,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       }
       case "text.trim":
         return `${RUNTIME_NAME}_text_trim(${argument(0)})`;
+      case "text.trimStart":
+        return `${RUNTIME_NAME}_text_trim_start(${argument(0)})`;
+      case "text.trimEnd":
+        return `${RUNTIME_NAME}_text_trim_end(${argument(0)})`;
       case "text.toLowerCase":
         return `${RUNTIME_NAME}_text_lower(${argument(0)})`;
       case "text.toUpperCase":

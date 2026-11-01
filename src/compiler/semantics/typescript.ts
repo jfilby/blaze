@@ -2488,6 +2488,14 @@ class TypeScriptParser {
    */
   private reporting = 0;
 
+  /**
+   * Which of the last call's arguments the source spread with `...`, or null
+   * when it spread none. A spread is not a value the call can take as it is —
+   * the arguments it stands for are the elements of what was written — so the
+   * call that can use one reads this beside the list it was handed.
+   */
+  private argumentSpreads: readonly boolean[] | null = null;
+
   private report(message: string, detail: string, token: Token = this.peek()): void {
     this.reporting += 1;
     if (this.reporting > 1) return;
@@ -6934,6 +6942,22 @@ class TypeScriptParser {
         // infinity.
         if (target.k === "member" && target.base.k === "ident" && target.base.name === "Number") {
           const args = this.readCallArguments();
+          // `Number.parseInt(text, 10)` is the number a text states in base ten,
+          // which is the one `parseInt` already reads. Another base is not a
+          // number this compiler can read out of a text.
+          if (target.field === "parseInt" && (args.length === 1 || args.length === 2)) {
+            const radix = args[1];
+            if (radix === undefined || (radix.k === "literal" && radix.text === "10")) {
+              replace({ k: "call", name: "parseInt", args: [args[0] as Expression] });
+              continue;
+            }
+            this.report(
+              "Number.parseInt reads a number in base ten",
+              "the digits the source writes are base ten ones, as in Number.parseInt(text, 10)",
+              this.peek(),
+            );
+            return this.hole();
+          }
           const lowered = this.numberMethod(target.field, args);
           if (lowered !== null) {
             replace(lowered);
@@ -7196,6 +7220,20 @@ class TypeScriptParser {
             );
           }
         }
+        // `parseInt(text, 10)` is the number the text states, which is what
+        // `parseInt(text)` reads; the radix is the one the language writes.
+        if (target.name === "parseInt" && args.length === 2) {
+          const radix = args[1];
+          if (radix !== undefined && radix.k === "literal" && radix.text === "10") {
+            args = [args[0] as Expression];
+          } else {
+            this.report(
+              "parseInt reads a number in base ten",
+              "the digits the source writes are base ten ones, as in parseInt(text, 10)",
+              this.peek(),
+            );
+          }
+        }
         // `String(x)` is the text the value is written as, which is the value a
         // template string interpolates: the builder is the same one.
         if (target.name === "String") {
@@ -7337,20 +7375,12 @@ class TypeScriptParser {
   }
 
   /**
-   * Which of the last call's arguments the source spread with `...`, or null
-   * when it spread none. A spread is not a value the call can take as it is —
-   * the arguments it stands for are the elements of what was written — so the
-   * call that can use one reads this beside the list it was handed.
-   */
-  private argumentSpreads: readonly boolean[] | null = null;
-
-  /**
    * The arguments of a call, from the `(` the parser is at to its `)`.
    *
    * `expected` is the type each argument is held at, and `callback` is the
    * parameters of the arrow the first argument writes, when the call is a
-   * collection method that walks the elements of its receiver. `spreads` says
-   * whether the call can use a spread argument; one written elsewhere is
+   * collection method that walks the elements of its receiver. `spreadsAllowed`
+   * says whether the call can use a spread argument; one written elsewhere is
    * refused where it is, because the arguments it stands for are not known
    * until the program runs.
    */
@@ -8199,6 +8229,8 @@ class TypeScriptParser {
     }
     const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
     if (method === "trim" && args.length === 0) return call("text.trim", [receiver]);
+    if (method === "trimStart" && args.length === 0) return call("text.trimStart", [receiver]);
+    if (method === "trimEnd" && args.length === 0) return call("text.trimEnd", [receiver]);
     if (method === "toLowerCase" && args.length === 0) return call("text.toLowerCase", [receiver]);
     if (method === "toUpperCase" && args.length === 0) return call("text.toUpperCase", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);

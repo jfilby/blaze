@@ -10672,6 +10672,8 @@ class Machine {
       call.callee === "text.indexOf" ||
       call.callee === "text.slice" ||
       call.callee === "text.trim" ||
+      call.callee === "text.trimStart" ||
+      call.callee === "text.trimEnd" ||
       call.callee === "text.toLowerCase" ||
       call.callee === "text.toUpperCase"
     ) {
@@ -10717,6 +10719,14 @@ class Machine {
         return;
       }
       const folded = text(0);
+      if (call.callee === "text.trimStart") {
+        this.callSymbol("blaze_rt_text_trim_start", [folded], TEXT);
+        return;
+      }
+      if (call.callee === "text.trimEnd") {
+        this.callSymbol("blaze_rt_text_trim_end", [folded], TEXT);
+        return;
+      }
       if (call.callee === "text.toLowerCase") {
         this.callSymbol("blaze_rt_text_lower", [folded], TEXT);
         return;

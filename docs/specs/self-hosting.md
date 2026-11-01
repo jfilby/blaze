@@ -272,6 +272,32 @@ pattern (`const [head, ...tail] = xs`) is still refused: the three in the
 compiler are all in files with a bigger gap, and the bound name needs the
 element type of a slice the pattern's own annotation states.
 
+### 4d. The small items
+
+- `text.trimStart()` and `text.trimEnd()` are the one end of a text, which is
+  what cuts a line of a file apart: `trim` already took both ends, and the two
+  are the runtime helpers the C runtime defines and the other targets import.
+  The program grammar reads them too.
+- `Number.parseInt(text, 10)` and `parseInt(text, 10)` are the number a text
+  states, which is what `parseInt(text)` already reads; the radix is the one
+  the language writes. Another base is refused where it is, because the runtime
+  reads a decimal text and nothing reads a hexadecimal one.
+- `parseInt` and `Number` had a lowering in the program emitter and none in the
+  semantic-IR C backend, so a module function that read a number out of a text
+  could not be built at all. The C backend now reads the number the value says,
+  which is the same call the program emitter makes.
+
+The rest of what this item named is not missing methods. `Array.find`, `some`,
+`every`, `sort`, `join`, `map`, `filter` and their neighbours are all
+implemented as functions of the file that walk the array; their refusals are
+the receiver's element type not being known — a field of an imported interface,
+or a value narrowed inside a `switch` on a union — so they are the type-flow
+slice and not this one. `Array.isArray` and `Object.is` are questions about a
+value that the runtime's dynamic kind could answer; neither is written yet, and
+`Object.is` distinguishes `-0` from `0`, which needs the sign of a zero.
+
+This took the total from 1898 to 1890.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

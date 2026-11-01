@@ -946,6 +946,8 @@ class FunctionEmitter {
       call.callee === "text.indexOf" ||
       call.callee === "text.slice" ||
       call.callee === "text.trim" ||
+      call.callee === "text.trimStart" ||
+      call.callee === "text.trimEnd" ||
       call.callee === "text.toLowerCase" ||
       call.callee === "text.toUpperCase"
     ) {
@@ -963,6 +965,8 @@ class FunctionEmitter {
         const stop = call.args.length > 2 ? `(long long)(${this.expression(call.args[2], null, depth)})` : "9223372036854775807LL";
         return `${RUNTIME_NAME}_text_slice(${textOf(call.args[0])}, (long long)(${this.expression(call.args[1], null, depth)}), ${stop})`;
       }
+      if (call.callee === "text.trimStart") return `${RUNTIME_NAME}_text_trim_start(${textOf(call.args[0])})`;
+      if (call.callee === "text.trimEnd") return `${RUNTIME_NAME}_text_trim_end(${textOf(call.args[0])})`;
       if (call.callee === "text.toLowerCase") return `${RUNTIME_NAME}_text_lower(${textOf(call.args[0])})`;
       if (call.callee === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf(call.args[0])})`;
       return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
@@ -1068,6 +1072,16 @@ class FunctionEmitter {
       const body = this.expression(call.args[3], null, depth);
       const bodyText = (call.args[3].type.kind === "ptr" || call.args[3].type.kind === "text") ? body : `blaze_rt_to_text(${body})`;
       return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
+    }
+    // `parseInt(text)` and `Number(text)` are the number a value states: a
+    // text is the number its text says, which the runtime reads out of the box
+    // it makes of the pointer it is. A number and a dynamic value are already
+    // the value it reads.
+    if (call.callee === "parseInt" || call.callee === "Number") {
+      // The argument is read at the parameter's type, which is a value the
+      // runtime holds: a text arrives boxed, and the runtime reads the number
+      // the value says out of it.
+      return `${RUNTIME_NAME}_to_number(${args[0] ?? "0.0"})`;
     }
     return builtinExpression(call.callee, args);
   }

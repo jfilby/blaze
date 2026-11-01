@@ -3600,6 +3600,16 @@ class Body {
         this.callService("blaze_rt_text_trim");
         return TEXT;
       }
+      case "text.trimStart": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_trim_start");
+        return TEXT;
+      }
+      case "text.trimEnd": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_trim_end");
+        return TEXT;
+      }
       case "text.toLowerCase": {
         this.textArgument(argument(0));
         this.callService("blaze_rt_text_lower");

@@ -333,6 +333,25 @@ class ProgramParser {
     return false;
   }
 
+  /**
+   * The arguments of a `parseInt` call, whose radix is the base ten one.
+   *
+   * `parseInt(text, 10)` is the number the text states, which is what
+   * `parseInt(text)` reads. Another base is not a number this grammar reads
+   * out of a text, and is refused where it is written.
+   */
+  private baseTenRadix(args: ProgramValue[], token: Token): ProgramValue[] {
+    if (args.length !== 2) return args;
+    const radix = args[1];
+    if (radix !== undefined && radix.k === "number" && radix.text === "10") return [args[0] as ProgramValue];
+    this.fail(
+      "parseInt reads a number in base ten",
+      token,
+      "the digits the source writes are base ten ones, as in parseInt(text, 10)",
+    );
+    return args;
+  }
+
   private at(text: string): boolean {
     const token = this.peek();
     return (token.kind === "punct" || token.kind === "ident") && token.text === text;
@@ -1282,6 +1301,14 @@ class ProgramParser {
           value = { k: "call", function: "text.trim", args: [value] };
           continue;
         }
+        if ((member === "trimStart" || member === "trimEnd") && this.at("(")) {
+          // One end of the text, which is the end a line of a file carries:
+          // a program cuts a line apart and trims the piece it read.
+          this.next();
+          this.expect(")");
+          value = { k: "call", function: member === "trimStart" ? "text.trimStart" : "text.trimEnd", args: [value] };
+          continue;
+        }
         if (member === "indexOf" && this.at("(")) {
           // `s.indexOf(needle)` answers where the needle first says itself in
           // the text, counted from the front, and -1 where it never does.
@@ -1386,6 +1413,13 @@ class ProgramParser {
             };
             continue;
           }
+          // `Number.parseInt(text, 10)` is the number the text states in base
+          // ten, which is the call `parseInt` already is.
+          if (value.k === "name" && value.name === "Number" && member === "parseInt") {
+            const written = this.arguments();
+            value = { k: "call", function: "parseInt", args: this.baseTenRadix(written, this.peek()) };
+            continue;
+          }
           const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite", "Promise"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
@@ -1445,7 +1479,8 @@ class ProgramParser {
         }
         this.next();
         const fn = this.valuePath(value);
-        value = { k: "call", function: fn, args: this.arguments() };
+        const named = this.arguments();
+        value = { k: "call", function: fn, args: fn === "parseInt" ? this.baseTenRadix(named, this.peek()) : named };
         continue;
       }
       break;

@@ -401,6 +401,37 @@ test("a top-level constant a function reads is the value it was written with", a
   assert.equal(output.trim(), "13");
 });
 
+test("a text is trimmed at one end and keeps the other", async () => {
+  // A line read out of a file carries its newline at the back, and a field cut
+  // out of a line carries the space that was written in front of it: one end
+  // at a time is what the source asks for.
+  const output = await agreesWithNode([
+    "export function cut(line: string): string {",
+    "  return line.trimStart() + `|` + line.trimEnd();",
+    "}",
+    "console.log(cut(`  hi  `));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "hi  |  hi");
+});
+
+test("a number is read out of a text in base ten", async () => {
+  // `Number.parseInt(text, 10)` is the number the text states, which is the
+  // reading `parseInt` already does. The radix is the one the language writes.
+  const output = await agreesWithNode(
+    ['import { read } from "./lib.ts";', "console.log(read(`42`));", ""].join("\n"),
+    {
+      "lib.ts": [
+        "export function read(text: string): number {",
+        "  return Number.parseInt(text, 10);",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "42");
+});
+
 test("a push with a spread joins the list it names", async () => {
   // The elements a spread stands for are the ones the list holds, so the push
   // is the list it appends to joined with the one it was handed: the

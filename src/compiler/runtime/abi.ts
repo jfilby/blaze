@@ -1688,6 +1688,8 @@ const TEXT_DECLARATIONS: readonly string[] = [
   "long long blaze_rt_text_index_of(const char* text, const char* needle)",
   "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
   "const char* blaze_rt_text_trim(const char* text)",
+  "const char* blaze_rt_text_trim_start(const char* text)",
+  "const char* blaze_rt_text_trim_end(const char* text)",
   "const char* blaze_rt_text_lower(const char* text)",
   "const char* blaze_rt_text_upper(const char* text)",
   "double blaze_rt_regex_test(const char* pattern, const char* flags, const char* text)",
@@ -3959,6 +3961,25 @@ const char* blaze_rt_text_trim(const char* text) {
   while (start < stop && blaze_rt_text_is_space(text[start])) start += 1;
   while (stop > start && blaze_rt_text_is_space(text[stop - 1])) stop -= 1;
   return blaze_rt_string_new((const unsigned char*)text + start, (size_t)(stop - start));
+}
+
+/* The text with the whitespace at its front, or at its back, gone. A source
+   that cuts a line of a file apart trims one end of it: the line arrives with
+   the newline at its back and nothing at its front. */
+const char* blaze_rt_text_trim_start(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const long long length = (long long)blaze_rt_text_length(text);
+  long long start = 0;
+  while (start < length && blaze_rt_text_is_space(text[start])) start += 1;
+  return blaze_rt_string_new((const unsigned char*)text + start, (size_t)(length - start));
+}
+
+const char* blaze_rt_text_trim_end(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const long long length = (long long)blaze_rt_text_length(text);
+  long long stop = length;
+  while (stop > 0 && blaze_rt_text_is_space(text[stop - 1])) stop -= 1;
+  return blaze_rt_string_new((const unsigned char*)text, (size_t)stop);
 }
 
 /* The text with its ASCII letters folded. A text is the bytes the source

@@ -156,6 +156,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `text.trim()` answers the text with the whitespace at both ends gone:
    *  the ends of a line a file is read with arrive still attached to it. */
   "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
+  /** `text.trimStart()` and `text.trimEnd()` answer the text with the
+   *  whitespace at one end gone, which is what cuts a line of a file apart. */
+  "text.trimStart": { params: [TEXT], returns: TEXT, arity: 1 },
+  "text.trimEnd": { params: [TEXT], returns: TEXT, arity: 1 },
   /** `text.toLowerCase()` and `text.toUpperCase()` fold the ASCII letters of
    *  the text and copy every other byte as it is. */
   "text.toLowerCase": { params: [TEXT], returns: TEXT, arity: 1 },
