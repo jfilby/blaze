@@ -401,6 +401,51 @@ test("a top-level constant a function reads is the value it was written with", a
   assert.equal(output.trim(), "13");
 });
 
+test("a set written at the top of a module answers its membership", async () => {
+  // The keys are written down, so the membership is the comparisons it means
+  // and no dictionary is allocated: a function of the module reads the name
+  // without the module being a program that holds it.
+  const output = await agreesWithNode(
+    [
+      'import { score, allowed } from "./lib.ts";',
+      "console.log(score(`a`) + score(`b`) + score(`c`) + allowed());",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        'const ALLOWED: ReadonlySet<string> = new Set(["a", "c"]);',
+        "export function score(x: string): number {",
+        "  return ALLOWED.has(x) ? 10 : 0;",
+        "}",
+        "export function allowed(): number { return ALLOWED.size; }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "22");
+});
+
+test("a map written at the top of a module answers the value of a key", async () => {
+  const output = await agreesWithNode(
+    [
+      'import { weigh, counted } from "./lib.ts";',
+      "console.log(weigh(`a`) + weigh(`b`) + counted());",
+      "",
+    ].join("\n"),
+    {
+      "lib.ts": [
+        'const WEIGHT = new Map([["a", 2], ["b", 5]]);',
+        "export function weigh(x: string): number {",
+        "  return WEIGHT.get(x);",
+        "}",
+        "export function counted(): number { return WEIGHT.size; }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "9");
+});
+
 test("an object spread of a constant object is the fields it wrote", async () => {
   const output = await agreesWithNode([
     "const BASE = { a: 1, b: 2 };",

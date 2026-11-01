@@ -833,6 +833,15 @@ interface ConstantRange {
 interface ConstantInfo {
   expression?: ConstantRange;
   fields?: ReadonlyMap<string, ConstantRange>;
+  /**
+   * The literal keys a top-level `ReadonlySet` or `ReadonlyMap` is written
+   * with, in the order the source wrote them. A set is the keys alone; a map
+   * keeps the value each one is written with beside it.
+   */
+  keys?: readonly string[];
+  values?: readonly ConstantRange[];
+  /** What a key is written as, which is how a comparison reads it. */
+  keyKind?: "text" | "number";
 }
 
 /**
@@ -882,6 +891,98 @@ function constructorRange(tokens: readonly Token[], start: number, end: number):
     if (tokens[index]?.text === ",") index += 1;
   }
   return tokens[index]?.text === ")";
+}
+
+/**
+ * A `new Set([...])` or `new Map([[...]])` written entirely of literals.
+ *
+ * A set or a map the file writes at the top is the file's constant only when
+ * every key is written down and nothing adds to it later: then its membership
+ * is the comparisons it is, and reading it allocates no dictionary at all.
+ * `end` is the token just past the construct.
+ */
+function collectionLiteral(
+  tokens: readonly Token[],
+  start: number,
+): { keys: string[]; values: ConstantRange[] | null; keyKind: "text" | "number"; end: number } | null {
+  if (tokens[start]?.text !== "new") return null;
+  const kind = tokens[start + 1]?.text;
+  if (kind !== "Set" && kind !== "Map") return null;
+  let at = start + 2;
+  if (tokens[at]?.text === "<") {
+    let depth = 0;
+    while (at < tokens.length) {
+      const text = tokens[at]?.text;
+      if (text === "<") depth += 1;
+      else if (text === ">" || text === ">>" || text === ">>>") {
+        depth -= text.length;
+        if (depth <= 0) {
+          at += 1;
+          break;
+        }
+      }
+      at += 1;
+    }
+  }
+  if (tokens[at]?.text !== "(") return null;
+  const after = closingBracket(tokens, at);
+  const inner = at + 1;
+  const keys: string[] = [];
+  const values: ConstantRange[] = [];
+  let keyKind: "text" | "number" = "text";
+  if (tokens[inner]?.text === "[") {
+    const close = closingBracket(tokens, inner) - 1;
+    let depth = 0;
+    let from = inner + 1;
+    for (let index = inner + 1; index <= close; index += 1) {
+      const text = tokens[index]?.text;
+      if (index < close && (text === "[" || text === "{" || text === "(")) depth += 1;
+      else if (index < close && (text === "]" || text === "}" || text === ")")) depth -= 1;
+      else if (index === close || (text === "," && depth === 0)) {
+        if (index === close && from === close) break;
+        if (kind === "Set") {
+          if (index !== from + 1) return null;
+          const element = tokens[from] as Token;
+          if (element.kind === "string") {
+            keys.push(unescape(element.text, element.line));
+            keyKind = "text";
+          } else if (element.kind === "number") {
+            keys.push(element.text);
+            keyKind = "number";
+          } else return null;
+        } else {
+          // A map entry is a pair: `["key", value]`.
+          if (tokens[from]?.text !== "[") return null;
+          if (closingBracket(tokens, from) !== index) return null;
+          const pairClose = index - 1;
+          const key = tokens[from + 1] as Token | undefined;
+          if (key === undefined || (key.kind !== "string" && key.kind !== "number")) return null;
+          keyKind = key.kind === "string" ? "text" : "number";
+          const valueStart = from + 2;
+          if (tokens[valueStart]?.text !== ",") return null;
+          if (!constantRange(tokens, valueStart + 1, pairClose)) return null;
+          keys.push(key.kind === "string" ? unescape(key.text, key.line) : key.text);
+          values.push({ start: valueStart + 1, end: pairClose });
+        }
+        from = index + 1;
+      }
+    }
+  } else if (tokens[inner]?.text !== ")") {
+    return null;
+  }
+  return { keys, values: kind === "Map" ? values : null, keyKind, end: after };
+}
+
+/** Whether a name is added to or removed from after it is declared. */
+function mutatesCollection(tokens: readonly Token[], name: string): boolean {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] as Token;
+    if (token.kind !== "ident" || token.text !== name) continue;
+    if (tokens[index + 1]?.text !== ".") continue;
+    const method = tokens[index + 2]?.text;
+    if (method === "add" || method === "set" || method === "delete" || method === "clear") return true;
+  }
+  return false;
 }
 
 /** How many times a name is written in a token stream. */
@@ -1030,6 +1131,22 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         continue;
       }
       const start = equals + 1;
+      // A set or a map written entirely of literals is the file's constant:
+      // its membership is the comparisons it is, and no dictionary is
+      // allocated. A name that is added to is state, because the value after
+      // the addition is not the one the source wrote.
+      const written = collectionLiteral(tokens, start);
+      if (written !== null) {
+        if (!mutable && !locals.has(name) && !mutatesCollection(tokens, name)) {
+          found.set(name, written.values === null
+            ? { keys: written.keys, keyKind: written.keyKind }
+            : { keys: written.keys, values: written.values, keyKind: written.keyKind });
+        } else {
+          state.add(name);
+        }
+        index = written.end;
+        continue;
+      }
       if (tokens[start]?.text === "[") {
         const end = closingBracket(tokens, start);
         // An array whose every element is written down is the file's constant,
@@ -6926,6 +7043,18 @@ class TypeScriptParser {
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
           // be a name, a field of an interface, or the map a function answered.
+          // `SEEN.has(x)` over a top-level set of written keys is the chain of
+          // comparisons it is, and `TABLE.get(k)` over a map of written entries
+          // the conditional chain. The name is not a value the runtime holds,
+          // so there is nothing to call the dictionary with.
+          const writtenCollection = receiver.k === "ident" ? this.constants.get(receiver.name) : undefined;
+          if (writtenCollection?.keys !== undefined) {
+            const lowered = this.writtenCollectionMethod(receiver, writtenCollection, target.field, args);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           const heldCollection = this.collectionOfExpression(receiver);
           if (heldCollection !== null) {
             const lowered = this.collectionMethod(receiver, heldCollection, target.field, args);
@@ -7085,6 +7214,13 @@ class TypeScriptParser {
           }
         }
         if (field.text === "size") {
+          const written = target.k === "ident" ? this.constants.get(target.name) : undefined;
+          if (written?.keys !== undefined) {
+            const count: Expression = { k: "literal", text: String(written.keys.length) };
+            this.expressionTypes.set(count, NUMBER_RESULT);
+            replace(count);
+            continue;
+          }
           const sized = this.collectionOfExpression(target);
           if (sized !== null) {
             const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [target] };
@@ -8470,6 +8606,82 @@ class TypeScriptParser {
     const made = { name, returns };
     this.collectHelpers.set(key, made);
     return made;
+  }
+
+  /**
+   * A read of a top-level set or map whose keys are written down.
+   *
+   * The name is not a value the runtime holds — nothing allocates it — so the
+   * read is the comparisons it means: `has` is the disjunction of the keys, and
+   * `get` is the chain of conditionals the written values are, ending in the
+   * zero of the value type where the key is absent, which is the answer an
+   * absent key of a dictionary gives. The value read is repeated by the chain,
+   * so it must read the same way twice; a call does not and is refused.
+   */
+  private writtenCollectionMethod(
+    receiver: Expression,
+    written: ConstantInfo,
+    method: string,
+    args: readonly Expression[],
+  ): Expression | null {
+    const keys = written.keys ?? [];
+    const numeric = written.keyKind === "number";
+    const textOf = (key: string): Expression => numeric
+      ? { k: "literal", text: key }
+      : { k: "text", parts: [{ k: "text", value: key }] };
+    if (method === "size" && args.length === 0) {
+      const count: Expression = { k: "literal", text: String(keys.length) };
+      this.expressionTypes.set(count, NUMBER_RESULT);
+      return count;
+    }
+    if (written.values === undefined) {
+      if (method !== "has" || args.length !== 1) return null;
+      const value = args[0] as Expression;
+      if (!repeatableExpression(value)) {
+        this.report(
+          "a set's membership reads the value once",
+          "write the value into a name first, as in const x = f(); SEEN.has(x)",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      let chain: Expression | null = null;
+      for (const key of keys) {
+        const equal: Expression = { k: "binary", op: "===", left: value, right: textOf(key) };
+        this.expressionTypes.set(equal, BOOLEAN_RESULT);
+        chain = chain === null ? equal : { k: "binary", op: "||", left: chain, right: equal };
+      }
+      const answer: Expression = chain ?? { k: "literal", text: "0" };
+      this.expressionTypes.set(answer, BOOLEAN_RESULT);
+      return answer;
+    }
+    if (method !== "get" || args.length !== 1) return null;
+    const value = args[0] as Expression;
+    if (!repeatableExpression(value)) {
+      this.report(
+        "a map's value reads the key once",
+        "write the key into a name first, as in const k = f(); TABLE.get(k)",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const name = receiver.k === "ident" ? receiver.name : "";
+    const first = written.values[0] === undefined ? null : this.constantExpression(name, written.values[0]);
+    const firstType = first === null ? ANY_TYPE : this.valueTypeOf(first);
+    let answer: Expression = firstType.kind === "text"
+      ? { k: "text", parts: [{ k: "text", value: "" }] }
+      : { k: "literal", text: "0" };
+    for (let at = keys.length - 1; at >= 0; at -= 1) {
+      const read = this.constantExpression(name, written.values[at]) ?? this.hole();
+      answer = {
+        k: "conditional",
+        condition: { k: "binary", op: "===", left: value, right: textOf(keys[at] as string) },
+        then: read,
+        otherwise: answer,
+      };
+    }
+    this.expressionTypes.set(answer, firstType);
+    return answer;
   }
 
   /**

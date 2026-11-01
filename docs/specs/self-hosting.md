@@ -229,6 +229,28 @@ Two parser bugs that the recovery made landable are fixed with it:
   own `semantics/typescript.ts` goes from 191 to 231; the net is +54, all of it
   the reading-further artefact.
 
+### 4b. Carry the constant set and map
+
+A top-level `const SEEN: ReadonlySet<string> = new Set(["a", "b"])` is not state:
+the keys are written down, so nothing allocates it and nothing changes it. The
+scanner now records the keys (and, for a `Map`, the value each was written
+with) when every key is a literal and nothing adds to or removes from the name.
+`SEEN.has(x)` is the disjunction of `x === "a" || x === "b"`, `MAP.get(k)` is
+the conditional chain of the written values ending in the zero of the value
+type, and `.size` is the count. The name is not a value the runtime holds, so a
+function of the module that reads it stays a module function; before, it was
+moved to the program parser and the name was read there. A set or map written
+another way — built at run time, or added to after the declaration — is still
+state. This took the total from 2004 to 1989.
+
+A mutable top-level value (`let temporaryWrites = 0`, `let reading:
+Promise<...> | undefined`) is still state with no place in the value model:
+a module function has no environment to read it from, and the IR has no
+storage a program holds across calls. The two in the compiler are read by a
+function that is already a program function, so they cost nothing today; a
+module-scoped global is the slice that would carry them, and it needs a slot
+the linker can name.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap
