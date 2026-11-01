@@ -73,6 +73,32 @@ test("a field names its type in every form the language writes", () => {
   assert.ok(Object.keys(program.files[0].functions).includes("Ledger_total"));
 });
 
+test("a method on a field of an imported type waits for the link", () => {
+  // A file is read before its imports are linked, so a class field written at
+  // an imported type is `any` on that read. A method written on the field is
+  // not refused there: the read that follows the link holds the declaration and
+  // reads the method against the field's own type.
+  const ir = irOf(
+    "typescript",
+    {
+      "names.ts": "export interface Name { text: string }\n",
+      "holder.ts": [
+        'import { type Name } from "./names.ts";',
+        "export class Holder {",
+        "  readonly name: Name;",
+        "  constructor(name: Name) { this.name = name; }",
+        "  read(): string { return this.name.text.trim(); }",
+        "}",
+        "",
+      ].join("\n"),
+      "main.ts": 'import { Holder } from "./holder.ts";\nconsole.log(0);\n',
+    },
+    "main.ts",
+    "Holder_read",
+  );
+  assert.match(ir, /text\.trim/);
+});
+
 test("`extends Error` adds the message field and `super` writes it", () => {
   // The one base a class may name is Error, and the one field it brings is the
   // message: `super(message)` is the write of that field, and the class's own

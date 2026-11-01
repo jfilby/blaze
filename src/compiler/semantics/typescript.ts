@@ -2104,6 +2104,8 @@ class TypeScriptParser {
   private pendingNote = false;
   /** The names whose declared type is a name this file imports, unlinked. */
   private pendingValues = new Set<string>();
+  /** The class fields whose declared type is a name this file imports, unlinked. */
+  private pendingFields = new Set<string>();
   /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
@@ -3161,6 +3163,15 @@ class TypeScriptParser {
     }
     const params = info.constructor?.params ?? [];
     const fields = this.fieldsOf(info, params);
+    // A field written at a type another module declares is held as `any` by a
+    // read that has not linked the declaration yet. The method written on the
+    // field waits for the read that follows the link, where the field's own
+    // declared type is in hand.
+    for (const field of fields) {
+      this.pendingNote = false;
+      this.typeForName(field.typeName, field.line);
+      if (this.pendingNote) this.pendingFields.add(field.name);
+    }
     const object: Expression = {
       k: "object",
       fields: fields.map((field) => {
@@ -7363,7 +7374,10 @@ class TypeScriptParser {
   /** Whether the name a member chain is rooted at holds a pending type. */
   private pendingHolds(value: Expression): boolean {
     let current = value;
-    while (current.k === "member" || current.k === "index") current = current.base;
+    while (current.k === "member" || current.k === "index") {
+      if (current.k === "member" && this.pendingFields.has(current.field)) return true;
+      current = current.base;
+    }
     return current.k === "ident" && this.pendingValues.has(current.name);
   }
 
@@ -9440,6 +9454,7 @@ class TypeScriptParser {
     child.valueTypes = this.valueTypes;
     child.valueShapes = this.valueShapes;
     child.pendingValues = this.pendingValues;
+    child.pendingFields = this.pendingFields;
     child.valueClasses = this.valueClasses;
     child.valueArrows = this.valueArrows;
     child.arrowBindings = this.arrowBindings;

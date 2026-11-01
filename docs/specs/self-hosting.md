@@ -92,8 +92,9 @@ upper case to 4245, `extends Error`/`super`, `instanceof Error` and a class
 another module declares to 4179, a method written on a field of an imported
 type — which waits for the read that follows the link rather than being refused
 on the first — to 3918, a record keyed by text and a generic annotation in a
-program to 3879, an array the file writes down to 3853, and a loop over the
-entries of a record to 3852, with `core/errors.ts`,
+program to 3879, an array the file writes down to 3853, a loop over the entries
+of a record to 3852, and a method on a class field written at an imported type
+to 3322, with `core/errors.ts`,
 `semantics/contract-build.ts`, `semantics/diagnostics.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
 The refusals fall into six frontiers:
@@ -102,10 +103,11 @@ The refusals fall into six frontiers:
   alias is no longer just erased: its fields type the member chain written
   through it, and a declaration imported from another module is read in the
   module that wrote it. A file is first read before its imports are linked, so
-  an empty list, an object spread or a method written on a field of an imported
-  type is left to the read the module graph makes once the declarations are
-  bound; that read settles it, and reports what is still unsettled. A refusal
-  written on any other value is still refused by the first read.
+  an empty list, an object spread or a method written on a value or a class
+  field of an imported type is left to the read the module graph makes once the
+  declarations are bound; that read settles it, and reports what is still
+  unsettled. A refusal written on any other value is still refused by the first
+  read.
   `Omit<T, "k">` and `Pick<T, "k">` select the fields of the record they name,
   which is how a type is written when
   a function takes a subset of a declaration's fields. The remaining
