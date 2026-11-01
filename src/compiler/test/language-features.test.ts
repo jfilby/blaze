@@ -453,6 +453,35 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a method on a field of an imported type waits for the link", async () => {
+  // A local interface may write a field at a type another module declares, and
+  // the first read does not hold that declaration: what the field holds is the
+  // link's to say. A method written on the field's field is not refused there,
+  // and the read that follows the link reads it against the declaration.
+  const output = await agreesWithNode(
+    [
+      'import { demo } from "./holder.ts";',
+      "console.log(demo());",
+      "",
+    ].join("\n"),
+    {
+      "names.ts": "export interface Analysis {\n  imports: string[];\n}\n",
+      "holder.ts": [
+        'import { type Analysis } from "./names.ts";',
+        "export interface Holder { analysis: Analysis }",
+        "export function read(record: Holder): string {",
+        "  return record.analysis.imports.map((one) => one.toUpperCase()).join(`,`);",
+        "}",
+        "export function demo(): string {",
+        "  return read({ analysis: { imports: [`a`, `b`] } });",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "A,B");
+});
+
 test("Array.isArray asks whether a value is a list", async () => {
   // A list the read holds is one where it is read; a value the read does not
   // type — the parameter of a function that takes anything — is asked of the

@@ -85,6 +85,15 @@ export type ResolvedType =
 export interface ResolvedField {
   type: ResolvedType;
   optional: boolean;
+  /**
+   * The names the field's annotation wrote that no declaration of the module
+   * that wrote it holds.
+   *
+   * A name this file imports is a declaration another module writes, and the
+   * module graph links it after the file is read: a value read through a field
+   * of that type waits for the link rather than being called `any`.
+   */
+  unlinked?: readonly string[];
 }
 
 /** The type an empty annotation reads as. */
@@ -550,9 +559,11 @@ function instantiate(
       if (parent.kind === "record" && parent.index !== null) index = parent.index;
     }
     for (const field of decl.fields.values()) {
+      const unlinked = namesNotDeclared(scope, field.typeName, params);
       fields.set(field.name, {
         type: resolveTypeText(scope, field.typeName, params, seen),
         optional: field.optional,
+        ...(unlinked.length > 0 ? { unlinked } : {}),
       });
     }
     if (decl.index !== null) index = resolveTypeText(scope, decl.index, params, seen);
@@ -560,6 +571,29 @@ function instantiate(
   } finally {
     seen.delete(decl);
   }
+}
+
+/**
+ * The names an annotation writes that the table it is written in does not hold.
+ *
+ * A name this module imports is a declaration another module writes, and the
+ * module graph links it after the file is read. The read that stands alone keeps
+ * the name so a value written at it waits for that link rather than being
+ * called `any`. A name the language writes — `number`, `Array`, `Record` — is
+ * kept here too, and the reader that asks is the one that knows its imports.
+ */
+function namesNotDeclared(
+  scope: TypeTable,
+  text: string,
+  params: ReadonlyMap<string, ResolvedType>,
+): string[] {
+  const names: string[] = [];
+  for (const name of text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
+    if (params.has(name)) continue;
+    if (scope.declarations.has(name) || scope.imported.has(name) || scope.classes.has(name)) continue;
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
 }
 
 /** Lays a parent's fields into a child's, as `extends` does. */

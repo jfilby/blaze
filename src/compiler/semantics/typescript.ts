@@ -2922,9 +2922,21 @@ class TypeScriptParser {
       }
       case "member": {
         const base = this.shapeOf(value.base);
+        // What the field's type writes is resolved where the field is: a name
+        // that no declaration of this table holds is a declaration another
+        // module writes, and the graph has not linked it. `record.analysis` is
+        // a `ModuleAnalysis`, and what the field holds is the link's to say, so
+        // a method written on it waits for that link rather than being refused
+        // here.
         if (base !== null) {
           const field = fieldOfType(this.typeTable, base, value.field);
-          if (field !== null) shape = field.type;
+          if (field !== null) {
+            shape = field.type;
+            if (this.fieldWaitsForLink(field)) {
+              this.deferred.add(value);
+              shape = null;
+            }
+          }
         }
         if (shape === null) {
           const owner = this.classOfExpression(value.base);
@@ -5171,6 +5183,25 @@ class TypeScriptParser {
     // graph links it, every one of them is a type this read does not hold.
     this.notePendingAnnotation(start, end);
     return this.typeFromTokens(start, end, promisePayload);
+  }
+
+  /**
+   * Whether a field is declared at a type this file imports and the graph has
+   * not linked.
+   *
+   * The field's annotation named a declaration that no table of this module
+   * holds. One of those names being an import means the declaration is another
+   * module's, and the read that follows the link holds it: what is written on a
+   * value at that type waits for that read.
+   */
+  private fieldWaitsForLink(field: ResolvedField): boolean {
+    if (this.linked || field.unlinked === undefined) return false;
+    for (const name of field.unlinked) {
+      if (!this.importedTypeNames.has(name)) continue;
+      if (this.typeTable.declarations.has(name) || this.typeTable.imported.has(name)) continue;
+      return true;
+    }
+    return false;
   }
 
   /**
