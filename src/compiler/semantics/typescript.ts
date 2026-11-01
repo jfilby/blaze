@@ -1984,6 +1984,14 @@ class TypeScriptParser {
   private readonly importedTypeNames: Set<string>;
   /** Shared with the nested parser a template string reads through. */
   private pendingType = { value: false };
+  /**
+   * Set when the annotation just read named a type the module graph has not
+   * bound. A name declared at such a type is held as `any` by this read, and
+   * what the body writes on it waits for the read that follows the link.
+   */
+  private pendingNote = false;
+  /** The names whose declared type is a name this file imports, unlinked. */
+  private pendingValues = new Set<string>();
   /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
@@ -2526,6 +2534,7 @@ class TypeScriptParser {
       if (!this.importedTypeNames.has(one)) continue;
       if (this.typeTable.declarations.has(one) || this.typeTable.imported.has(one)) continue;
       this.pendingType.value = true;
+      this.pendingNote = true;
       return;
     }
   }
@@ -4085,6 +4094,7 @@ class TypeScriptParser {
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           collectionType = this.annotationCollection(new Set([",", ")", "="]));
           mapped = this.readTypeAnnotation("a parameter type", new Set([",", ")", "="]));
+          this.pendingNote = false;
           shape = this.lastAnnotationShape();
           if (collectionType === null) collectionType = this.collectionOfShape(shape);
           if (head !== "" && this.classTable.names.has(head)) this.valueClasses.set(parameter.text, head);
@@ -4106,6 +4116,8 @@ class TypeScriptParser {
           ...(fallback === undefined ? {} : { default: fallback }),
         });
         this.valueTypes.set(parameter.text, mapped);
+        if (this.pendingNote) this.pendingValues.add(parameter.text);
+        else this.pendingValues.delete(parameter.text);
         if (shape !== null) this.valueShapes.set(parameter.text, shape);
         if (functionType !== null) this.valueFunctions.set(parameter.text, functionType);
         if (collectionType !== null) this.valueCollections.set(parameter.text, collectionType);
@@ -4695,6 +4707,7 @@ class TypeScriptParser {
         annotationFunction = this.annotationFunctionType(new Set(["=", ";", ",", ")"]));
         annotationMap = this.annotationCollection(new Set(["=", ";", ",", ")"]));
         type = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
+        this.pendingNote = false;
         annotationShape = this.lastAnnotationShape();
         if (annotationMap === null) annotationMap = this.collectionOfShape(annotationShape);
         if (head !== "" && this.classTable.names.has(head)) annotationClass = head;
@@ -4760,6 +4773,8 @@ class TypeScriptParser {
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
       this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      if (this.pendingNote) this.pendingValues.add(name.text);
+      else this.pendingValues.delete(name.text);
       const declaredShape = annotationShape ?? this.shapeOf(init);
       if (declaredShape !== null) this.valueShapes.set(name.text, declaredShape);
       else this.valueShapes.delete(name.text);
@@ -6425,6 +6440,16 @@ class TypeScriptParser {
           }
           const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
           if (found === null) {
+            // A receiver whose type is a name this file imports is not a value
+            // this read can say has no such method: the declaration is in
+            // another module the module graph has not linked yet. The read that
+            // follows the link holds the declaration, and refuses the method
+            // there where there really is none. A method written on anything
+            // else is refused here, whatever else the file imports.
+            if (this.typeReadIsPending() && this.pendingHolds(receiver)) {
+              replace(this.hole());
+              continue;
+            }
             this.report(
               `"${target.field}" is not a method this program compiles`,
               "a method is declared by a class the same module or its imports carry",
@@ -7084,6 +7109,13 @@ class TypeScriptParser {
    * there and a helper's answer can be walked again — which is what
    * `const b = a.map(f); b.reduce(g)` does.
    */
+  /** Whether the name a member chain is rooted at holds a pending type. */
+  private pendingHolds(value: Expression): boolean {
+    let current = value;
+    while (current.k === "member" || current.k === "index") current = current.base;
+    return current.k === "ident" && this.pendingValues.has(current.name);
+  }
+
   private valueTypeOf(value: Expression): TypeExpr {
     const recorded = this.expressionTypes.get(value);
     if (recorded !== undefined) return recorded;
@@ -9131,6 +9163,7 @@ class TypeScriptParser {
     child.wideBigint = this.wideBigint;
     child.valueTypes = this.valueTypes;
     child.valueShapes = this.valueShapes;
+    child.pendingValues = this.pendingValues;
     child.valueClasses = this.valueClasses;
     child.valueArrows = this.valueArrows;
     child.arrowBindings = this.arrowBindings;

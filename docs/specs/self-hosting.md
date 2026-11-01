@@ -88,18 +88,21 @@ several values at once to 4579, the type and shape a `??` keeps to 4542, and
 object spread of a typed object, `Omit`/`Pick`, a class field's annotation in
 every form the language writes, a field assignment read at the field's type,
 an empty list at a type an import declares to 4251, folding a text to lower or
-upper case to 4245, and `extends Error`/`super`, `instanceof Error` and a class
-another module declares to 4179, with `core/errors.ts`,
-`semantics/contract-build.ts`, `semantics/diagnostics.ts` and
-`semantics/language.ts` read as wholes. The refusals fall into six frontiers:
+upper case to 4245, `extends Error`/`super`, `instanceof Error` and a class
+another module declares to 4179, and a method written on a field of an imported
+type — which waits for the read that follows the link rather than being refused
+on the first — to 3918, with `core/errors.ts`, `semantics/contract-build.ts`,
+`semantics/diagnostics.ts` and `semantics/language.ts` read as wholes. The
+refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
   alias is no longer just erased: its fields type the member chain written
   through it, and a declaration imported from another module is read in the
   module that wrote it. A file is first read before its imports are linked, so
-  an empty list or an object spread written at an imported type is left to the
-  read the module graph makes once the declarations are bound; that read settles
-  it, and reports what is still unsettled. `Omit<T, "k">` and `Pick<T, "k">`
+  an empty list, an object spread or a method written on a field of an imported
+  type is left to the read the module graph makes once the declarations are
+  bound; that read settles it, and reports what is still unsettled. A refusal
+  written on any other value is still refused by the first read. `Omit<T, "k">` and `Pick<T, "k">`
   select the fields of the record they name, which is how a type is written when
   a function takes a subset of a declaration's fields. The remaining
   type-shaped refusal is the optional parameter, which needs an absent value the

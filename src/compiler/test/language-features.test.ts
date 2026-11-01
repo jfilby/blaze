@@ -933,6 +933,26 @@ test("a class another module declares is constructed by its name", async () => {
   assert.equal(output.trim(), "bad");
 });
 
+test("a method on a field of an imported interface waits for the link", async () => {
+  // A file is read before its imports are linked, so a parameter written at an
+  // imported type is `any` on that read. A method written on a field of it is
+  // not refused there: the read that follows the link holds the declaration and
+  // reads the method against the field's own type.
+  const output = await agreesWithNode(
+    [
+      'import { make } from "./names.ts";',
+      'import { greeting } from "./greet.ts";',
+      "console.log(greeting(make()));",
+      "",
+    ].join("\n"),
+    {
+      "names.ts": "export interface Name {\n  text: string;\n}\nexport function make(): Name {\n  return { text: `  ada  ` };\n}\n",
+      "greet.ts": 'import { type Name } from "./names.ts";\nexport function greeting(name: Name): string {\n  return `hello ${name.text.trim()}`;\n}\n',
+    },
+  );
+  assert.equal(output.trim(), "hello ada");
+});
+
 test("a text folds to lower or upper case", async () => {
   // The runtime folds the ASCII letters of the bytes the source wrote and
   // copies every other byte as it is, which is what the text helpers count.
