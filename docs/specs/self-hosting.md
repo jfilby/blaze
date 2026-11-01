@@ -572,6 +572,26 @@ is an array. The C driver, the C backend, the wasm service and the Nim adapter
 each answer it, the way they answer `blaze_rt_type_of`. This took the total from
 1540 to 1529.
 
+### 4o. A field of a type another module declares
+
+A local interface may write a field at a type another module declares —
+`interface ModuleRecord { analysis: ModuleAnalysis }` — and the first read does
+not hold that declaration. What the field holds was `any`, so a method written
+on the field's field, `record.analysis.imports.map(...)`, was refused as a
+method of nothing, although the read that follows the link holds the
+declaration and reads it.
+
+The declaration's fields now carry the names their annotations write that the
+table they are written in does not hold, so the reader can tell a name this file
+imports from a type that really is `any`. A field written at one of those waits
+for the link, as a value of an imported type already did.
+
+The total held at 1529: the refusals did not go away so much as move behind the
+construct they were hiding. `semantics/ir-validate.ts` rises by four — four
+`Object.values` of a constant object, one `hasOwnProperty` of a record keyed by
+text, both of which were standing behind a `map` over a field of an imported
+type — and that is the reading-further artefact, not a new gap.
+
 ## The next slices
 
 ### What the measurement says now
