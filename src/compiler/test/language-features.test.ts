@@ -1019,6 +1019,39 @@ test("a short-circuited comparison holds at equality", async () => {
   assert.equal(delivered.stdout, original.stdout);
 });
 
+test("a number question is answered out of the number itself", async () => {
+  // `Number.isNaN`, `isFinite`, `isInteger` and `isSafeInteger` are operations
+  // the language already has: a value unequal to itself, a difference that is
+  // zero, a floor, and the bound the language names.
+  const output = await agreesWithNode(
+    [
+      'import { classify, biggest, smallest } from "./numbers.ts";',
+      "console.log(classify(3));",
+      "console.log(classify(3.5));",
+      "console.log(classify(1 / 0));",
+      "console.log(classify(0 / 0));",
+      "console.log(classify(biggest()));",
+      "console.log(smallest());",
+      "",
+    ].join("\n"),
+    {
+      "numbers.ts": [
+        "export function classify(x: number): string {",
+        "  if (Number.isNaN(x)) return `nan`;",
+        "  if (!Number.isFinite(x)) return `infinite`;",
+        "  if (!Number.isInteger(x)) return `fraction`;",
+        "  if (Number.isSafeInteger(x)) return `safe`;",
+        "  return `big`;",
+        "}",
+        "export function biggest(): number { return Number.MAX_SAFE_INTEGER; }",
+        "export function smallest(): number { return Number.MIN_SAFE_INTEGER; }",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "safe\nfraction\ninfinite\nnan\nsafe\n-9007199254740991");
+});
+
 test("a record keyed by text is the runtime's dictionary", async () => {
   // `Record<string, V>` is the same dictionary `Map<string, V>` is: a field
   // written as a literal is one entry, `r[key]` reads one entry, and the own

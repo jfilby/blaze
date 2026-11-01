@@ -6314,6 +6314,65 @@ class TypeScriptParser {
   }
 
   /**
+   * `Number.isNaN(x)` and the questions beside it, as operations already here.
+   *
+   * A value that is not a number is the one value not equal to itself, so
+   * `x !== x` answers `isNaN` without a runtime service. `x - x` is zero for
+   * every finite number — and NaN for either infinity — which is `isFinite`;
+   * `isInteger` adds a floor, and `isSafeInteger` the bound the language names.
+   * The answer is a truth, so the body prints it the way the source writes it.
+   */
+  private numberMethod(field: string, args: readonly Expression[]): Expression | null {
+    const value = args[0];
+    const call = (name: string, values: Expression[]): Expression => ({ k: "call", name, args: values });
+    const answer = (made: Expression): Expression => {
+      this.expressionTypes.set(made, BOOLEAN_RESULT);
+      return made;
+    };
+    if (args.length !== 1 || value === undefined) return null;
+    // The value is written more than once, so it has to be one reading it: a
+    // call written in the argument would run once per mention.
+    if (!repeatableExpression(value)) {
+      this.report(
+        `Number.${field} reads its value more than once`,
+        "write the value into a name first, as in const n = f(); Number.isInteger(n)",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    if (field === "isNaN") return answer({ k: "binary", op: "!==", left: value, right: value });
+    if (field !== "isFinite" && field !== "isInteger" && field !== "isSafeInteger") return null;
+    // `x === x` fails only for NaN, and `x - x` is zero only for a finite one.
+    const notNaN: Expression = { k: "binary", op: "===", left: value, right: value };
+    const difference: Expression = { k: "binary", op: "-", left: value, right: value };
+    const isFinite: Expression = {
+      k: "binary",
+      op: "&&",
+      left: notNaN,
+      right: { k: "binary", op: "===", left: difference, right: { k: "literal", text: "0" } },
+    };
+    if (field === "isFinite") return answer(isFinite);
+    const whole: Expression = {
+      k: "binary",
+      op: "&&",
+      left: isFinite,
+      right: { k: "binary", op: "===", left: call("Math.floor", [value]), right: value },
+    };
+    if (field === "isInteger") return answer(whole);
+    return answer({
+      k: "binary",
+      op: "&&",
+      left: whole,
+      right: {
+        k: "binary",
+        op: "<=",
+        left: call("Math.abs", [value]),
+        right: { k: "literal", text: "9007199254740991" },
+      },
+    });
+  }
+
+  /**
    * `typeof value`: the name the value's type answers.
    *
    * A compiled program is typed before it runs, so the answer is read from the
@@ -6565,6 +6624,25 @@ class TypeScriptParser {
           );
           return this.hole();
         }
+        // `Number.isFinite(x)` and its neighbours are questions about the
+        // number a value holds, written out of the operations the language
+        // already has. `isNaN` is the one value that is not equal to itself,
+        // and `x - x` is zero for every finite number and not for either
+        // infinity.
+        if (target.k === "member" && target.base.k === "ident" && target.base.name === "Number") {
+          const args = this.readCallArguments();
+          const lowered = this.numberMethod(target.field, args);
+          if (lowered !== null) {
+            replace(lowered);
+            continue;
+          }
+          this.report(
+            `Number.${target.field} is not one of the questions this compiler answers`,
+            "a number question is isNaN, isFinite, isInteger or isSafeInteger",
+            this.peek(),
+          );
+          return this.hole();
+        }
         // `Object.prototype.hasOwnProperty.call(record, key)` asks whether a
         // record holds a key of its own. A record keyed by text is the
         // runtime's dictionary, so the question is the dictionary's.
@@ -6775,6 +6853,23 @@ class TypeScriptParser {
           const expanded = this.constantExpression(target.name, constant?.fields?.get(field.text));
           if (expanded !== null) {
             replace(expanded);
+            continue;
+          }
+        }
+        // `Number.MAX_SAFE_INTEGER` and its neighbours are numbers the
+        // language writes down, not values the runtime holds.
+        if (target.k === "ident" && target.name === "Number") {
+          const written =
+            field.text === "MAX_SAFE_INTEGER" ? "9007199254740991"
+              : field.text === "MIN_SAFE_INTEGER" ? "-9007199254740991"
+                : field.text === "EPSILON" ? "2.220446049250313e-16"
+                  : null;
+          if (written !== null) {
+            const value: Expression = written.startsWith("-")
+              ? { k: "unary", op: "-", operand: { k: "literal", text: written.slice(1) } }
+              : { k: "literal", text: written };
+            this.expressionTypes.set(value, NUMBER_RESULT);
+            replace(value);
             continue;
           }
         }

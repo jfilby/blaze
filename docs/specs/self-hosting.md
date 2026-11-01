@@ -93,8 +93,8 @@ another module declares to 4179, a method written on a field of an imported
 type — which waits for the read that follows the link rather than being refused
 on the first — to 3918, a record keyed by text and a generic annotation in a
 program to 3879, an array the file writes down to 3853, a loop over the entries
-of a record to 3852, and a method on a class field written at an imported type
-to 3322, with `core/errors.ts`,
+of a record to 3852, a method on a class field written at an imported type to
+3322, and the number questions to 3299, with `core/errors.ts`,
 `semantics/contract-build.ts`, `semantics/diagnostics.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
 The refusals fall into six frontiers:
@@ -125,6 +125,9 @@ The refusals fall into six frontiers:
   class check it is for a class of the module, and `new C(...)` of a class
   another module declares calls the constructor that module lowered. `typeof`
   answers from the type of a member, an element or a call as well as a name.
+  `Number.isNaN`, `isFinite`, `isInteger` and `isSafeInteger` are written out
+  of comparisons and a floor, and `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER` and
+  `EPSILON` are numbers the source writes down.
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. An array whose every
   element is written down is one of these, unless a body writes the name: a
