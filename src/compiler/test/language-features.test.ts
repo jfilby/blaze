@@ -646,6 +646,21 @@ test("a number may write a separator between its digits", async () => {
   assert.equal(output.trim(), "600000 255 10000000000 1000n");
 });
 
+test("a number written in binary or octal is the value it names", async () => {
+  // The bit fields an encoder is written with are binary, and the value is the
+  // one the digits name: `0b101` is five and `0o17` is fifteen, whether the
+  // language writes the number in base two, base eight or base sixteen.
+  const output = await agreesWithNode([
+    "function bits(): number { return 0b00010; }",
+    "function fields(): number { return (1 ? 0b1000 : 0) | (0 ? 0b100 : 0) | 0b10 | 0b1; }",
+    "function octal(): number { return 0o17; }",
+    "function wide(): bigint { return 0b1111_0000n; }",
+    "console.log(bits(), fields(), octal(), wide());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2 11 15 240n");
+});
+
 test("a block written as a statement is the statements it holds", async () => {
   // A nested block is a scope of the source, not a construct the program runs:
   // the body it belongs to holds its statements in order. A switch case may

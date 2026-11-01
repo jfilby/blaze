@@ -464,6 +464,17 @@ member read let the parser past a construct it used to stop at, and what it
 reached is a real gap that was hidden behind the first refusal. This took the
 total from 1719 to 1697.
 
+### 4h. A number written in binary or octal
+
+The bit fields an encoder is written with are binary — `(w ? 0b1000 : 0) |
+(reg >= 8 ? 0b100 : 0) | 0b10 | 0b1` — and the scanner read `0b101` as the
+number `0` followed by the name `b101`, which left the call it was written in
+unclosed. A number written in base two or base eight is now the value it names,
+written as the decimal every other number in the file is: `0b101` is `5` and
+`0o17` is `15`, and `0b1111_0000n` is the bigint `240n`. The digits are what
+the rest of the compiler reads, so nothing downstream changed. This took the
+total from 1697 to 1688.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

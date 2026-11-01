@@ -1694,6 +1694,20 @@ test("an empty array is built at the type the use writes it at", () => {
   assert.equal(firstBuffer(nullish?.right)?.element, "f64", "the fallback is read at the type of the value it falls back from");
 });
 
+test("a binary and an octal number are read as the values they name", () => {
+  // The token the parser reads is the decimal digits of the value, so a number
+  // written in base two or base eight is the same value everywhere after it.
+  const source = [
+    "export function read(): number {",
+    "  return 0b1010 + 0o17;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /"text":"10"/);
+  assert.match(body, /"text":"15"/);
+});
+
 test("a constant one module exports is the value the module that imports it reads", () => {
   // A compiled function has no environment to read another module's scope from,
   // so the value crosses the link: the list another module wrote is the list

@@ -559,6 +559,20 @@ function typeOfTypeofName(name: string): TypeExpr | null {
   }
 }
 
+/**
+ * The digits a written number stands for.
+ *
+ * The separators between digits name nothing and are dropped. A number written
+ * in binary or octal is the value it names, written the way every other number
+ * in the file is: `0b101` is `5`, and `0o17` is `15`.
+ */
+function numberText(written: string): string {
+  const digits = written.replace(/_/g, "");
+  if (digits.startsWith("0b") || digits.startsWith("0B")) return BigInt(digits).toString();
+  if (digits.startsWith("0o") || digits.startsWith("0O")) return BigInt(digits).toString();
+  return digits;
+}
+
 /** The text a value written as one string holds, or null where it is not one. */
 function textValue(value: Expression): string | null {
   if (value.k !== "text" || value.parts.length !== 1) return null;
@@ -2060,12 +2074,13 @@ export function tokenize(source: string): Token[] {
       continue;
     }
     if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1] ?? ""))) {
-      // A number may write `_` between its digits, as `600_000` does: the
-      // separator is for reading and names nothing, so the value is the digits
-      // without it.
-      const match = /^(?:0[xX][0-9a-fA-F_]+|[0-9_]*\.[0-9_]+|[0-9][0-9_]*)(?:[eE][+-]?[0-9_]+)?/.exec(source.slice(index));
+      // A number may write `_` between its digits, as `600_000` does, and it
+      // may be written in binary or octal, as the bit fields of an encoder are:
+      // both are the value they name, and the compiler reads a number's digits
+      // as the decimal they are.
+      const match = /^(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9_]*\.[0-9_]+|[0-9][0-9_]*)(?:[eE][+-]?[0-9_]+)?/.exec(source.slice(index));
       if (match === null) throw frontendError(`malformed number`, `line ${line}`);
-      tokens.push({ kind: "number", text: match[0].replace(/_/g, ""), line });
+      tokens.push({ kind: "number", text: numberText(match[0]), line });
       index += match[0].length;
       continue;
     }
