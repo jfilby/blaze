@@ -87,8 +87,10 @@ walks to 4584, splitting a text into the fields a separator cuts and pushing
 several values at once to 4579, the type and shape a `??` keeps to 4542, and
 object spread of a typed object, `Omit`/`Pick`, a class field's annotation in
 every form the language writes, a field assignment read at the field's type,
-an empty list at a type an import declares to 4251, and folding a text to
-lower or upper case to 4245, with `semantics/contract-build.ts` and
+an empty list at a type an import declares to 4251, folding a text to lower or
+upper case to 4245, and `extends Error`/`super`, `instanceof Error` and a class
+another module declares to 4179, with `core/errors.ts`,
+`semantics/contract-build.ts`, `semantics/diagnostics.ts` and
 `semantics/language.ts` read as wholes. The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
@@ -109,7 +111,10 @@ lower or upper case to 4245, with `semantics/contract-build.ts` and
   re-exports). A destructured name is now held at the element or field type of
   the value it reads, so the methods written on it are read too; a rest element
   and a nested pattern are still refused because they need a slice or a shape
-  the pattern does not name yet.
+  the pattern does not name yet. A class may name `Error` as its one base:
+  `super(message)` writes the message the base holds, `instanceof Error` is the
+  class check it is for a class of the module, and `new C(...)` of a class
+  another module declares calls the constructor that module lowered.
 - **Values a module exports.** A top-level constant is read by the functions of
   its own file, where the value is written into the body. A value another module
   imports is not carried: the module graph still offers functions only, and

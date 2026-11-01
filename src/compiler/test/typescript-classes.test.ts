@@ -73,6 +73,25 @@ test("a field names its type in every form the language writes", () => {
   assert.ok(Object.keys(program.files[0].functions).includes("Ledger_total"));
 });
 
+test("`extends Error` adds the message field and `super` writes it", () => {
+  // The one base a class may name is Error, and the one field it brings is the
+  // message: `super(message)` is the write of that field, and the class's own
+  // fields are laid out beside it.
+  const source = [
+    "class Failure extends Error {",
+    "  readonly stage: string;",
+    "  constructor(stage: string, message: string) { super(message); this.stage = stage; }",
+    "  describe(): string { return `${this.stage}: ${this.message}`; }",
+    "}",
+    "console.log(new Failure(`parse`, `bad`).describe());",
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source }, "main.ts", "Failure");
+  assert.match(ir, /field stage: text/);
+  assert.match(ir, /field message: text/);
+  assert.match(ir, /store_field .* Object1 message local\[text\] message/);
+});
+
 test("a call of a method passes the instance as its first argument", () => {
   const body = typeScriptFrontend.analyze(VECTOR, "main.ts").body;
   const q = body.find((statement) => statement.kind === "declare" && statement.name === "q");
@@ -143,8 +162,12 @@ test("instanceof is answered by the class the value is declared as", () => {
   const body = typeScriptFrontend.analyze(source, "main.ts").body;
   const print = body.find((statement) => statement.kind === "print");
   assert.ok(print !== undefined && print.kind === "print");
-  const answers = print.values.map((value) => (value.k === "number" ? value.text : value.k));
-  assert.deepEqual(answers, ["1", "0", "0"]);
+  // `instanceof` is a truth, so a program prints it the way the language writes
+  // a truth rather than as the number a comparison used to answer with.
+  const answers = print.values.map((value) =>
+    value.k === "boolean" ? (value.value ? "true" : "false") : value.k,
+  );
+  assert.deepEqual(answers, ["true", "false", "false"]);
 });
 
 test("a parameter property is a field the constructor fills", () => {

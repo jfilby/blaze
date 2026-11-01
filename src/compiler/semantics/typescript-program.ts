@@ -223,16 +223,19 @@ class ProgramParser {
   private unaryOperand = false;
   /** The classes the file declares, lowered by the module frontend. */
   private readonly classTable: ClassTable;
+  /** The names the file's imports bind, which may name a class of another module. */
+  private readonly importedNames: ReadonlySet<string>;
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
-  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable) {
+  constructor(tokens: Token[], path: string, diagnostics: Diagnostics, classTable?: ClassTable, imported: ReadonlySet<string> = new Set()) {
     this.tokens = tokens;
     this.path = path;
     this.diagnostics = diagnostics;
     this.classTable = classTable ?? scanClasses(tokens);
+    this.importedNames = imported;
   }
 
   private peek(offset = 0): Token {
@@ -1056,14 +1059,15 @@ class ProgramParser {
       if (level === 7 && token.kind === "ident" && token.text === "instanceof") {
         this.next();
         const name = this.identifier("the name of a class");
-        if (!this.classTable.names.has(name)) {
+        if (!this.classTable.names.has(name) && name !== "Error") {
           this.fail(`instanceof names a class of this module, not "${name}"`, token);
         }
         const held = this.classOfValue(left);
+        const isOne = held !== null && (held === name || (name === "Error" && this.classTable.classes.get(held)?.base === "Error"));
         left =
           held === null
             ? { k: "binary", op: "!==", left, right: { k: "null" } }
-            : { k: "number", text: held === name ? "1" : "0" };
+            : { k: "boolean", value: isOne };
         continue;
       }
       if (token.kind !== "punct" || !ops.includes(token.text as ProgramBinaryOp)) return left;
@@ -1585,6 +1589,15 @@ class ProgramParser {
           };
           return { k: "call", function: this.methodName(info.name, method, args.length), args };
         }
+        // `new C(...)` of a class another module declares is a call of the
+        // function that module lowered it to; the class is not in this file's
+        // table, and its constructor takes the arguments the source wrote.
+        if (constructed.kind === "ident" && this.importedNames.has(constructed.text)) {
+          this.next();
+          this.expect("(");
+          const args = this.arguments();
+          return { k: "call", function: constructed.text, args };
+        }
         return this.bufferLiteral();
       }
       if (token.text === "null" || token.text === "undefined") {
@@ -2059,6 +2072,7 @@ export function parseProgramBody(
   path: string,
   diagnostics: Diagnostics,
   classes?: ClassTable,
+  imported: ReadonlySet<string> = new Set(),
 ): ProgramStatement[] {
-  return new ProgramParser(tokens, path, diagnostics, classes).body();
+  return new ProgramParser(tokens, path, diagnostics, classes, imported).body();
 }

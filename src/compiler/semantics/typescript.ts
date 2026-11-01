@@ -2734,6 +2734,11 @@ class TypeScriptParser {
       seen.add(param.name);
       fields.push({ name: param.name, typeName: param.typeName, initStart: -1, initEnd: -1, line: param.line });
     }
+    // The one base a class may extend is `Error`, and the one field it brings
+    // is the message `super(...)` writes and a reader of the error reads.
+    if (info.base === "Error" && !seen.has("message")) {
+      fields.push({ name: "message", typeName: "string", initStart: -1, initEnd: -1, line: info.line });
+    }
     return fields;
   }
 
@@ -3016,7 +3021,10 @@ class TypeScriptParser {
   /** Every function a class becomes: a constructor, methods, and static members. */
   private emitClass(info: ClassInfo): DeclaredFunction[] {
     const out: DeclaredFunction[] = [];
-    if (info.base !== null) {
+    // `extends Error` is the one base a class may name: the language's errors
+    // are the one inheritance the compiler's own sources use, and the base is a
+    // `message` field rather than a second layout.
+    if (info.base !== null && info.base !== "Error") {
       this.report(
         `class inheritance is not supported ("${info.name}" extends "${info.base}")`,
         "write the fields and methods the class uses; a compiled class is one layout",
@@ -3559,7 +3567,7 @@ class TypeScriptParser {
       if (declaration.program && runs) continue;
       for (const entry of declaration.refusal) this.diagnostics.report(entry.message, entry.detail, entry.line);
     }
-    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable) : [];
+    const body = runs ? parseProgramBody(bodyTokens, path, this.diagnostics, this.classTable, this.importedTypeNames) : [];
     // `export { f }` may name a function the file declared after it, so the
     // names are applied once the whole file has been read. A name no
     // declaration answers is refused here, where every other export is.
@@ -5322,6 +5330,22 @@ class TypeScriptParser {
   /** A call or an `i++` written for what it does. */
   private readEffect(): Statement {
     const token = this.peek();
+    // `super(message)` is the only call a class of `extends Error` makes into
+    // its base: the base holds the one field an error has, and the call writes
+    // it. A compiled class has no other inheritance to call into.
+    if (token.kind === "ident" && token.text === "super" && this.peek(1).text === "(") {
+      this.next();
+      const args = this.readCallArguments();
+      this.accept(";");
+      return {
+        kind: "memberAssign",
+        base: "self",
+        field: "message",
+        op: "=",
+        value: args[0] ?? { k: "text", parts: [] },
+        line: token.line,
+      };
+    }
     if (token.kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--")) {
       this.next();
       const op = this.next().text as "++" | "--";
@@ -6030,21 +6054,24 @@ class TypeScriptParser {
     while (this.at("instanceof")) {
       this.next();
       const name = this.next();
-      if (name.kind !== "ident" || !this.classTable.names.has(name.text)) {
+      const known = name.kind === "ident" && (this.classTable.names.has(name.text) || name.text === "Error");
+      if (name.kind !== "ident" || !known) {
         this.report("instanceof names a class of this module", `near "${name.text}"`, name);
         continue;
       }
       // What the source says the value is settles the answer where it says
-      // anything: an instance of one class is not an instance of another. A
-      // value no type names may be any instance, so it is one when it is there.
+      // anything: an instance of one class is not an instance of another, and
+      // every class of `extends Error` is one too. A value no type names may be
+      // any instance, so it is one when it is there.
       const held = this.classOfExpression(left);
+      const isOne = held !== null && (held === name.text || (name.text === "Error" && this.classNamed(held)?.base === "Error"));
       left =
         held === null
           ? { k: "binary", op: "!==", left, right: { k: "null" } }
           : {
               k: "binary",
               op: "===",
-              left: { k: "literal", text: held === name.text ? "1" : "0" },
+              left: { k: "literal", text: isOne ? "1" : "0" },
               right: { k: "literal", text: "1" },
             };
     }
@@ -9040,6 +9067,13 @@ class TypeScriptParser {
     if (view.kind === "ident" && (view.text === "Map" || view.text === "Set" || view.text === "WeakMap" || view.text === "WeakSet")) {
       return this.readCollectionAllocation(view);
     }
+    // `new C(...)` of a class another module declares is a call of the function
+    // that module lowered the class to. The class itself is not in this file's
+    // table, so what its parameters are is not known here; the arguments are
+    // read as the source wrote them, and the linker names the constructor.
+    if (view.kind === "ident" && this.importedTypeNames.has(view.text)) {
+      return { k: "call", name: view.text, args: this.readCallArguments() };
+    }
     if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
       this.report(
         `a program allocates a typed array, not "${view.text}"`,
@@ -10079,7 +10113,7 @@ export const typeScriptFrontend: Frontend = {
       const fromStatements = tokensAfterImports(parser["tokens"]);
       const programDiagnostics = new Diagnostics();
       try {
-        const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable);
+        const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens));
         if (programDiagnostics.entries.length === 0) {
           // The class functions were lowered from declarations the program
           // parser never sees, so they travel with the body: they are the

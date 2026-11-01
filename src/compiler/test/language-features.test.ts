@@ -25,8 +25,10 @@ const QUIET = { stage: () => {} };
 async function build(
   source: string,
   backend?: "c" | "machine",
+  files: Record<string, string> = {},
 ): Promise<{ directory: string; binary: string; status: { backend: string; reason?: string } }> {
   const directory = await scratch("blaze-language-feature-");
+  for (const [name, text] of Object.entries(files)) await writeFile(join(directory, name), text, "utf8");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -50,8 +52,8 @@ async function build(
 }
 
 /** Builds a program and checks it prints what the source prints under node. */
-async function agreesWithNode(source: string): Promise<string> {
-  const { directory, binary } = await build(source);
+async function agreesWithNode(source: string, files: Record<string, string> = {}): Promise<string> {
+  const { directory, binary } = await build(source, undefined, files);
   const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(original.code, 0, original.stderr);
@@ -895,6 +897,40 @@ test("a destructured field is typed by the result an interface declares", async 
     "",
   ].join("\n"));
   assert.equal(output.trim(), "abc");
+});
+
+test("a class extends Error and super writes its message", async () => {
+  // `extends Error` is the one base a compiled class may name: the base holds
+  // the message `super(...)` writes, and every such class is an instance of
+  // Error. The class's own fields sit beside it in the same layout.
+  const output = await agreesWithNode([
+    "class Failure extends Error {",
+    "  readonly stage: string;",
+    "  constructor(stage: string, message: string) { super(message); this.stage = stage; }",
+    "  describe(): string { return `${this.stage}: ${this.message}`; }",
+    "}",
+    "const f = new Failure(`parse`, `bad`);",
+    "console.log(f.describe());",
+    "console.log(f instanceof Error);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "parse: bad\ntrue");
+});
+
+test("a class another module declares is constructed by its name", async () => {
+  // The constructor is a function of the module that declared the class, so a
+  // call in another module names the same function; the class itself is not in
+  // the importing file's table.
+  const output = await agreesWithNode(
+    [
+      'import { Failure } from "./errors.ts";',
+      "const f = new Failure(`bad`);",
+      "console.log(f.message);",
+      "",
+    ].join("\n"),
+    { "errors.ts": "export class Failure {\n  message: string;\n  constructor(message: string) { this.message = message; }\n}\n" },
+  );
+  assert.equal(output.trim(), "bad");
 });
 
 test("a text folds to lower or upper case", async () => {
