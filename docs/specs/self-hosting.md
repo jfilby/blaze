@@ -475,6 +475,22 @@ written as the decimal every other number in the file is: `0b101` is `5` and
 the rest of the compiler reads, so nothing downstream changed. This took the
 total from 1697 to 1688.
 
+### 4i. A field of a field written
+
+`this.frame().block.terminator = value` and `reading.needs.tls = true` are the
+two shapes a field write takes in the compiler's own code, and the IR writes one
+field of one *name*: `memberAssign` names a base and a field, and a chain of
+three was outside it. The statement is now read as the write it is — the value
+the field belongs to is read into a name of the loop's own, and the write goes
+into that name. An object is a reference, so writing through the name is writing
+the object the source named, and the value before the last field is evaluated
+once, which is what the source wrote.
+
+The one chain this does not take is a write to the `length` of a list or a text:
+a list's size is the block the runtime allocated, and the source writes its
+elements rather than its size. That is refused where it is written, as before.
+This took the total from 1688 to 1674.
+
 ## The next slices
 
 The order below is the order of leverage. The first three slices — the gap

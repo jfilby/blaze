@@ -1694,6 +1694,25 @@ test("an empty array is built at the type the use writes it at", () => {
   assert.equal(firstBuffer(nullish?.right)?.element, "f64", "the fallback is read at the type of the value it falls back from");
 });
 
+test("a field of a field is written through a name of its own", () => {
+  // The IR writes one field of one name, so `a.b.c = value` reads `a.b` into a
+  // name first: an object is a reference, and writing through the name is
+  // writing the object the source named.
+  const source = [
+    "class Inner { value: number; constructor(value: number) { this.value = value; } }",
+    "class Outer {",
+    "  inner: Inner;",
+    "  constructor(inner: Inner) { this.inner = inner; }",
+    "  bump(): number { this.inner.value = this.inner.value + 1; return this.inner.value; }",
+    "}",
+    'console.log("run");',
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "Outer_bump"));
+  assert.match(body, /"kind":"declare","name":"__field0"/, "the value the field belongs to is read once");
+  assert.match(body, /"kind":"memberAssign","base":"__field0","field":"value"/, "the write goes into the name the field is");
+});
+
 test("a binary and an octal number are read as the values they name", () => {
   // The token the parser reads is the decimal digits of the value, so a number
   // written in base two or base eight is the same value everywhere after it.

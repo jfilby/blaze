@@ -2446,6 +2446,8 @@ class TypeScriptParser {
    * the element that link will name.
    */
   private pendingArrow = false;
+  /** The names written for the values a nested field assignment writes into. */
+  private fieldCount = 0;
   /** How deeply expressions are being read, so an unsettled list waits for the outermost one. */
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
@@ -6035,10 +6037,16 @@ class TypeScriptParser {
       this.position = start;
       return null;
     }
-    this.next();
-    const field = this.next();
+    const chain: Token[] = [];
+    while (this.at(".") && this.peek(1).kind === "ident") {
+      this.next();
+      chain.push(this.next());
+    }
+    let writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
+    const field = chain[chain.length - 1] as Token;
     const operator = this.peek();
     if (
+      field === undefined ||
       field.kind !== "ident" ||
       (operator.text !== "=" &&
         operator.text !== "??=" &&
@@ -6049,13 +6057,36 @@ class TypeScriptParser {
       this.position = start;
       return null;
     }
+    // A field of a field is written the same way a field is: the value the
+    // field belongs to is read into a name of its own first, and the write goes
+    // into that name. An object is a reference, so writing through the name is
+    // writing the object the source named, and the value before the last field
+    // is read once, which is what the source wrote.
+    if (chain.length > 1) {
+      let owner: Expression = { k: "ident", name: writtenBase };
+      for (const one of chain.slice(0, -1)) owner = { k: "member", base: owner, field: one.text };
+      const ownerType = this.valueTypeOf(owner);
+      // A list has no writable length: what it holds is a block the runtime
+      // allocated, and the source writes the elements of it rather than its
+      // size. That is refused where it is written, as it was before.
+      if (field.text === "length" && (ownerType.kind === "slice" || ownerType.kind === "array" || ownerType.kind === "text")) {
+        this.position = start;
+        return null;
+      }
+      const held = `__field${this.fieldCount++}`;
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: owner, line: base.line });
+      this.valueTypes.set(held, ownerType);
+      const ownerShape = this.shapeOf(owner);
+      if (ownerShape !== null) this.valueShapes.set(held, ownerShape);
+      writtenBase = held;
+    }
     if (operator.text === "++" || operator.text === "--") {
       this.next();
       this.accept(";");
-      this.forgetNarrowing(`${base.text}.${field.text}`);
+      this.forgetNarrowing(`${writtenBase}.${field.text}`);
       return {
         kind: "memberAssign",
-        base: base.text === "this" && this.currentClass !== null ? "self" : base.text,
+        base: writtenBase,
         field: field.text,
         op: operator.text === "++" ? "+=" : "-=",
         value: { k: "literal", text: "1" },
@@ -6063,7 +6094,6 @@ class TypeScriptParser {
       };
     }
     this.next();
-    const writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
     // A field written to is the value it was written with, so nothing a test
     // settled about the field still holds.
     this.forgetNarrowing(`${writtenBase}.${field.text}`);
@@ -10832,6 +10862,7 @@ class TypeScriptParser {
     child.valueTypes = this.valueTypes;
     // A template string interpolates a value the block around it settled: the
     // text it writes is read with the same table the block was read with.
+    child.fieldCount = this.fieldCount;
     child.narrowed = this.narrowed;
     child.valueShapes = this.valueShapes;
     child.pendingValues = this.pendingValues;
@@ -10867,6 +10898,7 @@ class TypeScriptParser {
     this.destructureCount = child.destructureCount;
     this.switchCount = child.switchCount;
     this.walkCount = child.walkCount;
+    this.fieldCount = child.fieldCount;
   }
 
   /** The text of a template string, split where it interpolates a value. */

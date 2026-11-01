@@ -646,6 +646,31 @@ test("a number may write a separator between its digits", async () => {
   assert.equal(output.trim(), "600000 255 10000000000 1000n");
 });
 
+test("a field of a field is written the object the source named", async () => {
+  // `outer.inner.value = 10` writes the object `outer.inner` is, and the value
+  // before the last field is read once: the write inside the class method and
+  // the write outside it are one write of one object.
+  const output = await agreesWithNode([
+    "class Inner {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "class Outer {",
+    "  inner: Inner;",
+    "  constructor(inner: Inner) { this.inner = inner; }",
+    "  bump(): number { this.inner.value = this.inner.value + 1; return this.inner.value; }",
+    "}",
+    "function g(): number {",
+    "  const outer = new Outer(new Inner(1));",
+    "  outer.inner.value = 10;",
+    "  return outer.bump() + outer.inner.value;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "22");
+});
+
 test("a number written in binary or octal is the value it names", async () => {
   // The bit fields an encoder is written with are binary, and the value is the
   // one the digits name: `0b101` is five and `0o17` is fifteen, whether the
