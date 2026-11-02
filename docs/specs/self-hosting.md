@@ -866,6 +866,22 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4aq. A text repeated
+
+`text.repeat(n)` was not a method of this compiler, and the text formatter writes
+it eight times for an indent and a separator. It is now a function of the file
+that appends the text to an answer of its own `n` times — the same shape the
+split helper is — with the count floored, as the language floors it: a count of
+`2.7` repeats twice, and a count below one repeats nothing.
+
+The helper appends rather than allocates once, so a large count is quadratic in
+the length of the answer. Every use in the compiler's own sources is an indent
+of a few characters; a repeat of a long text that many times is the one shape
+this does not read well.
+
+This took the total from 608 to 601: five in `semantics/ir-text.ts`, one in
+`toolchain/ir-c.ts` and one in `toolchain/program-emit.ts`.
+
 ### 4ap. An arrow takes the rest of a call's arguments
 
 `(...taken: string[]) => ...` is a parameter list the arrow reader did not know:
@@ -1229,7 +1245,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-608 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+601 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1281,6 +1297,7 @@ What was closed this session, and what each was worth:
 | an assignment where an expression goes | 651 → 618 |
 | an optional chain reads the value once | 618 → 610 |
 | an arrow takes the rest of a call's arguments | 610 → 608 |
+| a text repeated | 608 → 601 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

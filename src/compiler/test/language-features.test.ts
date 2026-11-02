@@ -775,6 +775,25 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("a text repeated is the text appended that many times", async () => {
+  // `text.repeat(n)` is a function of the file that appends the text to an
+  // answer of its own, with the count floored the way the language floors it.
+  const source = [
+    "export function demo(): string {",
+    "  const dash = `-`.repeat(3);",
+    "  const pad = ` `.repeat(2.7);",
+    "  const none = `x`.repeat(0);",
+    "  return `${dash}|${pad}|${none}|`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "---|  ||", `the ${backend} backend repeats the text`);
+  }
+});
+
 test("an arrow takes the rest of a call's arguments as one list", async () => {
   // `(...taken: string[]) => ...` is called with as many arguments as the call
   // writes; the lifted function's parameter is the list they are packed into.

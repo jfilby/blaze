@@ -10578,6 +10578,13 @@ class TypeScriptParser {
     if (method === "toLowerCase" && args.length === 0) return call("text.toLowerCase", [receiver]);
     if (method === "toUpperCase" && args.length === 0) return call("text.toUpperCase", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
+    if (method === "repeat" && args.length === 1) {
+      // A repetition is a loop that appends the text to an answer of its own.
+      // The count is floored, as the language floors it: `"ab".repeat(2.5)` is
+      // two repetitions, not three.
+      const helper = this.repeatHelper(this.peek().line);
+      return call(helper.name, [receiver, args[0] as Expression]);
+    }
     if (method === "split" && args.length === 1) {
       // An empty separator and a separator of several characters are both
       // fields the helper cuts, and a regular expression was taken above.
@@ -10875,6 +10882,57 @@ class TypeScriptParser {
    * `text.indexOf` has no start index, so each step searches the rest of the
    * text from where the last separator ended.
    */
+  /**
+   * The function a `text.repeat(n)` becomes: the text appended to itself `n`
+   * times.
+   *
+   * The count is floored before the loop, which is what the language does with
+   * a count that is not whole, and a count below one repeats nothing.
+   */
+  private repeatHelper(line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["repeat"]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const body: Statement[] = [
+      {
+        kind: "declare",
+        name: "times",
+        type: null,
+        init: { k: "call", name: "Math.floor", args: [ident("count")] },
+        line,
+      },
+      { kind: "declare", name: "out", type: null, init: { k: "text", parts: [{ k: "text", value: "" }] }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: ident("times"),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [{ kind: "assign", target: "out", op: "+=", value: ident("text"), line }],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [
+      { name: "text", type: TEXT_RESULT },
+      { name: "count", type: NUMBER_RESULT },
+    ];
+    const returns: TypeExpr = TEXT_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
+  }
+
   private splitHelper(line: number): { name: string; returns: TypeExpr } {
     const key = JSON.stringify(["split"]);
     const known = this.collectHelpers.get(key);
