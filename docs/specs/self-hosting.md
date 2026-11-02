@@ -866,6 +866,21 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4at. An arrow that only reads a boxed name
+
+A name an arrow writes is held in a one-element list (§4al), and the arrow is
+handed the list. An arrow that only *reads* the name read the name itself — and
+the declaration had become the list, so the name was gone: the read was of a name
+nothing declares. The capture is now mapped to the box whether or not the body
+writes it, and an arrow lifted before the box existed has its body and its
+parameter rewritten when the box is made: `const read = () => total` after
+`const add = (n) => { total += n }` is handed the list the addition writes.
+
+This costs no refusals. It is a wrong build the measured sources do not happen to
+contain — the pattern needs one arrow that writes a name and another that only
+reads it, in the same function — and the test that finds it is in
+`test/language-features.test.ts`.
+
 ### 4as. A field written through a reference the ABI carries
 
 A wrong build, found while looking at what a box for a list would be. A

@@ -746,6 +746,31 @@ test("an assignment written in a template string writes before the text", async 
   }
 });
 
+test("an arrow that only reads a name another arrow writes reads its box", async () => {
+  // The name a writing arrow holds is a box, and the declaration is the box.
+  // An arrow that only reads the name captured the name itself, which no
+  // longer exists: it is handed the box and reads the value through it.
+  const source = [
+    "export function demo(): string {",
+    "  let total = 0;",
+    "  let note = ``;",
+    "  const add = (n: number): void => { total = total + n; };",
+    "  const say = (t: string): void => { note = note + t; };",
+    "  const read = (): string => `${total} ${note}`;",
+    "  add(2);",
+    "  add(3);",
+    "  say(`x`);",
+    "  return read();",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "5 x", `the ${backend} backend hands over the box`);
+  }
+});
+
 test("an arrow writes a name of the function around it", async () => {
   // An arrow is lifted into a function of its own, and the values it captured
   // are handed to it by value: a write would reach the lifted function's copy.

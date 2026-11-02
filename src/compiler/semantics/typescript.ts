@@ -1939,25 +1939,44 @@ function arrowCaptures(
 }
 
 /**
- * A read of a value that lives in the one-element list an arrow writes back.
+ * Where a value an arrow writes lives, so that both sides write the same one.
  *
- * A box is a list of one element, which is a reference: the arrow and the
- * function around it hold the same list, so a write either makes is a write the
- * other reads.
+ * A number, a text or a reference travels by value, so the name is held in a
+ * **one-element list** and both sides write element zero. A **list** cannot be
+ * held that way — a list has no element that holds a list — so it is held in a
+ * one-field object instead, and both sides write the field.
  */
-function boxedRead(name: string): Expression {
-  return { k: "index", base: { k: "ident", name }, index: { k: "literal", text: "0" } };
+interface Boxed {
+  /** The name of the list or object the value lives in. */
+  name: string;
+  /** The value is a list, which the box holds as a field rather than an element. */
+  list: boolean;
+}
+
+/** The field a list box keeps its list in. No source writes this name. */
+const BOXED_FIELD = "__boxed";
+
+/** A read of a value that lives in the box an arrow writes back. */
+function boxedRead(box: Boxed): Expression {
+  if (box.list) return { k: "member", base: { k: "ident", name: box.name }, field: BOXED_FIELD };
+  return { k: "index", base: { k: "ident", name: box.name }, index: { k: "literal", text: "0" } };
+}
+
+/** The write of a boxed value: the element, or the field a list lives in. */
+function boxedWrite(box: Boxed, op: AssignOperator, value: Expression, line: number): Statement {
+  if (box.list) return { kind: "memberAssign", base: box.name, field: BOXED_FIELD, op, value, line };
+  return { kind: "indexAssign", buffer: box.name, index: { k: "literal", text: "0" }, op, value, line };
 }
 
 /** Every read and write of `name` in a statement list, rewritten to its box. */
-function boxStatements(statements: Statement[], name: string, box: string): void {
+function boxStatements(statements: Statement[], name: string, box: Boxed): void {
   for (let at = 0; at < statements.length; at += 1) {
     statements[at] = boxStatement(statements[at] as Statement, name, box);
   }
 }
 
 /** One statement, with every read and write of `name` rewritten to its box. */
-function boxStatement(statement: Statement, name: string, box: string): Statement {
+function boxStatement(statement: Statement, name: string, box: Boxed): Statement {
   switch (statement.kind) {
     case "declare":
       // The declaration of the name itself is the box, and the caller has
@@ -1967,32 +1986,21 @@ function boxStatement(statement: Statement, name: string, box: string): Statemen
       return { ...statement, init: boxExpression(statement.init, name, box) };
     case "assign":
       if (statement.target === name) {
-        return {
-          kind: "indexAssign",
-          buffer: box,
-          index: { k: "literal", text: "0" },
-          op: statement.op,
-          value: boxExpression(statement.value, name, box),
-          line: statement.line,
-        };
+        return boxedWrite(box, statement.op, boxExpression(statement.value, name, box), statement.line);
       }
       return { ...statement, value: boxExpression(statement.value, name, box) };
     case "update":
       if (statement.name !== name) return statement;
-      return {
-        kind: "indexAssign",
-        buffer: box,
-        index: { k: "literal", text: "0" },
-        op: statement.op === "++" ? "+=" : "-=",
-        value: { k: "literal", text: "1" },
-        line: statement.line,
-      };
+      return boxedWrite(box, statement.op === "++" ? "+=" : "-=", { k: "literal", text: "1" }, statement.line);
     case "memberAssign":
       return { ...statement, value: boxExpression(statement.value, name, box) };
     case "indexAssign":
+      // An element written through a boxed list is a write an element of an
+      // element, which the box does not hold: the caller refuses that form
+      // before it rewrites anything.
       return {
         ...statement,
-        buffer: statement.buffer === name ? box : statement.buffer,
+        buffer: statement.buffer === name && !box.list ? box.name : statement.buffer,
         index: boxExpression(statement.index, name, box),
         value: boxExpression(statement.value, name, box),
       };
@@ -2027,7 +2035,7 @@ function boxStatement(statement: Statement, name: string, box: string): Statemen
     case "forOf":
       return {
         ...statement,
-        of: statement.of === name ? box : statement.of,
+        of: statement.of === name && !box.list ? box.name : statement.of,
         body: boxBlock(statement.body, name, box),
       };
     case "try":
@@ -2044,13 +2052,13 @@ function boxStatement(statement: Statement, name: string, box: string): Statemen
 }
 
 /** A statement list rewritten, as one statement list. */
-function boxBlock(statements: Statement[], name: string, box: string): Statement[] {
+function boxBlock(statements: Statement[], name: string, box: Boxed): Statement[] {
   boxStatements(statements, name, box);
   return statements;
 }
 
 /** One expression, with every read of `name` rewritten to its box. */
-function boxExpression(value: Expression, name: string, box: string): Expression {
+function boxExpression(value: Expression, name: string, box: Boxed): Expression {
   switch (value.k) {
     case "ident":
       return value.name === name ? boxedRead(box) : value;
@@ -2061,8 +2069,8 @@ function boxExpression(value: Expression, name: string, box: string): Expression
     case "argv":
       return value.index === null ? value : { ...value, index: boxExpression(value.index, name, box) };
     case "length":
-      // A name whose length is read is a list, which a box never holds.
-      return value;
+      // A list's length is the length of the list the box holds.
+      return value.buffer === name ? { k: "lengthOf", of: boxedRead(box) } : value;
     case "lengthOf":
       return { ...value, of: boxExpression(value.of, name, box) };
     case "index":
@@ -2115,7 +2123,9 @@ function boxExpression(value: Expression, name: string, box: string): Expression
       // refuses the capture before it rewrites anything.
       return value;
     case "arrow":
-      return { ...value, captures: value.captures.map((capture) => (capture === name ? box : capture)) };
+      // A nested arrow captures the box, not the name: the value it is handed
+      // is the box the value lives in.
+      return { ...value, captures: value.captures.map((capture) => (capture === name ? box.name : capture)) };
     case "capture":
       return { ...value, closure: boxExpression(value.closure, name, box) };
     case "invoke":
@@ -2125,9 +2135,15 @@ function boxExpression(value: Expression, name: string, box: string): Expression
         args: value.args.map((argument) => boxExpression(argument, name, box)),
       };
     case "append":
-      // A push belongs to a list side of the box, which is not a value a box
-      // holds; the values pushed are ordinary reads and are rewritten.
-      return { ...value, values: value.values.map((element) => boxExpression(element, name, box)) };
+      // A push on a boxed list is a push on the list the box holds; the values
+      // pushed are ordinary reads and are rewritten.
+      return {
+        ...value,
+        ...(value.base === null && value.target === name && box.list
+          ? { target: BOXED_FIELD, base: box.name }
+          : {}),
+        values: value.values.map((element) => boxExpression(element, name, box)),
+      };
   }
 }
 
@@ -2881,7 +2897,7 @@ class TypeScriptParser {
    * instead. Both the arrow and the function around it read and write the
    * element, and the write is the write the source wrote.
    */
-  private arrowBoxes = new Map<string, { box: string; element: TypeExpr }>();
+  private arrowBoxes = new Map<string, { box: string; element: TypeExpr; list: boolean }>();
   /** How many boxes this file's arrows have needed, for naming them. */
   private boxCount = 0;
   /**
@@ -9916,24 +9932,36 @@ class TypeScriptParser {
         start,
       );
     }
-    if (captures.written.length > 0) {
-      const boxed = captures.written.every((written) => this.arrowBoxes.has(written));
-      if (boxed) {
-        // The box of a name the body only writes is a value the body reads, so
-        // it joins the values the arrow captures even though the name itself
-        // was never read.
-        const captured: string[] = [];
-        for (const capture of captures.captures) {
-          const box = this.arrowBoxes.get(capture)?.box ?? capture;
-          if (!captured.includes(box)) captured.push(box);
-        }
-        for (const written of captures.written) {
-          const box = this.arrowBoxes.get(written)?.box;
-          if (box !== undefined && !captured.includes(box)) captured.push(box);
-        }
-        captures.captures = captured;
-        captures.written = [];
+    // A name that is already boxed is read through the box, whether or not
+    // this body writes it: the value the arrow is handed is the box.
+    for (const capture of captures.captures) {
+      const entry = this.arrowBoxes.get(capture);
+      if (entry !== undefined) boxStatements(body, capture, { name: entry.box, list: entry.list });
+    }
+    if (captures.written.length > 0 && captures.written.every((written) => this.arrowBoxes.has(written))) {
+      // The box of a name the body only writes is a value the body reads, so it
+      // joins the values the arrow captures even though the name itself was
+      // never read.
+      const captured: string[] = [];
+      for (const capture of captures.captures) {
+        const box = this.arrowBoxes.get(capture)?.box ?? capture;
+        if (!captured.includes(box)) captured.push(box);
       }
+      for (const written of captures.written) {
+        const box = this.arrowBoxes.get(written)?.box;
+        if (box !== undefined && !captured.includes(box)) captured.push(box);
+      }
+      captures.captures = captured;
+      captures.written = [];
+    } else if (captures.written.length === 0) {
+      // A body that writes nothing still reads the boxes it captures: a name
+      // another arrow boxed is handed over as the box.
+      const captured: string[] = [];
+      for (const capture of captures.captures) {
+        const box = this.arrowBoxes.get(capture)?.box ?? capture;
+        if (!captured.includes(box)) captured.push(box);
+      }
+      captures.captures = captured;
     }
     // A name an arrow inside this one wrote, and this body declares, is boxed
     // here: the box belongs to the nearest body that holds the name.
@@ -9975,7 +10003,10 @@ class TypeScriptParser {
    */
   private boxTypeOf(name: string): TypeExpr | null {
     for (const entry of this.arrowBoxes.values()) {
-      if (entry.box === name) return { kind: "slice", of: entry.element };
+      if (entry.box !== name) continue;
+      // A list box is an object the IR lays out from the literal it was built
+      // with, so what the arrow is handed is the reference it is.
+      return entry.list ? ANY_TYPE : { kind: "slice", of: entry.element };
     }
     return null;
   }
@@ -9991,21 +10022,25 @@ class TypeScriptParser {
   private boxArrowCaptures(body: Statement[], written: readonly string[]): boolean {
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;
-      const type = this.valueTypes.get(name) ?? ANY_TYPE;
-      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return false;
       if (readsUpdateIn(body, name)) return false;
+      const type = this.valueTypes.get(name) ?? ANY_TYPE;
+      // A list has no element that holds a list: the box a list would need is
+      // an object, and an object field holding a list is the layout a program
+      // lays out one of only where the source declares it. Until that is read,
+      // a captured list keeps the refusal an arrow always answered.
+      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return false;
     }
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;
       const type = this.valueTypes.get(name) ?? ANY_TYPE;
       const box = `__box_${this.stem}_${this.boxCount}`;
       this.boxCount += 1;
-      this.arrowBoxes.set(name, { box, element: type });
+      this.arrowBoxes.set(name, { box, element: type, list: false });
       this.valueTypes.set(box, { kind: "slice", of: type });
     }
     for (const name of written) {
-      const box = this.arrowBoxes.get(name)?.box;
-      if (box !== undefined) boxStatements(body, name, box);
+      const entry = this.arrowBoxes.get(name);
+      if (entry !== undefined) boxStatements(body, name, { name: entry.box, list: entry.list });
     }
     return true;
   }
@@ -10039,26 +10074,51 @@ class TypeScriptParser {
         continue;
       }
       const element = held?.type ?? parameter?.type ?? entry.element;
-      // The reads and writes are rewritten first: the list the box is made of
-      // holds the value the name was declared with, and that value is the one
-      // the source wrote, not a read of the name the box replaces.
+      // The reads and writes are rewritten first: the box is made of the value
+      // the name was declared with, and that value is the one the source wrote,
+      // not a read of the name the box replaces.
       const initial = held?.init ?? null;
-      boxStatements(body, name, box);
+      boxStatements(body, name, { name: box, list: entry.list });
       const declared = findDeclaration(body, name);
+      const value = initial ?? { k: "null" as const };
+      const made: Expression = entry.list
+        ? { k: "object", fields: [{ name: BOXED_FIELD, value }] }
+        : { k: "buffer", element: typeToString(element), values: [value] };
+      const kind: TypeExpr | null = entry.list ? null : { kind: "slice", of: element };
       if (declared !== null) {
         declared.name = box;
-        declared.type = { kind: "slice", of: element };
-        declared.init = { k: "buffer", element: typeToString(element), values: [initial ?? { k: "null" }] };
+        declared.type = kind;
+        declared.init = made;
       } else {
-        // A parameter is handed over by value, so the list is made where the
+        // A parameter is handed over by value, so the box is made where the
         // body starts and the parameter is what it holds.
         body.unshift({
           kind: "declare",
           name: box,
-          type: { kind: "slice", of: element },
-          init: { k: "buffer", element: typeToString(element), values: [{ k: "ident", name }] },
+          type: kind,
+          init: entry.list
+            ? { k: "object", fields: [{ name: BOXED_FIELD, value: { k: "ident", name } }] }
+            : { k: "buffer", element: typeToString(element), values: [{ k: "ident", name }] },
           line: body[0]?.line ?? 0,
         });
+      }
+      // An arrow read before this box existed captured the name itself. The
+      // name is the box now, so every arrow that captured it is handed the box
+      // and reads the value through it.
+      for (const [liftedName, lifted] of this.liftedArrows) {
+        const binding = this.arrowBindings.get(liftedName);
+        if (binding === undefined) continue;
+        const at = binding.captures.indexOf(name);
+        if (at < 0) continue;
+        const boxed = entry.list ? ANY_TYPE : { kind: "slice" as const, of: element };
+        binding.captures[at] = box;
+        binding.captureTypes[at] = boxed;
+        const param = lifted.params[at];
+        if (param !== undefined) {
+          param.name = box;
+          param.type = boxed;
+        }
+        boxStatements(lifted.body, name, { name: box, list: entry.list });
       }
       this.arrowBoxes.delete(name);
     }
