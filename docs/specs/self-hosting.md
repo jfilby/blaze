@@ -617,6 +617,42 @@ than the guards. `includes` is the one method that still asks the index; the two
 take, because a compiler whose scanners ask a text's index in a guard is exactly
 the program the self-build is. This took the total from 1529 to 1521.
 
+### 4q. The vector registers a call does not preserve
+
+The reproducer of 4p is fixed, and it was not a parser fault at all.
+`VECTOR_CALLEE_SAVED` in `toolchain/ir-machine.ts` is `xmm6` to `xmm15`, on the
+comment "ten is what the convention has" — that is the Windows rule. This target
+is System V AMD64, where **no** vector register is preserved by a call: every one
+of `xmm0`–`xmm15` is the caller's to save. The allocator pinned a name in `xmm6`
+across a call into the runtime, `strstr` wrote it, and the function answered
+`NaN`. Machine code calling machine code was never wrong, because both sides
+save the same registers; every call the runtime, the C library or the host serves
+was exposed.
+
+The fix is the one the convention states: around a call into code this backend
+did not build, the vector registers that hold this function's values are written
+down and read back. Which call that is, the lowering knows: a symbol this
+backend built is in the program's `callable` set, and everything else — the
+runtime, the C library, the host — is not. `MachineRequest` grew a `foreign` set
+beside `callable` so a test that links its own C functions can say which of the
+symbols it names are somebody else's; a build of a program passes none.
+
+The slot the call writes is not the prologue's. That one holds the value the
+caller had, which the epilogue has to give back, and a call-time save would write
+this function's current value over it. So each pinned vector register gets a
+second slot, and a call costs two instructions per register held — paid only by a
+function that keeps a value in a vector register *and* calls out of its own
+object.
+
+Two tests hold it: `ir-machine.test.ts` runs a loop whose running total is live
+across a call to a C function that writes all ten registers the backend used to
+assume were its own, and `language-features.test.ts` builds the source shape —
+five guards asking five text methods, one after another. Both fail with the save
+turned off.
+
+The total holds at 1521. This slice bought no refusals; it bought an answer that
+was wrong.
+
 ## The next slices
 
 ### What the measurement says now
@@ -641,29 +677,11 @@ The three that would move the most with one change are still the pair
 `map`/`push` and the optional chain, and each of them needs something the value
 model does not have yet rather than another special case in the parser.
 
-Two miscompilations found while reading the source are the next slice of their
-own, because a compiler whose scanners ask a text's index in a guard is exactly
-the program the self-build is:
-
-- a `text.indexOf` call in a guard, followed by another statement, answers
-  garbage on the machine backend (`if (text.includes("xx")) n += 1;` then any
-  second guard prints `NaN` for `n`); the same call written into a name first is
-  right, and so are two guards over a number.
-
-The second one is understood, and it is worse than the reproducer suggests:
-`VECTOR_CALLEE_SAVED` in `toolchain/ir-machine.ts` is `xmm6` to `xmm15`, on the
-comment that "ten is what the convention has". That is the Windows rule. The
-target here is System V AMD64, where **no** vector register is preserved by a
-call: every one of `xmm0`–`xmm15` is the caller's to save. The allocator pinned
-`n` in `xmm6` across a call into the C runtime, `strstr` wrote it, and the
-function returned `NaN`. Machine code calling machine code is unharmed, because
-both sides save the same registers; every call the runtime serves is exposed.
-
-Fixing it is not a one-line change: the temporaries an expression holds across
-the call on its other side are drawn from the same file, so the caller has to
-save what it holds across a call into anything not built by this backend — or
-the temporaries have to come from the frame. That is the next slice, and it is
-the first one that is a wrong answer rather than a refusal.
+The miscompilation found while reading the source is fixed (§4q): a `text.indexOf`
+call in a guard, followed by another statement, answered garbage on the machine
+backend because the vector registers the runtime writes were believed to be
+preserved by a call. It was the Windows rule applied to a System V target, and
+it is the only wrong answer this reading has found that was not a refusal.
 
 ### The roadmap
 

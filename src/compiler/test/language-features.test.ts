@@ -453,6 +453,30 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a guard that asks a text something survives a call into the runtime", async () => {
+  // The machine backend keeps a value alive across a call in `xmm6` to `xmm15`,
+  // and this target is System V AMD64, where no vector register is preserved by
+  // a call: the C runtime is built to that convention and writes them. A guard
+  // that asks a text something makes that call, so the two guards here are the
+  // shape that answered `NaN` for `n` before the registers were written down
+  // around a call that leaves the object.
+  const output = await agreesWithNode([
+    "export function demo(): string {",
+    "  const text = `xxabyy`;",
+    "  let n = 0;",
+    "  if (text.includes(`xx`)) n += 1;",
+    "  if (text.indexOf(`ab`) === 2) n += 10;",
+    "  if (text.slice(0, 2) === `xx`) n += 100;",
+    "  if (text.endsWith(`yy`)) n += 1000;",
+    "  if (text.startsWith(`xx`)) n += 10000;",
+    "  return String(n);",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "11111");
+});
+
 test("startsWith reads the field the text holds from a position", async () => {
   // `text.startsWith(needle, at)` is the field the text holds from `at`: the
   // slice that runs as far as the needle is long, compared with the needle.

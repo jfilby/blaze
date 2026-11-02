@@ -237,6 +237,20 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
       // The same call over whole numbers, whose argument registers are the ones
       // a whole number is pinned in.
       "long long mix(long long a, long long b) { calls++; return 10 * a + b; }",
+      /* A callee that writes every vector register the convention leaves to the
+         caller, which is all sixteen of them: it is what a C library function
+         built to that convention does, and what `strstr` did to a value the
+         machine backend had pinned in xmm6. */
+      "double dirty(double v) {",
+      "  calls++;",
+      "  __asm__ volatile(",
+      '    "pxor %%xmm6, %%xmm6\\n\\tpxor %%xmm7, %%xmm7\\n\\tpxor %%xmm8, %%xmm8\\n\\t"',
+      '    "pxor %%xmm9, %%xmm9\\n\\tpxor %%xmm10, %%xmm10\\n\\tpxor %%xmm11, %%xmm11\\n\\t"',
+      '    "pxor %%xmm12, %%xmm12\\n\\tpxor %%xmm13, %%xmm13\\n\\tpxor %%xmm14, %%xmm14\\n\\t"',
+      '    "pxor %%xmm15, %%xmm15"',
+      '    ::: "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");',
+      "  return v * 0.0 + 1.0;",
+      "}",
       // Nine floats is past the eight the convention has registers for, so a
       // call of this one is the shape where the arguments that run out of
       // registers are written to the stack before the registers are read.
@@ -254,7 +268,10 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
     fn,
     contract,
     target,
-    callable: new Set(["f", "g", "h9", "two", "mix", "wideAdd"]),
+    callable: new Set(["f", "g", "h9", "two", "mix", "wideAdd", "dirty"]),
+    // They are this test's own C, not objects this backend built, so a call to
+    // one of them is a call a vector register does not survive.
+    foreign: new Set(["f", "g", "h9", "two", "mix", "wideAdd", "dirty"]),
     objectPath: object,
   });
   assert.ok(built.textSizeBytes > 0, "the object carries the code the function is");
@@ -270,6 +287,7 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string, t
       "extern double f(double v);",
       "extern double two(double, double);",
       "extern long long mix(long long, long long);",
+      "extern double dirty(double);",
       `struct Point { double x; double y; };`,
       "extern double h9(double, double, double, double, double, double, double, double, double);",
       `extern ${cDeclarationType(parseType(typeTextOf({ kind: "value", name: "", mutable: false, type: fn.returns })))} ${symbolOf(contract)}(${contract.function.params
@@ -478,6 +496,79 @@ test("an argument left where it is read out of the accumulator, not out of the s
   ]);
   // (2+1) + (5+1) + (7+1) + (9+1)
   assert.equal(await lowered(fn, (name) => `double v[4] = {2, 5, 7, 9}; printf("%.17g", ${name}(v, 4, 4));`), "27");
+});
+
+test("a value kept in a vector register survives a call into code this backend did not build", async () => {
+  // This target is System V AMD64, where no vector register is preserved by a
+  // call: the C library and the runtime are built to that convention, and every
+  // one of `xmm0` to `xmm15` is the caller's to save. A name the allocator keeps
+  // in `xmm6` to `xmm15` because it is live across a call is written down before
+  // a call that leaves this object and read back after it. Without that, `dirty`
+  // — which writes every register the convention leaves to the caller — takes
+  // the running total with it, which is what `strstr` did to a value pinned
+  // across `text.indexOf`: `if (text.includes("xx")) n += 1;` followed by a
+  // second guard answered NaN for `n`.
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    terminator: { k: "return", value: local("total") },
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 2 },
+      {
+        k: "loop",
+        line: 3,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: F64,
+          from: number("0"),
+          to: local("n"),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              {
+                k: "set",
+                name: "total",
+                op: "=",
+                line: 4,
+                value: {
+                  k: "arith",
+                  type: F64,
+                  op: "add",
+                  left: local("total"),
+                  right: {
+                    k: "call",
+                    type: F64,
+                    call: {
+                      callee: "dirty",
+                      builtin: false,
+                      signature: { name: "dirty", symbol: "dirty", params: [{ name: "v", type: "f64" }], returns: "f64" },
+                      args: [local("i")],
+                      argTypes: [F64],
+                      returns: F64,
+                      effects: [],
+                      ownership: "none",
+                      retain: false,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  const fn = subject(F64, body, [{ kind: "value", name: "n", mutable: false, type: F64 }]);
+  // Four turns, each adding the one `dirty` answers.
+  assert.equal(await lowered(fn, (name) => `printf("%.17g", ${name}(4.0));`), "4");
 });
 
 test("an element the instruction carries is read before the other side's call writes its registers", async () => {

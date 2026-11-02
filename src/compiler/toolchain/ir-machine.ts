@@ -573,6 +573,16 @@ export interface MachineRequest {
    */
   callable: ReadonlySet<string>;
   /**
+   * The symbols something other than this backend provides, listed beside the
+   * callable ones so a caller that links its own C can say so.
+   *
+   * A build of a program passes none: every symbol of `callable` is an object
+   * this backend built. A test that links the object it is checking against its
+   * own C functions names them here, and a call to one of them is a call whose
+   * callee preserves no vector register.
+   */
+  foreign?: ReadonlySet<string>;
+  /**
    * The parameter indices that hold power-of-two arrays, as `powerOfTwoParams`
    * computed over the whole program. Division by one of their elements is
    * division by a power of two and can be strength-reduced to a shift.
@@ -656,6 +666,7 @@ export function machineRefusal(
       request.callable,
       request.target,
       request.powerOfTwoParams,
+      request.foreign,
     );
     return null;
   } catch (cause) {
@@ -683,6 +694,7 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
     request.callable,
     request.target,
     request.powerOfTwoParams,
+    request.foreign,
   );
   await writeFile(request.objectPath, object.bytes);
   const written = inspectWrittenObject(request.objectPath, functionName);
@@ -694,7 +706,11 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
     );
   }
   const outside = written.undefined.filter(
-    (symbol) => !isRuntimeSymbol(symbol) && LIBRARY[symbol] !== true && !request.callable.has(symbol),
+    (symbol) =>
+      !isRuntimeSymbol(symbol) &&
+      LIBRARY[symbol] !== true &&
+      !request.callable.has(symbol) &&
+      request.foreign?.has(symbol) !== true,
   );
   if (outside.length > 0) {
     throw machineError(
@@ -1322,11 +1338,13 @@ function lowerFunction(
   callable: ReadonlySet<string>,
   target: TargetSpec,
   powerOfTwoParams: ReadonlySet<number> = new Set(),
+  foreign: ReadonlySet<string> = new Set(),
 ): { bytes: Uint8Array; textSizeBytes: number; threads: boolean } {
-  const machine = new Machine(fn, contract, roundsOnItsOwn(target), powerOfTwoParams, target);
+  const machine = new Machine(fn, contract, roundsOnItsOwn(target), powerOfTwoParams, target, callable, foreign);
   const text = machine.emit();
   for (const symbol of machine.externals) {
-    if (isRuntimeSymbol(symbol) || LIBRARY[symbol] === true || symbol === functionName || callable.has(symbol)) continue;
+    if (isRuntimeSymbol(symbol) || LIBRARY[symbol] === true || symbol === functionName) continue;
+    if (callable.has(symbol) || foreign.has(symbol)) continue;
     throw machineError(
       `${functionName} refers to ${symbol}, which is neither the runtime, the C library, nor a function of this program`,
       undefined,
@@ -2232,6 +2250,16 @@ class Machine {
   readonly labels: DataLabel[] = [];
   /** The symbols the code calls or reads that this object does not define. */
   readonly externals: string[] = [];
+  /**
+   * The symbols this backend builds the code of.
+   *
+   * One of them spills every vector register it uses in its prologue and reads
+   * them back in its epilogue, so a value kept in one survives the call. The
+   * C library, the runtime and the host are not built that way: this target is
+   * System V AMD64, where no vector register is preserved by a call at all.
+   */
+  private readonly callable: ReadonlySet<string>;
+  private readonly foreign: ReadonlySet<string>;
   /** The target the function is lowered for, which decides whether BMI2
    *  instructions are available. */
   readonly target: TargetSpec;
@@ -2299,6 +2327,15 @@ class Machine {
   private pinnedRegisters: number[] = [];
   /** The vector registers spilled to the frame by the prologue and read back by the epilogue. */
   private pinnedVectors: VectorSave[] = [];
+  /**
+   * Where the vector registers this function keeps values in are written down
+   * across a call into code this backend did not build.
+   *
+   * A register saved here is not the prologue's slot: that one holds the value
+   * the caller had, which the epilogue has to give back, and a call writes the
+   * slot with what this function holds now.
+   */
+  private callSaves: VectorSave[] = [];
   /** The register an object being filled lives in, when this function fills one. */
   private objectRegister: number | null = null;
   /**
@@ -2401,7 +2438,9 @@ class Machine {
    */
   private readonly counterRegisters = new Map<string, number>();
 
-  constructor(fn: SemanticFunction, contract: FunctionContract | undefined, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }) {
+  constructor(fn: SemanticFunction, contract: FunctionContract | undefined, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }, callable: ReadonlySet<string> = new Set(), foreign: ReadonlySet<string> = new Set()) {
+    this.callable = callable;
+    this.foreign = foreign;
     const augmented: SemanticSlot[] = [];
     for (const param of fn.params) {
       augmented.push(param);
@@ -3142,6 +3181,7 @@ class Machine {
 
     this.pinnedRegisters = [];
     this.pinnedVectors = [];
+    this.callSaves = [];
     // Where every name is live, and what a call does to it. A name no call
     // reaches can be kept in a register the convention does not ask a callee to
     // preserve, which costs the function nothing; one that has to survive a
@@ -3467,6 +3507,7 @@ class Machine {
     this.used = this.pinnedRegisters.length * 8;
     for (const saved of this.pinnedVectors) {
       saved.offset = this.reserve(8, 8);
+      this.callSaves.push({ register: saved.register, offset: this.reserve(8, 8), single: saved.single });
     }
     // A loop written as a team of threads is a call into the runtime, so a
     // function holding one has a frame to keep aligned whether or not the IR
@@ -9430,11 +9471,11 @@ class Machine {
     this.code.alu("xor", RDI, RDI, false);
     // blaze_http_server_new(host, port) -> server handle in RAX.
     this.external("blaze_http_server_new");
-    this.code.call("blaze_http_server_new");
+    this.callForeign("blaze_http_server_new");
     // blaze_http_server_run(server) — never returns.
     this.code.movRegReg(RDI, RAX);
     this.external("blaze_http_server_run");
-    this.code.call("blaze_http_server_run");
+    this.callForeign("blaze_http_server_run");
   }
 
   private printText(value: SemanticValue): void {
@@ -10415,7 +10456,7 @@ class Machine {
     if (call.callee === "tl.math.exp") {
       this.at(call.args[0], NUMBER);
       this.external("exp");
-      this.code.call("exp");
+      this.callForeign("exp");
       return;
     }
     if (call.callee === "tl.arange") {
@@ -10483,7 +10524,7 @@ class Machine {
     }
     if (call.callee === "Promise") {
       this.external("blaze_promise_new");
-      this.code.call("blaze_promise_new");
+      this.callForeign("blaze_promise_new");
       // The runtime answers the promise as the address it holds, and the
       // language holds a handle as the number that address is. The address is
       // kept as the pointer it is while the executor runs, because the call
@@ -10494,7 +10535,7 @@ class Machine {
       this.load(slot);
       this.code.movRegReg(RDI, RAX);
       this.external("blaze_promise_set_current");
-      this.code.call("blaze_promise_set_current");
+      this.callForeign("blaze_promise_set_current");
       const cb = call.args[0];
       if (cb.k === "functionRef") {
         const captures = Array.isArray(cb.captures) ? cb.captures : [];
@@ -10503,7 +10544,7 @@ class Machine {
         this.callSymbol(cb.name, args, { kind: "void" });
       }
       this.external("blaze_promise_clear_current");
-      this.code.call("blaze_promise_clear_current");
+      this.callForeign("blaze_promise_clear_current");
       this.load(slot);
       this.code.zeroFloat(XMM0);
       this.code.cvtIntToFloat(XMM0, RAX, false);
@@ -10518,18 +10559,18 @@ class Machine {
       this.code.movRegReg(RDI, RAX);
       if (call.callee === "Promise.await.text") {
         this.external("blaze_promise_await_text");
-        this.code.call("blaze_promise_await_text");
+        this.callForeign("blaze_promise_await_text");
         return;
       }
       if (call.callee === "Promise.await.whole") {
         this.external("blaze_promise_await");
-        this.code.call("blaze_promise_await");
+        this.callForeign("blaze_promise_await");
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
         return;
       }
       if (call.callee === "Promise.await.bool") {
         this.external("blaze_promise_await");
-        this.code.call("blaze_promise_await");
+        this.callForeign("blaze_promise_await");
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
         this.code.test(RAX);
         this.code.setcc("ne", RAX);
@@ -10537,17 +10578,17 @@ class Machine {
       }
       if (call.callee === "Promise.await.value") {
         this.external("blaze_promise_await_value");
-        this.code.call("blaze_promise_await_value");
+        this.callForeign("blaze_promise_await_value");
         return;
       }
       if (call.callee === "Promise.await.nothing") {
         this.external("blaze_promise_await_nothing");
-        this.code.call("blaze_promise_await_nothing");
+        this.callForeign("blaze_promise_await_nothing");
         this.code.xorFloat(XMM0, XMM0);
         return;
       }
       this.external("blaze_promise_await");
-      this.code.call("blaze_promise_await");
+      this.callForeign("blaze_promise_await");
       return;
     }
     if (call.callee.startsWith("Promise.resolve") || call.callee.startsWith("Promise.settle")) {
@@ -10557,17 +10598,17 @@ class Machine {
         this.at(call.args[0], TEXT);
         this.code.movRegReg(RDI, RAX);
         this.external(`${symbol}_text`);
-        this.code.call(`${symbol}_text`);
+        this.callForeign(`${symbol}_text`);
       } else if (call.callee.endsWith(".bool")) {
         this.at(call.args[0], TRUTH);
         this.code.cvtIntToFloat(XMM0, RAX, false);
         this.external(`${symbol}_number`);
-        this.code.call(`${symbol}_number`);
+        this.callForeign(`${symbol}_number`);
       } else {
         this.at(call.args[0], NUMBER);
         const name = call.callee.endsWith(".value") ? `${symbol}_value` : `${symbol}_number`;
         this.external(name);
-        this.code.call(name);
+        this.callForeign(name);
       }
       // The runtime answers the promise as the address it holds, and the
       // language holds a handle as the number that address is.
@@ -10577,7 +10618,7 @@ class Machine {
     if (call.callee === "Promise.resolve.nothing" || call.callee === "Promise.settle.nothing") {
       const name = call.callee === "Promise.settle.nothing" ? "blaze_promise_settled_null" : "blaze_promise_resolved_null";
       this.external(name);
-      this.code.call(name);
+      this.callForeign(name);
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return;
     }
@@ -10589,13 +10630,13 @@ class Machine {
       } else if (message !== undefined) {
         this.at(message, NUMBER);
         this.external("blaze_rt_box_number");
-        this.code.call("blaze_rt_box_number");
+        this.callForeign("blaze_rt_box_number");
         this.external("blaze_rt_to_text");
-        this.code.call("blaze_rt_to_text");
+        this.callForeign("blaze_rt_to_text");
         this.code.movRegReg(RDI, RAX);
       }
       this.external("blaze_promise_rejected");
-      this.code.call("blaze_promise_rejected");
+      this.callForeign("blaze_promise_rejected");
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return;
     }
@@ -10605,18 +10646,18 @@ class Machine {
         this.at(value, TEXT);
         this.code.movRegReg(RDI, RAX);
         this.external("blaze_promise_resolve_current_text");
-        this.code.call("blaze_promise_resolve_current_text");
+        this.callForeign("blaze_promise_resolve_current_text");
       } else if (value !== undefined && value.k === "nothing") {
         this.external("blaze_promise_resolve_current_null");
-        this.code.call("blaze_promise_resolve_current_null");
+        this.callForeign("blaze_promise_resolve_current_null");
       } else if (value !== undefined && value.type.kind === "ref") {
         this.at(value, NUMBER);
         this.external("blaze_promise_resolve_current_value");
-        this.code.call("blaze_promise_resolve_current_value");
+        this.callForeign("blaze_promise_resolve_current_value");
       } else {
         this.at(call.args[0], call.argTypes[0] ?? NUMBER);
         this.external("blaze_promise_resolve_current");
-        this.code.call("blaze_promise_resolve_current");
+        this.callForeign("blaze_promise_resolve_current");
       }
       this.code.xorFloat(XMM0, XMM0);
       return;
@@ -10629,13 +10670,13 @@ class Machine {
       } else if (message !== undefined) {
         this.at(message, NUMBER);
         this.external("blaze_rt_box_number");
-        this.code.call("blaze_rt_box_number");
+        this.callForeign("blaze_rt_box_number");
         this.external("blaze_rt_to_text");
-        this.code.call("blaze_rt_to_text");
+        this.callForeign("blaze_rt_to_text");
         this.code.movRegReg(RDI, RAX);
       }
       this.external("blaze_promise_reject_current");
-      this.code.call("blaze_promise_reject_current");
+      this.callForeign("blaze_promise_reject_current");
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
@@ -10818,6 +10859,13 @@ class Machine {
    */
   private callSymbol(symbol: string, args: readonly (Held | null)[], returns: SemanticType, fresh = -1, placed = -1): void {
     this.external(symbol);
+    // What this function keeps in a vector register is written down before the
+    // arguments are placed, not after: an argument of a float is handed over in
+    // one of those registers, and writing that register into the slot the
+    // function's own value is kept in would lose it.
+    const foreign =
+      symbol !== this.fn.symbol && (this.foreign.has(symbol) || !this.callable.has(symbol));
+    if (foreign) this.saveVectorsForCall();
     const onStack: { held: Held; slot: number }[] = [];
     const registers: { register: number; held: Held; at: number }[] = [];
     let general = 0;
@@ -10967,6 +11015,7 @@ class Machine {
     if (slots > 0) this.code.aluImm("sub", RSP, slots * 8);
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
+    if (foreign) this.reloadVectorsAfterCall();
     if (returns.kind !== "void" && !isFloatType(returns) && !isWideType(returns)) this.normalize(returns);
   }
 
@@ -11098,7 +11147,7 @@ class Machine {
     // runtime registered, so it is boxed into a handle of its own first.
     this.at(value, NUMBER);
     this.external("blaze_rt_box_number");
-    this.code.call("blaze_rt_box_number");
+    this.callForeign("blaze_rt_box_number");
     const number = this.hold(NUMBER, "blaze_number");
     this.store(number);
     return number;
@@ -11123,8 +11172,38 @@ class Machine {
   }
 
   private library(symbol: string): void {
+    this.callForeign(symbol);
+  }
+
+  /**
+   * A call into code this backend did not build, with the vector registers this
+   * function keeps values in written down around it.
+   *
+   * A callee this backend builds spills every vector register it uses in its
+   * prologue and reads them back in its epilogue, so a value kept in one of them
+   * survives the call. Nothing else does. This target is System V AMD64, where
+   * no vector register is preserved by a call: the C library and the runtime are
+   * built for exactly that, and a value pinned in `xmm6` across one came back as
+   * whatever `strstr` had left there. So the registers are written down here,
+   * and read back on the far side.
+   *
+   * Writing them down is not free, and it is paid only where a call leaves this
+   * object: a function that calls nothing out of it, and a function that keeps
+   * nothing in a vector register, both write nothing here.
+   */
+  private callForeign(symbol: string): void {
     this.external(symbol);
+    this.saveVectorsForCall();
     this.code.call(symbol);
+    this.reloadVectorsAfterCall();
+  }
+
+  private saveVectorsForCall(): void {
+    for (const saved of this.callSaves) this.code.saveVector(saved.register, saved.offset, saved.single);
+  }
+
+  private reloadVectorsAfterCall(): void {
+    for (const saved of this.callSaves) this.code.movsLoad(saved.register, frame(saved.offset), saved.single);
   }
 
   private external(symbol: string): void {
