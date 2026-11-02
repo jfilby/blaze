@@ -866,6 +866,18 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ag. A parameter default ends at its own comma
+
+A class whose constructor wrote two defaults was read with one: the scan that
+skips a parameter's default value ran through the comma into the parameters
+after it, so the second parameter was never read and the field it initialised
+was never typed. A default now ends at the comma of its own list, and the comma
+inside a generic — `new Map<string, number>([["", 0]])` written as a field's
+value — is a comma of the type, not of the list, so the skip of a *value* is
+the one that stops at a comma and the skip of a *field* is not.
+
+This took the total from 751 to 746.
+
 ### 4af. A program erases a type it did not used to read
 
 The program parser — the one that reads `cli.ts` as the statements it runs —

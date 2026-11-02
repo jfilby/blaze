@@ -500,6 +500,28 @@ test("a write goes through the place the source named in full", async () => {
   assert.equal(output.trim(), "23");
 });
 
+test("a constructor with more than one default parameter is read", async () => {
+  // A parameter default ends at the comma of its own parameter list, and a
+  // field initialised with a generic call keeps the comma inside its type
+  // arguments: the one ends the parameter and the other is part of the value.
+  const output = await agreesWithNode([
+    "class Box {",
+    "  private readonly label: string;",
+    "  private readonly count: number;",
+    "  private readonly table = new Map<string, number>([[\`a\`, 1]]);",
+    "  constructor(label: string = \`c\`, count: number = 2) {",
+    "    this.label = label;",
+    "    this.count = count;",
+    "  }",
+    "  value(): string { return \`\${this.label} \${this.count} \${this.table.size}\`; }",
+    "}",
+    "export function demo(): string { return new Box().value(); }",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "c 2 1");
+});
+
 test("a program erases the type of a value it casts and of a parameter it types", async () => {
   // A program has one type for a number and one for a text, so an annotation is
   // read and erased: a union of types is the token run the type is, and `as`

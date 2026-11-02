@@ -228,7 +228,7 @@ function skipType(tokens: readonly Token[], index: number, limit: number, stops:
 }
 
 /** Advances past a value, stopping at the `;` or the class's closing `}`. */
-function skipValue(tokens: readonly Token[], index: number, limit: number): number {
+function skipValue(tokens: readonly Token[], index: number, limit: number, stopAtComma = false): number {
   let depth = 0;
   for (let at = index; at < limit; at += 1) {
     const token = tokens[at];
@@ -238,6 +238,7 @@ function skipValue(tokens: readonly Token[], index: number, limit: number): numb
       if (depth === 0) return at;
       depth -= 1;
     } else if (token.text === ";" && depth === 0) return at;
+    else if (stopAtComma && token.text === "," && depth === 0) return at;
   }
   return limit;
 }
@@ -292,7 +293,7 @@ function readParams(
     if (isPunct(tokens[index], "=")) {
       index += 1;
       defaultStart = index;
-      index = skipValue(tokens, index, limit);
+      index = skipValue(tokens, index, limit, true);
       defaultEnd = index;
     }
     params.push({ name, typeName, property, defaultStart, defaultEnd, line });
