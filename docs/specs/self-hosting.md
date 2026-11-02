@@ -688,6 +688,26 @@ resolve it, and the read that follows the link is where it pays. The refusal did
 not move to another construct in the standalone read; it stayed where it was and
 will be gone in the linked one.
 
+### 4t. The entries of a record
+
+`Object.entries(record)` names the entries of a dictionary, and only a loop that
+names the two parts of an entry could read it. The compiler's sources also build
+a map from a record — `new Map(Object.entries(functions))` — and that was
+refused with a message about lists of pairs the value model does not have.
+Neither use needs a pair: both walk the record by position, and the lowerings
+that already exist do it (`blaze_rt_dict_len` and the key and value reads by
+index pass).
+
+So `Object.entries(record)` is read wherever a collection is what asked — a
+`for` loop that names the two parts, and the source of a `new Map(...)` — and a
+`new Map(...)` built from it walks the record the entries came from rather than
+the marker the `Object.entries` left behind. Outside those two asks there is
+still nothing to hold an entry in, and the message says so.
+
+A record read through a declaration another module writes has no known entries
+in the standalone read, and the loop or the copy now waits for the link instead
+of being refused. This took the total from 1501 to 1486.
+
 ## The next slices
 
 ### What the measurement says now

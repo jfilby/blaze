@@ -453,6 +453,32 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("the entries of a record are walked and copied", async () => {
+  // `Object.entries(record)` names the entries of a dictionary. A loop that
+  // takes the two parts of one entry reads them straight out of it, and a
+  // `new Map(...)` built from the entries copies them — the record is walked by
+  // position rather than held as a list of pairs, which the value model has not.
+  const output = await agreesWithNode([
+    "export function counting(): string {",
+    "  const record: Record<string, number> = { a: 1, b: 2 };",
+    "  let total = 0;",
+    "  for (const [name, value] of Object.entries(record)) total += value;",
+    "  return String(total);",
+    "}",
+    "export function copying(): string {",
+    "  const record: Record<string, number> = { a: 1, b: 2 };",
+    "  const copy = new Map(Object.entries(record));",
+    "  let n = 0;",
+    "  if (copy.has(`a`)) n += 1;",
+    "  n += copy.get(`b`);",
+    "  return String(n);",
+    "}",
+    "console.log(counting(), copying());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3 3");
+});
+
 test("a guard that asks a text something survives a call into the runtime", async () => {
   // The machine backend keeps a value alive across a call in `xmm6` to `xmm15`,
   // and this target is System V AMD64, where no vector register is preserved by

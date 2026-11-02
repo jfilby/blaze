@@ -2529,6 +2529,17 @@ class TypeScriptParser {
   /** True while the source of a `for..of` is being read. */
   private readingIteration = false;
   /**
+   * Whether the value being read is the one a `new Map(...)` or a `new Set(...)`
+   * is built from.
+   *
+   * `Object.entries(record)` is the entries of a dictionary read by position,
+   * and a collection built from one copies them. It is not a value of its own:
+   * outside the loop that names the two parts and outside the collection that
+   * copies them there is nothing to hold it in, so the read is allowed only
+   * where one of those two is what asked.
+   */
+  private readingCollectionSource = false;
+  /**
    * The arrows the file's bodies wrote, lifted into functions of the file.
    *
    * An arrow is a function of its own, so it is a declaration the module holds
@@ -5192,6 +5203,17 @@ class TypeScriptParser {
   }
 
   /**
+   * Whether a value is held at the reference this read cannot look inside.
+   *
+   * A type another module declares is carried as one, and so is a value whose
+   * declaration the graph has not linked: what it holds is the link's to say.
+   */
+  private opaqueValue(value: Expression): boolean {
+    const type = this.valueTypeOf(value);
+    return type.kind === "ref" && type.of === null && type.name === undefined;
+  }
+
+  /**
    * Whether an annotation names a declaration this file imports and the graph
    * has not linked.
    *
@@ -7694,11 +7716,35 @@ class TypeScriptParser {
           const args = this.readCallArguments();
           const source = args[0];
           const collection = source === undefined ? null : this.collectionOfExpression(source);
-          if (source !== undefined && collection !== null && collection.kind === "map" && this.readingIteration) {
+          if (
+            source !== undefined &&
+            collection !== null &&
+            collection.kind === "map" &&
+            (this.readingIteration || this.readingCollectionSource)
+          ) {
             const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
             this.collectionExpressions.set(entries, collection);
             this.iteratedCollections.set(entries, collection);
             this.expressionTypes.set(entries, ANY_TYPE);
+            replace(entries);
+            continue;
+          }
+          // The record is read through a declaration another module writes, and
+          // the graph has not linked it: what its entries are is the link's to
+          // say. The loop names a key and a value this read cannot type, and the
+          // read that follows the link types them.
+          if (
+            source !== undefined &&
+            (this.readingIteration || this.readingCollectionSource) &&
+            this.importsArePending() &&
+            (this.pendingHolds(source) || this.opaqueValue(source))
+          ) {
+            const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
+            const unlinked: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE };
+            this.collectionExpressions.set(entries, unlinked);
+            this.iteratedCollections.set(entries, unlinked);
+            this.expressionTypes.set(entries, ANY_TYPE);
+            this.deferred.add(entries);
             replace(entries);
             continue;
           }
@@ -10710,7 +10756,10 @@ class TypeScriptParser {
     } else if (kind === "map" && this.at("[") && this.peek(1).text === "[") {
       call = this.readCollectionPairs(collection, view);
     } else {
+      const savedSource = this.readingCollectionSource;
+      this.readingCollectionSource = true;
       const source = this.readExpression();
+      this.readingCollectionSource = savedSource;
       this.expect(")");
       call = this.collectionFromSource(collection, source, view);
     }
@@ -10802,6 +10851,12 @@ class TypeScriptParser {
   /** `new Set(values)` or `new Map(other)`: the source filled entry by entry. */
   private collectionFromSource(collection: CollectionValue, source: Expression, view: Token): Expression {
     const sourceCollection = this.collectionOfExpression(source);
+    // The entries a record holds are read by position out of the record itself,
+    // so a copy of them walks the record and not the marker `Object.entries`
+    // left where the entries are.
+    const copied = source.k === "call" && source.name === "__collection_entries"
+      ? (source.args[0] as Expression)
+      : source;
     if (sourceCollection !== null) {
       // A collection built from another states its key and value with the one
       // it copies where the source wrote no generic.
@@ -10809,7 +10864,7 @@ class TypeScriptParser {
       if (collection.value.kind === "primitive" && collection.value.name === "f64" && sourceCollection.value.kind !== "primitive") {
         collection.value = sourceCollection.value;
       }
-      return this.collectionCopyHelper(collection, source, sourceCollection, view.line);
+      return this.collectionCopyHelper(collection, copied, sourceCollection, view.line);
     }
     if (collection.kind !== "set") {
       this.report(
