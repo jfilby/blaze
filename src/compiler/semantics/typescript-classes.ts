@@ -580,6 +580,13 @@ export function findField(
     if (info === undefined) return null;
     const field = (isStatic ? info.statics : info.fields).find((entry) => entry.name === name);
     if (field !== undefined) return { owner: info.name, field };
+    // `constructor(private readonly table: Table)` declares a field as well as a
+    // parameter, and the field is the one the instance carries: a read written
+    // through `this` is that field whichever way it was declared.
+    const written = isStatic ? undefined : info.constructor?.params.find((entry) => entry.property && entry.name === name);
+    if (written !== undefined) {
+      return { owner: info.name, field: { name: written.name, typeName: written.typeName, initStart: -1, initEnd: -1, line: written.line } };
+    }
     current = info.base;
   }
   return null;

@@ -890,6 +890,38 @@ test("a `??` keeps the type of the arm that names one", () => {
   assert.equal(value?.left?.name, "text.slice", "the fallback is a text, so startsWith reads the field the text holds");
 });
 
+test("a property parameter is the field it declares", () => {
+  // `constructor(private readonly names: Set<string>)` declares a field as well
+  // as a parameter, and a read written through `this` is that field: `has` is
+  // the dictionary's own membership and not a method of a class nobody wrote.
+  const body = JSON.stringify(analyzedBody([
+    "export class Names {",
+    "  constructor(private readonly names: Set<string>) {}",
+    "  asks(x: string): boolean { return this.names.has(x); }",
+    "}",
+    "",
+  ].join("\n"), "Names_asks"));
+  assert.match(body, /blaze_rt_dict_has/, "the membership is the runtime dictionary's");
+});
+
+test("a class parameter written at an imported type waits for the link", () => {
+  // The declaration is another module's, and the first read does not hold it:
+  // what is written on the parameter waits for the read that follows the link
+  // rather than being called `any` and refusing the method of nothing.
+  const analysis = typescript.analyze(
+    [
+      'import { type Table } from "./table.ts";',
+      "export class Reader {",
+      "  constructor(table: Table) {}",
+      "  names(table: Table): string[] { return table.declarations.map((one) => one.name); }",
+      "}",
+      "",
+    ].join("\n"),
+    "module.ts",
+  );
+  assert.ok(analysis.functions.some((entry) => entry.name === "Reader_names"));
+});
+
 test("a `??` keeps the shape of the arm that names one", () => {
   // The contract erases an interface to a reference, so the fields are kept
   // beside the type. A fallback whose left arm is an interface keeps that

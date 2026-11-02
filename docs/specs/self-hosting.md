@@ -653,6 +653,23 @@ turned off.
 The total holds at 1521. This slice bought no refusals; it bought an answer that
 was wrong.
 
+### 4r. A class parameter of a type another module declares
+
+Two small holes under the same refusal. A class parameter written at an imported
+type was not marked as waiting for the link, so a method written on a field of it
+was refused as a method of nothing, although the same read inside a plain
+function waited and was read after the link. And a *property* parameter —
+`constructor(private readonly names: Set<string>)` — declares a field as well as
+a parameter, but `findField` only searched `info.fields`, where a property
+parameter never appears, so `this.names.has(x)` was refused as an unknown method
+of a value the read could not type. A property parameter is now found where the
+field is written, which is what it is.
+
+This took the total from 1521 to 1501, almost all of it in the files whose
+classes take their collaborators as constructor parameters (`runtime/nim-program.ts`
+reads whole, 6 to 0, and `toolchain/driver.ts` and `toolchain/ir-wasm.ts` lose
+four each).
+
 ## The next slices
 
 ### What the measurement says now

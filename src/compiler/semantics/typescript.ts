@@ -3368,6 +3368,12 @@ class TypeScriptParser {
     }
     const shape = resolveTypeName(this.typeTable, typeName);
     this.valueShapes.set(name, shape);
+    // A parameter written at a type another module declares is a value this read
+    // cannot type until the graph links the declaration, exactly as a parameter
+    // of a body is: what is written on it waits for that link rather than being
+    // called `any`.
+    if (this.annotationWaitsForLink(typeName)) this.pendingValues.add(name);
+    else this.pendingValues.delete(name);
     const collection = this.collectionOfShape(shape);
     if (collection !== null) this.valueCollections.set(name, collection);
   }
@@ -5183,6 +5189,23 @@ class TypeScriptParser {
     // graph links it, every one of them is a type this read does not hold.
     this.notePendingAnnotation(start, end);
     return this.typeFromTokens(start, end, promisePayload);
+  }
+
+  /**
+   * Whether an annotation names a declaration this file imports and the graph
+   * has not linked.
+   *
+   * A name may be written inside a larger annotation, as `Name[]` and
+   * `Record<string, Name>` both do, so every name the text mentions is asked.
+   */
+  private annotationWaitsForLink(text: string): boolean {
+    if (this.linked) return false;
+    for (const name of text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
+      if (!this.importedTypeNames.has(name)) continue;
+      if (this.typeTable.declarations.has(name) || this.typeTable.imported.has(name)) continue;
+      return true;
+    }
+    return false;
   }
 
   /**
