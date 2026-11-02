@@ -866,6 +866,26 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4aj. An import under another name
+
+`import { buildObject as buildMachineObject }` was refused, and the compiler's
+own sources write nine of them — `parse as parseToml`, `buildObject as
+buildMachineObject`, `setTimeout as sleep`. The import binds the export under
+the name the file writes, but this linker is by name: one table holds every
+function of every file, so a call written under an alias had to be compiled
+under the name the module exports.
+
+An import now records the alias beside the name it names, and three things
+follow it. The call the file writes under the alias is emitted under the
+exported name. The signature the graph seeds for the file is seeded under the
+alias, which is the name the call is read against. The value a module exports
+as a constant is bound under the alias, so a function that reads `TABLE` reads
+the list the other module called `NAMES`. A type or a class renamed by the same
+statement still resolves, because the type binding already recorded the pair.
+
+This took the total from 735 to 726, nine exactly: every site was one refused
+`as` and nothing behind it.
+
 ### 4ai. A collection an arrow answers
 
 `const namesOf = (name: string): Set<string> => { ... }` states that the arrow

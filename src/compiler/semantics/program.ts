@@ -142,8 +142,13 @@ function importedFunctionsOf(
     if (entry.default || entry.names === null) return;
     const target = records.get(record.resolved[index] ?? "");
     if (target === undefined) return;
-    for (const name of entry.names) {
-      const declared = target.analysis.functions.find((one) => one.name === name && one.exported);
+    // A name the file imports under another name is seeded under the name this
+    // file writes: a call is read against that name and emitted under the one
+    // the other module exports.
+    const named: { local: string; imported: string }[] = entry.names.map((name) => ({ local: name, imported: name }));
+    for (const rename of entry.renames ?? []) named.push(rename);
+    for (const { local, imported } of named) {
+      const declared = target.analysis.functions.find((one) => one.name === imported && one.exported);
       if (declared === undefined) continue;
       const signature: ImportedFunction = {
         params: declared.params.map((param) => param.type),
@@ -152,7 +157,7 @@ function importedFunctionsOf(
       const handle = declared.handle as TypeScriptFunction | undefined;
       if (handle?.returnsShape !== undefined) signature.shape = handle.returnsShape;
       if (handle?.collection !== undefined) signature.collection = handle.collection;
-      functions.set(name, signature);
+      functions.set(local, signature);
     }
   });
   return functions;
@@ -276,6 +281,13 @@ function importedValuesOf(
     for (const name of entry.names ?? []) {
       const held = target.values.get(name);
       if (held !== undefined) values.set(name, held);
+    }
+    // A value the file reads under another name is bound under that name: the
+    // exported name is what the other module offers, and the alias is what this
+    // file writes in the functions that read it.
+    for (const rename of entry.renames ?? []) {
+      const held = target.values.get(rename.imported);
+      if (held !== undefined) values.set(rename.local, held);
     }
   });
   return values;

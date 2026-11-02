@@ -1431,6 +1431,69 @@ function importedNames(tokens: readonly Token[]): Set<string> {
 }
 
 /**
+ * The names a file imports under another name, as `import { a as b }` writes.
+ *
+ * `names` in the import statement are the names the other module exports,
+ * because that is what the graph links; the file reads the alias. A call the
+ * file writes under the alias is emitted under the exported name, which is the
+ * one name the function is compiled under.
+ */
+function importedRenames(tokens: readonly Token[]): Map<string, string> {
+  const renames = new Map<string, string>();
+  let index = 0;
+  while (index < tokens.length) {
+    if (tokens[index]?.text === ";") {
+      index += 1;
+      continue;
+    }
+    if (tokens[index]?.text !== "import") break;
+    index += 1;
+    // A type-only import binds no value: `{ type T as U }` is a type name, and
+    // an alias it writes is not a call the file can make.
+    let typeOnly = false;
+    if (tokens[index]?.text === "type") {
+      typeOnly = true;
+      index += 1;
+    }
+    if (tokens[index]?.text === "*") {
+      while (index < tokens.length && tokens[index]?.kind !== "string") index += 1;
+      index += 1;
+      continue;
+    }
+    if (tokens[index]?.text === "{") {
+      index += 1;
+      while (index < tokens.length && tokens[index]?.text !== "}") {
+        const token = tokens[index] as Token;
+        if (token.kind !== "ident") {
+          index += 1;
+          continue;
+        }
+        // `{ type T as U }` is the type modifier inside the braces: `T` is not
+        // a value, and a `type` followed by an alias is a value named `type`.
+        const typeName = token.text === "type" && tokens[index + 1]?.kind === "ident" && tokens[index + 1]?.text !== "as";
+        const imported = typeName ? (tokens[index + 1] as Token) : token;
+        const after = typeName ? index + 2 : index + 1;
+        if (tokens[after]?.text === "as" && tokens[after + 1]?.kind === "ident") {
+          if (!typeOnly && !typeName) renames.set((tokens[after + 1] as Token).text, imported.text);
+          index = after + 2;
+          continue;
+        }
+        index = typeName ? after : index + 1;
+      }
+      index += 1;
+    } else if (tokens[index]?.kind === "ident") {
+      index += 1;
+      if (tokens[index]?.text === ",") index += 1;
+    }
+    while (index < tokens.length && tokens[index]?.text !== "from") index += 1;
+    if (index < tokens.length) index += 1;
+    if (tokens[index]?.kind === "string") index += 1;
+    if (tokens[index]?.text === ";") index += 1;
+  }
+  return renames;
+}
+
+/**
  * Whether a function reads a value the running program holds.
  *
  * A top-level `const` of a constant expression, a function and a class are
@@ -2514,6 +2577,8 @@ class TypeScriptParser {
    * name is used before it is bound.
    */
   private readonly importedTypeNames: Set<string>;
+  /** The imported names this file writes under another name, as local to export. */
+  private readonly importedValueRenames: ReadonlyMap<string, string>;
   /** Shared with the nested parser a template string reads through. */
   private pendingType = { value: false };
   /**
@@ -2702,9 +2767,11 @@ class TypeScriptParser {
     state: ReadonlySet<string> = new Set(),
     typeTable?: TypeTable,
     importedTypeNames: ReadonlySet<string> = new Set(),
+    importedRenames: ReadonlyMap<string, string> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
+    this.importedValueRenames = importedRenames;
     this.path = path;
     this.stem = nameStem(path);
     this.diagnostics = diagnostics;
@@ -4454,6 +4521,14 @@ class TypeScriptParser {
    * real thing.
    */
   /**
+   * The name a call is emitted under: the name the other module exports, where
+   * this file imports it under another name.
+   */
+  private calledName(name: string): string {
+    return this.importedValueRenames.get(name) ?? name;
+  }
+
+  /**
    * The signature of an imported function, seeded into the tables a local
    * declaration fills. A call to the name answers what the module that writes
    * it says, which is what a field or `in` of the answer needs.
@@ -4970,6 +5045,7 @@ class TypeScriptParser {
   private readImport(typeOnly = false): ModuleImport {
     const start = this.peek();
     const types: ModuleTypeBinding[] = [];
+    const renames: ModuleTypeBinding[] = [];
     // `import * as ns from "./x.ts"` binds every export under one name. This
     // linker is by function name, so a namespace has no name to bind: the form
     // is read and the names it brings in are not. A type-only namespace names
@@ -4987,7 +5063,7 @@ class TypeScriptParser {
           start,
         );
       }
-      return this.readImportTail(start, [], false, types);
+      return this.readImportTail(start, [], false, types, renames);
     }
     // `import d from "./x.ts"` and `import d, { a, b } from "./x.ts"`. The
     // local name a default import writes is not carried, because the programs
@@ -4996,7 +5072,13 @@ class TypeScriptParser {
     // them would be a second compilation of it.
     if (!this.at("{") && (this.peek(1).kind === "ident" || this.peek(1).text === ",")) {
       this.next();
-      return this.readImportTail(start, this.accept(",") ? this.readImportedNames(typeOnly, types) : [], true, types);
+      return this.readImportTail(
+        start,
+        this.accept(",") ? this.readImportedNames(typeOnly, types, renames) : [],
+        true,
+        types,
+        renames,
+      );
     }
     if (!this.at("{")) {
       this.report(
@@ -5007,11 +5089,15 @@ class TypeScriptParser {
       this.synchronize();
       return { specifier: "", names: [], default: false, line: start.line };
     }
-    return this.readImportTail(start, this.readImportedNames(typeOnly, types), false, types);
+    return this.readImportTail(start, this.readImportedNames(typeOnly, types, renames), false, types, renames);
   }
 
   /** `{ f, g }`: the exports an import names, which it binds as they are written. */
-  private readImportedNames(typeOnly = false, types: ModuleTypeBinding[] = []): string[] {
+  private readImportedNames(
+    typeOnly = false,
+    types: ModuleTypeBinding[] = [],
+    renames: ModuleTypeBinding[] = [],
+  ): string[] {
     this.expect("{");
     const names: string[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
@@ -5037,22 +5123,16 @@ class TypeScriptParser {
         continue;
       }
       if (this.at("as")) {
-        if (!typeOnly) {
-          this.report("renaming an import is not supported", `as written on line ${name.line}`, name);
-        }
-        // The alias is read even though it is refused: the import is skipped as
-        // the statement it is, so the `}` that closes it must be read here and
-        // not left to end the statement.
+        // `{ a as b }` binds the export `a` under the name `b`. The import names
+        // `a`, because that is what the other module exports and what the linker
+        // checks; the file reads `b`, and a call written as `b` is emitted as
+        // `a`, the one name the function is compiled under.
         this.next();
         const alias = this.next();
-        if (typeOnly) {
-          // A type-only import binds nothing at run time, so a name it renames
-          // is the type's name and not a value of the module.
-          if (alias.kind === "ident") types.push({ local: alias.text, imported: name.text });
-          if (!this.accept(",")) break;
-          continue;
+        if (alias.kind === "ident") {
+          types.push({ local: alias.text, imported: name.text });
+          if (!typeOnly) renames.push({ local: alias.text, imported: name.text });
         }
-        if (alias.kind === "ident") types.push({ local: alias.text, imported: name.text });
       } else {
         types.push({ local: name.text, imported: name.text });
       }
@@ -5069,8 +5149,10 @@ class TypeScriptParser {
     names: string[],
     isDefault: boolean,
     types: ModuleTypeBinding[] = [],
+    renames: ModuleTypeBinding[] = [],
   ): ModuleImport {
     const withTypes = types.length === 0 ? {} : { types };
+    if (renames.length > 0) Object.assign(withTypes, { renames });
     if (!this.at("from")) {
       this.report('expected "from" after the imported names', `near "${this.peek().text}"`);
       this.synchronize();
@@ -8777,7 +8859,7 @@ class TypeScriptParser {
         // they were written.
         const variadic = this.variadicFunctions.get(target.name);
         if (variadic === undefined) {
-          replace({ k: "call", name: target.name, args });
+          replace({ k: "call", name: this.calledName(target.name), args });
           continue;
         }
         const rest: Expression = {
@@ -8788,7 +8870,7 @@ class TypeScriptParser {
         this.expressionTypes.set(rest, { kind: "slice", of: variadic.element });
         replace({
           k: "call",
-          name: target.name,
+          name: this.calledName(target.name),
           args: [...args.slice(0, variadic.fixed), rest],
         });
         continue;
@@ -11943,6 +12025,7 @@ class TypeScriptParser {
       this.state,
       this.typeTable,
       this.importedTypeNames,
+      this.importedValueRenames,
     );
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
@@ -12937,7 +13020,18 @@ export const typeScriptFrontend: Frontend = {
     if (imported !== undefined) {
       for (const [name, constant] of imported) scanned.constants.set(name, constant);
     }
-    const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable, importedNames(tokens));
+    const parser = new TypeScriptParser(
+      withoutClasses(tokens, classTable),
+      path,
+      diagnostics,
+      classTable,
+      tokens,
+      scanned.constants,
+      scanned.state,
+      typeTable,
+      importedNames(tokens),
+      importedRenames(tokens),
+    );
     parser.wideBigint = wideBigint;
     const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
     if (linkedFunctions !== undefined) {

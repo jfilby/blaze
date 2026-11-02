@@ -29,6 +29,13 @@ export interface ModuleImport {
   line: number;
   /** The type names the statement binds, as local name to imported name. */
   types?: ModuleTypeBinding[];
+  /**
+   * The value names the statement binds under another name, as `import { a as
+   * b }` writes: the module exports `a`, and the file reads `b`. The function is
+   * still compiled once, by the name it was declared with, and the call is
+   * written under that name.
+   */
+  renames?: ModuleTypeBinding[];
 }
 
 /** One type name an import binds, under the name the importing file uses. */

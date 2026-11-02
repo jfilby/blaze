@@ -637,6 +637,37 @@ test("a list of dynamic values holds a text and a number beside each other", asy
   }
 });
 
+test("an import binds an exported name under the name the file writes", async () => {
+  // `import { read as readOne, TABLE as NAMES }` binds a function and a value
+  // under another name. The function is compiled once, by the name its module
+  // declared, and the call the file writes under the alias is emitted under
+  // that name; the value is bound under the alias and read where it is written.
+  const sources = {
+    "lib.ts": [
+      "export interface Entry { name: string }",
+      "export const NAMES: string[] = [`a`, `b`];",
+      "export function read(value: string): Entry {",
+      "  return { name: `${value}!` };",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const main = [
+    "import { read as readOne, NAMES as TABLE } from \"./lib.ts\";",
+    "import type { Entry as Item } from \"./lib.ts\";",
+    "function use(item: Item): string { return item.name; }",
+    "export function demo(): string {",
+    "  return `${use(readOne(`x`))} ${TABLE.length} ${TABLE[0]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(main, sources, backend);
+    assert.equal(output.trim(), "x! 2 a", `the ${backend} backend reads a renamed import`);
+  }
+});
+
 test("a call of an arrow that answers a set is a set", async () => {
   // An arrow's declared result names the collection it answers, and the call is
   // written as a call of the function the arrow lifted to: without the answer
