@@ -729,6 +729,53 @@ on a field of a type another file declares — counted 623 times because every
 file that touches the IR, the program record or the analysis hits it. The queue
 it leaves behind is a much truer one, and it is the queue below.
 
+### 4v. The type arguments of a call
+
+`a.reduce<number>((sum, one) => sum + one, 0)` writes the type arguments of the
+call between its name and its arguments, and the reader had no place for them:
+the `<` was read as a comparison, so a one-argument method survived as
+`a.map < string > (...)` — a comparison of a function with a type name that
+happened to be "read" — and a two-argument one was refused as `expected ")"`.
+
+A `<` whose matching `>` is followed by `(` is now read as the type arguments of
+the call, and the list is skipped: the types are the source's statement about a
+call and the language does not carry them. The scan refuses a list that holds a
+number literal, a question mark or an arithmetic operator, because
+`shift < 32 ? value << (32 - shift) >> (32 - shift) : value` is the comparison
+and the shifts it looks like, and reading it as a type list swallowed the
+conditional (which is how the first version of this slice refused a line of
+`ir-wasm.ts` that had been read before it).
+
+This took the total from 863 to 862.
+
+### 4w. The text of a number written into a frame that is gone
+
+Two wrong answers found while trying to read `Array.from`, and both are the
+same bug in the two backends.
+
+The text of a number is written into a buffer the *function* owns — a frame
+slot, which is cheaper than an allocation for the common case of a number
+interpolated into a template that copies it straight away. But `return
+String(7)` answers that buffer, and the buffer dies with the frame:
+
+    export function label(): string { return String(7); }
+    console.log(label());            // the C backend printed one byte of
+    console.log(label() + "!");      // whatever the next frame left there
+
+The machine backend had it too, and passed only because the caller's next frame
+happened to land elsewhere. Both now copy the text into the managed heap before
+they answer it (`blaze_rt_string_new`), which costs one allocation per number
+written as a text. A template that interpolates a number pays it twice — once
+for the part and once for the join — and that is the price of an answer that
+survives the call it was written in.
+
+The second finding is why `Array.from` is not in this session's slices:
+`Array.from({ length: n }, f)` cannot be read without the length of the list the
+call *answers*, and a list a call answers has no length at all — it is a
+pointer, and the count of its elements is left behind with the callee's frame,
+unless the caller can recover it from the runtime's allocation header as
+`map`'s can. That is a value-model slice, not a syntax one, and it waits.
+
 ## The next slices
 
 ### What the measurement says now

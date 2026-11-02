@@ -3966,6 +3966,35 @@ class TypeScriptParser {
     }
   }
 
+  /**
+   * Whether the `<` at the parser opens the type arguments of a call, which is
+   * the list whose closing `>` is followed by the `(` of that call.
+   */
+  private typeArgumentsBeforeCall(): boolean {
+    // A type is written in names, commas, brackets and the punctuation of a
+    // generic: a number, a question mark or an arithmetic operator is a value,
+    // and `shift < 32 ? value << (32 - shift) >> (32 - shift) : value` is the
+    // comparison and the shifts it looks like rather than a call.
+    const allowed = new Set(["<", ">", ">>", ">>>", ",", ".", "[", "]", "|", "&", "(", ")", ":", "{", "}", "=>", "?", "!"]);
+    let depth = 0;
+    for (let at = this.position; at < this.tokens.length; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind === "number") return false;
+      const text = mark(token);
+      if (text !== "" && text !== "?" && !allowed.has(text)) return false;
+      // A `?` is the conditional of a value and not part of a type, but the
+      // `?` of an optional field is: only the one after a name in a record is
+      // a type's, and a call's arguments never write one.
+      if (text === "?" && mark(this.tokens[at - 1] as Token | undefined) !== ":") return false;
+      if (text === "<") depth += 1;
+      else if (text === ">" || text === ">>" || text === ">>>") {
+        depth -= text.length;
+        if (depth <= 0) return mark(this.tokens[at + 1] as Token | undefined) === "(";
+      }
+    }
+    return false;
+  }
+
   /** Skips a `<...>` type parameter list, including the `>>` a nested one writes. */
   private skipTypeParameters(): void {
     if (!this.at("<")) return;
@@ -7621,6 +7650,15 @@ class TypeScriptParser {
           }
         }
         replace(target.k === "argv" ? { k: "argv", index } : { k: "index", base: target, index });
+        continue;
+      }
+      // `a.map<string>(f)` writes the type arguments of the call before its
+      // own: the types are the source's statement about the call and the
+      // language does not carry them, so the list is skipped and the call is
+      // the one the `(` after it makes. A `<` that no `(` follows is the
+      // comparison it is, and is left to the reader above.
+      if (this.at("<") && this.typeArgumentsBeforeCall()) {
+        this.skipTypeParameters();
         continue;
       }
       if (this.at("(")) {
