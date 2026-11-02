@@ -1211,15 +1211,14 @@ test("a string that is never closed is reported instead of read again and again"
   assert.match(diagnostic(() => typescript.analyze("const t = `;\n", "main.ts")), /unterminated string/);
 });
 
-test("a renamed import is refused where it is written, and the file is read past it", () => {
-  // The alias was reported but not consumed, so the `}` that closes the import
-  // was read as the end of a statement and left the parser on the same token:
-  // a file whose only mistake was a rename never came back at all. The alias
-  // is read with the rest of the statement, and the refusal is still reported.
-  assert.match(
-    diagnostic(() => typescript.analyze('import { scale as fromB } from "./b.ts";\nconsole.log(1);\n', "main.ts")),
-    /renaming an import is not supported/,
-  );
+test("a renamed import is read where it is written, and the file is read past it", () => {
+  // `{ scale as fromB }` binds the export under the name the file writes. The
+  // alias is read with the rest of the statement, so the `}` that closes the
+  // import ends it and the file reads on; a call written under the alias is
+  // emitted under the name the module exports.
+  const analysis = typescript.analyze('import { scale as fromB } from "./b.ts";\nconsole.log(fromB(2));\n', "main.ts");
+  assert.equal(analysis.imports[0]?.renames?.[0]?.local, "fromB");
+  assert.equal(analysis.imports[0]?.renames?.[0]?.imported, "scale");
   // A stray closing brace is not a statement, and reading it is what makes the
   // rest of the file reachable: a scanner that stops before one must not stop
   // on it forever.

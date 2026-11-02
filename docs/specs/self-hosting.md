@@ -1115,7 +1115,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-746 refusals over 94 sources, 17 of them read whole. The largest buckets, in
+725 refusals over 94 sources, 17 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1125,13 +1125,13 @@ order, and what each of them is:
 | 20 + 14 + 9 | `an arrow function writes "found" / "changed" / "pres"` | a captured value written back, which is the box below |
 | 17 | `"+=" follows a complete value` | an assignment used as a value, as `${this.builds += 1}` is |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
-| 14 | `a spread argument is not part of the call subset` | `push(...list)`, `arr.splice(i, n, ...xs)` and `Math.max(...xs)` |
-| 14 | `an arrow function writes ...` | the box above |
-| 12 | `expected a parameter name` | an arrow whose parameter list holds a default or a rest parameter the arrow reader does not know |
+| 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
+| 12 | `expected a parameter name` | an arrow whose parameter list holds a rest parameter the arrow reader does not know |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
 | 10 | `Object.values` / `Object.keys` of a constant object | a runtime record in the standalone read; the linked read types it |
 | 10 | `an object spread reads a constant object` | the same |
 | 10 | `an optional chain reads the value before ?. twice` | a chain whose guard is a call that is not repeatable |
+| 9 | `a map holds a slice` (three element types) | a list in a dictionary, which needs a list handle that carries its length |
 
 The value-model slices still open, in the order they block the self-build:
 
@@ -1147,17 +1147,33 @@ The value-model slices still open, in the order they block the self-build:
   length, and the length is the runtime's for an allocated block and beside the
   name for a literal one.
 - **A list a callback answers.** `flatMap`, a callback that returns an object,
-  `new Map(entries)`, `Object.values` of a constant: all need a list of lists,
+  `new Map(entries)`, `Object.entries` of a constant: all need a list of lists,
   which the contract cannot spell.
-- **A collection keyed by a number.** `new Set<number>()` and
-  `Map<string, Set<number>>` are refused because the frontend's dictionary is
-  keyed by text or a reference; the runtime already has `_refkey` entries that
-  take a double, so the model only has to carry the key's type.
+- **A list in a dictionary.** The dictionary entry is one double; a list is a
+  pointer and a length, so the entry cannot carry it. The runtime's dynamic
+  array is one handle with a length, and the model would have to say that a
+  `T[]` stored in a map is one.
 - **Two object layouts for one interface.** An object literal's list field is
   typed `array<T, n>` from the length of the literal, so `{ children: [] }` and
   `{ children: [a, b] }` are two layouts and cannot be one `Node`. The IR's own
   nodes are written exactly that way, so this blocks the self-build at the
   object pass.
+
+What was closed this session, and what each was worth:
+
+| slice | total |
+| --- | --- |
+| a collection keyed by a number | 746 → 741 |
+| a collection an arrow answers | 741 → 735 |
+| an import under another name | 735 → 726 |
+| a list behind more than one field | 726 → 725 |
+
+**Two wrong answers found on the way.** A map of references read the double an
+entry holds, so the IR typed the value a number and a field of it read the
+runtime's table as an object; both backends segfaulted on `Map<Box, Box>`. Every
+key form now has a read that answers a reference. And `semantics/power-of-two`'s
+`namesOf` is an arrow, so the set it answered was a set the read did not know
+and `has`/`add` on it were methods of nothing.
 
 **A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
 the sources write when the members are laid out one per line — is read as a
@@ -1166,6 +1182,13 @@ such declaration erases. Fixing it lowers the frontend's own count and raises
 `semantics/python.ts`, because the types it erases are the ones whose lists are
 walked with `flatMap` and with callbacks that are not arrows yet. It is a real
 bug and it will pay once those methods are read.
+
+**What the entry still needs.** `cli.ts` is the first file of the self-build and
+is read as a program. It now refuses four constructs, and they are the entry's
+own: a default parameter on a program function, an array destructuring
+declaration with a rest element, `process.stdout.write`, and `switch`. The
+default parameter is the absent value above; the other three are program grammar
+and their own slice.
 
 ### The roadmap
 

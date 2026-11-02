@@ -152,19 +152,16 @@ test("one symbol cannot arrive from two files, or under another name", () => {
       ),
     /imports "shared" from both "\.\/a.ts" and "\.\/b.ts"/,
   );
-  assert.match(
-    diagnostic(() =>
-      contract(
-        {
-          "dot.ts": 'import { scale } from "./a.ts";\nimport { scale as fromB } from "./b.ts";\nexport function dot(): number {\n  return 0;\n}\n',
-          "a.ts": SCALE,
-          "b.ts": "export function scale(x: number): number {\n  return x;\n}\n",
-        },
-        "dot.ts",
-      ),
-    ),
-    /renaming an import is not supported/,
+  // A rename is a binding of the export under another name, and the edge still
+  // names the symbol the other module exports, because that is what is linked.
+  const renamed = contract(
+    {
+      "dot.ts": 'import { scale as fromB } from "./b.ts";\nexport function dot(): number {\n  return 0;\n}\n',
+      "b.ts": "export function scale(x: number): number {\n  return x;\n}\n",
+    },
+    "dot.ts",
   );
+  assert.deepEqual(renamed.edges, [{ from: "dot.ts", to: "b.ts", symbols: ["scale"] }]);
 });
 
 test("a module may export one function as its default, and an importer may bind it", () => {
