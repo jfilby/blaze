@@ -866,6 +866,40 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4al. A captured value written by an arrow
+
+An arrow is lifted into a function of the file, and the values it captures are
+handed to it as leading parameters. A parameter carries a value in, so a write
+the arrow's body makes reached the lifted function's own copy and vanished:
+`let total = 0; const add = (v) => { total += v; }; add(2);` answered `0`. The
+frontend refused the construct rather than compile the wrong answer, and the
+compiler's own sources write 152 of them.
+
+A name the arrow writes is now held in a **one-element list**, which is a
+reference, and the list is what the arrow captures. Both sides read and write
+the element: the declaration `let total = 0` becomes `const total = [0]`, the
+body writes `total[0] += v`, and every read of `total` in the function around
+the arrow is the element. The list lives in the function around the arrow, so
+it outlives the lifted call exactly as the name did, and an arrow that escapes
+as a value carries the same list in its closure.
+
+The boxing is done after the arrow's body is read, because whether a name is
+written is only known then. The nearest body that declares the name is the one
+that holds the list: a name declared inside an enclosing arrow is boxed there,
+a name declared by the function is boxed there, and a parameter is boxed where
+the body starts. A name no enclosing body declares is still refused.
+
+Two forms are not held this way, and keep the refusal they always answered: a
+**list**, because a list has no element that holds a list (`found.push(x)` in an
+arrow is the list-of-lists item below), and an `x++` **read as a value**, which
+is not a write to an element.
+
+This took the total from 725 to 651, and one source — `semantics/region.ts` —
+now reads whole. What is left of the arrow writes is 78 refusals, and almost all
+of them are lists: `pres`, `found`, `names`, `problems`, `accesses`, `calls`,
+`lines`, `args`, `bindings`, `edges`, `failures`, `statements`, `scopes`,
+`results`, `values`. They are the same list-of-lists the `flatMap` bucket needs.
+
 ### 4ak. A list behind more than one field
 
 `this.functions.waiting.push(draft)` is a push on a list two fields deep. The
@@ -1115,14 +1149,14 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-725 refusals over 94 sources, 17 of them read whole. The largest buckets, in
+651 refusals over 94 sources, 18 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 42 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
+| 43 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
 | 34 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. `toolchain/driver.ts` still earns the most, from constructs inside class members |
-| 20 + 14 + 9 | `an arrow function writes "found" / "changed" / "pres"` | a captured value written back, which is the box below |
+| 78 | `an arrow function writes "pres" / "found" / "names"` | a captured **list** written back: a box holds one value, and a list's element is not a list. The scalar and reference writes are boxed (§4al) |
 | 17 | `"+=" follows a complete value` | an assignment used as a value, as `${this.builds += 1}` is |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
@@ -1135,10 +1169,9 @@ order, and what each of them is:
 
 The value-model slices still open, in the order they block the self-build:
 
-- **A captured value written back.** An arrow's body is a function of the file,
-  and a name it writes is a name of the function that wrote the arrow, which the
-  lifted function cannot reach. It needs the name to become a box in the
-  enclosing function and every read and write to go through it.
+- **A captured list written back.** A name an arrow writes is now a one-element
+  list (§4al), but a list's element cannot be a list, so `found.push(x)` inside
+  an arrow is still refused. It needs the list handle below.
 - **An absent value.** A default parameter and an optional parameter need a
   value that is not the zero of the type. `function optionNumber(value: string |
   undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
@@ -1167,6 +1200,7 @@ What was closed this session, and what each was worth:
 | a collection an arrow answers | 741 → 735 |
 | an import under another name | 735 → 726 |
 | a list behind more than one field | 726 → 725 |
+| a captured value written by an arrow | 725 → 651 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

@@ -1938,6 +1938,331 @@ function arrowCaptures(
   return { captures, written };
 }
 
+/**
+ * A read of a value that lives in the one-element list an arrow writes back.
+ *
+ * A box is a list of one element, which is a reference: the arrow and the
+ * function around it hold the same list, so a write either makes is a write the
+ * other reads.
+ */
+function boxedRead(name: string): Expression {
+  return { k: "index", base: { k: "ident", name }, index: { k: "literal", text: "0" } };
+}
+
+/** Every read and write of `name` in a statement list, rewritten to its box. */
+function boxStatements(statements: Statement[], name: string, box: string): void {
+  for (let at = 0; at < statements.length; at += 1) {
+    statements[at] = boxStatement(statements[at] as Statement, name, box);
+  }
+}
+
+/** One statement, with every read and write of `name` rewritten to its box. */
+function boxStatement(statement: Statement, name: string, box: string): Statement {
+  switch (statement.kind) {
+    case "declare":
+      // The declaration of the name itself is the box, and the caller has
+      // already written it: a declaration of the same name inside a block is a
+      // different value, and its initialiser is not this one.
+      if (statement.name === name) return statement;
+      return { ...statement, init: boxExpression(statement.init, name, box) };
+    case "assign":
+      if (statement.target === name) {
+        return {
+          kind: "indexAssign",
+          buffer: box,
+          index: { k: "literal", text: "0" },
+          op: statement.op,
+          value: boxExpression(statement.value, name, box),
+          line: statement.line,
+        };
+      }
+      return { ...statement, value: boxExpression(statement.value, name, box) };
+    case "update":
+      if (statement.name !== name) return statement;
+      return {
+        kind: "indexAssign",
+        buffer: box,
+        index: { k: "literal", text: "0" },
+        op: statement.op === "++" ? "+=" : "-=",
+        value: { k: "literal", text: "1" },
+        line: statement.line,
+      };
+    case "memberAssign":
+      return { ...statement, value: boxExpression(statement.value, name, box) };
+    case "indexAssign":
+      return {
+        ...statement,
+        buffer: statement.buffer === name ? box : statement.buffer,
+        index: boxExpression(statement.index, name, box),
+        value: boxExpression(statement.value, name, box),
+      };
+    case "result":
+      return statement.value === null ? statement : { ...statement, value: boxExpression(statement.value, name, box) };
+    case "throw":
+    case "print":
+    case "expression":
+      return { ...statement, value: boxExpression(statement.value, name, box) };
+    case "if":
+      return {
+        ...statement,
+        condition: boxExpression(statement.condition, name, box),
+        then: boxBlock(statement.then, name, box),
+        otherwise: boxBlock(statement.otherwise, name, box),
+      };
+    case "while":
+    case "doWhile":
+      return {
+        ...statement,
+        condition: boxExpression(statement.condition, name, box),
+        body: boxBlock(statement.body, name, box),
+      };
+    case "loop":
+      return {
+        ...statement,
+        from: boxExpression(statement.from, name, box),
+        to: boxExpression(statement.to, name, box),
+        step: statement.step === null ? null : boxExpression(statement.step, name, box),
+        body: boxBlock(statement.body, name, box),
+      };
+    case "forOf":
+      return {
+        ...statement,
+        of: statement.of === name ? box : statement.of,
+        body: boxBlock(statement.body, name, box),
+      };
+    case "try":
+      return {
+        ...statement,
+        body: boxBlock(statement.body, name, box),
+        catchBody: statement.catchBody === null ? null : boxBlock(statement.catchBody, name, box),
+        finallyBody: statement.finallyBody === null ? null : boxBlock(statement.finallyBody, name, box),
+      };
+    case "break":
+    case "continue":
+      return statement;
+  }
+}
+
+/** A statement list rewritten, as one statement list. */
+function boxBlock(statements: Statement[], name: string, box: string): Statement[] {
+  boxStatements(statements, name, box);
+  return statements;
+}
+
+/** One expression, with every read of `name` rewritten to its box. */
+function boxExpression(value: Expression, name: string, box: string): Expression {
+  switch (value.k) {
+    case "ident":
+      return value.name === name ? boxedRead(box) : value;
+    case "literal":
+    case "bigint":
+    case "null":
+      return value;
+    case "argv":
+      return value.index === null ? value : { ...value, index: boxExpression(value.index, name, box) };
+    case "length":
+      // A name whose length is read is a list, which a box never holds.
+      return value;
+    case "lengthOf":
+      return { ...value, of: boxExpression(value.of, name, box) };
+    case "index":
+      return {
+        ...value,
+        base: boxExpression(value.base, name, box),
+        index: boxExpression(value.index, name, box),
+      };
+    case "slice":
+      return {
+        ...value,
+        base: boxExpression(value.base, name, box),
+        start: value.start === null ? null : boxExpression(value.start, name, box),
+        stop: value.stop === null ? null : boxExpression(value.stop, name, box),
+        step: value.step === null ? null : boxExpression(value.step, name, box),
+      };
+    case "member":
+      return { ...value, base: boxExpression(value.base, name, box) };
+    case "call":
+      return { ...value, args: value.args.map((argument) => boxExpression(argument, name, box)) };
+    case "object":
+      return {
+        ...value,
+        fields: value.fields.map((field) => ({ ...field, value: boxExpression(field.value, name, box) })),
+      };
+    case "sized":
+      return { ...value, count: boxExpression(value.count, name, box) };
+    case "buffer":
+      return { ...value, values: value.values.map((element) => boxExpression(element, name, box)) };
+    case "text":
+      return {
+        ...value,
+        parts: value.parts.map((part) => (part.k === "text" ? part : { ...part, value: boxExpression(part.value, name, box) })),
+      };
+    case "fixed":
+      return { ...value, of: boxExpression(value.of, name, box) };
+    case "binary":
+      return { ...value, left: boxExpression(value.left, name, box), right: boxExpression(value.right, name, box) };
+    case "unary":
+      return { ...value, operand: boxExpression(value.operand, name, box) };
+    case "conditional":
+      return {
+        ...value,
+        condition: boxExpression(value.condition, name, box),
+        then: boxExpression(value.then, name, box),
+        otherwise: boxExpression(value.otherwise, name, box),
+      };
+    case "update":
+      // An `x++` read as a value is not a write to an element, and the caller
+      // refuses the capture before it rewrites anything.
+      return value;
+    case "arrow":
+      return { ...value, captures: value.captures.map((capture) => (capture === name ? box : capture)) };
+    case "capture":
+      return { ...value, closure: boxExpression(value.closure, name, box) };
+    case "invoke":
+      return {
+        ...value,
+        callee: boxExpression(value.callee, name, box),
+        args: value.args.map((argument) => boxExpression(argument, name, box)),
+      };
+    case "append":
+      // A push belongs to a list side of the box, which is not a value a box
+      // holds; the values pushed are ordinary reads and are rewritten.
+      return { ...value, values: value.values.map((element) => boxExpression(element, name, box)) };
+  }
+}
+
+/** The declaration of `name` in a body, at any depth, or null. */
+function findDeclaration(
+  statements: readonly Statement[],
+  name: string,
+): Extract<Statement, { kind: "declare" }> | null {
+  for (const statement of statements) {
+    if (statement.kind === "declare" && statement.name === name) return statement;
+    for (const block of nestedBlocks(statement)) {
+      const found = findDeclaration(block, name);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+/** The statement lists a statement holds. */
+function nestedBlocks(statement: Statement): Statement[][] {
+  switch (statement.kind) {
+    case "loop":
+    case "while":
+    case "doWhile":
+    case "forOf":
+      return [statement.body];
+    case "if":
+      return [statement.then, statement.otherwise];
+    case "try":
+      return [statement.body, statement.catchBody ?? [], statement.finallyBody ?? []];
+    default:
+      return [];
+  }
+}
+
+/** Whether a body reads `x++` or `x--` as a value, which a box cannot hold. */
+function readsUpdateIn(statements: readonly Statement[], name: string): boolean {
+  for (const statement of statements) {
+    if (readsUpdate(statement, name)) return true;
+  }
+  return false;
+}
+
+function readsUpdate(statement: Statement, name: string): boolean {
+  const expression = (value: Expression | null): boolean => value !== null && expressionReadsUpdate(value, name);
+  switch (statement.kind) {
+    case "declare":
+      return expression(statement.init);
+    case "assign":
+      return expression(statement.value);
+    case "update":
+      return false;
+    case "memberAssign":
+      return expression(statement.value);
+    case "indexAssign":
+      return expression(statement.index) || expression(statement.value);
+    case "result":
+      return expression(statement.value);
+    case "throw":
+    case "print":
+    case "expression":
+      return expression(statement.value);
+    case "if":
+      return expression(statement.condition) || readsUpdateIn(statement.then, name) || readsUpdateIn(statement.otherwise, name);
+    case "while":
+    case "doWhile":
+      return expression(statement.condition) || readsUpdateIn(statement.body, name);
+    case "loop":
+      return expression(statement.from) || expression(statement.to) || expression(statement.step) || readsUpdateIn(statement.body, name);
+    case "forOf":
+      return readsUpdateIn(statement.body, name);
+    case "try":
+      return readsUpdateIn(statement.body, name) ||
+        (statement.catchBody !== null && readsUpdateIn(statement.catchBody, name)) ||
+        (statement.finallyBody !== null && readsUpdateIn(statement.finallyBody, name));
+    case "break":
+    case "continue":
+      return false;
+  }
+}
+
+function expressionReadsUpdate(value: Expression, name: string): boolean {
+  switch (value.k) {
+    case "update":
+      return value.name === name;
+    case "literal":
+    case "bigint":
+    case "ident":
+    case "null":
+    case "length":
+      return false;
+    case "argv":
+      return value.index !== null && expressionReadsUpdate(value.index, name);
+    case "lengthOf":
+      return expressionReadsUpdate(value.of, name);
+    case "index":
+      return expressionReadsUpdate(value.base, name) || expressionReadsUpdate(value.index, name);
+    case "slice":
+      return expressionReadsUpdate(value.base, name) ||
+        (value.start !== null && expressionReadsUpdate(value.start, name)) ||
+        (value.stop !== null && expressionReadsUpdate(value.stop, name)) ||
+        (value.step !== null && expressionReadsUpdate(value.step, name));
+    case "member":
+      return expressionReadsUpdate(value.base, name);
+    case "call":
+      return value.args.some((argument) => expressionReadsUpdate(argument, name));
+    case "object":
+      return value.fields.some((field) => expressionReadsUpdate(field.value, name));
+    case "sized":
+      return expressionReadsUpdate(value.count, name);
+    case "buffer":
+      return value.values.some((element) => expressionReadsUpdate(element, name));
+    case "text":
+      return value.parts.some((part) => part.k === "value" && expressionReadsUpdate(part.value, name));
+    case "fixed":
+      return expressionReadsUpdate(value.of, name);
+    case "binary":
+      return expressionReadsUpdate(value.left, name) || expressionReadsUpdate(value.right, name);
+    case "unary":
+      return expressionReadsUpdate(value.operand, name);
+    case "conditional":
+      return expressionReadsUpdate(value.condition, name) ||
+        expressionReadsUpdate(value.then, name) ||
+        expressionReadsUpdate(value.otherwise, name);
+    case "arrow":
+      return false;
+    case "capture":
+      return expressionReadsUpdate(value.closure, name);
+    case "invoke":
+      return expressionReadsUpdate(value.callee, name) || value.args.some((argument) => expressionReadsUpdate(argument, name));
+    case "append":
+      return value.values.some((element) => expressionReadsUpdate(element, name));
+  }
+}
+
 /** The tokens one construct of a file is written in. */
 interface Span {
   start: number;
@@ -2537,6 +2862,20 @@ class TypeScriptParser {
   private arrowDeclared: string | null = null;
   /** The calls the body being read writes of the arrow it is bound to. */
   private arrowSelfCalls: Expression[] = [];
+  /**
+   * The names an arrow of the function being read writes, and the one-element
+   * list each of them lives in.
+   *
+   * An arrow is lifted into a function of its own, and a captured value is
+   * handed to it by value: a write the body makes would be a write to the
+   * lifted function's own copy. A name the arrow writes is therefore held in a
+   * one-element list, which is a reference, and the list is handed over
+   * instead. Both the arrow and the function around it read and write the
+   * element, and the write is the write the source wrote.
+   */
+  private arrowBoxes = new Map<string, { box: string; element: TypeExpr }>();
+  /** How many boxes this file's arrows have needed, for naming them. */
+  private boxCount = 0;
   /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
@@ -3713,6 +4052,7 @@ class TypeScriptParser {
     line: number,
     promise?: TypeExpr,
   ): DeclaredFunction {
+    this.finishBoxes(body, params, true);
     return {
       name,
       exported,
@@ -5178,6 +5518,7 @@ class TypeScriptParser {
     this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
+    this.arrowBoxes = new Map();
     // A collection a file declares at the top is a name its functions read, so
     // what each of them holds is carried into the function being read.
     this.valueCollections = new Map(this.valueCollections);
@@ -5187,6 +5528,7 @@ class TypeScriptParser {
     /** The rest parameter, when the function declares one. */
     let restAt: { element: TypeExpr; fixed: number } | null = null;
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => {
+      this.finishBoxes(body, params, true);
       const fn: TypeScriptFunction = {
         name: name.text,
         params,
@@ -9463,13 +9805,45 @@ class TypeScriptParser {
       captures.captures = captures.captures.filter((capture) => capture !== declared);
       captures.written = captures.written.filter((written) => written !== declared);
     }
-    if (captures.written.length > 0) {
+    // A name the body writes is a name the arrow cannot carry: a parameter is
+    // handed its value, so the write would reach the lifted function's copy.
+    // The name is held in a one-element list instead, which both sides read and
+    // write, and the list is what the arrow captures.
+    if (captures.written.length > 0 && !this.boxArrowCaptures(body, captures.written)) {
       this.report(
         `an arrow function writes "${captures.written[0]}", a name of the function around it`,
         "an arrow is lifted into a function of its own, so a captured value is handed to it and cannot be written back; declare a function where the value is written, or keep the sum in the arrow's own result",
         start,
       );
     }
+    if (captures.written.length > 0) {
+      const boxed = captures.written.every((written) => this.arrowBoxes.has(written));
+      if (boxed) {
+        // The box of a name the body only writes is a value the body reads, so
+        // it joins the values the arrow captures even though the name itself
+        // was never read.
+        const captured: string[] = [];
+        for (const capture of captures.captures) {
+          const box = this.arrowBoxes.get(capture)?.box ?? capture;
+          if (!captured.includes(box)) captured.push(box);
+        }
+        for (const written of captures.written) {
+          const box = this.arrowBoxes.get(written)?.box;
+          if (box !== undefined && !captured.includes(box)) captured.push(box);
+        }
+        captures.captures = captured;
+        captures.written = [];
+      }
+    }
+    // A name an arrow inside this one wrote, and this body declares, is boxed
+    // here: the box belongs to the nearest body that holds the name.
+    this.finishBoxes(body, params, false);
+    // A box written into this body is a name the body declares, so it is not a
+    // name the arrow captures from around it, whatever the inner arrow's own
+    // capture list said before the box existed.
+    captures.captures = captures.captures.filter(
+      (capture) => !params.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
+    );
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
     // The map or set an arrow answers is the one its declaration states, and a
     // call of the arrow is a call whose answer is a collection: the call names
@@ -9492,6 +9866,105 @@ class TypeScriptParser {
   }
 
   /**
+   * The type of the one-element list a box is, for an arrow that captures it.
+   *
+   * A box is made while the body of the arrow that wrote the name is read, and
+   * the map of value types the enclosing body reads through is put back when
+   * that body ends, so the box is not a name that map holds. The boxes are
+   * kept for the whole file, and this is where a capture asks what one is.
+   */
+  private boxTypeOf(name: string): TypeExpr | null {
+    for (const entry of this.arrowBoxes.values()) {
+      if (entry.box === name) return { kind: "slice", of: entry.element };
+    }
+    return null;
+  }
+
+  /**
+   * Holds the names an arrow writes in one-element lists.
+   *
+   * Answers false when one of them cannot be held that way: a list's element is
+   * not a list, so a name that holds a list has no box, and an `x++` read as a
+   * value is not a write to an element. Nothing is rewritten in that case, and
+   * the arrow answers the refusal it always did.
+   */
+  private boxArrowCaptures(body: Statement[], written: readonly string[]): boolean {
+    for (const name of written) {
+      if (this.arrowBoxes.has(name)) continue;
+      const type = this.valueTypes.get(name) ?? ANY_TYPE;
+      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return false;
+      if (readsUpdateIn(body, name)) return false;
+    }
+    for (const name of written) {
+      if (this.arrowBoxes.has(name)) continue;
+      const type = this.valueTypes.get(name) ?? ANY_TYPE;
+      const box = `__box_${this.stem}_${this.boxCount}`;
+      this.boxCount += 1;
+      this.arrowBoxes.set(name, { box, element: type });
+      this.valueTypes.set(box, { kind: "slice", of: type });
+    }
+    for (const name of written) {
+      const box = this.arrowBoxes.get(name)?.box;
+      if (box !== undefined) boxStatements(body, name, box);
+    }
+    return true;
+  }
+
+  /**
+   * Puts a name an arrow wrote into the one-element list both sides read.
+   *
+   * The declaration the name was read at becomes the list, and every read and
+   * write of the name in this body goes through the element. A name this body
+   * does not declare and is not a parameter of belongs to a body around it, and
+   * is left for that body; at the outermost body there is no such body, and the
+   * write is the refusal an arrow always answered.
+   */
+  private finishBoxes(
+    body: Statement[],
+    params: readonly { name: string; type: TypeExpr }[],
+    outermost: boolean,
+  ): void {
+    if (this.arrowBoxes.size === 0) return;
+    for (const [name, entry] of [...this.arrowBoxes]) {
+      const box = entry.box;
+      const held = findDeclaration(body, name);
+      const parameter = params.find((one) => one.name === name);
+      if (held === null && parameter === undefined) {
+        if (!outermost) continue;
+        this.report(
+          `an arrow function writes "${name}", a name of the function around it`,
+          "an arrow is lifted into a function of its own, so a captured value is handed to it and cannot be written back; declare a function where the value is written, or keep the sum in the arrow's own result",
+        );
+        this.arrowBoxes.delete(name);
+        continue;
+      }
+      const element = held?.type ?? parameter?.type ?? entry.element;
+      // The reads and writes are rewritten first: the list the box is made of
+      // holds the value the name was declared with, and that value is the one
+      // the source wrote, not a read of the name the box replaces.
+      const initial = held?.init ?? null;
+      boxStatements(body, name, box);
+      const declared = findDeclaration(body, name);
+      if (declared !== null) {
+        declared.name = box;
+        declared.type = { kind: "slice", of: element };
+        declared.init = { k: "buffer", element: typeToString(element), values: [initial ?? { k: "null" }] };
+      } else {
+        // A parameter is handed over by value, so the list is made where the
+        // body starts and the parameter is what it holds.
+        body.unshift({
+          kind: "declare",
+          name: box,
+          type: { kind: "slice", of: element },
+          init: { k: "buffer", element: typeToString(element), values: [{ k: "ident", name }] },
+          line: body[0]?.line ?? 0,
+        });
+      }
+      this.arrowBoxes.delete(name);
+    }
+  }
+
+  /**
    * The function an arrow's body becomes.
    *
    * The values it captured are its leading parameters, so the body reads them
@@ -9506,7 +9979,7 @@ class TypeScriptParser {
     captures: readonly string[],
     line: number,
   ): ArrowBinding {
-    const captureTypes = captures.map((capture) => this.valueTypes.get(capture) ?? ANY_TYPE);
+    const captureTypes = captures.map((capture) => this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE);
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
     const written = params.map((param) => ({ name: param.name, type: param.type }));
     const lifted: TypeScriptFunction = {

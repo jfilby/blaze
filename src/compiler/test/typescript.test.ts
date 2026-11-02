@@ -1467,26 +1467,58 @@ test("a call of a value is a call through the closure, not of a name", () => {
   assert.equal(call?.returns?.kind, "primitive");
 });
 
-test("an arrow that writes a name of the function around it is refused", () => {
+test("an arrow that writes a name of the function around it writes the list both sides hold", () => {
   // A lifted arrow is handed the values it captured, and a parameter carries a
-  // value in but cannot write one back. Silently writing a copy would be a
-  // program that answers 0 where the source answers 2.
+  // value in but cannot write one back. A name the arrow writes is therefore
+  // held in a one-element list, which is a reference: the arrow and the
+  // function around it write and read the same element, and the answer is the
+  // one the source wrote rather than the copy a parameter would have been.
+  const body = analyzedBody(
+    [
+      "export function f(x: number): number {",
+      "  let total = 0;",
+      "  const add = (v: number): void => { total += v; };",
+      "  add(x);",
+      "  return total;",
+      "}",
+      "",
+    ].join("\n"),
+    "f",
+  ) as {
+    kind: string;
+    name?: string;
+    type?: unknown;
+    init?: { k: string; values?: unknown[] };
+    value?: { name?: string; args?: { name?: string }[] };
+  }[];
+  assert.equal(body[0]?.name, "__box_module_0", "the name the arrow writes is a list");
+  assert.deepEqual(body[0]?.type, { kind: "slice", of: { kind: "primitive", name: "f64" } });
+  assert.equal(body[0]?.init?.k, "buffer");
+  assert.equal(body[2]?.value?.name, "__closure_module_0");
+  assert.equal(body[2]?.value?.args?.[0]?.name, "__box_module_0", "the arrow is handed the list");
+  const read = body[3] as { value?: { base?: { name?: string } } };
+  assert.equal(read.value?.base?.name, "__box_module_0", "the result reads the element");
+});
+
+test("an arrow that writes a list it captured is refused", () => {
+  // A list has no element that holds a list, so there is no one-element list
+  // to put it in: the write is the refusal an arrow always answered.
   assert.match(
     diagnostic(() =>
       typescript.analyze(
         [
           "export function f(x: number): number {",
-          "  let total = 0;",
-          "  const add = (v: number): void => { total += v; };",
+          "  const found: number[] = [];",
+          "  const add = (v: number): void => { found.push(v); };",
           "  add(x);",
-          "  return total;",
+          "  return found.length;",
           "}",
           "",
         ].join("\n"),
         "main.ts",
       ),
     ),
-    /an arrow function writes "total", a name of the function around it/,
+    /an arrow function writes "found", a name of the function around it/,
   );
 });
 

@@ -720,6 +720,35 @@ test("a map holds a reference under a number key and under a reference key", asy
   }
 });
 
+test("an arrow writes a name of the function around it", async () => {
+  // An arrow is lifted into a function of its own, and the values it captured
+  // are handed to it by value: a write would reach the lifted function's copy.
+  // A name the arrow writes is held in a one-element list instead, which is a
+  // reference, so both sides write the element the source wrote.
+  const source = [
+    "function twice(f: (n: number) => void, n: number): void {",
+    "  f(n);",
+    "  f(n);",
+    "}",
+    "export function demo(): string {",
+    "  let total = 0;",
+    "  let note = ``;",
+    "  const add = (n: number): void => { total = total + n; };",
+    "  const say = (t: string): void => { note = note + t; };",
+    "  twice(add, 2);",
+    "  twice(add, 5);",
+    "  for (let i = 0; i < 2; i += 1) say(`${i}`);",
+    "  return `${total} ${note}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "14 01", `the ${backend} backend writes the captured name`);
+  }
+});
+
 test("a list behind more than one field takes a push", async () => {
   // `o.inner.list.push(x)`: the owner is a reference, so it is read into a name
   // of the statement's own and the push is written through that name. A place
