@@ -654,6 +654,21 @@ export function collectionOfType(type: ResolvedType): { kind: "map"; key: Resolv
   return null;
 }
 
+/**
+ * What one field of a record holds, which is what `T["field"]` names.
+ *
+ * A name is read as the declaration it stands for first, because that is where
+ * the field is written. A declaration the table does not hold, and a field it
+ * does not write, name nothing this read can say: both are `any`. `T` may also
+ * be a list or a collection, and every index of one of those is an element.
+ */
+function indexedFieldOf(table: TypeTable, type: ResolvedType, field: string): ResolvedType {
+  const found = fieldOfType(table, type, field);
+  if (found !== null) return found.type;
+  if (type.kind === "list" || type.kind === "map" || type.kind === "set") return elementOfType(table, type) ?? ANY_TYPE;
+  return ANY_TYPE;
+}
+
 /** A small recursive-descent reader over the text of a type annotation. */
 class TypeText {
   private at = 0;
@@ -729,7 +744,17 @@ class TypeText {
       if (!this.take("[")) return type;
       this.space();
       if (this.take("]")) type = { kind: "list", of: type };
-      else {
+      else if (this.text[this.at] === '"' || this.text[this.at] === "'" || this.text[this.at] === "`") {
+        // `T["field"]` is what the field holds: the declaration the name stands
+        // for is read first, because the field is written on it and not on the
+        // name.
+        const open = this.at;
+        this.stringLiteral();
+        const field = this.text.slice(open + 1, this.at - 1);
+        this.space();
+        this.take("]");
+        type = indexedFieldOf(this.table, type, field);
+      } else {
         // A tuple is a list of the values it names.
         const first = this.union();
         while (this.take(",")) this.union();

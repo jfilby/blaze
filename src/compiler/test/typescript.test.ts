@@ -890,6 +890,22 @@ test("a `??` keeps the type of the arm that names one", () => {
   assert.equal(value?.left?.name, "text.slice", "the fallback is a text, so startsWith reads the field the text holds");
 });
 
+test("an indexed access names what the field holds", () => {
+  // `Outcome["failure"]` is the type the field holds, which is where the source
+  // writes the one shape of a value it kept from somewhere else. Reading it as
+  // `any` made every method written on the value a method of nothing.
+  const body = JSON.stringify(analyzedBody([
+    "interface Failure { detail: string | undefined }",
+    "interface Outcome { failure: Failure | undefined }",
+    "export function f(failure: Outcome[`failure`]): string {",
+    "  return failure === undefined || failure.detail === undefined ? `` : failure.detail.trim();",
+    "}",
+    "",
+  ].join("\n"), "f"));
+  assert.doesNotMatch(body, /"k":"hole"/, "the value is read at the type the field names");
+  assert.match(body, /text\.trim/, "the method is the text method of the field's own type");
+});
+
 test("a property parameter is the field it declares", () => {
   // `constructor(private readonly names: Set<string>)` declares a field as well
   // as a parameter, and a read written through `this` is that field: `has` is

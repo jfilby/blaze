@@ -670,6 +670,24 @@ classes take their collaborators as constructor parameters (`runtime/nim-program
 reads whole, 6 to 0, and `toolchain/driver.ts` and `toolchain/ir-wasm.ts` lose
 four each).
 
+### 4s. `T["field"]`
+
+`CandidateOutcome["failure"]` is how the compiler's own sources write the type of
+a value they kept from a union — `failure` is `{ detail?: string; ... } |
+undefined` — and the type reader read the `[` as the start of a tuple or a list,
+so the annotation became `any`. Every method written on the value was then a
+method of nothing: `failure.detail.trim()` was refused on the line the source
+wrote it, although the `=== undefined` guard in front of it is exactly what makes
+it a text.
+
+An index written as a string literal is now read as the field it names, through
+the same `fieldOfType` the member chains use, and an index into a list, a map or
+a set is the element of one. The total is flat at 1501: the declaration the names
+are written on is another module's, so the read that stands alone still cannot
+resolve it, and the read that follows the link is where it pays. The refusal did
+not move to another construct in the standalone read; it stayed where it was and
+will be gone in the linked one.
+
 ## The next slices
 
 ### What the measurement says now
