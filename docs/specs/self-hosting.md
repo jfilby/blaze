@@ -898,46 +898,47 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-862 refusals over 94 sources, 15 of them read whole. The largest buckets, in
+785 refusals over 94 sources, 16 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 33 | `expected ")"` | mostly cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. The one construct of its own left is `Object.create(null)` |
-| 20 | `an optional chain reads the value before ?. twice` | a value bound beside its statement (`pendingBefore`), which the reader has — but a dictionary read that answers a *reference* cannot be read twice yet: see below |
-| 20 | `unexpected "=" in an expression` | an assignment used as a value: `x.length = n`, and `+=` inside a template (`${this.builds += 1}`) |
-| 16 | `in` asks a value whose fields the type does not write down` | the tag a union of shapes would need to answer the question at run time |
-| 13 | `"flatMap"`, 11 `"map"`, 9 `Object.values` of a constant | a list the callback answers, which is a list of lists |
-| 12 | `"+=" follows a complete value` | the same assignment-expression node as `unexpected "="` |
-| 12 | `a Map is built from entries` | `new Map(list.map((fn) => [fn.name, fn]))` — a list of pairs |
-| 12 | `a spread argument is not part of the call subset` | `push(...list)`, `arr.splice(i, n, ...xs)` and `Math.max(...xs)` |
-| 12 | `an arrow function writes "found", a name of the function around it` | a closure that captures a name of the function it is written in |
-| 12 | `an empty array needs the type of its elements` | `const xs = []` whose element type is only fixed later |
-| 11 | `an arrow function ... which is not` — `walk calls itself` | a recursive arrow, which the lift cannot make a function of its own |
+| 41 | `an empty array needs the type of its elements` | mostly the standalone read: the field is written at a type another module declares, so the element type is the link's to say. A handful are real and wait on the leading-bar bug below |
+| 39 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. `toolchain/driver.ts` alone earns sixteen of them from one class member whose value never ends where the class reader says it does |
+| 24 | `in` asks a value whose fields the type does not write down | half are an imported *constant* (`operator.text in COMPOUND_OPERATORS`), which the link does not bind: it binds types |
+| 20 + 14 + 9 | `an arrow function writes "found" / "changed" / "pres"` | a captured value written back: the arrow's writes are the lifted function's, and the enclosing one never sees them |
+| 17 | `"+=" follows a complete value` | an assignment used as a value, as `${this.builds += 1}` is |
+| 15 | `expected a parameter name` | a parameter written at an inline object type (`{ a: string; b: number }`) whose `;` is not a stop the annotation reader knows |
+| 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
+| 14 | `a spread argument is not part of the call subset` | `push(...list)`, `arr.splice(i, n, ...xs)` and `Math.max(...xs)` |
+| 10 | `Object.values reads a constant object` | a file constant written as a record the reader does not fold |
+| 10 | `an object spread reads a constant object` | the same |
+| 10 | `an optional chain reads the value before ?. twice` | a chain whose guard is a call that is not one of the dictionary's reads |
 
-The three that would move the most with one change are the assignment
-expression (32 refusals between its two messages), the list of pairs (36 across
-`flatMap`, `map`, `Map` from entries and `Object.values`) and the capturing
-arrow (21). Each of them is a node of the IR the frontend does not have rather
-than a special case in the parser.
+Three findings that block a slice a reader would expect to be easy:
 
-Two findings that block a slice a reader would expect to be easy:
+- **A captured value written back.** An arrow's body is a function of the file,
+  and a name it writes is a name of the function that wrote the arrow, which the
+  lifted function has no way to reach. Supporting it means the name is a box in
+  the enclosing function and every read and write of it goes through the box —
+  a rewrite of the enclosing body, which is being read as the arrow is found.
+- **A list's length.** `list.length = n` truncates. A list is a pointer and a
+  length, and the length lives in the runtime's header for an allocated block
+  and beside the name for a literal one, so the write has to say which.
+- **Two object layouts for one interface.** An object literal's list field is
+  typed `array<T, n>` from the length of the literal, so `{ children: [] }` and
+  `{ children: [a, b] }` are two layouts and cannot be one `Node`. The IR's own
+  nodes are written exactly that way, so this blocks the self-build — at the
+  object pass, which the gap report does not measure.
 
-- **A value of a dictionary that is a reference.** `m.get(k)` over
-  `Map<string, Info>` is lowered to a conditional whose taken arm is the address
-  the dictionary stored as a double, and whose absent arm is the *boxed* number
-  zero — a handle into the runtime's table. Reading a field of an absent entry
-  therefore reads the table as an object: `m.get("zz").name` segfaults on both
-  backends, and has since the dictionary was written. `?.` on the same value
-  does not compile at all in the C backend, because the null test compares that
-  double with `NULL`. The slice is: give a dictionary's reference value one
-  representation, so the absent arm is the null reference and the test is one
-  comparison.
-- **The length of a list a call answers.** `Array.from({ length: n }, f)` is a
-  sized block and a loop away, and it is read in nine places in the sources —
-  but a list a call answers is a pointer with no count, and `for (const v of
-  values)` cannot walk it. `map`'s result is walked today because the *caller*
-  passes a length it already had. That is a value-model slice.
+**A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
+the sources write when the members are laid out one per line — is read as a
+member that is `any`, and a union whose first member is `any` is `any`, so every
+such declaration erases. Fixing it lowers the frontend's own count by 5 and
+raises `semantics/python.ts` by 22, because the types it erases are the ones
+whose lists are walked with `flatMap` and with callbacks that are not arrows
+yet. It is a real bug and it will pay once those methods are read; until then it
+does not lower the budget.
 
 ### The roadmap
 
