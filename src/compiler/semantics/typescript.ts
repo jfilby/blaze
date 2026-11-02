@@ -6221,6 +6221,34 @@ class TypeScriptParser {
    * that name, and an object or a block is a reference: writing through the name
    * is writing the value the source named.
    */
+  /**
+   * A place stepped by one, as the value it had.
+   *
+   * The place is read into a name of the statement's own, the name is stepped
+   * beside the statement, and the value is the name: a read of the place and
+   * the step are the two things one `x++` does, and the place itself is named
+   * by whatever the language names a value with.
+   */
+  private stepPlace(target: Expression, op: "++" | "--", line: number): Expression | null {
+    if (target.k !== "member" && target.k !== "index") return null;
+    const base = this.writeTarget(target.base, line);
+    if (base === null) return null;
+    const place: Expression = target.k === "member"
+      ? { k: "member", base: { k: "ident", name: base }, field: target.field }
+      : { k: "index", base: { k: "ident", name: base }, index: target.index };
+    const held = `__stepped${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: held, type: null, init: place, line });
+    const type = this.valueTypeOf(place);
+    this.valueTypes.set(held, type);
+    const shape = this.shapeOf(place);
+    if (shape !== null) this.valueShapes.set(held, shape);
+    const one: Expression = { k: "literal", text: "1" };
+    this.pendingBefore.push(target.k === "member"
+      ? { kind: "memberAssign", base, field: target.field, op: op === "++" ? "+=" : "-=", value: one, line }
+      : { kind: "indexAssign", buffer: base, index: target.index, op: op === "++" ? "+=" : "-=", value: one, line });
+    return { k: "ident", name: held };
+  }
+
   private readChainAssignment(): Statement | null {
     const start = this.position;
     const operatorAt = this.assignmentOperatorAt(start);
@@ -8426,8 +8454,14 @@ class TypeScriptParser {
       if (this.at("++") || this.at("--")) {
         const target = current();
         const op = this.next().text as "++" | "--";
-        if (target.k !== "ident") return this.missing(`"${op}" needs a name to change`, this.peek());
-        return { k: "update", name: target.name, op, prefix: false };
+        if (target.k === "ident") return { k: "update", name: target.name, op, prefix: false };
+        // A place that is not a name is stepped through a name of the
+        // statement's own: the place is read into a name and that name is
+        // stepped, which is the value the source reads — `this.tokens[i++]` is
+        // the element at the old `i`, and `i` is one more afterwards.
+        const stepped = this.stepPlace(target, op, this.peek().line);
+        if (stepped !== null) return stepped;
+        return this.missing(`"${op}" needs a name to change`, this.peek());
       }
       // These follow a value, and none of them changes it: `as` and
       // `satisfies` assert a type the value already has, and `!` says a value

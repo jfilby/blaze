@@ -841,6 +841,17 @@ This took the total from 812 to 799. The eight writes left behind it are
 `list.length = n`, which truncates a list, and that is a value-model slice of its
 own: a list is a block the runtime allocated and its length is the runtime's.
 
+### 4aa. A place stepped by one
+
+The same story for `++` and `--`: `this.tokens[this.position++]` is the element
+at the old position, and the position is one more afterwards. Only a name could
+be stepped. A place that is a field or an element is now read into a name of the
+statement's own, the name is stepped beside the statement, and the value is that
+name — so the read of the place and the step are the two things one `x++` does,
+and the step still happens where the statement returns.
+
+This took the total from 799 to 785.
+
 **A wrong answer found while testing it.** `a[i] += 1` on the machine backend
 wrote the one and not the sum, on both backends' *front end*: the element was
 read out of the slot the element's *address* is kept in rather than through the

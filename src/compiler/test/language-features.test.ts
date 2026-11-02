@@ -457,6 +457,25 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a place that is not a name is stepped by one", async () => {
+  // `this.tokens[i++]` is the element at the old `i`, and `i` is one more
+  // afterwards. The place is read into a name of the statement's own and the
+  // step happens beside the statement, so the value is the one the source read
+  // even where the statement returns.
+  const output = await agreesWithNode([
+    "interface Cursor { position: number; tokens: string[] }",
+    "export function demo(): string {",
+    "  const cursor: Cursor = { position: 1, tokens: [`a`, `b`, `c`] };",
+    "  const first = cursor.tokens[cursor.position++];",
+    "  const second = cursor.tokens[cursor.position++];",
+    "  return `${first}${second}${cursor.position}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "bc3");
+});
+
 test("a write goes through the place the source named in full", async () => {
   // A write is written to a place, and the place may be named by anything the
   // language names a value with: a cast, a field of a field, an element of a
