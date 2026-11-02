@@ -708,6 +708,27 @@ A record read through a declaration another module writes has no known entries
 in the standalone read, and the loop or the copy now waits for the link instead
 of being refused. This took the total from 1501 to 1486.
 
+### 4u. A method on a value the read cannot look inside
+
+The largest slice of the session, and the smallest change. A value whose type is
+another module's declaration is carried as an opaque reference until the graph
+links it, and the read already waited for the link when the *name* the value was
+read through was one of those. It did not wait when the value itself was the
+opaque one: `this.frame().block.statements.push(statement)` has no name to check,
+and the class lookup refused `push` as a method of nothing.
+
+Now a method written on an opaque value waits for the link the same way, which is
+what the opaque reference means: what the value holds is the link's to say. The
+read that follows the link holds the declaration and refuses the method there
+where there is really none — `importsArePending()` is already false for a linked
+read, so the deferral cannot leak into a build. What it changes is the
+*measurement*: 1486 to 863, and 15 sources read whole instead of 11.
+
+That is not 623 slices' worth of work: it is one construct — the method written
+on a field of a type another file declares — counted 623 times because every
+file that touches the IR, the program record or the analysis hits it. The queue
+it leaves behind is a much truer one, and it is the queue below.
+
 ## The next slices
 
 ### What the measurement says now

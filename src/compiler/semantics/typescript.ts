@@ -8023,7 +8023,7 @@ class TypeScriptParser {
             // follows the link holds the declaration, and refuses the method
             // there where there really is none. A method written on anything
             // else is refused here, whatever else the file imports.
-            if (this.importsArePending() && this.pendingHolds(receiver)) {
+            if (this.importsArePending() && (this.pendingHolds(receiver) || this.opaqueValue(receiver))) {
               // What the method answers is a value of the same unlinked
               // declaration, so it waits for the link too: a method written on
               // it is a method of a value this read cannot type yet.

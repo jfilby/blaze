@@ -890,6 +890,30 @@ test("a `??` keeps the type of the arm that names one", () => {
   assert.equal(value?.left?.name, "text.slice", "the fallback is a text, so startsWith reads the field the text holds");
 });
 
+test("a method on a value the read cannot look inside waits for the link", () => {
+  // The value is a field of a type another module declares, reached through a
+  // call, so there is no name to check for a pending import. It is an opaque
+  // reference, which is exactly the statement that what it holds is the link's
+  // to say: the method waits rather than being refused as a method of nothing.
+  const analysis = typescript.analyze(
+    [
+      'import { type Box } from "./box.ts";',
+      "export class Builder {",
+      "  private held: Box;",
+      "  add(box: Box, value: number): void {",
+      "    box.items.push(value);",
+      "    this.held.items.push(value);",
+      "    this.heavy().items.push(value);",
+      "  }",
+      "  heavy(): Box { return this.held; }",
+      "}",
+      "",
+    ].join("\n"),
+    "module.ts",
+  );
+  assert.equal(analysis.awaitingLink, true, "the read says it is waiting for the link");
+});
+
 test("an indexed access names what the field holds", () => {
   // `Outcome["failure"]` is the type the field holds, which is where the source
   // writes the one shape of a value it kept from somewhere else. Reading it as
