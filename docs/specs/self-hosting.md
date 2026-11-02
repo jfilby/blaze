@@ -1036,47 +1036,57 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-785 refusals over 94 sources, 16 of them read whole. The largest buckets, in
+746 refusals over 94 sources, 17 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 41 | `an empty array needs the type of its elements` | mostly the standalone read: the field is written at a type another module declares, so the element type is the link's to say. A handful are real and wait on the leading-bar bug below |
-| 39 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. `toolchain/driver.ts` alone earns sixteen of them from one class member whose value never ends where the class reader says it does |
-| 24 | `in` asks a value whose fields the type does not write down | half are an imported *constant* (`operator.text in COMPOUND_OPERATORS`), which the link does not bind: it binds types |
-| 20 + 14 + 9 | `an arrow function writes "found" / "changed" / "pres"` | a captured value written back: the arrow's writes are the lifted function's, and the enclosing one never sees them |
+| 42 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
+| 34 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. `toolchain/driver.ts` still earns the most, from constructs inside class members |
+| 20 + 14 + 9 | `an arrow function writes "found" / "changed" / "pres"` | a captured value written back, which is the box below |
 | 17 | `"+=" follows a complete value` | an assignment used as a value, as `${this.builds += 1}` is |
-| 15 | `expected a parameter name` | a parameter written at an inline object type (`{ a: string; b: number }`) whose `;` is not a stop the annotation reader knows |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `push(...list)`, `arr.splice(i, n, ...xs)` and `Math.max(...xs)` |
-| 10 | `Object.values reads a constant object` | a file constant written as a record the reader does not fold |
+| 14 | `an arrow function writes ...` | the box above |
+| 12 | `expected a parameter name` | an arrow whose parameter list holds a default or a rest parameter the arrow reader does not know |
+| 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
+| 10 | `Object.values` / `Object.keys` of a constant object | a runtime record in the standalone read; the linked read types it |
 | 10 | `an object spread reads a constant object` | the same |
-| 10 | `an optional chain reads the value before ?. twice` | a chain whose guard is a call that is not one of the dictionary's reads |
+| 10 | `an optional chain reads the value before ?. twice` | a chain whose guard is a call that is not repeatable |
 
-Three findings that block a slice a reader would expect to be easy:
+The value-model slices still open, in the order they block the self-build:
 
 - **A captured value written back.** An arrow's body is a function of the file,
   and a name it writes is a name of the function that wrote the arrow, which the
-  lifted function has no way to reach. Supporting it means the name is a box in
-  the enclosing function and every read and write of it goes through the box —
-  a rewrite of the enclosing body, which is being read as the arrow is found.
+  lifted function cannot reach. It needs the name to become a box in the
+  enclosing function and every read and write to go through it.
+- **An absent value.** A default parameter and an optional parameter need a
+  value that is not the zero of the type. `function optionNumber(value: string |
+  undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
+  program function that omits `maximum` has nothing sound to pass.
 - **A list's length.** `list.length = n` truncates. A list is a pointer and a
-  length, and the length lives in the runtime's header for an allocated block
-  and beside the name for a literal one, so the write has to say which.
+  length, and the length is the runtime's for an allocated block and beside the
+  name for a literal one.
+- **A list a callback answers.** `flatMap`, a callback that returns an object,
+  `new Map(entries)`, `Object.values` of a constant: all need a list of lists,
+  which the contract cannot spell.
+- **A collection keyed by a number.** `new Set<number>()` and
+  `Map<string, Set<number>>` are refused because the frontend's dictionary is
+  keyed by text or a reference; the runtime already has `_refkey` entries that
+  take a double, so the model only has to carry the key's type.
 - **Two object layouts for one interface.** An object literal's list field is
   typed `array<T, n>` from the length of the literal, so `{ children: [] }` and
   `{ children: [a, b] }` are two layouts and cannot be one `Node`. The IR's own
-  nodes are written exactly that way, so this blocks the self-build — at the
-  object pass, which the gap report does not measure.
+  nodes are written exactly that way, so this blocks the self-build at the
+  object pass.
 
 **A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
 the sources write when the members are laid out one per line — is read as a
 member that is `any`, and a union whose first member is `any` is `any`, so every
-such declaration erases. Fixing it lowers the frontend's own count by 5 and
-raises `semantics/python.ts` by 22, because the types it erases are the ones
-whose lists are walked with `flatMap` and with callbacks that are not arrows
-yet. It is a real bug and it will pay once those methods are read; until then it
-does not lower the budget.
+such declaration erases. Fixing it lowers the frontend's own count and raises
+`semantics/python.ts`, because the types it erases are the ones whose lists are
+walked with `flatMap` and with callbacks that are not arrows yet. It is a real
+bug and it will pay once those methods are read.
 
 ### The roadmap
 
