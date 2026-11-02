@@ -780,31 +780,46 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-1521 refusals over 94 sources, 10 of them read whole. The largest buckets, in
+862 refusals over 94 sources, 15 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 57 | `"map"` is not a method | the element type of a receiver read out of a dictionary at run time — a list inside a dictionary is a handle, and its methods need the dynamic array the runtime already carries — and the callback's own result type |
-| 25 | `expected ")"` | `new Array(n)` (3), an optional parameter with a default (`cli.ts`), `??=`, and cascade from a refused statement before them |
-| 23 | `"push"` | the same element-type story as `map` |
-| 19 | `Object.entries` in a loop | a list of pairs, which the value model has not |
-| 19 | `an optional chain reads the value before ?. twice` | an assignment-expression node, so `f()?.x` can bind `f()` once without reordering the statement |
-| 18 | `"filter"`, 15 `"flatMap"`, 14 `"some"`, 13 `"find"` | the callback's own result type, and a receiver read out of a dictionary |
-| 18 | `"has"` | a `Map`/`Set` read out of a dictionary, and `hasOwnProperty` of a record keyed by text |
-| 16 | `"trim"`, 11 `"startsWith"` | a text whose type is a union of a text and the absent value, which erases to the absent one |
-| 15 | `in` | the test a union of shapes is discriminated by: a tag the value does not carry |
-| 14 | `unexpected "="` | `x.length = n`, and `+=` used as a value inside a template (`${this.builds += 1}`) |
+| 33 | `expected ")"` | mostly cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. The one construct of its own left is `Object.create(null)` |
+| 20 | `an optional chain reads the value before ?. twice` | a value bound beside its statement (`pendingBefore`), which the reader has — but a dictionary read that answers a *reference* cannot be read twice yet: see below |
+| 20 | `unexpected "=" in an expression` | an assignment used as a value: `x.length = n`, and `+=` inside a template (`${this.builds += 1}`) |
+| 16 | `in` asks a value whose fields the type does not write down` | the tag a union of shapes would need to answer the question at run time |
+| 13 | `"flatMap"`, 11 `"map"`, 9 `Object.values` of a constant | a list the callback answers, which is a list of lists |
+| 12 | `"+=" follows a complete value` | the same assignment-expression node as `unexpected "="` |
+| 12 | `a Map is built from entries` | `new Map(list.map((fn) => [fn.name, fn]))` — a list of pairs |
+| 12 | `a spread argument is not part of the call subset` | `push(...list)`, `arr.splice(i, n, ...xs)` and `Math.max(...xs)` |
+| 12 | `an arrow function writes "found", a name of the function around it` | a closure that captures a name of the function it is written in |
+| 12 | `an empty array needs the type of its elements` | `const xs = []` whose element type is only fixed later |
+| 11 | `an arrow function ... which is not` — `walk calls itself` | a recursive arrow, which the lift cannot make a function of its own |
 
-The three that would move the most with one change are still the pair
-`map`/`push` and the optional chain, and each of them needs something the value
-model does not have yet rather than another special case in the parser.
+The three that would move the most with one change are the assignment
+expression (32 refusals between its two messages), the list of pairs (36 across
+`flatMap`, `map`, `Map` from entries and `Object.values`) and the capturing
+arrow (21). Each of them is a node of the IR the frontend does not have rather
+than a special case in the parser.
 
-The miscompilation found while reading the source is fixed (§4q): a `text.indexOf`
-call in a guard, followed by another statement, answered garbage on the machine
-backend because the vector registers the runtime writes were believed to be
-preserved by a call. It was the Windows rule applied to a System V target, and
-it is the only wrong answer this reading has found that was not a refusal.
+Two findings that block a slice a reader would expect to be easy:
+
+- **A value of a dictionary that is a reference.** `m.get(k)` over
+  `Map<string, Info>` is lowered to a conditional whose taken arm is the address
+  the dictionary stored as a double, and whose absent arm is the *boxed* number
+  zero — a handle into the runtime's table. Reading a field of an absent entry
+  therefore reads the table as an object: `m.get("zz").name` segfaults on both
+  backends, and has since the dictionary was written. `?.` on the same value
+  does not compile at all in the C backend, because the null test compares that
+  double with `NULL`. The slice is: give a dictionary's reference value one
+  representation, so the absent arm is the null reference and the test is one
+  comparison.
+- **The length of a list a call answers.** `Array.from({ length: n }, f)` is a
+  sized block and a loop away, and it is read in nine places in the sources —
+  but a list a call answers is a pointer with no count, and `for (const v of
+  values)` cannot walk it. `map`'s result is walked today because the *caller*
+  passes a length it already had. That is a value-model slice.
 
 ### The roadmap
 
