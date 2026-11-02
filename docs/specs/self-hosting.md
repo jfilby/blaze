@@ -866,6 +866,22 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ao. An optional chain reads the value once
+
+`f()?.field` reads `f()` in the guard and again inside the branch, so a chain
+whose value before `?.` is not repeatable was refused — ten of them, in the
+compiler's own sources. The value is now written into a name of the statement's
+own before the statement, exactly as `a.b.c = d` already wrote its owner, and
+both reads are the name: the call runs once, which is what the source wrote.
+
+The one place a name before the statement would change the answer is a loop
+condition, which is read every turn rather than once. The while and do-while
+conditions are read with a flag set, and a chain there keeps the refusal. A
+counted `for` loop already treats its bound as a value computed once, so a chain
+in a bound is hoisted like any other.
+
+This took the total from 618 to 610, and `runtime/standalone.ts` reads whole.
+
 ### 4an. Two calls written the same way are two calls
 
 A wrong answer, found while testing the slice below. `inlineCall` inlines every
@@ -1195,7 +1211,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-618 refusals over 94 sources, 19 of them read whole. The largest buckets, in
+610 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1209,7 +1225,6 @@ order, and what each of them is:
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
 | 10 | `Object.values` / `Object.keys` of a constant object | a runtime record in the standalone read; the linked read types it |
 | 10 | `an object spread reads a constant object` | the same |
-| 10 | `an optional chain reads the value before ?. twice` | a chain whose guard is a call that is not repeatable |
 | 9 | `a map holds a slice` (three element types) | a list in a dictionary, which needs a list handle that carries its length |
 
 The value-model slices still open, in the order they block the self-build:
@@ -1247,6 +1262,7 @@ What was closed this session, and what each was worth:
 | a list behind more than one field | 726 → 725 |
 | a captured value written by an arrow | 725 → 651 |
 | an assignment where an expression goes | 651 → 618 |
+| an optional chain reads the value once | 618 → 610 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

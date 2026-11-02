@@ -2877,6 +2877,17 @@ class TypeScriptParser {
   /** How many boxes this file's arrows have needed, for naming them. */
   private boxCount = 0;
   /**
+   * Whether the expression being read is a while loop's condition, which is
+   * read again every turn.
+   *
+   * A value the compiler materialises is written before the statement the
+   * expression is part of, which is the value the source computed once. A
+   * condition is not computed once: hoisting a call out of it would run the
+   * call before the loop rather than every turn, so the condition keeps the
+   * refusal the language answered before.
+   */
+  private loopCondition = false;
+  /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
    *
@@ -7913,9 +7924,20 @@ class TypeScriptParser {
   private readWhile(): Statement {
     const start = this.next();
     this.expect("(");
-    const condition = this.readExpression();
+    const condition = this.inLoopCondition(() => this.readExpression());
     this.expect(")");
     return { kind: "while", condition, body: this.loopBody(), line: start.line };
+  }
+
+  /** A condition a loop reads every turn, which is not read once. */
+  private inLoopCondition<T>(read: () => T): T {
+    const saved = this.loopCondition;
+    this.loopCondition = true;
+    try {
+      return read();
+    } finally {
+      this.loopCondition = saved;
+    }
   }
 
   private readDoWhile(): Statement {
@@ -7926,7 +7948,7 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: start.line };
     }
     this.expect("(");
-    const condition = this.readExpression();
+    const condition = this.inLoopCondition(() => this.readExpression());
     this.expect(")");
     this.accept(";");
     return { kind: "doWhile", condition, body, line: start.line };
@@ -7988,6 +8010,14 @@ class TypeScriptParser {
       : null;
     if (op === null) return value;
     if (value.k !== "ident" && value.k !== "member") return value;
+    if (this.loopCondition) {
+      this.report(
+        "an assignment written in a loop condition is not part of the subset",
+        "write the value into a name inside the loop, and test the name",
+        operator,
+      );
+      return this.hole();
+    }
     this.next();
     const written = this.readExpression();
     if (value.k === "ident") {
@@ -8656,15 +8686,23 @@ class TypeScriptParser {
       else optional.then = next;
     };
     const beginOptional = (): void => {
-      const target = current();
+      let target = current();
       // The value before `?.` is read by the condition and again inside the
-      // branch, so it has to be a value reading twice does not change.
+      // branch, so it has to be a value reading twice does not change. A value
+      // that is not one is read into a name before the statement, which is the
+      // value the source read — unless the chain is a loop condition, which is
+      // read every turn and has no statement of its own to be read before.
       if (!repeatableExpression(target)) {
-        this.report(
-          "an optional chain reads the value before `?.` twice",
-          "write the value into a name first, as in const value = f(); value?.field",
-          this.peek(),
-        );
+        const held = this.loopCondition ? null : this.writeTarget(target, this.peek().line);
+        if (held === null) {
+          this.report(
+            "an optional chain reads the value before `?.` twice",
+            "write the value into a name first, as in const value = f(); value?.field",
+            this.peek(),
+          );
+        } else {
+          target = { k: "ident", name: held };
+        }
       }
       const link: OptionalLink = {
         condition: { k: "binary", op: "!=", left: target, right: { k: "null" } },

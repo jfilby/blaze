@@ -1522,6 +1522,54 @@ test("an arrow that writes a list it captured is refused", () => {
   );
 });
 
+test("an optional chain reads a call once, into a name before the statement", () => {
+  // `f()?.field` reads `f()` in the condition and again in the branch, so the
+  // call is written into a name of the statement's own first and both reads are
+  // the name: the call runs once, which is what the source wrote.
+  const body = analyzedBody(
+    [
+      "class Box { value: number; constructor(value: number) { this.value = value; } }",
+      "function make(): Box { return new Box(4); }",
+      "export function f(): number { return make()?.value ?? 0; }",
+      "",
+    ].join("\n"),
+    "f",
+  ) as { kind: string; name?: string; init?: { k?: string }; value?: { k?: string; condition?: { left?: { name?: string } }; then?: { name?: string } } }[];
+  const held = body[0];
+  assert.equal(held?.kind, "declare");
+  assert.equal(held?.init?.k, "call");
+  const result = body[1] as {
+    kind?: string;
+    value?: { condition?: { left?: { name?: string } }; then?: { base?: { name?: string } } };
+  };
+  assert.equal(result?.kind, "result");
+  // The chain is the conditional its two reads become.
+  assert.equal(result?.value?.condition?.left?.name, held?.name, "the condition reads the name");
+  assert.equal(result?.value?.then?.base?.name, held?.name, "the branch reads the same name");
+});
+
+test("an optional chain in a loop condition is not hoisted out of the loop", () => {
+  // A condition is read every turn, and a value written before the loop would
+  // be read once: the refusal stands rather than the call being moved.
+  assert.match(
+    diagnostic(() =>
+      typescript.analyze(
+        [
+          "class Box { value: number; constructor(value: number) { this.value = value; } }",
+          "function make(): Box { return new Box(4); }",
+          "export function f(): number {",
+          "  while (make()?.value !== undefined) { break; }",
+          "  return 0;",
+          "}",
+          "",
+        ].join("\n"),
+        "main.ts",
+      ),
+    ),
+    /an optional chain reads the value before `\?\.` twice/,
+  );
+});
+
 test("an assignment in a template string is a statement before the one that writes it", () => {
   // `\`n${this.builds += 1}\`` both writes and reads the field. A write is a
   // statement, so it runs before the statement the string is part of, and the

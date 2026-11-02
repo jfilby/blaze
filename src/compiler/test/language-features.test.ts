@@ -775,6 +775,32 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("an optional chain on a call reads the call once", async () => {
+  // `make()?.value` is read by the condition and by the branch, so the call is
+  // written into a name first: a call read twice would allocate twice and
+  // answer a different object each time.
+  const source = [
+    "class Box { value: number; constructor(value: number) { this.value = value; } }",
+    "class Maker {",
+    "  made: number;",
+    "  constructor() { this.made = 0; }",
+    "  next(): Box { this.made += 1; return new Box(this.made); }",
+    "}",
+    "export function demo(): string {",
+    "  const maker = new Maker();",
+    "  const first = maker.next()?.value ?? 0;",
+    "  const second = maker.next()?.value ?? 0;",
+    "  return `${first} ${second} ${maker.made}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 2 2", `the ${backend} backend reads the call once`);
+  }
+});
+
 test("two calls written the same way are two calls", async () => {
   // Inlining writes a body per call, and two calls written the same way are the
   // same value: a rewrite that replaced every equal call wrote one body and
