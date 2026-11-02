@@ -974,6 +974,22 @@ test("`Object.create(null)` is the empty record", () => {
   assert.match(body, /blaze_rt_dict_new/, "the empty record is the runtime's dictionary");
 });
 
+test("a write through a cast or a chain is a statement of its own", () => {
+  const body = JSON.stringify(analyzedBody([
+    "interface Nested { at: number }",
+    "interface Box { value: number; nested: Nested }",
+    "interface Holder { items: number[] }",
+    "export function f(box: Box, holder: Holder, at: number): number {",
+    "  (box as Box).nested.at = at;",
+    "  holder.items[0] = at;",
+    "  return box.nested.at;",
+    "}",
+    "",
+  ].join("\n"), "f"));
+  assert.match(body, /"kind":"memberAssign"/, "the field of the cast is written");
+  assert.match(body, /"kind":"indexAssign"/, "the element of the field is written");
+});
+
 test("an indexed access names what the field holds", () => {
   // `Outcome["failure"]` is the type the field holds, which is where the source
   // writes the one shape of a value it kept from somewhere else. Reading it as

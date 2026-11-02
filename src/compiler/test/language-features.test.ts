@@ -457,6 +457,30 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("a write goes through the place the source named in full", async () => {
+  // A write is written to a place, and the place may be named by anything the
+  // language names a value with: a cast, a field of a field, an element of a
+  // field. The place is read into a name of the statement's own, so the value
+  // before the last field is read once, and the write goes through that name —
+  // which is the value the source named, because an object is a reference.
+  const output = await agreesWithNode([
+    "interface Nested { at: number }",
+    "interface Box { value: number; nested: Nested }",
+    "interface Holder { items: number[] }",
+    "export function demo(): string {",
+    "  const box: Box = { value: 0, nested: { at: 0 } };",
+    "  const holder: Holder = { items: [1, 2, 3] };",
+    "  (box as Box).nested.at = 7;",
+    "  holder.items[1] = 9;",
+    "  holder.items[2] += 4;",
+    "  return `${box.nested.at + holder.items[1] + holder.items[2]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "23");
+});
+
 test("an entry a map does not hold is absent, and `?.` reads nothing", async () => {
   // `m.get(k)` asks the dictionary whether it holds the key and reads it only
   // where it does. The answer for a key it does not hold is the zero of the

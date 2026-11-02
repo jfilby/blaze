@@ -4006,15 +4006,6 @@ class Machine {
     this.code.movRegMemSized(RAX, where, widthOf(type), signedOf(type));
   }
 
-  /** The value in a slot of the frame, read as the type it is declared at. */
-  private readSlotAt(type: SemanticType, offset: number): void {
-    if (isFloatType(type)) {
-      this.code.movsLoad(XMM0, frame(offset), widthOf(type) === 4);
-      return;
-    }
-    this.code.movRegMemSized(RAX, frame(offset), widthOf(type), signedOf(type));
-  }
-
   /** The accumulator widened to the width and sign of the type it is read as. */
   private normalize(type: SemanticType): void {
     if (isFloatType(type) || isWideType(type) || widthOf(type) === 8) return;
@@ -4375,7 +4366,12 @@ class Machine {
         // written down rather than carried by the instruction that reads it.
         this.builtAddress(statement.buffer, statement.index, element);
         this.store(place);
-        this.readSlotAt(element, place.offset);
+        // The element is read *through* the address the write goes to, not out
+        // of the slot the address is kept in: the slot holds the address, and
+        // reading it as the element read the address as the old value, so
+        // `a[i] += 1` wrote the one and not the sum.
+        this.code.movRegMem(RAX, frame(place.offset));
+        this.readAt(element);
         const read = this.hold(element, "blaze_read");
         this.store(read);
         if (statement.op === "**=") {

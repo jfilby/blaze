@@ -821,6 +821,33 @@ there and the empty name for one that is.
 
 This took the total from 828 to 812.
 
+### 4z. A write to the place the source named in full
+
+A write is written to a *place*, and the place was only ever a plain name, a
+field of a name, or an element of a name. The sources write
+`(loop as { neverExits?: boolean }).neverExits = true`,
+`this.results[at] = value` and `holder.items[i] += 1`: a cast, an element of a
+field, an element of any value at all. The reader looked at the tokens and gave
+up, and what was left was read as an expression, which is `unexpected "="`.
+
+A statement that begins with an expression beginning at depth zero and whose
+top-level operator is an assignment is now read as the write it is: the place is
+read as an expression, and where it is not a name it is read into a name of the
+statement's own first, so the value before the last field is read once — which
+is what the source wrote. The write itself is the `memberAssign` or `indexAssign`
+the IR already had.
+
+This took the total from 812 to 799. The eight writes left behind it are
+`list.length = n`, which truncates a list, and that is a value-model slice of its
+own: a list is a block the runtime allocated and its length is the runtime's.
+
+**A wrong answer found while testing it.** `a[i] += 1` on the machine backend
+wrote the one and not the sum, on both backends' *front end*: the element was
+read out of the slot the element's *address* is kept in rather than through the
+address, so the old value was the address itself. `readSlotAt` is gone; the
+compound write loads the address and reads through it, which is what the plain
+write beside it already did.
+
 **A second finding.** Two object literals of the same interface whose list field
 holds a different number of values are laid out as two layouts: the field is
 typed `array<T,n>` from the length of the literal, so `{ children: [] }` and

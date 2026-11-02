@@ -5858,6 +5858,8 @@ class TypeScriptParser {
 
     const assigned = this.readAssignment();
     if (assigned !== null) return assigned;
+    const through = this.readChainAssignment();
+    if (through !== null) return through;
     return this.readEffect();
   }
 
@@ -6204,6 +6206,134 @@ class TypeScriptParser {
       value,
       line: target.line,
     };
+  }
+
+  /**
+   * A statement that writes through a value it names in full: `(x as Y).field`,
+   * `this.a[i]`, `a.b[i].c`.
+   *
+   * A write is written to a *place*, and the place may be named by anything the
+   * language names a value with — a cast, a call, a field, an element. The
+   * places a plain name reaches are read by `readAssignment` and its two
+   * helpers, which look at the tokens directly; this reads the place as the
+   * expression it is and finds the operator after it. A place that is not a name
+   * is read into a name of the statement's own first, so the write goes through
+   * that name, and an object or a block is a reference: writing through the name
+   * is writing the value the source named.
+   */
+  private readChainAssignment(): Statement | null {
+    const start = this.position;
+    const operatorAt = this.assignmentOperatorAt(start);
+    if (operatorAt === null) return null;
+    const target = this.readExpression();
+    if (this.position !== operatorAt) {
+      this.position = start;
+      return null;
+    }
+    const operator = this.next();
+    const line = this.tokens[start]?.line ?? operator.line;
+    if (target.k !== "member" && target.k !== "index") {
+      this.position = start;
+      return null;
+    }
+    const field = target.k === "member" ? target.field : null;
+    const base = target.base;
+    const held = this.writeTarget(base, line);
+    if (held === null) {
+      this.position = start;
+      return null;
+    }
+    // A list has no writable length: what it holds is a block the runtime
+    // allocated, and the source writes the elements of it rather than its size.
+    const ownerType = this.valueTypeOf(base);
+    if (field === "length" && (ownerType.kind === "slice" || ownerType.kind === "array" || ownerType.kind === "text")) {
+      this.position = start;
+      return null;
+    }
+    const place: Expression = target.k === "member"
+      ? { k: "member", base: { k: "ident", name: held }, field: field as string }
+      : { k: "index", base: { k: "ident", name: held }, index: target.index };
+    const shape = this.shapeOf(place);
+    const value = shape === null
+      ? this.readExpression()
+      : this.readAt(this.typeExprOfShape(shape), () => this.readExpression(), shape);
+    this.accept(";");
+    this.valueArrows.delete(held);
+    if (field === "length") this.valueTypes.delete(held);
+    this.forgetNarrowing(`${held}.${field ?? ""}`);
+    if (operator.text === "??=") {
+      return target.k === "member"
+        ? {
+            kind: "memberAssign",
+            base: held,
+            field: field as string,
+            op: "=",
+            value: { k: "binary", op: "??", left: place, right: value },
+            line,
+          }
+        : {
+            kind: "indexAssign",
+            buffer: held,
+            index: (target as { index: Expression }).index,
+            op: "=",
+            value: { k: "binary", op: "??", left: place, right: value },
+            line,
+          };
+    }
+    return target.k === "member"
+      ? { kind: "memberAssign", base: held, field: field as string, op: operator.text as AssignOperator, value, line }
+      : { kind: "indexAssign", buffer: held, index: (target as { index: Expression }).index, op: operator.text as AssignOperator, value, line };
+  }
+
+  /**
+   * The name a write goes through: the target itself where it is a name, and a
+   * name of the statement's own otherwise.
+   */
+  private writeTarget(base: Expression, line: number): string | null {
+    const named = base.k === "ident" ? (base.name === "this" && this.currentClass !== null ? "self" : base.name) : null;
+    if (named !== null) return named;
+    const held = `__place${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: held, type: null, init: base, line });
+    this.valueTypes.set(held, this.valueTypeOf(base));
+    const shape = this.shapeOf(base);
+    if (shape !== null) this.valueShapes.set(held, shape);
+    const collection = this.collectionOfExpression(base);
+    if (collection !== null) this.valueCollections.set(held, collection);
+    return held;
+  }
+
+  /**
+   * Where the assignment operator of the statement beginning at a token is, or
+   * null where the statement is not a write.
+   *
+   * The scan is over the source's own brackets, so an `=` inside a call or an
+   * object literal is not the statement's. A write is the operator at the top
+   * level whose left side ends a place: a name, a field or an element.
+   */
+  private assignmentOperatorAt(start: number): number | null {
+    let depth = 0;
+    for (let at = start; at < this.tokens.length; at += 1) {
+      const token = this.tokens[at] as Token;
+      const text = mark(token);
+      if (text === "(" || text === "[" || text === "{") {
+        depth += 1;
+        continue;
+      }
+      if (text === ")" || text === "]" || text === "}") {
+        depth -= 1;
+        if (depth < 0) return null;
+        continue;
+      }
+      if (depth > 0) continue;
+      if (token.kind === "end" || text === ";") return null;
+      if (text !== "=" && text !== "??=" && !(text in COMPOUND_OPERATORS)) continue;
+      const previous = this.tokens[at - 1] as Token | undefined;
+      if (previous === undefined) return null;
+      const before = mark(previous);
+      if (before === "]" || before === ")" || previous.kind === "ident") return at;
+      return null;
+    }
+    return null;
   }
 
   private readIndexedAssignment(): Statement | null {
