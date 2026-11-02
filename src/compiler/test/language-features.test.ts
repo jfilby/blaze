@@ -457,6 +457,50 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("an entry a map does not hold is absent, and `?.` reads nothing", async () => {
+  // `m.get(k)` asks the dictionary whether it holds the key and reads it only
+  // where it does. The answer for a key it does not hold is the zero of the
+  // value's own representation: the null reference for a reference, which is
+  // what `?.` tests and what `??` replaces. A number written there instead is
+  // boxed into a handle, and reading a field of the box reads the runtime's
+  // table as an object.
+  const source = [
+    "interface Info { name: string }",
+    "export function demo(): string {",
+    "  const m = new Map<string, Info>();",
+    "  m.set(`a`, { name: `A` });",
+    "  const present = m.get(`a`)?.name ?? `none`;",
+    "  const missing = m.get(`zz`)?.name ?? `none`;",
+    "  let n = 0;",
+    "  if (m.get(`a`)?.name.length > 0) n += 1;",
+    "  if (m.get(`zz`)?.name.length > 0) n += 10;",
+    "  return `${present} ${missing} ${n}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "A none 1", `the ${backend} backend reads an absent entry as absent`);
+  }
+});
+
+test("an arrow that calls itself may capture a value of the function around it", async () => {
+  // The values the arrow captured are leading parameters of the function it was
+  // lifted to, and the call its own body writes was read before they were
+  // known: each call the body writes of itself hands them over once they are.
+  const output = await agreesWithNode([
+    "export function demo(): string {",
+    "  const step = 2;",
+    "  const sum = (n: number): number => n <= 0 ? 0 : n * step + sum(n - 1);",
+    "  return `${sum(3)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12");
+});
+
 test("an arrow that calls itself is a function of the file", async () => {
   // The arrow is read before the declaration binds it, so the call it writes of
   // its own name is read as a call of the function it lifts to. A compiler

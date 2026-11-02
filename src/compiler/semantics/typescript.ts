@@ -811,8 +811,16 @@ function repeatableExpression(value: Expression): boolean {
     // b)` and `text.trim()` name the same text twice, so a value that asks one
     // of them twice is asking the same question. A compiled function is where
     // the call goes, and no text method writes the text it reads.
+    // A dictionary's own reads answer the same thing twice: `m.get(k)?.field`
+    // asks whether the entry is there and then reads it, and nothing between
+    // the two writes the dictionary — a call is what would, and there is none
+    // in the guard. The guard a dictionary read is written as asks `has` and
+    // then `get`, and both are reads of the same dictionary.
     case "call":
-      return value.name.startsWith("text.") && value.args.every((arg) => repeatableExpression(arg));
+      return (
+        (value.name.startsWith("text.") || value.name.startsWith("blaze_rt_dict_")) &&
+        value.args.every((arg) => repeatableExpression(arg))
+      );
     default:
       return false;
   }
@@ -2434,8 +2442,8 @@ class TypeScriptParser {
   private arrowName: string | null = null;
   /** The arrow whose body is being read, while its body is read. */
   private arrowDeclared: string | null = null;
-  /** Whether the body being read named the arrow it is bound to. */
-  private arrowSelf = false;
+  /** The calls the body being read writes of the arrow it is bound to. */
+  private arrowSelfCalls: Expression[] = [];
   /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
@@ -7161,9 +7169,39 @@ class TypeScriptParser {
       const type = expected ?? this.settledArrayType(left) ?? this.settledArrayType(right);
       if (type !== null) this.applyExpected(left, type, this.expectedShape);
       if (type !== null) this.applyExpected(right, type, this.expectedShape);
+      // `a?.b ?? c` is the branch of the optional chain with `c` where the
+      // chain found nothing. A chain of two optional accesses is two choices,
+      // each with an absent arm, and every one of them is what the `??` answers
+      // for. So the right side takes the place of each absent arm, and the
+      // guard asks each value once — which is what the language does, and what
+      // a `??` over the chain cannot do: the zero of a text is the empty text,
+      // and a `??` that tested for the absence would hand the empty text back
+      // in place of the value the source named.
+      const folded = this.absentArmFolded(left, right);
+      if (folded !== left) {
+        left = folded;
+        continue;
+      }
       left = { k: "binary", op: "??", left, right };
     }
     return left;
+  }
+
+  /**
+   * A choice with every absent arm answered by a value, or the value itself
+   * where there is no absent arm to answer.
+   *
+   * A `??` over a choice answers for each arm that holds nothing, however deep
+   * the choice of choices is: `o?.a?.b ?? 0` is two guards and one fallback,
+   * and the fallback is what each of them answers where it finds nothing.
+   */
+  private absentArmFolded(value: Expression, otherwise: Expression): Expression {
+    if (value.k === "null") return otherwise;
+    if (value.k !== "conditional") return value;
+    const then = this.absentArmFolded(value.then, otherwise);
+    const otherwiseArm = this.absentArmFolded(value.otherwise, otherwise);
+    if (then === value.then && otherwiseArm === value.otherwise) return value;
+    return { k: "conditional", condition: value.condition, then, otherwise: otherwiseArm };
   }
 
   private readLogicalAnd(): Expression {
@@ -7769,14 +7807,18 @@ class TypeScriptParser {
         // function the arrow lifted to, with the values it captured in front of
         // the arguments the source wrote.
         if (target.k === "ident" && this.valueArrows.has(target.name)) {
-          if (target.name === this.arrowDeclared) this.arrowSelf = true;
           const binding = this.valueArrows.get(target.name) as ArrowBinding;
           const args = this.readCallArguments(binding.params.map((param) => param.type));
-          replace({
+          const made: Expression = {
             k: "call",
             name: binding.function,
             args: [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...args],
-          });
+          };
+          // A call the arrow's own body writes of the arrow is a call site that
+          // was read before the arrow knew what it captured. The values are
+          // written in front of the arguments once they are known.
+          if (target.name === this.arrowDeclared) this.arrowSelfCalls.push(made);
+          replace(made);
           continue;
         }
         // `f(x)` where `f` holds a function: the call is made through the
@@ -8750,9 +8792,9 @@ class TypeScriptParser {
     const declared = this.arrowName;
     this.arrowName = null;
     const savedDeclared = this.arrowDeclared;
-    const savedSelf = this.arrowSelf;
+    const savedSelfCalls = this.arrowSelfCalls;
     this.arrowDeclared = declared;
-    this.arrowSelf = false;
+    this.arrowSelfCalls = [];
     if (declared !== null) {
       const provisional: ArrowBinding = {
         function: liftedName,
@@ -8762,10 +8804,6 @@ class TypeScriptParser {
         returns: stated ?? ANY_TYPE,
       };
       this.valueArrows.set(declared, provisional);
-      // The binding is what a value read of the name carries, and a callback
-      // the body hands the arrow to is a value: `list.map(f)` inside `f` reads
-      // the signature the arrow was declared with.
-      this.arrowBindings.set(liftedName, provisional);
     }
     this.valueFunctions = new Map(savedFunctions);
     this.valueCollections = new Map(savedCollections);
@@ -8818,14 +8856,13 @@ class TypeScriptParser {
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
     this.pendingValues = savedPendingValues;
-    const selfReferenced = this.arrowSelf;
+    const selfCalls = this.arrowSelfCalls;
     this.arrowDeclared = savedDeclared;
-    this.arrowSelf = savedSelf;
+    this.arrowSelfCalls = savedSelfCalls;
     const captures = arrowCaptures(params, body);
     // The name the arrow is bound to is the arrow, not a value of the function
-    // around it: a body that passes the arrow on is not capturing something to
+    // around it: a body that only calls the arrow is not capturing something to
     // hand to itself.
-    const named = declared !== null && captures.captures.includes(declared);
     if (declared !== null) {
       captures.captures = captures.captures.filter((capture) => capture !== declared);
       captures.written = captures.written.filter((written) => written !== declared);
@@ -8838,17 +8875,13 @@ class TypeScriptParser {
       );
     }
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
-    // A body that names the arrow it is bound to was read with the arrow's own
-    // values already written in front of its arguments. That is only the call
-    // the source means where the arrow captures nothing: a captured value is
-    // one of the lifted function's parameters, which a call site inside the
-    // body that was written before the body knew them did not pass.
-    if (declared !== null && (selfReferenced || named) && binding.captures.length > 0) {
-      this.report(
-        `${declared} calls itself, which an arrow function is not`,
-        "declare the function with `function` and call it by the name it is declared under",
-        start,
-      );
+    // The values the arrow captured are the lifted function's leading
+    // parameters, and a call the body wrote of itself was read before they were
+    // known: each is handed them now, in the order the lifted function takes
+    // them. A body that only calls itself captures nothing and is unchanged.
+    for (const call of selfCalls) {
+      if (call.k !== "call") continue;
+      call.args = [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...call.args];
     }
     return { k: "arrow", name: binding.function, captures: binding.captures };
   }
@@ -10038,9 +10071,17 @@ class TypeScriptParser {
       const held: Expression = kind === "bool"
         ? { k: "binary", op: "!=", left: read, right: { k: "literal", text: "0" } }
         : read;
+      // The answer for a key the map does not hold is the zero of the value
+      // type: the empty text for a text, the null reference for a reference,
+      // and the number zero for everything else. A number written where a
+      // reference is expected is boxed into a handle, and a boxed number is
+      // not the absence of an object: reading a field of one reads the
+      // runtime's table as an object.
       const otherwise: Expression = kind === "text"
         ? { k: "text", parts: [{ k: "text", value: "" }] }
-        : { k: "literal", text: "0" };
+        : kind === "reference"
+          ? { k: "null" }
+          : { k: "literal", text: "0" };
       const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise };
       const answer = kind === "reference" ? ANY_TYPE : kind === "bool" ? BOOLEAN_RESULT : collection.value;
       this.expressionTypes.set(chosen, answer);
@@ -10632,8 +10673,7 @@ class TypeScriptParser {
       // A name bound to an arrow is that arrow: read where a value is expected,
       // it is the closure the arrow is, carrying the values it captured.
       const arrow = this.valueArrows.get(token.text);
-      if (arrow !== undefined && !this.at("(")) {
-        if (token.text === this.arrowDeclared) this.arrowSelf = true;
+      if (arrow !== undefined && !this.at("(") && token.text !== this.arrowDeclared) {
         return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
       }
       return { k: "ident", name: token.text };

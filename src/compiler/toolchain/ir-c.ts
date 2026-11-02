@@ -104,6 +104,24 @@ function declaredType(type: SemanticType | null): string {
 }
 
 /**
+ * The text of the zero a value of this type compares against.
+ *
+ * A value the language can hold as one of two things is asked whether it holds
+ * either, and the absence of it is the zero of the C representation the value
+ * is *carried* in — not the zero of C. An unshaped reference is a handle, and a
+ * handle here is a `double`, so its absence is `0.0`; a text and a shaped
+ * reference are pointers, and their absence is `NULL`. Comparing a `double`
+ * with `NULL` is not C at all.
+ */
+function absenceOf(type: SemanticType | null): string {
+  if (type === null) return "NULL";
+  if (isNumber(type) || isBoolean(type)) return "0.0";
+  if (type.kind === "ref" && type.of === null && type.name === undefined) return "0.0";
+  if (type.kind === "mask") return "0.0";
+  return "NULL";
+}
+
+/**
  * The compound assignment as C spells it. C has no `>>>=` — an unsigned right
  * shift is `>>=` over an unsigned type, which is what the binary form already
  * lowers to, so it is the same here. `**=` is handled by the caller, which
@@ -1446,7 +1464,10 @@ class FunctionEmitter {
           ? `${RUNTIME_NAME}_argv_count()`
           : `${RUNTIME_NAME}_argv(${this.expression(value.index, USIZE, depth)})`;
       case "isNull":
-        return `((${this.raw(value.operand, depth)}) ${value.negate ? "!=" : "=="} NULL)`;
+        // The absence is the zero of the representation the value is carried in:
+        // a handle is a `double` and its absence is `0.0`, which is the value a
+        // dictionary answers for a key it does not hold.
+        return `((${this.raw(value.operand, depth)}) ${value.negate ? "!=" : "=="} ${absenceOf(value.operand.type)})`;
       case "unary": {
         const operand = this.expression(value.operand, value.type, depth);
         if (value.op === "not") return `((${this.condition(value.operand, depth)}) == 0)`;
@@ -1558,7 +1579,7 @@ class FunctionEmitter {
         const left = this.raw(value.left, depth);
         return (
           `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
-          `(${arm}) == NULL ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
+          `(${arm}) == ${absenceOf(value.left.type)} ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
         );
       }
       case "select": {
@@ -1573,7 +1594,7 @@ class FunctionEmitter {
           // that zero in C: it is a `void*`, and a choice of numbers with one
           // arm of `NULL` is not a conditional expression at all.
           if (one.k === "nothing") {
-            return isNumber(value.type) || isBoolean(value.type) ? "0.0" : isTextType(value.type) ? '""' : "NULL";
+            return isTextType(value.type) ? '""' : absenceOf(value.type);
           }
           if (!isTextType(value.type) && (isTextType(one.type) || one.k === "text")) {
             return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;

@@ -789,6 +789,38 @@ lists are walked with `flatMap` and with callbacks that are not arrows yet. It
 is a real bug and it will pay once those methods are read; until then it does
 not lower the budget, so it is not in this slice.
 
+### 4y. The entry a dictionary does not hold
+
+`m.get(k)` over a `Map<string, Info>` asks the dictionary whether it holds the
+key and reads it where it does. Where it does not, the answer was the *boxed*
+number zero — a handle into the runtime's table rather than nothing at all — so
+reading a field of an absent entry read the table as an object, and `m.get("zz").name`
+segmented the C backend and the machine backend alike. The answer for a key that
+is not there is now the zero of the value's own representation: the null
+reference for a reference, the empty text for a text, the number zero otherwise.
+
+That is one half of the slice. The other is what a choice is *carried* in: an
+unshaped reference is a `double` here, so a choice between one and nothing is a
+choice between a `double` and `0.0` — a `double` compared with `NULL` is not C at
+all, and the C backend wrote both the choice and the `?.` that tests it that way.
+`absenceOf` in `ir-c.ts` is the one place that says what the absence of a type is,
+and the choice, the coalesce and the null test all ask it.
+
+With the representation settled, a dictionary read became repeatable: the guard
+the chain writes asks `has` and then `get`, and nothing between them writes the
+dictionary. So `m.get(k)?.field` is read.
+
+The last piece is the `??` that follows a chain. `o?.a?.b ?? 0` is two guards,
+each answering nothing where it finds nothing, and the fallback answers for
+*each* of them. A `??` over the choice cannot do that, because the zero of the
+guarded value is the zero of its type — an empty text for a text — and a `??`
+that tested for absence would hand the empty text back in place of the value the
+source named. The frontend now folds the fallback into every absent arm of the
+choice, so `m.get(k)?.name ?? "none"` answers `"none"` for a key that is not
+there and the empty name for one that is.
+
+This took the total from 828 to 812.
+
 **A second finding.** Two object literals of the same interface whose list field
 holds a different number of values are laid out as two layouts: the field is
 typed `array<T,n>` from the length of the literal, so `{ children: [] }` and

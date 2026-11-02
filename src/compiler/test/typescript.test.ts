@@ -842,6 +842,11 @@ test("an optional access guards the accesses written after it", () => {
   // `a?.b.c` is `a != null ? a.b.c : null`: the `.c` is inside the branch, not
   // applied to the null the guard answers. A second `?.` nests another guard
   // inside the first, so each value is tested where it is read.
+  //
+  // The `??` that follows is the arm the chain takes when it finds nothing, so
+  // the two are one choice: `(a != null ? a?.b : null) ?? 0` asks whether `a`
+  // is there once and answers the fallback where it is not. A text's zero is
+  // the empty text, and a `??` over the chain would take it for a value.
   const analysis = typescript.analyze(
     [
       "export function read(o: any): number {",
@@ -852,16 +857,16 @@ test("an optional access guards the accesses written after it", () => {
     "main.ts",
   );
   const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
-    body: { kind: string; value?: { k: string; op?: string; left?: unknown; then?: unknown; otherwise?: { k: string } } }[];
+    body: { kind: string; value?: { k: string; condition?: { op?: string }; then?: unknown; otherwise?: { k: string } } }[];
   }).body;
   const value = body[0]?.value;
-  assert.equal(value?.k, "binary");
-  assert.equal(value?.op, "??");
-  const guard = value?.left as { k: string; condition?: { op?: string }; then?: { k: string }; otherwise?: { k: string } };
-  assert.equal(guard.k, "conditional");
-  assert.equal(guard.condition?.op, "!=");
-  assert.equal(guard.otherwise?.k, "null");
-  assert.equal((guard.then as { k?: string }).k, "conditional", "the second ?. is a second guard");
+  assert.equal(value?.k, "conditional", "the chain and the `??` are one choice");
+  assert.equal(value?.condition?.op, "!=", "the guard is the chain's first link");
+  assert.equal(value?.otherwise?.k, "literal", "the fallback is the arm taken when the chain finds nothing");
+  const guard = value?.then as { k?: string; k2?: string; otherwise?: { k: string }; then?: { k?: string } };
+  assert.equal(guard.k, "conditional", "the second ?. is a second guard");
+  assert.equal((guard.then as { k?: string }).k, "member", "the field read is inside the branch");
+  assert.equal(guard.otherwise?.k, "literal", "the inner guard answers the fallback too");
 });
 
 test("a `??` keeps the type of the arm that names one", () => {
@@ -1411,26 +1416,25 @@ test("an arrow that writes a name of the function around it is refused", () => {
   );
 });
 
-test("an arrow that calls itself and captures is refused", () => {
-  // A call of the name passes the values the arrow captured, and a call written
-  // inside the body was read before the arrow's own values were known. A
-  // function that recurses and captures is declared with `function`; one that
-  // captures nothing recurses as the function it lifts to.
-  assert.match(
-    diagnostic(() =>
-      typescript.analyze(
-        [
-          "export function f(x: number): number {",
-          "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1) + x;",
-          "  return fact(x);",
-          "}",
-          "",
-        ].join("\n"),
-        "main.ts",
-      ),
-    ),
-    /fact calls itself, which an arrow function is not/,
+test("an arrow that calls itself hands over the values it captured", () => {
+  // The values the arrow captured are the lifted function's leading parameters,
+  // and a call the body writes of itself was read before they were known: the
+  // call is completed once the body has said what they are.
+  const analysis = typescript.analyze(
+    [
+      "export function f(x: number): number {",
+      "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1) + x;",
+      "  return fact(x);",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
   );
+  const closure = analysis.functions.find((entry) => entry.name.startsWith("__closure_"));
+  assert.ok(closure !== undefined, "the arrow is a function of the file");
+  const lifted = closure.handle as { params: { name: string }[]; body: unknown[] };
+  assert.deepEqual(lifted.params.map((param) => param.name), ["x", "n"], "the captured value leads the parameters");
+  assert.match(JSON.stringify(lifted.body), /"name":"x"/, "the call passes the value it captured");
 });
 
 test("an arrow's body is a function of its own, so a break leaves a loop of that body", () => {
