@@ -7135,6 +7135,15 @@ class Machine {
   }
 
   /**
+   * Whether reading a value into a dynamic slot boxes it, which is a call the
+   * runtime makes and a call takes the registers a call takes.
+   */
+  private boxesDynamic(value: SemanticValue, as: SemanticType | null): boolean {
+    if (as === null || !isDynamicType(as)) return false;
+    return isTextType(value.type) || value.k === "text" || isNumber(value.type);
+  }
+
+  /**
    * A value in the accumulator: a whole number or a reference in `rax`, a float
    * in `xmm0`, and a whole number widened to fill the register so that a value
    * is always the number its type names and never the bits of something wider.
@@ -9574,7 +9583,11 @@ class Machine {
       return true;
     }
     if (isDynamicType(value.type)) {
+      // A service takes the handle as the double it is, and the bits this
+      // backend keeps in the accumulator are that double's: the move turns
+      // them back into the number the convention passes.
       this.value(value);
+      this.code.movdXmm(XMM0, RAX);
       this.runtime("_to_text");
       return false;
     }
@@ -10043,8 +10056,11 @@ class Machine {
     value.values.forEach((element, at) => {
       this.at(element, value.element);
       // The address is the value the accumulator held before the element was
-      // read, so it is rebuilt where the element took it from.
-      if (hasCall(element)) this.code.movRegMem(RCX, frame(array.offset));
+      // read, so it is rebuilt where the element took it from: a call takes the
+      // registers a call takes, and so does the boxing a dynamic element is.
+      if (hasCall(element) || this.boxesDynamic(element, value.element)) {
+        this.code.movRegMem(RCX, frame(array.offset));
+      }
       this.storeInto(value.element, RCX, at * widthOf(value.element));
     });
     this.code.movRegReg(RAX, RCX);
@@ -11243,6 +11259,43 @@ class Machine {
         `a value the runtime holds is read as a ${typeText(to)}, which this backend has no lowering for`,
         "the C backend reads the number the value says; write the program so the value is read where it is made, or build it with the C backend",
       );
+    }
+    // A dynamic value is a handle: the runtime's double. A text and a number
+    // written where one is expected are boxed into handles, and a handle read
+    // as a text is unboxed. Without the crossing the list a rest parameter
+    // holds kept the pointer of a text in a slot whose reader asked the
+    // runtime to unbox it, and the text read back was the number beside it.
+    if (isDynamicType(to)) {
+      if (isTextType(from)) {
+        this.code.movRegReg(RDI, RAX);
+        this.runtime("_box_string");
+        // The slot is a frame slot: the handle arrives in a vector register
+        // and this reads its bits out of the frame, which is one place the
+        // eight bytes of a handle are.
+        const boxed = this.holdSlot(NUMBER, "blaze_boxed");
+        this.store(boxed);
+        this.code.movRegMem(RAX, frame(boxed.offset));
+        return;
+      }
+      if (isNumber(from)) {
+        this.convert(from, NUMBER);
+        this.external("blaze_rt_box_number");
+        this.callForeign("blaze_rt_box_number");
+        // The slot is a frame slot: the handle arrives in a vector register
+        // and this reads its bits out of the frame, which is one place the
+        // eight bytes of a handle are.
+        const boxed = this.holdSlot(NUMBER, "blaze_boxed");
+        this.store(boxed);
+        this.code.movRegMem(RAX, frame(boxed.offset));
+        return;
+      }
+    }
+    if (isDynamicType(from) && isTextType(to)) {
+      // The handle's bits are in the accumulator and the service reads the
+      // double they are.
+      this.code.movdXmm(XMM0, RAX);
+      this.runtime("_to_text");
+      return;
     }
     if (isTextType(from) || isTextType(to) || isReference(from) || isReference(to)) return;
     if (!isNumber(from) || !isNumber(to)) return;

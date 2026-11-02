@@ -2293,6 +2293,15 @@ export interface TypeScriptFunction {
    * what holds those, and it hands the arrow the values it captured.
    */
   closure?: true;
+  /**
+   * A function declared with a rest parameter: `(...args: T[])`.
+   *
+   * The parameter holds the list of the arguments from `fixed` on, so a call
+   * passes the list where it wrote the arguments and the body reads it as one.
+   */
+  variadic?: { element: TypeExpr; fixed: number };
+  /** A signature with no body, which the implementation below it carries. */
+  overload?: true;
 }
 
 /** Whether the file's bigints reach past the machine word. */
@@ -2408,6 +2417,8 @@ class TypeScriptParser {
    * answers one.
    */
   private declaredReturns = new Map<string, TypeExpr>();
+  /** The functions declared with a rest parameter, and the list it holds. */
+  private variadicFunctions = new Map<string, { element: TypeExpr; fixed: number }>();
   /**
    * What a function's declared result holds, when the contract type erased it.
    *
@@ -4509,7 +4520,11 @@ class TypeScriptParser {
       let readable = true;
       for (const [start, end] of segments) {
         let index = start;
-        if (text(index) === "...") index += 1;
+        const rest = text(index) === "...";
+        if (rest) index += 1;
+        // A rest parameter is the list of the arguments a call wrote, not one
+        // of them: the call is read against the body's own declaration.
+        if (rest) readable = false;
         const named = tokens[index] as Token | undefined;
         if (named === undefined || named.kind !== "ident") {
           readable = false;
@@ -4869,6 +4884,16 @@ class TypeScriptParser {
     if (this.at("<")) this.skipTypeParameters();
     const parsed = this.parseFunction(name, isAsync);
     if (parsed === null) return null;
+    // A signature with no body names how the function is called and is not a
+    // function of the file: the body below it is. It still says what a call
+    // answers, and it is the parameter list a call is read against.
+    if (parsed.overload === true) {
+      this.declaredReturns.set(parsed.name, parsed.returns);
+      this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+      if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(parsed.name, parsed.returnsShape);
+      if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
+      return isDefault ? parsed.name : null;
+    }
     functions.push({
       name: parsed.name,
       exported,
@@ -4877,7 +4902,11 @@ class TypeScriptParser {
       handle: parsed,
     });
     this.declaredReturns.set(parsed.name, parsed.returns);
-    this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+    // A rest parameter is not a parameter list a call is checked against: the
+    // call wrote the arguments the body reads as one list, and packing them is
+    // the caller's work below. An overload above the body is the list to use.
+    if (parsed.variadic !== undefined) this.variadicFunctions.set(parsed.name, parsed.variadic);
+    else this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
     if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(parsed.name, parsed.returnsShape);
     if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
     for (const wrapper of this.defaultWrappers(parsed, exported)) {
@@ -5066,16 +5095,22 @@ class TypeScriptParser {
     this.iteratedCollections = new Map();
     this.iteratedSequences = new Map();
     let answered: CollectionValue | null = null;
-    const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => ({
-      name: name.text,
-      params,
-      returns,
-      ...(shape === null ? {} : { returnsShape: shape }),
-      body,
-      line: name.line,
-      ...(isAsync ? { async: true } : {}),
-      ...(answered === null ? {} : { collection: answered }),
-    });
+    /** The rest parameter, when the function declares one. */
+    let restAt: { element: TypeExpr; fixed: number } | null = null;
+    const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => {
+      const fn: TypeScriptFunction = {
+        name: name.text,
+        params,
+        returns,
+        body,
+        line: name.line,
+      };
+      if (shape !== null) fn.returnsShape = shape;
+      if (isAsync) fn.async = true;
+      if (answered !== null) fn.collection = answered;
+      if (restAt !== null) fn.variadic = restAt;
+      return fn;
+    };
     this.expect("(");
     const params: TypeScriptFunction["params"] = [];
     /** What a parameter written as a pattern binds, read before the body runs. */
@@ -5119,6 +5154,10 @@ class TypeScriptParser {
           this.expect(")");
           break;
         }
+        // `...args: T[]` is the rest of the call's arguments as one list. The
+        // parameter is the list, and a call packs what it wrote after the fixed
+        // parameters into it.
+        const rest = this.accept("...");
         const parameter = this.next();
         if (parameter.kind !== "ident") {
           this.report("expected a parameter name", `near "${parameter.text}"`, parameter);
@@ -5159,6 +5198,11 @@ class TypeScriptParser {
           }
           mapped = defaultParameterType(fallback);
         }
+        if (rest) {
+          // The parameter is the list itself; the element is what a call packs.
+          const element = mapped.kind === "slice" || mapped.kind === "array" ? mapped.of : ANY_TYPE;
+          restAt = { element, fixed: params.length };
+        }
         params.push({
           name: parameter.text,
           type: mapped,
@@ -5194,6 +5238,15 @@ class TypeScriptParser {
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
     const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
     const returnShape = this.lastAnnotationShape();
+    // A signature with no body is an overload: it names how the function below
+    // it is called, and the body the declaration after it writes is the one
+    // that runs.
+    if (this.at(";")) {
+      this.next();
+      const signature = declared(returnType, [...prelude], returnShape);
+      signature.overload = true;
+      return signature;
+    }
     if (this.accept("=")) {
       // `function f(x: T): T = expr;` carries an optional trailing semicolon.
       const value = this.readAt(returnType, () => this.readExpression(), returnShape);
@@ -8630,7 +8683,26 @@ class TypeScriptParser {
           continue;
         }
 
-        replace({ k: "call", name: target.name, args });
+        // A function declared with a rest parameter reads the arguments as one
+        // list. The call wrote them one by one, so they are packed into the
+        // list the parameter is, and the fixed parameters before it stay where
+        // they were written.
+        const variadic = this.variadicFunctions.get(target.name);
+        if (variadic === undefined) {
+          replace({ k: "call", name: target.name, args });
+          continue;
+        }
+        const rest: Expression = {
+          k: "buffer",
+          element: typeToString(variadic.element),
+          values: args.slice(variadic.fixed),
+        };
+        this.expressionTypes.set(rest, { kind: "slice", of: variadic.element });
+        replace({
+          k: "call",
+          name: target.name,
+          args: [...args.slice(0, variadic.fixed), rest],
+        });
         continue;
       }
       if (this.at("++") || this.at("--")) {
@@ -11795,6 +11867,7 @@ class TypeScriptParser {
     child.declaredReturns = this.declaredReturns;
     child.declaredReturnShapes = this.declaredReturnShapes;
     child.declaredParams = this.declaredParams;
+    child.variadicFunctions = this.variadicFunctions;
     child.valueCollections = this.valueCollections;
     child.declaredCollections = this.declaredCollections;
     child.collectionExpressions = this.collectionExpressions;

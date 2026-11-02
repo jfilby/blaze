@@ -866,6 +866,37 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ac. The rest of the arguments, and the signatures above the body
+
+`export function workingTitle(...args: any[]): string` is how the sources write
+one function that answers to several call shapes: two signatures above it say
+how it is called, and the body reads the rest of the arguments as one list.
+Neither was in the subset. `expected a parameter name` was the `...`, which the
+parameter reader did not know, and `expected "{"` was the signature with no
+body, which the declaration reader read as a function whose body it could not
+find.
+
+A signature with no body is now read as the signature it is: it records the
+parameters and the result a call is read against, and the declaration is not a
+function of the file — the body below it is. A rest parameter is one parameter
+whose type is the list; a call to the function packs the arguments it wrote
+after the fixed ones into a list of that element type, which is the list the
+body reads. A dynamic element is boxed, so `...args: any[]` holds a text beside
+a number and the body reads each back as what the call wrote.
+
+This took the total from 783 to 778.
+
+**Two wrong answers found on the machine backend.** A list of dynamic values
+held a text's *pointer* in a slot whose reader asked the runtime to unbox a
+handle, because the machine's conversion into a dynamic slot wrote no box at
+all; and the handle the reader passed to the runtime was left in the
+accumulator while the ABI takes the double in a vector register, so the text
+read was whatever handle happened to be in `xmm0` — always the last one boxed.
+Both are fixed in `ir-machine.ts`: a text and a number are boxed on the way
+into a dynamic slot, and the handle is moved into `xmm0` on the way to
+`blaze_rt_to_text`. A four-element list of mixed values read back as four
+copies of the last value before this, on the machine backend only.
+
 ### 4ab. A function the text calls before it is written
 
 A declaration is hoisted, but the text that calls a function need not come after

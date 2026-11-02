@@ -990,6 +990,28 @@ test("a write through a cast or a chain is a statement of its own", () => {
   assert.match(body, /"kind":"indexAssign"/, "the element of the field is written");
 });
 
+test("an overload is a signature, and a rest parameter is the list it names", () => {
+  // A signature with no body names how the function is called; the body below
+  // it is the function of the file. The rest parameter is one parameter that
+  // holds the arguments a call wrote, so a call packs them into the list.
+  const analysis = typescript.analyze(
+    [
+      "export function pick(a: string, b: number): string;",
+      "export function pick(b: string, a: number): string;",
+      "export function pick(...args: any[]): string {",
+      "  return `${args.length}`;",
+      "}",
+      "",
+    ].join("\n"),
+    "module.ts",
+  );
+  const picks = analysis.functions.filter((entry) => entry.name === "pick");
+  assert.equal(picks.length, 1, "the overloads are not functions of the file");
+  const handle = picks[0]?.handle as { variadic?: { fixed: number }; params: unknown[] } | undefined;
+  assert.deepEqual(handle?.variadic, { element: { kind: "ref", of: null }, fixed: 0 }, "the rest parameter is the list");
+  assert.equal(handle?.params.length, 1, "the list is one parameter");
+});
+
 test("a function declared after its caller answers the type it declares", () => {
   // A declaration is hoisted: a reader may call the function it writes below.
   // The body is read against the signatures of the whole file, so a field of

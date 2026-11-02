@@ -500,6 +500,49 @@ test("a write goes through the place the source named in full", async () => {
   assert.equal(output.trim(), "23");
 });
 
+test("a function with a rest parameter reads the arguments as one list", async () => {
+  // `(...args: any[])` is the list of everything the call wrote, and a text and
+  // a number beside each other are boxed into the handles a dynamic value is.
+  // The overloads above the body say how the function is called; the body says
+  // what the arguments are.
+  const source = [
+    "function pick(a: string, b: number): string;",
+    "function pick(b: string, a: number): string;",
+    "function pick(...args: any[]): string {",
+    "  if (args.length >= 2) return `${args[0]}:${args[1]}`;",
+    "  return `${args[0]}`;",
+    "}",
+    "export function demo(): string {",
+    "  return `${pick(`x`, 3)} ${pick(4, `y`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "x:3 4:y", `the ${backend} backend reads the rest list`);
+  }
+});
+
+test("a list of dynamic values holds a text and a number beside each other", async () => {
+  // A dynamic value is a handle: a text and a number are boxed into one, and a
+  // handle read back as a text is unboxed. The machine backend kept the text's
+  // pointer in a slot whose reader asked the runtime to unbox a handle, and
+  // then passed the handle where the convention wants a double.
+  const source = [
+    "export function demo(): string {",
+    "  const list: any[] = [`x`, 3];",
+    "  return `${list[0]}|${list[1]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "x|3", `the ${backend} backend boxes a dynamic element`);
+  }
+});
+
 test("an entry a map does not hold is absent, and `?.` reads nothing", async () => {
   // `m.get(k)` asks the dictionary whether it holds the key and reads it only
   // where it does. The answer for a key it does not hold is the zero of the
