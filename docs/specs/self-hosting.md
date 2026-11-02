@@ -866,6 +866,24 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ap. An arrow takes the rest of a call's arguments
+
+`(...taken: string[]) => ...` is a parameter list the arrow reader did not know:
+it read the `...` as the name of a parameter and answered that a parameter name
+was expected. Twelve of the compiler's own refusals were that form, and the two
+in `toolchain/c-names.ts` are how the whole of `cHeaderNames` is written — the
+file's name table is taken a line at a time.
+
+The rest parameter is a list, which is what the lifted function takes as one
+parameter, and a call packs what it wrote from that position on into a list
+literal of the element type the annotation states. Every call in the file is a
+call by name, so the packing is written where the arguments are, and the list is
+the one the arrow's body walks.
+
+This took the total from 610 to 608. The rest of the `expected a parameter name`
+bucket is not this form: `semantics/python.ts` and `semantics/typescript.ts`
+still answer it for constructs of their own.
+
 ### 4ao. An optional chain reads the value once
 
 `f()?.field` reads `f()` in the guard and again inside the branch, so a chain
@@ -1211,7 +1229,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-610 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+608 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1221,7 +1239,6 @@ order, and what each of them is:
 | 78 | `an arrow function writes "pres" / "found" / "names"` | a captured **list** written back: a box holds one value, and a list's element is not a list. The scalar and reference writes are boxed (§4al) |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
-| 12 | `expected a parameter name` | an arrow whose parameter list holds a rest parameter the arrow reader does not know |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
 | 10 | `Object.values` / `Object.keys` of a constant object | a runtime record in the standalone read; the linked read types it |
 | 10 | `an object spread reads a constant object` | the same |
@@ -1263,6 +1280,7 @@ What was closed this session, and what each was worth:
 | a captured value written by an arrow | 725 → 651 |
 | an assignment where an expression goes | 651 → 618 |
 | an optional chain reads the value once | 618 → 610 |
+| an arrow takes the rest of a call's arguments | 610 → 608 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

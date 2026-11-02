@@ -775,6 +775,30 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("an arrow takes the rest of a call's arguments as one list", async () => {
+  // `(...taken: string[]) => ...` is called with as many arguments as the call
+  // writes; the lifted function's parameter is the list they are packed into.
+  const source = [
+    "export function demo(): string {",
+    "  let count = 0;",
+    "  let last = ``;",
+    "  const take = (...taken: string[]): void => {",
+    "    for (let i = 0; i < taken.length; i += 1) { count += 1; last = taken[i]; }",
+    "  };",
+    "  take(`a`, `b`);",
+    "  take(`c`);",
+    "  take();",
+    "  return `${count} ${last}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "3 c", `the ${backend} backend packs the rest`);
+  }
+});
+
 test("an optional chain on a call reads the call once", async () => {
   // `make()?.value` is read by the condition and by the branch, so the call is
   // written into a name first: a call read twice would allocate twice and

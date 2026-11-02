@@ -1522,6 +1522,29 @@ test("an arrow that writes a list it captured is refused", () => {
   );
 });
 
+test("an arrow takes the rest of a call's arguments as one list", () => {
+  // `(...taken: string[]) => ...` is handed what the call wrote from that
+  // position on, packed into the list the lifted function's parameter is.
+  const body = analyzedBody(
+    [
+      "export function f(): number {",
+      "  const take = (...taken: string[]): number => taken.length;",
+      "  return take(`a`, `b`) + take();",
+      "}",
+      "",
+    ].join("\n"),
+    "f",
+  ) as { kind: string; value?: { op?: string; args?: { k?: string; values?: unknown[] }[] } }[];
+  const call = body[1];
+  assert.equal(call?.kind, "result");
+  assert.equal(call?.value?.op, "+");
+  const first = (call?.value as unknown as { left: { name?: string; args?: { k?: string; values?: unknown[] }[] } }).left;
+  assert.equal(first?.name, "__closure_module_0");
+  const packed = first?.args?.[0];
+  assert.equal(packed?.k, "buffer", "the arguments are packed into one list");
+  assert.equal(packed?.values?.length, 2);
+});
+
 test("an optional chain reads a call once, into a name before the statement", () => {
   // `f()?.field` reads `f()` in the condition and again in the branch, so the
   // call is written into a name of the statement's own first and both reads are

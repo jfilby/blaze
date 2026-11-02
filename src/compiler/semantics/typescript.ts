@@ -2601,6 +2601,14 @@ interface ArrowBinding {
   captureTypes: TypeExpr[];
   /** The parameters the arrow itself was written with. */
   params: { name: string; type: TypeExpr }[];
+  /**
+   * Where the rest parameter is, when the arrow declares one.
+   *
+   * `(...taken: string[]) => ...` is handed the arguments a call writes from
+   * this position on as one list, which is the parameter the lifted function
+   * takes: a call packs them into it here, at the site that wrote them.
+   */
+  rest?: number;
   /** What the arrow answers. */
   returns: TypeExpr;
   /** The function a call through the closure enters, once one is needed. */
@@ -8781,10 +8789,21 @@ class TypeScriptParser {
         if (target.k === "ident" && this.valueArrows.has(target.name)) {
           const binding = this.valueArrows.get(target.name) as ArrowBinding;
           const args = this.readCallArguments(binding.params.map((param) => param.type));
+          const rest = binding.rest;
+          const callArgs = rest === undefined
+            ? args
+            : [
+                ...args.slice(0, rest),
+                {
+                  k: "buffer" as const,
+                  element: typeToString(elementOfSequenceType(binding.params[rest]?.type ?? ANY_TYPE) ?? ANY_TYPE),
+                  values: args.slice(rest),
+                },
+              ];
           const made: Expression = {
             k: "call",
             name: binding.function,
-            args: [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...args],
+            args: [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...callArgs],
           };
           // A call the arrow's own body writes of the arrow is a call site that
           // was read before the arrow knew what it captured. The values are
@@ -9690,6 +9709,8 @@ class TypeScriptParser {
       typeName: string;
       functionType: FunctionType | null;
       shape: ResolvedType | null;
+      /** The parameter is the rest of the call's arguments, as one list. */
+      rest?: boolean;
     }
     const params: ArrowParam[] = [];
     /** What a parameter written as a pattern binds, read where the body starts. */
@@ -9715,6 +9736,10 @@ class TypeScriptParser {
           if (!this.accept(",")) break;
           continue;
         }
+        // `(...taken: string[]) => ...`: the rest of the call's arguments, as
+        // one list. The parameter is the list itself, and a call packs what it
+        // wrote from here on into it.
+        const rest = this.accept("...");
         const name = this.next();
         if (name.kind !== "ident") {
           this.report("expected a parameter name", `near "${name.text}"`, name);
@@ -9746,7 +9771,9 @@ class TypeScriptParser {
           this.next();
           this.readExpression();
         }
-        params.push({ name: name.text, type, typeName, functionType, shape });
+        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape };
+        if (rest) parameter.rest = true;
+        params.push(parameter);
         if (!this.accept(",")) break;
         // A list of parameters may end with a comma, as it may on a function.
         if (this.at(")")) break;
@@ -9812,6 +9839,8 @@ class TypeScriptParser {
         params: params.map((param) => ({ name: param.name, type: param.type })),
         returns: stated ?? ANY_TYPE,
       };
+      const restAt = params.findIndex((param) => param.rest === true);
+      if (restAt >= 0) provisional.rest = restAt;
       this.valueArrows.set(declared, provisional);
     }
     this.valueFunctions = new Map(savedFunctions);
@@ -10044,7 +10073,7 @@ class TypeScriptParser {
    */
   private liftArrow(
     name: string,
-    params: readonly { name: string; type: TypeExpr }[],
+    params: readonly { name: string; type: TypeExpr; rest?: boolean }[],
     returns: TypeExpr,
     body: Statement[],
     captures: readonly string[],
@@ -10077,6 +10106,8 @@ class TypeScriptParser {
       params: written,
       returns,
     };
+    const restAt = params.findIndex((param) => param.rest === true);
+    if (restAt >= 0) binding.rest = restAt;
     this.arrowBindings.set(name, binding);
     return binding;
   }
