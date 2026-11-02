@@ -8706,12 +8706,20 @@ class TypeScriptParser {
           // an object is a place the same way, and the write goes back into the
           // field the source named.
           if (target.field === "push" || target.field === "pop") {
-            const place =
+            let place: { target: string; base: string | null } | null =
               receiver.k === "ident"
                 ? { target: receiver.name, base: null }
                 : receiver.k === "member" && receiver.base.k === "ident"
                   ? { target: receiver.field, base: receiver.base.name }
                   : null;
+            // A list behind more than one field — `this.functions.waiting` — is
+            // reached through a name of the statement's own: the owner is a
+            // reference, and the push is written through the name that holds
+            // it, which is the object the source named.
+            if (place === null && receiver.k === "member") {
+              const owner = this.writeTarget(receiver.base, callLine);
+              if (owner !== null) place = { target: receiver.field, base: owner };
+            }
             const sequence = place === null ? null : this.valueTypeOf(receiver);
             if (
               place !== null &&

@@ -866,6 +866,19 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ak. A list behind more than one field
+
+`this.functions.waiting.push(draft)` is a push on a list two fields deep. The
+append lowering knew two places: a name, and one field of a name. Anything
+deeper was a method of nothing. A place that is a field of a place is now read
+into a name of the statement's own first — the owner is a reference, so the
+push goes through the name and writes the object the source named — and the
+append is the one a field of a name is.
+
+This took the total from 726 to 725. It is one refusal, and it is worth more
+than one: `semantics/ir-resolve.ts` is the resolver, and the list it pushes a
+waiting function onto is a field of the resolver's own functions table.
+
 ### 4aj. An import under another name
 
 `import { buildObject as buildMachineObject }` was refused, and the compiler's

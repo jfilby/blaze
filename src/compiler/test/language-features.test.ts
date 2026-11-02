@@ -720,6 +720,30 @@ test("a map holds a reference under a number key and under a reference key", asy
   }
 });
 
+test("a list behind more than one field takes a push", async () => {
+  // `o.inner.list.push(x)`: the owner is a reference, so it is read into a name
+  // of the statement's own and the push is written through that name. A place
+  // one field deep was the only one the append knew, so the deeper one was a
+  // method of nothing.
+  const output = await agreesWithNode([
+    "interface Inner { list: number[] }",
+    "interface Outer { inner: Inner }",
+    "function make(): Outer {",
+    "  const inner: Inner = { list: [] };",
+    "  return { inner };",
+    "}",
+    "export function demo(): string {",
+    "  const o = make();",
+    "  o.inner.list.push(3);",
+    "  o.inner.list.push(4);",
+    "  return `${o.inner.list.length} ${o.inner.list[0] + o.inner.list[1]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2 7");
+});
+
 test("a collection is keyed by a number", async () => {
   // A key is a text, a reference or a number: a number reaches the runtime as
   // the number it is, and the runtime keeps the key as the bits of its double,
