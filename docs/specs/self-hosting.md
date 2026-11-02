@@ -866,6 +866,27 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ab. A function the text calls before it is written
+
+A declaration is hoisted, but the text that calls a function need not come after
+it: `parseReview` calls `readProposal` ninety lines below it. The frontend read
+the file in order, so at the call it knew nothing about the callee — the call
+answered `any`, and a field of the answer, a method on it, and `in` over it were
+all refused.
+
+The signatures of the whole file are now read before any body: the parameter
+list and the result, not the body. A declaration is still read once, where it is
+written, and the scan is an improvement on knowing nothing rather than a
+replacement for that read — a signature the scan cannot parse (a pattern
+parameter, a default whose type it does not follow) is left to the declaration.
+A parameter written as a pattern still contributes the function's result type,
+which is the part a caller needs.
+
+This took the total from 785 to 783, and it is worth more than two refusals: it
+is the difference between a call that knows what it answers and one that knows
+nothing, and every later slice that types the result of a call a reader writes
+above its declaration is standing on it.
+
 ### 4x. The text of a number written into a frame that is gone
 
 Two wrong answers found while trying to read `Array.from`, and both are the

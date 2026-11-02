@@ -4215,6 +4215,12 @@ class TypeScriptParser {
     // A class is lowered before anything else is read: its constructor and
     // methods are declarations of the module, wherever the class was written,
     // and every use of the class is read against the same table.
+    // A function is declared before it is called in the text of a file, but not
+    // always: a reader names the function it calls first and writes it below.
+    // The signatures are read before any body, so a call to a function declared
+    // later is a call of a function whose result is known — which is what a
+    // field of that result, a method on it, or `in` over it needs.
+    this.prescanFunctions();
     const functions: DeclaredFunction[] = this.emitClasses();
     /** The names `export { f }` offered, which a declaration may name later. */
     const namesExported: Record<string, true> = {};
@@ -4399,6 +4405,182 @@ class TypeScriptParser {
       constants: this.exportedConstants(),
       awaitingLink: this.deferred.size > 0,
     };
+  }
+
+  /**
+   * The signatures of the file's functions, read before their bodies.
+   *
+   * A declaration is hoisted, but the text that calls a function need not come
+   * after it. The body of the caller is read against `declaredReturns`,
+   * `declaredParams` and `declaredReturnShapes`, and until a later declaration
+   * is read those say nothing: a call to it answers `any`, so a field read of
+   * the answer, a method written on it, and a question about its shape were all
+   * refused. Reading the signature — the parameters and the result, not the
+   * body — makes the hoisting the language gives a declaration visible to the
+   * text above it.
+   *
+   * A signature this scan cannot read is left to the read of its declaration:
+   * the scan is an improvement on knowing nothing, never a replacement for the
+   * real thing.
+   */
+  private prescanFunctions(): void {
+    const tokens = this.tokens;
+    // The token's own text: an identifier is a word here and not a punctuation
+    // mark, which `mark` answers nothing for.
+    const text = (at: number): string => (tokens[at] as Token | undefined)?.text ?? "";
+    /** The index of the bracket that closes the one at `open`, or -1. */
+    const closing = (open: number): number => {
+      let depth = 0;
+      for (let at = open; at < tokens.length; at += 1) {
+        const token = tokens[at] as Token;
+        if (token.kind === "end") return -1;
+        const written = text(at);
+        if (written === "(" || written === "[" || written === "{") depth += 1;
+        else if (written === ")" || written === "]" || written === "}") {
+          depth -= 1;
+          if (depth === 0) return at;
+          if (depth < 0) return -1;
+        }
+      }
+      return -1;
+    };
+    let depth = 0;
+    for (let at = 0; at < tokens.length; at += 1) {
+      const token = tokens[at] as Token;
+      if (token.kind === "end") break;
+      const written = text(at);
+      if (written === "(" || written === "[" || written === "{") {
+        depth += 1;
+        continue;
+      }
+      if (written === ")" || written === "]" || written === "}") {
+        depth = Math.max(0, depth - 1);
+        continue;
+      }
+      if (depth !== 0 || written !== "function") continue;
+      const before = at === 0 ? null : tokens[at - 1] as Token;
+      // A function expression is not a declaration: it is written after `=`,
+      // inside a call, or as the value of a field. Only a declaration carries a
+      // name the whole file knows.
+      if (before !== null && !["export", "default", "async", ";", "}"].includes(before.text)) continue;
+      const name = tokens[at + 1] as Token | undefined;
+      if (name === undefined || name.kind !== "ident") continue;
+      let open = at + 2;
+      if (text(open) === "<") {
+        // The erased type parameters of a generic function.
+        let angles = 0;
+        let closed = -1;
+        for (let scan = open; scan < tokens.length; scan += 1) {
+          const piece = text(scan);
+          if (piece === "<") angles += 1;
+          else if (piece === ">") {
+            angles -= 1;
+            if (angles === 0) {
+              closed = scan;
+              break;
+            }
+          }
+        }
+        if (closed < 0) continue;
+        open = closed + 1;
+      }
+      if (text(open) !== "(") continue;
+      const close = closing(open);
+      if (close < 0) continue;
+      const params: TypeExpr[] = [];
+      // The parameter list, split at the commas of its own depth. A type
+      // argument's comma is inside the angle brackets of the type.
+      let segment = open + 1;
+      let inner = 0;
+      const segments: [number, number][] = [];
+      for (let index = open + 1; index < close; index += 1) {
+        const piece = text(index);
+        const previous = index === open + 1 ? null : text(index - 1);
+        if (piece === "(" || piece === "[" || piece === "{") inner += 1;
+        else if (piece === ")" || piece === "]" || piece === "}") inner -= 1;
+        else if (piece === "<" && (previous === null || tokens[index - 1]?.kind === "ident")) inner += 1;
+        else if (piece === ">" && inner > 0) inner -= 1;
+        else if (piece === "," && inner === 0) {
+          segments.push([segment, index]);
+          segment = index + 1;
+        }
+      }
+      if (segment < close) segments.push([segment, close]);
+      let readable = true;
+      for (const [start, end] of segments) {
+        let index = start;
+        if (text(index) === "...") index += 1;
+        const named = tokens[index] as Token | undefined;
+        if (named === undefined || named.kind !== "ident") {
+          readable = false;
+          break;
+        }
+        index += 1;
+        if (text(index) === "?") index += 1;
+        if (text(index) !== ":") {
+          params.push(ANY_TYPE);
+          continue;
+        }
+        index += 1;
+        let finish = index;
+        let typeDepth = 0;
+        while (finish < end) {
+          const piece = text(finish);
+          const previous = finish === index ? null : text(finish - 1);
+          if (piece === "(" || piece === "[" || piece === "{") typeDepth += 1;
+          else if (piece === ")" || piece === "]" || piece === "}") typeDepth -= 1;
+          else if (piece === "<" && (previous === null || tokens[finish - 1]?.kind === "ident")) typeDepth += 1;
+          else if (piece === ">" && typeDepth > 0) typeDepth -= 1;
+          else if (piece === "=" && typeDepth === 0) break;
+          finish += 1;
+        }
+        try {
+          params.push(this.typeExprOfShape(resolveAnnotation(tokens, index, finish, this.typeTable)));
+        } catch {
+          params.push(ANY_TYPE);
+        }
+      }
+      // A parameter written as a pattern binds names this scan does not read,
+      // so the parameter list is left to the declaration; the result type is
+      // still the file's, and a call to the function answers it.
+      if (readable) this.declaredParams.set(name.text, params);
+      // The result type follows the parameter list: `: T` up to the body, or up
+      // to the semicolon of an overload.
+      let after = close + 1;
+      if (text(after) !== ":") continue;
+      after += 1;
+      let finish = after;
+      let typeDepth = 0;
+      while (finish < tokens.length) {
+        const piece = text(finish);
+        const previous = finish === after ? null : text(finish - 1);
+        if (piece === "(" || piece === "[" || piece === "{") typeDepth += 1;
+        else if (piece === ")" || piece === "]" || piece === "}") {
+          if (typeDepth === 0) break;
+          typeDepth -= 1;
+        } else if (piece === "<" && (previous === null || tokens[finish - 1]?.kind === "ident")) typeDepth += 1;
+        else if (piece === ">" && typeDepth > 0) typeDepth -= 1;
+        else if (piece === ";" || piece === "=") {
+          if (typeDepth === 0) break;
+        }
+        finish += 1;
+      }
+      const last = text(finish);
+      if (last !== "{" && last !== ";" && finish < tokens.length && tokens[finish]?.kind !== "end") {
+        // The declaration ends in a way this scan does not know: leave the
+        // signature to the read of the declaration itself.
+        continue;
+      }
+      try {
+        const shape = resolveAnnotation(tokens, after, finish, this.typeTable);
+        this.declaredReturns.set(name.text, this.typeExprOfShape(shape));
+        this.declaredReturnShapes.set(name.text, shape);
+        const collection = this.collectionOfShape(shape);
+        if (collection !== null) this.declaredCollections.set(name.text, collection);
+      } catch {
+        // A result this scan cannot resolve is read where the declaration is.
+      }
+    }
   }
 
   /**

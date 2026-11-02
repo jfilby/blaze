@@ -990,6 +990,27 @@ test("a write through a cast or a chain is a statement of its own", () => {
   assert.match(body, /"kind":"indexAssign"/, "the element of the field is written");
 });
 
+test("a function declared after its caller answers the type it declares", () => {
+  // A declaration is hoisted: a reader may call the function it writes below.
+  // The body is read against the signatures of the whole file, so a field of
+  // the answer and `in` over it are known before the declaration is reached.
+  const body = JSON.stringify(analyzedBody([
+    "export function f(value: string): number {",
+    "  const answer = read(value);",
+    "  if (\"unusable\" in answer) return 0;",
+    "  return answer.proposal.rule.length;",
+    "}",
+    "interface Proposal { readonly rule: string }",
+    "function read(value: string): { proposal: Proposal } | { unusable: string } {",
+    "  if (value === ``) return { unusable: `empty` };",
+    "  return { proposal: { rule: value } };",
+    "}",
+    "",
+  ].join("\n"), "f"));
+  assert.match(body, /"field":"rule"/, "a field of the answer the later declaration types is read");
+  assert.doesNotMatch(body, /"k":"hole"/, "nothing of the function is refused");
+});
+
 test("an indexed access names what the field holds", () => {
   // `Outcome["failure"]` is the type the field holds, which is where the source
   // writes the one shape of a value it kept from somewhere else. Reading it as
