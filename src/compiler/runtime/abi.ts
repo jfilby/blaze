@@ -4233,7 +4233,7 @@ double blaze_rt_dict_delete_refkey(double dict, double key) {
 
 double blaze_rt_dict_key_ref_at(double dict, double index) {
   const char* key = blaze_rt_dict_key_at(dict, index);
-  if (key == NULL || key[0] == '\0') return 0.0;
+  if (key == NULL || key[0] == '\\0') return 0.0;
   return (double)(uintptr_t)strtoull(key, NULL, 16);
 }
 
@@ -4293,7 +4293,7 @@ double blaze_rt_dict_key_num_at(double dict, double index) {
   const char* key = blaze_rt_dict_key_at(dict, index);
   uint64_t bits = 0;
   double answer;
-  if (key == NULL || key[0] == '\0') return 0.0;
+  if (key == NULL || key[0] == '\\0') return 0.0;
   bits = strtoull(key, NULL, 16);
   memcpy(&answer, &bits, sizeof answer);
   return answer;
