@@ -866,6 +866,36 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4af. A program erases a type it did not used to read
+
+The program parser — the one that reads `cli.ts` as the statements it runs —
+erased a parameter's type by taking its first word. `string | undefined` left
+the `|` where the reader wanted `)`, and an object type left its `{`. Both
+desynchronised the body, and the statements after it were never counted. A type
+is now read to the token its annotation ends at, with the braces, brackets and
+angles of the type balanced inside it, and `as`/`satisfies` are the value with
+its type erased.
+
+This is what the entry module needed: `cli.ts` is the first file of the
+self-build, and it is read as a program. It went from two refusals to four,
+because the parser now reaches `switch` and `process.stdout` where it used to
+stop; three other files fell by seven. The total went from 756 to 751.
+
+**A finding.** A program that passes an object to a function of the program is
+now read (an object type in a parameter used to be refused), and the machine
+backend runs it while the C backend is killed by a segmentation fault. The
+object a program allocates is not passed to a program function the way the C
+backend reads it. Verification refuses the C candidate and the machine one is
+delivered, so no build answers wrongly; the C backend cannot be the candidate
+for such a program until the passing is fixed.
+
+**What a default parameter still needs.** A program function with `x = 1` or
+`maximum?: number` is still refused, because a call that leaves the parameter
+out has no absent value to pass: the compiler's zero for a number is a number
+the source may have written, and a body that asks `maximum !== undefined` would
+then answer for a zero. This is the same absent value the roadmap names, and it
+is the next value-model slice.
+
 ### 4ad. The signature across the module link
 
 A runtime import binds a name, not a body: the function is compiled by the

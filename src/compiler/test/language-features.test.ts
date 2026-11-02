@@ -500,6 +500,22 @@ test("a write goes through the place the source named in full", async () => {
   assert.equal(output.trim(), "23");
 });
 
+test("a program erases the type of a value it casts and of a parameter it types", async () => {
+  // A program has one type for a number and one for a text, so an annotation is
+  // read and erased: a union of types is the token run the type is, and `as`
+  // says a type the value already has.
+  const output = await agreesWithNode([
+    "function label(value: string | undefined): string {",
+    "  if (value === undefined) return `none`;",
+    "  return value;",
+    "}",
+    "const total = (2 + 3) as number;",
+    "console.log(`${label(`x`)} ${total}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "x 5");
+});
+
 test("`in` on a union reads the arm the value is", async () => {
   // A union of shapes is one layout: every field of every arm, zero where the
   // arm that wrote the value did not write it, and a tag that says which arm it

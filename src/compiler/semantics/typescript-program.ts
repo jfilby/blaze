@@ -718,6 +718,13 @@ class ProgramParser {
   /** `: Type`, which a program names with a single token. */
   private annotation(what: string): string {
     const token = this.peek();
+    if (token.text === "{") {
+      // An object type written where a type is expected: the program erases it,
+      // and its fields are not a parameter list. A `;` inside the braces is the
+      // separator a field is written with, not the end of the annotation.
+      this.skipType(new Set([",", ")", "=", ";"]));
+      return "any";
+    }
     if (token.kind !== "ident") {
       this.fail(`expected ${what}`, token);
       return "";
@@ -726,14 +733,44 @@ class ProgramParser {
     // `Array<f64>` and the like name a type with more than one token. A program
     // has no such type of its own, so the annotation is erased: the value keeps
     // the type it is written with and the name states nothing the program reads.
+    let name = token.text;
     if (this.at("<")) {
       this.skipAngles();
-      return "any";
+      name = "any";
     }
+    // A union, an intersection, an array suffix and an object arm are part of
+    // the same annotation, and the program erases them with the name.
+    this.skipType(new Set([",", ")", "=", ";", "}", "{"]));
     // A class names a value the program holds as a reference, which is the one
     // type the source needs no fields spelled for.
     if (this.classTable.names.has(token.text)) return "any";
-    return token.text;
+    return name;
+  }
+
+  /**
+   * Reads past the rest of a type a program erases: a union's bars, a type's
+   * brackets and a member object's braces, to the token the annotation stops at.
+   */
+  private skipType(stops: ReadonlySet<string>): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      const token = this.peek();
+      if (token.kind === "punct") {
+        if (depth === 0 && stops.has(token.text)) return;
+        if (token.text === "(" || token.text === "[" || token.text === "<") depth += 1;
+        else if (token.text === ")" || token.text === "]" || token.text === ">") {
+          if (depth === 0) return;
+          depth -= 1;
+        } else if (token.text === "{" || token.text === "}") {
+          if (token.text === "{" && depth === 0) depth += 1;
+          else if (token.text === "}") {
+            if (depth === 0) return;
+            depth -= 1;
+          }
+        }
+      }
+      this.next();
+    }
   }
 
   /** Reads past a type written with angle brackets. */
@@ -1234,6 +1271,11 @@ class ProgramParser {
       return value;
     }
     for (;;) {
+      if (this.at("as") || this.at("satisfies")) {
+        this.next();
+        this.annotation("a type");
+        continue;
+      }
       if (this.at("[")) {
         this.next();
         const index = this.value();
