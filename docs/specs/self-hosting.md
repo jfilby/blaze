@@ -866,6 +866,38 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ah. A collection keyed by a number
+
+`new Set<number>()` and `new Map<string, Set<number>>` were refused because the
+frontend's dictionary was keyed by a text or a reference. The runtime already
+had the `_refkey` entries that take a double, so the model was the only thing
+missing: a key is now a text, a reference or a number, and the call one
+operation is lowered to is chosen by the key the collection declared.
+
+The runtime keys a number by the bits of its double, written in base sixteen:
+two writes of one number are one entry, and the text reads back as the number it
+was. A zero is one key whatever its sign and every NaN is one key, which is what
+the language's maps say. `+0` and `-0` are one entry, and every NaN is the same
+entry; no key a program can write collides with a key it did not.
+
+**A wrong answer found on the way.** A map of references — `Map<Box, Box>`,
+where the value is a reference — was already reading past the object before this
+slice: the dictionary read was the call that answers the double an entry holds,
+so the IR typed the value a number and a field read of it read the runtime's
+table as an object. Both backends segfaulted, and `Map<string, Box>` only worked
+because a text key had a call whose answer is a reference. Every key form now
+has one (`_get_ref`, `_get_refkey_ref`, `_get_numkey_ref`), and the frontend
+picks it when the value is a reference.
+
+This took the total from 746 to 741. It is worth less than the fifteen refusals
+it removed because five of those sites then refused the next thing they held:
+`toolchain/ir-machine.ts` and `toolchain/stack-frame.ts` keep a list in a map
+(`Map<number, (readonly [number, number])[]>`), which is the list-valued
+collection of the value-model list, and `semantics/power-of-two.ts` and
+`semantics/liveness.ts` ask a set a function answered, which is the next
+section. The refusals did not vanish; they moved behind a construct the reader
+could not reach before, and the number says so.
+
 ### 4ag. A parameter default ends at its own comma
 
 A class whose constructor wrote two defaults was read with one: the scan that

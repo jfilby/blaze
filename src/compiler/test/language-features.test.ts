@@ -637,6 +637,65 @@ test("a list of dynamic values holds a text and a number beside each other", asy
   }
 });
 
+test("a map holds a reference under a number key and under a reference key", async () => {
+  // The dictionary keeps the reference as the handle it is, and the read of it
+  // is the call that answers a reference: a call answered as the double the
+  // handle is carried in typed the value a number, and reading a field of it
+  // read the runtime's table as an object.
+  const source = [
+    "class Box {",
+    "  value: number;",
+    "  constructor(value: number) { this.value = value; }",
+    "}",
+    "function g(): number {",
+    "  const byNumber = new Map<number, Box>();",
+    "  byNumber.set(1, new Box(4));",
+    "  const byKey = new Map<Box, Box>();",
+    "  const key = new Box(2);",
+    "  byKey.set(key, new Box(5));",
+    "  return byNumber.get(1).value * 10 + byKey.get(key).value;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "45", `the ${backend} backend reads a reference from the dictionary`);
+  }
+});
+
+test("a collection is keyed by a number", async () => {
+  // A key is a text, a reference or a number: a number reaches the runtime as
+  // the number it is, and the runtime keeps the key as the bits of its double,
+  // so two writes of one number are one entry and `-0` is the zero it is.
+  const source = [
+    "export function demo(): string {",
+    "  const seen = new Set<number>();",
+    "  seen.add(4);",
+    "  seen.add(9);",
+    "  seen.add(4);",
+    "  let walk = 0;",
+    "  for (const value of seen) walk += value;",
+    "  const words = new Map<number, string>();",
+    "  words.set(1, `a`);",
+    "  words.set(2, `b`);",
+    "  words.set(-0, `zero`);",
+    "  words.set(0, `still zero`);",
+    "  const held = words.has(2) ? words.get(2) : `none`;",
+    "  const missing = words.has(3) ? `held` : `none`;",
+    "  seen.delete(9);",
+    "  const after = seen.has(9) ? `held` : `none`;",
+    "  return `${walk} ${held} ${missing} ${after} ${words.get(0)} ${seen.size}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "13 b none none still zero 1", `the ${backend} backend keys by a number`);
+  }
+});
+
 test("an entry a map does not hold is absent, and `?.` reads nothing", async () => {
   // `m.get(k)` asks the dictionary whether it holds the key and reads it only
   // where it does. The answer for a key it does not hold is the zero of the

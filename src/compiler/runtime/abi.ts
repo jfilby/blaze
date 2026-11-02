@@ -1105,11 +1105,21 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_set_refkey", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_get_refkey", "double", [["dict", "double"], ["key", "double"]], "Reads one value of a dictionary by a reference key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_get_refkey_text", "const char*", [["dict", "double"], ["key", "double"]], "Reads one text of a dictionary by a reference key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_ref", "double", [["dict", "double"], ["key", "double"]], "Reads one reference of a dictionary by a reference key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_refkey_text", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_refkey_ref", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has_refkey", "double", [["dict", "double"], ["key", "double"]], "Asks whether a dictionary holds a reference key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_delete_refkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a reference key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_key_ref_at", "double", [["dict", "double"], ["index", "double"]], "Reads the reference key of one entry of a dictionary by its position.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey", "double", [["dict", "double"], ["key", "double"]], "Reads one value of a dictionary by a number key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_text", "const char*", [["dict", "double"], ["key", "double"]], "Reads one text of a dictionary by a number key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_ref", "double", [["dict", "double"], ["key", "double"]], "Reads one reference of a dictionary by a number key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_text", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_ref", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_numkey", "double", [["dict", "double"], ["key", "double"]], "Asks whether a dictionary holds a number key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_numkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a number key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_num_at", "double", [["dict", "double"], ["index", "double"]], "Reads the number key of one entry of a dictionary by its position.", "Returns the key as the number it was written as, or zero when the position names no entry.", { tags: ["object"] }),
   entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
@@ -4193,6 +4203,10 @@ double blaze_rt_dict_get_refkey(double dict, double key) {
   return blaze_rt_dict_get(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
+double blaze_rt_dict_get_refkey_ref(double dict, double key) {
+  return blaze_rt_dict_get_refkey(dict, key);
+}
+
 const char* blaze_rt_dict_get_refkey_text(double dict, double key) {
   char buffer[32];
   return blaze_rt_dict_get_text(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
@@ -4221,6 +4235,68 @@ double blaze_rt_dict_key_ref_at(double dict, double index) {
   const char* key = blaze_rt_dict_key_at(dict, index);
   if (key == NULL || key[0] == '\0') return 0.0;
   return (double)(uintptr_t)strtoull(key, NULL, 16);
+}
+
+/* A number key is the number itself. The dictionary keeps a text for every
+   key, so the number is written as the bits of its double in base sixteen: two
+   keys that are the same number are the same bits, and the text reads back as
+   the number it was. A zero is one key whatever its sign, and every NaN is one
+   key, which is what the language's maps say. */
+static const char* blaze_rt_dict_numkey(double key, char* buffer, size_t size) {
+  uint64_t bits;
+  memcpy(&bits, &key, sizeof bits);
+  if (key == 0.0) bits = 0;
+  else if (key != key) bits = 0x7ff8000000000000ULL;
+  snprintf(buffer, size, "%016llx", (unsigned long long)bits);
+  return buffer;
+}
+
+double blaze_rt_dict_set_numkey(double dict, double key, double value) {
+  char buffer[32];
+  return blaze_rt_dict_set(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
+}
+
+double blaze_rt_dict_get_numkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_get(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_get_numkey_ref(double dict, double key) {
+  return blaze_rt_dict_get_numkey(dict, key);
+}
+
+const char* blaze_rt_dict_get_numkey_text(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_get_text(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_set_numkey_text(double dict, double key, const char* value) {
+  char buffer[32];
+  return blaze_rt_dict_set_text(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
+}
+
+double blaze_rt_dict_set_numkey_ref(double dict, double key, double value) {
+  return blaze_rt_dict_set_numkey(dict, key, value);
+}
+
+double blaze_rt_dict_has_numkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_has(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_delete_numkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_delete(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+double blaze_rt_dict_key_num_at(double dict, double index) {
+  const char* key = blaze_rt_dict_key_at(dict, index);
+  uint64_t bits = 0;
+  double answer;
+  if (key == NULL || key[0] == '\0') return 0.0;
+  bits = strtoull(key, NULL, 16);
+  memcpy(&answer, &bits, sizeof answer);
+  return answer;
 }
 
 static const double* blaze_rt_arguments = NULL;

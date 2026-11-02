@@ -5406,10 +5406,10 @@ class TypeScriptParser {
     // a map writes the same two arguments.
     const key = arguments_[0] ?? TEXT_RESULT;
     const value = kind === "map" ? (arguments_[1] ?? NUMBER_RESULT) : NUMBER_RESULT;
-    if (!this.isTextKey(key)) {
+    if (this.keyKind(key) === null) {
       this.report(
         `a ${head.text} here is keyed by text, not by ${typeToString(key)}`,
-        "a key is a string or a reference: write the key as the text it is, as in m.set(`${id}`, value)",
+        "a key is a text, a number or a reference: a map of numbers is written as Map<number, V>",
         head,
       );
       return null;
@@ -5417,9 +5417,49 @@ class TypeScriptParser {
     return { kind, key, value };
   }
 
-  /** Whether a key type is one the runtime's dictionary is keyed by. */
-  private isTextKey(type: TypeExpr): boolean {
-    return type.kind === "text" || type.kind === "ref";
+  /**
+   * How a dictionary key is written: a text, a reference or a number.
+   *
+   * A text is the key the dictionary holds. A reference and a number reach the
+   * runtime as the handle and the number they are, and it keys by those, so a
+   * `Set<number>` and a `Map<Node, number>` are the same dictionary with a
+   * different spelling of the key.
+   */
+  private keyKind(type: TypeExpr): "text" | "reference" | "number" | null {
+    const kind = this.storedKind(type);
+    if (kind === "text") return "text";
+    if (kind === "reference") return "reference";
+    if (kind === "number" || kind === "bool") return "number";
+    return null;
+  }
+
+  /**
+   * The runtime dictionary call one operation is lowered to, by what the key is.
+   *
+   * A text key is the call the dictionary itself names; a reference and a number
+   * are one of the `_refkey` and `_numkey` forms, which write the key as the
+   * text the dictionary holds and read it back as the value it was.
+   */
+  private dictionaryCall(
+    key: TypeExpr,
+    operation: "set" | "setText" | "setRef" | "get" | "getText" | "getRef" | "has" | "delete" | "keyAt",
+  ): string | null {
+    const kind = this.keyKind(key);
+    if (kind === null) return null;
+    if (operation === "keyAt") {
+      if (kind === "reference") return "blaze_rt_dict_key_ref_at";
+      if (kind === "number") return "blaze_rt_dict_key_num_at";
+      return "blaze_rt_dict_key_at";
+    }
+    const suffix = kind === "reference" ? "_refkey" : kind === "number" ? "_numkey" : "";
+    if (operation === "has") return `blaze_rt_dict_has${suffix}`;
+    if (operation === "delete") return `blaze_rt_dict_delete${suffix}`;
+    if (operation === "get") return `blaze_rt_dict_get${suffix}`;
+    if (operation === "getText") return `blaze_rt_dict_get${suffix}_text`;
+    if (operation === "getRef") return `blaze_rt_dict_get${suffix}_ref`;
+    if (operation === "set") return `blaze_rt_dict_set${suffix}`;
+    if (operation === "setText") return `blaze_rt_dict_set${suffix}_text`;
+    return `blaze_rt_dict_set${suffix}_ref`;
   }
 
   /** The type arguments written between two angle brackets, one per argument. */
@@ -8445,7 +8485,7 @@ class TypeScriptParser {
           if (collection !== null && collection.kind === "map" && key !== undefined) {
             const has: Expression = {
               k: "call",
-              name: collection.key.kind === "ref" ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+              name: this.dictionaryCall(collection.key, "has") ?? "blaze_rt_dict_has",
               args: [receiver, key],
             };
             const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
@@ -10460,7 +10500,6 @@ class TypeScriptParser {
     args: readonly Expression[],
   ): Expression | null {
     const one: Expression = { k: "literal", text: "1" };
-    const refKey = collection.key.kind === "ref";
     const call = (name: string, args_: Expression[], returns: TypeExpr): Expression => {
       const made: Expression = { k: "call", name, args: args_ };
       this.expressionTypes.set(made, returns);
@@ -10470,21 +10509,21 @@ class TypeScriptParser {
       if (collection.kind === "set") {
         if (method === "add" && args.length === 1) {
           return {
-            name: refKey ? "blaze_rt_dict_set_refkey" : "blaze_rt_dict_set",
+            name: this.dictionaryCall(collection.key, "set") ?? "blaze_rt_dict_set",
             args: [receiver, args[0] as Expression, one],
             returns: NUMBER_RESULT,
           };
         }
         if (method === "has" && args.length === 1) {
           return {
-            name: refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+            name: this.dictionaryCall(collection.key, "has") ?? "blaze_rt_dict_has",
             args: [receiver, args[0] as Expression],
             returns: BOOLEAN_RESULT,
           };
         }
         if (method === "delete" && args.length === 1) {
           return {
-            name: refKey ? "blaze_rt_dict_delete_refkey" : "blaze_rt_dict_delete",
+            name: this.dictionaryCall(collection.key, "delete") ?? "blaze_rt_dict_delete",
             args: [receiver, args[0] as Expression],
             returns: NUMBER_RESULT,
           };
@@ -10497,10 +10536,9 @@ class TypeScriptParser {
         return { name, args: [receiver, ...args], returns: NUMBER_RESULT };
       }
       if ((method === "has" || method === "delete") && args.length === 1) {
+        const operation = method === "has" ? "has" : "delete";
         return {
-          name: method === "has"
-            ? (refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has")
-            : (refKey ? "blaze_rt_dict_delete_refkey" : "blaze_rt_dict_delete"),
+          name: this.dictionaryCall(collection.key, operation) ?? "blaze_rt_dict_has",
           args: [receiver, ...args],
           returns: method === "has" ? BOOLEAN_RESULT : NUMBER_RESULT,
         };
@@ -10521,18 +10559,19 @@ class TypeScriptParser {
       // zero rather than the NaN the dictionary uses to say it holds nothing.
       const has: Expression = {
         k: "call",
-        name: refKey ? "blaze_rt_dict_has_refkey" : "blaze_rt_dict_has",
+        name: this.dictionaryCall(collection.key, "has") ?? "blaze_rt_dict_has",
         args: [receiver, args[0] as Expression],
       };
-      const heldName = refKey
-        ? kind === "text"
-          ? "blaze_rt_dict_get_refkey_text"
-          : "blaze_rt_dict_get_refkey"
-        : kind === "text"
-          ? "blaze_rt_dict_get_text"
+      // A reference is read by the call that answers a reference: the dictionary
+      // holds the handle, and the IR needs the type of the call to be the
+      // reference it is rather than the double it is carried in. A number and a
+      // truth are the double an entry holds, so they read as an entry.
+      const heldName =
+        kind === "text"
+          ? this.dictionaryCall(collection.key, "getText") ?? "blaze_rt_dict_get_text"
           : kind === "reference"
-            ? "blaze_rt_dict_get_ref"
-            : "blaze_rt_dict_get";
+            ? this.dictionaryCall(collection.key, "getRef") ?? "blaze_rt_dict_get_ref"
+            : this.dictionaryCall(collection.key, "get") ?? "blaze_rt_dict_get";
       const read = call(heldName, [receiver, args[0] as Expression], collection.value);
       const held: Expression = kind === "bool"
         ? { k: "binary", op: "!=", left: read, right: { k: "literal", text: "0" } }
@@ -10598,28 +10637,13 @@ class TypeScriptParser {
     return answer;
   }
 
-  /**
-   * The dictionary call that writes one value of a map, by what the value is.
-   * A value with no entry here is one the dictionary cannot hold.
-   */
-  private collectionSetName(type: TypeExpr): string | null {
-    const kind = this.storedKind(type);
-    if (kind === "number" || kind === "bool") return "blaze_rt_dict_set";
-    if (kind === "text") return "blaze_rt_dict_set_text";
-    if (kind === "reference") return "blaze_rt_dict_set_ref";
-    return null;
-  }
-
   /** The dictionary call that writes a map entry, by what its key and value are. */
   private collectionSetNameFor(collection: CollectionValue): string | null {
     const kind = this.storedKind(collection.value);
-    if (collection.key.kind === "ref") {
-      if (kind === "text") return "blaze_rt_dict_set_refkey_text";
-      if (kind === "reference") return "blaze_rt_dict_set_refkey_ref";
-      if (kind === "number" || kind === "bool") return "blaze_rt_dict_set_refkey";
-      return null;
-    }
-    return this.collectionSetName(collection.value);
+    if (kind === "text") return this.dictionaryCall(collection.key, "setText");
+    if (kind === "reference") return this.dictionaryCall(collection.key, "setRef");
+    if (kind === "number" || kind === "bool") return this.dictionaryCall(collection.key, "set");
+    return null;
   }
 
   /**
@@ -10644,7 +10668,7 @@ class TypeScriptParser {
 
   /** The dictionary call that reads the key of an entry, by what the key is. */
   private keyReadName(collection: CollectionValue): string {
-    return collection.key.kind === "ref" ? "blaze_rt_dict_key_ref_at" : "blaze_rt_dict_key_at";
+    return this.dictionaryCall(collection.key, "keyAt") ?? "blaze_rt_dict_key_at";
   }
 
   /** The dictionary call that reads a value entry, by what the value is. */
@@ -11523,10 +11547,10 @@ class TypeScriptParser {
     if (pairs.length === 0) {
       return { k: "call", name: "blaze_rt_dict_new", args: [] };
     }
-    if (collection.key.kind !== "text" && collection.key.kind !== "ref") {
+    if (this.keyKind(collection.key) === null) {
       this.report(
         `a ${view.text} here is keyed by text, not by ${typeToString(collection.key)}`,
-        "a key is a string or a reference: write the key as the text it is",
+        "a key is a text, a number or a reference: a map of numbers is written as Map<number, V>",
         view,
       );
       return this.hole();
@@ -11534,7 +11558,7 @@ class TypeScriptParser {
     // A map written out without a generic states its key and value types with
     // the first entry it holds.
     const firstKey = this.valueTypeOf((pairs[0] as { key: Expression }).key);
-    if (collection.key.kind === "text" && firstKey.kind === "ref") collection.key = firstKey;
+    if (collection.key.kind === "text" && firstKey.kind !== "text") collection.key = firstKey;
     if (collection.value.kind === "primitive" && collection.value.name === "f64") {
       const first = this.valueTypeOf((pairs[0] as { value: Expression }).value);
       if (first.kind !== "primitive" || first.name !== "f64") collection.value = first;
@@ -11597,7 +11621,7 @@ class TypeScriptParser {
     if (sourceCollection !== null) {
       // A collection built from another states its key and value with the one
       // it copies where the source wrote no generic.
-      if (collection.key.kind === "text" && sourceCollection.key.kind === "ref") collection.key = sourceCollection.key;
+      if (collection.key.kind === "text" && sourceCollection.key.kind !== "text") collection.key = sourceCollection.key;
       if (collection.value.kind === "primitive" && collection.value.name === "f64" && sourceCollection.value.kind !== "primitive") {
         collection.value = sourceCollection.value;
       }
@@ -11650,12 +11674,11 @@ class TypeScriptParser {
     const key = JSON.stringify(["fromLiteral", collection.kind, element, values.length]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return { k: "call", name: known.name, args: [...values] };
-    const kind = this.storedKind(element);
-    const setName = kind === "reference" ? "blaze_rt_dict_set_refkey" : kind === "text" ? "blaze_rt_dict_set" : null;
+    const setName = this.dictionaryCall(element, "set");
     if (setName === null) {
       this.report(
         `a set of ${typeToString(element)} is keyed by text, not by ${typeToString(element)}`,
-        "a set holds texts, or references keyed by the handle they are",
+        "a set holds numbers, texts, or references keyed by the handle they are",
         this.peek(),
       );
       return this.hole();
@@ -11706,12 +11729,11 @@ class TypeScriptParser {
     const name = `__collect_${this.stem}_${this.collectCount}`;
     this.collectCount += 1;
     const items: TypeExpr = { kind: "slice", of: element };
-    const refKey = element.kind === "ref";
-    const setName = refKey ? "blaze_rt_dict_set_refkey" : null;
-    if (setName === null && element.kind !== "text") {
+    const setName = this.dictionaryCall(element, "set");
+    if (setName === null) {
       this.report(
         `a set of ${typeToString(element)} is keyed by text, not by ${typeToString(element)}`,
-        "a set holds texts, or references keyed by the handle they are",
+        "a set holds numbers, texts, or references keyed by the handle they are",
         this.peek(),
       );
       return this.hole();
@@ -11764,8 +11786,7 @@ class TypeScriptParser {
     if (known !== undefined) return { k: "call", name, args: [source] };
     this.collectCount += 1;
     const ident = (value: string): Expression => ({ k: "ident", name: value });
-    const refKey = sourceCollection.key.kind === "ref";
-    const keyRead = refKey ? "blaze_rt_dict_key_ref_at" : "blaze_rt_dict_key_at";
+    const keyRead = this.keyReadName(sourceCollection);
     const body: Statement[] = [
       { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
       { kind: "declare", name: "n", type: null, init: { k: "call", name: "blaze_rt_dict_len", args: [ident("source")] }, line },
@@ -11784,7 +11805,7 @@ class TypeScriptParser {
     ];
     const loop = body[2] as Statement & { kind: "loop" };
     if (collection.kind === "set") {
-      const setName = refKey ? "blaze_rt_dict_set_refkey" : "blaze_rt_dict_set";
+      const setName = this.dictionaryCall(collection.key, "set") ?? "blaze_rt_dict_set";
       loop.body = [{
         kind: "expression",
         value: {

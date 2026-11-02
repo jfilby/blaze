@@ -373,6 +373,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_get_refkey(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_get_refkey_text":
       return `blaze_rt_dict_get_refkey_text(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_get_refkey_ref":
+      return `blaze_rt_dict_get_refkey_ref(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_set_refkey_text":
       return `blaze_rt_dict_set_refkey_text(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_set_refkey_ref":
@@ -385,6 +387,24 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_key_ref_at(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_delete":
       return `blaze_rt_dict_delete(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_numkey":
+      return `blaze_rt_dict_set_numkey(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_get_numkey":
+      return `blaze_rt_dict_get_numkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_get_numkey_text":
+      return `blaze_rt_dict_get_numkey_text(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_get_numkey_ref":
+      return `blaze_rt_dict_get_numkey_ref(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_numkey_text":
+      return `blaze_rt_dict_set_numkey_text(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_set_numkey_ref":
+      return `blaze_rt_dict_set_numkey_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+    case "blaze_rt_dict_has_numkey":
+      return `blaze_rt_dict_has_numkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_delete_numkey":
+      return `blaze_rt_dict_delete_numkey(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_key_num_at":
+      return `blaze_rt_dict_key_num_at(${args[0]}, ${args[1]})`;
     // The regular-expression helpers. The pattern and the flags are texts, and
     // so is the text they are matched against; a match is a block of texts, and
     // a match of matches is a block of those.

@@ -1265,6 +1265,9 @@ proc blaze_rt_dict_get_refkey*(dict: float64, key: float64): float64 {.exportc, 
 proc blaze_rt_dict_get_refkey_text*(dict: float64, key: float64): cstring {.exportc, cdecl.} =
   blaze_rt_dict_get_text(dict, $uint64(key))
 
+proc blaze_rt_dict_get_refkey_ref*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_get_refkey(dict, key)
+
 proc blaze_rt_dict_set_refkey_text*(dict: float64, key: float64, value: cstring): float64 {.exportc, cdecl.} =
   blaze_rt_dict_set_text(dict, $uint64(key), value)
 
@@ -1281,6 +1284,45 @@ proc blaze_rt_dict_key_ref_at*(dict: float64, index: float64): float64 {.exportc
   let key = blaze_rt_dict_key_at(dict, index)
   if key == nil or ord(key[0]) == 0: return 0.0
   float64(parseUInt($key))
+
+## A number key is the number itself, written as the bits of its double: two
+## keys that are the same number are the same bits, and the text reads back as
+## the number it was. A zero is one key whatever its sign, and every NaN is one.
+
+proc blazeNumKey(key: float64): string =
+  var bits = cast[uint64](key)
+  if key == 0.0: bits = 0'u64
+  elif key != key: bits = 0x7ff8000000000000'u64
+  $bits
+
+proc blaze_rt_dict_set_numkey*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set(dict, blazeNumKey(key), value)
+
+proc blaze_rt_dict_get_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_get(dict, blazeNumKey(key))
+
+proc blaze_rt_dict_get_numkey_text*(dict: float64, key: float64): cstring {.exportc, cdecl.} =
+  blaze_rt_dict_get_text(dict, blazeNumKey(key))
+
+proc blaze_rt_dict_get_numkey_ref*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_get_numkey(dict, key)
+
+proc blaze_rt_dict_set_numkey_text*(dict: float64, key: float64, value: cstring): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set_text(dict, blazeNumKey(key), value)
+
+proc blaze_rt_dict_set_numkey_ref*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_set_numkey(dict, key, value)
+
+proc blaze_rt_dict_has_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_has(dict, blazeNumKey(key))
+
+proc blaze_rt_dict_delete_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
+  blaze_rt_dict_delete(dict, blazeNumKey(key))
+
+proc blaze_rt_dict_key_num_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
+  let key = blaze_rt_dict_key_at(dict, index)
+  if key == nil or ord(key[0]) == 0: return 0.0
+  cast[float64](parseUInt($key))
 
 proc blaze_rt_random*(): float64 {.exportc, cdecl.} =
   ## A pseudo-random double in [0, 1), which is what the C runtime answers.
