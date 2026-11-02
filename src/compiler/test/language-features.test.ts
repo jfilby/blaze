@@ -913,6 +913,32 @@ test("two calls written the same way are two calls", async () => {
   }
 });
 
+test("a function writes a field and a list of the object it was handed", async () => {
+  // An object travels as the double the ABI carries, and a field of it is
+  // reached through a pointer. The store cast the double straight to a pointer,
+  // which C refuses to compile: the cast has to go through an integer wide
+  // enough to hold an address, as the field read already did.
+  const source = [
+    "interface Inner { list: number[]; count: number }",
+    "function addOne(inner: Inner, n: number): void {",
+    "  inner.list.push(n);",
+    "  inner.count = inner.count + 1;",
+    "}",
+    "export function demo(): string {",
+    "  const inner: Inner = { list: [], count: 0 };",
+    "  addOne(inner, 1);",
+    "  addOne(inner, 2);",
+    "  return `${inner.list.length} ${inner.list[1]} ${inner.count}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 2 2", `the ${backend} backend writes the field`);
+  }
+});
+
 test("a list behind more than one field takes a push", async () => {
   // `o.inner.list.push(x)`: the owner is a reference, so it is read into a name
   // of the statement's own and the push is written through that name. A place

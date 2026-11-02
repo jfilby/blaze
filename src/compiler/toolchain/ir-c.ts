@@ -728,8 +728,12 @@ class FunctionEmitter {
         this.write([`${pad(depth)}${RUNTIME_NAME}_raise(${this.expression(statement.message, TEXT, depth)});`]);
         return;
       case "storeField":
+        // A reference travels as the double the ABI carries, and a layout's
+        // fields are read through a pointer: the cast goes through an integer
+        // wide enough to hold one, as every other reference read in this
+        // backend does. `self` is already a pointer and casts the same way.
         this.write([
-          `${pad(depth)}((struct ${statement.layout}*)${this.expression(statement.object, null, depth)})->${cMemberName(statement.field)} = ${this.expression(statement.value, null, depth)};`,
+          `${pad(depth)}((struct ${statement.layout}*)(uintptr_t)(${this.expression(statement.object, null, depth)}))->${cMemberName(statement.field)} = ${this.expression(statement.value, null, depth)};`,
         ]);
         return;
       case "if":

@@ -866,6 +866,24 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4as. A field written through a reference the ABI carries
+
+A wrong build, found while looking at what a box for a list would be. A
+reference travels between functions as the double the ABI carries it in, and a
+layout's field is reached through a pointer. The store into a field cast the
+double straight to a pointer — `((struct Object1*)inner)->list` — which C
+refuses to compile: *cannot convert to a pointer type*. The read of the field
+already cast through `uintptr_t`, and the store now does too.
+
+So a program could not pass an object to a function and write one of its fields,
+which is the shape every record of this compiler is built with. `OB5` below is
+the smallest form of it: an interface with a list and a count, a function that
+pushes to the list and counts, and a caller that hands the object over.
+
+This costs no refusals — the C backend refused the *candidate*, which the
+frontend had read — and it is the thing that stood in the way of a box for a
+list.
+
 ### 4ar. A text searched from a position
 
 `text.indexOf(needle, from)` is the two-argument form, and the frontend read
