@@ -52,8 +52,12 @@ async function build(
 }
 
 /** Builds a program and checks it prints what the source prints under node. */
-async function agreesWithNode(source: string, files: Record<string, string> = {}): Promise<string> {
-  const { directory, binary } = await build(source, undefined, files);
+async function agreesWithNode(
+  source: string,
+  files: Record<string, string> = {},
+  backend?: "c" | "machine",
+): Promise<string> {
+  const { directory, binary } = await build(source, backend, files);
   const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
   const delivered = run(binary, [], { timeoutMs: 60_000 });
   assert.equal(original.code, 0, original.stderr);
@@ -451,6 +455,37 @@ test("a push with a spread joins the list it names", async () => {
     "",
   ].join("\n"));
   assert.equal(output.trim(), "15");
+});
+
+test("a number written as text outlives the function that wrote it", async () => {
+  // The text of a number is written into a buffer the function owns, and a text
+  // a function answers is read after it has returned — so the answer is copied
+  // into the managed heap before the frame it was written in is gone. Without
+  // that, `return String(7)` answered a pointer into a dead frame and the
+  // caller's next call wrote over it: the C backend printed the byte the next
+  // frame happened to leave there.
+  const files = {
+    "lib.ts": [
+      "export function label(): string {",
+      "  return String(7);",
+      "}",
+      "export function unlabel(): string {",
+      "  return `${9}`;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts": [
+      'import { label, unlabel } from "./lib.ts";',
+      "console.log(label());",
+      "console.log(label() + `!`);",
+      "console.log(unlabel() + label());",
+      "",
+    ].join("\n"),
+  };
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(files["main.ts"] as string, { "lib.ts": files["lib.ts"] as string }, backend);
+    assert.equal(output.trim(), "7\n7!\n97", `the ${backend} backend keeps the text it answered`);
+  }
 });
 
 test("the entries of a record are walked and copied", async () => {

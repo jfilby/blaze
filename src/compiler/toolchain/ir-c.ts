@@ -2267,7 +2267,8 @@ class FunctionEmitter {
       return {
         text:
           `({ ${wideType} ${wide} = ${read}; ${written} = ${RUNTIME_NAME}_${signed ? "i256" : "u256"}_format(&${wide}, 10u, ` +
-          `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`,
+          `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ` +
+          `(const char*)${RUNTIME_NAME}_string_new((const unsigned char*)${buffer}, ${written}); })`,
         length: written,
       };
     }
@@ -2304,7 +2305,9 @@ class FunctionEmitter {
         ? `(unsigned long long)(${value})`
         : `(unsigned long long)((${value}) < 0 ? 0ULL - (unsigned long long)(${value}) : (unsigned long long)(${value}))`;
       return {
-        text: `({ ${declaredType(type)} ${value} = ${read}; ${written} = blaze_whole_text(${negative}, ${magnitude}, ${buffer}); ${buffer}; })`,
+        text:
+          `({ ${declaredType(type)} ${value} = ${read}; ${written} = blaze_whole_text(${negative}, ${magnitude}, ${buffer}); ` +
+          `(const char*)${RUNTIME_NAME}_string_new((const unsigned char*)${buffer}, ${written}); })`,
         length: written,
       };
     }
@@ -2313,7 +2316,8 @@ class FunctionEmitter {
     return {
       text:
         `({ ${written} = ${RUNTIME_NAME}_format_number((double)(${read}), ` +
-        `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ${buffer}; })`,
+        `(unsigned char*)${buffer}, sizeof ${buffer}); ${buffer}[${written}] = '\\0'; ` +
+        `(const char*)${RUNTIME_NAME}_string_new((const unsigned char*)${buffer}, ${written}); })`,
       length: written,
     };
   }

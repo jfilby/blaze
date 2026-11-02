@@ -9621,7 +9621,13 @@ class Machine {
       this.code.movRegImm(RCX, 80n);
       this.library("blaze_rt_u256_format");
       if (measured !== null) this.code.movMemRegSized(frame(measured.offset), RAX, 8);
-      this.code.lea(RAX, frame(buffer));
+      // The buffer is this function's own, so the text is copied into the
+      // managed heap before it is answered: a text a function returns outlives
+      // the frame it was written in.
+      this.code.movRegReg(RCX, RAX);
+      this.code.lea(RDI, frame(buffer));
+      this.code.movRegReg(RSI, RCX);
+      this.runtime("_string_new");
       this.freeSlot(slot);
       return true;
     }
@@ -9660,7 +9666,13 @@ class Machine {
     this.code.lea(RAX, frame(buffer));
     this.code.alu("xor", RDX, RDX, false);
     this.code.movMemRegSized(indexed(RAX, RCX, 1), RDX, 1);
-    this.code.lea(RAX, frame(buffer));
+    // The text is copied out of this function's frame before it is answered: a
+    // text a function returns, a call keeps, or a list holds outlives the frame
+    // the number was written in, and reading it afterwards reads what the next
+    // call left there.
+    this.code.lea(RDI, frame(buffer));
+    this.code.movRegReg(RSI, RCX);
+    this.runtime("_string_new");
   }
 
   private length(of: SemanticValue): void {
