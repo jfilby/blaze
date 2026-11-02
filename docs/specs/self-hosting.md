@@ -866,6 +866,21 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ar. A text searched from a position
+
+`text.indexOf(needle, from)` is the two-argument form, and the frontend read
+only the one-argument form: `source.indexOf("\n", column)` is how the Python
+frontend, the TypeScript frontend and the assembly reader all find the end of a
+line, and each was refused.
+
+The runtime's search starts at the beginning of the text, so the search from
+`from` is the search of the field that starts there, and a hit is that field's
+position plus `from`. The start is clamped the way the language clamps it: below
+zero is the beginning, past the end is the end.
+
+This took the total from 601 to 598: two in `semantics/python.ts` and one in
+`toolchain/asm-text.ts`.
+
 ### 4aq. A text repeated
 
 `text.repeat(n)` was not a method of this compiler, and the text formatter writes
@@ -1245,7 +1260,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-601 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+598 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1298,6 +1313,7 @@ What was closed this session, and what each was worth:
 | an optional chain reads the value once | 618 → 610 |
 | an arrow takes the rest of a call's arguments | 610 → 608 |
 | a text repeated | 608 → 601 |
+| a text searched from a position | 601 → 598 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

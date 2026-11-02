@@ -775,6 +775,29 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("a text is searched from a position", async () => {
+  // `indexOf(needle, from)` is the search of the field that starts at `from`,
+  // and the position it answers is that field's plus the start. A start below
+  // zero is the beginning and a start past the end is the end.
+  const source = [
+    "export function demo(): string {",
+    "  const text = `a,b,c`;",
+    "  const one = text.indexOf(`,`, 0);",
+    "  const two = text.indexOf(`,`, 2);",
+    "  const three = text.indexOf(`,`, 9);",
+    "  const four = text.indexOf(`,`, -3);",
+    "  const five = text.indexOf(`b`, 10);",
+    "  return `${one} ${two} ${three} ${four} ${five}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 3 -1 1 -1", `the ${backend} backend searches from the position`);
+  }
+});
+
 test("a choice of a length and a number is a number", async () => {
   // The two arms of `from > text.length ? text.length : from` are a length and
   // a double. The choice between them is one number, and reading it as the
