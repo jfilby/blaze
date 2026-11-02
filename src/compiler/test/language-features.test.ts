@@ -775,6 +775,31 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("two calls written the same way are two calls", async () => {
+  // Inlining writes a body per call, and two calls written the same way are the
+  // same value: a rewrite that replaced every equal call wrote one body and
+  // answered with its result twice, so the callee ran once where the source ran
+  // it twice and the second answer was the first one.
+  const source = [
+    "class Counter {",
+    "  builds: number;",
+    "  constructor() { this.builds = 0; }",
+    "  next(): string { this.builds += 1; return `n${this.builds}`; }",
+    "}",
+    "export function demo(): string {",
+    "  const counter = new Counter();",
+    "  const two = `${counter.next()}-${counter.next()}`;",
+    "  return `${two} ${counter.builds}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "n1-n2 2", `the ${backend} backend runs both calls`);
+  }
+});
+
 test("a list behind more than one field takes a push", async () => {
   // `o.inner.list.push(x)`: the owner is a reference, so it is read into a name
   // of the statement's own and the push is written through that name. A place

@@ -866,6 +866,31 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4an. Two calls written the same way are two calls
+
+A wrong answer, found while testing the slice below. `inlineCall` inlines every
+call a block makes to a callee, one call at a time, and each inline binds the
+callee's result to a name of its own. The rewrite that put the name where the
+call was, though, replaced *every* value equal to the call — and two calls
+written the same way are equal values. So `${c.next()}-${c.next()}` inlined one
+body, bound one result, and answered it twice: the callee ran once where the
+source ran it twice, and `n1 n1` was printed for `n1 n2`.
+
+`replaceValues` now takes a flag that stops after the first replacement, and the
+inliner asks for it: the calls are written in order, so the leftmost remaining
+one is the call the block was read as making.
+
+**One wrong answer remains, and predates this.** A call written as a statement
+of its own — `c.next();` with its result unused — is refused by the inliner,
+which is right; but when the calls around it are inlined their bodies are
+written where the statements are, and the refused call keeps a position the
+source gave it only relative to those statements. In
+`const a = c.next(); c.next(); const b = c.next();` the program prints `n2` for
+`a`, which the source prints as `n1`: the middle call runs first. It is a
+reordering of an effect across another effect, and it is the next thing to read
+in the inliner. It is not caused by either of this session's changes: the same
+program answered `n2 n2 2` before them.
+
 ### 4am. An assignment where an expression goes
 
 `` `n${this.builds += 1}` `` is a write written where a value goes, and seventeen
