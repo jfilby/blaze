@@ -1219,9 +1219,14 @@ class FunctionBody {
           // whichever arm it takes: two arms that name the same thing, or a
           // reference the source left unshaped. Two lists are one list type
           // even when one arm is empty and the other is not.
+          // A choice of two values is the type they have in common, which is
+          // exact whenever neither arm is an object: a length and a double are
+          // one number, and reading the choice as a length keeps the arithmetic
+          // that follows it arithmetic. Two references are a reference, and the
+          // source did not say which layout it is.
           inferred: describe(then.inferred) === describe(otherwise.inferred)
             ? then.inferred
-            : type.kind === "slice" || type.kind === "array"
+            : type.kind === "slice" || type.kind === "array" || type.kind === "primitive" || type.kind === "text"
               ? asType(type)
               : ANY,
         };

@@ -10578,6 +10578,12 @@ class TypeScriptParser {
     if (method === "toLowerCase" && args.length === 0) return call("text.toLowerCase", [receiver]);
     if (method === "toUpperCase" && args.length === 0) return call("text.toUpperCase", [receiver]);
     if (method === "indexOf" && args.length === 1) return call("text.indexOf", [receiver, args[0] as Expression]);
+    if (method === "indexOf" && args.length === 2) {
+      // A search that starts at a position is the search of the field from
+      // there, and the position it found is the field's own plus the start.
+      const helper = this.indexOfHelper(this.peek().line);
+      return call(helper.name, [receiver, args[0] as Expression, args[1] as Expression]);
+    }
     if (method === "repeat" && args.length === 1) {
       // A repetition is a loop that appends the text to an answer of its own.
       // The count is floored, as the language floors it: `"ab".repeat(2.5)` is
@@ -10882,6 +10888,73 @@ class TypeScriptParser {
    * `text.indexOf` has no start index, so each step searches the rest of the
    * text from where the last separator ended.
    */
+  /**
+   * The function a `text.indexOf(needle, from)` becomes.
+   *
+   * The runtime's search starts at the beginning of the text, so the search
+   * from `from` is the search of the field that starts there, and a hit is the
+   * position in that field plus `from`. The start is clamped the way the
+   * language clamps it: below zero is the beginning, and past the end is the
+   * end.
+   */
+  private indexOfHelper(line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["indexOf", 2]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const less = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
+    const greater = (left: Expression, right: Expression): Expression => ({ k: "binary", op: ">", left, right });
+    const add = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "+", left, right });
+    const body: Statement[] = [
+      {
+        kind: "declare",
+        name: "start",
+        type: null,
+        init: {
+          k: "conditional",
+          condition: less(ident("from"), number("0")),
+          then: number("0"),
+          otherwise: {
+            k: "conditional",
+            condition: greater(ident("from"), { k: "lengthOf", of: ident("text") }),
+            then: { k: "lengthOf", of: ident("text") },
+            otherwise: ident("from"),
+          },
+        },
+        line,
+      },
+      {
+        kind: "declare",
+        name: "at",
+        type: null,
+        init: {
+          k: "call",
+          name: "text.indexOf",
+          args: [{ k: "call", name: "text.slice", args: [ident("text"), ident("start")] }, ident("needle")],
+        },
+        line,
+      },
+      { kind: "if", condition: less(ident("at"), number("0")), then: [{ kind: "result", value: number("-1"), line }], otherwise: [], line },
+      { kind: "result", value: add(ident("at"), ident("start")), line },
+    ];
+    const params = [
+      { name: "text", type: TEXT_RESULT },
+      { name: "needle", type: TEXT_RESULT },
+      { name: "from", type: NUMBER_RESULT },
+    ];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
+  }
+
   /**
    * The function a `text.repeat(n)` becomes: the text appended to itself `n`
    * times.

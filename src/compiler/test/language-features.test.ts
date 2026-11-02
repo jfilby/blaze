@@ -775,6 +775,27 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("a choice of a length and a number is a number", async () => {
+  // The two arms of `from > text.length ? text.length : from` are a length and
+  // a double. The choice between them is one number, and reading it as the
+  // reference an unstated arm is refused the addition that follows it.
+  const source = [
+    "export function demo(): string {",
+    "  const text = `abc`;",
+    "  const from = 2;",
+    "  const start = from > text.length ? text.length : from;",
+    "  const clamp = from < 0 ? 0 : (from > text.length ? text.length : from);",
+    "  return `${start + 1} ${clamp + 1}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "3 3", `the ${backend} backend types the choice`);
+  }
+});
+
 test("a text repeated is the text appended that many times", async () => {
   // `text.repeat(n)` is a function of the file that appends the text to an
   // answer of its own, with the count floored the way the language floors it.
