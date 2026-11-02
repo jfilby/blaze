@@ -748,7 +748,55 @@ conditional (which is how the first version of this slice refused a line of
 
 This took the total from 863 to 862.
 
-### 4w. The text of a number written into a frame that is gone
+### 4w. An arrow that calls itself
+
+`const count = (node: Node): number => { ... count(child) ... }` is how the
+sources walk a tree: the compiler's Python skin, its optimiser and its machine
+backend all recurse with an arrow. The arrow is read *before* the declaration
+binds it, so the call the body writes of the name it is about to be given was a
+call of a name nothing had bound, and the declaration refused it with "count
+calls itself, which an arrow function is not".
+
+The function is named before its body is read, and the arrow is bound to it for
+the length of that read: a call inside the body is rewritten to the lifted
+function exactly as every call site after the declaration is. A body that only
+*calls* itself is a plain recursive function and needs no closure at all; a body
+that hands itself to a collection method reads the signature the declaration
+wrote. A body that recurses *and* captures is still refused, because the values
+it captures are leading parameters of the lifted function and a call written
+before they were known did not pass them.
+
+Three smaller holes under the same reading:
+
+- `children: Node[]` is a field named for the record it is written on. The
+  field's type is the *name*, and a name is not the record: it is resolved
+  before the literal is read, so the empty list a leaf writes is held at
+  `Node[]` and not reported as an empty list with no element type.
+- `Object.create(null)` is an empty record with no prototype, which the sources
+  write where a dictionary is filled by key. A record here is a dictionary, so
+  it is the runtime's empty dictionary.
+- A name bound to an arrow is a function the file can call, so
+  `list.map(normalise)` reads the arrow the declaration lifted.
+
+This took the total from 862 to 828.
+
+**A finding, not a slice.** `type X = | A | B` — the leading bar the sources
+write when the members are laid out one per line — is read as a member that is
+`any`, and a union whose first member is `any` is `any`, so *every* such
+declaration erases. Fixing it lowers the frontend's own count by 5 and raises
+`semantics/python.ts` by 22, because the types it erases are the ones whose
+lists are walked with `flatMap` and with callbacks that are not arrows yet. It
+is a real bug and it will pay once those methods are read; until then it does
+not lower the budget, so it is not in this slice.
+
+**A second finding.** Two object literals of the same interface whose list field
+holds a different number of values are laid out as two layouts: the field is
+typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
+`{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
+written exactly that way, so this blocks the self-build — at the object pass,
+which the gap report does not measure.
+
+### 4x. The text of a number written into a frame that is gone
 
 Two wrong answers found while trying to read `Array.from`, and both are the
 same bug in the two backends.

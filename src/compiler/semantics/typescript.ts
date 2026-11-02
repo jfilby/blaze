@@ -1445,6 +1445,42 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
 }
 
 /** Every function a body calls, by the name the source wrote. */
+/**
+ * A body with every call of one name read as a call of a function of the file.
+ *
+ * An arrow is read before the declaration binds it, so a call the body writes
+ * of the name it is about to be given is a plain call of a function of that
+ * name. A recursive arrow is a function of the file like any other — the one it
+ * lifted to — and its captured values are that function's leading parameters,
+ * which the body can name, so the call is rewritten with them in front of its
+ * own arguments: the same rewriting every call site after the declaration does.
+ *
+ * Only a call of the name itself is rewritten. A field, a name that is only read
+ * as a value, and a call of anything else are left as they are.
+ */
+function callsRewritten<T>(node: T, source: string, target: string, captures: readonly string[]): T {
+  if (Array.isArray(node)) {
+    return node.map((entry) => callsRewritten(entry, source, target, captures)) as T;
+  }
+  if (node !== null && typeof node === "object") {
+    const call = node as { k?: unknown; name?: unknown; args?: unknown };
+    if (call.k === "call" && call.name === source && Array.isArray(call.args)) {
+      return {
+        ...(node as object),
+        name: target,
+        args: [...captures.map((name) => ({ k: "ident", name })), ...call.args],
+      } as T;
+    }
+    return Object.fromEntries(
+      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [
+        name,
+        callsRewritten(entry, source, target, captures),
+      ]),
+    ) as T;
+  }
+  return node;
+}
+
 function callsOf(fn: TypeScriptFunction): Set<string> {
   const called = new Set<string>();
   walkFunction(fn, () => {}, (name) => called.add(name));
@@ -2385,6 +2421,22 @@ class TypeScriptParser {
    */
   private bindingArrow = false;
   /**
+   * The name the arrow being read is about to be bound to, while its body is
+   * read.
+   *
+   * An arrow is read before the declaration binds it, so a body that calls the
+   * name it is about to be given — a recursive arrow — reads a call of a name
+   * nothing has bound yet. The name is known here, so the body is read with the
+   * arrow already bound to the function it lifts to.
+   */
+  private declaringArrow: string | null = null;
+  /** The name the arrow at the top of a declaration's initialiser is bound to. */
+  private arrowName: string | null = null;
+  /** The arrow whose body is being read, while its body is read. */
+  private arrowDeclared: string | null = null;
+  /** Whether the body being read named the arrow it is bound to. */
+  private arrowSelf = false;
+  /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
    *
@@ -2838,6 +2890,23 @@ class TypeScriptParser {
   }
 
   /** The contract type a resolved shape is held at. */
+  /**
+   * The shape a value written at a field is read at.
+   *
+   * A field's resolved type may be a name the module declares — a recursive
+   * type writes its own name, as `Expression` does through every member — and a
+   * name is not the record it stands for. The read needs the record, so the
+   * name is resolved here. A declaration another module writes is not this
+   * read's to resolve and answers null, which leaves it to the read that
+   * follows the link.
+   */
+  private shapeForRead(type: ResolvedType): ResolvedType | null {
+    if (type.kind !== "ref") return type;
+    if (type.name === null) return null;
+    const shape = this.shapeOfNamedType({ kind: "ref", of: null, name: type.name });
+    return shape === null || shape.kind === "any" ? null : shape;
+  }
+
   private typeExprOfShape(shape: ResolvedType): TypeExpr {
     switch (shape.kind) {
       case "primitive":
@@ -3217,7 +3286,7 @@ class TypeScriptParser {
       for (const field of value.fields) {
         const declared = shape.fields.get(field.name);
         if (declared === undefined) continue;
-        this.applyExpected(field.value, this.typeExprOfShape(declared.type), declared.type);
+        this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
       }
     }
   }
@@ -5594,11 +5663,14 @@ class TypeScriptParser {
         // The arrow this declaration binds is a direct call by the name it is
         // given, so it is not turned into a closure here.
         const wasBinding = this.bindingArrow;
+        const wasDeclaring = this.declaringArrow;
         this.bindingArrow = true;
+        this.declaringArrow = name.text;
         try {
           init = this.readAt(type, () => this.readExpression(), annotationShape);
         } finally {
           this.bindingArrow = wasBinding;
+          this.declaringArrow = wasDeclaring;
         }
         this.accept(";");
       } else if (type === null) {
@@ -5616,18 +5688,28 @@ class TypeScriptParser {
       // already carries the values it captured, so the name is not a slot the
       // body reads. A name bound to a value that is not an arrow is not one.
       if (init.k === "arrow") {
-        // An arrow that calls the name it is bound to would have to pass itself
-        // the values it captured, which it cannot name until the declaration is
-        // complete. A function that recurses is declared with `function`.
+        // An arrow that calls the name it is bound to is a function of the file
+        // that calls itself. The body was read before the declaration bound the
+        // name, so the call it wrote is a plain call of that name; it is
+        // rewritten here as a call of the function the arrow lifted to, with
+        // the values the arrow captured in front, which the lifted body names
+        // as its own parameters.
         const lifted = this.liftedArrows.get(init.name);
-        if (lifted !== undefined && callsOf(lifted).has(name.text)) {
-          this.report(
-            `${name.text} calls itself, which an arrow function is not`,
-            "declare the function with `function` and call it by the name it is declared under",
-            name,
-          );
-        }
         const binding = this.arrowBindings.get(init.name);
+        if (lifted !== undefined && binding !== undefined && callsOf(lifted).has(name.text)) {
+          if (binding.captures.length > 0) {
+            // A recursive arrow that captures takes the captured values again
+            // at every call, and a call written before the arrow is complete
+            // cannot say which of them it means.
+            this.report(
+              `${name.text} calls itself, which an arrow function is not`,
+              "declare the function with `function` and call it by the name it is declared under",
+              name,
+            );
+          } else {
+            lifted.body = callsRewritten(lifted.body, name.text, binding.function, binding.captures);
+          }
+        }
         if (binding !== undefined) this.valueArrows.set(name.text, binding);
         this.valueTypes.set(name.text, ANY_TYPE);
         this.valueClasses.delete(name.text);
@@ -7001,7 +7083,14 @@ class TypeScriptParser {
     try {
       const binding = this.bindingArrow;
       this.bindingArrow = false;
+      // The arrow a declaration binds is the one at the top of its initialiser,
+      // and no arrow nested inside that one is it.
+      const declaring = this.declaringArrow;
+      this.declaringArrow = null;
+      const arrowName = this.arrowName;
+      this.arrowName = binding ? declaring : null;
       const value = this.readConditional();
+      this.arrowName = arrowName;
       return binding ? value : this.materialized(value);
     } finally {
       this.expressionReads -= 1;
@@ -7680,6 +7769,7 @@ class TypeScriptParser {
         // function the arrow lifted to, with the values it captured in front of
         // the arguments the source wrote.
         if (target.k === "ident" && this.valueArrows.has(target.name)) {
+          if (target.name === this.arrowDeclared) this.arrowSelf = true;
           const binding = this.valueArrows.get(target.name) as ArrowBinding;
           const args = this.readCallArguments(binding.params.map((param) => param.type));
           replace({
@@ -7699,6 +7789,34 @@ class TypeScriptParser {
             replace({ k: "invoke", callee: target, args, params: signature.params, returns: signature.returns });
             continue;
           }
+        }
+        // `Object.create(null)` is an empty record with no prototype, which the
+        // sources write where a dictionary is filled by key and a `__proto__`
+        // entry must not reach a prototype. A record here is a dictionary and
+        // has no prototype to reach, so the empty record *is* the empty
+        // dictionary, and the type it is held at says what its values are.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Object" &&
+          target.field === "create"
+        ) {
+          const args = this.readCallArguments();
+          const prototype = args[0];
+          if (prototype !== undefined && prototype.k === "null" && args.length === 1) {
+            const empty: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+            const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: NUMBER_RESULT };
+            this.collectionExpressions.set(empty, collection);
+            this.expressionTypes.set(empty, NUMBER_RESULT);
+            replace(empty);
+            continue;
+          }
+          this.report(
+            "Object.create copies a prototype",
+            "the sources keep the one handed no prototype: Object.create(null), which is an empty record",
+            this.peek(),
+          );
+          return this.hole();
         }
         // `Object.keys(TABLE)` and `Object.values(TABLE)` over a constant object
         // are the names or the values it was written with, which the file
@@ -8624,6 +8742,31 @@ class TypeScriptParser {
     // an arrow here too: a body that passes one on or calls one is reading the
     // same value the function that wrote it reads.
     this.valueArrows = new Map(savedArrows);
+    // The function is named before its body is read, because a body that names
+    // the arrow it is about to be bound to — a recursive arrow — has to be read
+    // as a call of that function and not as a call of a name nothing binds.
+    const liftedName = `__closure_${this.stem}_${this.closureCount}`;
+    this.closureCount += 1;
+    const declared = this.arrowName;
+    this.arrowName = null;
+    const savedDeclared = this.arrowDeclared;
+    const savedSelf = this.arrowSelf;
+    this.arrowDeclared = declared;
+    this.arrowSelf = false;
+    if (declared !== null) {
+      const provisional: ArrowBinding = {
+        function: liftedName,
+        captures: [],
+        captureTypes: [],
+        params: params.map((param) => ({ name: param.name, type: param.type })),
+        returns: stated ?? ANY_TYPE,
+      };
+      this.valueArrows.set(declared, provisional);
+      // The binding is what a value read of the name carries, and a callback
+      // the body hands the arrow to is a value: `list.map(f)` inside `f` reads
+      // the signature the arrow was declared with.
+      this.arrowBindings.set(liftedName, provisional);
+    }
     this.valueFunctions = new Map(savedFunctions);
     this.valueCollections = new Map(savedCollections);
     this.loops = 0;
@@ -8675,7 +8818,18 @@ class TypeScriptParser {
     this.loops = savedLoops;
     this.breakTargets = savedTargets;
     this.pendingValues = savedPendingValues;
+    const selfReferenced = this.arrowSelf;
+    this.arrowDeclared = savedDeclared;
+    this.arrowSelf = savedSelf;
     const captures = arrowCaptures(params, body);
+    // The name the arrow is bound to is the arrow, not a value of the function
+    // around it: a body that passes the arrow on is not capturing something to
+    // hand to itself.
+    const named = declared !== null && captures.captures.includes(declared);
+    if (declared !== null) {
+      captures.captures = captures.captures.filter((capture) => capture !== declared);
+      captures.written = captures.written.filter((written) => written !== declared);
+    }
     if (captures.written.length > 0) {
       this.report(
         `an arrow function writes "${captures.written[0]}", a name of the function around it`,
@@ -8683,7 +8837,19 @@ class TypeScriptParser {
         start,
       );
     }
-    const binding = this.liftArrow(params, returns, body, captures.captures, line);
+    const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
+    // A body that names the arrow it is bound to was read with the arrow's own
+    // values already written in front of its arguments. That is only the call
+    // the source means where the arrow captures nothing: a captured value is
+    // one of the lifted function's parameters, which a call site inside the
+    // body that was written before the body knew them did not pass.
+    if (declared !== null && (selfReferenced || named) && binding.captures.length > 0) {
+      this.report(
+        `${declared} calls itself, which an arrow function is not`,
+        "declare the function with `function` and call it by the name it is declared under",
+        start,
+      );
+    }
     return { k: "arrow", name: binding.function, captures: binding.captures };
   }
 
@@ -8695,14 +8861,13 @@ class TypeScriptParser {
    * those values in front of its own arguments.
    */
   private liftArrow(
+    name: string,
     params: readonly { name: string; type: TypeExpr }[],
     returns: TypeExpr,
     body: Statement[],
     captures: readonly string[],
     line: number,
   ): ArrowBinding {
-    const name = `__closure_${this.stem}_${this.closureCount}`;
-    this.closureCount += 1;
     const captureTypes = captures.map((capture) => this.valueTypes.get(capture) ?? ANY_TYPE);
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
     const written = params.map((param) => ({ name: param.name, type: param.type }));
@@ -10048,6 +10213,13 @@ class TypeScriptParser {
     if (value.k === "ident") {
       const known = this.valueFunctions.get(value.name);
       if (known !== undefined) return known;
+      // A name bound to an arrow is a function of the file, and the callback a
+      // collection method walks with is one: `list.map(normalise)` names the
+      // arrow the declaration lifted rather than an anonymous one written here.
+      const arrow = this.valueArrows.get(value.name);
+      if (arrow !== undefined) {
+        return { params: arrow.params.map((param) => param.type), returns: arrow.returns };
+      }
     }
     return null;
   }
@@ -10461,6 +10633,7 @@ class TypeScriptParser {
       // it is the closure the arrow is, carrying the values it captured.
       const arrow = this.valueArrows.get(token.text);
       if (arrow !== undefined && !this.at("(")) {
+        if (token.text === this.arrowDeclared) this.arrowSelf = true;
         return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
       }
       return { k: "ident", name: token.text };
@@ -10478,9 +10651,11 @@ class TypeScriptParser {
   /** `{ left: a, right: b }`: an object allocated where it is written. */
   private readObject(): Expression {
     const fields: { name: string; value: Expression }[] = [];
-    const expected = this.expectedShape !== null && this.expectedShape.kind === "record"
-      ? this.expectedShape
-      : null;
+    // The shape a field is written at may be a name this module declares — a
+    // recursive type writes its own name, as `Node` does inside `children` — and
+    // a name is not the record it stands for, so it is resolved here.
+    const declaredShape = this.expectedShape === null ? null : this.shapeForRead(this.expectedShape);
+    const expected = declaredShape !== null && declaredShape.kind === "record" ? declaredShape : null;
     // A field a spread writes is replaced by a field written later, as an
     // object literal's last write is the one it holds, and the position stays
     // the first one the field was written at. Two fields the source names
@@ -10542,7 +10717,7 @@ class TypeScriptParser {
         const declared = expected?.fields.get(name);
         const value = declared === undefined
           ? this.readExpression()
-          : this.readAt(this.typeExprOfShape(declared.type), () => this.readExpression(), declared.type);
+          : this.readAt(this.typeExprOfShape(declared.type), () => this.readExpression(), this.shapeForRead(declared.type));
         put(name, value);
       } else if (key.kind === "ident") {
         // `{ line }` is `{ line: line }`: the field is named by the name the

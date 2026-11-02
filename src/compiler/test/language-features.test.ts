@@ -457,6 +457,44 @@ test("a push with a spread joins the list it names", async () => {
   assert.equal(output.trim(), "15");
 });
 
+test("an arrow that calls itself is a function of the file", async () => {
+  // The arrow is read before the declaration binds it, so the call it writes of
+  // its own name is read as a call of the function it lifts to. A compiler
+  // whose passes walk a tree with an arrow is the program the self-build is.
+  const output = await agreesWithNode([
+    "interface Node { name: string; children: Node[] }",
+    "export function demo(): string {",
+    "  const count = (one: Node): number => {",
+    "    let total = 1;",
+    "    for (const child of one.children) total += count(child);",
+    "    return total;",
+    "  };",
+    "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1);",
+    "  const tree: Node = { name: `a`, children: [] };",
+    "  return `${count(tree)} ${fact(5)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1 120");
+});
+
+test("`Object.create(null)` is an empty record that is filled by key", async () => {
+  const output = await agreesWithNode([
+    "export function demo(): string {",
+    "  const record = Object.create(null) as Record<string, number>;",
+    "  record[`a`] = 1;",
+    "  record[`b`] = 2;",
+    "  let total = 0;",
+    "  for (const [name, value] of Object.entries(record)) total += value;",
+    "  return `${total}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3");
+});
+
 test("a number written as text outlives the function that wrote it", async () => {
   // The text of a number is written into a buffer the function owns, and a text
   // a function answers is read after it has returned — so the answer is copied

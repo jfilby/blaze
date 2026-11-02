@@ -914,6 +914,61 @@ test("a method on a value the read cannot look inside waits for the link", () =>
   assert.equal(analysis.awaitingLink, true, "the read says it is waiting for the link");
 });
 
+test("an arrow that calls itself is a function of the file", () => {
+  // An arrow is read before the declaration binds it, so a body that calls the
+  // name it is about to be given reads a call of a name nothing bound yet. The
+  // call is the lifted function's, so the arrow recurses instead of being
+  // refused: a compiler whose parser walks a tree with arrows is the program
+  // the self-build is.
+  const analysis = typescript.analyze(
+    [
+      "interface Node { name: string; children: Node[] }",
+      "export function depth(node: Node): number {",
+      "  const count = (one: Node): number => {",
+      "    let total = 1;",
+      "    for (const child of one.children) total += count(child);",
+      "    return total;",
+      "  };",
+      "  return count(node);",
+      "}",
+      "",
+    ].join("\n"),
+    "module.ts",
+  );
+  const closure = analysis.functions.find((entry) => entry.name.startsWith("__closure_"));
+  assert.ok(closure !== undefined, "the recursive arrow is a function of the file");
+  const lifted = closure.handle as { body: unknown[] };
+  const printed = JSON.stringify(lifted.body);
+  assert.match(printed, new RegExp(`"name":"${closure.name}"`), "the call is the lifted function's own");
+  assert.doesNotMatch(printed, /"name":"count"/, "the source name is not called");
+});
+
+test("the fields of a recursive type settle the lists written in them", () => {
+  // `children: Node[]` names the type of the record it is written on, so the
+  // empty list a leaf writes is held at that element type. The field's type is
+  // the name, and a name is not the record it stands for: it is resolved.
+  const body = JSON.stringify(analyzedBody([
+    "interface Node { name: string; children: Node[] }",
+    "export function leaf(): Node {",
+    "  const one: Node = { name: `b`, children: [] };",
+    "  return one;",
+    "}",
+    "",
+  ].join("\n"), "leaf"));
+  assert.doesNotMatch(body, /"element":"any"/, "the empty list is held at the field's element type");
+});
+
+test("`Object.create(null)` is the empty record", () => {
+  const body = JSON.stringify(analyzedBody([
+    "export function f(): Record<string, number> {",
+    "  const record: Record<string, number> = Object.create(null);",
+    "  return record;",
+    "}",
+    "",
+  ].join("\n"), "f"));
+  assert.match(body, /blaze_rt_dict_new/, "the empty record is the runtime's dictionary");
+});
+
 test("an indexed access names what the field holds", () => {
   // `Outcome["failure"]` is the type the field holds, which is where the source
   // writes the one shape of a value it kept from somewhere else. Reading it as
@@ -1356,16 +1411,17 @@ test("an arrow that writes a name of the function around it is refused", () => {
   );
 });
 
-test("an arrow that calls itself is refused", () => {
-  // A call of the name passes the values the arrow captured, and the arrow
-  // cannot name them until the declaration it is bound to is complete. A
-  // function that recurses is declared with `function`.
+test("an arrow that calls itself and captures is refused", () => {
+  // A call of the name passes the values the arrow captured, and a call written
+  // inside the body was read before the arrow's own values were known. A
+  // function that recurses and captures is declared with `function`; one that
+  // captures nothing recurses as the function it lifts to.
   assert.match(
     diagnostic(() =>
       typescript.analyze(
         [
           "export function f(x: number): number {",
-          "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1);",
+          "  const fact = (n: number): number => n <= 1 ? 1 : n * fact(n - 1) + x;",
           "  return fact(x);",
           "}",
           "",
