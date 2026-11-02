@@ -637,6 +637,31 @@ test("a list of dynamic values holds a text and a number beside each other", asy
   }
 });
 
+test("a call of an arrow that answers a set is a set", async () => {
+  // An arrow's declared result names the collection it answers, and the call is
+  // written as a call of the function the arrow lifted to: without the answer
+  // recorded under that name, `has`, `add` and `size` were methods of nothing.
+  const source = [
+    "function namesOf(name: string): Set<string> {",
+    "  const found = new Set<string>();",
+    "  if (name.length > 0) found.add(name);",
+    "  return found;",
+    "}",
+    "export function demo(): string {",
+    "  const set = namesOf(`a`);",
+    "  const missing = namesOf(``);",
+    "  set.add(`b`);",
+    "  return `${set.has(`a`)} ${set.has(`b`)} ${missing.has(`a`)} ${set.size}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "true true false 2", `the ${backend} backend knows what the arrow answered`);
+  }
+});
+
 test("a map holds a reference under a number key and under a reference key", async () => {
   // The dictionary keeps the reference as the handle it is, and the read of it
   // is the call that answers a reference: a call answered as the double the

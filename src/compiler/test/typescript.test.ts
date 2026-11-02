@@ -2177,15 +2177,26 @@ test("an object literal at a record is the dictionary its type names", () => {
   assert.match(declared.init?.name ?? "", /^__collect_/);
 });
 
-test("a map keyed by anything but text is refused, because a key is a string", () => {
+test("a map is keyed by a number, and by a value a key cannot be", () => {
+  // A key is a text, a reference or a number: a number reaches the runtime as
+  // the number it is. A sequence is not a key, because it has no value the
+  // dictionary could compare.
+  const analysis = typescript.analyze(
+    "export function g(): number {\n  const s = new Set<number>();\n  s.add(1);\n  return s.size;\n}\n",
+    "main.ts",
+  );
+  const body = ((analysis.functions.find((entry) => entry.name === "g")?.handle ?? { body: [] }) as {
+    body: { value?: { name?: string } }[];
+  }).body;
+  assert.equal(body[1]?.value?.name, "blaze_rt_dict_set_numkey", "a number is written under a number key");
   assert.match(
     diagnostic(() =>
       typescript.analyze(
-        "export function g(): number {\n  const s = new Set<number>();\n  return s.size;\n}\n",
+        "export function g(): number {\n  const s = new Set<number[]>();\n  return s.size;\n}\n",
         "main.ts",
       ),
     ),
-    /a Set here is keyed by text, not by f64/,
+    /a Set here is keyed by text, not by/,
   );
 });
 

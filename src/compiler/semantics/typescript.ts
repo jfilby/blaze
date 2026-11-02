@@ -9381,6 +9381,15 @@ class TypeScriptParser {
       );
     }
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
+    // The map or set an arrow answers is the one its declaration states, and a
+    // call of the arrow is a call whose answer is a collection: the call names
+    // the lifted function, so the collection is recorded under that name. A
+    // caller that holds what the arrow answered asks it the collection's
+    // questions — `has`, `add`, `get` — which is what a name of the answer is.
+    if (statedShape !== null) {
+      const answered = this.collectionOfShape(this.shapeForRead(statedShape));
+      if (answered !== null) this.declaredCollections.set(binding.function, answered);
+    }
     // The values the arrow captured are the lifted function's leading
     // parameters, and a call the body wrote of itself was read before they were
     // known: each is handed them now, in the order the lifted function takes

@@ -866,6 +866,20 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ai. A collection an arrow answers
+
+`const namesOf = (name: string): Set<string> => { ... }` states that the arrow
+answers a set, and a caller asks the answer `has` and `add`. The call is written
+as a call of the function the arrow lifted to — a name the source never wrote —
+so the collection the arrow declared was recorded under no name at all, and
+every question asked of its answer was a method of nothing. The arrow now
+records its answer's collection under the lifted function's name, which is the
+name the call reads, and a name bound to that call holds the collection too.
+
+This took the total from 741 to 735, all six in `semantics/power-of-two.ts`,
+whose `namesOf` is an arrow and whose sets are asked `has` and `add` eleven
+times.
+
 ### 4ah. A collection keyed by a number
 
 `new Set<number>()` and `new Map<string, Set<number>>` were refused because the
