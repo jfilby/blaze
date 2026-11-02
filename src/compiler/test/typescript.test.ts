@@ -1522,6 +1522,35 @@ test("an arrow that writes a list it captured is refused", () => {
   );
 });
 
+test("an assignment in a template string is a statement before the one that writes it", () => {
+  // `\`n${this.builds += 1}\`` both writes and reads the field. A write is a
+  // statement, so it runs before the statement the string is part of, and the
+  // value the string interpolates is the place read after it. The write is not
+  // inside the text: the text is built from the value the write left behind.
+  const body = analyzedBody(
+    [
+      "class Counter {",
+      "  builds: number;",
+      "  constructor() { this.builds = 0; }",
+      "  next(): string { return `n${this.builds += 1}`; }",
+      "}",
+      "",
+    ].join("\n"),
+    "Counter_next",
+  ) as { kind: string; base?: string; field?: string; op?: string; value?: { k?: string; parts?: { k: string; value?: unknown }[] } }[];
+  const write = body[0];
+  assert.equal(write?.kind, "memberAssign");
+  assert.equal(write?.base, "self");
+  assert.equal(write?.field, "builds");
+  assert.equal(write?.op, "+=");
+  const result = body[1];
+  assert.equal(result?.kind, "result");
+  assert.equal(result?.value?.k, "text");
+  const interpolated = result?.value?.parts?.[1];
+  assert.equal(interpolated?.k, "value");
+  assert.deepEqual(interpolated?.value, { k: "member", base: { k: "ident", name: "self" }, field: "builds" });
+});
+
 test("an arrow that calls itself hands over the values it captured", () => {
   // The values the arrow captured are the lifted function's leading parameters,
   // and a call the body writes of itself was read before they were known: the

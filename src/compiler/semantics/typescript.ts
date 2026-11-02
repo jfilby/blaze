@@ -7962,12 +7962,45 @@ class TypeScriptParser {
       const arrowName = this.arrowName;
       this.arrowName = binding ? declaring : null;
       const value = this.readConditional();
+      const written = this.assignmentAsValue(value);
       this.arrowName = arrowName;
-      return binding ? value : this.materialized(value);
+      return binding ? written : this.materialized(written);
     } finally {
       this.expressionReads -= 1;
       if (this.expressionReads === 0 && this.expectedReads === 0) this.reportUnsettledArrays();
     }
+  }
+
+  /**
+   * An assignment written where an expression goes, as `${this.builds += 1}`.
+   *
+   * A write is a statement, so the value the expression answers is the place
+   * read after the write: the write runs before the statement the expression is
+   * part of, and the place is what the expression is. Only a name and a field
+   * of a name are places an expression can write; a field of a field and an
+   * element are not, and are refused where they are written.
+   */
+  private assignmentAsValue(value: Expression): Expression {
+    const operator = this.peek();
+    if (operator.kind !== "punct") return value;
+    const op = operator.text === "=" || operator.text in COMPOUND_OPERATORS
+      ? (operator.text as AssignOperator)
+      : null;
+    if (op === null) return value;
+    if (value.k !== "ident" && value.k !== "member") return value;
+    this.next();
+    const written = this.readExpression();
+    if (value.k === "ident") {
+      this.pendingBefore.push({ kind: "assign", target: value.name, op, value: written, line: operator.line });
+      return value;
+    }
+    const base = this.writeTarget(value.base, operator.line);
+    if (base === null) {
+      this.report("an assignment answers the place it writes", "write it as a statement of its own", operator);
+      return this.hole();
+    }
+    this.pendingBefore.push({ kind: "memberAssign", base, field: value.field, op, value: written, line: operator.line });
+    return { k: "member", base: { k: "ident", name: base }, field: value.field };
   }
 
   /** `c ? a : b`, the loosest operator an expression has. */
@@ -12547,6 +12580,11 @@ class TypeScriptParser {
 
   /** The counters a nested parser advanced, taken back by the file. */
   private adopt(child: TypeScriptParser): void {
+    // An assignment a template string interpolates is a statement of the body
+    // the string is written in, so it runs before that statement and not
+    // inside the text the string builds.
+    this.pendingBefore.push(...child.pendingBefore);
+    child.pendingBefore = [];
     this.closureCount = child.closureCount;
     this.collectCount = child.collectCount;
     this.destructureCount = child.destructureCount;

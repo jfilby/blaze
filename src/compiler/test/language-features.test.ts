@@ -720,6 +720,32 @@ test("a map holds a reference under a number key and under a reference key", asy
   }
 });
 
+test("an assignment written in a template string writes before the text", async () => {
+  // `${this.builds += 1}` is a write and a read of the same place. The write is
+  // a statement, so it runs before the statement the string is part of, and the
+  // string interpolates what the write left there — the number `1`, not zero.
+  const source = [
+    "class Counter {",
+    "  builds: number;",
+    "  constructor() { this.builds = 0; }",
+    "  next(): string { return `n${this.builds += 1}`; }",
+    "}",
+    "export function demo(): string {",
+    "  const counter = new Counter();",
+    "  let label = 0;",
+    "  const one = `a${label += 1}`;",
+    "  const two = `${counter.next()}`;",
+    "  return `${one} ${two} ${label}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a1 n1 1", `the ${backend} backend writes an interpolated assignment`);
+  }
+});
+
 test("an arrow writes a name of the function around it", async () => {
   // An arrow is lifted into a function of its own, and the values it captured
   // are handed to it by value: a write would reach the lifted function's copy.

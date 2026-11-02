@@ -521,16 +521,32 @@ function isValueNode(node: unknown): node is SemanticValue {
  * Replaces every occurrence of the values a map holds. A node that is replaced
  * is not looked at again, so a value inside a value that was already replaced
  * is never rewritten into itself.
+ *
+ * `once` stops after the first replacement. Two calls written the same way are
+ * the same value, and inlining writes one body per call: replacing every equal
+ * call would give one body's result to both, and run the callee once where the
+ * source ran it twice.
  */
-export function replaceValues<T>(node: T, replacements: ReadonlyMap<string, SemanticValue>): T {
+export function replaceValues<T>(
+  node: T,
+  replacements: ReadonlyMap<string, SemanticValue>,
+  once = false,
+  replaced: boolean[] = [],
+): T {
   if (isValueNode(node)) {
     const hit = replacements.get(valueKey(node));
-    if (hit !== undefined) return structuredClone(hit) as T;
+    if (hit !== undefined && (!once || replaced.length === 0)) {
+      if (once) replaced.push(true);
+      return structuredClone(hit) as T;
+    }
   }
-  if (Array.isArray(node)) return node.map((entry) => replaceValues(entry, replacements)) as T;
+  if (Array.isArray(node)) return node.map((entry) => replaceValues(entry, replacements, once, replaced)) as T;
   if (node !== null && typeof node === "object") {
     return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, replaceValues(entry, replacements)]),
+      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [
+        name,
+        replaceValues(entry, replacements, once, replaced),
+      ]),
     ) as T;
   }
   return node;
@@ -1202,8 +1218,12 @@ function inlineOne(
     added.push({ k: "let", slot, value: result, line });
     temp = { k: "local", type: slotType(slot), name: slot.name };
   }
-  const atCall = (read: SemanticValue): ReadonlyMap<string, SemanticValue> =>
-    temp === null ? new Map() : new Map([[valueKey(read), temp]]);
+  // One call at a time: a block may make the same call twice, and each is a
+  // body of its own with a result of its own. Replacing every equal call would
+  // write one body and answer with its result twice, which is one turn where
+  // the source takes two.
+  const atCall = <T>(node: T): T =>
+    temp === null ? node : replaceValues(node, new Map([[valueKey({ k: "call", type: call.returns, call }), temp]]), true);
   if (statement !== null) {
     const at = block.statements.indexOf(statement);
     // A statement the call was the whole of is replaced by the body, which is
@@ -1213,8 +1233,7 @@ function inlineOne(
     // statement stays and only the call inside it becomes the name, so losing
     // a statement would lose the call around it.
     const whole = statement.k === "call" && statement.call === call;
-    const callNode = { k: "call" as const, type: call.returns, call };
-    const kept = whole ? [] : [temp === null ? statement : replaceValues(statement, atCall(callNode))];
+    const kept = whole ? [] : [atCall(statement)];
     block.statements.splice(at, 1, ...added, ...kept);
   } else {
     // A block whose terminator makes the call has no statement to write in
@@ -1222,8 +1241,7 @@ function inlineOne(
     // call the terminator reads is the name the body bound.
     block.statements.push(...added);
     if (temp !== null && block.terminator.k === "return") {
-      const callNode = { k: "call" as const, type: call.returns, call };
-      block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, atCall(callNode)) };
+      block.terminator = { ...block.terminator, value: atCall(block.terminator.value) };
     }
   }
   dropUnusedEdge(fn, calleeName);

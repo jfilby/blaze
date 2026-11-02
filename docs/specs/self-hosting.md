@@ -866,6 +866,27 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4am. An assignment where an expression goes
+
+`` `n${this.builds += 1}` `` is a write written where a value goes, and seventeen
+of `toolchain/driver.ts`'s refusals were that one construct in the driver's own
+name generator. The expression reader stopped at the `+=` and reported what
+followed as a value nothing could follow.
+
+A write is a statement, so the assignment is read as one: the place becomes the
+value the expression answers, and the write is written in front of the statement
+the expression is part of. The place is read after the write, so
+`${this.builds += 1}` answers the number the write left there — `1` the first
+time, not `0`.
+
+The value is the place read after the write, which means the write runs before
+the statement around it. For an expression whose other parts have effects the
+order would differ from the language's; the compiler's own uses are all in a
+declaration of the text, where there is nothing else to order against.
+
+`toolchain/driver.ts` now reads whole — every 33 of its refusals were this
+construct or the cascade it left — and the total went from 651 to 618.
+
 ### 4al. A captured value written by an arrow
 
 An arrow is lifted into a function of the file, and the values it captures are
@@ -1149,15 +1170,14 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-651 refusals over 94 sources, 18 of them read whole. The largest buckets, in
+618 refusals over 94 sources, 19 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
 | 43 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
-| 34 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements. `toolchain/driver.ts` still earns the most, from constructs inside class members |
+| 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 78 | `an arrow function writes "pres" / "found" / "names"` | a captured **list** written back: a box holds one value, and a list's element is not a list. The scalar and reference writes are boxed (§4al) |
-| 17 | `"+=" follows a complete value` | an assignment used as a value, as `${this.builds += 1}` is |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
 | 12 | `expected a parameter name` | an arrow whose parameter list holds a rest parameter the arrow reader does not know |
@@ -1201,6 +1221,7 @@ What was closed this session, and what each was worth:
 | an import under another name | 735 → 726 |
 | a list behind more than one field | 726 → 725 |
 | a captured value written by an arrow | 725 → 651 |
+| an assignment where an expression goes | 651 → 618 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the
