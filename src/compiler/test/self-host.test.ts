@@ -53,7 +53,7 @@ import { selfHostGap } from "./self-host-gap.ts";
  * changes which parser reads a body, or when the compiler itself grows a
  * construct the frontend has not learned yet.
  */
-const REFUSAL_BUDGET = 778;
+const REFUSAL_BUDGET = 756;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

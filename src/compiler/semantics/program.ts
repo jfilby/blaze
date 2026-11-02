@@ -29,6 +29,7 @@ import { parseContract } from "./contract.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport, ProgramBody } from "./module.ts";
 import { bindImportedTypes } from "./typescript-types.ts";
 import type { TypeTable } from "./typescript-types.ts";
+import type { ImportedFunction, TypeScriptFunction } from "./typescript.ts";
 import { resolveObjects } from "./objects.ts";
 import { programShapes } from "./program-objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
@@ -124,6 +125,39 @@ function offeredValues(records: readonly ModuleRecord[]): OfferedValues[] {
   return offered;
 }
 
+/**
+ * The signatures of the functions another module declares, by the names this
+ * file imports them under.
+ *
+ * A runtime import binds a name: the function is compiled in the module that
+ * writes it, and a call here answers what that function declares. The graph has
+ * already read the module, so the signature is the one its analysis kept.
+ */
+function importedFunctionsOf(
+  record: ModuleRecord,
+  records: ReadonlyMap<string, ModuleRecord>,
+): Map<string, ImportedFunction> {
+  const functions = new Map<string, ImportedFunction>();
+  record.analysis.imports.forEach((entry, index) => {
+    if (entry.default || entry.names === null) return;
+    const target = records.get(record.resolved[index] ?? "");
+    if (target === undefined) return;
+    for (const name of entry.names) {
+      const declared = target.analysis.functions.find((one) => one.name === name && one.exported);
+      if (declared === undefined) continue;
+      const signature: ImportedFunction = {
+        params: declared.params.map((param) => param.type),
+        returns: declared.returns,
+      };
+      const handle = declared.handle as TypeScriptFunction | undefined;
+      if (handle?.returnsShape !== undefined) signature.shape = handle.returnsShape;
+      if (handle?.collection !== undefined) signature.collection = handle.collection;
+      functions.set(name, signature);
+    }
+  });
+  return functions;
+}
+
 /** Reads each file at most once, so a diamond import costs one read. */
 function cachingReader(read: (path: string) => string | null): (path: string) => string | null {
   const cache = new Map<string, string | null>();
@@ -206,10 +240,14 @@ function discover(request: ContractPhaseRequest, read: (path: string) => string 
       }
     }
     const values = importedValuesOf(record.analysis.imports, record.resolved, offered);
+    // The signatures of the functions this file calls are what a call answers,
+    // and the graph has read the modules that write them by now.
+    const functions = importedFunctionsOf(record, records);
     if (!namesAType && values.size === 0 && record.analysis.awaitingLink !== true) continue;
     record.analysis = request.frontend.analyze(record.source, record.path, record.path === request.entry.path, {
       table: record.analysis.types,
       values,
+      functions,
       linked: true,
     });
   }

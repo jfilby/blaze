@@ -866,6 +866,50 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ad. The signature across the module link
+
+A runtime import binds a name, not a body: the function is compiled by the
+module that writes it. The frontend knew the signatures of the file's own
+functions and nothing of the functions it imports, so every call to one
+answered `any` — and a field of the answer, `in` over it, and a method written
+on it were refused. The graph had already read the module, so its analysis had
+the signature; the link now hands it to the reading of the importer, by the name
+the importer writes. A call that waits for a signature is a deferral like a type
+that waits for the link, so the file is read again once the graph has answered,
+and the refusal is not written into the first read.
+
+Two smaller things in the same reading:
+
+- The scan that reads the file's own signatures before its bodies stopped at a
+  `{` that was the body's, so a result written as a union of records — a brace
+  in the type and another for the body — was left unread and the declaration
+  below its caller still answered `any`. It now ends the annotation where
+  `skipFunctionBody` does.
+- A union of shapes is one layout with a tag (see the next section), so the
+  answer of a linked function can be asked about at run time.
+
+This took the total from 778 to 756.
+
+### 4ae. A union of shapes is one layout with a tag
+
+`Outcome = { refused: string } | { applied: number }` is how the compiler says
+"either" in its own sources, and `"refused" in outcome` is how it asks which.
+The union erased to a record that named every field of every arm, and the
+literal for one arm was laid out as *that arm's* fields: reading the field of
+another arm read past the object, and `in` was answered as the constant truth
+because the merged type declared the field. Both were wrong answers waiting for
+a program that asked.
+
+Every literal written at a union is now laid out as every arm's fields — zero
+where the arm did not write one — and carries `__arm`, the index of the arm it
+was written as. `in` over the union is a chain of comparisons on `__arm` against
+the arms that declare the field, which is the question the language asks. The
+same layout for every arm is also what makes a read of a field of another arm a
+read of a zero rather than of memory past the object.
+
+This is the tag the spec said a union of shapes needed. It took the total from
+776 to 756, and it removes a wrong answer rather than only a refusal.
+
 ### 4ac. The rest of the arguments, and the signatures above the body
 
 `export function workingTitle(...args: any[]): string` is how the sources write

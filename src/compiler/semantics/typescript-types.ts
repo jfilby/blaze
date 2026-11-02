@@ -75,7 +75,17 @@ export type ResolvedType =
   | { kind: "list"; of: ResolvedType }
   | { kind: "map"; key: ResolvedType; value: ResolvedType }
   | { kind: "set"; of: ResolvedType }
-  | { kind: "record"; fields: Map<string, ResolvedField>; index: ResolvedType | null }
+  | {
+      kind: "record";
+      fields: Map<string, ResolvedField>;
+      index: ResolvedType | null;
+      /**
+       * The arms a union of records was written as, in the order the source
+       * wrote them. A record built from an interface has no arms; one built
+       * from a union keeps them so that a value can say which arm it is.
+       */
+      arms?: ResolvedType[];
+    }
   | { kind: "function"; params: ResolvedType[]; returns: ResolvedType }
   | { kind: "ref"; name: string | null }
   /** The absent value of a union, which a value this compiler holds has not. */
@@ -715,7 +725,7 @@ class TypeText {
         }
         if (member.index !== null) index = member.index;
       }
-      return { kind: "record", fields, index };
+      return { kind: "record", fields, index, arms: present };
     }
     return present[0] as ResolvedType;
   }

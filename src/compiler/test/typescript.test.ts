@@ -990,6 +990,22 @@ test("a write through a cast or a chain is a statement of its own", () => {
   assert.match(body, /"kind":"indexAssign"/, "the element of the field is written");
 });
 
+test("a union of shapes is one layout with a tag", () => {
+  // Every arm writes every field of the union and a tag saying which arm it is;
+  // `in` over the union is the tag compared with the arms that have the field.
+  const body = JSON.stringify(analyzedBody([
+    "type Outcome = { refused: string } | { applied: number };",
+    "export function f(flag: boolean): string {",
+    "  const outcome: Outcome = flag ? { refused: `no` } : { applied: 1 };",
+    "  return (\"refused\" in outcome) ? outcome.refused : `applied`;",
+    "}",
+    "",
+  ].join("\n"), "f"));
+  assert.match(body, /"name":"__arm"/, "the literal carries the arm it is");
+  assert.match(body, /"name":"applied"/, "a field the arm did not write is still laid out");
+  assert.match(body, /"field":"__arm"/, "`in` reads the tag");
+});
+
 test("an overload is a signature, and a rest parameter is the list it names", () => {
   // A signature with no body names how the function is called; the body below
   // it is the function of the file. The rest parameter is one parameter that

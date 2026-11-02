@@ -285,6 +285,8 @@ const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
  * that writes no brace at all.
  */
 const FUNCTION_BODY_STOPS: ReadonlySet<string> = new Set(["{", "=", ";"]);
+/** Where the type of one parameter ends: the comma or paren of its own list. */
+const PARAMETER_TYPE_STOPS: ReadonlySet<string> = new Set([",", ")", "="]);
 
 /**
  * Where an `as` or `satisfies` type ends. A type is followed by the rest of the
@@ -2243,6 +2245,15 @@ interface ArrowParameterType {
  * the frontend keeps it beside the name: `m.get(k)` answers the value type the
  * source declared, and `s.add(v)` answers the set.
  */
+export interface ImportedFunction {
+  params: TypeExpr[];
+  returns: TypeExpr;
+  /** What the result holds where the contract type erased it. */
+  shape?: ResolvedType;
+  /** The map or set the function answers, when it answers one. */
+  collection?: CollectionValue;
+}
+
 interface CollectionValue {
   kind: "map" | "set";
   /** The element a key is; this frontend keys by text. */
@@ -2419,6 +2430,14 @@ class TypeScriptParser {
   private declaredReturns = new Map<string, TypeExpr>();
   /** The functions declared with a rest parameter, and the list it holds. */
   private variadicFunctions = new Map<string, { element: TypeExpr; fixed: number }>();
+  /**
+   * The calls of imported functions this read could not type.
+   *
+   * A runtime import binds a name of another module, and the module graph
+   * reads that module's functions. Until the link hands their signatures over,
+   * a call to one answers `any`; the file is read again once it does.
+   */
+  private waitForFunction = false;
   /**
    * What a function's declared result holds, when the contract type erased it.
    *
@@ -4414,7 +4433,7 @@ class TypeScriptParser {
       default: defaultExport,
       body,
       constants: this.exportedConstants(),
-      awaitingLink: this.deferred.size > 0,
+      awaitingLink: this.deferred.size > 0 || (this.waitForFunction && !this.linked),
     };
   }
 
@@ -4434,6 +4453,18 @@ class TypeScriptParser {
    * the scan is an improvement on knowing nothing, never a replacement for the
    * real thing.
    */
+  /**
+   * The signature of an imported function, seeded into the tables a local
+   * declaration fills. A call to the name answers what the module that writes
+   * it says, which is what a field or `in` of the answer needs.
+   */
+  seedFunction(name: string, signature: ImportedFunction): void {
+    this.declaredReturns.set(name, signature.returns);
+    this.declaredParams.set(name, signature.params);
+    if (signature.shape !== undefined) this.declaredReturnShapes.set(name, signature.shape);
+    if (signature.collection !== undefined) this.declaredCollections.set(name, signature.collection);
+  }
+
   private prescanFunctions(): void {
     const tokens = this.tokens;
     // The token's own text: an identifier is a word here and not a punctuation
@@ -4537,18 +4568,7 @@ class TypeScriptParser {
           continue;
         }
         index += 1;
-        let finish = index;
-        let typeDepth = 0;
-        while (finish < end) {
-          const piece = text(finish);
-          const previous = finish === index ? null : text(finish - 1);
-          if (piece === "(" || piece === "[" || piece === "{") typeDepth += 1;
-          else if (piece === ")" || piece === "]" || piece === "}") typeDepth -= 1;
-          else if (piece === "<" && (previous === null || tokens[finish - 1]?.kind === "ident")) typeDepth += 1;
-          else if (piece === ">" && typeDepth > 0) typeDepth -= 1;
-          else if (piece === "=" && typeDepth === 0) break;
-          finish += 1;
-        }
+        const finish = Math.min(end, this.typeTokensEnd(index, PARAMETER_TYPE_STOPS));
         try {
           params.push(this.typeExprOfShape(resolveAnnotation(tokens, index, finish, this.typeTable)));
         } catch {
@@ -4564,24 +4584,11 @@ class TypeScriptParser {
       let after = close + 1;
       if (text(after) !== ":") continue;
       after += 1;
-      let finish = after;
-      let typeDepth = 0;
-      while (finish < tokens.length) {
-        const piece = text(finish);
-        const previous = finish === after ? null : text(finish - 1);
-        if (piece === "(" || piece === "[" || piece === "{") typeDepth += 1;
-        else if (piece === ")" || piece === "]" || piece === "}") {
-          if (typeDepth === 0) break;
-          typeDepth -= 1;
-        } else if (piece === "<" && (previous === null || tokens[finish - 1]?.kind === "ident")) typeDepth += 1;
-        else if (piece === ">" && typeDepth > 0) typeDepth -= 1;
-        else if (piece === ";" || piece === "=") {
-          if (typeDepth === 0) break;
-        }
-        finish += 1;
-      }
+      // The annotation ends where the body's brace or the overload's semicolon
+      // is, which is the same read `skipFunctionBody` makes of a signature.
+      const finish = this.typeTokensEnd(after, FUNCTION_BODY_STOPS);
       const last = text(finish);
-      if (last !== "{" && last !== ";" && finish < tokens.length && tokens[finish]?.kind !== "end") {
+      if (last !== "{" && last !== ";" && last !== "=" && finish < tokens.length && tokens[finish]?.kind !== "end") {
         // The declaration ends in a way this scan does not know: leave the
         // signature to the read of the declaration itself.
         continue;
@@ -7727,10 +7734,47 @@ class TypeScriptParser {
     if (name !== null) {
       const shape = this.shapeOf(object);
       if (shape !== null && shape.kind === "record" && shape.fields.has(name)) {
-        const answer: Expression = { k: "literal", text: "1" };
+        // A record built from an interface has every field it declares, so the
+        // question is answered where it is read. A union of shapes does not: an
+        // object written as one arm is laid out as every arm's fields with the
+        // rest zero, and the arm it is written as is the tag the literal
+        // carries. The question is whether that tag names an arm with the field.
+        if (shape.arms === undefined) {
+          const answer: Expression = { k: "literal", text: "1" };
+          this.expressionTypes.set(answer, BOOLEAN_RESULT);
+          return answer;
+        }
+        const arms: number[] = [];
+        for (let at = 0; at < shape.arms.length; at += 1) {
+          const arm = shape.arms[at] as ResolvedType;
+          if (arm.kind === "record" && arm.fields.has(name)) arms.push(at);
+        }
+        const tag: Expression = { k: "member", base: object, field: "__arm" };
+        this.expressionTypes.set(tag, NUMBER_RESULT);
+        let answer: Expression = { k: "literal", text: "0" };
+        for (let at = arms.length - 1; at >= 0; at -= 1) {
+          answer = {
+            k: "conditional",
+            condition: {
+              k: "binary",
+              op: "===",
+              left: tag,
+              right: { k: "literal", text: String(arms[at]) },
+            },
+            then: { k: "literal", text: "1" },
+            otherwise: answer,
+          };
+        }
         this.expressionTypes.set(answer, BOOLEAN_RESULT);
         return answer;
       }
+    }
+    // The value may be one an imported function answered: its fields are the
+    // declaration's, and the graph has not linked that module yet. The question
+    // waits for the read that follows the link rather than being refused here.
+    if (this.importsArePending() && this.opaqueValue(object)) {
+      this.deferred.add(object);
+      return this.hole();
     }
     this.report(
       "`in` asks a value whose fields the type does not write down",
@@ -8683,6 +8727,10 @@ class TypeScriptParser {
           continue;
         }
 
+        // A call of a name this file imports is a call of a function another
+        // module declares. Its result is known once the graph has linked that
+        // module, which is a second read of this file.
+        if (this.pendingValues.has(target.name) && !this.linked) this.waitForFunction = true;
         // A function declared with a rest parameter reads the arguments as one
         // list. The call wrote them one by one, so they are packed into the
         // list the parameter is, and the fixed parameters before it stay where
@@ -11203,6 +11251,24 @@ class TypeScriptParser {
       this.expressionTypes.set(call, NUMBER_RESULT);
       return call;
     }
+    // An object written at a union of shapes is laid out as every arm: the
+    // fields the source did not write are zero, and a tag says which arm it is.
+    // That is one layout for every arm, which is what a read of a field of
+    // another arm, and the `in` that guards it, is a read of.
+    if (expected !== null && expected.index === null && expected.arms !== undefined) {
+      const written = new Map(fields.map((field) => [field.name, field]));
+      let arm = expected.arms.findIndex(
+        (one) => one.kind === "record" && fields.every((field) => one.fields.has(field.name)),
+      );
+      if (arm < 0) arm = 0;
+      const padded: { name: string; value: Expression }[] = [];
+      for (const [field, declared] of expected.fields) {
+        const held = written.get(field);
+        padded.push(held ?? { name: field, value: this.zeroFor(this.typeExprOfShape(declared.type)) });
+      }
+      padded.push({ name: "__arm", value: { k: "literal", text: String(arm) } });
+      return { k: "object", fields: padded };
+    }
     return { k: "object", fields };
   }
 
@@ -12843,6 +12909,10 @@ export const typeScriptFrontend: Frontend = {
     }
     const parser = new TypeScriptParser(withoutClasses(tokens, classTable), path, diagnostics, classTable, tokens, scanned.constants, scanned.state, typeTable, importedNames(tokens));
     parser.wideBigint = wideBigint;
+    const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
+    if (linkedFunctions !== undefined) {
+      for (const [linked, signature] of linkedFunctions) parser.seedFunction(linked, signature);
+    }
     // The read the graph makes after binding says every name its imports bind;
     // a read that stands alone waits for a link that may never come.
     parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;

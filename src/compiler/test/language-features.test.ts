@@ -500,6 +500,62 @@ test("a write goes through the place the source named in full", async () => {
   assert.equal(output.trim(), "23");
 });
 
+test("`in` on a union reads the arm the value is", async () => {
+  // A union of shapes is one layout: every field of every arm, zero where the
+  // arm that wrote the value did not write it, and a tag that says which arm it
+  // is. `"refused" in outcome` is the tag naming an arm that has the field, so
+  // the field of another arm is a field the value really holds as zero rather
+  // than a read past the object it was laid out as.
+  const output = await agreesWithNode([
+    "type Outcome = { refused: string } | { applied: number };",
+    "function pick(flag: boolean): Outcome {",
+    "  if (flag) return { refused: `no` };",
+    "  return { applied: 7 };",
+    "}",
+    "export function demo(): string {",
+    "  const a = pick(true);",
+    "  const b = pick(false);",
+    "  const first = (\"refused\" in a) ? a.refused : `applied`;",
+    "  const second = (\"refused\" in b) ? b.refused : `${b.applied}`;",
+    "  return `${first}|${second}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "no|7");
+});
+
+test("a call to a function another module declares answers what it says", async () => {
+  // A runtime import binds a name, and the function is compiled by the module
+  // that writes it. The graph reads that module, so the call answers the
+  // result its declaration writes — which is what a field of the answer and
+  // `in` over it need, and what the first read of this file deferred.
+  const sources = {
+    "lib.ts": [
+      "export interface Proposal { rule: string }",
+      "export function read(value: string): { proposal: Proposal } | { unusable: string } {",
+      "  if (value === ``) return { unusable: `empty` };",
+      "  return { proposal: { rule: value } };",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const main = [
+    'import { read } from "./lib.ts";',
+    "function f(value: string): number {",
+    "  const answer = read(value);",
+    "  if (\"unusable\" in answer) return 0;",
+    "  return answer.proposal.rule.length;",
+    "}",
+    "console.log(`${f(``)} ${f(`xyz`)}`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(main, sources, backend);
+    assert.equal(output.trim(), "0 3", `the ${backend} backend reads the linked answer`);
+  }
+});
+
 test("a function with a rest parameter reads the arguments as one list", async () => {
   // `(...args: any[])` is the list of everything the call wrote, and a text and
   // a number beside each other are boxed into the handles a dynamic value is.
