@@ -1664,20 +1664,29 @@ unless the caller can recover it from the runtime's allocation header as
 ### What the measurement says now
 
 426 refusals over 94 sources, 29 of them read whole. The largest buckets, in
-order, and what each of them is:
+order, and what each of them is (the counts are the messages the frontend
+listed with its cut raised, since a file with more than two dozen refusals lists
+only the first two dozen):
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 45 | `an empty array needs the type of its elements` | an empty literal in an object field, whose element type the interface states: `{ children: [] }` where the field is `Node[]`. Mostly the standalone read, which does not link the interface |
-| 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
-| 14 | `a Map is built from entries`, 13 `"map"` | a list of lists: `map` over a list of lists, and the entries a map is built from |
-| 4 | `a spread argument is not part of the call subset` | `Math.max(...xs)`: a list spread into a call whose parameters the file does not declare |
-| 12 | `expected a parameter name` | a member of a class written as a parameter pattern, or a construct of `semantics/python.ts`'s own |
+| 46 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field of an interface, a map value, or a list of lists. Most of it is the standalone read, which does not link the interface |
+| 14 | `a Map is built from entries` | the entries a map is built from — a list of pairs, and a pair is a list of lists — or a copy of a map whose type the standalone read does not hold |
+| 14 | `expected a parameter name` | a member of a class read as a parameter pattern, and `semantics/python.ts`'s own grammar |
+| 13 | `"map" is not a method this program compiles` | a receiver whose type is a list an imported declaration names; the linked read types it |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
-| 10 | `Object.values` / `Object.keys` of a constant object, 9 entries, 10 spreads | a runtime record in the standalone read; the linked read types it |
-| 10 | `only a named function is called` | `f()(x)` and `this.target[method](x)` |
+| 10 | `Object.values` of a constant object, 8 `Object.keys`, 9 entries, 10 spreads | a record or a map whose type the standalone read does not hold; the linked read types it |
 | 9 | `a program allocates a typed array, not "Date"` | `new Date()` as a program value |
+| 9 | `expected ")"` | a cascade: a construct refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 8 | `a map here holds a slice<ref<any>>` | a list in a dictionary, which needs a list handle that carries its length |
+| 8 | `a spread argument is not part of the call subset` | `Math.max(...xs)`: a list spread into a call whose parameters the file does not declare |
+
+A refusal listed here is not necessarily a construct the frontend cannot read:
+a file is read standalone, so a type another file declares is not in the table,
+and the marks of the linked read — the bucket of `"map"`, of `Object.values`,
+of an empty list in an imported interface's field — are the standalone read's.
+The linked read is the build's, and it is what the value-model slices below
+have to be measured against once the report can read the graph.
 
 The value-model slices still open, in the order they block the self-build:
 
