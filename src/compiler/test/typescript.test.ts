@@ -1822,16 +1822,53 @@ test("a collection method is a function of the file that walks the array", () =>
   assert.deepEqual(call?.args?.map((argument) => argument.k), ["ident", "arrow"]);
 });
 
-test("a collection method whose callback is not a function of the compiler's is refused", () => {
-  // A callback is a closure the frontend wrote, so it is an arrow or a name
-  // held at a function type. A plain function name is not one: the compiler
-  // has no value of it to hand over.
+test("a declared function is a closure a collection method can call", () => {
+  // A function the file declares is a value where it is not called, and a
+  // collection method takes the function itself: the name is a closure with
+  // nothing captured, entered through a function of the file that calls the
+  // declaration.
+  const analysis = typescript.analyze(
+    [
+      "function twice(x: number): number { return x * 2; }",
+      "export function g(a: Float64Array): number {",
+      "  const b = a.map(twice);",
+      "  return b[0];",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const names = analysis.functions.map((declared) => declared.name);
+  assert.equal(names.filter((name) => name === "twice").length, 1, "the declaration is one function of the file");
+  const body = ((analysis.functions.find((declared) => declared.name === "g")?.handle ?? { body: [] }) as {
+    body: { kind: string; init?: { k: string; name?: string; args?: { k: string; name?: string; code?: string; captures?: string[] }[] } }[];
+  }).body;
+  const call = body[0]?.init;
+  assert.equal(call?.k, "call");
+  assert.equal(call?.name, "__collect_main_0");
+  assert.deepEqual(call?.args?.map((argument) => argument.k), ["ident", "arrow"]);
+  const closure = call?.args?.[1];
+  assert.equal(closure?.name, "twice", "the closure is the declaration");
+  assert.equal(closure?.captures?.length, 0, "a declaration captures nothing");
+  assert.ok(closure?.code !== undefined, "the closure is entered through a function of the file");
+  const entry = analysis.functions.find((declared) => declared.name === closure?.code);
+  assert.ok(entry !== undefined, "the entry is a function of the file");
+  assert.deepEqual(
+    entry?.params.map((param) => param.name),
+    ["self", "a0"],
+    "the entry takes the closure and then the declaration's parameters",
+  );
+});
+
+test("a value that is not a function is refused where a callback is expected", () => {
+  // A name a body declared itself is that value, and a number is not a
+  // callback: only a declared function or an arrow is one.
   assert.match(
     diagnostic(() =>
       typescript.analyze(
         [
-          "function twice(x: number): number { return x * 2; }",
           "export function g(a: Float64Array): number {",
+          "  const twice = 3;",
           "  const b = a.map(twice);",
           "  return b[0];",
           "}",

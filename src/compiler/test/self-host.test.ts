@@ -51,9 +51,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * 1981: both let a file be read that was not read before, and what they expose
  * is real work. Lower it with every slice; raise it only when the measurement
  * changes which parser reads a body, or when the compiler itself grows a
- * construct the frontend has not learned yet.
+ * construct the frontend has not learned yet. A declared function read as the
+ * value a collection method takes lowered it to 421.
  */
-const REFUSAL_BUDGET = 426;
+const REFUSAL_BUDGET = 421;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

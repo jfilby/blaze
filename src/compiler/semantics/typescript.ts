@@ -2712,6 +2712,8 @@ interface ArrowBinding {
   rest?: number;
   /** What the arrow answers. */
   returns: TypeExpr;
+  /** The line the function was written at, for a closure made from a declaration. */
+  line?: number;
   /** The function a call through the closure enters, once one is needed. */
   code?: string;
 }
@@ -3168,6 +3170,8 @@ class TypeScriptParser {
   private closureCount = 0;
   /** The function each lifted arrow became, by the name it took. */
   private liftedArrows = new Map<string, TypeScriptFunction>();
+  /** The closure a declared function is, by the name the file wrote it under. */
+  private functionValues = new Map<string, ArrowBinding>();
   /**
    * The function each collection method was lowered to, by the shape it walks.
    *
@@ -10570,9 +10574,11 @@ class TypeScriptParser {
    */
   private closureCode(binding: ArrowBinding): string {
     if (binding.code !== undefined) return binding.code;
-    const code = binding.function.replace("__closure_", "__closure_code_");
+    const code = binding.function.startsWith("__closure_")
+      ? binding.function.replace("__closure_", "__closure_code_")
+      : `__closure_code_${this.stem}_${binding.function}`;
     binding.code = code;
-    const line = this.liftedArrows.get(binding.function)?.line ?? 0;
+    const line = this.liftedArrows.get(binding.function)?.line ?? binding.line ?? 0;
     const args: Expression[] = [
       ...binding.captures.map((_, index) => ({
         k: "capture" as const,
@@ -10582,7 +10588,7 @@ class TypeScriptParser {
       })),
       ...binding.params.map((param) => ({ k: "ident" as const, name: param.name })),
     ];
-    const call: Expression = { k: "call", name: binding.function, args };
+    const call: Expression = { k: "call", name: this.calledName(binding.function), args };
     const lifted: TypeScriptFunction = {
       name: code,
       params: [{ name: "self", type: ANY_TYPE }, ...binding.params],
@@ -12558,10 +12564,39 @@ class TypeScriptParser {
    * call it would be by the name it is bound to.
    */
   private materialized(value: Expression): Expression {
-    if (value.k !== "arrow") return value;
+    if (value.k !== "arrow" || value.code !== undefined) return value;
     const binding = this.arrowBindings.get(value.name);
     if (binding === undefined) return value;
     return { k: "arrow", name: value.name, captures: value.captures, code: this.closureCode(binding) };
+  }
+
+  /**
+   * A function the file declares, read where a value is expected.
+   *
+   * `list.map(asBullet)` hands the collection a function, and a declared
+   * function is one: it is called by the name it was written under, so the
+   * value is a closure with nothing captured and an entry that calls the
+   * declaration. A name a body declared itself is a value of that body, and
+   * `readPrimary` asks this only after the names the body holds.
+   */
+  private functionValue(name: string, line: number): Expression | null {
+    const params = this.declaredParams.get(name);
+    const returns = this.declaredReturns.get(name);
+    if (params === undefined || returns === undefined) return null;
+    const known = this.functionValues.get(name);
+    const binding: ArrowBinding = known ?? {
+      function: name,
+      captures: [],
+      captureTypes: [],
+      params: params.map((type, index) => ({ name: `a${index}`, type })),
+      returns,
+      line,
+    };
+    if (known === undefined) {
+      this.functionValues.set(name, binding);
+      this.arrowBindings.set(name, binding);
+    }
+    return { k: "arrow", name, captures: [] as string[], code: this.closureCode(binding) };
   }
 
   private readPrimary(): Expression {
@@ -12665,6 +12700,13 @@ class TypeScriptParser {
       const arrow = this.valueArrows.get(token.text);
       if (arrow !== undefined && !this.at("(") && token.text !== this.arrowDeclared) {
         return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
+      }
+      // A function the file declares is a value where it is not called: a
+      // collection method takes the function itself, and the name is a name
+      // the body did not declare, so the declaration is the value.
+      if (!this.at("(") && !this.valueTypes.has(token.text) && !this.valueArrows.has(token.text)) {
+        const declared = this.functionValue(token.text, token.line);
+        if (declared !== null) return declared;
       }
       return { k: "ident", name: token.text };
     }

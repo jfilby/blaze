@@ -2235,6 +2235,26 @@ test("an arrow passed as a value is a closure the callee can call", async () => 
   assert.equal(output.trim(), "25");
 });
 
+test("a declared function is a value a collection method can call", async () => {
+  // `values.map(label)` names a function of the file rather than an arrow
+  // written where the call is. The function is a value: a closure with nothing
+  // captured, entered through a function of the file that calls the declaration.
+  const output = await agreesWithNode([
+    'function label(value: number): string { return `#${value}`; }',
+    "function even(value: number): boolean { return value % 2 === 0; }",
+    'function withIndex(value: number, index: number): string { return `${index}:${value}`; }',
+    "export function render(values: number[]): string {",
+    "  const labels = values.map(label).join(\",\");",
+    "  const evens = values.filter(even).join(\",\");",
+    "  const indexed = values.map(withIndex).join(\",\");",
+    "  return [labels, evens, indexed].join(\" | \");",
+    "}",
+    "console.log(render([1, 2, 3]));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "#1,#2,#3 | 2 | 0:1,1:2,2:3");
+});
+
 test("a closure is built where the arrow is written, not where it was declared", async () => {
   // The call site of the arrow by its name is a direct call and needs no
   // closure; the closure is built at the place the value is handed over, which

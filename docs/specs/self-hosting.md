@@ -866,6 +866,33 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bo. A declared function is a value a collection method takes
+
+`feedback.map(asBullet)` and `declared.map(stringLiteral)` hand a collection
+method a function the file declares. The method's callback was an arrow, or a
+name held at a function type; a declaration was not, and five of the compiler's
+own refusals were that form: three in `ai/review.ts` and two in
+`semantics/ir-text.ts`.
+
+A declaration is a value where it is not called. The name is read as the
+closure it is: nothing is captured, and the entry is a function of the file
+that takes the closure the call hands over and calls the declaration with the
+arguments the closure does not use. The entry's name is the declaration's,
+prefixed with the file's stem, so a declaration called `twice` is entered
+through `__closure_code_<stem>_twice` and the declaration itself is still the
+one function of that name. A name the body declared itself is the value of
+that body, and a number passed where a callback is expected is still refused.
+
+The signature a call through the closure is written against is the
+declaration's, so `values.map(withIndex)` passes the element and the position,
+and `values.filter(even)` passes the element and reads the truth the
+declaration answers. The entry is the one an arrow's closure already uses; the
+C backend carries it, and the machine backend, which cannot lower a closure,
+falls back to C as it does for an arrow value. A closure whose `code` is
+already set is left alone where a value is read, so the entry is written once.
+
+This took the total from 426 to 421.
+
 ### 4bn. A collection written clear is a new, empty dictionary
 
 `m.clear()` and `s.clear()` were read as a method no class declares, because a
@@ -1663,7 +1690,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-426 refusals over 94 sources, 29 of them read whole. The largest buckets, in
+421 refusals over 94 sources, 29 of them read whole. The largest buckets, in
 order, and what each of them is (the counts are the messages the frontend
 listed with its cut raised, since a file with more than two dozen refusals lists
 only the first two dozen):
@@ -1749,6 +1776,7 @@ What was closed this session, and what each was worth:
 | a pushed value read at the element the list holds | 430 → 429 |
 | an arrow's concise body as an assignment | 429 → 428 |
 | a collection written clear | 428 → 426 |
+| a declared function as a collection callback | 426 → 421 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
