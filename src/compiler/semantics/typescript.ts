@@ -1117,6 +1117,39 @@ function closingBracket(tokens: readonly Token[], open: number): number {
 }
 
 /**
+ * Where an initialiser written as a literal ends, following the type it is
+ * asserted as and the calls written after it.
+ *
+ * `[...] as const` asserts the type of the list, and `[...].join(",")` calls a
+ * method of it: both are the same initialiser, and the scan past the literal has
+ * to end after them or it reads them as statements of the file.
+ */
+function initializerEnd(tokens: readonly Token[], from: number): number {
+  let at = from;
+  for (;;) {
+    const text = tokens[at]?.text;
+    if (text === "as" || text === "satisfies") {
+      at += 1;
+      while (tokens[at] !== undefined && (tokens[at]?.kind === "ident" || mark(tokens[at]) === "." || mark(tokens[at]) === "[" || mark(tokens[at]) === "]")) at += 1;
+      continue;
+    }
+    if (text === "." && tokens[at + 1]?.kind === "ident") {
+      at += 2;
+      continue;
+    }
+    if (text === "." && tokens[at + 1]?.text === "<") {
+      at += 2;
+      continue;
+    }
+    if (text === "(" || text === "[") {
+      at = closingBracket(tokens, at);
+      continue;
+    }
+    return at;
+  }
+}
+
+/**
  * Whether an array written at the top of a file is a value the compiler can
  * read without running anything: every element is a number, a text, a whole
  * number, or an array of those.
@@ -1260,15 +1293,18 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       }
       if (tokens[start]?.text === "[") {
         const end = closingBracket(tokens, start);
+        // The type the list is asserted as, and a call written after it, are
+        // part of the same value.
+        const whole = initializerEnd(tokens, end);
         // An array whose every element is written down is the file's constant,
         // inlined where it is read, unless a body writes the name: a value a
         // program changes is state rather than a constant.
-        if (!mutable && constantList(tokens, start, end - 1) && !locals.has(name) && !writtenName(tokens, name)) {
+        if (!mutable && whole === end && constantList(tokens, start, end - 1) && !locals.has(name) && !writtenName(tokens, name)) {
           found.set(name, { expression: { range: { start, end } }, exported: offered });
         } else {
           state.add(name);
         }
-        index = end;
+        index = whole;
         continue;
       }
       if (tokens[start]?.text === "{") {

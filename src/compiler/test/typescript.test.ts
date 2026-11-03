@@ -1522,6 +1522,24 @@ test("an arrow that writes a list it captured is refused", () => {
   );
 });
 
+test("a top-level list asserted as const or joined is one value, not two statements", () => {
+  // The scan past a top-level initialiser has to end after the type it is
+  // asserted as and after a call chained to the list. Read as a statement of
+  // its own, `as const` was "a class member value is one expression" and the
+  // call after a list was read as the body of nothing.
+  const analysis = typescript.analyze(
+    [
+      "const FRAMES = [`a`, `b`] as const;",
+      "export const RULES = [`x`, `y`].join(`-`);",
+      "export function f(): number { return FRAMES.length; }",
+      "",
+    ].join("\n"),
+    "module.ts",
+    false,
+  );
+  assert.deepEqual(analysis.imports, []);
+});
+
 test("an arrow takes the rest of a call's arguments as one list", () => {
   // `(...taken: string[]) => ...` is handed what the call wrote from that
   // position on, packed into the list the lifted function's parameter is.

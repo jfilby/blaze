@@ -866,6 +866,22 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4aw. A top-level list asserted as const, or joined
+
+The scan of a file's top-level constants stopped at the closing `]` of a list
+literal, so what the source wrote after it was read as the next statement:
+`export const SPINNER_FRAMES = [...] as const` was the assertion read as a class
+member's value, and `export const cSourceRules = [...].join("\n")` was the call
+read as the body of nothing. Both are the same initialiser as the list, and the
+scan now follows the `as`/`satisfies` and the calls written after the literal.
+
+A value a call answers is not a value the scan can write down, so the name is
+state rather than a constant. That is enough for the scan to read the file: it
+is the *misreading* of the suffix that was refused, not the value.
+
+This took the total from 591 to 588: two in `core/terminal-title.ts` and one in
+`toolchain/csource.ts`.
+
 ### 4av. A destructured rest element
 
 `const [head, ...rest] = value` is the first line of four functions in the
@@ -1318,7 +1334,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-591 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+588 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1374,6 +1390,7 @@ What was closed this session, and what each was worth:
 | a text searched from a position | 601 → 598 |
 | a value marked with void | 598 → 595 |
 | a destructured rest element | 595 → 591 |
+| a top-level list asserted or joined | 591 → 588 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the
