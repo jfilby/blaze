@@ -153,6 +153,10 @@ function programBodies(statement: ProgramStatement): ProgramStatement[][] {
 
 /** The array views a program can allocate, and the element each one holds. */
 const VIEWS: Record<string, PrimitiveTypeName> = {
+  // `new Array(n)` is the array of numbers the source language has: a block of
+  // `n` elements, cleared, which is what a read past what the program filled
+  // answers. `new Array(a, b)` is the two values written out.
+  Array: "f64",
   Float32Array: "f32",
   Float64Array: "f64",
   Int8Array: "i8",
@@ -2369,6 +2373,11 @@ class ProgramParser {
       const args = this.arguments();
       if (args.length === 1) {
         return { k: "sized", element: VIEWS[view] as PrimitiveTypeName, count: args[0] };
+      }
+      // `new Array(a, b)` names the elements, which is what the source language
+      // does with more than one argument, and what a list written out is.
+      if (args.length !== 3 && view === "Array") {
+        return { k: "buffer", element: "f64" as PrimitiveTypeName, values: args };
       }
       if (args.length === 3) {
         return { k: "view", element: VIEWS[view] as PrimitiveTypeName, of: args[0], offset: args[1], count: args[2] };

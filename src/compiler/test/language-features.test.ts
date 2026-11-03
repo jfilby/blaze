@@ -791,6 +791,27 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("new Array is a block of numbers, and fill writes every element", async () => {
+  // The source language's `Array` is this compiler's array of numbers: a block
+  // of the count written, cleared, which is what a read past what the program
+  // filled answers. `new Array(a, b)` names the elements instead.
+  const source = [
+    "export function demo(): string {",
+    "  const xs: number[] = new Array(3).fill(-1);",
+    "  xs[1] = 5;",
+    "  const named: number[] = new Array(1, 2, 3);",
+    "  const empty: number[] = new Array();",
+    "  return `${xs.length} ${xs[0]} ${xs[1]} ${xs[2]} ${named.join(`,`)} ${empty.length}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "3 -1 5 -1 1,2,3 0", `the ${backend} backend allocates the array`);
+  }
+});
+
 test("a switch is the chain of comparisons its cases are", async () => {
   // The subject is read once into a name of the switch's own, and each arm is
   // an if that compares the name with the case. An arm that does not end by

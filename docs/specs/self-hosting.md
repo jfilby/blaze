@@ -866,6 +866,22 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bc. new Array is the array of numbers, and fill writes it
+
+`new Array(n)` is the array of numbers the source language has, and the compiler
+read it as a construct it did not know: the name was not one of the typed arrays,
+so the allocation was refused. It is the block of `n` cleared elements a typed
+array of numbers is, and `new Array(a, b)` names its elements instead.
+
+`a.fill(v)` is not a callback method — the value is written into each element
+rather than read out of one — so it was read as a `map` whose callback was the
+value and refused. It is a function of the file that walks the list and writes
+the value into every element, which is a statement and the list itself.
+
+Together they are the field `new Array(universe).fill(-1)` that a sparse set is
+made of. This took the total from 476 to 465: eight in `util/sets.ts`, two in
+`toolchain/probe.ts` and one in `semantics/optimize-ir.ts`.
+
 ### 4bb. A switch, a list written at a length, and a program's own output
 
 Three things the entry of the compiler writes that the program reader did not
@@ -1450,7 +1466,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-476 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+465 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1515,6 +1531,7 @@ What was closed this session, and what each was worth:
 | shift and unshift are the two ends of a list | 503 → 494 |
 | splice is a range replaced by the values written | 494 → 483 |
 | a switch, a length, and a program's own output | 483 → 476 |
+| `new Array(n)` and `fill` | 476 → 465 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

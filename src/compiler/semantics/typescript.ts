@@ -2816,6 +2816,7 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "indexOf",
   "at",
   "slice",
+  "fill",
 ]);
 
 /** The operators that stand in front of a value, as opposed to between two. */
@@ -10438,6 +10439,21 @@ class TypeScriptParser {
     ) {
       return this.sequenceMethod(method, elements, receiver, args, line);
     }
+    // `a.fill(v)` takes the value every element becomes, and the list is the
+    // answer. It is not a callback method: the value is written into each
+    // element rather than read out of one.
+    if (method === "fill") {
+      if (args.length !== 1) {
+        this.report("fill takes one argument", "as in a.fill(0)", this.peek());
+        return this.hole();
+      }
+      const helper = this.collectionHelper("fill", elements, { params: [elements], returns: elements }, false, line);
+      const filled: Expression = { k: "call", name: helper.name, args: [receiver, args[0] as Expression] };
+      this.expressionTypes.set(filled, helper.returns);
+      const shape = this.elementShapeOf(receiver, elements);
+      this.expressionShapes.set(filled, { kind: "list", of: shape ?? { kind: "any" } });
+      return filled;
+    }
     const callback = args[0];
     if (callback === undefined) {
       this.report(`${method} takes a function`, `as in a.${method}((x: number): number => x)`, this.peek());
@@ -12112,6 +12128,25 @@ class TypeScriptParser {
         ];
         break;
       }
+      case "fill": {
+        // Every element of the list is the value written, and the list is the
+        // answer: `new Array(n).fill(0)` is a block of zeros.
+        returns = { kind: "slice", of: element };
+        body = [
+          loop("0", [
+            {
+              kind: "indexAssign",
+              buffer: "items",
+              index: ident("i"),
+              op: "=",
+              value: ident("fn"),
+              line,
+            },
+          ]),
+          answer(ident("items")),
+        ];
+        break;
+      }
       case "forEach": {
         returns = NOTHING;
         body = [
@@ -13115,6 +13150,29 @@ class TypeScriptParser {
     }
     if (view.kind === "ident" && (view.text === "Map" || view.text === "Set" || view.text === "WeakMap" || view.text === "WeakSet")) {
       return this.readCollectionAllocation(view);
+    }
+    // `new Array(n)` is the array of numbers the source language has: a block
+    // of `n` elements, cleared, which is what a read past what the program
+    // filled answers. `new Array(a, b)` names the elements instead.
+    if (view.kind === "ident" && view.text === "Array") {
+      if (!this.accept("(")) {
+        this.report("an array is allocated with a count", "as in new Array(n)", view);
+        return this.hole();
+      }
+      const values: Expression[] = [];
+      while (!this.at(")") && this.peek().kind !== "end") {
+        values.push(this.readExpression());
+        if (!this.accept(",")) break;
+      }
+      this.expect(")");
+      if (values.length === 1) {
+        const sized: Expression = { k: "sized", element: "f64", count: values[0] as Expression };
+        this.expressionTypes.set(sized, { kind: "slice", of: { kind: "primitive", name: "f64" } });
+        return sized;
+      }
+      const listed: Expression = { k: "buffer", element: "f64", values };
+      this.expressionTypes.set(listed, { kind: "slice", of: { kind: "primitive", name: "f64" } });
+      return listed;
     }
     // `new C(...)` of a class another module declares is a call of the function
     // that module lowered the class to. The class itself is not in this file's
