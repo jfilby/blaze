@@ -62,9 +62,16 @@ import { selfHostGap } from "./self-host-gap.ts";
  * first imported type it cannot resolve: everything after that type was
  * deferred, so 421 measured how far a parse got rather than what is missing.
  * The linked read binds those types and reports what survives, and that is the
- * number the queue is now spent against.
+ * number the queue is now spent against. Reading a union laid out with the bar
+ * the first member is written after lowered it to 1841: the bar was read as a
+ * member that is `any`, and a union whose first member is `any` erased, so the
+ * IR's own `SemanticValue` — a union of twenty-odd shapes written one per line —
+ * was `any` and every member read through it was a method of nothing. Keeping
+ * the one expansion of a declaration a table makes, which the link invalidates,
+ * is what made the corrected reading affordable: the standalone read of the same
+ * tree took five minutes without it.
  */
-const REFUSAL_BUDGET = 2218;
+const REFUSAL_BUDGET = 1841;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

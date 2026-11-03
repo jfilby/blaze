@@ -714,6 +714,62 @@ test("an object spread of an imported type reads the fields its declaration name
   assert.match(ir, /b const\[f64\] 2/);
 });
 
+test("a union laid out with a leading bar is the records it names", () => {
+  // The bar the first member is written after states nothing the type is not.
+  // Reading it as a member made that member `any`, and a union of anything but
+  // records is the one member this compiler's values can hold — so a type laid
+  // out one member per line, which is how the sources write a union of shapes,
+  // erased to `any` and every member read through it was a method of nothing.
+  const analysis = typescript.analyze(
+    [
+      "type Value =",
+      '  | { k: "a"; left: number; right: number }',
+      '  | { k: "b"; operand: number };',
+      "export function bump(value: Value): Value {",
+      "  return { ...value, left: 1 };",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string; value?: { k: string; fields?: { name: string }[] } }[];
+  }).body;
+  const returned = body.find((statement) => statement.kind === "result")?.value;
+  assert.equal(returned?.k, "object", "the union is a record the spread reads");
+  const names = returned?.fields?.map((field) => field.name) ?? [];
+  for (const field of ["k", "left", "right", "operand"]) {
+    assert.ok(names.includes(field), `the spread copies ${field}, which an arm of the union writes`);
+  }
+  assert.equal(names.filter((name) => name === "left").length, 1, "the field both arms share is copied once");
+});
+
+test("a local interface that names an imported type is read after the link", () => {
+  // The first read of the file cannot resolve `Holder`, so the field written at
+  // it is `any` and `names.join` would be a method of nothing. The read that
+  // follows the link binds the declaration, and the field's type is the one the
+  // other module wrote: a type expansion made before the link is not the answer
+  // the linked read asks for.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import type { Holder } from "./types.ts";',
+        "interface Wrapper { holder: Holder }",
+        "export function joined(wrapper: Wrapper): string {",
+        '  return wrapper.holder.names.join(",");',
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+      "types.ts": "export interface Holder { names: string[] }\n",
+    },
+    "main.ts",
+  );
+  const ir = printSemanticFunction(semanticsOf(phase)["joined"]);
+  assert.match(ir, /join/, "the field the import types is the list its declaration names");
+});
+
 test("an angle-bracket type assertion is erased", () => {
   // `<T>value` is the other spelling of `value as T`, and it names no runtime
   // work: the value after the closing bracket is the value the source wrote.

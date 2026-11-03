@@ -100,6 +100,15 @@ computed position to 3201, a nested type argument to 3168, and the line an
 interpreter opens a file with to 3162, with `core/errors.ts`,
 `semantics/contract-build.ts`, `semantics/diagnostics.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
+Reading every source as the module graph a build reads raised the number to
+2218 — a file read on its own stops counting at the first imported type it
+cannot resolve, so the old number measured how far a parse got — and a union
+laid out with the bar its first member is written after lowered it to 1841.
+The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
+`core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
+`semantics/builtins.ts`, `semantics/contract-build.ts`,
+`semantics/diagnostics.ts`, `semantics/language.ts`, `semantics/module.ts`,
+`toolchain/wasm-host-runtime.ts` and `util/source.ts`.
 The refusals fall into six frontiers:
 
 - **Type-only syntax.** Most of it is already carried, and an interface or an
@@ -787,7 +796,8 @@ declaration erases. Fixing it lowers the frontend's own count by 5 and raises
 `semantics/python.ts` by 22, because the types it erases are the ones whose
 lists are walked with `flatMap` and with callbacks that are not arrows yet. It
 is a real bug and it will pay once those methods are read; until then it does
-not lower the budget, so it is not in this slice.
+not lower the budget, so it is not in this slice. (It was taken later, once the
+report read the linked graph: §4bp.)
 
 ### 4y. The entry a dictionary does not hold
 
@@ -865,6 +875,67 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bq. An expansion of a type is made once
+
+Making the union below a real record made the frontend expand it, and a
+declaration such as the IR's `SemanticValue` names a field of nearly every type
+the program has: expanding it parses sixteen hundred characters of type text.
+A member read asks for the same declaration again for every value it sees, and
+the linked read of the compiler's own tree made 5.8 million such calls, 129
+million characters: `semantics/ir-validate.ts` alone took 95 seconds and the
+whole tree five minutes.
+
+An expansion depends on nothing but the declaration and the table it is written
+in, so `instantiate` keeps the one a table made from the top of a type. An
+expansion made *inside* another one is not kept, because it reads the names its
+parent already opened as references and that cut is part of the answer. The cut
+is the same for every expansion that starts at the declaration, so the kept one
+is what every top-level ask would have built.
+
+The table is not constant: a module is read once before its imports are bound
+and again after, and a declaration read before the link names the imported type
+it writes as `any`. Keeping that expansion would hide the declaration the link
+brought in — a local `interface Wrapper { holder: Holder }` would still hold
+`any` after `Holder` was bound — so `bindImportedTypes` bumps a generation and
+an expansion from before the link is not read after it. The tree is 13 seconds
+again.
+
+The total moved by two, and in the direction that means work: a nested expansion
+cut at a reference leaves a field `any`, and the eager one lets the loop or the
+spread written through it be read — and both of them report the gap that was
+standing behind the cut (`Object.values(file.functions)` in
+`semantics/ir-validate.ts`, an empty list in a field of `loop.reductions`).
+
+### 4bp. A union laid out with a leading bar
+
+The sources lay a union out one member per line and write the bar before the
+first member:
+
+    export type SemanticValue =
+      /** A number written out, of the type it is used at. */
+      | { k: "const"; type: SemanticType; text: string }
+      | { k: "text"; type: TextType; parts: SemanticTextPart[] }
+      | ...;
+
+The type reader read that bar as the start of a member. The member it started
+was `any`, and a union is the member its values can hold only when every member
+is a record: a union whose first member is `any` therefore *is* `any`. Every
+declaration the sources lay out this way erased, and every member read through
+one was a method of nothing — `value.call.args`, `statement.then.statements`,
+`contract.files`, and the fifty-five `{ ...value, left: next() }` spreads of a
+`SemanticValue` in `semantics/optimize-ir.ts` and its neighbours.
+
+The bar states no member and is now skipped where a type begins. This took the
+total from 2218 to 1839, and `core/semantic-ir.ts` and `runtime/http-needs.ts`
+read whole.
+
+The earlier report of this bug (§ "A finding, not a slice") said fixing it
+lowers the frontend's own count by five and *raises* `semantics/python.ts` by
+twenty-two, because the types it erased are the ones whose lists are walked
+with `flatMap`. That was the standalone read. The linked read resolves the
+declarations the erased types named, so the same fix is worth 379 refusals
+across the tree, and `semantics/python.ts` falls rather than rises.
 
 ### 4bo. A declared function is a value a collection method takes
 
@@ -1690,33 +1761,34 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-2218 refusals over 95 sources, 11 of them read whole. The report now reads the
+1841 refusals over 95 sources, 13 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value or a signature is read
 again with them — so the number is what survives the link rather than what
 waited for one. The buckets the standalone read used to own are gone:
 `new Map(scope.slots)`, `Object.values(file.functions)` and an empty list in a
-field another module types are read whole.
+field another module types are read whole, and so is every member read through a
+union laid out with a leading bar (§4bp).
 
-The number is five times larger because the standalone read was counting with a
-hand over the rest of the file: the first imported type it could not resolve set
-the deferral, and every construct after it that would have needed the link was
-skipped rather than reported. The linked read binds those types and reports what
-is left, so the old 421 measured how far a parse got, not what is missing. The
-largest buckets now, in order:
+The number was five times larger than the standalone read's 421 because that
+read was counting with a hand over the rest of the file: the first imported type
+it could not resolve set the deferral, and every construct after it that would
+have needed the link was skipped rather than reported. The linked read binds
+those types and reports what is left, so 421 measured how far a parse got, not
+what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 94 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`) or a spread of a value whose record the read does not hold |
-| 90 | `"map" is not a method this program compiles` | a receiver the linked read still cannot type — a list an interface names, or a value another refused file writes — so the walking method has no element type (§4e) |
-| 59 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 73 | `"find"`, `"read"`, `"some"`, `"filter"`, `"every"`, `"forEach"` as methods of nothing | the same receiver problem as `"map"` |
+| 63 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 60 | `"map" is not a method this program compiles` | a receiver the linked read still cannot type — a list a field of a refused file writes, or a value narrowed inside a `switch` — so the walking method has no element type (§4e) |
+| 39 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
 | 26 | `"push" is not a method this program compiles` | the same receiver, written as a push |
-| 18 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
-| 17 | `in` asks a value whose fields the type does not write down | the tag a union of shapes needs (§4k) |
-| 15 | `"startsWith"`, 14 `"every"`, 13 `"forEach"`, 11 `"trim"`, 10 `"includes"`, 9 `"join"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
-| 9 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
-| 8 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
+| 24 | `"find"`, 19 `"read"`, 12 `"some"`, 16 `"filter"`, 10 `"every"`, 13 `"forEach"` as methods of nothing | the same receiver problem as `"map"` |
+| 21 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
+| 13 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
+| 13 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
+| 9 | `"startsWith"`, 11 `"trim"`, 10 `"includes"`, 9 `"join"`, 8 `"slice"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
+| 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
 
 A refusal listed here is still not always a construct the frontend cannot read:
 a file is linked against the declarations of other files, and a file that is
@@ -1785,6 +1857,8 @@ What was closed this session, and what each was worth:
 | an arrow's concise body as an assignment | 429 → 428 |
 | a collection written clear | 428 → 426 |
 | a declared function as a collection callback | 426 → 421 |
+| a union laid out with a leading bar (§4bp) | 2218 → 1839 |
+| an expansion of a type made once (§4bq) | 1839 → 1841 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
@@ -1799,13 +1873,14 @@ a number was read at the unshaped reference an arm of another type falls back to
 the turn's block, so a loop that appended to a list dropped what its first turn
 appended (§4ax).
 
-**A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
-the sources write when the members are laid out one per line — is read as a
-member that is `any`, and a union whose first member is `any` is `any`, so every
-such declaration erases. Fixing it lowers the frontend's own count and raises
-`semantics/python.ts`, because the types it erases are the ones whose lists are
-walked with `flatMap` and with callbacks that are not arrows yet. It is a real
-bug and it will pay once those methods are read.
+**A type-layer bug, found and fixed.** `type X = | A | B` — the leading bar the
+sources write when the members are laid out one per line — was read as a member
+that is `any`, and a union whose first member is `any` is `any`, so every such
+declaration erased. An earlier measurement said fixing it lowers the frontend's
+own count by five and raises `semantics/python.ts` by twenty-two, because the
+types it erases are the ones whose lists are walked with `flatMap`; the linked
+read resolves those declarations, so the same fix is worth 379 refusals and
+`semantics/python.ts` falls (§4bp).
 
 **What the entry still needs.** `cli.ts` is the first file of the self-build and
 is read as a program. The linked read refuses ten constructs: seven
@@ -1861,7 +1936,9 @@ modifier-named member are carried now. So is the information the type text
 carries: an interface is a record of fields, a type alias is the type it names,
 and an annotation in one module resolves an imported declaration through the
 module that wrote it. A field of a `Contract` is a `Definition`, its `calls` is
-a list of `Call`, and a text field is the receiver of a text method. The
+a list of `Call`, and a text field is the receiver of a text method. A union of
+records is the fields of every arm, including the bar the sources write before
+the first member, so a value held at a union is read field by field (§4bp). The
 remaining type-shaped construct is the optional parameter, `x?: T`: an absent
 value is not the zero of the type, and the value model has no absent value until
 slice 3.

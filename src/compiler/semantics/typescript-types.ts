@@ -539,7 +539,49 @@ function resolveTypeText(
   return new TypeText(text, table, params, seen).parse();
 }
 
+/**
+ * The one expansion of a declaration a table has already made.
+ *
+ * A union of records names every field of every arm, and a declaration such as
+ * the IR's `SemanticValue` names a field of nearly every type the program has.
+ * Expanding it parses a thousand characters of type text, and a member read
+ * asks for it again for every value it sees, so the same declaration was
+ * expanded hundreds of thousands of times. An expansion depends on nothing but
+ * the declaration, so it is made once and kept.
+ *
+ * Only an expansion made from the top of a type is kept: an expansion made
+ * inside another one reads the names its parent already opened as references,
+ * and that cut is part of the answer. The cut is the same for every expansion
+ * that starts at the declaration, which is what is kept.
+ *
+ * An expansion is only as good as the table it was made in. A module is read
+ * once before its imports are bound and again after, and a declaration read
+ * before the link names the imported type it writes as `any`; keeping that
+ * expansion would hide the declaration the link brought in. The generation
+ * counts the links that have been made, so a kept expansion is read only by
+ * the read that made it.
+ */
+const EXPANSIONS = new WeakMap<TypeDecl, { generation: number; type: ResolvedType }>();
+let EXPANSION_GENERATION = 0;
+
 function instantiate(
+  decl: TypeDecl,
+  args: readonly ResolvedType[],
+  seen: Set<TypeDecl>,
+): ResolvedType {
+  // A generic declaration is expanded once per list of arguments, and this
+  // table does not key that list, so it is expanded where it is asked for.
+  const cacheable = seen.size === 0 && decl.params.length === 0;
+  if (cacheable) {
+    const kept = EXPANSIONS.get(decl);
+    if (kept !== undefined && kept.generation === EXPANSION_GENERATION) return kept.type;
+  }
+  const built = instantiateUncached(decl, args, seen);
+  if (cacheable) EXPANSIONS.set(decl, { generation: EXPANSION_GENERATION, type: built });
+  return built;
+}
+
+function instantiateUncached(
   decl: TypeDecl,
   args: readonly ResolvedType[],
   seen: Set<TypeDecl>,
@@ -706,6 +748,18 @@ class TypeText {
   }
 
   private union(): ResolvedType {
+    // A union laid out one member per line may lead with the bar the first
+    // member is written after:
+    //
+    //     type Value =
+    //       | { k: "a"; left: number }
+    //       | { k: "b"; operand: number };
+    //
+    // The bar states no member, and reading it as one made the first member
+    // `any` — which erased the whole union, because a union of anything but
+    // records is the one member the value model can hold.
+    this.space();
+    this.take("|");
     const members = [this.intersection()];
     while (this.take("|")) members.push(this.intersection());
     if (members.length === 1) return members[0] as ResolvedType;
@@ -1049,6 +1103,9 @@ export function bindImportedTypes(
   imports: readonly { specifier: string; names: readonly { local: string; imported: string }[] }[],
   targets: ReadonlyMap<string, TypeTable>,
 ): void {
+  // A declaration already expanded in this table may name one of these types,
+  // so the expansions made before the link are no longer the table's answer.
+  EXPANSION_GENERATION += 1;
   for (const entry of imports) {
     const target = targets.get(entry.specifier);
     if (target === undefined) continue;
