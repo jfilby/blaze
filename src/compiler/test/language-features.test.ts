@@ -791,6 +791,40 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("a for loop that is not a counted loop is the while loop it is", async () => {
+  // The initialiser runs once before the loop, the condition is read every
+  // turn, and the step runs at the end of a turn — and in front of every
+  // continue, which is where the source put it.
+  const source = [
+    "class Peek {",
+    "  at = 0;",
+    "  values: number[] = [1, 2, 3];",
+    "  peek(): number | null { return this.at < this.values.length ? this.values[this.at] : null; }",
+    "  step(): void { this.at += 1; }",
+    "}",
+    "export function demo(): string {",
+    "  const p = new Peek();",
+    "  let out = ``;",
+    "  for (let line = p.peek(); line !== null && line > 0; line = p.peek()) {",
+    "    out = `${out}${line}`;",
+    "    p.step();",
+    "  }",
+    "  let skipped = ``;",
+    "  for (let i = 0; i < 5; i += 1) {",
+    "    if (i === 2) continue;",
+    "    skipped = `${skipped}${i}`;",
+    "  }",
+    "  return `${out}|${skipped}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "123|0134", `the ${backend} backend runs the general for loop`);
+  }
+});
+
 test("new Array is a block of numbers, and fill writes every element", async () => {
   // The source language's `Array` is this compiler's array of numbers: a block
   // of the count written, cleared, which is what a read past what the program

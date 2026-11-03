@@ -866,6 +866,28 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bd. A for loop that is not a counted loop
+
+The frontend read `for` two ways: a counted loop whose condition compares the
+index with a bound, and `for (const x of xs)`. Everything else was refused with
+"the loop condition must compare the index with a bound", and `semantics/ir-text.ts`
+writes eight loops the third way:
+
+```ts
+for (let line = this.peek(); line !== null && line.indent === 0; line = this.peek()) {
+```
+
+That is a while loop with an initialiser and a step. It is read as one: the
+initialiser is a statement before the loop, the condition is the while loop's
+condition — read every turn — and the step is the last statement of the body. A
+`continue` of that loop runs the step, so the step is also written in front of
+every `continue` the body's own loops do not hold, which is where the source put
+it; a `continue` of a loop the body holds belongs to that loop and is left alone.
+
+This took the total from 465 to 449: eight in `semantics/ir-text.ts`, and the
+rest are the loops in the compiler's own reader whose bodies the refusal had
+hidden.
+
 ### 4bc. new Array is the array of numbers, and fill writes it
 
 `new Array(n)` is the array of numbers the source language has, and the compiler
@@ -1466,7 +1488,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-465 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+449 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1532,6 +1554,7 @@ What was closed this session, and what each was worth:
 | splice is a range replaced by the values written | 494 → 483 |
 | a switch, a length, and a program's own output | 483 → 476 |
 | `new Array(n)` and `fill` | 476 → 465 |
+| a for loop that is not a counted loop | 465 → 449 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

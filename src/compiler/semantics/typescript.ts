@@ -2215,6 +2215,35 @@ function nestedBlocks(statement: Statement): Statement[][] {
   }
 }
 
+/**
+ * The body of a `for` loop read as a while loop, with the step written in front
+ * of every `continue` of this loop.
+ *
+ * A `continue` of the while loop goes to the end of the body, where the step is;
+ * a `continue` of a loop the body holds belongs to that loop and runs the step
+ * that loop states, so the walk stops at one.
+ */
+function continueWithStep(body: readonly Statement[], step: Statement): Statement[] {
+  const out: Statement[] = [];
+  for (const statement of body) {
+    if (statement.kind === "continue") {
+      out.push({ ...step }, statement);
+      continue;
+    }
+    if (statement.kind === "while" || statement.kind === "doWhile" || statement.kind === "loop" || statement.kind === "forOf") {
+      out.push(statement);
+      continue;
+    }
+    for (const block of nestedBlocks(statement)) {
+      const rewritten = continueWithStep(block, step);
+      block.length = 0;
+      block.push(...rewritten);
+    }
+    out.push(statement);
+  }
+  return out;
+}
+
 /** Whether a body reads `x++` or `x--` as a value, which a box cannot hold. */
 function readsUpdateIn(statements: readonly Statement[], name: string): boolean {
   for (const statement of statements) {
@@ -7550,25 +7579,11 @@ class TypeScriptParser {
   private readLoop(): Statement {
     const start = this.next();
     this.expect("(");
-    // `for (;;)` is the loop that runs until a `break` in its body: it names
-    // no index and stops for no condition, which is a while loop whose
-    // condition is the constant truth.
-    if (this.at(";")) {
-      this.next();
-      if (this.at(";")) {
-        this.next();
-        this.expect(")");
-        return {
-          kind: "while",
-          condition: { k: "literal", text: "1" },
-          body: this.loopBody(),
-          line: start.line,
-        };
-      }
-      this.report("a for loop states its condition and its step together", "as in for (;;) { ... }");
-      this.synchronize();
-      return { kind: "expression", value: this.hole(), line: start.line };
-    }
+    /** Where the header begins, for a loop read again as the while it is. */
+    const header = this.position;
+    // `for (;;)`, `for (; condition; step)` and every other header that is not
+    // a counted loop are the while loop the source wrote as a for loop.
+    if (this.at(";")) return this.readGeneralFor(header);
     if (!this.at("let") && !this.at("const") && !this.at("var")) {
       this.report("a loop must declare its index", "as in for (let i = 0; ...)", start);
       this.synchronize();
@@ -7595,21 +7610,16 @@ class TypeScriptParser {
     const from = this.readExpression();
     this.expect(";");
 
+    // The header is read from where the loop began when it is not the counted
+    // loop: `for (let line = this.peek(); line !== null; line = this.peek())`
+    // is a while loop with a step, and the header is read again that way.
     const condition = this.next();
     if (condition.kind !== "ident" || condition.text !== variable.text) {
-      this.report(`the loop condition must test the index "${variable.text}"`, `near "${condition.text}"`, condition);
-      this.synchronize();
-      return { kind: "expression", value: this.hole(), line: start.line };
+      return this.readGeneralFor(header);
     }
     const comparison = this.next();
     if (comparison.kind !== "punct" || !["<", "<=", ">", ">="].includes(comparison.text)) {
-      this.report(
-        "the loop condition must compare the index with a bound",
-        'as in "i < bound" or "i <= bound"',
-        comparison,
-      );
-      this.synchronize();
-      return { kind: "expression", value: this.hole(), line: start.line };
+      return this.readGeneralFor(header);
     }
     const to = this.readExpression();
     this.expect(";");
@@ -7628,6 +7638,50 @@ class TypeScriptParser {
       step,
       down: comparison.text === ">" || comparison.text === ">=",
       body: this.loopBody(),
+      line: start.line,
+    };
+  }
+
+  /**
+   * `for (init; condition; step) body`: the while loop the source wrote as a
+   * for loop.
+   *
+   * The initialiser runs once, before the loop, so it is a statement of its
+   * own before this one; the step runs at the end of every turn, so it is the
+   * last statement of the body. The condition is read every turn, as a while
+   * loop's is. A `continue` written in the body would jump to the update the
+   * source wrote rather than the end of the body, and this lowering has no way
+   * to say that: it is refused where it is written.
+   */
+  private readGeneralFor(header: number): Statement {
+    const start = this.tokens[header - 2] ?? this.peek();
+    this.position = header;
+    if (!this.at(";")) {
+      const init = this.readStatement();
+      this.pendingBefore.push(init);
+    } else {
+      this.next();
+    }
+    const condition: Expression = this.at(";") ? { k: "literal", text: "1" } : this.readExpression();
+    this.expect(";");
+    let step: Statement | null = null;
+    if (!this.at(")")) step = this.readStatement();
+    this.expect(")");
+    // The initialiser runs once, before the loop, so it belongs to the
+    // statement list this loop is one of — and the body's own statements flush
+    // that list as they are read. It is taken back while the body is read.
+    const before = this.pendingBefore;
+    this.pendingBefore = [];
+    const body = this.loopBody();
+    this.pendingBefore = before;
+    if (step === null) return { kind: "while", condition, body, line: start.line };
+    // A `continue` of this loop runs the step, which is where the source put it:
+    // the step is written in front of each `continue` the body's own loops do
+    // not hold, and at the end of the body for a turn that runs to the end.
+    return {
+      kind: "while",
+      condition,
+      body: [...continueWithStep(body, step), step],
       line: start.line,
     };
   }
