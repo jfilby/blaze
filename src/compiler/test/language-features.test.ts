@@ -791,6 +791,42 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("splice is a range of a list replaced by the values written", async () => {
+  // The answer is the range the call took out, read before the write, and the
+  // list is the part before the range, the values, and the part after it. A
+  // start below zero counts from the end, a start past the end is the end, and
+  // a count below zero takes nothing out.
+  const source = [
+    "class Pool {",
+    "  items: string[] = [];",
+    "  add(s: string): void { this.items.push(s); }",
+    "  drop(at: number, n: number): void { this.items.splice(at, n); }",
+    "  insert(at: number, s: string): void { this.items.splice(at, 0, s); }",
+    "}",
+    "export function demo(): string {",
+    "  const xs: number[] = [1, 2, 3, 4];",
+    "  const removed = xs.splice(1, 2);",
+    "  const head: number[] = [0];",
+    "  xs.splice(0, 0, ...head, 9);",
+    "  xs.splice(1, 1);",
+    "  const last = xs.splice(-1, 5);",
+    "  const p = new Pool();",
+    "  p.add(`a`);",
+    "  p.add(`b`);",
+    "  p.add(`c`);",
+    "  p.drop(1, 1);",
+    "  p.insert(1, `d`);",
+    "  return `${removed.join(`,`)}|${xs.join(`,`)}|${last.join(`,`)}|${p.items.join(`,`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2,3|0,1|4|a,d,c", `the ${backend} backend splices the list`);
+  }
+});
+
 test("shift takes the first element off a list and unshift puts one in front", async () => {
   // The list a name holds changes, so the element is read before the change and
   // the change is written beside the statement the call was read in: a shift

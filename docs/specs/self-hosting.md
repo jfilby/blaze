@@ -866,6 +866,24 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ba. splice is a range replaced by the values written
+
+`xs.splice(at, del, ...items)` was not a method of this compiler, and the five
+sites that write it are how the compiler rebuilds a list in place: the refusals
+of a round, the statements of a block, the functions a program keeps. The answer
+is the range the call took out, read before the write, and the list the name
+holds afterwards is the part before the range, the values written, and the part
+after it — which is the concatenation of two lists with a list of the values
+between them.
+
+The positions are the ones the language uses: a start below zero counts from the
+end, a start past the end is the end, and a count below zero takes nothing out.
+Each position is read once into a name of the statement's own, because a
+position is written three times and a call read three times runs three times.
+
+This took the total from 494 to 483: the five sites and the spreads written
+around them, which were refused as a spread argument before the call was read.
+
 ### 4az. shift and unshift are the two ends of a list
 
 `xs.shift()` and `xs.unshift(v)` were not methods of this compiler: nine
@@ -1398,7 +1416,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-494 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+483 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1406,7 +1424,7 @@ order, and what each of them is:
 | 45 | `an empty array needs the type of its elements` | an empty literal in an object field, whose element type the interface states: `{ children: [] }` where the field is `Node[]`. Mostly the standalone read, which does not link the interface |
 | 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 14 | `a Map is built from entries`, 13 `"map"` | a list of lists: `map` over a list of lists, and the entries a map is built from |
-| 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
+| 4 | `a spread argument is not part of the call subset` | `Math.max(...xs)`: a list spread into a call whose parameters the file does not declare |
 | 12 | `expected a parameter name` | a member of a class written as a parameter pattern, or a construct of `semantics/python.ts`'s own |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
 | 10 | `Object.values` / `Object.keys` of a constant object, 9 entries, 10 spreads | a runtime record in the standalone read; the linked read types it |
@@ -1461,6 +1479,7 @@ What was closed this session, and what each was worth:
 | a captured list held in a one-field object | 588 → 514 |
 | flatMap is the lists its callback answers | 514 → 503 |
 | shift and unshift are the two ends of a list | 503 → 494 |
+| splice is a range replaced by the values written | 494 → 483 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

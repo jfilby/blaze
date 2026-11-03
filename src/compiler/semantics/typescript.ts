@@ -9202,10 +9202,10 @@ class TypeScriptParser {
           const args = this.readCallArguments(
             this.expectedMethodArguments(target.base, target.field),
             callback,
-            target.field === "push",
+            target.field === "push" || target.field === "splice",
             waitsForLink,
           );
-          const spreads = target.field === "push" ? this.argumentSpreads : null;
+          const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
           const receiver = target.base;
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
@@ -9235,6 +9235,17 @@ class TypeScriptParser {
           // and the frontend writes the assignment that keeps it. A field of
           // an object is a place the same way, and the write goes back into the
           // field the source named.
+          if (
+            target.field === "splice" &&
+            (receiver.k === "ident" || (receiver.k === "member" && receiver.base.k === "ident")) &&
+            (this.valueTypeOf(receiver).kind === "slice" || this.valueTypeOf(receiver).kind === "array")
+          ) {
+            const lowered = this.spliceMethod(receiver, args, spreads, callLine);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           if (
             (target.field === "shift" || target.field === "unshift") &&
             (receiver.k === "ident" || (receiver.k === "member" && receiver.base.k === "ident")) &&
@@ -10891,6 +10902,106 @@ class TypeScriptParser {
     const front: Expression = { k: "buffer", element: typeToString(element), values: [...args] };
     this.pendingBefore.push(this.writePlace(written, { k: "binary", op: "+", left: front, right: place }, line));
     return { k: "lengthOf", of: place };
+  }
+
+  /**
+   * `a.splice(at, del, ...items)`: a range of the list is the items instead.
+   *
+   * The answer is the range that was taken out, and the list the name holds is
+   * the part before the range, the items, and the part after it. The positions
+   * are the ones the language's `splice` uses: a start below zero counts from
+   * the end, a start past the end is the end, and a count below zero takes
+   * nothing out.
+   *
+   * Every position is read once into a name of the statement's own, because a
+   * position is written three times: a call written twice runs twice.
+   */
+  private spliceMethod(
+    receiver: Expression,
+    args: readonly Expression[],
+    spreads: readonly boolean[] | null,
+    line: number,
+  ): Expression | null {
+    let written: { target: string; base: string | null } | null = null;
+    if (receiver.k === "ident") written = { target: receiver.name, base: null };
+    else if (receiver.k === "member" && receiver.base.k === "ident") written = { target: receiver.field, base: receiver.base.name };
+    if (written === null) return null;
+    const sequence = this.valueTypeOf(receiver);
+    const element = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : ANY_TYPE;
+    const place: Expression = receiver;
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const length: Expression = { k: "lengthOf", of: place };
+    const at = args[0] ?? number("0");
+    const del = args[1] ?? { k: "lengthOf", of: place };
+    // A position is read once, at the type it is read at, and the names below
+    // are the only reads of it.
+    const hold = (value: Expression, what: string): Expression => {
+      if (value.k === "literal" || value.k === "ident") return value;
+      const name = `__splice${what}${this.fieldCount++}`;
+      this.pendingBefore.push({ kind: "declare", name, type: null, init: value, line });
+      this.valueTypes.set(name, NUMBER_RESULT);
+      return { k: "ident", name };
+    };
+    const startAt = hold(at, "at");
+    const removedCount = hold(del, "del");
+    const start = `__spliceStart${this.fieldCount++}`;
+    const below = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
+    const above = (left: Expression, right: Expression): Expression => ({ k: "binary", op: ">", left, right });
+    const sum = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "+", left, right });
+    this.pendingBefore.push({
+      kind: "declare",
+      name: start,
+      type: null,
+      init: {
+        k: "conditional",
+        condition: below(startAt, number("0")),
+        then: {
+          k: "conditional",
+          condition: below(sum(length, startAt), number("0")),
+          then: number("0"),
+          otherwise: sum(length, startAt),
+        },
+        otherwise: {
+          k: "conditional",
+          condition: above(startAt, length),
+          then: length,
+          otherwise: startAt,
+        },
+      },
+      line,
+    });
+    this.valueTypes.set(start, NUMBER_RESULT);
+    const from: Expression = { k: "ident", name: start };
+    const count: Expression = {
+      k: "conditional",
+      condition: below(removedCount, number("0")),
+      then: number("0"),
+      otherwise: removedCount,
+    };
+    const stop = sum(from, count);
+    // The answer is the range the call took out, read before the write.
+    const taken = `__spliceTaken${this.fieldCount++}`;
+    this.pendingBefore.push({
+      kind: "declare",
+      name: taken,
+      type: null,
+      init: this.sequenceMethod("slice", element, place, [from, stop], line),
+      line,
+    });
+    this.valueTypes.set(taken, { kind: "slice", of: element });
+    // The items written where the range was: a value written out joins the list
+    // as a list of one, and a spread joins the list it already is.
+    const elementText = typeToString(element);
+    let items: Expression = { k: "buffer", element: elementText, values: [] };
+    args.slice(2).forEach((value, index) => {
+      const piece: Expression = spreads?.[index + 2] === true ? value : { k: "buffer", element: elementText, values: [value] };
+      items = index === 0 ? piece : { k: "binary", op: "+", left: items, right: piece };
+    });
+    const head = this.sequenceMethod("slice", element, place, [number("0"), from], line);
+    const tail = this.sequenceMethod("slice", element, place, [stop], line);
+    const kept: Expression = { k: "binary", op: "+", left: { k: "binary", op: "+", left: head, right: items }, right: tail };
+    this.pendingBefore.push(this.writePlace(written, kept, line));
+    return { k: "ident", name: taken };
   }
 
   /** The write that puts a value back into the place a call was written on. */
