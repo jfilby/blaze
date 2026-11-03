@@ -3275,6 +3275,14 @@ class TypeScriptParser {
   /** A nested function declaration is handled by the program parsing, not the module one. */
   nestedFunction = false;
   /**
+   * The exports whose body this read could not hold, by signature.
+   *
+   * A build stops at this file, so the declarations are not compiled here. A
+   * file that imports the name still reads its calls against the signature,
+   * which is what the declaration wrote.
+   */
+  private readonly droppedExports: DeclaredFunction[] = [];
+  /**
    * Statements a single read produced past the first one, as a destructuring
    * declaration is a temporary and a binding for each name. The next block
    * drains them after the statement it returns, so they run in the order the
@@ -4993,6 +5001,7 @@ class TypeScriptParser {
       typeImports,
       types: this.typeTable,
       classes: this.classTable,
+      ...(this.droppedExports.length === 0 ? {} : { signatures: this.droppedExports }),
       functions,
       default: defaultExport,
       body,
@@ -5286,6 +5295,12 @@ class TypeScriptParser {
       // statement of the body either, so nothing reads it a second time.
       functions.length = before;
       this.closures.length = closuresBefore;
+    }
+    // What the declaration is, as opposed to what its body does: a file that
+    // imports the name calls it against this signature, whether or not the
+    // module that writes it could read the body.
+    if ((program || refused) && exported) {
+      for (const entry of entries) this.droppedExports.push({ ...entry, exported: true, internal: undefined });
     }
     const calls = new Set<string>();
     if (!program) {

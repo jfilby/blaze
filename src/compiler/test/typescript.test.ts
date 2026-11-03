@@ -2984,3 +2984,30 @@ test("a refused read still answers the imports it did read", () => {
     (error: unknown) => error instanceof CompilerError && error.message.includes(`${read.count} constructs`),
   );
 });
+
+test("an inline object type keeps a field a modifier is written in front of", () => {
+  // `readonly` states what a body may write, not the name of the field. The
+  // record `{ readonly applied: number }` has a field named `applied`, and
+  // reading the modifier as the name dropped it — so a union of shapes written
+  // the way the compiler's own sources write one had no fields at all, and
+  // `"applied" in outcome` asked a value whose type wrote down nothing.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "type Outcome =",
+        "  | { readonly applied: number }",
+        "  | { readonly refused: string };",
+        "export function copy(outcome: Outcome): Outcome {",
+        "  return { ...outcome };",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "copy",
+  );
+  assert.match(ir, /field applied/, "the field the modifier is written in front of is laid out");
+  assert.match(ir, /load_field\[[^\]]+\] local\[[^\]]+\] outcome [^\]]+ applied/, "and the spread reads it");
+});

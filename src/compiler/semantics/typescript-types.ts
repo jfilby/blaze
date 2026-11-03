@@ -117,6 +117,9 @@ const PRIMITIVES: Record<string, PrimitiveTypeName> = {
   u256: "u256",
 };
 
+/** The words a member of an object type may write in front of its name. */
+const RECORD_MODIFIERS: ReadonlySet<string> = new Set(["readonly", "public", "private", "protected", "override"]);
+
 const TYPED_ARRAYS: Record<string, PrimitiveTypeName> = {
   Float32Array: "f32",
   Float64Array: "f64",
@@ -984,9 +987,20 @@ class TypeText {
         if (colon >= 0) index = resolveTypeText(this.table, trimmed.slice(colon + 1), this.params, this.seen);
         continue;
       }
-      const name = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(trimmed);
+      let name = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(trimmed);
       if (name === null) continue;
       let rest = trimmed.slice(name[0].length).trim();
+      // A member may be written with a modifier in front of its name, as every
+      // field of the IR's own records is: `readonly applied: SemanticFunction`.
+      // The modifier states what a body may write, not what the field is, and
+      // reading it as the name dropped the field the name belongs to.
+      if (RECORD_MODIFIERS.has(name[0]) && !rest.startsWith(":")) {
+        const named = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(rest);
+        if (named !== null) {
+          name = named;
+          rest = rest.slice(named[0].length).trim();
+        }
+      }
       const optional = rest.startsWith("?");
       if (optional) rest = rest.slice(1).trim();
       if (!rest.startsWith(":")) continue;

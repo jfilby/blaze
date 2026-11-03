@@ -131,7 +131,12 @@ function importedFunctionsOf(
     const named: { local: string; imported: string }[] = entry.names.map((name) => ({ local: name, imported: name }));
     for (const rename of entry.renames ?? []) named.push(rename);
     for (const { local, imported } of named) {
-      const declared = target.analysis.functions.find((one) => one.name === imported && one.exported);
+      // A file whose body could not be held still offers the signatures of what
+      // it exports: the declaration is refused where it is written, and the
+      // calls a file writes to it are read against the parameters and result
+      // the declaration states.
+      const declared = target.analysis.functions.find((one) => one.name === imported && one.exported) ??
+        (target.analysis.signatures ?? []).find((one) => one.name === imported);
       if (declared === undefined) continue;
       const signature: ImportedFunction = {
         params: declared.params.map((param) => param.type),

@@ -105,7 +105,9 @@ Reading every source as the module graph a build reads raised the number to
 cannot resolve, so the old number measured how far a parse got — a union
 laid out with the bar its first member is written after lowered it to 1841,
 and carrying the classes one module declares to the files that import them
-lowered it to 991, and what a collection's value holds to 945.
+lowered it to 991, what a collection's value holds to 945, and the signatures a
+refused module still offers to 916, and a field a modifier is written in front
+of to 903.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -877,6 +879,52 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bu. A field a modifier is written in front of
+
+    export type RepairOutcome =
+      | { readonly applied: SemanticFunction; readonly note: string }
+      | { readonly refused: string };
+
+The union's members are object types written in the text of an annotation, and
+the reader of that text took the first name of each member as the field's: it
+saw a field named `readonly` whose text after it was `applied: …`, which is not
+an annotation, and moved on. Every member of every such object type was empty.
+The type still resolved — a union of records with no fields — so
+`"applied" in outcome` asked a value whose fields the type did not write down,
+`outcome.applied` was a field of nothing, and a spread of one copied nothing.
+
+An interface is read from the tokens, where `readonly` was already skipped; the
+text of *inline* object types is where the modifier was missing. It is now read
+as the modifier it is — `readonly`, `public`, `private`, `protected`,
+`override` — and a field whose name happens to be one of those words
+(`{ readonly: boolean }`) is still the field it names.
+
+This took the total from 916 to 903, and `semantics/restructure.ts` goes from
+five refusals to one: its `if (!("applied" in outcome))` is the union's tag
+chain, which is the question the language asks.
+
+### 4bt. A signature a refused module still offers
+
+`restructureHotFunction` answers either a function or the reason it could not,
+and its caller writes `if ("refused" in restructured) return fn;`. The
+declaration is a union of shapes in `semantics/repair.ts` — and that file is
+refused, so the read that links `semantics/optimize-ir.ts` against it found no
+declaration of `inlineCall` at all. An *exported* declaration whose body the
+module refuses is dropped from the module's functions, and a caller then knows
+nothing about what it answers.
+
+The drop is right for the module: a build stops at the file it cannot read,
+and a function it cannot hold is not compiled. What it must not drop is what
+the declaration *says*. A signature with no body is already read as the
+signature it is (§4ac); a file that names the function reads its calls against
+the parameters and result the declaration wrote. The read now keeps those
+signatures beside the functions (`ModuleAnalysis.signatures`), and the link
+offers them to the files that import the name. A build's answer is unchanged —
+the refusing file still stops it — and the measurement reads the caller
+instead of stopping at the import.
+
+This took the total from 945 to 916, and `toolchain/csource.ts` reads whole.
 
 ### 4bs. What a collection's value holds
 
@@ -1835,7 +1883,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-945 refusals over 95 sources, 15 of them read whole. The report reads the
+903 refusals over 95 sources, 16 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -1854,13 +1902,13 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 69 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
-| 56 | `"map"`, 17 `"filter"`, 13 `"find"`, 13 `"has"`, 10 `"every"`, 10 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 72 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 47 | `"map"`, 16 `"filter"`, 14 `"has"`, 12 `"find"`, 10 `"every"`, 10 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
 | 36 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 22 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
-| 21 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
+| 21 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
+| 14 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 13 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
-| 13 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
+| 12 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
 | 10 | `"startsWith"`, 9 `"trim"`, 9 `"split"`, 8 `"join"`, 8 `"set"`, 8 `"at"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
 | 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
 | 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
@@ -1936,6 +1984,8 @@ What was closed this session, and what each was worth:
 | an expansion of a type made once (§4bq) | 1839 → 1841 |
 | a class another module declares (§4br) | 1841 → 991 |
 | what a collection's value holds (§4bs) | 991 → 945 |
+| a signature a refused module still offers (§4bt) | 945 → 916 |
+| a field a modifier is written in front of (§4bu) | 916 → 903 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

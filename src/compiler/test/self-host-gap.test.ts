@@ -76,3 +76,33 @@ test("a construct outside the subset is refused after the link, whoever imports 
     );
   }
 });
+
+test("a refused module still offers the signatures of what it exports", async () => {
+  const directory = await tree({
+    "lib.ts": [
+      "export type Outcome = { refused: string } | { applied: number };",
+      "export function apply(n: number): Outcome {",
+      "  const stamp = new Date().getTime();",
+      "  return n > 0 ? { applied: n + stamp } : { refused: `no` };",
+      "}",
+      "",
+    ].join("\n"),
+    "cli.ts": [
+      'import { apply } from "./lib.ts";',
+      "export function run(n: number): number {",
+      "  const outcome = apply(n);",
+      '  if ("refused" in outcome) return 0;',
+      "  return outcome.applied;",
+      "}",
+      "",
+    ].join("\n"),
+  });
+
+  const report = await selfHostGap(directory);
+  // The module that writes the function is refused, so a build stops there.
+  // The *signature* is not refused: the file that calls it is read against the
+  // parameters and result the declaration writes, and that file's queue is
+  // what the report measures.
+  assert.deepEqual(report.clean, ["cli.ts"], "the caller's calls are read through the signature");
+  assert.deepEqual(report.refused.map((one) => one.path), ["lib.ts"]);
+});

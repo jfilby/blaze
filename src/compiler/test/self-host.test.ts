@@ -75,9 +75,12 @@ import { selfHostGap } from "./self-host-gap.ts";
  * instance of `toolchain/x86.ts`'s `Encoder`, and a class is now described to
  * the files that import it. Keeping the shape a collection's value was written
  * at — what `values()` and `get()` answer a field read through — lowered it to
- * 945.
+ * 945, and keeping the signatures an exported declaration offers when its own
+ * module is refused lowered it to 916: a file that calls one is read against
+ * the parameters and result the declaration writes. Reading a `readonly` field
+ * of an inline object type as the field it names lowered it to 903.
  */
-const REFUSAL_BUDGET = 945;
+const REFUSAL_BUDGET = 903;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

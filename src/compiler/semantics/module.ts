@@ -326,6 +326,16 @@ export interface ModuleAnalysis {
    */
   constants?: unknown;
   /**
+   * What the module offers a file that names it, for a declaration this read
+   * could not hold.
+   *
+   * An export whose body the module refuses is a refusal of that file, and a
+   * build stops there. The *signature* is not refused: the file that imports
+   * the name reads its calls against exactly the parameters and result this
+   * declaration writes, and the link is what tells it so.
+   */
+  signatures?: DeclaredFunction[];
+  /**
    * True when the read waited for the module graph to link a declaration an
    * import names. The graph reads such a file again once its imports are bound,
    * which is the read that answers what this one deferred.
