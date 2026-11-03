@@ -866,6 +866,16 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4au. A value marked with void
+
+`void compilerDir;` is a statement the three model-build programs write to say
+they read a value they have no use for. The statement has no effect, and both
+readers now read it: the program reader drops it, and the module reader keeps the
+read as a statement of the body — a value it holds for nothing is a value the
+optimizer removes.
+
+This took the total from 598 to 595, one in each of the three build programs.
+
 ### 4at. An arrow that only reads a boxed name
 
 A name an arrow writes is held in a one-element list (§4al), and the arrow is
@@ -1293,7 +1303,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-598 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+595 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1347,6 +1357,7 @@ What was closed this session, and what each was worth:
 | an arrow takes the rest of a call's arguments | 610 → 608 |
 | a text repeated | 608 → 601 |
 | a text searched from a position | 601 → 598 |
+| a value marked with void | 598 → 595 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

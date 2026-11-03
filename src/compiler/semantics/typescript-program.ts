@@ -521,6 +521,25 @@ class ProgramParser {
     if (this.at("while")) return this.whileLoop();
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
+    if (this.at("void")) {
+      this.next();
+      // `void name;` marks a value as read and writes nothing. The statement
+      // has no effect, and the name is what the source wanted read; anything
+      // else written after `void` is a value read for an effect, which this
+      // program cannot run as a statement.
+      const name = this.next();
+      if (name.kind !== "ident" || !this.at(";")) {
+        this.fail(
+          "a value written with void is read for its effect, which a program cannot run as a statement",
+          name,
+        );
+        this.synchronize(";");
+        this.accept(";");
+        return null;
+      }
+      this.next();
+      return null;
+    }
     if (this.at("async")) {
       this.next();
       if (!this.at("function")) {

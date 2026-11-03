@@ -800,6 +800,23 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("a value marked with void is read and writes nothing", async () => {
+  // `void unused;` is how a source says it read a value it has no use for. The
+  // statement has no effect, and the value is the one the name holds.
+  const source = [
+    "function takes(dir: string, unused: number): string {",
+    "  void unused;",
+    "  return dir;",
+    "}",
+    "console.log(takes(`a`, 1));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a", `the ${backend} backend reads the value and drops it`);
+  }
+});
+
 test("a text is searched from a position", async () => {
   // `indexOf(needle, from)` is the search of the field that starts at `from`,
   // and the position it answers is that field's plus the start. A start below

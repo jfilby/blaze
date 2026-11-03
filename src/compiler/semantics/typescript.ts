@@ -6494,6 +6494,15 @@ class TypeScriptParser {
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
 
+    // `void name;` marks a value as read and writes nothing. The statement has
+    // no effect of its own, so what it reads is a value the body keeps for
+    // nothing.
+    if (this.at("void")) {
+      const start = this.next();
+      const value = this.readExpression();
+      this.accept(";");
+      return { kind: "expression", value, line: start.line };
+    }
     if (this.at("for")) return this.readLoop();
     if (this.at("if")) return this.readIf();
     if (this.at("try")) return this.readTry();
