@@ -13,6 +13,7 @@
  */
 
 import type { FunctionContract, PrimitiveTypeName, SourceInput, TypeExpr } from "../core/types.ts";
+import type { ClassTable } from "./typescript-classes.ts";
 import type { TypeTable } from "./typescript-types.ts";
 
 /**
@@ -292,6 +293,16 @@ export interface ModuleAnalysis {
   typeImports?: ModuleTypeImport[];
   /** The interfaces, aliases and imports the file's annotations resolve in. */
   types?: TypeTable;
+  /**
+   * The classes the file declares, as the lowering read them.
+   *
+   * A class is a value a name holds: the constructor and the methods are
+   * functions of the module that wrote it, and a file that imports the class
+   * reads the fields and methods of its instances. The declarations travel
+   * beside the imports so the module graph can hand the description to the
+   * files that name it — see `bindImportedClasses`.
+   */
+  classes?: ClassTable;
   functions: DeclaredFunction[];
   /** The name the file exports as its default, or null where it exports none. */
   default: string | null;

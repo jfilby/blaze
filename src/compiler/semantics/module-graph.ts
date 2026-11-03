@@ -21,6 +21,8 @@ import type { SourceModule } from "../core/types.ts";
 import type { Diagnostic } from "./diagnostics.ts";
 import type { Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
+import { bindImportedClasses } from "./typescript-classes.ts";
+import type { ClassTable } from "./typescript-classes.ts";
 import { bindImportedTypes } from "./typescript-types.ts";
 import type { TypeTable } from "./typescript-types.ts";
 
@@ -323,6 +325,24 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     }
     bindImportedTypes(types, imports, targets);
   }
+  // A class crosses the link as the description of itself: the fields a value
+  // has and the methods it answers, which are functions the declaring module
+  // compiled. The table is the first read's, so the second read sees them.
+  const classTables = new Map<string, ClassTable>();
+  for (const record of records.values()) {
+    if (record.analysis.classes !== undefined) classTables.set(record.path, record.analysis.classes);
+  }
+  for (const record of records.values()) {
+    const table = record.analysis.classes;
+    if (table === undefined) continue;
+    const targets = new Map<string, ClassTable>();
+    for (let index = 0; index < record.analysis.imports.length; index += 1) {
+      const target = classTables.get(record.resolved[index] as string);
+      const entry = record.analysis.imports[index] as { specifier: string };
+      if (target !== undefined) targets.set(entry.specifier, target);
+    }
+    bindImportedClasses(table, record.analysis.imports, targets);
+  }
   // A file is read again with the table its imports now fill, and with the
   // values its imports bind. Its runtime imports were resolved by the first
   // read and are unchanged, so only the analysis is replaced.
@@ -331,11 +351,11 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     if (record.analysis.types === undefined) continue;
     const imports = record.analysis.typeImports ?? [];
     // A second read is only needed when an import names a module that actually
-    // declares a type or offers a value. A runtime import binds neither, and
-    // most files have one: reading every file twice for nothing would double
-    // the parse of the whole tree. A file that waited for the link is read again
-    // whatever its imports turned out to hold, because what it deferred is the
-    // link's to answer one way or the other.
+    // declares a type or a class, or offers a value. A runtime import binds
+    // none of them, and most files have one: reading every file twice for
+    // nothing would double the parse of the whole tree. A file that waited for
+    // the link is read again whatever its imports turned out to hold, because
+    // what it deferred is the link's to answer one way or the other.
     let namesAType = false;
     for (let index = 0; index < imports.length; index += 1) {
       const target = tables.get(record.typeResolved[index] as string);
@@ -344,13 +364,24 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
         break;
       }
     }
+    let namesAClass = false;
+    if (!namesAType) {
+      for (let index = 0; index < record.analysis.imports.length; index += 1) {
+        const target = classTables.get(record.resolved[index] as string);
+        if (target !== undefined && target.classes.size > 0) {
+          namesAClass = true;
+          break;
+        }
+      }
+    }
     const values = importedValuesOf(record.analysis.imports, record.resolved, offered);
     // The signatures of the functions this file calls are what a call answers,
     // and the graph has read the modules that write them by now.
     const functions = importedFunctionsOf(record, records);
-    if (!namesAType && values.size === 0 && record.analysis.awaitingLink !== true) continue;
+    if (!namesAType && !namesAClass && values.size === 0 && record.analysis.awaitingLink !== true) continue;
     const second = reader(record.source, record.path, record.path === request.entry.path, {
       table: record.analysis.types,
+      classes: record.analysis.classes,
       values,
       functions,
       linked: true,

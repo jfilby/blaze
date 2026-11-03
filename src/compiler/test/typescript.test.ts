@@ -770,6 +770,43 @@ test("a local interface that names an imported type is read after the link", () 
   assert.match(ir, /join/, "the field the import types is the list its declaration names");
 });
 
+test("a class another module declares is read through its instances", () => {
+  // The class is a value of the module that wrote it: its constructor and its
+  // methods are functions of that module, and what crosses the link is the
+  // description of the class. Without it `counter.add` is a method of nothing,
+  // because the field the instance is held in is a name no table of this file
+  // declares.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import { Counter } from "./types.ts";',
+        "export function twice(): number {",
+        "  const counter = new Counter();",
+        "  counter.add(1);",
+        "  return counter.add(2);",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+      "types.ts": [
+        "export class Counter {",
+        "  total = 0;",
+        "  add(by: number): number {",
+        "    this.total += by;",
+        "    return this.total;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const ir = printSemanticFunction(semanticsOf(phase)["twice"]);
+  assert.match(ir, /Counter_add/, "the method is the function the other module compiled");
+  assert.match(ir, /Counter\b/, "the constructor is the one the other module lowered");
+});
+
 test("an angle-bracket type assertion is erased", () => {
   // `<T>value` is the other spelling of `value as T`, and it names no runtime
   // work: the value after the closing bracket is the value the source wrote.
@@ -2591,6 +2628,33 @@ test("a map states a type that names a type of its own", () => {
   ) as { kind: string; init?: { k: string; name?: string } }[];
   assert.equal(body[0]?.init?.name, "blaze_rt_dict_new", "a map of sets is the dictionary the runtime lays out");
   assert.equal(body[1]?.init?.name, "blaze_rt_dict_new", "and so is the set it holds");
+});
+
+test("an entry read out of a map is held at the declaration its value names", () => {
+  // The dictionary's type can spell only the opaque reference, so a field read
+  // of an entry was a read through a reference nothing named: `item.names` was
+  // `any`, and the `join` written on it was a method of nothing. What `get`
+  // and `values()` answer carries the fields the annotation's declaration
+  // wrote, so the member chain after them is read.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "interface Item { names: string[] }",
+        "export function listed(table: Map<string, Item>, key: string): string {",
+        "  const one = table.get(key);",
+        '  let out = one === undefined ? "" : one.names.join(",");',
+        '  for (const item of table.values()) out += item.names.join(",");',
+        "  return out;",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const ir = printSemanticFunction(semanticsOf(phase)["listed"]);
+  assert.match(ir, /call __collect_/, "the join on an entry's field is the helper that joins a list");
 });
 
 test("a record keyed by text is the dictionary a map is", () => {

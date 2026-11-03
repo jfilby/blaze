@@ -2759,6 +2759,14 @@ interface CollectionValue {
   key: TypeExpr;
   /** The value a map holds, which is the number `1` for a set. */
   value: TypeExpr;
+  /**
+   * What the value holds, where the declaration named it.
+   *
+   * The type is what the contract can spell, and a record of a declaration
+   * spells only the opaque reference: the fields are gone. The read that asks
+   * what a field of one holds asks the shape.
+   */
+  valueShape?: ResolvedType;
 }
 
 export interface TypeScriptFunction {
@@ -3518,17 +3526,18 @@ class TypeScriptParser {
     // `Record<string, V>` is the same dictionary `Map<string, V>` is: the keys
     // are texts and the value is what the index states.
     if (shape.kind === "record" && shape.index !== null) {
-      return { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(shape.index) };
+      return { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(shape.index), valueShape: shape.index };
     }
     const collection = collectionOfType(shape);
     if (collection === null) return null;
     if (collection.kind === "set") {
-      return { kind: "set", key: TEXT_RESULT, value: this.typeExprOfShape(collection.of) };
+      return { kind: "set", key: TEXT_RESULT, value: this.typeExprOfShape(collection.of), valueShape: collection.of };
     }
     return {
       kind: "map",
       key: this.typeExprOfShape(collection.key),
       value: this.typeExprOfShape(collection.value),
+      valueShape: collection.value,
     };
   }
 
@@ -4983,6 +4992,7 @@ class TypeScriptParser {
       imports,
       typeImports,
       types: this.typeTable,
+      classes: this.classTable,
       functions,
       default: defaultExport,
       body,
@@ -5972,11 +5982,18 @@ class TypeScriptParser {
     if (this.tokens[start + 1]?.text !== "<") return { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
     const close = this.matchingToken(start + 1, "<", ">");
     if (close < 0 || close >= end) return { kind, key: TEXT_RESULT, value: NUMBER_RESULT };
-    const arguments_ = this.typeArguments(start + 2, close);
+    const ranges = this.typeArgumentRanges(start + 2, close);
+    const arguments_ = ranges.map((range) => this.typeFromTokens(range.from, range.to, false));
     // `Record<string, V>` writes the key it is keyed by and the value it holds;
     // a map writes the same two arguments.
     const key = arguments_[0] ?? TEXT_RESULT;
     const value = kind === "map" ? (arguments_[1] ?? NUMBER_RESULT) : NUMBER_RESULT;
+    // What the value holds is the declaration the annotation names, which is
+    // the read of a field of an entry: the contract's spelling of that value is
+    // the opaque reference, and a member written through it asks the shape.
+    const valueRange = ranges[1];
+    const resolved = valueRange === undefined ? null : this.shapeOfRange(valueRange);
+    const valueShape = kind === "map" && resolved !== null ? this.shapeForRead(resolved) : null;
     if (this.keyKind(key) === null) {
       this.report(
         `a ${head.text} here is keyed by text, not by ${typeToString(key)}`,
@@ -5985,7 +6002,22 @@ class TypeScriptParser {
       );
       return null;
     }
-    return { kind, key, value };
+    return { kind, key, value, ...(valueShape === null ? {} : { valueShape }) };
+  }
+
+  /**
+   * What a run of tokens states, as the fields it names.
+   *
+   * A shape is what a member chain asks, and a read that has not linked an
+   * imported declaration answers `any`: the read that follows the link is the
+   * one that holds the fields.
+   */
+  private shapeOfRange(range: { from: number; to: number }): ResolvedType | null {
+    try {
+      return resolveAnnotation(this.tokens, range.from, range.to, this.typeTable);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -6033,9 +6065,9 @@ class TypeScriptParser {
     return `blaze_rt_dict_set${suffix}_ref`;
   }
 
-  /** The type arguments written between two angle brackets, one per argument. */
-  private typeArguments(start: number, close: number): TypeExpr[] {
-    const out: TypeExpr[] = [];
+  /** Where each argument of a `<...>` list is written, in order. */
+  private typeArgumentRanges(start: number, close: number): { from: number; to: number }[] {
+    const out: { from: number; to: number }[] = [];
     let depth = 0;
     let from = start;
     for (let at = start; at < close; at += 1) {
@@ -6046,11 +6078,11 @@ class TypeScriptParser {
       else if (token.text === ">>") depth -= 2;
       else if (token.text === ">>>") depth -= 3;
       else if (token.text === "," && depth === 0) {
-        out.push(this.typeFromTokens(from, at, false));
+        out.push({ from, to: at });
         from = at + 1;
       }
     }
-    if (from < close) out.push(this.typeFromTokens(from, close, false));
+    if (from < close) out.push({ from, to: close });
     return out;
   }
 
@@ -12025,7 +12057,7 @@ class TypeScriptParser {
       // A map whose value the source named keeps the fields that name holds,
       // so a member chain written through the value reads them.
       if (kind === "reference") {
-        const shape = this.shapeOfTypeExpr(collection.value);
+        const shape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
         if (shape.kind !== "any") this.expressionShapes.set(chosen, shape);
       }
       return chosen;
@@ -12045,7 +12077,9 @@ class TypeScriptParser {
         );
         return this.hole();
       }
-      return call(helper.name, [receiver], helper.returns);
+      const listed = call(helper.name, [receiver], helper.returns);
+      this.expressionShapes.set(listed, { kind: "list", of: helper.elementShape });
+      return listed;
     }
     // `for (const [k, v] of m.entries())` names the two parts of an entry. The
     // pair is not an element a typed array holds, so the loop reads the two
@@ -12137,15 +12171,19 @@ class TypeScriptParser {
     collection: CollectionValue,
     list: "keys" | "values",
     line: number,
-  ): { name: string; returns: TypeExpr } | null {
+  ): { name: string; returns: TypeExpr; elementShape: ResolvedType } | null {
     const element = list === "keys"
       ? collection.key
       : collection.kind === "set" ? collection.key : collection.value;
     const kind = this.storedKind(element);
     if (kind === "sequence" || kind === "other") return null;
+    // What the block holds is the element's own field list where the map's
+    // value named a declaration: the block's type can spell only the opaque
+    // reference, and a field read through one asks a type nothing says.
+    const elementShape = (list === "values" ? collection.valueShape : undefined) ?? this.shapeOfTypeExpr(element);
     const key = JSON.stringify(["list", list, collection.kind, collection.key, collection.value, element]);
     const known = this.collectHelpers.get(key);
-    if (known !== undefined) return known;
+    if (known !== undefined) return { ...known, elementShape };
 
     const name = `__collect_${this.stem}_${this.collectCount}`;
     this.collectCount += 1;
@@ -12176,7 +12214,7 @@ class TypeScriptParser {
     this.liftedArrows.set(name, helper);
     const made = { name, returns };
     this.collectHelpers.set(key, made);
-    return made;
+    return { name, returns, elementShape };
   }
 
   /** The signature the callback of a collection method is written at. */
@@ -14521,7 +14559,11 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // the program body is lowered against the same table.
   const tokens = tokenize(source);
   const wideBigint = fileHoldsWideBigint(tokens);
-  const classTable = scanClasses(tokens);
+  // A file read again after its imports are bound keeps the table the first
+  // read built: the module graph has added the classes the imports name, and
+  // that read is the one that reads the methods written on them.
+  const sharedClasses = (context as { classes?: ClassTable } | undefined)?.classes;
+  const classTable = sharedClasses ?? scanClasses(tokens);
   const scanned = scanConstants(tokens);
   // The interfaces and aliases are read before the bodies that name them.
   // A file read again after its imports are bound keeps the table the first

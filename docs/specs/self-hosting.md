@@ -102,8 +102,10 @@ interpreter opens a file with to 3162, with `core/errors.ts`,
 `semantics/language.ts` and `toolchain/wasm-host-runtime.ts` read as wholes.
 Reading every source as the module graph a build reads raised the number to
 2218 — a file read on its own stops counting at the first imported type it
-cannot resolve, so the old number measured how far a parse got — and a union
-laid out with the bar its first member is written after lowered it to 1841.
+cannot resolve, so the old number measured how far a parse got — a union
+laid out with the bar its first member is written after lowered it to 1841,
+and carrying the classes one module declares to the files that import them
+lowered it to 991, and what a collection's value holds to 945.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -875,6 +877,78 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bs. What a collection's value holds
+
+The compiler walks a `Map<string, Item>` in its own functions:
+
+    for (const item of table.values()) out += item.names.join(",");
+
+What `values()` answers is a block of the map's value type, and a collection's
+*type* can spell only the opaque reference: the fields a declaration writes are
+the shape's, not the type's. The block therefore held unnamed references, the
+loop bound `item` to one of them, and `item.names` was a field read through a
+reference that named nothing — `join` written on it was a method of nothing.
+`Object.values(record)` and `map.get(k)` were the same.
+
+A collection now keeps the shape its value was written at beside the type.
+`CollectionValue.valueShape` is the record the annotation named; `values()`,
+`keys()` and `get()` record it on the answer they build, and `for..of` binds
+the element at it. `get` already carried the shape of a value whose *source*
+named a declaration (that was the `?.` slice); the path an annotation takes —
+`annotationCollection` — built the collection from the type text alone and
+dropped it.
+
+This took the total from 991 to 945, and `semantics/calls.ts` and
+`semantics/parallel.ts` read whole. The object-spread bucket rises by five:
+a spread whose value the read can now type is read, and what it reaches behind
+the deferral is another gap.
+
+### 4br. A class another module declares
+
+The largest file of the tree was also the largest queue: 859 of the 2218
+refusals were in `toolchain/ir-machine.ts`, and almost all of them were one
+shape.
+
+    this.code.movRegReg(RAX, register);
+
+`code` is `readonly code = new Encoder()`, and `Encoder` is a class of
+`toolchain/x86.ts`. A class is lowered to functions of the module that declares
+it, and the class table was that module's alone, so another file had no way to
+know what an instance answers. The first read deferred — the field's type names
+an import — and the read that followed the link refused every method:
+`"movRegReg" is not a method this program compiles`.
+
+A class now crosses the link as the description of itself.
+`bindImportedClasses` copies the declaring module's `ClassInfo` into the
+importing file's class table under the name that file reads it by: the fields,
+the methods and getters, the statics, and the arity of each. The bodies stay
+with the module that wrote them, and every token position in the copy is `-1`,
+because an index into another file's tokens means nothing here; the `ordered`
+list, which is what emits declarations and cuts them out of the text, is still
+the local one, so nothing is emitted twice.
+
+The call the importer writes names the same function the declaring module
+compiled (`Encoder_movRegReg`), which is how the rest of the link already
+works: one table of functions, keyed by name. A class imported under another
+name keeps the declaring module's name for exactly that reason, and a class a
+module offers as its *default* is not bound, because the import statement does
+not say which name the file reads it under and no source of the compiler
+imports a class that way.
+
+`toolchain/ir-machine.ts` goes from 859 refusals to 61 and the total from 1841
+to 991.
+
+**A finding under it, not fixed.** `semantics/builtins.ts` now reads whole but
+offers no functions at all, so every call of `builtinFor` in the tree answers
+`any` — `builtin.params.map(...)` is one of the queues this slice did not
+reach. The file's `BUILTINS` is a table of four hundred entries whose values
+are computed objects, so the scan calls it *state* rather than a constant, and
+a function that reads state is read where the program runs. An exported
+function cannot be a program function, so the declaration is dropped from the
+library's functions and no refusal is written — the file looks read and offers
+nothing. It is the module-scoped global the roadmap names, and the slice that
+carries one will make this file's functions real.
 
 ### 4bq. An expansion of a type is made once
 
@@ -1761,14 +1835,15 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-1841 refusals over 95 sources, 13 of them read whole. The report reads the
+945 refusals over 95 sources, 15 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
-resolved, and a file whose imports bind a type, a value or a signature is read
-again with them — so the number is what survives the link rather than what
-waited for one. The buckets the standalone read used to own are gone:
+resolved, and a file whose imports bind a type, a value, a signature or a class
+is read again with them — so the number is what survives the link rather than
+what waited for one. The buckets the standalone read used to own are gone:
 `new Map(scope.slots)`, `Object.values(file.functions)` and an empty list in a
-field another module types are read whole, and so is every member read through a
-union laid out with a leading bar (§4bp).
+field another module types are read whole, so is every member read through a
+union laid out with a leading bar (§4bp), and so is every method written on an
+instance of a class another module declares (§4br).
 
 The number was five times larger than the standalone read's 421 because that
 read was counting with a hand over the rest of the file: the first imported type
@@ -1779,16 +1854,16 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 63 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
-| 60 | `"map" is not a method this program compiles` | a receiver the linked read still cannot type — a list a field of a refused file writes, or a value narrowed inside a `switch` — so the walking method has no element type (§4e) |
-| 39 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 26 | `"push" is not a method this program compiles` | the same receiver, written as a push |
-| 24 | `"find"`, 19 `"read"`, 12 `"some"`, 16 `"filter"`, 10 `"every"`, 13 `"forEach"` as methods of nothing | the same receiver problem as `"map"` |
+| 69 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 56 | `"map"`, 17 `"filter"`, 13 `"find"`, 13 `"has"`, 10 `"every"`, 10 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 36 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
+| 22 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
 | 21 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 13 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
 | 13 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
-| 9 | `"startsWith"`, 11 `"trim"`, 10 `"includes"`, 9 `"join"`, 8 `"slice"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
+| 10 | `"startsWith"`, 9 `"trim"`, 9 `"split"`, 8 `"join"`, 8 `"set"`, 8 `"at"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
 | 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
+| 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
 
 A refusal listed here is still not always a construct the frontend cannot read:
 a file is linked against the declarations of other files, and a file that is
@@ -1859,6 +1934,8 @@ What was closed this session, and what each was worth:
 | a declared function as a collection callback | 426 → 421 |
 | a union laid out with a leading bar (§4bp) | 2218 → 1839 |
 | an expansion of a type made once (§4bq) | 1839 → 1841 |
+| a class another module declares (§4br) | 1841 → 991 |
+| what a collection's value holds (§4bs) | 991 → 945 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
@@ -1985,7 +2062,10 @@ below are independent enough to land one at a time, in this order:
   of its own file, and a file of declarations is a library rather than a
   program; what is missing is the module graph carrying that value across files.
   A self-hosting compiler has a module graph, so the linker's "one name per
-  function" rule has to become a module-scoped name.
+  function" rule has to become a module-scoped name. A type, a value, a
+  signature and the description of a class already cross the link; a class
+  another module declares is read through its instances from the fields and
+  methods its declaration writes (§4br).
 
 Exit criterion: the source's control flow and expressions parse; only data and
 host refusals remain.

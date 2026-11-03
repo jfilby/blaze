@@ -69,9 +69,15 @@ import { selfHostGap } from "./self-host-gap.ts";
  * was `any` and every member read through it was a method of nothing. Keeping
  * the one expansion of a declaration a table makes, which the link invalidates,
  * is what made the corrected reading affordable: the standalone read of the same
- * tree took five minutes without it.
+ * tree took five minutes without it. Carrying the classes another module
+ * declares across the link lowered it to 991: `toolchain/ir-machine.ts` was 859
+ * refusals on its own, almost all of them `this.code.movRegReg(...)` on an
+ * instance of `toolchain/x86.ts`'s `Encoder`, and a class is now described to
+ * the files that import it. Keeping the shape a collection's value was written
+ * at — what `values()` and `get()` answer a field read through — lowered it to
+ * 945.
  */
-const REFUSAL_BUDGET = 1841;
+const REFUSAL_BUDGET = 945;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

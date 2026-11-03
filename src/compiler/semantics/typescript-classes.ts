@@ -603,6 +603,80 @@ export function withoutClasses(tokens: readonly Token[], table: ClassTable): Tok
   return tokens.filter((_token, index) => removed[index] === 0);
 }
 
+/**
+ * A class another module declares, as the file that imports it holds it.
+ *
+ * What an importer needs is the signatures: the fields a value has, the
+ * methods it answers, and how many arguments each takes. The bodies are the
+ * declaring module's, which compiles them into functions of its own, and every
+ * position here is an index into tokens this file never read — so each one is
+ * -1. A copy is a description of the class, not a second declaration of it.
+ *
+ * The name is the one the declaring module compiled the class under, because
+ * that is what the methods are named after (`P_sum`); a file that imports the
+ * class under another name still calls the function the module wrote.
+ */
+export function importedClass(info: ClassInfo): ClassInfo {
+  const withoutBody = (method: ClassMethod): ClassMethod => ({ ...method, bodyStart: -1, bodyEnd: -1 });
+  const withoutValue = (field: ClassField): ClassField => ({ ...field, initStart: -1, initEnd: -1 });
+  return {
+    ...info,
+    fields: info.fields.map(withoutValue),
+    statics: info.statics.map(withoutValue),
+    constructor: info.constructor === null ? null : withoutBody(info.constructor),
+    methods: info.methods.map(withoutBody),
+    staticMethods: info.staticMethods.map(withoutBody),
+    getters: info.getters.map(withoutBody),
+    staticGetters: info.staticGetters.map(withoutBody),
+    start: -1,
+    end: -1,
+    exported: false,
+    isDefault: false,
+  };
+}
+
+/**
+ * Binds the classes an import names to the class the other module declares.
+ *
+ * A class is a value a name holds, and a file that imports one reads the
+ * fields and methods of its instances. The declaring module compiles the
+ * constructor and every method into functions of its own, under the names the
+ * class is written with, so what crosses the link is the description: the
+ * importer emits a call to the same `P_sum` the other module compiled.
+ *
+ * A class the module offers as its default is not bound: the import statement
+ * does not say which name the file reads it under, and no source of the
+ * compiler writes one.
+ */
+export function bindImportedClasses(
+  table: ClassTable,
+  imports: readonly {
+    specifier: string;
+    names: string[] | null;
+    renames?: readonly { local: string; imported: string }[];
+  }[],
+  targets: ReadonlyMap<string, ClassTable>,
+): void {
+  for (const entry of imports) {
+    const target = targets.get(entry.specifier);
+    if (target === undefined) continue;
+    for (const imported of entry.names ?? []) {
+      const info = target.classes.get(imported);
+      if (info === undefined) continue;
+      table.classes.set(imported, importedClass(info));
+      table.names.add(imported);
+    }
+    // `import { Encoder as Code }` binds the class under the name the file
+    // reads; the methods are still the ones the module compiled.
+    for (const rename of entry.renames ?? []) {
+      const info = target.classes.get(rename.imported);
+      if (info === undefined) continue;
+      table.classes.set(rename.local, importedClass(info));
+      table.names.add(rename.local);
+    }
+  }
+}
+
 /** The method a class has under a name, as the class or the base it inherits from. */
 export function findMethod(
   table: ClassTable,
