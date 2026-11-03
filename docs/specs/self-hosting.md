@@ -866,6 +866,40 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ax. A captured list, held in a one-field object
+
+A name an arrow writes is held in a one-element list (§4al), but a list has no
+element that holds a list: `found.push(n)` inside an arrow was still refused,
+and that was the largest real bucket — 78 refusals, in `pres`, `found`, `names`
+and the other accumulators the compiler's own functions declare outside an
+arrow and append inside it.
+
+What a list needs is a box that holds one **field**: the name becomes a one-field
+object, the arrow is handed the object, and both sides read and write
+`box.__boxed`. Two things had to be true first.
+
+**A list field is a slice** (§ "A list field is one field whatever the literal
+held"). A field initialised from `[]` was typed `array<T, 0>`, so the first read
+past the empty length was a read past the block, and two literals of one
+interface were two layouts. A field written from a list is a `slice<T>` now: the
+block carries its length, and the field is a pointer to it.
+
+**A loop that appends keeps its storage.** `push` answers a longer list, and the
+`__collect` helper that answers it builds a block. `calleeBuilds` counted an
+object a callee builds and not an array, so a loop whose body appends kept the
+region mark and the next turn's rewind wrote over the element the turn before had
+appended: `out.push(x)` in a loop dropped the first element. That is fixed here
+too, and it was a wrong build on its own, without any arrow.
+
+The box is made where the name is declared, from the value the source wrote. An
+arrow lifted before the box existed — another arrow had already captured the
+name — has its body and its parameter rewritten when the box is made, so an
+arrow that only reads the list is handed the object as well.
+
+This took the total from 588 to 514, and four more sources read whole
+(`core/semantic-ir.ts`, `runtime/nim.ts`, `semantics/parallel.ts`,
+`semantics/power-of-two.ts`).
+
 ### 4aw. A top-level list asserted as const, or joined
 
 The scan of a file's top-level constants stopped at the closing `]` of a list
@@ -1334,31 +1368,29 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-588 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+514 refusals over 94 sources, 24 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 43 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
-| 78 | `an arrow function writes "pres" / "found" / "names"` | a captured **list** written back: a box holds one value, and a list's element is not a list. The scalar and reference writes are boxed (§4al) |
+| 45 | `an empty array needs the type of its elements` | an empty literal in an object field, whose element type the interface states: `{ children: [] }` where the field is `Node[]`. Mostly the standalone read, which does not link the interface |
 | 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
+| 12 | `expected a parameter name` | a member of a class written as a parameter pattern, or a construct of `semantics/python.ts`'s own |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
-| 10 | `Object.values` / `Object.keys` of a constant object | a runtime record in the standalone read; the linked read types it |
-| 10 | `an object spread reads a constant object` | the same |
-| 9 | `a map holds a slice` (three element types) | a list in a dictionary, which needs a list handle that carries its length |
+| 10 | `Object.values` / `Object.keys` of a constant object, 9 entries, 10 spreads | a runtime record in the standalone read; the linked read types it |
+| 10 | `only a named function is called` | `f()(x)` and `this.target[method](x)` |
+| 9 | `a program allocates a typed array, not "Date"` | `new Date()` as a program value |
+| 8 | `a map here holds a slice<ref<any>>` | a list in a dictionary, which needs a list handle that carries its length |
 
 The value-model slices still open, in the order they block the self-build:
 
-- **A captured list written back.** A name an arrow writes is now a one-element
-  list (§4al), but a list's element cannot be a list, so `found.push(x)` inside
-  an arrow is still refused. A box *object* holding the list was tried this
-  session and is close: the C backend's field store through a reference had to
-  be fixed first (§4as), and what is left is the layout — a field initialised
-  from `[]` is typed `array<T, 0>`, so the first read past the empty length is a
-  read past the block. That is the two-layouts item below, and it is the next
-  thing to read for this bucket.
+- **An empty list in a field.** `{ children: [] }` needs the element type the
+  field's interface states, and the frontend asks the literal for it before the
+  interface is linked. It is the largest bucket left and the last half of the
+  two-layouts item below; a literal an interface types would also read whole in
+  the standalone report.
 - **An absent value.** A default parameter and an optional parameter need a
   value that is not the zero of the type. `function optionNumber(value: string |
   undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
@@ -1373,11 +1405,11 @@ The value-model slices still open, in the order they block the self-build:
   pointer and a length, so the entry cannot carry it. The runtime's dynamic
   array is one handle with a length, and the model would have to say that a
   `T[]` stored in a map is one.
-- **Two object layouts for one interface.** An object literal's list field is
-  typed `array<T, n>` from the length of the literal, so `{ children: [] }` and
-  `{ children: [a, b] }` are two layouts and cannot be one `Node`. The IR's own
-  nodes are written exactly that way, so this blocks the self-build at the
-  object pass.
+- **Two object layouts for one interface.** A list field is a `slice<T>` now
+  (§ "A list field is one field whatever the literal held"), so two literals of
+  one interface are one layout whatever they hold. What is left of this item is
+  the *empty* literal above: the element type of `[]` in a field is the
+  interface's to state, and the frontend refuses before it has the interface.
 
 What was closed this session, and what each was worth:
 
@@ -1396,6 +1428,7 @@ What was closed this session, and what each was worth:
 | a value marked with void | 598 → 595 |
 | a destructured rest element | 595 → 591 |
 | a top-level list asserted or joined | 591 → 588 |
+| a captured list held in a one-field object | 588 → 514 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
@@ -1406,7 +1439,9 @@ arrow wrote read a name the box had replaced (§4at). And a choice of a length a
 a number was read at the unshaped reference an arm of another type falls back to
 (§ "Read a choice of two values at the type they share"). `semantics/power-of-two`'s
 `namesOf` is an arrow, so the set it answered was a set the read did not know and
-`has`/`add` on it were methods of nothing.
+`has`/`add` on it were methods of nothing. And an array a *callee* builds was not
+the turn's block, so a loop that appended to a list dropped what its first turn
+appended (§4ax).
 
 **A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
 the sources write when the members are laid out one per line — is read as a

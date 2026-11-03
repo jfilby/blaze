@@ -746,6 +746,51 @@ test("an assignment written in a template string writes before the text", async 
   }
 });
 
+test("an arrow that appends to a captured list appends to the caller's list", async () => {
+  // A list is a reference, but a push answers a longer list and the name is
+  // bound to the answer: an arrow that pushes holds the list in a one-field
+  // object, and both sides write the field. The scalar box is a one-element
+  // list, which cannot hold a list.
+  const source = [
+    "export function demo(): string {",
+    "  const found: number[] = [];",
+    "  const add = (n: number): void => { found.push(n); };",
+    "  add(3);",
+    "  add(4);",
+    "  return `${found.length} ${found[0] + found[1]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 7", `the ${backend} backend appends to the caller's list`);
+  }
+});
+
+test("two arrows append to two captured lists", async () => {
+  // The list one arrow appends to is read by another, and both are boxes: the
+  // names an arrow captures are the boxes, whichever arrow made them.
+  const source = [
+    "export function demo(): string {",
+    "  const names: string[] = [];",
+    "  const out: string[] = [];",
+    "  const note = (n: string): void => { names.push(n); };",
+    "  const copy = (): void => { for (let i = 0; i < names.length; i += 1) out.push(names[i]); };",
+    "  note(`a`);",
+    "  note(`b`);",
+    "  copy();",
+    "  return `${out.length} ${out[0]} ${out[1]} ${names[0]} ${names[1]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 a b a b", `the ${backend} backend appends to both lists`);
+  }
+});
+
 test("a list pushed to in a loop keeps what every turn appended", async () => {
   // `push` answers a longer list, so the turn stores a block a function built
   // into a name that outlives it. The loop may only reuse a turn's storage when

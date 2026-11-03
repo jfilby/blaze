@@ -10100,20 +10100,17 @@ class TypeScriptParser {
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;
       if (readsUpdateIn(body, name)) return false;
-      const type = this.valueTypes.get(name) ?? ANY_TYPE;
-      // A list has no element that holds a list: the box a list would need is
-      // an object, and an object field holding a list is the layout a program
-      // lays out one of only where the source declares it. Until that is read,
-      // a captured list keeps the refusal an arrow always answered.
-      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return false;
     }
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;
       const type = this.valueTypes.get(name) ?? ANY_TYPE;
       const box = `__box_${this.stem}_${this.boxCount}`;
       this.boxCount += 1;
-      this.arrowBoxes.set(name, { box, element: type, list: false });
-      this.valueTypes.set(box, { kind: "slice", of: type });
+      // A list has no element that holds a list, so a name that holds one is
+      // held in a one-field object instead and both sides write the field.
+      const list = type.kind === "slice" || type.kind === "array" || type.kind === "ptr";
+      this.arrowBoxes.set(name, { box, element: type, list });
+      this.valueTypes.set(box, list ? ANY_TYPE : { kind: "slice", of: type });
     }
     for (const name of written) {
       const entry = this.arrowBoxes.get(name);
@@ -13539,7 +13536,16 @@ class BodyAnalysis {
       }
       case "index": {
         if (expression.base.k !== "ident") {
-          throw frontendError("only single level indexing is supported", `line ${line}`);
+          // The contract states the result as one expression over the
+          // parameters, and an element of a value the body built is a value the
+          // contract cannot name: the body is contracted by what it does
+          // instead. The value is one a box holds as well, and a boxed list is
+          // read at an element of its field.
+          this.uncontractable(
+            "reads an element of a value it built rather than a value it was given",
+            line,
+            "a contract is one expression over the parameters; a body that reads an element of a value it built is contracted by what it does",
+          );
         }
         const base = expression.base;
         const param = this.declaration.params.find((entry) => entry.name === base.name);
