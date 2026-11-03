@@ -1500,26 +1500,33 @@ test("an arrow that writes a name of the function around it writes the list both
   assert.equal(read.value?.base?.name, "__box_module_0", "the result reads the element");
 });
 
-test("an arrow that writes a list it captured is refused", () => {
-  // A list has no element that holds a list, so there is no one-element list
-  // to put it in: the write is the refusal an arrow always answered.
-  assert.match(
-    diagnostic(() =>
-      typescript.analyze(
-        [
-          "export function f(x: number): number {",
-          "  const found: number[] = [];",
-          "  const add = (v: number): void => { found.push(v); };",
-          "  add(x);",
-          "  return found.length;",
-          "}",
-          "",
-        ].join("\n"),
-        "main.ts",
-      ),
-    ),
-    /an arrow function writes "found", a name of the function around it/,
-  );
+test("an arrow that writes a list it captured writes the object both sides hold", () => {
+  // A list has no element that holds a list, so the box is a one-field object
+  // rather than a one-element list: the name becomes the object, and both sides
+  // write the field.
+  const body = analyzedBody(
+    [
+      "export function f(x: number): number {",
+      "  const found: number[] = [];",
+      "  const add = (v: number): void => { found.push(v); };",
+      "  add(x);",
+      "  return found.length;",
+      "}",
+      "",
+    ].join("\n"),
+    "f",
+  ) as {
+    kind: string;
+    name?: string;
+    type?: unknown;
+    init?: { k: string; fields?: { name?: string }[] };
+    value?: { name?: string; args?: { name?: string }[] };
+  }[];
+  assert.equal(body[0]?.name, "__box_module_0", "the list the arrow writes is one object");
+  assert.equal(body[0]?.init?.k, "object");
+  assert.equal(body[0]?.init?.fields?.[0]?.name, "__boxed", "the object holds the list in one field");
+  assert.equal(body[2]?.value?.name, "__closure_module_0");
+  assert.equal(body[2]?.value?.args?.[0]?.name, "__box_module_0", "the arrow is handed the object");
 });
 
 test("a top-level list asserted as const or joined is one value, not two statements", () => {
