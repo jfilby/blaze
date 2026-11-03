@@ -2219,6 +2219,47 @@ test("a collection allocation may end its arguments with a comma", () => {
   assert.ok(functions.includes("counted"), "the map reads");
 });
 
+test("hasOwnProperty over an object the file wrote is the names it asks", () => {
+  // A record keyed by text is the runtime's dictionary, and the frontend asks
+  // the dictionary. An object the file wrote is not a dictionary: its fields
+  // are the names the source wrote, so the question is whether the key is one
+  // of them — the comparison chain those names are, with the key read once.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const TABLE = { alpha: 1, beta: 2 };",
+        "export function has(name: string): boolean {",
+        "  return Object.prototype.hasOwnProperty.call(TABLE, name);",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "has",
+  );
+  assert.match(ir, /\[eq\[bool\] text local\[text\] name \[text "alpha"\]\]/);
+  assert.match(ir, /\[text "beta"\]/);
+});
+
+test("hasOwnProperty reads the names of an object whose values are computed", () => {
+  // The values are not constants, so the object is a value the program holds.
+  // The names are still what the source wrote, and the question about the keys
+  // is one the read answers without running anything.
+  typescript.analyze(
+    [
+      "export const KEYS: Record<string, number> = { alpha: compute(), beta: compute() };",
+      "function compute(): number { return 1; }",
+      "export function has(name: string): boolean {",
+      "  return Object.prototype.hasOwnProperty.call(KEYS, name);",
+      "}",
+      "",
+    ].join("\n"),
+    "module.ts",
+  );
+});
+
 test("a conditional of an empty list and a list keeps the one element type", () => {
   const ir = irOf(
     "typescript",

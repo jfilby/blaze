@@ -941,6 +941,13 @@ interface ConstantInfo {
   /** What a key is written as, which is how a comparison reads it. */
   keyKind?: "text" | "number";
   /**
+   * The field names of an object literal whose values are computed. The names
+   * are what the source wrote even when the values are not constants, so a
+   * question about the keys is one the read can answer without running
+   * anything.
+   */
+  names?: readonly string[];
+  /**
    * True where the value is a `new C(...)`: the constructor is a function of
    * the module that wrote it, so the value is the file's own and is not offered
    * to a module that imports the name.
@@ -964,6 +971,13 @@ interface ScannedFile {
   constants: Map<string, ConstantInfo>;
   /** The top-level names that are values the running program holds, not constants. */
   state: Set<string>;
+  /**
+   * The field names of a top-level object literal whose values are computed.
+   * The names are what the source wrote even when the values are not constants,
+   * so a question about the keys is one the read can answer without running
+   * anything.
+   */
+  shapes: Map<string, ConstantInfo>;
 }
 
 /**
@@ -1211,6 +1225,7 @@ function writtenName(tokens: readonly Token[], name: string): boolean {
 
 function scanConstants(tokens: readonly Token[]): ScannedFile {
   const found = new Map<string, ConstantInfo>();
+  const shapes = new Map<string, ConstantInfo>();
   const state = new Set<string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1319,6 +1334,9 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           if (!locals.has(name)) found.set(name, { fields: object.fields, exported: offered });
         } else {
           state.add(name);
+          // The values are computed, but the names are written down: a
+          // question about the keys is still one the source answers.
+          if (!locals.has(name) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
         }
         index = end;
         continue;
@@ -1348,7 +1366,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state };
+  return { constants: found, state, shapes };
 }
 
 /** Marks the constants an `export { ... }` list of this file offers. */
@@ -2374,8 +2392,9 @@ interface Declaration extends Span {
 }
 
 /** The constant fields of an object literal, by the name each is written under. */
-function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantValue>; all: boolean } {
+function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantValue>; names: string[]; all: boolean } {
   const fields = new Map<string, ConstantValue>();
+  const names: string[] = [];
   let total = 0;
   let depth = 0;
   let index = open + 1;
@@ -2393,6 +2412,7 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
     }
     if (depth === 0 && token.kind === "ident" && tokens[index + 1]?.text === ":") {
       total += 1;
+      names.push(token.text);
       const start = index + 2;
       let end = start;
       let nested = 0;
@@ -2409,7 +2429,7 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
     }
     index += 1;
   }
-  return { fields, all: fields.size === total && total > 0 };
+  return { fields, names, all: fields.size === total && total > 0 };
 }
 
 /**
@@ -3206,6 +3226,7 @@ class TypeScriptParser {
     allTokens?: Token[],
     constants: ReadonlyMap<string, ConstantInfo> = new Map(),
     state: ReadonlySet<string> = new Set(),
+    shapes: ReadonlyMap<string, ConstantInfo> = new Map(),
     typeTable?: TypeTable,
     importedTypeNames: ReadonlySet<string> = new Set(),
     importedRenames: ReadonlyMap<string, string> = new Map(),
@@ -3220,6 +3241,7 @@ class TypeScriptParser {
     this.allTokens = allTokens ?? tokens;
     this.constants = constants;
     this.state = state;
+    this.shapes = shapes;
     this.typeTable = typeTable ?? scanTypeTable(tokens);
     // A name this file imports is a value another module holds. Until the graph
     // binds the declaration, a method written on the name is not a method this
@@ -3233,6 +3255,8 @@ class TypeScriptParser {
   private readonly constants: ReadonlyMap<string, ConstantInfo>;
   /** The names the running program holds, which a module function cannot read. */
   private readonly state: ReadonlySet<string>;
+  /** The field names of a computed top-level object, by the name it is held at. */
+  private readonly shapes: ReadonlyMap<string, ConstantInfo>;
   /** The constants being read, so one that names itself is not read forever. */
   private readonly expanding = new Set<string>();
 
@@ -9232,6 +9256,45 @@ class TypeScriptParser {
             replace(answer);
             continue;
           }
+          // A constant object's fields are the names the file wrote, so the
+          // question is whether the key is one of them: the comparison chain
+          // the set of names is, read with the key once. An object whose values
+          // are computed has the same names, because the names are what the
+          // source wrote.
+          const named = receiver !== undefined && receiver.k === "ident" ? receiver.name : null;
+          const constant = named === null ? undefined : this.constants.get(named);
+          const declared = named === null ? undefined : this.shapes.get(named);
+          let fieldNames: readonly string[] | undefined = declared?.names;
+          if (constant?.fields !== undefined) {
+            const written: string[] = [];
+            for (const name of constant.fields.keys()) written.push(name);
+            fieldNames = written;
+          }
+          if (fieldNames !== undefined && key !== undefined) {
+            const read = (value: Expression): Expression => {
+              if (value.k === "literal" || value.k === "ident" || value.k === "text") return value;
+              const held = `__hasOwn${this.fieldCount++}`;
+              this.pendingBefore.push({ kind: "declare", name: held, type: null, init: value, line: this.peek().line });
+              this.valueTypes.set(held, TEXT_RESULT);
+              return { k: "ident", name: held };
+            };
+            const held = read(key);
+            let answer: Expression | null = null;
+            for (const name of fieldNames) {
+              const equal: Expression = {
+                k: "binary",
+                op: "===",
+                left: held,
+                right: { k: "text", parts: [{ k: "text", value: name }] },
+              };
+              this.expressionTypes.set(equal, BOOLEAN_RESULT);
+              answer = answer === null ? equal : { k: "binary", op: "||", left: answer, right: equal };
+            }
+            const decided: Expression = answer ?? { k: "literal", text: "0" };
+            this.expressionTypes.set(decided, BOOLEAN_RESULT);
+            replace(decided);
+            continue;
+          }
           this.report(
             "hasOwnProperty asks a record keyed by text",
             "a record keyed by text is the runtime's dictionary; a compiled object is one layout",
@@ -13287,6 +13350,7 @@ class TypeScriptParser {
       this.allTokens,
       this.constants,
       this.state,
+      this.shapes,
       this.typeTable,
       this.importedTypeNames,
       this.importedValueRenames,
@@ -14306,6 +14370,7 @@ export const typeScriptFrontend: Frontend = {
       tokens,
       scanned.constants,
       scanned.state,
+      scanned.shapes,
       typeTable,
       importedNames(tokens),
       importedRenames(tokens),

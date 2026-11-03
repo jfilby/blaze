@@ -866,6 +866,25 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bk. hasOwnProperty over an object the file wrote is its names
+
+`Object.prototype.hasOwnProperty.call(record, key)` was read for a record
+keyed by text — the runtime's dictionary — and for nothing else. The compiler
+asks it of its own tables: `BUILTINS`, `ENV_KEYS`, `NIM_PRIMITIVES`, each an
+object literal the file wrote. An object literal is one layout, not a
+dictionary, but the question about it is still one the source answers: its
+fields are the names the source wrote, so a key is one of them when it is equal
+to one of those names. The comparison chain is read with the key held once.
+
+The names are recorded even when the values are computed. `ENV_KEYS` is a
+`Record<ProviderName, readonly string[]>` whose values are not constants, so
+the object is a value the program holds; its *names* are still written down,
+and the scan records them beside the state it already records. A name the file
+writes to is not recorded: a write could add a key the source never named.
+
+This took the total from 433 to 430, and `ai/model.ts`,
+`semantics/builtins.ts` and `semantics/frontend.ts` are read whole.
+
 ### 4bj. A collection allocation may end its arguments with a comma
 
 A `new Set(source)` reads one source expression and then the `)`, and the
@@ -1596,7 +1615,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-433 refusals over 94 sources, 26 of them read whole. The largest buckets, in
+430 refusals over 94 sources, 29 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1669,6 +1688,7 @@ What was closed this session, and what each was worth:
 | a method's result as a union of object types | 442 → 441 |
 | an object type inside a type argument | 441 → 437 |
 | a collection allocation's trailing comma | 437 → 433 |
+| hasOwnProperty over an object's names | 433 → 430 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
