@@ -90,6 +90,9 @@ test("a method's result may be a union of object types or a predicate", () => {
     "  count(): number {",
     "    return this.rows.length + (this.pick(this.rows[0], this.rows[0]).hit ? 1 : 0);",
     "  }",
+    "  cache(loop: number): Map<string, { register: number; established: boolean }> {",
+    "    return new Map();",
+    "  }",
     "}",
     "console.log(new Table().count());",
     "",
@@ -99,6 +102,7 @@ test("a method's result may be a union of object types or a predicate", () => {
   assert.ok(functions.includes("Table_pick"), `the union result is read: ${functions.join(", ")}`);
   assert.ok(functions.includes("Table_isHit"), "the predicate result is read");
   assert.ok(functions.includes("Table_count"), "the member after them is read");
+  assert.ok(functions.includes("Table_cache"), "an object type inside a type argument is part of the type");
 });
 
 test("a method on a field of an imported type waits for the link", () => {

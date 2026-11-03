@@ -866,6 +866,19 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bi. An object type inside a type argument is part of the type
+
+`Map<string, { register: number; established: boolean }>` is one return type.
+`toolchain/ir-machine.ts` writes it for `cacheTurnReads`, and the class scanner
+saw the `{` inside the angle group as the method body. The angle group a return
+type writes is now skipped as a type: its own `<`/`>` count, and the object,
+parenthesised and tuple groups inside it are skipped whole, so the `>` that
+closes the type is the one that ends it. A comparison is not a type, and is not
+read here: the `<` of a return type is always a type argument.
+
+This took the total from 441 to 437: four in `toolchain/ir-machine.ts`, whose
+members the desync had hidden.
+
 ### 4bh. A method's result may be a union of object types
 
 The class scanner found a method's body by skipping to the first `{` after the
@@ -1571,7 +1584,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-441 refusals over 94 sources, 26 of them read whole. The largest buckets, in
+437 refusals over 94 sources, 26 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1642,6 +1655,7 @@ What was closed this session, and what each was worth:
 | an import hoisted from where it is written | 448 → 443 |
 | a method named length is a call | 443 → 442 |
 | a method's result as a union of object types | 442 → 441 |
+| an object type inside a type argument | 441 → 437 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

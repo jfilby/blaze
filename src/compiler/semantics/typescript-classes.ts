@@ -179,7 +179,7 @@ function bodyAfterReturnType(tokens: readonly Token[], start: number, limit: num
       continue;
     }
     if (token.text === "<") {
-      const end = skipAngles(tokens, at);
+      const end = skipTypeAngles(tokens, at, limit);
       if (end <= at + 1) return at;
       at = end - 1;
       previous = ">";
@@ -189,6 +189,35 @@ function bodyAfterReturnType(tokens: readonly Token[], start: number, limit: num
     previous = token.text;
   }
   return limit;
+}
+
+/**
+ * Skips a type's `<...>` from its `<`, through the object types a type argument
+ * may hold.
+ *
+ * `Map<string, { register: number }>` is one type, and the brace inside the
+ * angle group is not a body. The groups a type argument holds are skipped as
+ * whole, so the `>` that closes the type is the one that ends it.
+ */
+function skipTypeAngles(tokens: readonly Token[], open: number, limit: number): number {
+  let depth = 0;
+  for (let at = open; at < limit; at += 1) {
+    const token = tokens[at];
+    if (token.kind !== "punct") continue;
+    if (token.text === "<") depth += 1;
+    else if (token.text === ">") {
+      depth -= 1;
+      if (depth === 0) return at + 1;
+    } else if (token.text === ">>" || token.text === ">>>") {
+      depth -= token.text.length;
+      if (depth <= 0) return at + 1;
+    } else if (token.text === "{" || token.text === "(" || token.text === "[") {
+      const close = matching(tokens, at);
+      if (close < 0) return open;
+      at = close;
+    } else if (token.text === ";" && depth === 0) return open;
+  }
+  return open;
 }
 
 /**
