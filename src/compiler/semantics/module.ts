@@ -180,6 +180,21 @@ export type ProgramAssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "//=" | "%=" | "
 /** One piece of a string: text as written, or a value interpolated into it. */
 export type ProgramText = { k: "text"; value: string } | { k: "value"; value: ProgramValue };
 
+/**
+ * A parameter a program function declares.
+ *
+ * `default` is the value a call that leaves the parameter out hands over. The
+ * parameter is still one the function reads: a shorter arity is a function of
+ * the program that fills the defaults where the call is made, exactly as the
+ * module's own default wrappers do (see `defaultWrappers` in
+ * `typescript.ts`).
+ */
+export interface ProgramParameter {
+  name: string;
+  type: string | null;
+  default?: ProgramValue;
+}
+
 /** A statement a program runs. */
 export type ProgramStatement =
   | { kind: "declare"; name: string; mutable: boolean; type: string | null; value: ProgramValue; line: number }
@@ -226,7 +241,7 @@ export type ProgramStatement =
   | {
       kind: "function";
       name: string;
-      params: { name: string; type: string | null }[];
+      params: ProgramParameter[];
       body: ProgramStatement[];
       line: number;
       /**
@@ -247,7 +262,7 @@ export type ProgramStatement =
  */
 export interface ProgramFunction {
   name: string;
-  params: { name: string; type: string | null }[];
+  params: ProgramParameter[];
   body: ProgramStatement[];
   line: number;
 }

@@ -866,6 +866,33 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4be. A default parameter in a program function
+
+A module function with a default parameter is callable at every shorter arity:
+`defaultWrappers` writes one function per arity, each filling the defaults the
+source wrote and calling the full one. A *program* function was not: its
+parameter list stopped at the type, so `function optionNumber(value: string |
+undefined, name: string, minimum = 1, maximum?: number)` refused at the `=`, and
+that is the first function of `cli.ts` the report stopped at.
+
+The program now reads a parameter's `?` and its `=` and keeps the default as a
+value. `ir-resolve` writes the same wrappers the module does, as program
+statements: the shorter arity declares each default where the call is made,
+under a name of its own, and calls the full function with it. The default is
+read once, before the call, so a default that is itself a call runs before the
+arguments are pinned in the registers it uses — the same rule the module states.
+A call of a shorter arity finds the wrapper by the name the module uses,
+`f__1`, so nothing about the call site changes.
+
+The `?` states nothing a program can hold yet: a program has no absent value of
+its own, so the parameter is the type it was declared and a call that omits it
+is still refused at the arity. That is the same reading the module frontend
+gives it today (it erases the `?` too), and it is what keeps `cli.ts` from
+reading all the way: `maximum?: number` needs the absent value, not a default.
+
+This took the total from 449 to 448. The one refusal is `cli.ts`'s parameter
+list; the defaults it contains are now what a shorter call fills.
+
 ### 4bd. A for loop that is not a counted loop
 
 The frontend read `for` two ways: a counted loop whose condition compares the
@@ -1488,7 +1515,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-449 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+448 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1555,6 +1582,7 @@ What was closed this session, and what each was worth:
 | a switch, a length, and a program's own output | 483 → 476 |
 | `new Array(n)` and `fill` | 476 → 465 |
 | a for loop that is not a counted loop | 465 → 449 |
+| a default parameter in a program function | 449 → 448 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

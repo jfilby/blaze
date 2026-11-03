@@ -83,6 +83,7 @@
 import type {
   ProgramAssignOp,
   ProgramBinaryOp,
+  ProgramParameter,
   ProgramStatement,
   ProgramText,
   ProgramUnaryOp,
@@ -1053,7 +1054,7 @@ class ProgramParser {
       return { kind: "invoke", function: "", args: [], line };
     }
     const name = this.identifier("the name of a function");
-    const params: { name: string; type: string | null }[] = [];
+    const params: ProgramParameter[] = [];
     const previous = new Map(this.valueClasses);
     this.expect("(");
     if (!this.at(")")) {
@@ -1061,6 +1062,11 @@ class ProgramParser {
         const parameter = this.identifier("the name of a parameter");
         let type: string | null = null;
         let held: string | null = null;
+        // `x?: T` says the call may leave the parameter out. A program has no
+        // absent value of its own, so the `?` states nothing the program reads:
+        // the parameter is the type it was declared, and a call that omits it
+        // is the shorter arity a default names.
+        this.accept("?");
         if (this.accept(":")) {
           const annotation = this.peek();
           if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) held = annotation.text;
@@ -1069,7 +1075,10 @@ class ProgramParser {
         if (held !== null) this.valueClasses.set(parameter, held);
         // A parameter the source wrote no type for is read at the type its
         // callers pass it at, which is what the call sites of the program say.
-        params.push({ name: parameter, type });
+        // A default is what a shorter arity hands over, and the parameter is
+        // still one the function reads.
+        const fallback = this.accept("=") ? this.value() : undefined;
+        params.push({ name: parameter, type, ...(fallback === undefined ? {} : { default: fallback }) });
         if (!this.accept(",")) break;
       }
     }

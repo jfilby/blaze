@@ -2032,6 +2032,71 @@ class ProgramResolver {
     // A function is also given what the functions it calls read, so the closure
     // is settled as soon as there is a call to settle it from.
     this.closure();
+    // A parameter with a default makes the function callable at a shorter
+    // arity: each one is a function of the program whose body fills the
+    // defaults the source wrote, evaluated where the call is made, and calls
+    // the full one. This is the module's own `defaultWrappers` lowered to the
+    // statements a program runs.
+    this.defaultWrappers(statement, declaredHere);
+  }
+
+  /**
+   * The shorter arities a function with default parameters is callable at.
+   *
+   * `function f(a, b = 2)` is `f` at two arguments and an `f__1` that takes
+   * `a`, reads the default where the call is made, and calls `f(a, b)`. A
+   * parameter written after a default and without one keeps the arity it has:
+   * a call cannot leave a hole in the middle of a list.
+   */
+  private defaultWrappers(
+    statement: ProgramStatement & { kind: "function" },
+    declaredHere: readonly string[],
+  ): void {
+    let required = 0;
+    statement.params.forEach((param, index) => {
+      if (param.default === undefined) required = index + 1;
+    });
+    for (let arity = required; arity < statement.params.length; arity += 1) {
+      const name = `${statement.name}__${arity}`;
+      if (this.functions.table.has(name)) continue;
+      const body: ProgramStatement[] = [];
+      const args: ProgramValue[] = [];
+      statement.params.forEach((param, index) => {
+        if (index < arity) {
+          args.push({ k: "name", name: param.name });
+          return;
+        }
+        // The default is read once, under a name of its own, before the call:
+        // it may be a call itself, and a call written among the arguments
+        // would run while the earlier arguments are held.
+        const held = `__default${index}`;
+        body.push({
+          kind: "declare",
+          mutable: false,
+          name: held,
+          type: null,
+          value: param.default as ProgramValue,
+          line: statement.line,
+        });
+        args.push({ k: "name", name: held });
+      });
+      body.push({
+        kind: "result",
+        value: { k: "call", function: statement.name, args },
+        line: statement.line,
+      });
+      this.declared(
+        {
+          kind: "function",
+          name,
+          params: statement.params.slice(0, arity).map((param) => ({ name: param.name, type: param.type })),
+          body,
+          line: statement.line,
+          ...(statement.async === true ? { async: true } : {}),
+        },
+        declaredHere,
+      );
+    }
   }
 
   /**
@@ -4346,8 +4411,11 @@ class ProgramResolver {
     }
     // A function the program declared is called like any other: it is compiled
     // on its own, and what it hands back is settled by reading its body, so a
-    // call reads the body of what it calls before it types the call.
-    const declared = this.functions.table.get(value.function);
+    // call reads the body of what it calls before it types the call. A call of
+    // a shorter arity is the wrapper the default parameters made, which is the
+    // function the source names with the count it was called at.
+    const declared = this.functions.table.get(`${value.function}__${value.args.length}`) ??
+      this.functions.table.get(value.function);
     if (declared !== undefined) {
       // What the arguments are written as is what the parameters the source
       // wrote no type for are read at. The kinds are read here, at the call

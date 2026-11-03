@@ -723,6 +723,34 @@ test("a parameter the source wrote no type for is read at the type its callers p
   assert.equal(count?.kind === "value" ? typeText(count.type) : "", "f64", "the number is a double");
 });
 
+test("a parameter the source may leave out is the type it was declared", () => {
+  // `b?: number` says a call may leave the parameter out. A program has no
+  // absent value of its own, so the `?` is erased: the parameter is the number
+  // it was declared, and a call that omits it still has to be the shorter arity
+  // a default names. This is the same reading the module gives it.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "let bias = 1;",
+        "function add(a: number, b?: number): number { return a + b + bias; }",
+        "console.log(add(1, 2));",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const declared = phase.body?.statements.find((statement) => statement.kind === "function");
+  assert.ok(declared !== undefined && declared.kind === "function", "the function is a statement of the program");
+  if (declared === undefined || declared.kind !== "function") throw new Error("expected a function");
+  assert.deepEqual(
+    declared.params.map((param) => [param.name, param.type]),
+    [["a", "number"], ["b", "number"]],
+    "the optional parameter is the number it was declared",
+  );
+  assert.equal(declared.params[1]?.default, undefined, "a `?` names no value a shorter arity hands over");
+});
+
 test("a string is given to a function of a program by value", () => {
   // The string the caller builds is the string the callee reads: it is handed
   // over as the text it is, not as a number the caller holds.
@@ -2805,6 +2833,31 @@ test("a program reads a type alias from a module that offers only types", async 
     "",
   ].join("\n");
   await agreesWithNodeLib(source, "export type Name = string;\n");
+});
+
+test("a program function with a default parameter is callable at the shorter arity", async () => {
+  // The full function takes every parameter, and each shorter arity is a
+  // function of the program whose body fills the default where the call is
+  // made and calls the full one. A default that reads a value the program holds
+  // is the value it holds at the call, not the one it held when the function
+  // was declared.
+  const source = [
+    'const LABEL = "total";',
+    "function add(a: number, b: number = 10, c: number = 100): number { return a + b + c; }",
+    "function scale(a: number, by = 2): number { return a * by; }",
+    'function label(prefix: string, text: string = LABEL): string { return prefix + text; }',
+    "console.log(add(1), add(1, 2), add(1, 2, 3));",
+    "console.log(scale(3), scale(3, 5));",
+    'console.log(label("x"), label("x", "y"));',
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  const original = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  assert.equal(original.code, 0, original.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, original.stdout);
+  assert.equal(delivered.stdout.trim(), "111 103 6\n6 15\nxtotal xy");
 });
 
 test("a program constructs classes and runs their methods", async () => {
