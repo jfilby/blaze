@@ -866,6 +866,18 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bj. A collection allocation may end its arguments with a comma
+
+A `new Set(source)` reads one source expression and then the `)`, and the
+sources write the argument list over several lines with a comma at the end of
+the last one — the compiler's own `new Set<string>(\n  bodies.filter(...).map(...),\n)`
+is that shape. The comma is not a second argument and no set holds it: the
+allocation accepts it where it accepts the `)`, and the list of pairs a `new
+Map([...])` is built from does the same.
+
+This took the total from 437 to 433: two in `compiler.ts`, one in
+`semantics/program.ts` and one in `toolchain/assembler.ts`.
+
 ### 4bi. An object type inside a type argument is part of the type
 
 `Map<string, { register: number; established: boolean }>` is one return type.
@@ -1584,7 +1596,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-437 refusals over 94 sources, 26 of them read whole. The largest buckets, in
+433 refusals over 94 sources, 26 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1656,6 +1668,7 @@ What was closed this session, and what each was worth:
 | a method named length is a call | 443 → 442 |
 | a method's result as a union of object types | 442 → 441 |
 | an object type inside a type argument | 441 → 437 |
+| a collection allocation's trailing comma | 437 → 433 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

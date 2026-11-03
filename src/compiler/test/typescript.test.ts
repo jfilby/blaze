@@ -2190,6 +2190,35 @@ test("a method named length is a call, not the length of its receiver", () => {
   assert.ok(functions.includes("Window_length"), `the method is a function of the file: ${functions.join(", ")}`);
 });
 
+test("a collection allocation may end its arguments with a comma", () => {
+  // A call may end its arguments with a comma, which names nothing; a set or a
+  // map allocated from a source is written the same way, and the list of pairs
+  // a map is built from may end with one too.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "export function unique(xs: string[]): Set<string> {",
+        "  return new Set<string>(",
+        "    xs.filter((x) => x !== ``).map((x) => x),",
+        "  );",
+        "}",
+        "export function counted(xs: string[]): Map<string, number> {",
+        "  return new Map<string, number>([",
+        "    [`a`, 1],",
+        "  ],);",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const functions = Object.keys(phase.program.files[0]?.functions ?? {});
+  assert.ok(functions.includes("unique"), `the set reads: ${functions.join(", ")}`);
+  assert.ok(functions.includes("counted"), "the map reads");
+});
+
 test("a conditional of an empty list and a list keeps the one element type", () => {
   const ir = irOf(
     "typescript",

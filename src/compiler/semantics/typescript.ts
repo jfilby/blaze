@@ -12848,6 +12848,8 @@ class TypeScriptParser {
       this.readingCollectionSource = true;
       const source = this.readExpression();
       this.readingCollectionSource = savedSource;
+      // A call may end its arguments with a comma, which names no argument.
+      this.accept(",");
       this.expect(")");
       call = this.collectionFromSource(collection, source, view);
     }
@@ -12870,6 +12872,9 @@ class TypeScriptParser {
       if (!this.accept(",")) break;
     }
     this.expect("]");
+    // The list of pairs and the call's own arguments may each end with a
+    // comma, which names nothing.
+    this.accept(",");
     this.expect(")");
     if (pairs.length === 0) {
       return { k: "call", name: "blaze_rt_dict_new", args: [] };
