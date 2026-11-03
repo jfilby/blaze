@@ -2802,6 +2802,7 @@ function fileHoldsWideBigint(tokens: readonly Token[]): boolean {
  */
 const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "map",
+  "flatMap",
   "filter",
   "forEach",
   "every",
@@ -11778,6 +11779,47 @@ class TypeScriptParser {
               value: callBack([at(ident("i")), ident("i"), ident("items")]),
               line,
             },
+          ]),
+          answer(ident("out")),
+        ];
+        break;
+      }
+      case "flatMap": {
+        // The callback answers a list, and the answer is those lists one after
+        // another. Each answer is walked where it is read, and its elements are
+        // appended to the answer of the helper: a list of lists is not a value
+        // here, so the walk happens as the answer is read.
+        const answers = signature.returns;
+        const listed = answers.kind === "slice" || answers.kind === "array" || answers.kind === "ptr";
+        const inner: TypeExpr = listed && answers.kind !== "ptr" ? answers.of : answers;
+        const append = this.appendHelper("push", inner, 1, line);
+        returns = { kind: "slice", of: inner };
+        // A push written on its own line is the write that keeps the longer
+        // list, which is the assignment the frontend writes for one.
+        const keep = (value: Expression): Statement => ({
+          kind: "assign",
+          target: "out",
+          op: "=",
+          value: { k: "call", name: append.name, args: [ident("out"), value] },
+          line,
+        });
+        body = [
+          declare("out", { k: "sized", element: typeToString(inner), count: number("0") }),
+          loop("0", [
+            declare("part", callBack([at(ident("i")), ident("i"), ident("items")])),
+            listed
+              ? {
+                  kind: "loop",
+                  variable: "j",
+                  from: number("0"),
+                  to: { k: "length", buffer: "part" },
+                  inclusive: false,
+                  step: null,
+                  down: false,
+                  body: [keep({ k: "index", base: ident("part"), index: ident("j") })],
+                  line,
+                }
+              : keep(ident("part")),
           ]),
           answer(ident("out")),
         ];

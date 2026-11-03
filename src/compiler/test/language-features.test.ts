@@ -791,6 +791,27 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("flatMap is the lists its callback answers, one after another", async () => {
+  // The callback answers a list, and the answer is those lists in order. A list
+  // of lists is not a value here, so each answer is walked where it is read and
+  // its elements are appended to the answer of the helper.
+  const source = [
+    "export function demo(): string {",
+    "  const xs: number[] = [1, 2, 3];",
+    "  const grown = xs.flatMap((x: number): number[] => [x, x + 10]);",
+    "  const doubled = xs.flatMap((x: number): number => x * 2);",
+    "  const some = xs.flatMap((x: number): number[] => (x > 1 ? [x] : []));",
+    "  return `${grown.join(`,`)}|${doubled.join(`,`)}|${some.join(`,`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1,11,2,12,3,13|2,4,6|2,3", `the ${backend} backend flattens the answers`);
+  }
+});
+
 test("a list pushed to in a loop keeps what every turn appended", async () => {
   // `push` answers a longer list, so the turn stores a block a function built
   // into a name that outlives it. The loop may only reuse a turn's storage when

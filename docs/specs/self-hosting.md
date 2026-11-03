@@ -866,6 +866,19 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4ay. flatMap is the lists its callback answers
+
+`xs.flatMap(f)` was not a method of this compiler. The callback answers a list,
+and the answer is those lists one after another: a list of lists is not a value
+here, so each answer is walked where it is read and its elements are appended to
+the answer of the helper. A callback that answers one value appends that value,
+which is what the language's `flatMap` does with one.
+
+`map` keeps its refusal of a list answer: a `map` of a list is a list of lists,
+which is a different value from the concatenation.
+
+This took the total from 514 to 503, and `toolchain/csource.ts` reads whole.
+
 ### 4ax. A captured list, held in a one-field object
 
 A name an arrow writes is held in a one-element list (§4al), but a list has no
@@ -1368,14 +1381,14 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-514 refusals over 94 sources, 24 of them read whole. The largest buckets, in
+503 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
 | 45 | `an empty array needs the type of its elements` | an empty literal in an object field, whose element type the interface states: `{ children: [] }` where the field is `Node[]`. Mostly the standalone read, which does not link the interface |
 | 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
-| 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
+| 13 | `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
 | 12 | `expected a parameter name` | a member of a class written as a parameter pattern, or a construct of `semantics/python.ts`'s own |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
@@ -1429,6 +1442,7 @@ What was closed this session, and what each was worth:
 | a destructured rest element | 595 → 591 |
 | a top-level list asserted or joined | 591 → 588 |
 | a captured list held in a one-field object | 588 → 514 |
+| flatMap is the lists its callback answers | 514 → 503 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
