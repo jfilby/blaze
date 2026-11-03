@@ -3556,7 +3556,11 @@ class TypeScriptParser {
         shape = { kind: "text" };
         break;
       case "buffer": {
-        const element = resolveTypeName(this.typeTable, value.element);
+        // The element is written as the type it was read at, which is the
+        // contract's spelling of a type and not a name the table holds: reading
+        // it as a name gave a list of the unshaped reference, and a `join`
+        // written after the list then walked elements of no type.
+        const element = this.shapeOfTypeExpr(parseType(value.element)) ?? { kind: "any" as const };
         shape = { kind: "list", of: element };
         break;
       }
@@ -10586,11 +10590,17 @@ class TypeScriptParser {
     }
     const names = [...constant.fields.keys()];
     if (method === "keys") {
-      return {
+      const keys: Expression = {
         k: "buffer",
         element: "text",
         values: names.map((name): Expression => ({ k: "text", parts: [{ k: "text", value: name }] })),
       };
+      // The list is built here rather than written by the source, so nothing
+      // else says what it holds: a `join` written after it reads the element
+      // type from this, and without it the elements were the unshaped
+      // reference a value the frontend cannot type is.
+      this.expressionTypes.set(keys, { kind: "slice", of: TEXT_RESULT });
+      return keys;
     }
     const values: Expression[] = [];
     for (const name of names) {
@@ -10598,7 +10608,9 @@ class TypeScriptParser {
       if (read !== null) values.push(read);
     }
     const element = values.length === 0 ? typeToString(ANY_TYPE) : typeToString(this.valueTypeOf(values[0] as Expression));
-    return { k: "buffer", element, values };
+    const listed: Expression = { k: "buffer", element, values };
+    this.expressionTypes.set(listed, { kind: "slice", of: values.length === 0 ? ANY_TYPE : this.valueTypeOf(values[0] as Expression) });
+    return listed;
   }
 
   /**

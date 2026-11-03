@@ -791,6 +791,28 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("a list the parser built is a list of the type it holds", async () => {
+  // `Object.keys(TABLE)` is a list the parser builds from the names the file
+  // wrote. Its element type is written as a type and not as a name the table
+  // holds, so reading it as a name gave a list of the unshaped reference: a
+  // `join` or a `map` written after it walked elements of no type.
+  const source = [
+    "const TABLE = { a: 1, b: 2 };",
+    "export function demo(): string {",
+    "  const keys = Object.keys(TABLE);",
+    "  const values = Object.values(TABLE);",
+    "  const upper = keys.map((key: string): string => key.toUpperCase());",
+    "  return `${keys.join(`, `)}|${values.join(`, `)}|${upper.join(``)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a, b|1, 2|AB", `the ${backend} backend walks the list it built`);
+  }
+});
+
 test("flatMap is the lists its callback answers, one after another", async () => {
   // The callback answers a list, and the answer is those lists in order. A list
   // of lists is not a value here, so each answer is walked where it is read and
