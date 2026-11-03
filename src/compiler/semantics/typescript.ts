@@ -6727,7 +6727,7 @@ class TypeScriptParser {
     // read apart where it stands; every other value is read once into a name
     // of the pattern's own, because the pattern may read the same element more
     // than once and a call is not a value that reads the same twice.
-    const bindings: { name: string; index: number }[] = [];
+    const bindings: { name: string; index: number; rest?: boolean }[] = [];
     let at = 0;
     while (!this.at("]") && this.peek().kind !== "end") {
       // `[a, , b]`: a gap names no element, and the positions move past it all
@@ -6736,10 +6736,14 @@ class TypeScriptParser {
         at += 1;
         continue;
       }
+      // `[a, ...rest]`: the rest of the elements, from this position on, as the
+      // list they are.
       if (this.accept("...")) {
-        this.report("a rest element is not part of the destructuring subset", "write the names the pattern binds");
-        this.synchronizeTo("]");
-        break;
+        const bound = this.next();
+        if (bound.kind !== "ident") this.report("a destructured element binds a name", `near "${bound.text}"`, bound);
+        else bindings.push({ name: bound.text, index: at, rest: true });
+        if (!this.accept(",")) break;
+        continue;
       }
       const name = this.next();
       if (name.kind !== "ident") this.report("a destructured element binds a name", `near "${name.text}"`, name);
@@ -6770,6 +6774,15 @@ class TypeScriptParser {
         );
       }
       bindings.forEach((binding) => {
+        if (binding.rest === true) {
+          // The rest of a written-out list is the list of the values left,
+          // which is a literal of its own.
+          const element = parseType(init.element);
+          const tail: Expression = { k: "buffer", element: init.element, values: values.slice(binding.index) };
+          this.valueTypes.set(binding.name, { kind: "slice", of: element });
+          this.pending.push({ kind: "declare", name: binding.name, type: null, init: tail, line });
+          return;
+        }
         const value = values[binding.index];
         if (value === undefined) return;
         const shape = this.shapeOf(value);
@@ -6802,6 +6815,25 @@ class TypeScriptParser {
       base = { k: "ident", name: temp };
     }
     bindings.forEach((binding) => {
+      if (binding.rest === true) {
+        // The rest of a list is the field from its position to the end.
+        this.valueTypes.set(binding.name, { kind: "slice", of: elementType });
+        if (elementShape !== null) this.valueShapes.set(binding.name, { kind: "list", of: elementShape });
+        this.pending.push({
+          kind: "declare",
+          name: binding.name,
+          type: null,
+          init: this.sequenceMethod(
+            "slice",
+            elementType,
+            base,
+            [{ k: "literal", text: String(binding.index) }],
+            line,
+          ),
+          line,
+        });
+        return;
+      }
       this.valueTypes.set(binding.name, elementType);
       if (elementShape !== null) this.valueShapes.set(binding.name, elementShape);
       this.pending.push({

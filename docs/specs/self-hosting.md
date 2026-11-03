@@ -866,6 +866,21 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4av. A destructured rest element
+
+`const [head, ...rest] = value` is the first line of four functions in the
+compiler's own sources — the bullet writer of a diagnostic, the rule reader of a
+proposal, the mnemonic reader of an assembly line and the vector reader of the
+machine backend. The rest element was not part of the destructuring subset.
+
+The rest is the list from its position to the end: the elements before it are
+read by position, as they were, and the rest is the slice of the value that
+starts there. A written-out list gives the values left as a literal; anything
+else is the sequence's own `slice`, which is the helper a `list.slice(n)` is.
+
+This took the total from 595 to 591: one in `ai/review.ts`, two in
+`core/proposal.ts` and one in `toolchain/ir-machine.ts`.
+
 ### 4au. A value marked with void
 
 `void compilerDir;` is a statement the three model-build programs write to say
@@ -1303,7 +1318,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-595 refusals over 94 sources, 20 of them read whole. The largest buckets, in
+591 refusals over 94 sources, 20 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1358,6 +1373,7 @@ What was closed this session, and what each was worth:
 | a text repeated | 608 → 601 |
 | a text searched from a position | 601 → 598 |
 | a value marked with void | 598 → 595 |
+| a destructured rest element | 595 → 591 |
 
 **Two wrong answers found on the way.** A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the

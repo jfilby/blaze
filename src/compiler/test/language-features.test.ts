@@ -800,6 +800,25 @@ test("an arrow writes a name of the function around it", async () => {
   }
 });
 
+test("a destructured rest element is the list from its position on", async () => {
+  // `const [head, ...rest] = list` binds `head` to the first element and `rest`
+  // to the field from the second to the end, which is the list the slice of a
+  // sequence answers.
+  const source = [
+    "export function demo(): string {",
+    "  const [head, ...rest] = `a,b,c`.split(`,`);",
+    "  const [first, ...more] = [1, 2, 3];",
+    "  return `${head} ${rest.length} ${rest[1]} ${first} ${more.length} ${more[0]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a 2 c 1 2 2", `the ${backend} backend binds the rest`);
+  }
+});
+
 test("a value marked with void is read and writes nothing", async () => {
   // `void unused;` is how a source says it read a value it has no use for. The
   // statement has no effect, and the value is the one the name holds.
