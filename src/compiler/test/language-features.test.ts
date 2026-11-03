@@ -3099,6 +3099,37 @@ test("a push of several values keeps every element in the order it was written",
   assert.equal(output.trim(), "3abc392");
 });
 
+test("a collection written clear is empty afterwards", async () => {
+  // `clear()` is a statement, and the handle the field holds is replaced by a
+  // new, empty dictionary. A value recorded after the clear is in the new one,
+  // and the size the field reports is the entries of that dictionary alone.
+  const output = await agreesWithNode([
+    "class Ledger {",
+    "  private rows: Map<string, number> = new Map();",
+    "  private seen: Set<string> = new Set();",
+    "  record(name: string, amount: number): number {",
+    "    this.rows.set(name, amount);",
+    "    this.seen.add(name);",
+    "    return this.rows.size + this.seen.size;",
+    "  }",
+    "  reset(): void {",
+    "    this.rows.clear();",
+    "    this.seen.clear();",
+    "  }",
+    "  sizes(): string {",
+    "    return `${this.rows.size} ${this.seen.size}`;",
+    "  }",
+    "}",
+    "const ledger = new Ledger();",
+    'console.log(ledger.record("a", 1), ledger.record("b", 2));',
+    "console.log(ledger.sizes());",
+    "ledger.reset();",
+    'console.log(ledger.sizes(), ledger.record("c", 3));',
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2 4\n2 2\n0 0 2");
+});
+
 test("an arrow's concise body may be the assignment it writes", async () => {
   // `() => (current ??= "none")` runs the write and answers the name, and
   // `() => total += n` is the same shape with the operator it wrote. The

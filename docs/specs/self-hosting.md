@@ -866,6 +866,21 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bn. A collection written clear is a new, empty dictionary
+
+`m.clear()` and `s.clear()` were read as a method no class declares, because a
+collection's methods are the runtime dictionary's and the dictionary has no call
+that empties one in place. A collection here is a handle a name or a field
+holds, and the clear is the write of a new, empty dictionary over that handle:
+`m.clear();` is `m = new Map();`, which is the statement the call is written as.
+The receiver is named by the marker `__collection_clear`, and `readEffect`
+writes the place with `blaze_rt_dict_new`. Only a statement reads it, which is
+where the source writes it: a clear used as a value has no lowering.
+
+This took the total from 428 to 426: `semantics/objects.ts` no longer refuses
+`this.registered.clear()`, and `semantics/typescript.ts` no longer refuses the
+two `this.unsettledArrays.clear()`.
+
 ### 4bm. An arrow's concise body may be the assignment it writes
 
 `const backend = (): AiBackend => (backend ??= backendOf());` — `codegen.ts`
@@ -1648,7 +1663,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-428 refusals over 94 sources, 29 of them read whole. The largest buckets, in
+426 refusals over 94 sources, 29 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1724,6 +1739,7 @@ What was closed this session, and what each was worth:
 | hasOwnProperty over an object's names | 433 → 430 |
 | a pushed value read at the element the list holds | 430 → 429 |
 | an arrow's concise body as an assignment | 429 → 428 |
+| a collection written clear | 428 → 426 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

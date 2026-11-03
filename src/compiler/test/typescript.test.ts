@@ -2441,6 +2441,30 @@ test("a map and a set are one handle on the runtime's dictionary", () => {
   assert.equal(result?.condition?.name, "blaze_rt_dict_has");
 });
 
+test("a collection written clear is a new, empty dictionary", () => {
+  // `m.clear()` is a statement, and the runtime holds no dictionary call that
+  // empties one in place: the handle a name holds is replaced by a new, empty
+  // dictionary, which is the one the clear asks for. The entry after it reads
+  // the handle the statement wrote.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "export function f(m: Map<string, number>): number {",
+        "  m.clear();",
+        "  return m.size;",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "f",
+  );
+  assert.match(ir, /set m = \[call\[f64\] blaze_rt_dict_new \[\]/);
+  assert.match(ir, /return \[call\[f64\] blaze_rt_dict_len/);
+});
+
 test("a file opens with the interpreter that runs it", () => {
   // `#!/usr/bin/env node` is the host's line rather than the program's, and the
   // entry source is the one an interpreter runs: a source that opens with it is

@@ -7561,6 +7561,20 @@ class TypeScriptParser {
     }
     const value = this.readExpression();
     this.accept(";");
+    // `m.clear()` written on its own line empties the collection the place
+    // holds: the handle is a new, empty dictionary, and the place is written
+    // with it. Nothing else names the dictionary the place held, so this is the
+    // clear the source asked for.
+    if (value.k === "call" && value.name === "__collection_clear") {
+      const receiver = value.args[0];
+      const empty: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+      if (receiver !== undefined && receiver.k === "ident") {
+        return { kind: "assign", target: receiver.name, op: "=", value: empty, line: token.line };
+      }
+      if (receiver !== undefined && receiver.k === "member" && receiver.base.k === "ident") {
+        return { kind: "memberAssign", base: receiver.base.name, field: receiver.field, op: "=", value: empty, line: token.line };
+      }
+    }
     // `a.push(x)` answers the array the name holds afterwards, so written on
     // its own line it is the write that keeps it. A field is written back into
     // the field it was read from, with the object it belongs to unchanged.
@@ -12034,6 +12048,20 @@ class TypeScriptParser {
       const marker: Expression = { k: "call", name: "__collection_entries", args: [receiver] };
       this.iteratedCollections.set(marker, collection);
       this.expressionTypes.set(marker, ANY_TYPE);
+      return marker;
+    }
+    // `m.clear()` empties the dictionary. The runtime holds no dictionary call
+    // that empties one in place, and a collection here is a handle a name or a
+    // field holds: the clear is the write of a new, empty dictionary over the
+    // handle, which is the statement the call is written as. The marker names
+    // the receiver, and `readEffect` writes it.
+    if (method === "clear" && args.length === 0) {
+      const place = receiver.k === "ident"
+        ? true
+        : receiver.k === "member" && receiver.base.k === "ident";
+      if (!place) return null;
+      const marker: Expression = { k: "call", name: "__collection_clear", args: [receiver] };
+      this.expressionTypes.set(marker, NOTHING);
       return marker;
     }
     const lowered = take();
