@@ -470,23 +470,30 @@ function calleeBuilds(name: string, reach: Reach): boolean {
   if (callee === undefined) return builtinFor(name) === null;
   if (reach.reading.has(name)) return false;
   reach.reading.add(name);
+  const buildsIn = (value: SemanticValue): boolean => {
+    let found = false;
+    walkValues(value, (inner) => {
+      if (found) return;
+      if (inner.k === "newObject") found = true;
+      // An array literal is a block the runtime takes from the region's cursor,
+      // exactly as an object is — the same answer `ownsRegionBlock` gives. A
+      // window into a block another name holds is that name's block, not one
+      // this body made.
+      else if (inner.k === "buffer") found = inner.view === null;
+      else if (inner.k === "call") found = calleeBuilds(inner.call.callee, reach);
+    });
+    return found;
+  };
   let builds = false;
   for (const block of blocksWithin(callee.entry)) {
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
-      walkValues(block.terminator.value, (inner) => {
-        if (builds) return;
-        if (inner.k === "newObject") builds = true;
-        else if (inner.k === "call") builds = calleeBuilds(inner.call.callee, reach);
-      });
+    if (block.terminator.k === "return" && block.terminator.value !== null && buildsIn(block.terminator.value)) {
+      builds = true;
+      break;
     }
     for (const statement of block.statements) {
       if (builds) break;
       for (const value of statementValues(statement)) {
-        walkValues(value, (inner) => {
-          if (builds) return;
-          if (inner.k === "newObject") builds = true;
-          else if (inner.k === "call") builds = calleeBuilds(inner.call.callee, reach);
-        });
+        if (buildsIn(value)) builds = true;
       }
     }
     if (builds) break;

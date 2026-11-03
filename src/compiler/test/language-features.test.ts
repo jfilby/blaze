@@ -746,6 +746,27 @@ test("an assignment written in a template string writes before the text", async 
   }
 });
 
+test("a list pushed to in a loop keeps what every turn appended", async () => {
+  // `push` answers a longer list, so the turn stores a block a function built
+  // into a name that outlives it. The loop may only reuse a turn's storage when
+  // nothing it built is still wanted, and an array a helper builds is as much
+  // the turn's block as an object is.
+  const source = [
+    "export function demo(): string {",
+    "  const names: string[] = [`a`, `b`];",
+    "  const out: string[] = [];",
+    "  for (let i = 0; i < names.length; i += 1) out.push(`x`);",
+    "  return `${out.length} ${out[0]} ${out[1]}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 x x", `the ${backend} backend keeps every appended value`);
+  }
+});
+
 test("an arrow that only reads a name another arrow writes reads its box", async () => {
   // The name a writing arrow holds is a box, and the declaration is the box.
   // An arrow that only reads the name captured the name itself, which no

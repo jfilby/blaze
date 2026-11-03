@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { markRegionLoops, refusalFor } from "../semantics/region.ts";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
+import { typeText } from "../core/semantic-ir.ts";
 import type { TypeExpr } from "../core/types.ts";
 import type {
   SemanticFunction,
@@ -119,6 +120,25 @@ function callValue(callee: string, args: readonly SemanticValue[] = []): Semanti
       args: [...args],
       argTypes: [],
       returns: F64,
+      effects: [],
+      ownership: "none",
+      retain: false,
+      builtin: false,
+    },
+  };
+}
+
+/** A call of the function named, at the type the function answers. */
+function callOf(callee: string, returns: TypeExpr): SemanticValue {
+  return {
+    k: "call",
+    type: returns,
+    call: {
+      callee,
+      signature: { name: callee, symbol: `blaze_${callee}`, params: [], returns: typeText(returns) },
+      args: [],
+      argTypes: [],
+      returns,
       effects: [],
       ownership: "none",
       retain: false,
@@ -483,6 +503,37 @@ test("a block a callee builds through another callee is the turn's block", () =>
   );
   markRegionLoops(fn.entry, new Map([["makeNode", make], ["build", wrap]]));
   assert.equal(onlyLoop(fn).region, undefined, "the block escapes the turn through two calls");
+});
+
+test("an array a callee builds in its answer is the turn's block", () => {
+  // `push` answers a longer list, so the turn that appends to a list writes a
+  // block the callee built into a name that outlives it. `calleeBuilds` counted
+  // an object a callee builds but not an array, so the helper that appends read
+  // as building nothing: the loop kept its mark, the rewind took the block, and
+  // the next turn wrote over the element the turn before had appended.
+  const append = factory("append");
+  append.returns = { kind: "slice", of: F64 };
+  append.entry = {
+    ...append.entry,
+    terminator: {
+      k: "return",
+      value: { k: "buffer", type: { kind: "slice", of: F64 }, element: F64, length: 1, count: null, view: null, values: [] },
+    },
+  };
+  const fn = functionWith(
+    countedLoop([
+      {
+        k: "set",
+        line: 2,
+        name: "acc",
+        op: "=",
+        // The answer is a list, which is the reference the store is about.
+        value: callOf("append", { kind: "slice", of: F64 }),
+      },
+    ]),
+  );
+  markRegionLoops(fn.entry, new Map([["append", append]]));
+  assert.equal(onlyLoop(fn).region, undefined, "the array escapes the turn, so the turn may not reuse the storage");
 });
 
 test("an array written in a turn is as much the turn's as an object is", () => {
