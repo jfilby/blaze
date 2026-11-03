@@ -77,6 +77,23 @@ export interface Shape {
   fields: { name: string; value: Inferred }[];
 }
 
+/**
+ * What a field holds when the source wrote a list in it.
+ *
+ * A list written into a field is a **slice**: the block it allocates carries
+ * its length in a header, and the field is a pointer to it. Reading the length
+ * of the literal as the length of the field made two literals of different
+ * lengths two layouts of one interface -- `{ children: [] }` and
+ * `{ children: [a, b] }` cannot be one `Node` -- and it made a field a body
+ * pushes to a field whose type still said the length the literal had.
+ */
+export function asField(value: Inferred): Inferred {
+  if (value.kind !== "type") return value;
+  const type = value.type;
+  if (type.kind !== "array" || type.length === null) return value;
+  return { kind: "type", type: { kind: "slice", of: type.of } };
+}
+
 function objectsError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
 }
@@ -445,7 +462,7 @@ class BodyTypes {
 
   /** Registers the object a literal writes, and returns its key. */
   private object(fields: readonly { name: string; value: Expression }[]): string {
-    const typed = fields.map((field) => ({ name: field.name, value: this.expression(field.value) }));
+    const typed = fields.map((field) => ({ name: field.name, value: asField(this.expression(field.value)) }));
     // The key is a function of the shape alone, and the shape is written as
     // JSON so that a field name cannot read like the key of another shape:
     // `{ a: 1, b: 2 }` and `{ "a:f64,b": 2 }` hold different fields, and

@@ -165,6 +165,36 @@ test("two objects with the same fields are one object, whatever wrote them", () 
   assert.deepEqual(Object.keys(contracts.leaf.definition?.objects ?? {}), ["Object1"]);
 });
 
+test("a list field is one field whatever the literal held", () => {
+  // The length of a list literal is not the length of the field: the field is a
+  // pointer to a block whose header carries its length, and a body that pushes
+  // to the field writes a longer block into it. Reading the literal's length as
+  // the field's made two literals of one interface two layouts, and a field a
+  // body pushed to a field whose type still said the length the literal had.
+  const contracts = contractsOf(
+    {
+      "main.ts": [
+        "export function one(): any {",
+        "  return { children: [1], name: `one` };",
+        "}",
+        "export function two(): any {",
+        "  return { children: [1, 2], name: `two` };",
+        "}",
+        "console.log(`${one()}${two()}`);",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  assert.equal(contracts.one.function.returns, "ref<Object1>");
+  assert.equal(contracts.two.function.returns, "ref<Object1>", "both literals are one interface");
+  const layout = contracts.one.definition?.objects.Object1;
+  assert.deepEqual(layout?.fields.map((field) => [field.name, field.type]), [
+    ["children", "slice<f64>"],
+    ["name", "text"],
+  ]);
+});
+
 test("a field name that reads like another shape's key does not give two objects one layout", () => {
   // `{ a: 1, b: 2 }` and `{ "a:f64,b": 2 }` hold different fields, and one
   // key gave both the same eight bytes: `two` then wrote its second double

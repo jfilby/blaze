@@ -59,7 +59,7 @@ import { contractText, parseType } from "./contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { ARGV, ARGV_LENGTH, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor } from "./language.ts";
-import { ANY_REF, BOOL, F64, I64, USIZE, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric, saysNothing } from "./objects.ts";
+import { ANY_REF, BOOL, F64, I64, USIZE, asField, bodyIgnoresCounter, bodyIndexesCounter, bodyIsWhole, coalesce, countsWholeNumber, describe, elementOf, numeric, saysNothing } from "./objects.ts";
 import { isInteger, isNumber, isWhole, isWide, isWideType, wholeOf } from "../core/semantic-ir.ts";
 import { foldWhole, modularReduction, wholeConstant, wholePower, wholeText, wholeType } from "./whole-arithmetic.ts";
 import type { Inferred } from "./objects.ts";
@@ -2016,7 +2016,13 @@ class FunctionBody {
    * out as, and every field as the body writes it.
    */
   private literal(fields: readonly { name: string; value: Expression }[], line: number): Literal {
-    const typed = fields.map((field) => ({ name: field.name, value: this.typed(field.value, null, line) }));
+    // A list written into a field is a slice, which is what the layout pass
+    // types it as: the key of a shape is the types of its fields, and a body
+    // that spelled this one differently would name a layout nothing lays out.
+    const typed = fields.map((field) => {
+      const value = this.typed(field.value, null, line);
+      return { name: field.name, value: { ...value, inferred: asField(value.inferred) } };
+    });
     // The key is a function of the shape alone, and the shape is written as
     // JSON so that a field name cannot read like the key of another shape.
     const key = JSON.stringify(typed.map((field) => [field.name, describe(field.value.inferred)]));
