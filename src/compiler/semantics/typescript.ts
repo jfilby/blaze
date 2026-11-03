@@ -9649,7 +9649,7 @@ class TypeScriptParser {
             continue;
           }
         }
-        if (field.text === "length" && target.k === "ident") {
+        if (field.text === "length" && target.k === "ident" && !this.at("(")) {
           replace({ k: "length", buffer: target.name });
           continue;
         }
@@ -9676,7 +9676,7 @@ class TypeScriptParser {
           replace({ k: "call", name: ARGV_LENGTH, args: [] });
           continue;
         }
-        if (field.text === "length") {
+        if (field.text === "length" && !this.at("(")) {
           // A length of a value no name holds — an element, a call — is the
           // same length read where the value is.
           replace({ k: "lengthOf", of: target });

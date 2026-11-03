@@ -2109,6 +2109,24 @@ test("a class method may be named with a modifier word", async () => {
   assert.equal(output.trim(), "2");
 });
 
+test("a method named length is the method, not the length of the receiver", async () => {
+  // `this.length(1)` is a call of the method the class declares. `.length` is
+  // the length of a sequence, and a `(` after it says the name is a method: the
+  // length of a sequence is never called.
+  const output = await agreesWithNode([
+    "class Window {",
+    "  width: number;",
+    "  constructor(width: number) { this.width = width; }",
+    "  length(n: number): number { return this.width + n; }",
+    "}",
+    "const w = new Window(3);",
+    "const xs = new Float64Array(2);",
+    "console.log(w.length(4), xs.length);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7 2");
+});
+
 test("an arrow function runs as the function its body lifted to", async () => {
   // An arrow is bound to the name it is declared under and called by that name.
   // Its body becomes a function of the file whose leading parameters are the

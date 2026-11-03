@@ -2167,6 +2167,29 @@ test("an import is hoisted from wherever it is written", () => {
   assert.ok(compute?.functions.compute !== undefined, "the function after the imports is read");
 });
 
+test("a method named length is a call, not the length of its receiver", () => {
+  // `.length` of a name is the length of the sequence it holds; a `(` after it
+  // says the class declared a method of that name, and the call is the method's.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "class Window {",
+        "  width: number = 2;",
+        "  length(n: number): number { return this.width + n; }",
+        "  measure(): number { return this.length(1); }",
+        "}",
+        "export function f(): number { return new Window().measure(); }",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const functions = Object.keys(phase.program.files[0]?.functions ?? {});
+  assert.ok(functions.includes("Window_length"), `the method is a function of the file: ${functions.join(", ")}`);
+});
+
 test("a conditional of an empty list and a list keeps the one element type", () => {
   const ir = irOf(
     "typescript",

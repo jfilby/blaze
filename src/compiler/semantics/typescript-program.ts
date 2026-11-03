@@ -1566,7 +1566,7 @@ class ProgramParser {
         if (member === "toFixed" && this.at("(")) return this.fixed(value);
         if (member === "toString" && this.at("(")) return this.hexString(value);
         if (member === "fill" && this.at("(")) return this.filled(value);
-        if (member === "length" && value.k === "name") {
+        if (member === "length" && value.k === "name" && !this.at("(")) {
           value = { k: "length", of: value.name };
           continue;
         }
