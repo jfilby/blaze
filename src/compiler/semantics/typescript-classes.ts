@@ -144,6 +144,54 @@ function skipAngles(tokens: readonly Token[], open: number): number {
 }
 
 /**
+ * The token a member's body starts at, when the return type starts at `start`.
+ *
+ * A result written as an object type starts with the same `{` a body does, and
+ * so does the second arm of a union of them, and the object an `is` predicate
+ * names. The `{` is part of the type when the token before it says the type
+ * goes on: the `:` after the parameter list, a union's `|`, an intersection's
+ * `&`, the `is` of a predicate, a `keyof`, the `<` of a type argument, a comma
+ * or an arrow. Any other `{` is the body; a `;` at the top is a member with no
+ * body.
+ */
+function bodyAfterReturnType(tokens: readonly Token[], start: number, limit: number): number {
+  const continues: ReadonlySet<string> = new Set([":", "|", "&", "is", "keyof", "typeof", "<", ",", "(", "[", "=>"]);
+  let previous = ":";
+  for (let at = start; at < limit; at += 1) {
+    const token = tokens[at];
+    if (token.kind !== "punct") {
+      previous = token.text;
+      continue;
+    }
+    if (token.text === "{") {
+      if (!continues.has(previous)) return at;
+      const close = matching(tokens, at);
+      if (close < 0) return limit;
+      at = close;
+      previous = "}";
+      continue;
+    }
+    if (token.text === "(" || token.text === "[") {
+      const close = matching(tokens, at);
+      if (close < 0) return limit;
+      at = close;
+      previous = tokens[at]?.text ?? token.text;
+      continue;
+    }
+    if (token.text === "<") {
+      const end = skipAngles(tokens, at);
+      if (end <= at + 1) return at;
+      at = end - 1;
+      previous = ">";
+      continue;
+    }
+    if (token.text === ";" || token.text === "}") return at;
+    previous = token.text;
+  }
+  return limit;
+}
+
+/**
  * The type an annotation names, or `"any"` where none is written.
  *
  * The name is more than the first identifier: `number[]` says the field is a
@@ -206,25 +254,6 @@ function annotationType(
     }
   }
   return { text: typeText(tokens, from, limit), end: limit };
-}
-
-/**
- * Advances past a type annotation, stopping at one of `stops` at bracket depth
- * zero. Generic brackets are counted so `Array<number>` is one type and not a
- * comparison against a name.
- */
-function skipType(tokens: readonly Token[], index: number, limit: number, stops: ReadonlySet<string>): number {
-  let depth = 0;
-  for (let at = index; at < limit; at += 1) {
-    const token = tokens[at];
-    if (token.kind !== "punct") continue;
-    if (token.text === "<" || token.text === "(" || token.text === "[") depth += 1;
-    else if (token.text === ">" || token.text === ")" || token.text === "]") {
-      if (depth === 0) return at;
-      depth -= 1;
-    } else if (depth === 0 && stops.has(token.text)) return at;
-  }
-  return limit;
 }
 
 /** Advances past a value, stopping at the `;` or the class's closing `}`. */
@@ -410,15 +439,10 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       if (isPunct(tokens[index], ":")) {
         returnTypeName = typeNameAt(tokens, index + 1);
         // A result written as an object type, `{ line: number; text: string }`,
-        // starts with the same brace a method body does. The brace is part of
-        // the type when it is the first token after the colon, and the body is
-        // the brace that follows the type's own closing one.
-        if (isPunct(tokens[index + 1], "{")) {
-          const typeClose = matching(tokens, index + 1);
-          index = typeClose < 0 ? index + 1 : typeClose + 1;
-        } else {
-          index = skipType(tokens, index + 1, close, new Set(["{", ";"]));
-        }
+        // starts with the same brace a method body does, and a union of them,
+        // or the object an `is` predicate names, has more than one. The body is
+        // the brace the type does not hold.
+        index = bodyAfterReturnType(tokens, index + 1, close);
       }
       while (index < close && !isPunct(tokens[index], "{") && !isPunct(tokens[index], ";")) index += 1;
       let bodyStart = index;

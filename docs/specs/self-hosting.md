@@ -866,6 +866,28 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bh. A method's result may be a union of object types
+
+The class scanner found a method's body by skipping to the first `{` after the
+return type. A result written as an object type starts with the same brace, so
+the scanner had a special case for it; a *union* of object types had a second
+brace after the first, and the second arm was read as the body. An `is`
+predicate had the same shape: `value is SemanticValue & { k: "call" }` put the
+object after an `&`, and its brace became the body. The members after it were
+read from inside a type, and `semantics/ir-resolve.ts`'s `equality` (three arms
+of object types) and `toolchain/ir-machine.ts`'s predicates refused at `:`.
+
+A brace is part of a type when the token before it says the type goes on: the
+`:` after the parameter list, a union's `|`, an intersection's `&`, the `is` of
+a predicate, a `keyof`, a type argument's `<`, a comma or an arrow. Any other
+brace is the body, and a `;` at the top is a member with no body. The scanner
+skips the type as a whole — its brackets, angle groups and object braces — and
+lands on the body.
+
+This took the total from 442 to 441: three in `semantics/ir-resolve.ts` and one
+in `toolchain/ir-machine.ts`. The refusals the desync had hidden behind them are
+now read, which is why the drop is smaller than the sites.
+
 ### 4bg. A method named length is a call, not a length
 
 `x.length` is the length of the sequence a name holds, and the frontend read
@@ -1549,7 +1571,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-442 refusals over 94 sources, 26 of them read whole. The largest buckets, in
+441 refusals over 94 sources, 26 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1619,6 +1641,7 @@ What was closed this session, and what each was worth:
 | a default parameter in a program function | 449 → 448 |
 | an import hoisted from where it is written | 448 → 443 |
 | a method named length is a call | 443 → 442 |
+| a method's result as a union of object types | 442 → 441 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

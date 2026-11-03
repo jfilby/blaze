@@ -73,6 +73,34 @@ test("a field names its type in every form the language writes", () => {
   assert.ok(Object.keys(program.files[0].functions).includes("Ledger_total"));
 });
 
+test("a method's result may be a union of object types or a predicate", () => {
+  // A result written as a union of object types, or as the object an `is`
+  // predicate names, has more than one brace in it. The body is the brace the
+  // type does not hold, and every member the class writes after it is read.
+  const source = [
+    "type Entry = { k: string };",
+    "class Table {",
+    "  private rows: Entry[] = [];",
+    "  private pick(left: Entry, right: Entry): { hit: Entry } | { miss: true } {",
+    "    return left.k === right.k ? { hit: left } : { miss: true };",
+    "  }",
+    "  private isHit(value: Entry | null): value is Entry & { k: \"hit\" } {",
+    "    return value !== null && value.k === \"hit\";",
+    "  }",
+    "  count(): number {",
+    "    return this.rows.length + (this.pick(this.rows[0], this.rows[0]).hit ? 1 : 0);",
+    "  }",
+    "}",
+    "console.log(new Table().count());",
+    "",
+  ].join("\n");
+  const program = programOf("typescript", { "main.ts": source }, "main.ts");
+  const functions = Object.keys(program.files[0].functions);
+  assert.ok(functions.includes("Table_pick"), `the union result is read: ${functions.join(", ")}`);
+  assert.ok(functions.includes("Table_isHit"), "the predicate result is read");
+  assert.ok(functions.includes("Table_count"), "the member after them is read");
+});
+
 test("a method on a field of an imported type waits for the link", () => {
   // A file is read before its imports are linked, so a class field written at
   // an imported type is `any` on that read. A method written on the field is
