@@ -1404,12 +1404,9 @@ calls in one expression were inlined once (§4an). A store through an object
 reference did not compile as C (§4as). An arrow that only read a name another
 arrow wrote read a name the box had replaced (§4at). And a choice of a length and
 a number was read at the unshaped reference an arm of another type falls back to
-(§ "Read a choice of two values at the type they share"). A map of references read the double an
-entry holds, so the IR typed the value a number and a field of it read the
-runtime's table as an object; both backends segfaulted on `Map<Box, Box>`. Every
-key form now has a read that answers a reference. And `semantics/power-of-two`'s
-`namesOf` is an arrow, so the set it answered was a set the read did not know
-and `has`/`add` on it were methods of nothing.
+(§ "Read a choice of two values at the type they share"). `semantics/power-of-two`'s
+`namesOf` is an arrow, so the set it answered was a set the read did not know and
+`has`/`add` on it were methods of nothing.
 
 **A type-layer bug, found and not fixed.** `type X = | A | B` — the leading bar
 the sources write when the members are laid out one per line — is read as a
