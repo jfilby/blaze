@@ -2141,6 +2141,32 @@ test("a module that offers only a constant is a library the program may import",
   assert.ok(kinds !== undefined, "the module that only writes a constant is a module of the program");
 });
 
+test("an import is hoisted from wherever it is written", () => {
+  // An import binds a module's names for the whole file, so it is read where it
+  // is written and its names are in scope for every declaration, above it and
+  // below. A file that writes a constant and then imports what its functions
+  // use is the shape `semantics/ir-function.ts` has.
+  const program = programOf(
+    "typescript",
+    {
+      "base.ts": "export const base: number = 3;\n",
+      "scale.ts": "export type Scale = number;\n",
+      "compute.ts": [
+        "const SCALE: number = 2;",
+        'import type { Scale } from "./scale.ts";',
+        'import { base } from "./base.ts";',
+        "export function compute(): Scale { return base * SCALE; }",
+        "",
+      ].join("\n"),
+      "main.ts": 'import { compute } from "./compute.ts";\nconsole.log(compute());\n',
+    },
+    "main.ts",
+  );
+  const compute = program.files.find((file) => file.path === "compute.ts");
+  assert.ok(compute !== undefined, "the module after the constant is a module of the program");
+  assert.ok(compute?.functions.compute !== undefined, "the function after the imports is read");
+});
+
 test("a conditional of an empty list and a list keeps the one element type", () => {
   const ir = irOf(
     "typescript",

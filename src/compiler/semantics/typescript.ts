@@ -4777,9 +4777,9 @@ class TypeScriptParser {
     const declarations: Declaration[] = [];
     /** The spans of the file that are imports rather than the module's own. */
     const importsWritten: Span[] = [];
-    // An import is written at the top of the file, before anything runs; a
-    // declaration is hoisted from wherever it is written.
-    let atTop = true;
+    // An import is hoisted: it binds a module's names for the whole file, so it
+    // is read wherever it is written, above the declarations or below them. A
+    // declaration is hoisted the same way.
     /** Whether the file runs anything: a file that runs nothing is a library. */
     let runs = false;
     while (this.peek().kind !== "end") {
@@ -4787,7 +4787,7 @@ class TypeScriptParser {
       // each statement of a body: the count a statement left behind is the
       // last statement's, not this one's.
       this.reporting = 0;
-      if (atTop && this.at("import")) {
+      if (this.at("import")) {
         const start = this.position;
         this.next();
         // `import type { T } from "./x.ts"` binds a type and no value, so the
@@ -4831,7 +4831,6 @@ class TypeScriptParser {
       if (this.at("const") || this.at("let") || this.at("var")) {
         this.synchronize();
         this.accept(";");
-        atTop = false;
         if (entry) runs = true;
         continue;
       }
@@ -4842,7 +4841,6 @@ class TypeScriptParser {
       // at the top of a file would leave the parser on the same token forever,
       // so it is read as the statement it ended rather than left to end it.
       if (this.position === before) this.next();
-      atTop = false;
       runs = true;
     }
     // The calls decide where a declaration is read. A function the module

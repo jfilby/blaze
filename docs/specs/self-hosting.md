@@ -866,6 +866,25 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bf. An import is hoisted from wherever it is written
+
+An import binds a module's names for the whole file, so it is read where it is
+written rather than only before the first declaration. The frontend required
+every import to come first, and `semantics/ir-function.ts` writes a constant,
+then two `import type`s and a value import — so the file was read as a program
+whose first statement was `import`, which a program cannot run, and the whole
+body was read by the wrong parser. Reading the import as the import it is makes
+the file a module again, and the refusals the program parser reported inside it
+are gone with it.
+
+The spans of the imports are still held out of the body the program parser
+reads, and they are held out wherever they are written: an entry module that
+writes a constant, then an import, then a statement runs the constant and the
+statement, and the import binds the module for both.
+
+This took the total from 448 to 443: five in `semantics/ir-function.ts`, whose
+program read had hidden what the module holds.
+
 ### 4be. A default parameter in a program function
 
 A module function with a default parameter is callable at every shorter arity:
@@ -1515,7 +1534,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-448 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+443 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1583,6 +1602,7 @@ What was closed this session, and what each was worth:
 | `new Array(n)` and `fill` | 476 → 465 |
 | a for loop that is not a counted loop | 465 → 449 |
 | a default parameter in a program function | 449 → 448 |
+| an import hoisted from where it is written | 448 → 443 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
