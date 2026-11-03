@@ -866,6 +866,40 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bb. A switch, a list written at a length, and a program's own output
+
+Three things the entry of the compiler writes that the program reader did not
+know, and they are one slice because the first two hid the third.
+
+**A `switch`** is the chain of comparisons its cases are: the subject is read
+once into a name of the switch's own, and each arm is an `if` that compares the
+name with the case. An arm that does not end by leaving the switch runs into the
+arm after it, which is the language's fallthrough; a `break` at the end of an
+arm is the arm leaving the switch and is dropped with the end of that body. A
+`break` anywhere else in an arm leaves the switch from inside a nested statement,
+which the chain cannot say, and that is refused rather than read as a break of
+whatever loop the switch is in.
+
+**`a.length = n`** is the list at that length: the first `n` elements, and the
+empty elements a longer list gains after them. A list is a block whose length the
+runtime keeps in a header, so the write is a block of its own rather than a size
+written into the one it had — which is a copy where a write of the header would
+be none. Every use of a length in the compiler's own sources is a rollback of a
+list to a mark it had, so the copy is the list it keeps rather than the one it
+drops.
+
+**`process.stdout.write(text)`** writes the text where it is and does not end the
+line a `console.log` ends. A program has no way to write to the error stream —
+that is the runtime's own — and `process.stderr.write` keeps the refusal it had.
+
+The switch is why the first two are one slice: reading the arms of the entry's
+switch uncovered the writes the refusal had hidden, so the slice that reads a
+switch has to read what its arms write as well.
+
+This took the total from 483 to 476: `toolchain/ir-machine.ts` loses its six
+rollbacks, `dump-ir.ts` and `semantics/typescript.ts` their writes, and the
+entry's own two error-stream writes are what is left of its switch.
+
 ### 4ba. splice is a range replaced by the values written
 
 `xs.splice(at, del, ...items)` was not a method of this compiler, and the five
@@ -1416,7 +1450,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-483 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+476 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1480,6 +1514,7 @@ What was closed this session, and what each was worth:
 | flatMap is the lists its callback answers | 514 → 503 |
 | shift and unshift are the two ends of a list | 503 → 494 |
 | splice is a range replaced by the values written | 494 → 483 |
+| a switch, a length, and a program's own output | 483 → 476 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

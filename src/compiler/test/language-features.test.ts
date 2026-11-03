@@ -791,6 +791,79 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("a switch is the chain of comparisons its cases are", async () => {
+  // The subject is read once into a name of the switch's own, and each arm is
+  // an if that compares the name with the case. An arm that does not end by
+  // leaving the switch runs into the arm after it, which is the fallthrough.
+  const source = [
+    "function name(n: number): string {",
+    "  let out = `?`;",
+    "  switch (n) {",
+    "    case 0:",
+    "      out = `zero`;",
+    "      break;",
+    "    case 1:",
+    "    case 2:",
+    "      out = `small`;",
+    "      break;",
+    "    default:",
+    "      out = `big`;",
+    "  }",
+    "  return out;",
+    "}",
+    "function fall(n: number): number {",
+    "  let total = 0;",
+    "  switch (n) {",
+    "    case 1:",
+    "      total += 2;",
+    "    case 2:",
+    "      total += 3;",
+    "      break;",
+    "    default:",
+    "      return 7;",
+    "  }",
+    "  return total;",
+    "}",
+    "console.log(`${name(0)} ${name(2)} ${name(9)} ${fall(0)} ${fall(1)} ${fall(2)}`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "zero small big 7 5 3", `the ${backend} backend compares the cases`);
+  }
+});
+
+test("a list is written at a length, and a program writes without ending the line", async () => {
+  // `a.length = n` is the first `n` elements and the empty ones a longer list
+  // gains. `process.stdout.write` writes where it is, and does not end the line
+  // the way a console does.
+  const source = [
+    "class Pool {",
+    "  items: number[] = [];",
+    "  add(n: number): void { this.items.push(n); }",
+    "  trim(n: number): void { this.items.length = n; }",
+    "}",
+    "export function demo(): string {",
+    "  const xs: number[] = [1, 2, 3, 4];",
+    "  xs.length = 2;",
+    "  const grown: number[] = [1];",
+    "  grown.length = 3;",
+    "  const p = new Pool();",
+    "  p.add(1);",
+    "  p.add(2);",
+    "  p.trim(1);",
+    "  return `${xs.join(`,`)} ${grown.length} ${p.items.join(`,`)}`;",
+    "}",
+    "process.stdout.write(demo());",
+    "console.log(` done`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1,2 3 1 done", `the ${backend} backend writes the list and the line`);
+  }
+});
+
 test("splice is a range of a list replaced by the values written", async () => {
   // The answer is the range the call took out, read before the write, and the
   // list is the part before the range, the values, and the part after it. A

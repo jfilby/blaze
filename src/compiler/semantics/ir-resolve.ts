@@ -314,7 +314,7 @@ type DraftStatement =
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; type: TypeExpr; line: number }
   /** `a.fill(x)`: the array is written from its first element, as one value. */
   | { kind: "fill"; buffer: DraftValue; value: DraftValue; held: ArrayHeld; line: number }
-  | { kind: "print"; values: DraftValue[]; line: number }
+  | { kind: "print"; values: DraftValue[]; line: number; newline?: boolean }
   | { kind: "invoke"; call: DraftCall; line: number }
   | { kind: "if"; condition: DraftValue; then: DraftStatement[]; otherwise: DraftStatement[]; line: number }
   | { kind: "try"; body: DraftStatement[]; catchParam: string | null; catchBody: DraftStatement[] | null; finallyBody: DraftStatement[] | null; line: number }
@@ -2450,6 +2450,7 @@ class ProgramResolver {
             this.assertPrintable(resolved, statement.line);
             return resolved;
           }),
+          ...(statement.newline === false ? { newline: false } : {}),
           line: statement.line,
         };
       case "invoke": {
@@ -5536,7 +5537,9 @@ class ProgramLowering {
       }
       this.printed(value, isBigint(item), statement.line);
     });
-    this.statement({ k: "printNewline", line: statement.line });
+    // `process.stdout.write` writes the values where they are, and does not end
+    // the line the way a console does.
+    if (statement.newline !== false) this.statement({ k: "printNewline", line: statement.line });
   }
 
   /** One printed value, the way the runtime writes what it holds. */

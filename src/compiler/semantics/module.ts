@@ -195,7 +195,11 @@ export type ProgramStatement =
    */
   | { kind: "fill"; buffer: string; value: ProgramValue; line: number }
   | { kind: "update"; name: string; op: "++" | "--"; prefix: boolean; line: number }
-  | { kind: "print"; values: ProgramValue[]; line: number }
+  /**
+   * `console.log(a, b)` and `process.stdout.write(text)`: the values written
+   * out, and whether the line they are written on ends there.
+   */
+  | { kind: "print"; values: ProgramValue[]; line: number; newline?: boolean }
   | { kind: "if"; condition: ProgramValue; then: ProgramStatement[]; otherwise: ProgramStatement[]; line: number }
   | { kind: "while"; condition: ProgramValue; body: ProgramStatement[]; line: number }
   | { kind: "doWhile"; condition: ProgramValue; body: ProgramStatement[]; line: number }

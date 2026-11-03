@@ -7094,10 +7094,20 @@ class TypeScriptParser {
       this.position = start;
       return null;
     }
-    // A list has no writable length: what it holds is a block the runtime
-    // allocated, and the source writes the elements of it rather than its size.
+    // `a.length = n` is the list at that length: the first `n` elements, and
+    // the empty elements a longer list gains after them. A text has no writable
+    // length — what it holds is a block the runtime wrote — and the write is
+    // left to the refusal below.
     const ownerType = this.valueTypeOf(base);
-    if (field === "length" && (ownerType.kind === "slice" || ownerType.kind === "array" || ownerType.kind === "text")) {
+    if (field === "length" && (ownerType.kind === "slice" || ownerType.kind === "array")) {
+      const value = this.readExpression();
+      this.accept(";");
+      const lowered = this.lengthAssign(base, ownerType, operator.text, value, line);
+      if (lowered !== null) return lowered;
+      this.position = start;
+      return null;
+    }
+    if (field === "length" && ownerType.kind === "text") {
       this.position = start;
       return null;
     }
@@ -7134,6 +7144,47 @@ class TypeScriptParser {
     return target.k === "member"
       ? { kind: "memberAssign", base: held, field: field as string, op: operator.text as AssignOperator, value, line }
       : { kind: "indexAssign", buffer: held, index: (target as { index: Expression }).index, op: operator.text as AssignOperator, value, line };
+  }
+
+  /**
+   * `a.length = n`: the list as the first `n` elements it has.
+   *
+   * A list is a block whose length the runtime keeps in a header, and the block
+   * is a value: a longer list is a block of its own, so the write is the list
+   * at that length rather than a size written into it. The first `n` elements
+   * are the slice up to `n`, and a longer list is that slice followed by the
+   * empty elements it gains. Nothing answers the write, so only `=` is read.
+   */
+  private lengthAssign(base: Expression, owner: TypeExpr, op: string, value: Expression, line: number): Statement | null {
+    if (op !== "=") return null;
+    // The write goes back into the place the list is held in, which is the name
+    // or the field the source wrote.
+    let place: { target: string; base: string | null } | null = null;
+    if (base.k === "ident") place = { target: base.name === "this" ? "self" : base.name, base: null };
+    else if (base.k === "member" && base.base.k === "ident") place = { target: base.field, base: base.base.name === "this" ? "self" : base.base.name };
+    if (place === null) return null;
+    // The count is read once, because it is written three times.
+    let wanted = value;
+    if (value.k !== "literal" && value.k !== "ident") {
+      const held = `__length${this.fieldCount++}`;
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: value, line });
+      this.valueTypes.set(held, NUMBER_RESULT);
+      wanted = { k: "ident", name: held };
+    }
+    const length: Expression = { k: "lengthOf", of: base };
+    const element = owner.kind === "slice" || owner.kind === "array" ? owner.of : ANY_TYPE;
+    const kept = this.sequenceMethod("slice", element, base, [{ k: "literal", text: "0" }, wanted], line);
+    const grew: Expression = {
+      k: "conditional",
+      condition: { k: "binary", op: ">", left: wanted, right: length },
+      then: { k: "binary", op: "-", left: wanted, right: length },
+      otherwise: { k: "literal", text: "0" },
+    };
+    const added: Expression = { k: "sized", element: typeToString(element), count: grew };
+    const listed: Expression = { k: "binary", op: "+", left: kept, right: added };
+    return place.base === null
+      ? { kind: "assign", target: place.target, op: "=", value: listed, line }
+      : { kind: "memberAssign", base: place.base, field: place.target, op: "=", value: listed, line };
   }
 
   /**
@@ -7315,6 +7366,20 @@ class TypeScriptParser {
       return null;
     }
     this.position = lastDot + 2;
+    // `a.length = n` writes the list the name holds, at that length.
+    if (field.text === "length") {
+      const owner: Expression = { k: "ident", name: writtenBase };
+      const ownerType = this.valueTypeOf(owner);
+      if (ownerType.kind === "slice" || ownerType.kind === "array") {
+        this.next();
+        const value = this.readExpression();
+        this.accept(";");
+        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, base.line);
+        if (lowered !== null) return lowered;
+        this.position = start;
+        return null;
+      }
+    }
     // A field of a field is written the same way a field is: the value the
     // field belongs to is read into a name of its own first, and the write goes
     // into that name. An object is a reference, so writing through the name is
@@ -7328,10 +7393,19 @@ class TypeScriptParser {
             { k: "ident", name: writtenBase },
           );
       const ownerType = this.valueTypeOf(owner);
-      // A list has no writable length: what it holds is a block the runtime
-      // allocated, and the source writes the elements of it rather than its
-      // size. That is refused where it is written, as it was before.
-      if (field.text === "length" && (ownerType.kind === "slice" || ownerType.kind === "array" || ownerType.kind === "text")) {
+      // `a.b.length = n` writes the list the field holds, and the write goes
+      // back into that field. A text has no writable length, and that is
+      // refused where it is written, as it was before.
+      if (field.text === "length" && (ownerType.kind === "slice" || ownerType.kind === "array")) {
+        this.next();
+        const value = this.readExpression();
+        this.accept(";");
+        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, base.line);
+        if (lowered !== null) return lowered;
+        this.position = start;
+        return null;
+      }
+      if (field.text === "length" && ownerType.kind === "text") {
         this.position = start;
         return null;
       }

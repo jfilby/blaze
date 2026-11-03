@@ -103,6 +103,54 @@ import {
   type ClassTable,
 } from "./typescript-classes.ts";
 
+/** One arm of a `switch`: its case, or its default, and the body written after it. */
+interface SwitchArm {
+  test: ProgramValue | null;
+  body: ProgramStatement[];
+  /** The arm ended with a `break`, which leaves the switch. */
+  broke: boolean;
+}
+
+/**
+ * Whether a body ends by leaving the `switch` it is the arm of.
+ *
+ * `break` at the end of an arm leaves the switch; a `return` leaves the
+ * function the switch is in, which leaves the switch as well. Anything else
+ * runs into the arm after it.
+ */
+function leavesSwitch(body: readonly ProgramStatement[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined && (last.kind === "result" || last.kind === "break" || last.kind === "continue");
+}
+
+/** Whether a `break` is written anywhere in these statements, nested ones included. */
+function holdsBreak(body: readonly ProgramStatement[]): boolean {
+  for (const statement of body) {
+    if (statement.kind === "break") return true;
+    for (const inner of programBodies(statement)) {
+      if (holdsBreak(inner)) return true;
+    }
+  }
+  return false;
+}
+
+/** The statement lists a statement is made of. */
+function programBodies(statement: ProgramStatement): ProgramStatement[][] {
+  switch (statement.kind) {
+    case "if":
+      return [statement.then, statement.otherwise];
+    case "while":
+    case "doWhile":
+    case "for":
+    case "forOf":
+    case "block":
+    case "function":
+      return [statement.body];
+    default:
+      return [];
+  }
+}
+
 /** The array views a program can allocate, and the element each one holds. */
 const VIEWS: Record<string, PrimitiveTypeName> = {
   Float32Array: "f32",
@@ -229,6 +277,8 @@ class ProgramParser {
   private readonly importedNames: ReadonlySet<string>;
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
+  /** How many switches the reader has lowered, for naming their subjects. */
+  private switchCount = 0;
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
@@ -521,6 +571,11 @@ class ProgramParser {
     if (this.at("while")) return this.whileLoop();
     if (this.at("do")) return this.doWhileLoop();
     if (this.at("for")) return this.countedLoop();
+    if (this.at("switch")) return this.switchStatement();
+    if (this.at("process") && this.peek(1).text === "." ) {
+      const written = this.processWrite();
+      if (written !== undefined) return written;
+    }
     if (this.at("void")) {
       this.next();
       // `void name;` marks a value as read and writes nothing. The statement
@@ -1021,6 +1076,174 @@ class ProgramParser {
     const body = this.at("{") ? this.braces() : this.statements();
     this.valueClasses = previous;
     return { kind: "function", name, params, body, line, ...(isAsync ? { async: true } : {}) };
+  }
+
+  /**
+   * `switch (value) { case a: ... default: ... }`: the chain of comparisons it
+   * is.
+   *
+   * The subject is read once into a name of the switch's own, and every arm is
+   * an `if` that compares the name with the arm's case. An arm that does not
+   * end by leaving the switch runs into the arm after it, which is what the
+   * language's fallthrough is: the two bodies are one body. A `break` at the
+   * end of an arm is the arm leaving the switch, and it is dropped with the end
+   * of that body.
+   */
+  private switchStatement(): ProgramStatement {
+    const line = this.peek().line;
+    this.next();
+    this.expect("(");
+    const subject = this.value();
+    this.expect(")");
+    this.expect("{");
+    const arms = this.switchArms();
+    this.expect("}");
+    const held = `__switch${this.switchCount++}`;
+    const chain = this.switchChain(arms, held, line);
+    const declared: ProgramStatement = { kind: "declare", name: held, mutable: false, type: null, value: subject, line };
+    return { kind: "block", body: [declared, ...chain], line };
+  }
+
+  /**
+   * The arms of a switch, read to the brace that closes it.
+   *
+   * A `break` anywhere but the end of an arm leaves the switch from inside a
+   * nested statement, which the chain of comparisons cannot say: it is refused
+   * rather than read as a break of whatever loop the switch is in. A `default`
+   * before a case runs into the case after it, which is the same fault.
+   */
+  private switchArms(): SwitchArm[] {
+    const arms: SwitchArm[] = [];
+    while (!this.at("}") && this.peek().kind !== "end") {
+      const read = this.switchArm();
+      if (read === null) break;
+      arms.push(read);
+    }
+    let stray = false;
+    for (const arm of arms) {
+      if (holdsBreak(arm.body)) stray = true;
+    }
+    if (stray) {
+      this.fail(
+        "a switch arm leaves the switch from inside a nested statement",
+        this.peek(),
+        "a switch is the chain of comparisons its cases are, and a break of the switch is the end of an arm",
+      );
+      return [];
+    }
+    let fallback = false;
+    for (const arm of arms) {
+      if (arm.test === null) fallback = true;
+    }
+    if (fallback) {
+      const last = arms[arms.length - 1];
+      if (last === undefined || last.test !== null) {
+        this.fail("a default before a case runs into the case after it", this.peek(), "write the default last");
+        return [];
+      }
+    }
+    return arms;
+  }
+
+  /** One arm of a switch: its case, or its default, and the body after it. */
+  private switchArm(): SwitchArm | null {
+    let test: ProgramValue | null = null;
+    if (this.accept("case")) {
+      test = this.value();
+      this.expect(":");
+    } else if (this.accept("default")) {
+      this.expect(":");
+    } else {
+      this.fail("a switch holds the cases it compares with", this.peek());
+      this.synchronizeToBrace();
+      return null;
+    }
+    const body: ProgramStatement[] = [];
+    while (!this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
+      const statement = this.guardedStatement();
+      if (statement !== null) body.push(statement);
+      this.accept(";");
+    }
+    // The break that ends the body is the arm leaving the switch, and the arm
+    // does not run into the next one.
+    const last = body[body.length - 1];
+    const broke = last !== undefined && last.kind === "break";
+    if (broke) body.pop();
+    return { test, body, broke };
+  }
+
+  /**
+   * The chain of comparisons the arms are, folded from the last arm back.
+   *
+   * An arm that does not leave the switch runs into the body of the arm after
+   * it, and that body is the one already folded: the two are one body.
+   */
+  private switchChain(arms: readonly SwitchArm[], held: string, line: number): ProgramStatement[] {
+    const last = arms[arms.length - 1];
+    const hasDefault = last !== undefined && last.test === null;
+    const fallback: ProgramStatement[] = hasDefault && last !== undefined ? last.body : [];
+    const tests: SwitchArm[] = [];
+    for (const arm of arms) {
+      if (arm.test !== null) tests.push(arm);
+    }
+    let next: ProgramStatement[] = fallback;
+    let chain: ProgramStatement[] = fallback;
+    for (let at = tests.length - 1; at >= 0; at -= 1) {
+      const arm = tests[at];
+      if (arm === undefined) continue;
+      const fallsThrough = !arm.broke && !leavesSwitch(arm.body);
+      const body: ProgramStatement[] = fallsThrough ? [...arm.body, ...next] : arm.body;
+      const caseValue: ProgramValue = arm.test === null ? { k: "number", text: "0" } : arm.test;
+      const same: ProgramValue = { k: "binary", op: "===", left: { k: "name", name: held }, right: caseValue };
+      chain = [{ kind: "if", condition: same, then: body, otherwise: chain, line }];
+      next = body;
+    }
+    return chain;
+  }
+
+  /** Reads past the rest of a switch whose arms could not be read. */
+  private synchronizeToBrace(): void {
+    let depth = 0;
+    while (this.peek().kind !== "end") {
+      if (this.at("{")) depth += 1;
+      else if (this.at("}")) {
+        if (depth === 0) return;
+        depth -= 1;
+      }
+      this.next();
+    }
+  }
+
+  /**
+   * `process.stdout.write(text)`: the text written where it is, without ending
+   * the line a `console.log` ends.
+   *
+   * A program writes to its own output. The error stream is the runtime's own —
+   * what it reports when it cannot go on — and a program has no way to write
+   * there, so that one is refused where it is written.
+   */
+  private processWrite(): ProgramStatement | null | undefined {
+    const line = this.peek().line;
+    const stream = this.peek(2).text;
+    if (this.peek(3).text !== "." || (stream !== "stdout" && stream !== "stderr")) return undefined;
+    const method = this.peek(4).text;
+    if (method !== "write") return undefined;
+    this.next();
+    this.next();
+    this.next();
+    this.next();
+    this.next();
+    this.expect("(");
+    const values = this.arguments();
+    if (stream === "stderr") {
+      this.fail(
+        "a program writes process.stdout; the error stream is the runtime's own",
+        this.peek(),
+        "write the message with process.stdout.write, or print it with console.log",
+      );
+      return null;
+    }
+    return { kind: "print", values, newline: false, line };
   }
 
   /** `console.log(v, ...)`: the values a program writes out. */
