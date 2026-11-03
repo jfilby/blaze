@@ -9797,6 +9797,60 @@ class TypeScriptParser {
   }
 
   /**
+   * The name the tokens at the cursor write, when the operator after it writes
+   * one: `x = v`, `x ??= v`, `x += v`.
+   *
+   * A tuple write and a write through a field or an index are places the
+   * statement reader names itself, and are not read here.
+   */
+  private assignmentNameAt(from = this.position): string | null {
+    const target = this.tokens[from];
+    if (target === undefined || target.kind !== "ident") return null;
+    const operator = this.tokens[from + 1];
+    if (operator === undefined || operator.kind !== "punct") return null;
+    if (operator.text !== "=" && operator.text !== "??=" && !(operator.text in COMPOUND_OPERATORS)) return null;
+    return target.text;
+  }
+
+  /**
+   * A whole assignment written where a value is expected.
+   *
+   * An assignment is a statement, and an expression answers no statement. Where
+   * the whole value *is* the assignment — the concise body of an arrow, which is
+   * the return the source wrote without the word — the statement runs and the
+   * name it wrote is the value. `() => (count ??= next())` is that shape: the
+   * parentheses are the writer's, and what the value holds is the name.
+   *
+   * The parentheses are read only where they close before the body ends, so a
+   * value that merely starts with an assignment — a call's first argument —
+   * is not this shape and is read as the source wrote it.
+   */
+  private readWholeAssignment(): { statement: Statement; value: Expression } | null {
+    const start = this.position;
+    const wrapped = this.at("(");
+    if (wrapped) {
+      const close = this.matchingToken(this.position, "(", ")");
+      if (close < 0) return null;
+      const after = this.tokens[close + 1];
+      const ends = after === undefined || after.kind === "end" || after.text === "," || after.text === ")" || after.text === ";" || after.text === "}";
+      if (!ends) return null;
+      this.next();
+    }
+    const name = this.assignmentNameAt();
+    if (name === null) {
+      this.position = start;
+      return null;
+    }
+    const statement = this.readAssignment();
+    if (statement === null) {
+      this.position = start;
+      return null;
+    }
+    if (wrapped) this.expect(")");
+    return { statement, value: { k: "ident", name } };
+  }
+
+  /**
    * The arguments of a call, from the `(` the parser is at to its `)`.
    *
    * `expected` is the type each argument is held at, and `callback` is the
@@ -10195,6 +10249,15 @@ class TypeScriptParser {
     });
     const body: Statement[] = this.readReturning(stated, () => {
       if (this.at("{")) return [...prelude, ...this.readBlock()];
+      // A concise body that is a whole assignment is the write and the value it
+      // wrote: `() => (count ??= next())` runs the write and answers `count`.
+      // A parenthesised form is the same value, and the parentheses are the
+      // writer's. It is read before the body as an expression, because an
+      // assignment is a statement here.
+      const assigned = this.readWholeAssignment();
+      if (assigned !== null) {
+        return [...prelude, assigned.statement, { kind: "result" as const, value: assigned.value, line }];
+      }
       // A concise body is the return the source wrote without the word, so an
       // empty list it answers is built at the type the arrow declares.
       return [...prelude, { kind: "result" as const, value: this.readAt(stated, () => this.readExpression(), statedShape), line }];

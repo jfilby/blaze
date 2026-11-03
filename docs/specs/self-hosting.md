@@ -866,6 +866,24 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bm. An arrow's concise body may be the assignment it writes
+
+`const backend = (): AiBackend => (backend ??= backendOf());` — `codegen.ts`
+writes it — is an arrow whose concise body is a whole assignment. A concise body
+is read as an expression, and an assignment is a statement here, so the reader
+stopped at `??=` with `expected ")"`.
+
+A concise body is the return the source wrote without the word, and an
+assignment written as a whole value is the write and the value it wrote: the
+body is the statement, and what it answers is the name. The parenthesised form
+is the same value and the parentheses are the writer's, so both are read. The
+parentheses are only read as this shape where they close at the end of the body,
+so a value that merely starts with an assignment — a call's first argument — is
+still read as the source wrote it. `??=` keeps its short circuit: it lowers to
+`x = x ?? value`, so the value is not computed where `x` holds one.
+
+This took the total from 429 to 428.
+
 ### 4bl. A value pushed into a list is read at the element it holds
 
 `list.push(value)` reads every value at no type at all, so a value that states
@@ -1630,7 +1648,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-429 refusals over 94 sources, 29 of them read whole. The largest buckets, in
+428 refusals over 94 sources, 29 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1705,6 +1723,7 @@ What was closed this session, and what each was worth:
 | a collection allocation's trailing comma | 437 → 433 |
 | hasOwnProperty over an object's names | 433 → 430 |
 | a pushed value read at the element the list holds | 430 → 429 |
+| an arrow's concise body as an assignment | 429 → 428 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

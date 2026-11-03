@@ -23,6 +23,32 @@ function contractOfExport(source: string, name: string): FunctionContract {
 
 const typescript = frontendFor("typescript");
 
+test("an arrow's concise body may be the assignment it writes", () => {
+  // `() => (current ??= "none")` is the write and the value it wrote: the
+  // parentheses are the writer's, the body is the assignment, and the value is
+  // the name. The write is the `??` the operator names, so the value is only
+  // computed where the name holds none. An assignment is a statement here, so
+  // the body reader answers the statement and the name it wrote.
+  const body = analyzedBody(
+    [
+      "export function f(name: string | undefined): string {",
+      "  let current: string | undefined = name;",
+      '  const get = (): string => (current ??= "none");',
+      "  return get() + get() + current;",
+      "}",
+      "",
+    ].join("\n"),
+    "__closure_module_0",
+  ) as { kind: string; value?: { k?: string; op?: string } }[];
+  assert.equal(body.length, 2, "the write and the value it answers");
+  const write = body[0] as { kind: string; value?: { k?: string; op?: string } };
+  assert.ok(write !== undefined, "the body writes a name");
+  assert.ok(write.kind === "assign" || write.kind === "indexAssign", `the body writes the name: ${write.kind}`);
+  assert.equal(write.value?.k, "binary");
+  assert.equal(write.value?.op, "??", "the value is computed only where the name holds none");
+  assert.equal(body[1]?.kind, "result", "what the body answers is the name it wrote");
+});
+
 /** The statements one function of a module body was lowered to. */
 function analyzedBody(source: string, name: string): unknown[] {
   const analysis = typescript.analyze(source, "module.ts");

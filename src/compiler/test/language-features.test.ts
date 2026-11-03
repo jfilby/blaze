@@ -3099,6 +3099,27 @@ test("a push of several values keeps every element in the order it was written",
   assert.equal(output.trim(), "3abc392");
 });
 
+test("an arrow's concise body may be the assignment it writes", async () => {
+  // `() => (current ??= "none")` runs the write and answers the name, and
+  // `() => total += n` is the same shape with the operator it wrote. The
+  // parentheses are the writer's; the write is the `??` the operator names, so
+  // the value is only computed where the name holds none.
+  const output = await agreesWithNode([
+    "export function run(name: string | undefined): string {",
+    "  let current: string | undefined = name;",
+    '  const get = (): string => (current ??= "none");',
+    "  let total = 0;",
+    "  const add = (n: number): number => total += n;",
+    "  const set = (n: number): number => total = n;",
+    "  add(2); add(3); set(10);",
+    "  return `${get()} ${get()} ${current} ${total}`;",
+    "}",
+    'console.log(run("a"), run(undefined));',
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "a a a 10 none none none 10");
+});
+
 test("a push of an empty list writes a list of the element the list holds", async () => {
   // `rows.push([])` writes an empty list into a list of lists. The value is read
   // at the element the outer list holds, so it is a list of texts rather than a
