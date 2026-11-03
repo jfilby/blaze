@@ -221,46 +221,12 @@ function skipTypeAngles(tokens: readonly Token[], open: number, limit: number): 
 }
 
 /**
- * The type an annotation names, or `"any"` where none is written.
- *
- * The name is more than the first identifier: `number[]` says the field is a
- * list and `Array<Point>` names the element inside the brackets. Both are the
- * text `typeForName` reads, so the suffix and the type arguments travel with
- * the name rather than being cut off where the identifier ends.
- */
-function typeNameAt(tokens: readonly Token[], index: number): string {
-  let token = tokens[index];
-  // `readonly T[]` is the list `T[]` is, and the word says nothing a type
-  // reader needs to see beside it.
-  if (token?.kind === "ident" && token.text === "readonly" && tokens[index + 1]?.kind === "ident") {
-    index += 1;
-    token = tokens[index];
-  }
-  if (token === undefined || token.kind !== "ident") return "any";
-  let name = token.text;
-  let at = index + 1;
-  if (isPunct(tokens[at], "<")) {
-    const end = skipAngles(tokens, at);
-    if (end > at) {
-      name += tokens.slice(at, end).map((one) => one.text).join("");
-      at = end;
-    }
-  }
-  while (isPunct(tokens[at], "[") && isPunct(tokens[at + 1], "]")) {
-    name += "[]";
-    at += 2;
-  }
-  return name;
-}
-
-/**
  * The text of a type annotation from `from` to the token that ends it.
  *
  * A member may name its type in any form the language writes: `readonly Row[]`,
  * a union in parentheses, or an object type whose own `;` separates fields. The
  * text is what the type reader parses, so it travels whole rather than being
- * cut at the first name; `typeNameAt` answers only a leading name and its
- * suffix, which is enough for the annotations written as one name.
+ * cut at the first name.
  */
 function annotationType(
   tokens: readonly Token[],
@@ -466,12 +432,14 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       index = params.end;
       let returnTypeName = "any";
       if (isPunct(tokens[index], ":")) {
-        returnTypeName = typeNameAt(tokens, index + 1);
+        const from = index + 1;
         // A result written as an object type, `{ line: number; text: string }`,
         // starts with the same brace a method body does, and a union of them,
         // or the object an `is` predicate names, has more than one. The body is
-        // the brace the type does not hold.
-        index = bodyAfterReturnType(tokens, index + 1, close);
+        // the brace the type does not hold, and what is written before it is
+        // the type — in every form the source writes one, not only a name.
+        index = bodyAfterReturnType(tokens, from, close);
+        returnTypeName = typeText(tokens, from, index);
       }
       while (index < close && !isPunct(tokens[index], "{") && !isPunct(tokens[index], ";")) index += 1;
       let bodyStart = index;

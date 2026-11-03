@@ -10806,6 +10806,16 @@ class TypeScriptParser {
     if (returnTypeName.trim() === "" || returnTypeName.trim() === "void") return call;
     const type = this.typeForName(returnTypeName, line);
     if (type.kind !== "void") this.expressionTypes.set(call, type);
+    // What the declaration writes for its result is the fields a member chain
+    // written after the call reads. The contract's spelling of a record is the
+    // opaque reference, so the shape is kept beside the type: `{ ...made }`
+    // copies the fields `make()` said it answers.
+    try {
+      const shape = resolveTypeName(this.typeTable, returnTypeName.trim());
+      if (shape.kind !== "any") this.expressionShapes.set(call, shape);
+    } catch {
+      // A return type this read cannot resolve names nothing a shape can say.
+    }
     return call;
   }
 

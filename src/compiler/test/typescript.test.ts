@@ -3011,3 +3011,34 @@ test("an inline object type keeps a field a modifier is written in front of", ()
   assert.match(ir, /field applied/, "the field the modifier is written in front of is laid out");
   assert.match(ir, /load_field\[[^\]]+\] local\[[^\]]+\] outcome [^\]]+ applied/, "and the spread reads it");
 });
+
+test("a method's result is the type its signature writes, whatever form it writes", () => {
+  // A class member's return type was read as one leading name: a result written
+  // as an object type — `make(): { name: string; size: number }` — became
+  // `any`, so `{ ...factory.make() }` had no fields to copy and the member
+  // chain after the call asked a value nothing typed. The annotation is read
+  // as the text it is, and the shape it names is kept beside the call.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "class Factory {",
+        "  make(): { name: string; size: number } {",
+        '    return { name: "x", size: 1 };',
+        "  }",
+        "}",
+        "export function copy(factory: Factory): number {",
+        "  const made = factory.make();",
+        "  const again = { ...made };",
+        "  return again.size;",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "copy",
+  );
+  assert.match(ir, /field name/, "the result's fields are laid out");
+  assert.match(ir, /load_field\[[^\]]+\] local\[[^\]]+\] made [^\]]+ name/, "the spread copies them");
+});

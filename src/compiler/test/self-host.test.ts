@@ -78,9 +78,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * 945, and keeping the signatures an exported declaration offers when its own
  * module is refused lowered it to 916: a file that calls one is read against
  * the parameters and result the declaration writes. Reading a `readonly` field
- * of an inline object type as the field it names lowered it to 903.
+ * of an inline object type as the field it names lowered it to 903, and the
+ * type a method writes for its result to 857.
  */
-const REFUSAL_BUDGET = 903;
+const REFUSAL_BUDGET = 857;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();
