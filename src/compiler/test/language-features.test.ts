@@ -3099,6 +3099,26 @@ test("a push of several values keeps every element in the order it was written",
   assert.equal(output.trim(), "3abc392");
 });
 
+test("a push of an empty list writes a list of the element the list holds", async () => {
+  // `rows.push([])` writes an empty list into a list of lists. The value is read
+  // at the element the outer list holds, so it is a list of texts rather than a
+  // list nothing says the element of, and the write is the helper the push
+  // lowers to.
+  const output = await agreesWithNode([
+    "class Rows {",
+    "  private rows: string[][] = [];",
+    "  add(count: number): number {",
+    "    for (let i = 0; i < count; i++) this.rows.push([]);",
+    "    return this.rows.length;",
+    "  }",
+    "}",
+    "const rows = new Rows();",
+    "console.log(rows.add(3));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3");
+});
+
 test("a text split answers the fields the separator cuts", async () => {
   // The separator may be absent, may end the text, and may be several
   // characters; an empty one cuts the text into its characters.

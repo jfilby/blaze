@@ -2336,6 +2336,30 @@ test("a push of several values is one function of the file with every value", ()
   );
 });
 
+test("a value pushed into a list is read at the element the list holds", () => {
+  // `rows.push([])` writes an empty list into a list of lists, so the value is
+  // a list of the element the outer list holds rather than a list nothing says
+  // the element of. The empty list is built at that type and written by the
+  // helper the push lowers to.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "export function f(rows: string[][]): number {",
+        "  rows.push([]);",
+        "  return rows.length;",
+        "}",
+        'console.log("run");',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "f",
+  );
+  assert.match(ir, /arrayConcat/);
+  assert.match(ir, /buffer\[\[text; 0\]\] element\[text\]/);
+});
+
 test("a text split is a function of the file that walks the text", () => {
   // A text knows where a needle is and what lies between two indexes, and a
   // split is those two questions asked until the text ends: the frontend

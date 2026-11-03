@@ -4285,6 +4285,21 @@ class TypeScriptParser {
     return this.shapeOfNamedType(element);
   }
 
+  /**
+   * The element a list method writes into the list.
+   *
+   * `list.push(value)` and `list.unshift(value)` write their values into the
+   * list, so each value is read at the element the list holds: an empty list
+   * written there is a list of that element, and an object written there is
+   * read at the element's own shape. A call on a value that is not a list
+   * states nothing, and the argument is read as the source wrote it.
+   */
+  private writtenElementType(receiver: Expression, method: string): TypeExpr | null {
+    if (method !== "push" && method !== "unshift") return null;
+    const sequence = this.valueTypeOf(receiver);
+    return sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+  }
+
   /** The types a method's written arguments are read at, when a class answers it. */
   private expectedMethodArguments(receiver: Expression, method: string): readonly TypeExpr[] {
     // A map or a set answers the method itself, and its arguments are not the
@@ -9394,6 +9409,7 @@ class TypeScriptParser {
             callback,
             target.field === "push" || target.field === "splice",
             waitsForLink,
+            this.writtenElementType(target.base, target.field),
           );
           const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
           const receiver = target.base;
@@ -9788,20 +9804,23 @@ class TypeScriptParser {
    * collection method that walks the elements of its receiver. `spreadsAllowed`
    * says whether the call can use a spread argument; one written elsewhere is
    * refused where it is, because the arguments it stands for are not known
-   * until the program runs.
+   * until the program runs. `rest` is the type every argument of an arity the
+   * call does not state is held at, which is what a list's own method says of
+   * the values written into it: `list.push(value)` writes an element.
    */
   private readCallArguments(
     expected: readonly TypeExpr[] = [],
     callback: readonly ArrowParameterType[] | null = null,
     spreadsAllowed = false,
     callbackWaitsForLink = false,
+    rest: TypeExpr | null = null,
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
     const spreads: boolean[] = [];
     let spread = false;
     while (!this.at(")") && this.peek().kind !== "end") {
-      const type = expected[args.length] ?? null;
+      const type = expected[args.length] ?? rest;
       if (this.accept("...")) {
         if (!spreadsAllowed) {
           this.report(

@@ -866,6 +866,21 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4bl. A value pushed into a list is read at the element it holds
+
+`list.push(value)` reads every value at no type at all, so a value that states
+nothing — `this.scopes.push([])` — was an empty list with no element. The list
+being pushed into does say what an element is, and the value written is one: the
+argument is now read at the list's element type, so `rows.push([])` is an empty
+list of texts when `rows` is a list of lists of texts, and an object written
+there is read at the element's shape. `unshift` writes the same way. The change
+is a fourth argument to `readCallArguments`, `rest`, for the type of every
+argument the call does not state positionally.
+
+This took the total from 430 to 429; `toolchain/names.ts` no longer refuses the
+empty list a scope is opened with, though its next construct — a push through an
+index — is a separate gap.
+
 ### 4bk. hasOwnProperty over an object the file wrote is its names
 
 `Object.prototype.hasOwnProperty.call(record, key)` was read for a record
@@ -1615,7 +1630,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-430 refusals over 94 sources, 29 of them read whole. The largest buckets, in
+429 refusals over 94 sources, 29 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
@@ -1689,6 +1704,7 @@ What was closed this session, and what each was worth:
 | an object type inside a type argument | 441 → 437 |
 | a collection allocation's trailing comma | 437 → 433 |
 | hasOwnProperty over an object's names | 433 → 430 |
+| a pushed value read at the element the list holds | 430 → 429 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
