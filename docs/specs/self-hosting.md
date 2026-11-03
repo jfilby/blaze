@@ -58,10 +58,10 @@ The compiler is 94 non-test, non-benchmark, non-scratch TypeScript sources, abou
 erased by the frontend rather than modelled by it. That is the cheapest large
 slice available, and it is why the type layer is first below.
 
-The gap is measured, not guessed: `test/self-host.test.ts` reads every source and
-holds the refusal count as a budget. When the report was added, 1 of the 91
-sources (`semantics/module.ts`, which is types alone) was read and 6339
-constructs were refused. The type-only slice below lowered the count to 6248.
+The gap is measured, not guessed: `test/self-host.test.ts` reads the sources as
+the module graph a build reads and holds the refusal count as a budget. When the
+report was added, 1 of the 91 sources (`semantics/module.ts`, which is types
+alone) was read and 6339 constructs were refused. The type-only slice below lowered the count to 6248.
 The platform boundary added two sources that are values and re-exports, which
 raised it to 6313: the compiler is now 93 sources, and 1 is read. Object
 shorthand and the text methods lowered it to 5856, and reading a module's own
@@ -1690,38 +1690,45 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-421 refusals over 94 sources, 29 of them read whole. The largest buckets, in
-order, and what each of them is (the counts are the messages the frontend
-listed with its cut raised, since a file with more than two dozen refusals lists
-only the first two dozen):
+2218 refusals over 95 sources, 11 of them read whole. The report now reads the
+module graph a build reads — every source is a root, every project import is
+resolved, and a file whose imports bind a type, a value or a signature is read
+again with them — so the number is what survives the link rather than what
+waited for one. The buckets the standalone read used to own are gone:
+`new Map(scope.slots)`, `Object.values(file.functions)` and an empty list in a
+field another module types are read whole.
+
+The number is five times larger because the standalone read was counting with a
+hand over the rest of the file: the first imported type it could not resolve set
+the deferral, and every construct after it that would have needed the link was
+skipped rather than reported. The linked read binds those types and reports what
+is left, so the old 421 measured how far a parse got, not what is missing. The
+largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 46 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field of an interface, a map value, or a list of lists. Most of it is the standalone read, which does not link the interface |
-| 14 | `a Map is built from entries` | the entries a map is built from — a list of pairs, and a pair is a list of lists — or a copy of a map whose type the standalone read does not hold |
-| 14 | `expected a parameter name` | a member of a class read as a parameter pattern, and `semantics/python.ts`'s own grammar |
-| 13 | `"map" is not a method this program compiles` | a receiver whose type is a list an imported declaration names; the linked read types it |
-| 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
-| 10 | `Object.values` of a constant object, 8 `Object.keys`, 9 entries, 10 spreads | a record or a map whose type the standalone read does not hold; the linked read types it |
-| 9 | `a program allocates a typed array, not "Date"` | `new Date()` as a program value |
-| 9 | `expected ")"` | a cascade: a construct refused inside a call's arguments leaves the rest of the call to be read as statements |
-| 8 | `a map here holds a slice<ref<any>>` | a list in a dictionary, which needs a list handle that carries its length |
-| 8 | `a spread argument is not part of the call subset` | `Math.max(...xs)`: a list spread into a call whose parameters the file does not declare |
+| 94 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`) or a spread of a value whose record the read does not hold |
+| 90 | `"map" is not a method this program compiles` | a receiver the linked read still cannot type — a list an interface names, or a value another refused file writes — so the walking method has no element type (§4e) |
+| 59 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
+| 73 | `"find"`, `"read"`, `"some"`, `"filter"`, `"every"`, `"forEach"` as methods of nothing | the same receiver problem as `"map"` |
+| 26 | `"push" is not a method this program compiles` | the same receiver, written as a push |
+| 18 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
+| 17 | `in` asks a value whose fields the type does not write down | the tag a union of shapes needs (§4k) |
+| 15 | `"startsWith"`, 14 `"every"`, 13 `"forEach"`, 11 `"trim"`, 10 `"includes"`, 9 `"join"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
+| 9 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
+| 8 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
 
-A refusal listed here is not necessarily a construct the frontend cannot read:
-a file is read standalone, so a type another file declares is not in the table,
-and the marks of the linked read — the bucket of `"map"`, of `Object.values`,
-of an empty list in an imported interface's field — are the standalone read's.
-The linked read is the build's, and it is what the value-model slices below
-have to be measured against once the report can read the graph.
+A refusal listed here is still not always a construct the frontend cannot read:
+a file is linked against the declarations of other files, and a file that is
+itself refused offers only what its partial read built. The queue is a queue, not
+a verdict — the per-file delta is read before a slice is accepted.
 
 The value-model slices still open, in the order they block the self-build:
 
 - **An empty list in a field.** `{ children: [] }` needs the element type the
-  field's interface states, and the frontend asks the literal for it before the
-  interface is linked. It is the largest bucket left and the last half of the
-  two-layouts item below; a literal an interface types would also read whole in
-  the standalone report.
+  field's interface states, and the linked read still refuses the literal where
+  the interface, or the field's use, does not name it. It is the largest
+  single-construct bucket left.
 - **An absent value.** A default parameter and an optional parameter need a
   value that is not the zero of the type. `function optionNumber(value: string |
   undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
@@ -1740,7 +1747,8 @@ The value-model slices still open, in the order they block the self-build:
   (§ "A list field is one field whatever the literal held"), so two literals of
   one interface are one layout whatever they hold. What is left of this item is
   the *empty* literal above: the element type of `[]` in a field is the
-  interface's to state, and the frontend refuses before it has the interface.
+  interface's to state, and the linked read refuses it before the interface is
+  bound.
 
 What was closed this session, and what each was worth:
 
@@ -1800,11 +1808,11 @@ walked with `flatMap` and with callbacks that are not arrows yet. It is a real
 bug and it will pay once those methods are read.
 
 **What the entry still needs.** `cli.ts` is the first file of the self-build and
-is read as a program. It now refuses four constructs, and they are the entry's
-own: a default parameter on a program function, an array destructuring
-declaration with a rest element, `process.stdout.write`, and `switch`. The
-default parameter is the absent value above; the other three are program grammar
-and their own slice.
+is read as a program. The linked read refuses ten constructs: seven
+`process.stdout` writes — the error stream is the runtime's own — two field names
+in an object literal, and the name of a declared value. The last three are
+program grammar and their own slice; the entry's default parameter and its
+`switch` are read now.
 
 ### The roadmap
 
@@ -1817,10 +1825,19 @@ value and module forms those sources use and the next slice has to carry.
 
 ### 0. Make the gap a number
 
-The report is in place: `test/self-host-gap.ts` reads every compiler source and
-groups the refusals by the message the frontend writes, and
+The report is in place: `test/self-host-gap.ts` reads the compiler's sources as
+the module graph a build reads — every source is a root, every project import is
+resolved, and a file whose imports bind a type, a value or a signature is read
+again with them — and groups the refusals by the message the frontend writes.
 `test/self-host.test.ts` holds the total as a budget. A change may not raise it,
 and a slice must lower it.
+
+A source is still a root of its own, so a file no import reaches is measured:
+the graph is the whole tree, not one binary's closure. A build reads strictly —
+it stops at the first file it refuses — and the report reads tolerantly, so one
+refused file does not hide every file that imports it. An import the tree does
+not hold, such as a package or a host module, is left unbound: the report asks
+what the frontend reads of a file, not which packages the tree depends on.
 
 It covers `src/compiler` only. The tests, benchmarks and scratch programs are not
 part of the compiler binary and are not compiled into it.

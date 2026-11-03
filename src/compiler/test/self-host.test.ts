@@ -3,9 +3,10 @@
  *
  * A compiler that compiles itself starts with its own tree: every source that
  * makes the binary has to be a source the frontend reads. This test reads them
- * all and reports what is still outside the subset, so a slice that teaches the
- * frontend one more construct shows up as a lower number rather than as a
- * feeling that progress was made.
+ * as the module graph a build reads — every file linked with the types, values
+ * and signatures its imports bind — and reports what is still outside the
+ * subset, so a slice that teaches the frontend one more construct shows up as a
+ * lower number rather than as a feeling that progress was made.
  *
  * The budget is a ratchet, not a target. It is lowered by the change that earns
  * the lowering, and a change that adds a construct to the compiler raises it in
@@ -52,9 +53,18 @@ import { selfHostGap } from "./self-host-gap.ts";
  * is real work. Lower it with every slice; raise it only when the measurement
  * changes which parser reads a body, or when the compiler itself grows a
  * construct the frontend has not learned yet. A declared function read as the
- * value a collection method takes lowered it to 421.
+ * value a collection method takes lowered it to 421. Reading the linked module
+ * graph — the same two-pass read a build makes, with every file of the tree a
+ * root — lowered the buckets that were only waiting for an import: a map built
+ * from a field another file types, `Object.values` of a value another file
+ * exports, and `new Date()` all read whole once the graph links them. It also
+ * raised the whole to 2218, because an unlinked read stops counting at the
+ * first imported type it cannot resolve: everything after that type was
+ * deferred, so 421 measured how far a parse got rather than what is missing.
+ * The linked read binds those types and reports what survives, and that is the
+ * number the queue is now spent against.
  */
-const REFUSAL_BUDGET = 421;
+const REFUSAL_BUDGET = 2218;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

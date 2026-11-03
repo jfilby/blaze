@@ -25,6 +25,23 @@ export interface Diagnostic {
 const MAXIMUM_DIAGNOSTICS = 24;
 
 /**
+ * The refusal of one file, from the constructs it earned and the whole number
+ * it earned.
+ *
+ * A read that answers its refusals rather than throwing them still needs the
+ * same error a build writes, so the message is built here once: the count is
+ * the whole number, and the lines are the ones that survived the cut.
+ */
+export function refusalError(path: string, refused: readonly Diagnostic[], count: number): CompilerError {
+  const found = refused.map((entry) => `  line ${entry.line}: ${entry.message}\n    ${entry.detail}`);
+  if (count > refused.length) found.push(`  and ${count - refused.length} more`);
+  return frontendError(
+    `${count} construct${count === 1 ? "" : "s"} of ${path} ${count === 1 ? "is" : "are"} outside the subset the compiler reads`,
+    found.join("\n"),
+  );
+}
+
+/**
  * Every construct of one file that is outside the subset, gathered as the
  * parser reads on.
  */
@@ -40,13 +57,13 @@ export class Diagnostics {
     this.dropped += 1;
   }
 
+  /** How many constructs were refused, including the ones cut from the list. */
+  get count(): number {
+    return this.entries.length + this.dropped;
+  }
+
   throwIfAny(path: string): void {
     if (this.entries.length === 0) return;
-    const found = this.entries.map((entry) => `  line ${entry.line}: ${entry.message}\n    ${entry.detail}`);
-    if (this.dropped > 0) found.push(`  and ${this.dropped} more`);
-    throw frontendError(
-      `${this.entries.length + this.dropped} construct${this.entries.length + this.dropped === 1 ? "" : "s"} of ${path} ${this.entries.length + this.dropped === 1 ? "is" : "are"} outside the subset the compiler reads`,
-      found.join("\n"),
-    );
+    throw refusalError(path, this.entries, this.count);
   }
 }

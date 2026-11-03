@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
 import { pythonFrontend } from "../semantics/python.ts";
+import { readTypeScriptModule } from "../semantics/typescript.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { contractOf, diagnostic, irOf, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
@@ -2827,4 +2828,39 @@ test("a name spelled type holds a value like any other name", () => {
   ].join("\n");
   const body = JSON.stringify(analyzedBody(source, "read"));
   assert.match(body, /"name":"type"/);
+});
+
+test("a refused read still answers the imports it did read", () => {
+  // A measurement of a tree needs what a refused file did say: its imports are
+  // the imports it wrote, and the rest of the graph resolves against them.
+  // `analyze` is this read plus the refusal it answered.
+  const source = [
+    'import { TABLE } from "./lib.ts";',
+    "",
+    "export function kept(): number {",
+    "  let total = 0;",
+    "  for (const value of Object.values(TABLE)) total += value;",
+    "  return total;",
+    "}",
+    "",
+    "export function refused(): number {",
+    "  return new Date().getTime();",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts");
+  assert.equal(read.analysis.path, "main.ts");
+  assert.deepEqual(
+    read.analysis.imports.map((entry) => [entry.specifier, entry.names]),
+    [["./lib.ts", ["TABLE"]]],
+    "the imports are the imports the file wrote, whatever else it refused",
+  );
+  assert.ok(read.refused.length > 0, "the file is refused");
+  assert.ok(read.count >= read.refused.length, "the count is the whole number, not the listed one");
+
+  // The strict read is the same read followed by the refusal it answered.
+  assert.throws(
+    () => frontendFor("typescript").analyze(source, "main.ts"),
+    (error: unknown) => error instanceof CompilerError && error.message.includes(`${read.count} constructs`),
+  );
 });

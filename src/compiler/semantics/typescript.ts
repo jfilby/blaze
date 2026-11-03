@@ -67,7 +67,7 @@ import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
 export { ARGV, ARGV_LENGTH };
 import { assembleContract, type AccessRange } from "./contract-build.ts";
 import { isCompilerError } from "../core/errors.ts";
-import { Diagnostics, frontendError, type Diagnostic } from "./diagnostics.ts";
+import { Diagnostics, frontendError, refusalError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport, ModuleTypeBinding, ModuleTypeImport } from "./module.ts";
 import { parseProgramBody } from "./typescript-program.ts";
 import { lowerWideArithmetic } from "./typescript-wide-lowering.ts";
@@ -14477,79 +14477,103 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
   ];
 }
 
-export const typeScriptFrontend: Frontend = {
-  analyze(source, path, entry = true, context?: unknown) {
-    if (typeof source !== "string" || source.trim() === "") {
-      throw frontendError(`module ${path} is empty`);
-    }
-    // The lowering is the arithmetic of the secp256k1 benchmark's own curve,
-    // and a source that does not declare that curve is compiled exactly as it
-    // was written.
-    if (isSecp256k1Source(source)) {
-      source = lowerWideArithmetic(source);
-    }
-    // The Promise executor's resolve/reject are the promise the executor runs
-    // for, and the compiler reads the names the source wrote them by
-    // (`resolve`, `reject`, `onFulfilled`, `onRejected`) as the ones that
-    // settle it, so the executor's parameters are not written out again.
-    const diagnostics = new Diagnostics();
-    // Class declarations are read once, up front: their constructor and methods
-    // are functions of the module, and every use of a class in a function or in
-    // the program body is lowered against the same table.
-    const tokens = tokenize(source);
-    const wideBigint = fileHoldsWideBigint(tokens);
-    const classTable = scanClasses(tokens);
-    const scanned = scanConstants(tokens);
-    // The interfaces and aliases are read before the bodies that name them.
-    // A file read again after its imports are bound keeps the table the first
-    // read built, so the declarations the importing files already hold keep
-    // resolving against it.
-    const shared = (context as { table?: TypeTable } | undefined)?.table;
-    const typeTable = shared ?? scanTypeTable(tokens);
-    typeTable.classes = classTable.names;
-    // The values the imports of this file bind, once the graph has read the
-    // modules that write them. They are read in place of the names that hold
-    // them, exactly as the file's own constants are.
-    const imported = (context as { values?: ReadonlyMap<string, ConstantInfo> } | undefined)?.values;
-    if (imported !== undefined) {
-      for (const [name, constant] of imported) scanned.constants.set(name, constant);
-    }
-    const parser = new TypeScriptParser(
-      withoutClasses(tokens, classTable),
-      path,
-      diagnostics,
-      classTable,
-      tokens,
-      scanned.constants,
-      scanned.state,
-      scanned.shapes,
-      typeTable,
-      importedNames(tokens),
-      importedRenames(tokens),
-    );
-    parser.wideBigint = wideBigint;
-    const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
-    if (linkedFunctions !== undefined) {
-      for (const [linked, signature] of linkedFunctions) parser.seedFunction(linked, signature);
-    }
-    // The read the graph makes after binding says every name its imports bind;
-    // a read that stands alone waits for a link that may never come.
-    parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
-    const analysis = parser.parseModule(path, entry);
-    // A file read as a program has its whole text readable as statements, so a
-    // nested function inside a function that the module parser stopped for is
-    // read by the one parser whose grammar carries that shape. The module
-    // parse's nested-function entries are still the answer if that fails too.
-    if (parser.nestedFunction) {
-      const fromStatements = tokensAfterImports(parser["tokens"]);
-      const programDiagnostics = new Diagnostics();
-      try {
-        const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens));
-        if (programDiagnostics.entries.length === 0) {
-          // The class functions were lowered from declarations the program
-          // parser never sees, so they travel with the body: they are the
-          // constructors and methods the statements call.
-          return {
+/**
+ * What one read of a TypeScript module answers, whether or not it refused
+ * anything.
+ *
+ * `refused` is the part of the file the read could not read, and `count` is the
+ * whole number: the list is cut at the maximum the error states. The analysis is
+ * what the read did understand, which is what a linked read needs even from a
+ * file that refused something: its imports are still the imports it wrote.
+ */
+export interface TypeScriptRead {
+  analysis: ModuleAnalysis;
+  refused: readonly Diagnostic[];
+  count: number;
+}
+
+/**
+ * Reads one module, answering the refusals rather than throwing them.
+ *
+ * A build reads strictly — see `typeScriptFrontend.analyze` — because the first
+ * file it cannot read is the one it has to name. A measurement of a whole tree
+ * asks for this read so a refused file can still be discovered and linked: the
+ * constructs that were only waiting for an import are then counted as read, and
+ * the queue is the constructs that survive the link.
+ */
+export function readTypeScriptModule(source: string, path: string, entry = true, context?: unknown): TypeScriptRead {
+  if (typeof source !== "string" || source.trim() === "") {
+    throw frontendError(`module ${path} is empty`);
+  }
+  // The lowering is the arithmetic of the secp256k1 benchmark's own curve,
+  // and a source that does not declare that curve is compiled exactly as it
+  // was written.
+  if (isSecp256k1Source(source)) {
+    source = lowerWideArithmetic(source);
+  }
+  // The Promise executor's resolve/reject are the promise the executor runs
+  // for, and the compiler reads the names the source wrote them by
+  // (`resolve`, `reject`, `onFulfilled`, `onRejected`) as the ones that
+  // settle it, so the executor's parameters are not written out again.
+  const diagnostics = new Diagnostics();
+  // Class declarations are read once, up front: their constructor and methods
+  // are functions of the module, and every use of a class in a function or in
+  // the program body is lowered against the same table.
+  const tokens = tokenize(source);
+  const wideBigint = fileHoldsWideBigint(tokens);
+  const classTable = scanClasses(tokens);
+  const scanned = scanConstants(tokens);
+  // The interfaces and aliases are read before the bodies that name them.
+  // A file read again after its imports are bound keeps the table the first
+  // read built, so the declarations the importing files already hold keep
+  // resolving against it.
+  const shared = (context as { table?: TypeTable } | undefined)?.table;
+  const typeTable = shared ?? scanTypeTable(tokens);
+  typeTable.classes = classTable.names;
+  // The values the imports of this file bind, once the graph has read the
+  // modules that write them. They are read in place of the names that hold
+  // them, exactly as the file's own constants are.
+  const imported = (context as { values?: ReadonlyMap<string, ConstantInfo> } | undefined)?.values;
+  if (imported !== undefined) {
+    for (const [name, constant] of imported) scanned.constants.set(name, constant);
+  }
+  const parser = new TypeScriptParser(
+    withoutClasses(tokens, classTable),
+    path,
+    diagnostics,
+    classTable,
+    tokens,
+    scanned.constants,
+    scanned.state,
+    scanned.shapes,
+    typeTable,
+    importedNames(tokens),
+    importedRenames(tokens),
+  );
+  parser.wideBigint = wideBigint;
+  const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
+  if (linkedFunctions !== undefined) {
+    for (const [linked, signature] of linkedFunctions) parser.seedFunction(linked, signature);
+  }
+  // The read the graph makes after binding says every name its imports bind;
+  // a read that stands alone waits for a link that may never come.
+  parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
+  const analysis = parser.parseModule(path, entry);
+  // A file read as a program has its whole text readable as statements, so a
+  // nested function inside a function that the module parser stopped for is
+  // read by the one parser whose grammar carries that shape. The module
+  // parse's nested-function entries are still the answer if that fails too.
+  if (parser.nestedFunction) {
+    const fromStatements = tokensAfterImports(parser["tokens"]);
+    const programDiagnostics = new Diagnostics();
+    try {
+      const statements = parseProgramBody(fromStatements, path, programDiagnostics, classTable, importedNames(tokens));
+      if (programDiagnostics.entries.length === 0) {
+        // The class functions were lowered from declarations the program
+        // parser never sees, so they travel with the body: they are the
+        // constructors and methods the statements call.
+        return {
+          analysis: {
             path,
             imports: analysis.imports,
             typeImports: analysis.typeImports,
@@ -14558,18 +14582,29 @@ export const typeScriptFrontend: Frontend = {
             default: null,
             body: statements,
             wideBigint,
-          };
-        }
-      } catch {
-        // A program parse that cannot be a program keeps the module parse's
-        // own diagnostics, which name the refusal where it is.
+          },
+          // The program parser read the whole text, so the module parse's
+          // refusals are the attempt it replaced and not the file's.
+          refused: [],
+          count: 0,
+        };
       }
+    } catch {
+      // A program parse that cannot be a program keeps the module parse's
+      // own diagnostics, which name the refusal where it is.
     }
-    // A file is read to the end whatever it holds, so a build names every
-    // construct outside the subset instead of the first one.
-    diagnostics.throwIfAny(path);
-    analysis.wideBigint = wideBigint;
-    return analysis;
+  }
+  // A file is read to the end whatever it holds, so a build names every
+  // construct outside the subset instead of the first one.
+  analysis.wideBigint = wideBigint;
+  return { analysis, refused: [...diagnostics.entries], count: diagnostics.count };
+}
+
+export const typeScriptFrontend: Frontend = {
+  analyze(source, path, entry = true, context?: unknown) {
+    const read = readTypeScriptModule(source, path, entry, context);
+    if (read.refused.length > 0) throw refusalError(path, read.refused, read.count);
+    return read.analysis;
   },
 
   contractFor(analysis, declared, input) {
