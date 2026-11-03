@@ -223,11 +223,11 @@ test("an arrow function's body is read", () => {
 
 test("a statement a program cannot run is refused", () => {
   assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
-  // A refused statement names the keyword that was written and what to write
-  // instead, so a `switch` is not reported as the token the parser lost.
-  const refused = diagnostic(() => bodyOf("switch (total) {\n}\n"));
-  assert.match(refused, /"switch" is not part of a program/);
-  assert.match(refused, /if \(x === 1\)/);
+  // A switch is the chain of comparisons its cases are, so the one form it
+  // cannot say is a `break` that leaves it from inside a nested statement.
+  const refused = diagnostic(() => bodyOf("switch (1) { case 1: if (1 > 0) { break; } }\n"));
+  assert.match(refused, /a switch arm leaves the switch from inside a nested statement/);
+  assert.match(refused, /a break of the switch is the end of an arm/);
 });
 
 test("an array written out is the array a typed array of its values would be", () => {
