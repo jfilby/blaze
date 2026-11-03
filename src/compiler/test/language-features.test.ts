@@ -791,6 +791,38 @@ test("two arrows append to two captured lists", async () => {
   }
 });
 
+test("shift takes the first element off a list and unshift puts one in front", async () => {
+  // The list a name holds changes, so the element is read before the change and
+  // the change is written beside the statement the call was read in: a shift
+  // answers the element it took out, and an unshift answers the length.
+  const source = [
+    "class Queue {",
+    "  items: number[] = [];",
+    "  add(n: number): void { this.items.push(n); }",
+    "  take(): number { return this.items.shift(); }",
+    "  front(n: number): void { this.items.unshift(n); }",
+    "}",
+    "export function demo(): string {",
+    "  const xs: number[] = [1, 2, 3];",
+    "  const first = xs.shift();",
+    "  xs.unshift(9);",
+    "  const length = xs.unshift(8, 7);",
+    "  const q = new Queue();",
+    "  q.add(1);",
+    "  q.add(2);",
+    "  q.front(0);",
+    "  const taken = q.take();",
+    "  return `${first} ${xs.join(`,`)} ${length} ${taken} ${q.items.length}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 8,7,9,2,3 5 0 2", `the ${backend} backend changes the ends of the list`);
+  }
+});
+
 test("a list the parser built is a list of the type it holds", async () => {
   // `Object.keys(TABLE)` is a list the parser builds from the names the file
   // wrote. Its element type is written as a type and not as a name the table

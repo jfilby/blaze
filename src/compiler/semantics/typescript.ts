@@ -9235,6 +9235,17 @@ class TypeScriptParser {
           // and the frontend writes the assignment that keeps it. A field of
           // an object is a place the same way, and the write goes back into the
           // field the source named.
+          if (
+            (target.field === "shift" || target.field === "unshift") &&
+            (receiver.k === "ident" || (receiver.k === "member" && receiver.base.k === "ident")) &&
+            (this.valueTypeOf(receiver).kind === "slice" || this.valueTypeOf(receiver).kind === "array")
+          ) {
+            const lowered = this.listFrontMethod(receiver, target.field, args, callLine);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           if (target.field === "push" || target.field === "pop") {
             let place: { target: string; base: string | null } | null =
               receiver.k === "ident"
@@ -10836,6 +10847,57 @@ class TypeScriptParser {
       : [...args];
     const helper = this.sequenceMethodHelper(method, element, extra.length, line);
     return { k: "call", name: helper.name, args: [receiver, ...extra] };
+  }
+
+  /**
+   * `a.shift()` and `a.unshift(x)`: the two ends of a list that change it.
+   *
+   * The list a name holds changes, so the value is read before the change and
+   * the change is written beside the statement it was read in: a shift answers
+   * the element it took out, and an unshift answers the length the list has
+   * afterwards. The change is not a value, so a call written for what it does
+   * writes the change and drops the answer.
+   */
+  private listFrontMethod(
+    receiver: Expression,
+    method: "shift" | "unshift",
+    args: readonly Expression[],
+    line: number,
+  ): Expression | null {
+    // The caller reads a name or a field of one, so the place is the receiver.
+    let written: { target: string; base: string | null } | null = null;
+    if (receiver.k === "ident") written = { target: receiver.name, base: null };
+    else if (receiver.k === "member" && receiver.base.k === "ident") written = { target: receiver.field, base: receiver.base.name };
+    if (written === null) return null;
+    const place: Expression = receiver;
+    const sequence = this.valueTypeOf(receiver);
+    const element = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : ANY_TYPE;
+    if (method === "shift") {
+      if (args.length !== 0) {
+        this.report("shift takes no arguments", "it answers the element it takes out", this.peek());
+        return this.hole();
+      }
+      // The element is read before the list loses it, and the list is the place
+      // from one past the first element on.
+      const taken = `__shifted${this.fieldCount++}`;
+      this.pendingBefore.push({ kind: "declare", name: taken, type: null, init: { k: "index", base: place, index: { k: "literal", text: "0" } }, line });
+      this.valueTypes.set(taken, element);
+      const rest = this.sequenceMethod("slice", element, place, [{ k: "literal", text: "1" }], line);
+      this.pendingBefore.push(this.writePlace(written, rest, line));
+      return { k: "ident", name: taken };
+    }
+    // `unshift` writes the values in front of the list, in the order the source
+    // wrote them, and answers the length it has afterwards.
+    const front: Expression = { k: "buffer", element: typeToString(element), values: [...args] };
+    this.pendingBefore.push(this.writePlace(written, { k: "binary", op: "+", left: front, right: place }, line));
+    return { k: "lengthOf", of: place };
+  }
+
+  /** The write that puts a value back into the place a call was written on. */
+  private writePlace(place: { target: string; base: string | null }, value: Expression, line: number): Statement {
+    return place.base === null
+      ? { kind: "assign", target: place.target, op: "=", value, line }
+      : { kind: "memberAssign", base: place.base, field: place.target, op: "=", value, line };
   }
 
   /** The helper one of the walking methods is lowered to, written once per shape. */

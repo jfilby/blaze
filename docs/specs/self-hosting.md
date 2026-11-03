@@ -866,6 +866,23 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4az. shift and unshift are the two ends of a list
+
+`xs.shift()` and `xs.unshift(v)` were not methods of this compiler: nine
+refusals, the queue the code generator waits its work in and the pending
+statements the frontend keeps among them. Both change the list a name holds, so
+the change is written beside the statement the call was read in and the value is
+read before it: a shift answers the element it took out, which is read into a
+name of the statement's own, and an unshift answers the length the list has
+afterwards. A call written for what it does writes the change and drops the
+answer, which is what the statement reader already did with a push.
+
+The shift is the list from one past its first element on, which is the slice
+helper a `list.slice(1)` already is; an unshift is the values written in front of
+the list, which is the concatenation of two lists.
+
+This took the total from 503 to 494.
+
 ### 4ay. flatMap is the lists its callback answers
 
 `xs.flatMap(f)` was not a method of this compiler. The callback answers a list,
@@ -1381,14 +1398,14 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-503 refusals over 94 sources, 25 of them read whole. The largest buckets, in
+494 refusals over 94 sources, 25 of them read whole. The largest buckets, in
 order, and what each of them is:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
 | 45 | `an empty array needs the type of its elements` | an empty literal in an object field, whose element type the interface states: `{ children: [] }` where the field is `Node[]`. Mostly the standalone read, which does not link the interface |
 | 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
-| 13 | `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
+| 14 | `a Map is built from entries`, 13 `"map"` | a list of lists: `map` over a list of lists, and the entries a map is built from |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
 | 12 | `expected a parameter name` | a member of a class written as a parameter pattern, or a construct of `semantics/python.ts`'s own |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
@@ -1443,6 +1460,7 @@ What was closed this session, and what each was worth:
 | a top-level list asserted or joined | 591 → 588 |
 | a captured list held in a one-field object | 588 → 514 |
 | flatMap is the lists its callback answers | 514 → 503 |
+| shift and unshift are the two ends of a list | 503 → 494 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
