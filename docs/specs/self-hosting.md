@@ -1340,8 +1340,8 @@ order, and what each of them is:
 | refusals | refusal | what it needs |
 | --- | --- | --- |
 | 43 | `an empty array needs the type of its elements` | mostly the standalone read: the element type is a field's, written in a module the report does not link. The linked read settles most of them |
-| 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 78 | `an arrow function writes "pres" / "found" / "names"` | a captured **list** written back: a box holds one value, and a list's element is not a list. The scalar and reference writes are boxed (§4al) |
+| 18 | `expected ")"` | cascade: a statement refused inside a call's arguments leaves the rest of the call to be read as statements |
 | 14 | `"flatMap"`, 13 `"map"`, 14 `a Map is built from entries` | a list the callback answers, which is a list of lists |
 | 14 | `a spread argument is not part of the call subset` | `arr.splice(i, n, ...xs)`, `Math.max(...xs)` and `splice` itself |
 | 11 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object |
@@ -1353,7 +1353,12 @@ The value-model slices still open, in the order they block the self-build:
 
 - **A captured list written back.** A name an arrow writes is now a one-element
   list (§4al), but a list's element cannot be a list, so `found.push(x)` inside
-  an arrow is still refused. It needs the list handle below.
+  an arrow is still refused. A box *object* holding the list was tried this
+  session and is close: the C backend's field store through a reference had to
+  be fixed first (§4as), and what is left is the layout — a field initialised
+  from `[]` is typed `array<T, 0>`, so the first read past the empty length is a
+  read past the block. That is the two-layouts item below, and it is the next
+  thing to read for this bucket.
 - **An absent value.** A default parameter and an optional parameter need a
   value that is not the zero of the type. `function optionNumber(value: string |
   undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
@@ -1392,7 +1397,14 @@ What was closed this session, and what each was worth:
 | a destructured rest element | 595 → 591 |
 | a top-level list asserted or joined | 591 → 588 |
 
-**Two wrong answers found on the way.** A map of references read the double an
+**Wrong answers found on the way.** A map of references read the double an entry
+holds, so the IR typed the value a number and a field of it read the runtime's
+table as an object; both backends segfaulted on `Map<Box, Box>`. Two identical
+calls in one expression were inlined once (§4an). A store through an object
+reference did not compile as C (§4as). An arrow that only read a name another
+arrow wrote read a name the box had replaced (§4at). And a choice of a length and
+a number was read at the unshaped reference an arm of another type falls back to
+(§ "Read a choice of two values at the type they share"). A map of references read the double an
 entry holds, so the IR typed the value a number and a field of it read the
 runtime's table as an object; both backends segfaulted on `Map<Box, Box>`. Every
 key form now has a read that answers a reference. And `semantics/power-of-two`'s
