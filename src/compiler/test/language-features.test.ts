@@ -3955,3 +3955,29 @@ test("a reference a conditional spread leaves out is the null it is read as", as
   ].join("\n"));
   assert.equal(output.trim(), "1 2");
 });
+
+test("a program writes its output and its errors to the streams the source names", async () => {
+  // The two stream names are the two streams: the write does not end the line,
+  // the console does, and a program body and a function body write the same
+  // way.
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await build(
+      [
+        "export function f(): void {",
+        "  process.stdout.write(`out `);",
+        "  process.stderr.write(`err `);",
+        "  console.log(`line`);",
+        "}",
+        "f();",
+        "",
+      ].join("\n"),
+      backend,
+    );
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    assert.equal(original.code, 0, original.stderr);
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, original.stdout, `the ${backend} backend writes the output stream`);
+    assert.equal(delivered.stderr, original.stderr, `the ${backend} backend writes the error stream`);
+  }
+});

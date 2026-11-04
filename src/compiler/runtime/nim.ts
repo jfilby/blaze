@@ -753,6 +753,14 @@ proc blaze_rt_argv*(index: csize_t): float64 {.exportc, cdecl.} =
 proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
   if text != nil: stdout.write($text)
 
+proc blaze_rt_print_error_text*(text: cstring) {.exportc, cdecl.} =
+  ## The error stream is the runtime's own, and a program that writes a line
+  ## and then fails has both: the output is flushed before the text is written.
+  if text != nil:
+    flushFile(stdout)
+    stderr.write($text)
+    flushFile(stderr)
+
 proc blaze_rt_print_text_n*(text: cstring, length: csize_t) {.exportc, cdecl.} =
   ## The count is the length rather than where the zero is: a compiler that laid
   ## the text out knows how long it is, and the text need not be terminated.

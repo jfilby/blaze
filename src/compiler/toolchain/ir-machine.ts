@@ -10856,6 +10856,14 @@ class Machine {
       this.runtime("_env_get");
       return;
     }
+    if (call.callee === "process.stderr.write") {
+      // The error stream is the runtime's own, and the text is handed over as
+      // a pointer to the bytes it is.
+      this.at(call.args[0], TEXT);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_print_error_text");
+      return;
+    }
     const library = MATH_LIBRARY[call.callee];
     if (library === undefined || BUILTINS[call.callee] === undefined) {
       throw machineError(`${this.fn.symbol} calls ${call.callee}, which this backend does not lower`);

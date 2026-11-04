@@ -1050,7 +1050,7 @@ class FunctionBody {
         });
         break;
     }
-    this.write({ k: "printNewline", line: statement.line });
+    if (statement.newline !== false) this.write({ k: "printNewline", line: statement.line });
   }
 
   /* ---------------------------------------------------------------------- */

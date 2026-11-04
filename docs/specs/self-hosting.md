@@ -112,8 +112,8 @@ of to 903, and the type a method writes for its result to 857, a module that re-
 writes to 698, a default read at its parameter's type to 689, the type an
 exported constant offers to 680, and the type a call reads its arguments at to
 622, the shape a value has across the arm of a conditional to 609, a view of a
-block to 602, a whole number of sixty-four bits to 580, and the field a
-conditional spread leaves out to 574.
+block to 602, a whole number of sixty-four bits to 580, the field a conditional
+spread leaves out to 574, and the error stream to 566.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -885,6 +885,29 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4cg. The error stream, and a write that does not end the line
+
+    process.stdout.write(`\n${message}\n`);
+    process.stderr.write(text);
+
+A program body already wrote both streams: `process.stdout.write` was a print
+that does not end the line, and the error stream was refused with the runtime's
+own message. A *function* had neither — `process.stdout.write` was `"write" is
+not a method this program compiles` — so the compiler's own modules, which
+report progress from functions, could not be read.
+
+A function writes the two streams the way the program body does. The output is
+the print statement the IR already has, with the line not ended: `print_text`
+and no `print_newline`. The error stream is a call of the runtime's entry for it
+— `blaze_rt_print_error_text`, which flushes the output and writes to the error
+stream — so the text a program wrote before it failed is still there when the
+failure is read. The entry is declared with the rest of the ABI, and the C, Nim
+and wasm hosts each write their own error stream.
+
+This took the total from 574 to 566. What is left of the host is
+`process.hrtime.bigint()`, which is a call of a clock the runtime carries as
+milliseconds: a reading in nanoseconds is the next thing the queue names.
 
 ### 4cf. A field a conditional spread leaves out
 
@@ -2206,7 +2229,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-574 refusals over 95 sources, 28 of them read whole. The report reads the
+566 refusals over 95 sources, 28 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2259,30 +2282,11 @@ The value-model slices still open, in the order they block the self-build:
   `Record<string, string[]>` and a set of lists are refused where the value is
   read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
   its own whose handle is the entry — before a key can answer one.
-- **The host's stdio.** `process.stdout.write` and `process.stderr.write` are
-  the way a program prints without a newline, and `process` is not a value the
-  frontend models. Every site the report still refuses for `"write"` is one of
-  the two, or a stream another host hands the program.
-- **An absent value.** A default parameter and an optional parameter need a
-  value that is not the zero of the type. `function optionNumber(value: string |
-  undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
-  program function that omits `maximum` has nothing sound to pass.
-- **A list's length.** `list.length = n` truncates. A list is a pointer and a
-  length, and the length is the runtime's for an allocated block and beside the
-  name for a literal one.
-- **A list a callback answers.** `flatMap`, a callback that returns an object,
-  `new Map(entries)`, `Object.entries` of a constant: all need a list of lists,
-  which the contract cannot spell.
-- **A list in a dictionary.** The dictionary entry is one double; a list is a
-  pointer and a length, so the entry cannot carry it. The runtime's dynamic
-  array is one handle with a length, and the model would have to say that a
-  `T[]` stored in a map is one.
-- **Two object layouts for one interface.** A list field is a `slice<T>` now
-  (§ "A list field is one field whatever the literal held"), so two literals of
-  one interface are one layout whatever they hold. What is left of this item is
-  the *empty* literal above: the element type of `[]` in a field is the
-  interface's to state, and the linked read refuses it before the interface is
-  bound.
+- **The host's clock.** `process.hrtime.bigint()` reads a monotonic clock in
+  nanoseconds, and the runtime carries one in milliseconds
+  (`blaze_rt_monotonic_ms`); a program that measures a duration reads it in
+  every build the compiler makes of itself. The two streams a program writes are
+  read now (§4cg), so this is what is left of the host object.
 
 What was closed this session, and what each was worth:
 
@@ -2336,6 +2340,7 @@ What was closed this session, and what each was worth:
 | a view of a block (§4cd) | 609 → 602 |
 | a whole number of sixty-four bits (§4ce) | 602 → 580 |
 | a field a conditional spread leaves out (§4cf) | 580 → 574 |
+| the error stream (§4cg) | 574 → 566 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

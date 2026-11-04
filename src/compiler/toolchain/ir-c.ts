@@ -275,6 +275,10 @@ function builtinExpression(name: string, args: string[]): string {
       // ask for: the name is the text it is spelled with, and the answer is
       // the text it is set to, empty where it is not set at all.
       return `${RUNTIME_NAME}_env_get(${args[0]})`;
+    case "process.stderr.write":
+      // The error stream is the runtime's own, and a program writes there
+      // through the entry that flushes the output it has already written.
+      return `${RUNTIME_NAME}_print_error_text(${args[0]})`;
     case "blaze_had_error":
       return `(blaze_had_error())`;
     case "blaze_last_error":

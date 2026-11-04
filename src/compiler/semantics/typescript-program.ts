@@ -1231,9 +1231,9 @@ class ProgramParser {
    * `process.stdout.write(text)`: the text written where it is, without ending
    * the line a `console.log` ends.
    *
-   * A program writes to its own output. The error stream is the runtime's own —
-   * what it reports when it cannot go on — and a program has no way to write
-   * there, so that one is refused where it is written.
+   * A program writes to its own output, and to the error stream the runtime
+   * reports its own failures on: the two are the runtime's to hold, and the text
+   * is written where it is.
    */
   private processWrite(): ProgramStatement | null | undefined {
     const line = this.peek().line;
@@ -1249,12 +1249,7 @@ class ProgramParser {
     this.expect("(");
     const values = this.arguments();
     if (stream === "stderr") {
-      this.fail(
-        "a program writes process.stdout; the error stream is the runtime's own",
-        this.peek(),
-        "write the message with process.stdout.write, or print it with console.log",
-      );
-      return null;
+      return { kind: "invoke", function: "process.stderr.write", args: values, line };
     }
     return { kind: "print", values, newline: false, line };
   }

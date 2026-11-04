@@ -242,6 +242,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arities: [3, 4] },
   "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
   "process.exit": { params: [ANY], returns: ANY, arity: 1 },
+  /** `process.stderr.write(text)` writes the text to the error stream, where
+   * the runtime reports its own failures. It is not buffered with the output. */
+  "process.stderr.write": { params: [TEXT], returns: { kind: "void" }, arity: 1 },
   "parseInt": { params: [ANY], returns: F64, arity: 1 },
   /** `Number(value)` reads the number a value is written at: a string is the
    * number its text states, a dynamic value is the number it holds, and a

@@ -191,7 +191,17 @@ export type Statement =
   | { kind: "forOf"; variable: string; of: string; body: Statement[]; line: number }
   | { kind: "break"; line: number }
   | { kind: "continue"; line: number }
-  | { kind: "print"; value: Expression; line: number }
+  | {
+      kind: "print";
+      value: Expression;
+      line: number;
+      /**
+       * Whether the line ends after the value. `console.log` ends it and
+       * `process.stdout.write` does not, which is the whole difference between
+       * the two.
+       */
+      newline?: boolean;
+    }
   /** A call kept for what it does, as in `main();`. */
   | { kind: "expression"; value: Expression; line: number }
   /** An element written, by `=` or by one of the compound operators. */

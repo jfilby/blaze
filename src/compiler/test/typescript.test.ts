@@ -3342,3 +3342,23 @@ test("a spread of a conditional writes a reference field only when it holds", ()
     /an object spread reads a constant object/,
   );
 });
+
+test("a function writes to the output and to the error stream, and ends a line only where the source does", () => {
+  // `process.stdout.write` writes where it is, and `console.log` ends the line
+  // after it; the error stream is the runtime's own, and a function writes
+  // there through the call the runtime carries.
+  const source = [
+    "export function f(text: string): void {",
+    "  process.stdout.write(text);",
+    "  process.stderr.write(text);",
+    "  console.log(text);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nf(\"a\");\n` }, "main.ts", "f");
+  assert.match(ir, /print_text local\[text\] text @2/, "the write is the text and no newline");
+  assert.ok(!/print_newline @2/.test(ir), "the write does not end the line");
+  assert.match(ir, /print_newline @4/, "the console ends it");
+  assert.match(ir, /call\[void\] process\.stderr\.write/, "the error stream is the runtime's call");
+});

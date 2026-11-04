@@ -88,6 +88,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_object_new",
   "blaze_rt_object_size",
   "blaze_rt_print_text",
+  "blaze_rt_print_error_text",
   "blaze_rt_print_text_n",
   "blaze_rt_print_number",
   "blaze_rt_print_whole",
@@ -518,6 +519,12 @@ function formatNumberFixed(value, digits) {
 function writeOut(bytes) {
   process.stdout.write(Buffer.from(bytes));
 }
+
+/* The error stream is the runtime's own, and it is not buffered with the
+   output: a program that prints a line and then fails has both. */
+function writeError(bytes) {
+  process.stderr.write(Buffer.from(bytes));
+}
 `;
 
 /** The implementation of each service, as the source of the generated host. */
@@ -713,6 +720,14 @@ export function blaze_rt_object_size(pointer) {
     source: `
 export function blaze_rt_print_text(text) {
   writeOut(textBytes(text));
+}
+`,
+  },
+  {
+    service: "blaze_rt_print_error_text",
+    source: `
+export function blaze_rt_print_error_text(text) {
+  writeError(textBytes(text));
 }
 `,
   },

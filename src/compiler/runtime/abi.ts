@@ -1361,6 +1361,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_print_error_text",
+    "void",
+    [["text", "const char*"]],
+    "Writes text to the error stream, as it is given.",
+    "A null pointer writes nothing. This is the stream the runtime reports its own failures on, and it is not buffered with the output: a program that prints a line and then fails has the line it printed and the failure apart.",
+    { tags: ["output"] },
+  ),
+  entry(
     "blaze_rt_print_text_n",
     "void",
     [
@@ -4355,6 +4363,14 @@ ${guarded ? "  if (text == NULL) return;" : ""}
      the header in front of one of those is reading memory that is not there.
      blaze_rt_text_length is for a value the compiler knows is a string. */
   fputs(text, stdout);
+}
+
+void blaze_rt_print_error_text(const char* text) {
+${guarded ? "  if (text == NULL) return;" : ""}
+  /* The error stream is not buffered with the output, so a program that writes a
+     line and then fails has both, in the order it wrote them. */
+  fflush(stdout);
+  fputs(text, stderr);
 }
 
 void blaze_rt_print_text_n(const char* text, size_t length) {

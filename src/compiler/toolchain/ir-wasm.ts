@@ -3644,6 +3644,12 @@ class Body {
         this.callService("blaze_rt_env_get");
         return TEXT;
       }
+      case "process.stderr.write": {
+        // The error stream is the host's own, and the text is handed over.
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_print_error_text");
+        return { kind: "void" };
+      }
       default:
         return null;
     }

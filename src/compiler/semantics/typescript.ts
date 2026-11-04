@@ -6928,6 +6928,10 @@ class TypeScriptParser {
       return { kind: "result", value, line: token.line };
     }
     if (this.at("console")) return this.readPrint();
+    if (this.at("process") && this.peek(1).text === "." && (this.peek(2).text === "stdout" || this.peek(2).text === "stderr")) {
+      const written = this.readProcessWrite();
+      if (written !== null) return written;
+    }
     if (this.at("throw")) {
       // An error is a value the source raises; the program ends where it is
       // raised, and the text it was raised with is what the program reports.
@@ -7867,6 +7871,39 @@ class TypeScriptParser {
       return { kind: "memberAssign", base: value.base, field: value.target, op: "=", value: call, line: token.line };
     }
     return { kind: "expression", value, line: token.line };
+  }
+
+  /**
+   * `process.stdout.write(text)`: the text written where it is, without ending
+   * the line a `console.log` ends.
+   *
+   * A function writes to the program's own output, and to the error stream the
+   * runtime reports its own failures on: the two are the runtime's to hold, and
+   * the text is written where it is.
+   */
+  private readProcessWrite(): Statement | null {
+    const start = this.peek();
+    this.next();
+    this.next();
+    const stream = this.next();
+    this.next();
+    const method = this.next();
+    if (method.text !== "write") {
+      this.report(`process.${stream.text}.${method.text} is not part of the subset`, "a program writes with process.stdout.write", method);
+      this.skipStatementTail();
+      return { kind: "print", value: this.hole(), line: start.line };
+    }
+    this.expect("(");
+    const value = this.readAt(TEXT_RESULT, () => this.readExpression());
+    this.expect(")");
+    this.accept(";");
+    // The error stream is the runtime's own, and the text a function writes
+    // there is the text it wrote: the runtime holds the stream, and the call
+    // writes it before it reports anything of its own.
+    if (stream.text === "stderr") {
+      return { kind: "expression", value: { k: "call", name: "process.stderr.write", args: [value] }, line: start.line };
+    }
+    return { kind: "print", value, newline: false, line: start.line };
   }
 
   private readPrint(): Statement {
