@@ -242,6 +242,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arities: [3, 4] },
   "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
   "process.exit": { params: [ANY], returns: ANY, arity: 1 },
+  /** `process.hrtime.bigint()` reads a monotonic clock in nanoseconds: the
+   * reading is a whole number, and two readings of it differ by a duration. */
+  "process.hrtime.bigint": { params: [], returns: I64, arity: 0, effects: ["clock"] },
   /** `process.stderr.write(text)` writes the text to the error stream, where
    * the runtime reports its own failures. It is not buffered with the output. */
   "process.stderr.write": { params: [TEXT], returns: { kind: "void" }, arity: 1 },

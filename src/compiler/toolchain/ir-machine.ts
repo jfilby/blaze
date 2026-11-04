@@ -10864,6 +10864,12 @@ class Machine {
       this.runtime("_print_error_text");
       return;
     }
+    if (call.callee === "process.hrtime.bigint") {
+      // The runtime holds the clock, and the reading is the whole number of
+      // nanoseconds it answers in.
+      this.runtime("_monotonic_ns");
+      return;
+    }
     const library = MATH_LIBRARY[call.callee];
     if (library === undefined || BUILTINS[call.callee] === undefined) {
       throw machineError(`${this.fn.symbol} calls ${call.callee}, which this backend does not lower`);

@@ -3650,6 +3650,12 @@ class Body {
         this.callService("blaze_rt_print_error_text");
         return { kind: "void" };
       }
+      case "process.hrtime.bigint": {
+        // The host holds the clock, and the reading crosses the wall as the
+        // whole number of nanoseconds it is.
+        this.callService("blaze_rt_monotonic_ns");
+        return I64_TYPE;
+      }
       default:
         return null;
     }

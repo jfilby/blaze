@@ -113,7 +113,8 @@ writes to 698, a default read at its parameter's type to 689, the type an
 exported constant offers to 680, and the type a call reads its arguments at to
 622, the shape a value has across the arm of a conditional to 609, a view of a
 block to 602, a whole number of sixty-four bits to 580, the field a conditional
-spread leaves out to 574, and the error stream to 566.
+spread leaves out to 574, the error stream to 566, and the monotonic clock to
+559.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -885,6 +886,29 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4ch. The monotonic clock in whole nanoseconds
+
+    const started = process.hrtime.bigint();
+    const durationNs = process.hrtime.bigint() - started;
+
+The runtime already read a monotonic clock, but in milliseconds as a double
+(`blaze_rt_monotonic_ms`), and the source reads nanoseconds as a whole number.
+A duration of a few microseconds is a whole number of nanoseconds and is lost by
+a reading that keeps only milliseconds, so the milliseconds were not a reading
+this could be computed from.
+
+`process.hrtime.bigint()` is now a call of `blaze_rt_monotonic_ns`, an entry
+that answers the same clock in whole nanoseconds. The frontend reads the call
+where it reads `process.argv` — in a primary expression, before the member chain
+asks whether `bigint` is a method of anything — and a builtin declares it as a
+call of no arguments answering an `i64` with the `clock` effect, so the
+optimizer does not compute it twice or hoist it out of a loop. The C, Nim and
+wasm runtimes each implement the entry, and the wasm host answers
+`process.hrtime.bigint()` itself.
+
+This took the total from 566 to 559. The host object that was left is
+`process.cwd()`, the directory a build runs in.
 
 ### 4cg. The error stream, and a write that does not end the line
 
@@ -2229,7 +2253,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-566 refusals over 95 sources, 28 of them read whole. The report reads the
+559 refusals over 95 sources, 28 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2282,11 +2306,10 @@ The value-model slices still open, in the order they block the self-build:
   `Record<string, string[]>` and a set of lists are refused where the value is
   read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
   its own whose handle is the entry — before a key can answer one.
-- **The host's clock.** `process.hrtime.bigint()` reads a monotonic clock in
-  nanoseconds, and the runtime carries one in milliseconds
-  (`blaze_rt_monotonic_ms`); a program that measures a duration reads it in
-  every build the compiler makes of itself. The two streams a program writes are
-  read now (§4cg), so this is what is left of the host object.
+- **The host's directory.** `process.cwd()` is the directory a build runs in.
+  The clock and the two streams a program writes are read now (§4cg, §4ch), so
+  this is what is left of the host object: one file, `ai/commandcode.ts`, asks
+  for the directory it runs in.
 
 What was closed this session, and what each was worth:
 
@@ -2341,6 +2364,7 @@ What was closed this session, and what each was worth:
 | a whole number of sixty-four bits (§4ce) | 602 → 580 |
 | a field a conditional spread leaves out (§4cf) | 580 → 574 |
 | the error stream (§4cg) | 574 → 566 |
+| the monotonic clock (§4ch) | 566 → 559 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

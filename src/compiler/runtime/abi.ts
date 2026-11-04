@@ -1143,6 +1143,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Returns the milliseconds since a point the host does not name. The clock does not move backwards, so a duration measured over two readings of it is a duration.",
     { tags: ["host"] },
   ),
+  entry(
+    "blaze_rt_monotonic_ns",
+    "int64_t",
+    [],
+    "The nanoseconds on a monotonic clock.",
+    "Returns the nanoseconds since a point the host does not name, which is the same clock the milliseconds are read on. A whole count rather than a fraction: a duration of a few microseconds is a whole number of nanoseconds and would be lost by a reading that kept only milliseconds.",
+    { tags: ["host"] },
+  ),
   entry("blaze_rt_to_number", "double", [["value", "double"]], "Converts a dynamic value to a number.", "Returns the number.", { tags: ["object"] }),
   entry(
     "blaze_error_clear",
@@ -4961,6 +4969,14 @@ double blaze_rt_monotonic_ms(void) {
   struct timespec now;
   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0.0;
   return (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1000000.0;
+}
+/* The same monotonic clock in whole nanoseconds, which is the reading a source
+   that measures a duration keeps: the fraction a millisecond reading carries is
+   a whole number here, so two readings a microsecond apart differ. */
+int64_t blaze_rt_monotonic_ns(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+  return (int64_t)now.tv_sec * 1000000000LL + (int64_t)now.tv_nsec;
 }
 double blaze_rt_to_number(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);

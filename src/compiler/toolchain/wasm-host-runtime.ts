@@ -101,6 +101,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_format_number_fixed",
   "blaze_rt_random",
   "blaze_rt_monotonic_ms",
+  "blaze_rt_monotonic_ns",
   "blaze_rt_argv_count",
   "blaze_rt_argv",
   "blaze_rt_json_parse",
@@ -887,6 +888,14 @@ export function blaze_rt_random() {
     source: `
 export function blaze_rt_monotonic_ms() {
   return Number(process.hrtime.bigint()) / 1000000;
+}
+`,
+  },
+  {
+    service: "blaze_rt_monotonic_ns",
+    source: `
+export function blaze_rt_monotonic_ns() {
+  return process.hrtime.bigint();
 }
 `,
   },

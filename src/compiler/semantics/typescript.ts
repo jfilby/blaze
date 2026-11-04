@@ -13281,6 +13281,25 @@ class TypeScriptParser {
         this.next();
         return { k: "argv", index: null };
       }
+      // `process.hrtime.bigint()`: the nanoseconds on a monotonic clock, which
+      // is the runtime's to read. The clock does not move backwards, so the
+      // difference of two readings of it is a duration; a source that measures
+      // one reads both ends this way.
+      if (
+        token.text === "process" &&
+        this.at(".") &&
+        this.peek(1).text === "hrtime" &&
+        this.peek(2).text === "." &&
+        this.peek(3).text === "bigint"
+      ) {
+        this.next();
+        this.next();
+        this.next();
+        this.next();
+        this.expect("(");
+        this.expect(")");
+        return { k: "call", name: "process.hrtime.bigint", args: [] };
+      }
       // `Deno.args` names the same command line under a host that hands over
       // the arguments alone: node counts the program and the file it runs
       // before them, so `Deno.args[i]` is argument `i + 2`, as it is in a

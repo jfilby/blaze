@@ -220,7 +220,7 @@ object are:
 | `text_compare` | the comparison of two texts |
 | `array_new`, `array_push`, `array_get`, `array_set`, `array_length` | dynamic arrays |
 | `object_new`, `object_size` | objects |
-| `random`, `monotonic_ms` | the clock and the random source |
+| `random`, `monotonic_ms`, `monotonic_ns` | the clock and the random source |
 | `argv_count`, `argv` | the command line |
 | `json_parse`, `json_stringify`, `json_get` | dynamic values |
 | `md5_create`, `md5_update`, `md5_digest`, `file_read` | the file and the hasher |
@@ -367,6 +367,7 @@ env.blaze_rt_box_string                     (i32) -> f64
 env.blaze_rt_box_null                       () -> f64
 env.blaze_rt_random                         () -> f64
 env.blaze_rt_monotonic_ms                   () -> f64
+env.blaze_rt_monotonic_ns                   () -> i64
 env.blaze_rt_argv_count                     () -> i64
 env.blaze_rt_argv                           (i64) -> f64
 env.blaze_rt_json_parse                     (i32) -> f64

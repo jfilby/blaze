@@ -3362,3 +3362,22 @@ test("a function writes to the output and to the error stream, and ends a line o
   assert.match(ir, /print_newline @4/, "the console ends it");
   assert.match(ir, /call\[void\] process\.stderr\.write/, "the error stream is the runtime's call");
 });
+
+test("a function reads the monotonic clock as the whole nanoseconds it measures a duration in", () => {
+  // `process.hrtime.bigint()` is the runtime's own clock. The reading is a
+  // whole number of nanoseconds rather than a fraction of something, so two
+  // readings of it differ by a duration the source can keep.
+  const source = [
+    "export function measure(): number {",
+    "  const started = process.hrtime.bigint();",
+    "  const finished = process.hrtime.bigint();",
+    "  return finished >= started ? Number(finished - started) : -1;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nmeasure();\n` }, "main.ts", "measure");
+  assert.match(ir, /call\[i64\] process\.hrtime\.bigint/, "the reading is the runtime's own call");
+  assert.match(ir, /ge\[bool\] i64 local\[i64\] finished local\[i64\] started/, "two readings compare as whole numbers");
+  assert.match(ir, /sub\[i64\]/, "the duration is the difference of two whole numbers");
+});

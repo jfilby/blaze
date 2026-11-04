@@ -3981,3 +3981,27 @@ test("a program writes its output and its errors to the streams the source names
     assert.equal(delivered.stderr, original.stderr, `the ${backend} backend writes the error stream`);
   }
 });
+
+test("a program measures a duration on the clock the runtime reads", async () => {
+  // The clock is the runtime's, and a reading is a whole number of nanoseconds:
+  // what the source subtracts from a later reading is a duration, and both
+  // backends read the same clock the source reads under node.
+  const source = [
+    "export function measure(): number {",
+    "  const started = process.hrtime.bigint();",
+    "  const finished = process.hrtime.bigint();",
+    "  return finished >= started ? Number(finished - started) : -1;",
+    "}",
+    "console.log(measure() >= 0 ? `measured` : `backwards`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await build(source, backend);
+    const original = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(original.code, 0, original.stderr);
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, original.stdout, `the ${backend} backend reads the clock`);
+    assert.equal(delivered.stdout, "measured\n");
+  }
+});

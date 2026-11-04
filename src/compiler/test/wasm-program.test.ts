@@ -363,3 +363,24 @@ async function readHost(module: string): Promise<string> {  const directory = mo
   assert.ok(host !== undefined, "the host is delivered beside the module");
   return join(directory, host);
 }
+
+test("a program measures a duration on the clock the host reads", async () => {
+  // The clock is a service of the host, and the module reads it as the whole
+  // number of nanoseconds it is: a duration is the difference of two readings,
+  // and it is the reading the source under node measures as well.
+  const files = {
+    "main.ts": [
+      "export function measure(): number {",
+      "  const started = process.hrtime.bigint();",
+      "  const finished = process.hrtime.bigint();",
+      "  return finished >= started ? Number(finished - started) : -1;",
+      "}",
+      "console.log(measure() >= 0 ? `measured` : `backwards`);",
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, await sourceOutput(files, "main.ts"));
+  assert.equal(result.stdout, "measured\n");
+});

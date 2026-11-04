@@ -279,6 +279,11 @@ function builtinExpression(name: string, args: string[]): string {
       // The error stream is the runtime's own, and a program writes there
       // through the entry that flushes the output it has already written.
       return `${RUNTIME_NAME}_print_error_text(${args[0]})`;
+    case "process.hrtime.bigint":
+      // The reading is the runtime's, and it is a whole number of nanoseconds:
+      // a duration measured over two readings is the difference of two whole
+      // numbers.
+      return `${RUNTIME_NAME}_monotonic_ns()`;
     case "blaze_had_error":
       return `(blaze_had_error())`;
     case "blaze_last_error":

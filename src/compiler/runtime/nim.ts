@@ -1345,6 +1345,12 @@ proc blaze_rt_monotonic_ms*(): float64 {.exportc, cdecl.} =
   ## as zero.
   float64(getMonoTime().ticks) / 1000000.0
 
+proc blaze_rt_monotonic_ns*(): int64 {.exportc, cdecl.} =
+  ## The same monotonic clock in whole nanoseconds, which is the reading a
+  ## source that measures a duration keeps: the fraction a millisecond reading
+  ## carries is a whole number here, so two readings a microsecond apart differ.
+  getMonoTime().ticks
+
 ## ---------------------------------------------------------------------- ##
 ## Promises                                                                ##
 ## ---------------------------------------------------------------------- ##
