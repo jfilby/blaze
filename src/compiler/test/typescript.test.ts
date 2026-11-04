@@ -3263,3 +3263,50 @@ test("a conditional's arms share the type and the shape the other arm has", () =
   const read = readTypeScriptModule(source, "main.ts", false);
   assert.deepEqual(read.refused, [], "the arm without a type is read at the arm that has one");
 });
+
+test("a view of a block reads and writes the bytes of it", () => {
+  // A typed array is a block, and `bytes.buffer` is the block itself: a
+  // `DataView` over one is the same bytes, so a write of a chosen width is the
+  // stores that write it and a read is the sum the bytes are.
+  const source = [
+    "export function f(): number {",
+    "  const bytes = new Uint8Array(8);",
+    "  const view = new DataView(bytes.buffer);",
+    "  view.setUint32(0, 7, true);",
+    "  bytes.set([1, 2], 4);",
+    "  return view.getUint32(0, true) + bytes.byteLength;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+
+  // A view of part of a block is not the block: an offset or a length the
+  // stores are not checked against would be a write past the view.
+  const partial = [
+    "export function f(bytes: Uint8Array): number {",
+    "  const view = new DataView(bytes.buffer, 1, 4);",
+    "  return view.getUint8(0);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(partial, "main.ts", false);
+  assert.match(read.refused[0]?.message ?? "", /a view of part of a buffer is not part of the subset/);
+});
+
+test("a sixty-four bit view of a block is a store and a load of a whole number", () => {
+  // Eight bytes are a whole number of sixty-four bits, and the language writes
+  // one with `BigInt(x)`: the value is the machine word the number is, which is
+  // what a use of it as a `bigint` converts it to.
+  const source = [
+    "export function f(): number {",
+    "  const bytes = new Uint8Array(16);",
+    "  const view = new DataView(bytes.buffer);",
+    "  const base = 4;",
+    "  const big = BigInt(base) * 3n + 5n;",
+    "  view.setBigUint64(0, big, true);",
+    "  return Number(view.getBigUint64(0, true));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

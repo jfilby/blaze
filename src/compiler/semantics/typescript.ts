@@ -408,6 +408,8 @@ const NUMBER_RESULT: TypeExpr = { kind: "primitive", name: "f64" };
 const BOOLEAN_RESULT: TypeExpr = { kind: "primitive", name: "bool" };
 const TEXT_RESULT: TypeExpr = { kind: "text" };
 const BIGINT_RESULT: TypeExpr = { kind: "primitive", name: "i64" };
+/** The element a block of bytes holds, which a view of one is read through. */
+const BYTE: TypeExpr = { kind: "primitive", name: "u8" };
 const WIDE_RESULT: TypeExpr = { kind: "primitive", name: "u256" };
 
 /**
@@ -6635,6 +6637,14 @@ class TypeScriptParser {
     if (this.tokens[open]?.text !== "{") return read();
     const close = this.blockEnd(open);
     if (close < 0) return read();
+    // A body that names no type of its own is read as it is: the scan is only
+    // worth its own pass where the body writes a `type` or an `interface`.
+    let namesAType = false;
+    for (let index = open + 1; index < close && !namesAType; index += 1) {
+      const token = this.tokens[index] as Token;
+      if (token.kind === "ident" && (token.text === "type" || token.text === "interface")) namesAType = true;
+    }
+    if (!namesAType) return read();
     const declared = scanTypeTable(this.tokens.slice(open + 1, close));
     if (declared.declarations.size === 0) return read();
     const table: TypeTable = {
@@ -9361,6 +9371,28 @@ class TypeScriptParser {
         // `f(x)` where `f` holds a function: the call is made through the
         // value, and the signature it is made against is the one `f` was
         // declared with at the place it is named.
+        // `BigInt(x)` is the whole number a value names. A number is the
+        // machine word it is, and the use converts it there: the language's own
+        // `BigInt` of a double is that number without its fraction, which is
+        // the reading a store of sixty-four bits makes of it.
+        if (target.k === "ident" && target.name === "BigInt") {
+          const args = this.readCallArguments([NUMBER_RESULT]);
+          const written = args[0];
+          // A literal is a constant the compiler already holds: `BigInt(128)`
+          // is the wide constant a power is folded with, and the read that
+          // folds it is the one that knows its width.
+          const constant = written !== undefined && (written.k === "literal" || written.k === "bigint" || written.k === "text");
+          const held = written === undefined || constant ? null : this.valueTypeOf(written);
+          if (held !== null && held.kind === "primitive" && held.name !== "i256" && held.name !== "u256") {
+            this.expressionTypes.set(args[0] as Expression, BIGINT_RESULT);
+            replace(args[0] as Expression);
+            continue;
+          }
+          // A form this read does not fold — the digits a text states — is
+          // left as the call the source wrote, for the read that knows it.
+          replace({ k: "call", name: "BigInt", args });
+          continue;
+        }
         if (target.k === "ident") {
           const signature = this.valueFunctions.get(target.name);
           if (signature !== undefined) {
@@ -9841,6 +9873,16 @@ class TypeScriptParser {
               continue;
             }
           }
+          // A typed array is a block of bytes, and the reads and writes a view
+          // of one makes are the stores and loads of that block.
+          const view = this.valueTypeOf(receiver);
+          if (view.kind === "slice" || view.kind === "array") {
+            const lowered = this.blockViewMethod(receiver, target.field, args);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
           if (found === null) {
             // A receiver whose type is a name this file imports is not a value
@@ -10029,6 +10071,19 @@ class TypeScriptParser {
             const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [target] };
             this.expressionTypes.set(counted, NUMBER_RESULT);
             replace(counted);
+            continue;
+          }
+        }
+        // `bytes.buffer` is the block a typed array is: a view of a block is
+        // the block, and its two offsets say where in the file it starts.
+        if (!this.at("(") && (field.text === "buffer" || field.text === "byteOffset" || field.text === "byteLength")) {
+          const held = this.valueTypeOf(target);
+          if (held.kind === "slice" || held.kind === "array") {
+            replace(field.text === "buffer"
+              ? target
+              : field.text === "byteOffset"
+                ? { k: "literal", text: "0" }
+                : { k: "lengthOf", of: target });
             continue;
           }
         }
@@ -11382,6 +11437,180 @@ class TypeScriptParser {
       return call("blaze_rt_regex_search", head, NUMBER_RESULT);
     }
     return null;
+  }
+
+  /**
+   * The reads and writes a view of a block makes.
+   *
+   * A typed array is a block of elements, and `bytes.buffer` is the block
+   * itself: a `DataView` over one is the same bytes, so a write of a chosen
+   * width at a chosen offset is the stores that write it, from the least
+   * significant byte up, and a read is the sum the bytes are. `bytes.set` is a
+   * copy of a list into the block. Each is a function of the file, written once
+   * per width and element, so a call of it is a call the backends already
+   * lower — nothing new is asked of a backend.
+   */
+  private blockViewMethod(receiver: Expression, method: string, args: readonly Expression[]): Expression | null {
+    const stores: Record<string, number> = { setUint8: 1, setUint16: 2, setUint32: 4, setBigUint64: 8, setBigInt64: 8 };
+    const loads: Record<string, number> = { getUint8: 1, getUint16: 2, getUint32: 4, getBigUint64: 8, getBigInt64: 8 };
+    const width = stores[method];
+    if (width !== undefined) {
+      if (args.length < 2 || args.length > 3) return null;
+      if (args.length === 3 && !isNumberLiteral(args[2] as Expression, "1")) return null;
+      const value = args[1] as Expression;
+      const helper = this.viewStoreHelper(width, this.valueTypeOf(value), this.peek().line);
+      const call: Expression = { k: "call", name: helper, args: [receiver, args[0] as Expression, value] };
+      this.expressionTypes.set(call, NOTHING);
+      return call;
+    }
+    const read = loads[method];
+    if (read !== undefined) {
+      if (args.length < 1 || args.length > 2) return null;
+      if (args.length === 2 && !isNumberLiteral(args[1] as Expression, "1")) return null;
+      const helper = this.viewLoadHelper(read, this.peek().line);
+      const call: Expression = { k: "call", name: helper, args: [receiver, args[0] as Expression] };
+      this.expressionTypes.set(call, read === 8 ? BIGINT_RESULT : NUMBER_RESULT);
+      return call;
+    }
+    if (method !== "set") return null;
+    // `bytes.set(source)` writes the source from the start; `bytes.set(source,
+    // at)` from the offset the source names.
+    if (args.length < 1 || args.length > 2) return null;
+    const source = args[0] as Expression;
+    const held = this.valueTypeOf(source);
+    const element: TypeExpr = held.kind === "slice" || held.kind === "array" ? held.of : NUMBER_RESULT;
+    const helper = this.viewCopyHelper(element, this.peek().line);
+    const at: Expression = args[1] ?? { k: "literal", text: "0" };
+    const call: Expression = { k: "call", name: helper, args: [receiver, at, source] };
+    this.expressionTypes.set(call, NOTHING);
+    return call;
+  }
+
+  /** The function that writes a value of a width into a block at an offset. */
+  private viewStoreHelper(width: number, held: TypeExpr, line: number): string {
+    // A whole number of sixty-four bits is written a byte at a time from its
+    // own digits, which is what a mask and a shift of a `bigint` are; a number
+    // is written from the double, where the shift is a division.
+    const whole = held.kind === "primitive" && (held.name === "i64" || held.name === "u64");
+    const key = JSON.stringify(["viewStore", width, whole]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known.name;
+    const name = `__view_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const shift = (places: number): Expression => whole
+      ? { k: "bigint", text: `${BigInt(2) ** BigInt(places * 8)}n` }
+      : number(String(2 ** (places * 8)));
+    const at = (offset: number): Expression => offset === 0
+      ? ident("at")
+      : { k: "binary", op: "+", left: ident("at"), right: number(String(offset)) };
+    const body: Statement[] = [];
+    for (let index = 0; index < width; index += 1) {
+      // The byte is the value shifted down and masked, which is the low byte of
+      // what is left of it.
+      let byte: Expression = ident("value");
+      if (index > 0) byte = whole
+        ? { k: "binary", op: ">>", left: byte, right: shift(index) }
+        : { k: "binary", op: "/", left: byte, right: shift(index) };
+      if (width > 1) byte = { k: "binary", op: "&", left: byte, right: whole ? { k: "bigint", text: "255n" } : number("255") };
+      body.push({ kind: "indexAssign", buffer: "target", index: at(index), op: "=", value: byte, line });
+    }
+    const params = [
+      { name: "target", type: { kind: "slice", of: BYTE } as TypeExpr },
+      { name: "at", type: NUMBER_RESULT },
+      { name: "value", type: whole ? BIGINT_RESULT : NUMBER_RESULT },
+    ];
+    const helper: TypeScriptFunction = { name, params, returns: NOTHING, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns: NOTHING, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns: NOTHING });
+    return name;
+  }
+
+  /** The function that reads a value of a width out of a block at an offset. */
+  private viewLoadHelper(width: number, line: number): string {
+    // Eight bytes are a whole number of sixty-four bits, so the sum is of the
+    // digits of one: a byte of a number wider than a machine word is not a
+    // number the double the read answers can hold.
+    const whole = width === 8;
+    const key = JSON.stringify(["viewLoad", width]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known.name;
+    const name = `__view_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const weight = (places: number): Expression => whole
+      ? { k: "bigint", text: `${BigInt(2) ** BigInt(places * 8)}n` }
+      : number(String(2 ** (places * 8)));
+    const at = (offset: number): Expression => offset === 0
+      ? ident("at")
+      : { k: "binary", op: "+", left: ident("at"), right: number(String(offset)) };
+    let total: Expression = { k: "index", base: ident("target"), index: at(0) };
+    for (let index = 1; index < width; index += 1) {
+      const byte: Expression = { k: "index", base: ident("target"), index: at(index) };
+      total = {
+        k: "binary",
+        op: "+",
+        left: total,
+        right: { k: "binary", op: "*", left: byte, right: weight(index) },
+      };
+    }
+    const returns: TypeExpr = whole ? BIGINT_RESULT : NUMBER_RESULT;
+    const params = [
+      { name: "target", type: { kind: "slice", of: BYTE } as TypeExpr },
+      { name: "at", type: NUMBER_RESULT },
+    ];
+    const body: Statement[] = [{ kind: "result", value: total, line }];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return name;
+  }
+
+  /** The function that copies a list of numbers into a block at an offset. */
+  private viewCopyHelper(element: TypeExpr, line: number): string {
+    const key = JSON.stringify(["viewCopy", element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known.name;
+    const name = `__view_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const params = [
+      { name: "target", type: { kind: "slice", of: BYTE } as TypeExpr },
+      { name: "at", type: NUMBER_RESULT },
+      { name: "source", type: { kind: "slice", of: element } as TypeExpr },
+    ];
+    const body: Statement[] = [
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "lengthOf", of: ident("source") },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          {
+            kind: "indexAssign",
+            buffer: "target",
+            index: { k: "binary", op: "+", left: ident("at"), right: ident("i") },
+            op: "=",
+            value: { k: "index", base: ident("source"), index: ident("i") },
+            line,
+          },
+        ],
+        line,
+      },
+    ];
+    const helper: TypeScriptFunction = { name, params, returns: NOTHING, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns: NOTHING, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns: NOTHING });
+    return name;
   }
 
   private textMethod(
@@ -13784,6 +14013,40 @@ class TypeScriptParser {
       };
       this.regexValues.add(value);
       return value;
+    }
+    // `new DataView(bytes.buffer)` is a view of a block of bytes, and a view of
+    // a block here is the block: the bytes are the ones the typed array holds.
+    // A view of part of a block — an offset and a length — is not part of the
+    // subset, because the block a write reaches is the whole of it.
+    if (view.kind === "ident" && view.text === "DataView") {
+      if (!this.accept("(")) {
+        this.report("a view is made of a buffer", "as in new DataView(bytes.buffer)", view);
+        return this.hole();
+      }
+      const args: Expression[] = [];
+      while (!this.at(")") && this.peek().kind !== "end") {
+        args.push(this.readExpression());
+        if (!this.accept(",")) break;
+      }
+      this.expect(")");
+      // A view from the start of the block to its end is the block. A view of
+      // part of one is not: the block is the whole of what a store reaches, so
+      // an offset or a length the stores are not checked against would be a
+      // write past the view the source declared.
+      const buffer = args[0] as Expression;
+      const from = args[1];
+      const to = args[2];
+      const whole = from === undefined
+        || (isNumberLiteral(from, "0") && (to === undefined || (to.k === "lengthOf" && buffer.k === "ident" && to.of.k === "ident" && to.of.name === buffer.name)));
+      if (!whole) {
+        this.report(
+          "a view of part of a buffer is not part of the subset",
+          "view the whole buffer, as in new DataView(bytes.buffer)",
+          view,
+        );
+        return this.hole();
+      }
+      return buffer;
     }
     if (view.kind === "ident" && (view.text === "Map" || view.text === "Set" || view.text === "WeakMap" || view.text === "WeakSet")) {
       return this.readCollectionAllocation(view);

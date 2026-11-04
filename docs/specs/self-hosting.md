@@ -111,7 +111,8 @@ of to 903, and the type a method writes for its result to 857, a module that re-
 847, a closure a layout field holds to 725, and the type a top-level declaration
 writes to 698, a default read at its parameter's type to 689, the type an
 exported constant offers to 680, and the type a call reads its arguments at to
-622, and the shape a value has across the arm of a conditional to 609.
+622, the shape a value has across the arm of a conditional to 609, a view of a
+block to 602, and a whole number of sixty-four bits to 580.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -883,6 +884,75 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4ce. A whole number of sixty-four bits, and `BigInt(x)`
+
+    view.setBigUint64(where, BigInt(symbol.size), true);
+    const headersAt = Number(view.getBigUint64(40, true));
+
+The last of the ELF writer's byte operations are the sixty-four bit ones, and
+two reads stood in front of them. `BigInt(x)` of a value the compiler does not
+fold was a call of a function the program does not compile: the language's own
+`Number(v)` is a builtin the runtime carries, and there was no `BigInt`. And a
+store of eight bytes is a *whole* number's digits, which the double the value
+model writes a number as cannot hold.
+
+A number is a machine word, and the use converts it there — `convertibleTo` says
+so — so `BigInt(x)` of a number is the value itself read at a `bigint`: the
+number without its fraction, which is what the language's `BigInt` of a double
+is. A value the compiler already holds is left to the read that folds it — a
+literal is a constant, so `2n ** BigInt(128)` is still the wide constant a power
+is folded with — and the digits a text states are left as the call the source
+wrote. The eight-byte store is then the value's own shifts and
+masks, and the load is the sum of the digits with the weights a bigint has: the
+functions of the file that write and read two and four bytes write eight the
+same way.
+
+A bigint literal written in an expression came out as `256nLL` in C — the digits
+with the `n` the language writes after them, and a suffix the C compiler does
+not know — because the literal writer used the text the source wrote rather than
+the value it names. `cLiteral` writes the digits now, which is the only spelling
+C has.
+
+This took the total from 602 to 580, and `toolchain/elf64.ts` from 31 refusals
+to 9: what is left of it is `codePointAt` of a character, the two computed keys
+of a record, and three calls of the read-back describer.
+
+### 4cd. A view of a block
+
+    const bytes = new Uint8Array(total);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(where, section.name, true);
+    bytes.set(request.text, textOffset);
+
+`toolchain/elf64.ts` writes the object file the machine backend links, and it
+writes it as bytes. A typed array is a block the value model already has; a
+view of one is the same bytes. So the view is the block — `bytes.buffer` is the
+typed array itself, `byteOffset` is zero and `byteLength` is the length — and a
+write of a chosen width is the stores that write it, from the least significant
+byte up: `setUint16`, `setUint32` and `setUint8` each become a function of the
+file that masks and shifts, and `getUint8`/`getUint16`/`getUint32` each become
+the sum the bytes are. `bytes.set(source, at)` copies a list into the block.
+Nothing new is asked of a backend: a helper is a function the file writes, and
+calling one is a call.
+
+A view of *part* of a block is refused: the block is the whole of what a store
+reaches, so an offset or a length the stores are not checked against would be a
+write past the view the source declared. `new DataView(buffer, 0, buffer.length)`
+is the whole block and is read as it.
+
+A field a class declares as `new Map<K, V>()` now holds that map: the type
+arguments are part of the type the initialiser writes, so a key answers the
+value it was declared to hold rather than `any`.
+
+What is still blocked in the ELF writer is the sixty-four bit store and load:
+`view.setBigUint64(where, BigInt(symbol.size), true)` needs `BigInt(x)` for a
+value the compiler does not fold (it calls a function the program does not
+compile) and a wide number written a byte at a time. The two are the next
+blocker this file names.
+
+This took the total from 609 to 602, and `toolchain/elf64.ts` from 39 refusals
+to 31.
 
 ### 4cc. The shape a value has crosses the arm, and a body's own types
 
@@ -2110,7 +2180,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-609 refusals over 95 sources, 28 of them read whole. The report reads the
+580 refusals over 95 sources, 28 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2129,14 +2199,14 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 64 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 62 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
 | 25 | `an empty array needs the type of its elements` | an empty literal whose element type no use states: a value a callback answers, a field an assignment replaces, or a name a `Map` answers |
-| 25 | `"map" is not a method`, 13 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
-| 18 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
+| 24 | `"map" is not a method`, 13 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 17 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
 | 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
 | 10 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
-| 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
-| 8 | `"set" is not a method`, 7 `"bigint"`, 7 `"get"`, 7 `"setBigUint64"` | text and list methods on a value the read cannot type, and the `DataView` of `toolchain/elf64.ts` |
+| 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle, read as a value rather than in a loop |
+| 8 | `"set" is not a method`, 7 `"bigint"`, 7 `"get"` | text and list methods on a value the read cannot type |
 | 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
 | 8 | `a spread argument is not part of the call subset` | `f(...xs)` where the declaration is a builtin, or a list spread into a push |
 | 8 | `expected ")"` | a construct the parser stopped in the middle of, which the report's line cannot name |
@@ -2158,12 +2228,11 @@ The value-model slices still open, in the order they block the self-build:
   field's interface states, and the linked read still refuses the literal where
   the interface, or the field's use, does not name it. It is the largest
   single-construct bucket left.
-- **A byte view of a block.** `toolchain/elf64.ts` writes its ELF header through
-  `new DataView(bytes.buffer)` and `setUint16`/`setUint32`/`setBigUint64`, and
-  copies a block with `bytes.set(source, offset)`. A typed array is a block the
-  IR already lays out, but a view that reads and writes a chosen width at a
-  chosen offset, and a block copied into another, are not part of the value
-  model: the calls are refused and the ELF writer waits on them.
+- **A list stored in a dictionary.** A dictionary's entry is one double, and a
+  list is a pointer and a length: `Map<string, number[]>`,
+  `Record<string, string[]>` and a set of lists are refused where the value is
+  read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
+  its own whose handle is the entry — before a key can answer one.
 - **The host's stdio.** `process.stdout.write` and `process.stderr.write` are
   the way a program prints without a newline, and `process` is not a value the
   frontend models. Every site the report still refuses for `"write"` is one of
@@ -2238,6 +2307,8 @@ What was closed this session, and what each was worth:
 | the type an exported constant offers (§4ca) | 689 → 680 |
 | the type a call reads its arguments at (§4cb) | 680 → 622 |
 | the shape a value has across an arm (§4cc) | 622 → 609 |
+| a view of a block (§4cd) | 609 → 602 |
+| a whole number of sixty-four bits (§4ce) | 602 → 580 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

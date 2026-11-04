@@ -17,6 +17,7 @@ import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { validateCSource } from "../toolchain/csource.ts";
 import { generateFunctionC } from "../toolchain/ir-c.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
+import { cLiteral } from "../toolchain/c-names.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout } from "../core/types.ts";
 import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
@@ -759,4 +760,12 @@ test("a number written in base sixteen is refused rather than written in base te
     parts: [{ k: "value", value: { k: "toText", type: TEXT, of: { k: "const", type: F64, text: "255" }, digits: -1 } }],
   }));
   assert.throws(() => generateFunctionC(fn), /cannot do/);
+});
+
+test("a bigint literal is written as the digits of the number, not with its n", () => {
+  // The source writes a bigint with the `n` that says it is one, and `n` is not
+  // a suffix C knows: a literal in an expression came out as `256nLL`.
+  assert.equal(cLiteral("256n", "i64"), "256LL");
+  assert.equal(cLiteral("256", "i64"), "256LL");
+  assert.equal(cLiteral("-4n", "i64"), "-4LL");
 });

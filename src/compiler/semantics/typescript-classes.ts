@@ -515,7 +515,17 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       else if (first?.kind === "bigint") typeName = "bigint";
       else if (first?.kind === "string") typeName = "string";
       else if (first?.text === "true" || first?.text === "false") typeName = "boolean";
-      else if (first?.text === "new" && tokens[initStart + 1]?.kind === "ident") typeName = tokens[initStart + 1].text;
+      else if (first?.text === "new" && tokens[initStart + 1]?.kind === "ident") {
+        const construct = tokens[initStart + 1].text;
+        // A map or a set says what it holds in its type arguments, and a field
+        // that starts as one holds what they say: `new Map<string, Shape>()` is
+        // a `Map<string, Shape>`, so a key answers a shape rather than `any`.
+        const angle = initStart + 2;
+        const collection = construct === "Map" || construct === "Set" || construct === "WeakMap" || construct === "WeakSet";
+        typeName = collection && isPunct(tokens[angle], "<")
+          ? typeText(tokens, initStart + 1, skipAngles(tokens, angle))
+          : construct;
+      }
     }
     (isStatic ? statics : fields).push({ name: memberName, typeName, initStart, initEnd, line: memberLine });
   }

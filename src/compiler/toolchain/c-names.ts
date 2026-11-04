@@ -327,7 +327,10 @@ export function cLiteral(text: string, type: string): string {
   const wide = C_WIDE_INTEGERS[type];
   if (wide !== undefined) {
     const value = integerLiteral(text);
-    if (value !== null && value >= wide.low && value <= wide.high) return `${text}${wide.suffix}`;
+    // The digits the value is, not the text it was written with: a literal the
+    // language writes as a bigint carries the `n` that says so, and that is not
+    // a suffix C knows.
+    if (value !== null && value >= wide.low && value <= wide.high) return `${value.toString()}${wide.suffix}`;
     // A value the type cannot hold as a magnitude is written as the bits it
     // is rather than as that magnitude: a decimal constant too large for any
     // signed type is not something C will read, and the bits are what the

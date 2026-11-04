@@ -3895,3 +3895,46 @@ test("a conditional answers the record the arm that has a type answers", async (
   ].join("\n"));
   assert.equal(output.trim(), "0 1");
 });
+
+test("a DataView over a typed array writes and reads the bytes of it", async () => {
+  // The block a `Uint8Array` is holds the bytes a `DataView` writes: a sixteen
+  // bit value is two stores, a thirty-two bit one is four, and `bytes.set`
+  // copies a list into the block.
+  const output = await agreesWithNode([
+    "export function main(): number {",
+    "  const bytes = new Uint8Array(12);",
+    "  const view = new DataView(bytes.buffer);",
+    "  view.setUint16(0, 0x1234, true);",
+    "  view.setUint32(2, 0x12345678, true);",
+    "  bytes.set([9, 8, 7], 8);",
+    "  const a = view.getUint16(0, true);",
+    "  const b = view.getUint32(2, true);",
+    "  const c = view.getUint8(9);",
+    "  console.log(`${a} ${b} ${c} ${bytes.byteLength}`);",
+    "  return a;",
+    "}",
+    "main();",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "4660 305419896 8 12");
+});
+
+test("a sixty-four bit store writes the digits of the number it is given", async () => {
+  // `setBigUint64` writes eight bytes of the whole number from the least
+  // significant up, and `getBigUint64` reads them back as one.
+  const output = await agreesWithNode([
+    "export function main(): number {",
+    "  const bytes = new Uint8Array(16);",
+    "  const view = new DataView(bytes.buffer);",
+    "  const base = 4294967296;",
+    "  const big = BigInt(base) * 3n + 5n;",
+    "  view.setBigUint64(0, big, true);",
+    "  const back = Number(view.getBigUint64(0, true));",
+    "  console.log(`${back} ${bytes[0]} ${bytes[4]} ${bytes[7]}`);",
+    "  return back;",
+    "}",
+    "main();",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12884901893 5 3 0");
+});
