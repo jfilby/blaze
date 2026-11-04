@@ -86,10 +86,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * lowered it to 698, a default read at its parameter's type to 689, and the
  * type an exported constant offers to 680, and reading every call's arguments
  * at the type the declaration states to 622, and the shape a value has across
- * the arm of a conditional to 609, a view of a block to 602, and a whole number
- * of sixty-four bits to 580.
+ * the arm of a conditional to 609, a view of a block to 602, a whole number of
+ * sixty-four bits to 580, and the field a conditional spread leaves out to 574.
  */
-const REFUSAL_BUDGET = 580;
+const REFUSAL_BUDGET = 574;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

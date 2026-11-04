@@ -973,3 +973,29 @@ test("an arrow a program writes as a field is a reference, not a wide number", (
   assert.ok(actions, "the literal is laid out");
   assert.equal(actions.fields[0]?.type, "ref<any>", "the field holds the code the arrow names");
 });
+
+test("a choice of null and a reference is the reference, not a handle of no shape", () => {
+  // The absent arm is `NULL` in the field the reference names, so the field is
+  // laid out as the reference: read as a handle of no shape it was a `double`,
+  // and the C compiler refused to put a pointer in one.
+  const contracts = contractsOf(
+    {
+      "1.ts": [
+        "interface Handle { name: string; tail?: Box }",
+        "class Box { value: number = 1; }",
+        "function make(c: boolean, tail: Box): Handle {",
+        "  const one: Handle = { name: `a`, tail: c ? null : tail };",
+        "  return one;",
+        "}",
+        "console.log(make(true, new Box()).name.length);",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  const handle = Object.values(contracts.make?.definition?.objects ?? {}).find((layout) =>
+    layout.fields.some((field) => field.name === "tail"),
+  );
+  assert.ok(handle, "the literal is laid out");
+  assert.equal(handle.fields.find((field) => field.name === "tail")?.type, "ref<Box>");
+});

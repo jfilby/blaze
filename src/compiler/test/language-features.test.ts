@@ -3938,3 +3938,20 @@ test("a sixty-four bit store writes the digits of the number it is given", async
   ].join("\n"));
   assert.equal(output.trim(), "12884901893 5 3 0");
 });
+
+test("a reference a conditional spread leaves out is the null it is read as", async () => {
+  // The field is written on the arm that holds the object and left at the null
+  // reference on the other, and `one.tail === undefined` is that null test.
+  const output = await agreesWithNode([
+    "interface Handle { name: string; tail?: Box }",
+    "class Box { value: number = 1; }",
+    "export function f(c: boolean): number {",
+    "  const tail = new Box();",
+    "  const one: Handle = { name: `a`, ...(c ? {} : { tail }) };",
+    "  return one.name.length + (one.tail === undefined ? 0 : one.tail.value);",
+    "}",
+    "console.log(f(true), f(false));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1 2");
+});

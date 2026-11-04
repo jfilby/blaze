@@ -13306,6 +13306,50 @@ class TypeScriptParser {
     return this.missing(`unexpected "${token.text}" in an expression`, token);
   }
 
+  /**
+   * What a spread of a conditional writes: a field the literal names, written
+   * only when the condition holds.
+   *
+   * The answer is false where the spread is not one of the two forms this can
+   * read — an arm that writes no field and an arm that writes fields whose
+   * absence is the null reference — and the caller then refuses the spread the
+   * way it refused every one.
+   */
+  private spreadOfOneArm(
+    conditional: Expression & { k: "conditional" },
+    expected: ResolvedType & { kind: "record" },
+    put: (name: string, value: Expression, spread: boolean) => void,
+  ): boolean {
+    const empty = (arm: Expression): boolean => arm.k === "object" && arm.fields.length === 0;
+    const written = empty(conditional.then)
+      ? conditional.otherwise
+      : empty(conditional.otherwise)
+        ? conditional.then
+        : null;
+    if (written === null || written.k !== "object" || written.fields.length === 0) return false;
+    const holdsThen = written === conditional.then;
+    for (const field of written.fields) {
+      const declared = expected.fields.get(field.name);
+      if (declared === undefined || !this.absenceIsNull(declared.type)) return false;
+    }
+    for (const field of written.fields) {
+      const declared = expected.fields.get(field.name) as ResolvedField;
+      this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
+      put(field.name, {
+        k: "conditional",
+        condition: conditional.condition,
+        then: holdsThen ? field.value : { k: "null" },
+        otherwise: holdsThen ? { k: "null" } : field.value,
+      }, true);
+    }
+    return true;
+  }
+
+  /** Whether a value of this type has `null` for the zero a field is written at. */
+  private absenceIsNull(type: ResolvedType): boolean {
+    return type.kind === "ref" || type.kind === "record" || type.kind === "any";
+  }
+
   /** `{ left: a, right: b }`: an object allocated where it is written. */
   private readObject(): Expression {
     const fields: { name: string; value: Expression }[] = [];
@@ -13349,6 +13393,13 @@ class TypeScriptParser {
           }
         } else if (spread.k === "object") {
           for (const field of spread.fields) put(field.name, field.value, true);
+        } else if (spread.k === "conditional" && expected !== null && this.spreadOfOneArm(spread, expected, put)) {
+          // `...(c ? {} : { field: v })` writes a field only when the condition
+          // holds. The arm that writes nothing leaves the field at the object's
+          // zero, and for a *reference* that zero is the absence the language's
+          // `undefined` is: `x.field === undefined` is already the null test the
+          // read writes. A number, a text or a list keeps its own zero, which a
+          // program may have meant, so those are refused rather than guessed.
         } else {
           const shape = this.shapeOf(spread);
           if (shape !== null && shape.kind === "record" && shape.index === null && readsOnce(spread)) {

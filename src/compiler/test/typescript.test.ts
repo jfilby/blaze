@@ -3310,3 +3310,35 @@ test("a sixty-four bit view of a block is a store and a load of a whole number",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a spread of a conditional writes a reference field only when it holds", () => {
+  // `...(c ? {} : { tail })` writes `tail` on one arm and leaves the field at
+  // its zero on the other. For a reference the zero is the null reference,
+  // which is what the language's `undefined` is: the field is absent when the
+  // condition holds, and reading it asks the null test the read already writes.
+  const source = [
+    "interface Handle { name: string; tail?: Box }",
+    "class Box { value: number = 1; }",
+    "export function f(c: boolean, tail: Box): number {",
+    "  const one: Handle = { name: `a`, ...(c ? {} : { tail }) };",
+    "  return one.name.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+
+  // The zero of a text is a value a program may have meant, so a text field is
+  // not read as absent.
+  const text = [
+    "interface Handle { name: string; label?: string }",
+    "export function f(c: boolean, label: string): number {",
+    "  const one: Handle = { name: `a`, ...(c ? {} : { label }) };",
+    "  return one.name.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.match(
+    readTypeScriptModule(text, "main.ts", false).refused[0]?.message ?? "",
+    /an object spread reads a constant object/,
+  );
+});

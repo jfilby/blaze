@@ -422,7 +422,17 @@ class BodyTypes {
         // a smaller one.
         const first = this.expression(expression.then);
         const second = this.expression(expression.otherwise);
-        return describe(first) === describe(second) ? first : { kind: "type", type: ANY_REF };
+        if (describe(first) === describe(second)) return first;
+        // A null is the absence of a reference, and a choice of one and a
+        // shaped reference is the shaped reference: the field holds a `Box*`
+        // that is `NULL` on the absent arm, not a handle of no shape. Reading
+        // it as the unshaped one laid the field out as a `double` and the C
+        // compiler refused to put a `Box*` in it.
+        const shaped = (value: Inferred): boolean =>
+          value.kind === "type" && value.type.kind === "ref" && value.type.name !== undefined;
+        if (expression.then.k === "null" && shaped(second)) return second;
+        if (expression.otherwise.k === "null" && shaped(first)) return first;
+        return { kind: "type", type: ANY_REF };
       }
       case "update":
         return this.environment.get(expression.name) ?? { kind: "type", type: F64 };
