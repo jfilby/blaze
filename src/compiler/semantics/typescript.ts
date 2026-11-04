@@ -3199,6 +3199,15 @@ class TypeScriptParser {
   private narrowed = new Map<string, TypeExpr>();
   /** The type of each test `typeof` wrote at run time, by the path it read. */
   private typeofPaths = new Map<Expression, string>();
+  /**
+   * The value each `Array.isArray` test asked about, by the test it wrote.
+   *
+   * A value the read does not type — a type parameter, an `any`, a field of a
+   * module the graph has not linked — is a list in the branch the test guards,
+   * and the branch reads it as one: `node.map(...)` is a list's map once the
+   * `Array.isArray(node)` around it holds.
+   */
+  private arrayTests = new Map<Expression, Expression>();
   /** True while the source of a `for..of` is being read. */
   private readingIteration = false;
   /**
@@ -4412,6 +4421,20 @@ class TypeScriptParser {
     if (method !== "push" && method !== "unshift") return null;
     const sequence = this.valueTypeOf(receiver);
     return sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+  }
+
+  /**
+   * The shape of the element a value is written into a list at.
+   *
+   * The contract erases a record to the opaque reference, so the type alone is
+   * not what an element written into a list of records is read at: `blocks.push`
+   * of an object literal takes the fields of `SemanticBlock`, and an empty list
+   * inside it is the element type that record states.
+   */
+  private writtenElementShape(receiver: Expression, method: string): ResolvedType | null {
+    if (method !== "push" && method !== "unshift") return null;
+    const shape = this.shapeOf(receiver);
+    return shape !== null && shape.kind === "list" ? shape.of : null;
   }
 
   /**
@@ -6651,6 +6674,7 @@ class TypeScriptParser {
       declarations: declared.declarations,
       imported: new Map(),
       exported: new Map(),
+      reexported: new Set(),
       classes: saved.classes,
       parent: saved,
     };
@@ -8821,6 +8845,7 @@ class TypeScriptParser {
       right: { k: "literal", text: "1" },
     };
     this.expressionTypes.set(asked, BOOLEAN_RESULT);
+    this.arrayTests.set(asked, value);
     return asked;
   }
 
@@ -9198,6 +9223,20 @@ class TypeScriptParser {
       }
       if (value.k !== "binary" || (value.op !== "===" && value.op !== "!==" && value.op !== "==" && value.op !== "!=")) return;
       const positive = value.op === "===" || value.op === "==";
+      const subject = this.arrayTests.get(value);
+      if (subject !== undefined) {
+        // `Array.isArray(node)` is a list in the branch it holds in, whatever
+        // the declaration said: the value is asked at run time because the read
+        // could not type it, and the element type it holds is the untyped
+        // reference the read would have given every element anyway.
+        const one = isNumberLiteral(value.right, "1") ? "1" : isNumberLiteral(value.right, "0") ? "0" : null;
+        if (one !== null) {
+          const list = one === "1" ? positive === truth : positive !== truth;
+          const path = list ? this.narrowedPath(subject) : null;
+          if (path !== null) settled.set(path, { kind: "slice", of: ANY_TYPE });
+        }
+        return;
+      }
       const tested = positive === truth ? value.right : value.left;
       const kind = textValue(tested);
       if (kind === null) return;
@@ -9797,6 +9836,7 @@ class TypeScriptParser {
             waitsForLink,
             this.writtenElementType(target.base, target.field),
             expectedParams.map((param) => param.shape),
+            this.writtenElementShape(target.base, target.field),
           );
           const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
           const receiver = target.base;
@@ -10280,6 +10320,7 @@ class TypeScriptParser {
     callbackWaitsForLink = false,
     rest: TypeExpr | null = null,
     shapes: readonly (ResolvedType | null)[] = [],
+    restShape: ResolvedType | null = null,
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
@@ -10300,7 +10341,7 @@ class TypeScriptParser {
       } else {
         spreads.push(false);
       }
-      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink, shapes[args.length] ?? null));
+      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink, shapes[args.length] ?? (args.length < expected.length ? null : restShape)));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
@@ -13472,7 +13513,8 @@ class TypeScriptParser {
           // read writes. A number, a text or a list keeps its own zero, which a
           // program may have meant, so those are refused rather than guessed.
         } else {
-          const shape = this.shapeOf(spread);
+          const held = this.shapeOf(spread);
+          const shape = held === null ? null : this.shapeForRead(held);
           if (shape !== null && shape.kind === "record" && shape.index === null && readsOnce(spread)) {
             for (const name of shape.fields.keys()) {
               put(name, { k: "member", base: spread, field: name }, true);

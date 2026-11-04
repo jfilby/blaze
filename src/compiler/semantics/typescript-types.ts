@@ -67,6 +67,15 @@ export interface TypeTable {
   imported: Map<string, TypeDecl>;
   /** The declarations this module offers to its importers. */
   exported: Map<string, TypeDecl>;
+  /**
+   * The names this module offers under a name it did not declare, as
+   * `export type { X }` writes where `X` is a type the module imported.
+   *
+   * What the name stands for is the declaration the module's own import binds,
+   * and the module graph binds those after the file is read: the re-export is
+   * resolved when the graph links the types, not where the list is written.
+   */
+  reexported: Set<string>;
   /** The classes the module declares, which name a reference. */
   classes: ReadonlySet<string>;
 }
@@ -377,6 +386,7 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
     declarations: new Map(),
     imported: new Map(),
     exported: new Map(),
+    reexported: new Set(),
     classes: new Set(),
   };
   let depth = 0;
@@ -525,11 +535,24 @@ function exportTypeLists(tokens: readonly Token[], table: TypeTable): void {
       let local = tokens[one];
       if (local?.text === "type") local = tokens[++one];
       if (local?.kind !== "ident") continue;
+      // `X as Y` offers X under the name Y, which is the name an importer
+      // writes; a list of plain names offers each under its own.
+      let offered = local.text;
+      if (tokens[one + 1]?.text === "as" && tokens[one + 2]?.kind === "ident") {
+        offered = (tokens[one + 2] as Token).text;
+        one += 2;
+      }
       const decl = table.declarations.get(local.text);
       if (decl !== undefined) {
         decl.exported = true;
-        table.exported.set(decl.name, decl);
+        table.exported.set(offered, decl);
+        continue;
       }
+      // A name the module did not write is one its imports bind: the export
+      // list offers it under the name it writes, and what it stands for is the
+      // declaration the module's own import resolves to. The module graph binds
+      // those after the file is read, so the offer is resolved at the link.
+      table.reexported.add(offered);
     }
   }
 }
@@ -1167,17 +1190,26 @@ export function bindImportedTypes(
   table: TypeTable,
   imports: readonly { specifier: string; names: readonly { local: string; imported: string }[] }[],
   targets: ReadonlyMap<string, TypeTable>,
-): void {
+): boolean {
   // A declaration already expanded in this table may name one of these types,
   // so the expansions made before the link are no longer the table's answer.
   EXPANSION_GENERATION += 1;
+  let added = false;
   for (const entry of imports) {
     const target = targets.get(entry.specifier);
     if (target === undefined) continue;
     for (const name of entry.names) {
-      const decl = target.exported.get(name.imported) ?? target.declarations.get(name.imported);
+      const decl = target.exported.get(name.imported) ??
+        target.declarations.get(name.imported) ??
+        // A module that re-exports a type writes no declaration for it: the
+        // name stands for the declaration its own import bound, which the graph
+        // binds before this file when the two are linked more than once.
+        (target.reexported.has(name.imported) ? target.imported.get(name.imported) : undefined);
       if (decl === undefined) continue;
+      if (table.imported.get(name.local) === decl) continue;
       table.imported.set(name.local, decl);
+      added = true;
     }
   }
+  return added;
 }

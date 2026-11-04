@@ -107,6 +107,34 @@ test("a refused module still offers the signatures of what it exports", async ()
   assert.deepEqual(report.refused.map((one) => one.path), ["lib.ts"]);
 });
 
+test("a type a module re-exports is the declaration its own import binds", async () => {
+  const directory = await tree({
+    "ir.ts": [
+      "export interface Body { symbol: string }",
+      "export interface Program { bodies: Body[] }",
+      "",
+    ].join("\n"),
+    "resolve.ts": 'import type { Program } from "./ir.ts";\nexport type { Program };\n',
+    "driver.ts": [
+      'import type { Program } from "./resolve.ts";',
+      "",
+      "export function symbols(program: Program): string[] {",
+      "  return program.bodies.map((body) => body.symbol);",
+      "}",
+      "",
+    ].join("\n"),
+    "cli.ts": 'import { symbols } from "./driver.ts";\n',
+  });
+
+  const report = await selfHostGap(directory);
+  // The re-exporting module writes no declaration: `Program` is the type its
+  // own import bound, and the fields resolve in the module that wrote them. The
+  // list field is read as the list it is, so `map` is a list's method and not a
+  // method of the opaque reference the contract spells.
+  assert.deepEqual(report.clean, ["cli.ts", "driver.ts", "ir.ts", "resolve.ts"]);
+  assert.equal(report.total, 0);
+});
+
 test("a module that re-exports a name offers the declaration the other module wrote", async () => {
   const directory = await tree({
     "impl.ts": "export function readText(path: string): string {\n  return path;\n}\n",

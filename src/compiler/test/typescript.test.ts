@@ -660,6 +660,23 @@ test("an empty list written into a field is built at the field's elements", () =
   assert.equal(firstBuffer(written)?.element, "text", "the field's element type is the list's");
 });
 
+test("an empty list in an object written into a list is built at the record's elements", () => {
+  // `statements.push({ ..., then: { releases: [] } })` writes an object into a
+  // list of records. The element's *shape* is the record the list was declared
+  // with — the contract type erases it to the opaque reference — so the empty
+  // list inside is built at the element type the record's field states.
+  const source = [
+    "interface Block { id: string; releases: string[] }",
+    "interface If { k: string; then: Block }",
+    "export function add(statements: If[]): number {",
+    "  statements.push({ k: `if`, then: { id: `x`, releases: [] } });",
+    "  return statements.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("an empty list in a field of an imported type is built at the type's elements", () => {
   // The field is declared in another module, so the read that first parses this
   // file has not linked the declaration the field belongs to. The module graph
@@ -2232,6 +2249,38 @@ test("Array.isArray is settled where the type is written and asked where it is n
   assert.match(asked, /blaze_rt_is_array/, "a value the read does not type is asked of the runtime");
 });
 
+test("a branch Array.isArray holds reads the value as a list", () => {
+  // A value the read does not type — a type parameter, an `any`, a field of a
+  // module the graph has not linked — is asked of the runtime because the read
+  // cannot say what it is. In the branch the test holds in it is a list, so the
+  // methods of a list are read there, and the other branch says nothing.
+  const source = [
+    "function walk<T>(node: T): T {",
+    "  if (Array.isArray(node)) return node.map((entry) => entry) as T;",
+    "  return node;",
+    "}",
+    "function each(value: any): number {",
+    "  if (!Array.isArray(value)) return 0;",
+    "  return value.length;",
+    "}",
+    "export function run(): number { return each(1); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+
+  const other = [
+    "function walk<T>(node: T): T {",
+    "  if (Array.isArray(node)) return node;",
+    "  return node.map((entry) => entry) as T;",
+    "}",
+    "",
+  ].join("\n");
+  assert.match(
+    readTypeScriptModule(other, "main.ts", false).refused[0]?.message ?? "",
+    /"map" is not a method this program compiles/,
+  );
+});
+
 test("a field of a field is written through a name of its own", () => {
   // The IR writes one field of one name, so `a.b.c = value` reads `a.b` into a
   // name first: an object is a reference, and writing through the name is
@@ -3339,6 +3388,36 @@ test("a spread of a conditional writes a reference field only when it holds", ()
   ].join("\n");
   assert.match(
     readTypeScriptModule(text, "main.ts", false).refused[0]?.message ?? "",
+    /an object spread reads a constant object/,
+  );
+});
+
+test("a spread copies the fields of the record its value names", () => {
+  // The shape a value is held at keeps the name of the record its declaration
+  // writes, and a spread copies the fields that record has: a field of a value
+  // the source read is spread field by field, as a value the file wrote out as
+  // a constant already is.
+  const source = [
+    "interface Block { id: number; statements: number[] }",
+    "interface Placed { block: Block; statement: number }",
+    "export function copy(placed: Placed): Block {",
+    "  return { ...placed.block };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+
+  // A dictionary has no fields to copy: what it holds is written by name, and a
+  // spread of one would have to guess them.
+  const dictionary = [
+    "export function copy(all: Record<string, number>): number {",
+    "  const one = { ...all };",
+    "  return 1;",
+    "}",
+    "",
+  ].join("\n");
+  assert.match(
+    readTypeScriptModule(dictionary, "main.ts", false).refused[0]?.message ?? "",
     /an object spread reads a constant object/,
   );
 });

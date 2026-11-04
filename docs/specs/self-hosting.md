@@ -888,6 +888,69 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cm. An object written into a list
+
+    statements.push({ k: "if", then: { id, releases: [], statements: [...] } });
+
+The element a `push` writes is held at the *type* the list declares, and a
+record's contract type is the opaque reference: an object literal written there
+took its fields from nothing, so an empty list inside one was a list no use had
+settled. A class method's arguments already carried the declaration's *shape*
+beside the type; a list's element did not. The push now passes the element's
+shape, so an object literal written into a list of records reads the fields the
+record states, and an empty list inside it is built at the element type.
+
+This took the total from 518 to 515.
+
+### 4cl. A type a module re-exports
+
+    import type { SemanticProgram } from "../semantics/ir-resolve.ts";
+
+    // semantics/ir-resolve.ts
+    export type { SemanticProgram };
+
+`export type { X }` where `X` is a type the module *imported* offered nothing:
+the export list only marked declarations the file wrote itself. The importing
+file therefore held no `SemanticProgram`, `program.bodies` was the untyped
+reference, and every method written on a list field of it was a method of
+nothing — `toolchain/driver.ts` and `runtime/nim-program.ts` were refused for
+this alone.
+
+A name the export list writes and the module did not declare is now recorded as
+re-exported, and binding an import resolves it to the declaration the module's
+own import bound. The records are walked in discovery order, so a re-export that
+only the previous pass could resolve is bound on the next one: the bind repeats
+until no table gains a declaration. `toolchain/driver.ts` and
+`runtime/nim-program.ts` are now read whole.
+
+This took the total from 529 to 518.
+
+### 4ck. The list a narrowed value is, and the record a spread names
+
+    function replaceValues<T>(node: T, …): T {
+      if (Array.isArray(node)) return node.map((entry) => replaceValues(entry, …)) as T;
+
+    const then = { ...statement.then, statements: [...statement.then.statements] };
+
+Two readings were missing. `Array.isArray(node)` asks the runtime what the value
+is, because the read cannot type it — a type parameter, an `any`, a field of a
+module the graph has not linked — and the branch the test holds in was still
+`any`, so `node.map(…)` there was a method of nothing. The test now remembers the
+value it asked about, and the branch it holds in reads that value as a list of the
+untyped reference: the element type is the one the read would have given every
+element anyway. The branch the test does not hold in says nothing, and a guard
+that leaves (`if (!Array.isArray(node)) return node;`) narrows the rest of the
+block the way a `typeof` guard does.
+
+A spread copies the fields of a record, and the shape a value is held at keeps
+the *name* of the record its declaration writes — `Statement` for `statement.then`
+— because that is what a field read of it resolves. The spread asked for a record
+outright and refused the name. It now resolves the name to the record it stands
+for, the way an expected type does, and a dictionary is still refused: a record
+with an index has no fields to copy.
+
+This took the total from 537 to 529.
+
 ### 4cj. The members Extract and Exclude name
 
     reductions?: Reduction[];
@@ -2411,6 +2474,9 @@ What was closed this session, and what each was worth:
 | the monotonic clock (§4ch) | 566 → 559 |
 | the record a collection's element is (§4ci) | 559 → 548 |
 | the members Extract and Exclude name (§4cj) | 548 → 537 |
+| the list a narrowed value is, and the record a spread names (§4ck) | 537 → 529 |
+| a type a module re-exports (§4cl) | 529 → 518 |
+| an object written into a list (§4cm) | 518 → 515 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

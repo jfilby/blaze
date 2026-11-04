@@ -90,9 +90,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * sixty-four bits to 580, the field a conditional spread leaves out to 574, and
  * the error stream to 566, the monotonic clock to 559, the record a
  * collection's element is to 548, and the members `Extract` and `Exclude` name
- * to 537.
+ * to 537, the list a narrowed value is, with the record a spread names, to 529,
+ * a type a module re-exports to 518, and an object written into a list to 515.
  */
-const REFUSAL_BUDGET = 537;
+const REFUSAL_BUDGET = 515;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

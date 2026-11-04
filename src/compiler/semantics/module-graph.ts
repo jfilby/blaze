@@ -352,23 +352,29 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   }
 
   // The types are linked after every file is read, because a declaration may
-  // import one from a file that was discovered later. The table object is the
-  // one the first read built, and the second read reuses it: a declaration an
+  // import one from a file that was discovered later. A module that re-exports
+  // a type it imported offers a name only once the module it imported from has
+  // been linked, and the records are walked in discovery order, so the bind is
+  // repeated until no table gains a declaration. The table object is the one
+  // the first read built, and the second read reuses it: a declaration an
   // importer already holds keeps resolving through the module that wrote it.
   const tables = new Map<string, TypeTable>();
   for (const record of records.values()) {
     if (record.analysis.types !== undefined) tables.set(record.path, record.analysis.types);
   }
-  for (const record of records.values()) {
-    const types = record.analysis.types;
-    const imports = record.analysis.typeImports;
-    if (types === undefined || imports === undefined) continue;
-    const targets = new Map<string, TypeTable>();
-    for (let index = 0; index < imports.length; index += 1) {
-      const target = tables.get(record.typeResolved[index] as string);
-      if (target !== undefined) targets.set((imports[index] as { specifier: string }).specifier, target);
+  for (let linked = true; linked; ) {
+    linked = false;
+    for (const record of records.values()) {
+      const types = record.analysis.types;
+      const imports = record.analysis.typeImports;
+      if (types === undefined || imports === undefined) continue;
+      const targets = new Map<string, TypeTable>();
+      for (let index = 0; index < imports.length; index += 1) {
+        const target = tables.get(record.typeResolved[index] as string);
+        if (target !== undefined) targets.set((imports[index] as { specifier: string }).specifier, target);
+      }
+      if (bindImportedTypes(types, imports, targets)) linked = true;
     }
-    bindImportedTypes(types, imports, targets);
   }
   // A class crosses the link as the description of itself: the fields a value
   // has and the methods it answers, which are functions the declaring module
