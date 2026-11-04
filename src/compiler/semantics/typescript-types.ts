@@ -53,6 +53,16 @@ export interface TypeDecl {
 export interface TypeTable {
   /** The declarations the module itself writes. */
   declarations: Map<string, TypeDecl>;
+  /**
+   * The table this one is written inside, when a block declares a type of its
+   * own.
+   *
+   * A `type` or an `interface` written in a function body is in scope for that
+   * body and no other, so the body is read against a table of its own that
+   * falls back to the module's: the name a body declares shadows the one the
+   * module writes, and a module never sees a name a body declared.
+   */
+  parent?: TypeTable;
   /** The declarations another module offers, under the names this one binds. */
   imported: Map<string, TypeDecl>;
   /** The declarations this module offers to its importers. */
@@ -530,7 +540,16 @@ function exportTypeLists(tokens: readonly Token[], table: TypeTable): void {
 
 /** The declaration a name binds, in the table and then among its imports. */
 export function typeDeclared(table: TypeTable, name: string): TypeDecl | undefined {
-  return table.declarations.get(name) ?? table.imported.get(name);
+  // A table a block writes inside another falls back to the other, so a name
+  // the block declares shadows the module's and a name it does not is the
+  // module's still.
+  let at: TypeTable | undefined = table;
+  while (at !== undefined) {
+    const found = at.declarations.get(name) ?? at.imported.get(name);
+    if (found !== undefined) return found;
+    at = at.parent;
+  }
+  return undefined;
 }
 
 function resolveTypeText(
@@ -645,7 +664,7 @@ function namesNotDeclared(
   const names: string[] = [];
   for (const name of text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
     if (params.has(name)) continue;
-    if (scope.declarations.has(name) || scope.imported.has(name) || scope.classes.has(name)) continue;
+    if (typeDeclared(scope, name) !== undefined || scope.classes.has(name)) continue;
     if (!names.includes(name)) names.push(name);
   }
   return names;

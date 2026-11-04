@@ -2728,7 +2728,7 @@ interface ArrowBinding {
   /** The type each capture was held at when the arrow was written. */
   captureTypes: TypeExpr[];
   /** The parameters the arrow itself was written with. */
-  params: { name: string; type: TypeExpr }[];
+  params: { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
   /**
    * Where the rest parameter is, when the arrow declares one.
    *
@@ -2739,6 +2739,15 @@ interface ArrowBinding {
   rest?: number;
   /** What the arrow answers. */
   returns: TypeExpr;
+  /**
+   * What the answer holds, where the declaration names it.
+   *
+   * A declaration that answers an interface erases to the opaque reference in
+   * the contract, so the fields are not in the type: a call of the arrow
+   * answers the shape beside it, which is what an arm of a conditional written
+   * against the call is read at.
+   */
+  returnsShape?: ResolvedType | null;
   /** The line the function was written at, for a closure made from a declaration. */
   line?: number;
   /** The function a call through the closure enters, once one is needed. */
@@ -2815,7 +2824,7 @@ export interface TypeScriptFunction {
    * callable without it, which the module answers with an overload: see
    * `defaultWrappers`.
    */
-  params: { name: string; type: TypeExpr; default?: Expression }[];
+  params: { name: string; type: TypeExpr; default?: Expression; shape?: ResolvedType | null }[];
   returns: TypeExpr;
   /**
    * What the declared result holds, where the contract type erased it: the
@@ -2989,6 +2998,15 @@ class TypeScriptParser {
    * the callee's declaration is what says what that is.
    */
   private declaredParams = new Map<string, readonly TypeExpr[]>();
+  /**
+   * What each declared parameter's annotation holds, beside its type.
+   *
+   * The contract type of an interface is the opaque reference: the fields it
+   * names are not a type the contract can spell. An argument written at that
+   * parameter is read at the fields the annotation states, so the shape travels
+   * beside the type it was read from.
+   */
+  private declaredParamShapes = new Map<string, readonly (ResolvedType | null)[]>();
   /**
    * Whether the expression being read is the initialiser of a declaration, and
    * so may be an arrow that is only ever called by the name it is bound to.
@@ -3249,7 +3267,7 @@ class TypeScriptParser {
    * resolve in. A name that is not a class is still a value with fields, and
    * this is what the member chain after it is read through.
    */
-  readonly typeTable: TypeTable;
+  typeTable: TypeTable;
   /** The shape each name of the body is declared at. */
   private valueShapes = new Map<string, ResolvedType>();
   /** The shape a member chain has already answered for a value it built. */
@@ -3959,6 +3977,19 @@ class TypeScriptParser {
     }
   }
 
+  /**
+   * What a value holds, where every empty list in it has been settled.
+   *
+   * A value with a list nothing has said the type of is half read: its shape is
+   * not the one the whole value will have, so the other arm of a conditional is
+   * not read at it.
+   */
+  private settledShapeOf(value: Expression): ResolvedType | null {
+    if (this.holdsUnsettledArray(value)) return null;
+    const shape = this.shapeOf(value);
+    return shape === null || shape.kind === "any" ? null : shape;
+  }
+
   /** The array type a value names, where its use has settled every empty list in it. */
   private settledArrayType(value: Expression): TypeExpr | null {
     if (this.holdsUnsettledArray(value)) return null;
@@ -4282,7 +4313,7 @@ class TypeScriptParser {
     });
     const out: DeclaredFunction[] = [];
     for (let arity = required; arity < fn.params.length; arity += 1) {
-      const written = fn.params.slice(0, arity).map(({ name, type }) => ({ name, type }));
+      const written = fn.params.slice(0, arity).map(({ name, type, shape }) => ({ name, type, shape }));
       // A default is read once, under a name of its own, before the call: it may
       // be a call of its own, and a call written among the arguments would run
       // while the earlier arguments are pinned in the registers it uses.
@@ -4314,10 +4345,14 @@ class TypeScriptParser {
   }
 
   /** The parameters of a method, where a class-typed one is a reference. */
-  private methodParams(params: readonly ClassParam[]): { name: string; type: TypeExpr }[] {
+  private methodParams(params: readonly ClassParam[]): { name: string; type: TypeExpr; shape: ResolvedType | null }[] {
     return params.map((param) => ({
       name: param.name,
       type: this.classTable.names.has(param.typeName) ? this.referenceTo(param.typeName) : this.typeForName(param.typeName, param.line),
+      // The annotation is what an argument written at the parameter is read at:
+      // a method takes the same records a function takes, and the shape of one
+      // is not a type the contract can spell.
+      shape: this.shapeForName(param.typeName),
     }));
   }
 
@@ -4377,14 +4412,22 @@ class TypeScriptParser {
     return sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
   }
 
-  /** The types a method's written arguments are read at, when a class answers it. */
-  private expectedMethodArguments(receiver: Expression, method: string): readonly TypeExpr[] {
+  /**
+   * The parameters a method of a class is called with, or none where the method
+   * is not one of a class.
+   *
+   * The annotation is what an argument is read at, and the *shape* of it is
+   * what a record argument needs: a parameter declared as an interface is the
+   * opaque reference in the contract, so without the shape an object literal
+   * written there is read with nothing said about its fields.
+   */
+  private expectedMethodParams(receiver: Expression, method: string): readonly { name: string; type: TypeExpr; shape: ResolvedType | null }[] {
     // A map or a set answers the method itself, and its arguments are not the
     // parameters of a class method that happens to share the name.
     if (this.collectionOfExpression(receiver) !== null) return [];
     const found = this.methodOwner(this.classOfExpression(receiver), method, false);
     if (found === null) return [];
-    return this.methodParams(found.method.params).map((param) => param.type);
+    return this.methodParams(found.method.params);
   }
 
   /** An instance of a class, as the reference the layout pass names. */
@@ -4493,7 +4536,7 @@ class TypeScriptParser {
       body.push(
         ...this.withClassContext(info, params, true, () => {
           this.position = info.constructor?.bodyStart ?? this.position;
-          const statements = this.readBlock();
+          const statements = this.readFunctionBlock();
           if (this.position !== (info.constructor?.bodyEnd ?? this.position)) {
             this.report("a constructor body is a block of statements", `near "${this.peek().text}"`);
           }
@@ -4514,7 +4557,7 @@ class TypeScriptParser {
       const statements = this.withClassContext(info, method.params, true, () =>
         this.readReturning(returns, () => {
           this.position = method.bodyStart;
-          const read = this.readBlock();
+          const read = this.readFunctionBlock();
           if (this.position !== method.bodyEnd) {
             this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
           }
@@ -4539,7 +4582,7 @@ class TypeScriptParser {
       const statements = this.withClassContext(info, method.params, false, () =>
         this.readReturning(returns, () => {
           this.position = method.bodyStart;
-          const read = this.readBlock();
+          const read = this.readFunctionBlock();
           if (this.position !== method.bodyEnd) {
             this.report(`method "${method.name}" has a body of statements`, `near "${this.peek().text}"`);
           }
@@ -5184,6 +5227,7 @@ class TypeScriptParser {
       const close = closing(open);
       if (close < 0) continue;
       const params: TypeExpr[] = [];
+      const paramShapes: (ResolvedType | null)[] = [];
       // The parameter list, split at the commas of its own depth. A type
       // argument's comma is inside the angle brackets of the type.
       let segment = open + 1;
@@ -5219,20 +5263,27 @@ class TypeScriptParser {
         if (text(index) === "?") index += 1;
         if (text(index) !== ":") {
           params.push(ANY_TYPE);
+          paramShapes.push(null);
           continue;
         }
         index += 1;
         const finish = Math.min(end, this.typeTokensEnd(index, PARAMETER_TYPE_STOPS));
         try {
-          params.push(this.typeExprOfShape(resolveAnnotation(tokens, index, finish, this.typeTable)));
+          const shape = resolveAnnotation(tokens, index, finish, this.typeTable);
+          params.push(this.typeExprOfShape(shape));
+          paramShapes.push(shape);
         } catch {
           params.push(ANY_TYPE);
+          paramShapes.push(null);
         }
       }
       // A parameter written as a pattern binds names this scan does not read,
       // so the parameter list is left to the declaration; the result type is
       // still the file's, and a call to the function answers it.
-      if (readable) this.declaredParams.set(name.text, params);
+      if (readable) {
+        this.declaredParams.set(name.text, params);
+        this.declaredParamShapes.set(name.text, paramShapes);
+      }
       // The result type follows the parameter list: `: T` up to the body, or up
       // to the semicolon of an overload.
       let after = close + 1;
@@ -5562,6 +5613,7 @@ class TypeScriptParser {
     if (parsed.overload === true) {
       this.declaredReturns.set(parsed.name, parsed.returns);
       this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+      this.declaredParamShapes.set(parsed.name, parsed.params.map((param) => param.shape ?? null));
       if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(parsed.name, parsed.returnsShape);
       if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
       return isDefault ? parsed.name : null;
@@ -5578,12 +5630,19 @@ class TypeScriptParser {
     // call wrote the arguments the body reads as one list, and packing them is
     // the caller's work below. An overload above the body is the list to use.
     if (parsed.variadic !== undefined) this.variadicFunctions.set(parsed.name, parsed.variadic);
-    else this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+    else {
+      this.declaredParams.set(parsed.name, parsed.params.map((param) => param.type));
+      this.declaredParamShapes.set(parsed.name, parsed.params.map((param) => param.shape ?? null));
+    }
     if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(parsed.name, parsed.returnsShape);
     if (parsed.collection !== undefined) this.declaredCollections.set(parsed.name, parsed.collection);
     for (const wrapper of this.defaultWrappers(parsed, exported)) {
       this.declaredReturns.set(wrapper.name, wrapper.returns);
       this.declaredParams.set(wrapper.name, wrapper.params.map((param) => param.type));
+      this.declaredParamShapes.set(
+        wrapper.name,
+        wrapper.params.map((param) => parsed.params.find((one) => one.name === param.name)?.shape ?? null),
+      );
       if (parsed.returnsShape !== undefined) this.declaredReturnShapes.set(wrapper.name, parsed.returnsShape);
       functions.push(wrapper);
     }
@@ -5895,6 +5954,7 @@ class TypeScriptParser {
           name: parameter.text,
           type: mapped,
           ...(fallback === undefined ? {} : { default: fallback }),
+          shape,
         });
         this.valueTypes.set(parameter.text, mapped);
         if (this.pendingNote) this.pendingValues.add(parameter.text);
@@ -5919,7 +5979,7 @@ class TypeScriptParser {
       // A function that states no result has the one its returns are. The body
       // is read here rather than refused, because the language lets a function
       // omit the annotation and the returns are what say it.
-      const body = this.readBlock();
+      const body = this.readFunctionBlock();
       return declared(inferredResult(body, params), [...prelude, ...body]);
     }
     this.next();
@@ -5943,7 +6003,7 @@ class TypeScriptParser {
     }
     return declared(
       returnType,
-      [...prelude, ...this.readReturning(returnType, () => this.readBlock(), returnShape)],
+      [...prelude, ...this.readReturning(returnType, () => this.readFunctionBlock(), returnShape)],
       returnShape,
     );
   }
@@ -6553,6 +6613,62 @@ class TypeScriptParser {
       }
     }
     return null;
+  }
+
+  /**
+   * A function body read with the types it declares of its own in scope.
+   *
+   * A body may write `type Expanded = { value: PyValue; pre: PyStatement[] }`
+   * and annotate its own declarations with it. The module's table has no such
+   * name — the scan reads the declarations at the top of the file — so the
+   * body is read against a table layered over the module's, which is what
+   * resolves the name and keeps it out of every other body.
+   */
+  private readFunctionBlock(): Statement[] {
+    return this.withBodyTypes(() => this.readBlock());
+  }
+
+  /** Reads a body against the types it declares, and restores the table after. */
+  private withBodyTypes<T>(read: () => T): T {
+    const saved = this.typeTable;
+    const open = this.position;
+    if (this.tokens[open]?.text !== "{") return read();
+    const close = this.blockEnd(open);
+    if (close < 0) return read();
+    const declared = scanTypeTable(this.tokens.slice(open + 1, close));
+    if (declared.declarations.size === 0) return read();
+    const table: TypeTable = {
+      declarations: declared.declarations,
+      imported: new Map(),
+      exported: new Map(),
+      classes: saved.classes,
+      parent: saved,
+    };
+    // A declaration resolves the names it writes in the table it is read in,
+    // which is the body's: a body that names its own type and then the module's
+    // resolves both.
+    for (const declaration of table.declarations.values()) declaration.scope = table;
+    this.typeTable = table;
+    try {
+      return read();
+    } finally {
+      this.typeTable = saved;
+    }
+  }
+
+  /** The index of the `}` that closes the `{` at `open`, or -1. */
+  private blockEnd(open: number): number {
+    let depth = 0;
+    for (let index = open; index < this.tokens.length; index += 1) {
+      const token = this.tokens[index] as Token;
+      if (token.kind !== "punct") continue;
+      if (token.text === "{") depth += 1;
+      else if (token.text === "}") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
   }
 
   private readBlock(): Statement[] {
@@ -8463,16 +8579,22 @@ class TypeScriptParser {
     const then = this.withNarrowing(this.narrowingOf(condition, true), () => this.readExpression());
     this.expect(":");
     const otherwise = this.withNarrowing(this.narrowingOf(condition, false), () => this.readExpression());
-    // An empty arm is built at the type of the arm that has values, or at the
-    // type the use of the whole conditional states. A use that states a
-    // number says nothing about a list written inside the conditional.
+    // An arm is read at the type of the arm that has one, or at the type the
+    // use of the whole conditional states: `c ? { v: 1, pre: [] } : expand(x)`
+    // takes the fields the call answers for the literal. A use that states a
+    // number says nothing about a list written inside the conditional, so a
+    // type is taken from an arm only where it is a list or a record.
     const expected = this.expectedType !== null &&
       (this.expectedType.kind === "slice" || this.expectedType.kind === "array")
       ? this.expectedType
       : null;
-    const type = expected ?? this.settledArrayType(then) ?? this.settledArrayType(otherwise);
-    if (type !== null) this.applyExpected(then, type, this.expectedShape);
-    if (type !== null) this.applyExpected(otherwise, type, this.expectedShape);
+    const shape = this.expectedShape ?? this.settledShapeOf(then) ?? this.settledShapeOf(otherwise);
+    const type = expected
+      ?? this.settledArrayType(then)
+      ?? this.settledArrayType(otherwise)
+      ?? (shape === null ? null : this.typeExprOfShape(shape));
+    if (type !== null) this.applyExpected(then, type, shape);
+    if (type !== null) this.applyExpected(otherwise, type, shape);
     return { k: "conditional", condition, then, otherwise };
   }
 
@@ -9202,7 +9324,14 @@ class TypeScriptParser {
         // the arguments the source wrote.
         if (target.k === "ident" && this.valueArrows.has(target.name)) {
           const binding = this.valueArrows.get(target.name) as ArrowBinding;
-          const args = this.readCallArguments(binding.params.map((param) => param.type));
+          const args = this.readCallArguments(
+            binding.params.map((param) => param.type),
+            null,
+            false,
+            false,
+            null,
+            binding.params.map((param) => param.shape ?? null),
+          );
           const rest = binding.rest;
           const callArgs = rest === undefined
             ? args
@@ -9219,6 +9348,9 @@ class TypeScriptParser {
             name: binding.function,
             args: [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...callArgs],
           };
+          if (binding.returnsShape !== undefined && binding.returnsShape !== null) {
+            this.expressionShapes.set(made, this.shapeForRead(binding.returnsShape) ?? binding.returnsShape);
+          }
           // A call the arrow's own body writes of the arrow is a call site that
           // was read before the arrow knew what it captured. The values are
           // written in front of the arguments once they are known.
@@ -9537,7 +9669,15 @@ class TypeScriptParser {
           if (owner !== undefined && !this.valueClasses.has(target.base.name)) {
             const found = this.methodOwner(owner.name, target.field, true);
             if (found !== null) {
-              const args = this.readCallArguments(this.methodParams(found.method.params).map((param) => param.type));
+              const params = this.methodParams(found.method.params);
+              const args = this.readCallArguments(
+                params.map((param) => param.type),
+                null,
+                false,
+                false,
+                null,
+                params.map((param) => param.shape),
+              );
               replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), args, found.method.returnTypeName, found.method.line));
               continue;
             }
@@ -9565,12 +9705,14 @@ class TypeScriptParser {
           // waits for that link too. An element the read holds as a reference
           // with no name is one the link will name.
           const waitsForLink = this.importsArePending();
+          const expectedParams = this.expectedMethodParams(target.base, target.field);
           const args = this.readCallArguments(
-            this.expectedMethodArguments(target.base, target.field),
+            expectedParams.map((param) => param.type),
             callback,
             target.field === "push" || target.field === "splice",
             waitsForLink,
             this.writtenElementType(target.base, target.field),
+            expectedParams.map((param) => param.shape),
           );
           const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
           const receiver = target.base;
@@ -9734,8 +9876,9 @@ class TypeScriptParser {
         // read does not hold — one another module declares — cannot say how
         // many to read, and the spread is refused where it is.
         const declared = this.declaredParams.get(target.name) ?? [];
+        const declaredShapes = this.declaredParamShapes.get(target.name) ?? [];
         const spreadCall = declared.length > 0 && this.at("(") && this.peek(1).text === "...";
-        let args = this.readCallArguments(spreadCall ? [] : declared, null, spreadCall);
+        let args = this.readCallArguments(spreadCall ? [] : declared, null, spreadCall, false, null, spreadCall ? [] : declaredShapes);
         if (spreadCall) {
           if (args.length === 1 && this.argumentSpreads?.[0] === true) {
             const list = args[0] as Expression;
@@ -10029,6 +10172,7 @@ class TypeScriptParser {
     spreadsAllowed = false,
     callbackWaitsForLink = false,
     rest: TypeExpr | null = null,
+    shapes: readonly (ResolvedType | null)[] = [],
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
@@ -10049,7 +10193,7 @@ class TypeScriptParser {
       } else {
         spreads.push(false);
       }
-      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink));
+      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink, shapes[args.length] ?? null));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
@@ -10063,8 +10207,9 @@ class TypeScriptParser {
     type: TypeExpr | null,
     callback: readonly ArrowParameterType[] | null,
     waitsForLink = false,
+    shape: ResolvedType | null = null,
   ): Expression {
-    const read = (): Expression => (type === null ? this.readExpression() : this.readAt(type, () => this.readExpression()));
+    const read = (): Expression => (type === null ? this.readExpression() : this.readAt(type, () => this.readExpression(), shape));
     // A hint applies only to the arrow written at the cursor. A hint on a value
     // that is not an arrow names no parameter, and is not passed on to an arrow
     // the value contains.
@@ -10380,8 +10525,9 @@ class TypeScriptParser {
         function: liftedName,
         captures: [],
         captureTypes: [],
-        params: params.map((param) => ({ name: param.name, type: param.type })),
+        params: params.map((param) => ({ name: param.name, type: param.type, shape: param.shape })),
         returns: stated ?? ANY_TYPE,
+        returnsShape: statedShape,
       };
       const restAt = params.findIndex((param) => param.rest === true);
       if (restAt >= 0) provisional.rest = restAt;
@@ -10409,7 +10555,7 @@ class TypeScriptParser {
       }
     });
     const body: Statement[] = this.readReturning(stated, () => {
-      if (this.at("{")) return [...prelude, ...this.readBlock()];
+      if (this.at("{")) return [...prelude, ...this.readFunctionBlock()];
       // A concise body that is a whole assignment is the write and the value it
       // wrote: `() => (count ??= next())` runs the write and answers `count`.
       // A parenthesised form is the same value, and the parentheses are the
@@ -10510,6 +10656,9 @@ class TypeScriptParser {
       (capture) => !params.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
     );
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
+    // The shape the arrow's declaration writes is what a call of it answers,
+    // beside the type the contract can spell.
+    binding.returnsShape = statedShape;
     // The map or set an arrow answers is the one its declaration states, and a
     // call of the arrow is a call whose answer is a collection: the call names
     // the lifted function, so the collection is recorded under that name. A
@@ -10667,7 +10816,7 @@ class TypeScriptParser {
    */
   private liftArrow(
     name: string,
-    params: readonly { name: string; type: TypeExpr; rest?: boolean }[],
+    params: readonly { name: string; type: TypeExpr; rest?: boolean; shape?: ResolvedType | null }[],
     returns: TypeExpr,
     body: Statement[],
     captures: readonly string[],
@@ -10675,7 +10824,7 @@ class TypeScriptParser {
   ): ArrowBinding {
     const captureTypes = captures.map((capture) => this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE);
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
-    const written = params.map((param) => ({ name: param.name, type: param.type }));
+    const written = params.map((param) => ({ name: param.name, type: param.type, shape: param.shape ?? null }));
     const lifted: TypeScriptFunction = {
       name,
       params: [...captured, ...written],
@@ -13606,9 +13755,17 @@ class TypeScriptParser {
           this.report("a class is constructed with its arguments", `as in new ${view.text}()`, view);
           return { k: "call", name: info.name, args: [] };
         }
-        const params = info.constructor?.params ?? [];
-        const args = this.readCallArguments(this.methodParams(params).map((param) => param.type));
-        return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
+        const written = info.constructor?.params ?? [];
+        const params = this.methodParams(written);
+        const args = this.readCallArguments(
+          params.map((param) => param.type),
+          null,
+          false,
+          false,
+          null,
+          params.map((param) => param.shape),
+        );
+        return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params: written, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
     }
     // `new RegExp(pattern, flags)`: the same pair a written-out regular

@@ -84,9 +84,11 @@ import { selfHostGap } from "./self-host-gap.ts";
  * arrow is a reference and a function-typed field is called through the value
  * it holds, reading a top-level constant at the type its declaration writes
  * lowered it to 698, a default read at its parameter's type to 689, and the
- * type an exported constant offers to 680.
+ * type an exported constant offers to 680, and reading every call's arguments
+ * at the type the declaration states to 622, and the shape a value has across
+ * the arm of a conditional to 609.
  */
-const REFUSAL_BUDGET = 680;
+const REFUSAL_BUDGET = 609;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

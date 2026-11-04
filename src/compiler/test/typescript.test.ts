@@ -3181,3 +3181,85 @@ test("an exported constant offers the type its declaration writes", () => {
   assert.ok(shapes !== undefined, "the declaration offers the type it writes");
   assert.ok(shapes.has("TABLE"), "the exported name is the one offered");
 });
+
+test("an argument is read at the type and the shape the declaration states", () => {
+  // A parameter declared as an interface is the opaque reference in the
+  // contract, so the shape the annotation names is what says what an object
+  // literal written there holds: `args: []` is a list of expressions only if
+  // the field's declaration says so.
+  const union = [
+    "type A = { k: `a`; args: string[] };",
+    "type B = { k: `b`; name: string };",
+    "type Expr = A | B;",
+    "function take(value: Expr): number { return 1; }",
+    "export function f(): number { return take({ k: `a`, args: [] }); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(union, "main.ts", false).refused, []);
+
+  // A name bound to an arrow is not a declaration the module carries, and the
+  // call of it reads the arrow's own parameters, which is where the type of an
+  // argument comes from.
+  const arrow = [
+    "interface Entry { kind: string; args: string[] }",
+    "export function f(): number {",
+    "  const take = (value: Entry): number => value.args.length;",
+    "  return take({ kind: `call`, args: [] });",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(arrow, "main.ts", false).refused, []);
+});
+
+test("a method and a constructor read their arguments at their parameters", () => {
+  const source = [
+    "interface Input { tags: string[] }",
+    "class Reader {",
+    "  constructor(private input: Input) {}",
+    "  count(value: Input): number { return value.tags.length; }",
+    "  run(): number { return this.count({ tags: [] }); }",
+    "}",
+    "export function f(): number { return new Reader({ tags: [] }).run(); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "the constructor and the method state what their arguments hold");
+});
+
+test("a type a function body declares is in scope for that body and no other", () => {
+  // `type Expanded = { … }` written inside a body is not a declaration of the
+  // module: the body's own annotations resolve it, and the next body does not
+  // see it.
+  const source = [
+    "export function inside(): number {",
+    "  type Expanded = { value: string; pre: string[] };",
+    "  const one: Expanded = { value: `a`, pre: [] };",
+    "  return one.pre.length;",
+    "}",
+    "export function outside(): number {",
+    "  const one: Expanded = { value: `a`, pre: [] };",
+    "  return 1;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.equal(read.refused.length, 1, "the body that did not declare the name still waits for its element type");
+  assert.match(read.refused[0]?.message ?? "", /an empty array needs the type of its elements/);
+});
+
+test("a conditional's arms share the type and the shape the other arm has", () => {
+  // `c ? { value, pre: [] } : expand(x)` reads the literal at what the call
+  // answers: the call's declaration states the record, and the empty list in
+  // the arm that has no type of its own is settled by it.
+  const source = [
+    "interface Expanded { value: string; pre: string[] }",
+    "export function f(start: string | null): number {",
+    "  const expand = (one: string): Expanded => ({ value: one, pre: [] });",
+    "  const one = start === null ? { value: ``, pre: [] } : expand(start);",
+    "  return one.pre.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "the arm without a type is read at the arm that has one");
+});

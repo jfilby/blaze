@@ -3862,3 +3862,36 @@ test("a set held in a map is a handle the questions written after it reach", asy
   ].join("\n"));
   assert.equal(output.trim(), "1");
 });
+
+test("a call hands an object literal at the type the declaration states", async () => {
+  // The arrow's parameter is an interface, and the value the caller writes is
+  // an object literal whose `tags` field is an empty list: the declaration is
+  // what says the list holds texts, and the call is what hands it over.
+  const output = await agreesWithNode([
+    "interface Input { tags: string[]; label: string }",
+    "export function run(): string {",
+    "  const describe = (one: Input): string => one.label + (one.tags.length === 0 ? `: empty` : `: full`);",
+    "  return describe({ tags: [], label: `none` });",
+    "}",
+    "console.log(run());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "none: empty");
+});
+
+test("a conditional answers the record the arm that has a type answers", async () => {
+  // One arm is a literal with an empty list and the other is a call whose
+  // declaration states the record: the arm without a type is read at the one
+  // with it, so the empty list is a list of the elements the field names.
+  const output = await agreesWithNode([
+    "interface Expanded { value: string; pre: string[] }",
+    "export function f(start: string | null): number {",
+    "  const expand = (one: string): Expanded => ({ value: one, pre: [one] });",
+    "  const one = start === null ? { value: `none`, pre: [] } : expand(start);",
+    "  return one.pre.length;",
+    "}",
+    "console.log(f(null), f(`ab`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "0 1");
+});

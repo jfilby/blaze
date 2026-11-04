@@ -109,8 +109,9 @@ lowered it to 991, what a collection's value holds to 945, and the signatures a
 refused module still offers to 916, and a field a modifier is written in front
 of to 903, and the type a method writes for its result to 857, a module that re-exports to
 847, a closure a layout field holds to 725, and the type a top-level declaration
-writes to 698, a default read at its parameter's type to 689, and the type an
-exported constant offers to 680.
+writes to 698, a default read at its parameter's type to 689, the type an
+exported constant offers to 680, and the type a call reads its arguments at to
+622, and the shape a value has across the arm of a conditional to 609.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -882,6 +883,67 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4cc. The shape a value has crosses the arm, and a body's own types
+
+    function expandWalrus(module: PyModule): PyModule {
+      type Expanded = { value: PyValue; pre: PyStatement[] };
+      const expandExpr = (value: PyValue, scope: Set<string>): Expanded => { … };
+      const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start, scope);
+    }
+
+Three reads kept `pre: []` from being a list of statements, and each is the
+same question — *what shape does this value have* — asked where the answer was
+already written down:
+
+- **A type a body declares.** `type Expanded` is written inside a function, and
+  the module's type table read only the declarations at the top of the file. The
+  name was `any`, so the arrow's result had no shape. A function body is now
+  read against a table layered over the module's (`TypeTable.parent`): the body
+  sees the types it declares, and no other body sees them. The declarations are
+  scanned before the body is read, so a body may name a type it writes below.
+- **What an arrow answers.** An arrow's declared result is a *type* the contract
+  can spell, and an interface is the opaque reference: the fields are not in it.
+  The binding now keeps the shape beside the type, and a call of the arrow
+  answers it.
+- **The arm of a conditional.** `c ? { value, pre: [] } : expand(x)` was read arm
+  by arm with nothing said, because the declaration states no type for it. An
+  arm is now read at the type *and* the shape of the arm that has one — the same
+  rule the reader already used for the arms of a `??` whose other side was a
+  list, generalized from lists to records.
+
+This took the total from 622 to 609, and `semantics/python.ts` from 20 refusals
+to 16.
+
+### 4cb. The type a call reads its arguments at
+
+    const describe = (one: Input): string => one.label;
+    describe({ label: "a", tags: [] });
+
+An argument was read at the parameter's *contract type*, and the contract type
+of an interface is the opaque reference: the fields are not a type the contract
+can spell. So `{ label: "a", tags: [] }` was a literal of no shape, and the
+empty list in it was `an empty array needs the type of its elements` — even
+though the arrow states that `tags` is a `string[]`. Four call sites had the
+same gap, and each now hands over both the type and the shape:
+
+- a call of a function the module declares, where the signature is the one the
+  file's own scan read (a parameter's annotation is resolved to a shape and
+  carried beside the type it erases to; a wrapper for a shorter arity takes the
+  shapes of the parameters it passes on);
+- a call of a name bound to an arrow, where the arrow's own parameters say what
+  the arguments are;
+- a call of a method through its receiver, and of a static method;
+- a constructor: `new Reader({ … })`.
+
+The shape is resolved in the file that writes the declaration and crosses the
+link for an exported one, exactly as the type does. Reading the argument at the
+shape is not only what settles an empty list: it is what a call *means*, and
+the literals are now checked field by field against the declaration they are
+handed to.
+
+This took the total from 680 to 622, and `semantics/typescript.ts` from 79
+refusals to 26.
 
 ### 4ca. The type an exported constant offers
 
@@ -2048,7 +2110,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-680 refusals over 95 sources, 28 of them read whole. The report reads the
+609 refusals over 95 sources, 28 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2067,14 +2129,14 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 69 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
-| 33 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 28 | `"map"`, 13 `"filter"`, 9 `"has"`, 11 `"find"`, 10 `"every"`, 8 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 64 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 25 | `an empty array needs the type of its elements` | an empty literal whose element type no use states: a value a callback answers, a field an assignment replaces, or a name a `Map` answers |
+| 25 | `"map" is not a method`, 13 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
 | 18 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
-| 15 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
+| 10 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
-| 8 | `"set"`, 8 `"startsWith"`, 8 `"trim"`, 8 `"split"`, 8 `"join"`, 8 `"at"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
+| 8 | `"set" is not a method`, 7 `"bigint"`, 7 `"get"`, 7 `"setBigUint64"` | text and list methods on a value the read cannot type, and the `DataView` of `toolchain/elf64.ts` |
 | 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
 | 8 | `a spread argument is not part of the call subset` | `f(...xs)` where the declaration is a builtin, or a list spread into a push |
 | 8 | `expected ")"` | a construct the parser stopped in the middle of, which the report's line cannot name |
@@ -2174,6 +2236,8 @@ What was closed this session, and what each was worth:
 | the type a top-level declaration writes (§4by) | 725 → 698 |
 | a default read at the parameter's type (§4bz) | 698 → 689 |
 | the type an exported constant offers (§4ca) | 689 → 680 |
+| the type a call reads its arguments at (§4cb) | 680 → 622 |
+| the shape a value has across an arm (§4cc) | 622 → 609 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
