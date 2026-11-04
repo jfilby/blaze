@@ -888,6 +888,71 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cq. A key asks a dictionary
+
+    if (name in args) return { unusable: `line ${line} gives ${name} twice` };
+
+    if (source in PYTHON_TYPES) return PYTHON_TYPES[source];
+
+`key in value` was read against the *fields* a record's type writes down. A
+dictionary — `Record<string, V>`, `Map<string, V>`, an object the program builds
+by key — writes no fields, so the question had nothing to compare against and was
+refused. It is the `has` the dictionary's own entries answer: the key the
+dictionary holds, asked of the handle the name is.
+
+This took the total from 488 to 485.
+
+### 4cp. A string is not a bracket
+
+    export function open(): string { return `{`; }
+
+    function rows(sizes: number[]): Set<string> { … }
+    export function ask(sizes: number[]): boolean { return rows(sizes).has(`a`); }
+
+The scan that reads a function's signature before its body counts brackets to
+know which functions are at the top of the file. It counted a token's *text*,
+and a string whose text is `{` or `}` is one token: every function written after
+such a string — which the frontend's own sources write, `"}"` among the operator
+tables — was read as nested inside something, so its signature was never
+scanned. A call written above it answered nothing, and the method on the answer
+was a method of nothing.
+
+The scan now counts punctuation marks, the way `mark` has always answered them
+for the constant scan. `semantics/typescript.ts` and the other files that write
+a brace in a string read further.
+
+This took the total from 494 to 488.
+
+### 4co. The element a list method answers
+
+    const target = offered.find((one) => one.path === resolved[index]);
+    target.values.get(name)
+
+`find` and `at` answer one element of a list, and the answer was held at the
+element's *contract* type — the opaque reference a record spells. `find(f).values`
+was therefore a field of a reference with no name, and `get` on it was a method
+of nothing: `semantics/module-graph.ts` and `semantics/frontend.ts` were refused
+for this alone. A list method that answers an element now records the element's
+shape, so the fields of the answer are read where the list declares them. The
+element a `shift` takes out is recorded the same way.
+
+This took the total from 509 to 494.
+
+### 4cn. The type a top-level allocation writes
+
+    export function known(name: string): boolean { return seen.has(name); }
+    const seen = new Set<string>();
+
+A top-level `new Map<...>()` or `new Set<...>()` holds a handle the running
+program has, so the name is *state* and not a constant: the scan kept the value
+of a written-out collection and nothing about an allocated one. A function
+written above the declaration was read before the declaration was, so `seen`
+held no type at all, and `has`/`set`/`add` on it were methods of nothing. The
+scan now keeps the type the allocation writes, and the read resolves it against
+the table the module graph built. `semantics/python.ts` reads further.
+
+This took the total from 515 to 509.
+
 ### 4cm. An object written into a list
 
     statements.push({ k: "if", then: { id, releases: [], statements: [...] } });
@@ -2477,6 +2542,10 @@ What was closed this session, and what each was worth:
 | the list a narrowed value is, and the record a spread names (§4ck) | 537 → 529 |
 | a type a module re-exports (§4cl) | 529 → 518 |
 | an object written into a list (§4cm) | 518 → 515 |
+| the type a top-level allocation writes (§4cn) | 515 → 509 |
+| the element a list method answers (§4co) | 509 → 494 |
+| a string is not a bracket (§4cp) | 494 → 488 |
+| a key asks a dictionary (§4cq) | 488 → 485 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

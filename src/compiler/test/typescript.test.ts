@@ -2281,6 +2281,73 @@ test("a branch Array.isArray holds reads the value as a list", () => {
   );
 });
 
+test("a collection declared below a function is still what the name holds", () => {
+  // A top-level `new Set<string>()` holds a handle the running program has, so
+  // it is state and not a constant — but the name is a set, and a function
+  // written above the declaration reads `has` on it. The scan keeps the type
+  // the allocation writes so that read knows what the name holds.
+  const source = [
+    "export function known(name: string): boolean { return seen.has(name); }",
+    "const seen = new Set<string>();",
+    "export function mark(name: string): void { seen.add(name); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a list method that answers one element keeps the element's shape", () => {
+  // `find` and `at` answer one element of the list, so what the answer holds is
+  // what the list's element holds: `find(f).values` is a field of the record,
+  // not a field of the opaque reference the contract spells.
+  const source = [
+    "interface Offer { path: string; values: ReadonlyMap<string, number> }",
+    "export function found(offered: Offer[], path: string): number {",
+    "  const target = offered.find((one) => one.path === path);",
+    "  if (target === undefined) return 0;",
+    "  return target.values.get(path) ?? 0;",
+    "}",
+    "export function taken(offered: Offer[], index: number): number {",
+    "  return offered.at(index).values.get(`a`) ?? 0;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a string that holds a bracket is not a bracket", () => {
+  // The signature scan counts brackets, and a string whose text is `{` or `}`
+  // is one token: counting it as a bracket put every function after it inside
+  // something, so their signatures were never scanned and a call written above
+  // one answered nothing.
+  const source = [
+    "export function open(): string { return `{`; }",
+    "export function ask(sizes: number[]): boolean { return rows(sizes).has(`a`); }",
+    "function rows(sizes: number[]): Set<string> {",
+    "  const found = new Set<string>();",
+    "  return found;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("`in` asks a dictionary whether it holds the key", () => {
+  // A dictionary's fields are not written down, so there is no field to compare
+  // against: the question is the `has` the dictionary's own entries answer, and
+  // the key is the one the dictionary holds.
+  const source = [
+    "export function asked(args: Record<string, number>, name: string): boolean {",
+    "  return name in args;",
+    "}",
+    "export function seen(names: Map<string, number>, name: string): boolean {",
+    "  return name in names;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  assert.match(JSON.stringify(analyzedBody(source, "asked")), /blaze_rt_dict_has/);
+});
+
 test("a field of a field is written through a name of its own", () => {
   // The IR writes one field of one name, so `a.b.c = value` reads `a.b` into a
   // name first: an object is a reference, and writing through the name is

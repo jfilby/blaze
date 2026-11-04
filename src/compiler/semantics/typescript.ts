@@ -1003,6 +1003,17 @@ interface ScannedFile {
    * is the read that resolves it.
    */
   annotations: Map<string, { start: number; end: number; exported: boolean }>;
+  /**
+   * The type each top-level `new Map<...>()` or `new Set<...>()` is allocated
+   * at, as the tokens that write it.
+   *
+   * A collection's handle is a value the running program holds, so it is state
+   * and not a constant; what the *name* holds — a map's key and value, a set's
+   * element — is what a method written on the name reads, and a function above
+   * the declaration is read before the declaration is. The range is resolved
+   * by the read that asks, against the table the module graph built.
+   */
+  collections: Map<string, { start: number; end: number }>;
 }
 
 /**
@@ -1252,6 +1263,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const found = new Map<string, ConstantInfo>();
   const shapes = new Map<string, ConstantInfo>();
   const annotations = new Map<string, { start: number; end: number; exported: boolean }>();
+  const collections = new Map<string, { start: number; end: number }>();
   const state = new Set<string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1318,6 +1330,31 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         continue;
       }
       const start = equals + 1;
+      // `const seen = new Set<string>()` writes the type the name holds in the
+      // allocation, and a method written above the declaration is read before
+      // it: the span is kept so that read can resolve the collection.
+      const allocated = tokens[start]?.text === "new" ? tokens[start + 1] : undefined;
+      if (allocated?.kind === "ident" && COLLECTION_CONSTRUCTORS.has(allocated.text)) {
+        let open = start + 2;
+        if (tokens[open]?.text === "<") {
+          let depth = 0;
+          while (open < tokens.length) {
+            const written = mark(tokens[open]);
+            if (written === "<") depth += 1;
+            else if (written === ">") {
+              depth -= 1;
+              if (depth === 0) {
+                open += 1;
+                break;
+              }
+            }
+            open += 1;
+          }
+        }
+        if (tokens[open]?.text === "(" && !locals.has(name)) {
+          collections.set(name, { start: start + 1, end: open });
+        }
+      }
       // A set or a map written entirely of literals is the file's constant:
       // its membership is the comparisons it is, and no dictionary is
       // allocated. A name that is added to is state, because the value after
@@ -1394,7 +1431,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state, shapes, annotations };
+  return { constants: found, state, shapes, annotations, collections };
 }
 
 /** Marks the constants an `export { ... }` list of this file offers. */
@@ -2916,6 +2953,9 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "fill",
 ]);
 
+/** The constructors a `new` expression names to allocate a map or a set. */
+const COLLECTION_CONSTRUCTORS: ReadonlySet<string> = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
+
 /** The operators that stand in front of a value, as opposed to between two. */
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
@@ -3293,6 +3333,17 @@ class TypeScriptParser {
    * is one whose fields a member chain reads.
    */
   private constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map();
+  /**
+   * The type each top-level `new Map<...>()` or `new Set<...>()` is allocated
+   * at, by the name it is bound to.
+   *
+   * A collection the file holds is state, but its element types are what a
+   * method written on the name reads — and a function written above the
+   * declaration is read before the declaration is.
+   */
+  private constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map();
+  /** The collections those spans name, read once per read. */
+  private readonly constantCollectionValues = new Map<string, CollectionValue | null>();
   /** The shapes a link bound for the values this file imports, by name. */
   importedValueShapes: ReadonlyMap<string, ResolvedType> = new Map();
   /** The shape each annotation names, resolved once per read. */
@@ -3311,6 +3362,7 @@ class TypeScriptParser {
     importedTypeNames: ReadonlySet<string> = new Set(),
     importedRenames: ReadonlyMap<string, string> = new Map(),
     constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map(),
+    constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3322,6 +3374,7 @@ class TypeScriptParser {
     this.allTokens = allTokens ?? tokens;
     this.constants = constants;
     this.constantAnnotations = constantAnnotations;
+    this.constantCollections = constantCollections;
     this.state = state;
     this.shapes = shapes;
     this.typeTable = typeTable ?? scanTypeTable(tokens);
@@ -3643,6 +3696,13 @@ class TypeScriptParser {
     if (value.k === "ident") {
       const known = this.valueCollections.get(value.name);
       if (known !== undefined) return known;
+
+      // A top-level collection declared below the read is not in the body's
+      // table yet: what the name holds is the allocation the scan found.
+      if (!this.valueTypes.has(value.name)) {
+        const scanned = this.constantCollection(value.name);
+        if (scanned !== null) return scanned;
+      }
     }
     if (value.k === "call") {
       const answered = this.declaredCollections.get(value.name);
@@ -5192,13 +5252,18 @@ class TypeScriptParser {
     // The token's own text: an identifier is a word here and not a punctuation
     // mark, which `mark` answers nothing for.
     const text = (at: number): string => (tokens[at] as Token | undefined)?.text ?? "";
+    // A bracket is a punctuation mark. A string whose text is `"}"` is one
+    // token whose text is `}`, and counting it as a closing bracket unbalances
+    // the depth: every function written after such a string was read as nested
+    // in something, and its signature was not scanned.
+    const bracket = (at: number): string => mark(tokens[at]);
     /** The index of the bracket that closes the one at `open`, or -1. */
     const closing = (open: number): number => {
       let depth = 0;
       for (let at = open; at < tokens.length; at += 1) {
         const token = tokens[at] as Token;
         if (token.kind === "end") return -1;
-        const written = text(at);
+        const written = bracket(at);
         if (written === "(" || written === "[" || written === "{") depth += 1;
         else if (written === ")" || written === "]" || written === "}") {
           depth -= 1;
@@ -5213,11 +5278,12 @@ class TypeScriptParser {
       const token = tokens[at] as Token;
       if (token.kind === "end") break;
       const written = text(at);
-      if (written === "(" || written === "[" || written === "{") {
+      const punctuated = bracket(at);
+      if (punctuated === "(" || punctuated === "[" || punctuated === "{") {
         depth += 1;
         continue;
       }
-      if (written === ")" || written === "]" || written === "}") {
+      if (punctuated === ")" || punctuated === "]" || punctuated === "}") {
         depth = Math.max(0, depth - 1);
         continue;
       }
@@ -8889,8 +8955,8 @@ class TypeScriptParser {
       return answer;
     }
     const name = textValue(key);
+    const shape = this.shapeOf(object);
     if (name !== null) {
-      const shape = this.shapeOf(object);
       if (shape !== null && shape.kind === "record" && shape.fields.has(name)) {
         // A record built from an interface has every field it declares, so the
         // question is answered where it is read. A union of shapes does not: an
@@ -8926,6 +8992,20 @@ class TypeScriptParser {
         this.expressionTypes.set(answer, BOOLEAN_RESULT);
         return answer;
       }
+    }
+    // A dictionary the program builds answers the question from its entries:
+    // `key in table` is the `has` the dictionary's own method is, and the key
+    // is the one it holds. The fields are not written down, so there is no
+    // field to compare against.
+    const dictionary = shape === null ? null : this.collectionOfShape(shape);
+    if (dictionary !== null && dictionary.kind === "map") {
+      const asked: Expression = {
+        k: "call",
+        name: this.dictionaryCall(dictionary.key, "has") ?? "blaze_rt_dict_has",
+        args: [object, key],
+      };
+      this.expressionTypes.set(asked, BOOLEAN_RESULT);
+      return asked;
     }
     // The value may be one an imported function answered: its fields are the
     // declaration's, and the graph has not linked that module yet. The question
@@ -11158,6 +11238,13 @@ class TypeScriptParser {
         : this.shapeOfTypeExpr(returns.of);
       this.expressionShapes.set(call, { kind: "list", of: element });
     }
+    // `find` answers the element it found, or nothing, so what the answer holds
+    // is what the list's element holds: `offered.find(f).values` is a field of
+    // the record, not a field of the opaque reference the contract spells.
+    if (method === "find") {
+      const found = this.elementShapeOf(receiver, elements);
+      if (found !== null) this.expressionShapes.set(call, found);
+    }
     return call;
   }
 
@@ -11328,6 +11415,31 @@ class TypeScriptParser {
       this.notePendingType(typeText(this.allTokens, annotation.start, annotation.end));
       return null;
     }
+  }
+
+  /**
+   * The collection a top-level `new Map<...>()` or `new Set<...>()` allocates,
+   * by the name it is bound to.
+   *
+   * The handle is state, but what the name holds is what a method written on it
+   * reads — and a function written above the declaration is read before the
+   * declaration is. The span the scan kept is resolved here, against the table
+   * the module graph built.
+   */
+  private constantCollection(name: string): CollectionValue | null {
+    const range = this.constantCollections.get(name);
+    if (range === undefined) return null;
+    const known = this.constantCollectionValues.get(name);
+    if (known !== undefined) return known;
+    let collection: CollectionValue | null = null;
+    try {
+      const shape = resolveAnnotation(this.allTokens, range.start, range.end, this.typeTable);
+      collection = this.collectionOfShape(shape);
+    } catch {
+      this.notePendingType(typeText(this.allTokens, range.start, range.end));
+    }
+    this.constantCollectionValues.set(name, collection);
+    return collection;
   }
 
   /** The signature a member's declaration types it at, when it types one. */
@@ -11833,7 +11945,14 @@ class TypeScriptParser {
       ? [{ k: "text" as const, parts: [{ k: "text" as const, value: "," }] }]
       : [...args];
     const helper = this.sequenceMethodHelper(method, element, extra.length, line);
-    return { k: "call", name: helper.name, args: [receiver, ...extra] };
+    const call: Expression = { k: "call", name: helper.name, args: [receiver, ...extra] };
+    // `a.at(i)` answers one element of the list, the way `find` does, so what
+    // the answer holds is what the list's element holds.
+    if (method === "at") {
+      const found = this.elementShapeOf(receiver, element);
+      if (found !== null) this.expressionShapes.set(call, found);
+    }
+    return call;
   }
 
   /**
@@ -11869,6 +11988,8 @@ class TypeScriptParser {
       const taken = `__shifted${this.fieldCount++}`;
       this.pendingBefore.push({ kind: "declare", name: taken, type: null, init: { k: "index", base: place, index: { k: "literal", text: "0" } }, line });
       this.valueTypes.set(taken, element);
+      const takenShape = this.elementShapeOf(place, element);
+      if (takenShape !== null) this.valueShapes.set(taken, takenShape);
       const rest = this.sequenceMethod("slice", element, place, [{ k: "literal", text: "1" }], line);
       this.pendingBefore.push(this.writePlace(written, rest, line));
       return { k: "ident", name: taken };
@@ -14299,6 +14420,7 @@ class TypeScriptParser {
       this.importedTypeNames,
       this.importedValueRenames,
       this.constantAnnotations,
+      this.constantCollections,
     );
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
@@ -15347,6 +15469,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     importedNames(tokens),
     importedRenames(tokens),
     scanned.annotations,
+    scanned.collections,
   );
   parser.wideBigint = wideBigint;
   // The type each imported value's declaration writes, for a value whose own

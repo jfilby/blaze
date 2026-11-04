@@ -91,9 +91,12 @@ import { selfHostGap } from "./self-host-gap.ts";
  * the error stream to 566, the monotonic clock to 559, the record a
  * collection's element is to 548, and the members `Extract` and `Exclude` name
  * to 537, the list a narrowed value is, with the record a spread names, to 529,
- * a type a module re-exports to 518, and an object written into a list to 515.
+ * a type a module re-exports to 518, an object written into a list to 515, the
+ * type a top-level allocation writes to 509, the element a list method answers
+ * to 494, a string that is not a bracket to 488, and a key that asks a
+ * dictionary to 485.
  */
-const REFUSAL_BUDGET = 515;
+const REFUSAL_BUDGET = 485;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();
