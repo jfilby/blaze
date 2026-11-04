@@ -1964,6 +1964,18 @@ a verdict — the per-file delta is read before a slice is accepted.
 
 The value-model slices still open, in the order they block the self-build:
 
+- **A closure in a layout field.** `toolchain/program-emit.ts` is 95 refusals
+  and almost all of them are one shape: `this.target.prelude(...)`,
+  `this.target.escape(...)`, `this.target.release(...)`. `ProgramTarget` is an
+  interface whose fields are *functions*, and a value of it is an object
+  literal whose fields are arrows — in `toolchain/c-target.ts` and its
+  neighbours. Reading the call is not enough: a program that passes
+  `{ write: (t) => { … } }` to a function and calls `sink.write(t)` is refused
+  by the IR today, with `Object1.write is a u256, not a void`. The layout pass
+  writes the field as the unshaped reference and the invocation of a closure
+  read out of a field is not carried. Every one of these sites — and
+  `compiler.ts`'s `JsonStore` methods and `ai/backend.ts`'s reporter — waits on
+  that one value-model item.
 - **An empty list in a field.** `{ children: [] }` needs the element type the
   field's interface states, and the linked read still refuses the literal where
   the interface, or the field's use, does not name it. It is the largest
