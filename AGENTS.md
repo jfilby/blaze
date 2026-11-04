@@ -100,4 +100,6 @@ tests all live there. Run commands from it.
 ## Test suite
 
 For every change or fix, add a test (or tests) to the test suite to prevent
-regressions.
+regressions. But don't duplicate tests.
+
+If confidence is high you can make up to 5 changes before running all tests.
