@@ -3806,3 +3806,21 @@ test("a map is keyed by a reference, and answers the text it holds", async () =>
   ].join("\n"));
   assert.equal(output.trim(), "21");
 });
+
+test("a module re-exports another module's function and the program calls it", async () => {
+  // `export { a } from "./x.ts"` offers a name the other module writes: the
+  // function is compiled once, by the module that declares it, and a caller
+  // that imports it from the re-exporting module reaches the same function.
+  const output = await agreesWithNode(
+    [
+      'import { shout } from "./platform.ts";',
+      'console.log(shout(" hi "));',
+      "",
+    ].join("\n"),
+    {
+      "platform.ts": 'export { shout } from "./impl.ts";\n',
+      "impl.ts": "export function shout(text: string): string {\n  return text.trim().toUpperCase() + `!`;\n}\n",
+    },
+  );
+  assert.equal(output.trim(), "HI!");
+});

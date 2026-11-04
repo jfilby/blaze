@@ -3283,6 +3283,15 @@ class TypeScriptParser {
    */
   private readonly droppedExports: DeclaredFunction[] = [];
   /**
+   * The modules this file offers the names of, as `export { a } from "./x.ts"`
+   * writes.
+   *
+   * The names are the other module's, so they are not functions of this file.
+   * What this file offers is the name, and the link follows it to the module
+   * that compiled the function.
+   */
+  private readonly reexports: { specifier: string; names: string[]; line: number }[] = [];
+  /**
    * Statements a single read produced past the first one, as a destructuring
    * declaration is a temporary and a binding for each name. The next block
    * drains them after the statement it returns, so they run in the order the
@@ -4995,6 +5004,11 @@ class TypeScriptParser {
         );
       }
     }
+    // A re-export names another module, so that module is read like one this
+    // file imports: the graph has to resolve it to follow the name.
+    for (const entry of this.reexports) {
+      imports.push({ specifier: entry.specifier, names: [...entry.names], default: false, line: entry.line });
+    }
     return {
       path,
       imports,
@@ -5002,6 +5016,7 @@ class TypeScriptParser {
       types: this.typeTable,
       classes: this.classTable,
       ...(this.droppedExports.length === 0 ? {} : { signatures: this.droppedExports }),
+      ...(this.reexports.length === 0 ? {} : { reexports: this.reexports }),
       functions,
       default: defaultExport,
       body,
@@ -5437,7 +5452,12 @@ class TypeScriptParser {
       isDefault = true;
     }
     if (exported && this.at("{")) {
-      for (const name of this.readExportNames()) namesExported[name] = true;
+      const list = this.readExportNames();
+      if (list.from === null) {
+        for (const name of list.names) namesExported[name] = true;
+      } else {
+        this.reexports.push({ specifier: list.from, names: list.names, line: this.peek().line });
+      }
       return null;
     }
     // A top-level `const`, `let` or `var` is a value the file holds. A function
@@ -5513,7 +5533,7 @@ class TypeScriptParser {
   }
 
   /** `export { f, g }`: the names the file offers, and the `from` they may come from. */
-  private readExportNames(): string[] {
+  private readExportNames(): { names: string[]; from: string | null } {
     this.next();
     const names: string[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
@@ -5539,14 +5559,21 @@ class TypeScriptParser {
     }
     this.expect("}");
     this.accept(";");
+    // `export { a } from "./x.ts"` offers a name the other module writes. What
+    // crosses is the name: the function is compiled once, by the module that
+    // declares it, and a file that imports it from here reaches it through the
+    // link.
     if (this.at("from")) {
-      this.report(
-        "a module re-exporting another module's functions is not supported",
-        `import ${names.map((name) => `{ ${name} }`).join(", ")} from the other module and call ${names[0] ?? "them"} from here`,
-      );
-      this.synchronize();
+      this.next();
+      const specifier = this.next();
+      this.accept(";");
+      if (specifier.kind !== "string") {
+        this.report("a re-export names the module it comes from", `as in export { a } from "./x.ts"`, specifier);
+        return { names, from: null };
+      }
+      return { names, from: specifier.text };
     }
-    return names;
+    return { names, from: null };
   }
 
   /**

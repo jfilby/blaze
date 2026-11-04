@@ -19,7 +19,7 @@ import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { SourceModule } from "../core/types.ts";
 import type { Diagnostic } from "./diagnostics.ts";
-import type { Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
 import type { ClassTable } from "./typescript-classes.ts";
@@ -135,8 +135,7 @@ function importedFunctionsOf(
       // it exports: the declaration is refused where it is written, and the
       // calls a file writes to it are read against the parameters and result
       // the declaration states.
-      const declared = target.analysis.functions.find((one) => one.name === imported && one.exported) ??
-        (target.analysis.signatures ?? []).find((one) => one.name === imported);
+      const declared = declaredOffered(target, imported, records, new Set());
       if (declared === undefined) continue;
       const signature: ImportedFunction = {
         params: declared.params.map((param) => param.type),
@@ -149,6 +148,36 @@ function importedFunctionsOf(
     }
   });
   return functions;
+}
+
+/**
+ * The declaration a module offers under a name, following a re-export.
+ *
+ * `export { a } from "./x.ts"` offers a name the other module writes: this file
+ * compiles nothing of it, and the signature a caller reads is the one the
+ * module that declares the function wrote.
+ */
+function declaredOffered(
+  record: ModuleRecord,
+  name: string,
+  records: ReadonlyMap<string, ModuleRecord>,
+  seen: Set<string>,
+): DeclaredFunction | undefined {
+  if (seen.has(record.path)) return undefined;
+  seen.add(record.path);
+  const held = record.analysis.functions.find((one) => one.name === name && one.exported) ??
+    (record.analysis.signatures ?? []).find((one) => one.name === name);
+  if (held !== undefined) return held;
+  for (const entry of record.analysis.reexports ?? []) {
+    if (!entry.names.includes(name)) continue;
+    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+    if (index < 0) continue;
+    const target = records.get(record.resolved[index] ?? "");
+    if (target === undefined) continue;
+    const found = declaredOffered(target, name, records, seen);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 /** Reads each file at most once, so a diamond import costs one read. */
@@ -383,7 +412,7 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // The signatures of the functions this file calls are what a call answers,
     // and the graph has read the modules that write them by now.
     const functions = importedFunctionsOf(record, records);
-    if (!namesAType && !namesAClass && values.size === 0 && record.analysis.awaitingLink !== true) continue;
+    if (!namesAType && !namesAClass && values.size === 0 && functions.size === 0 && record.analysis.awaitingLink !== true) continue;
     const second = reader(record.source, record.path, record.path === request.entry.path, {
       table: record.analysis.types,
       classes: record.analysis.classes,

@@ -107,7 +107,8 @@ laid out with the bar its first member is written after lowered it to 1841,
 and carrying the classes one module declares to the files that import them
 lowered it to 991, what a collection's value holds to 945, and the signatures a
 refused module still offers to 916, and a field a modifier is written in front
-of to 903, and the type a method writes for its result to 857.
+of to 903, and the type a method writes for its result to 857, and a module that re-exports to
+847.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -879,6 +880,28 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bw. A module that re-exports
+
+`core/platform.ts` is the host boundary, and it declares nothing: it is one
+list of names another module writes.
+
+    export { readFile, readdir, join, ... } from "./platform-node.ts";
+
+The reader refused a re-export, so the boundary itself was outside the subset,
+and every file that imported from it read those calls as `any`. A re-export is
+now read as the offer it is: the frontend records the module and the names
+(`ModuleAnalysis.reexports`), the graph resolves that module like any import,
+and a file that names one of the names is given the signature the module that
+declared the function wrote. A module that only re-exports is a library the
+contract phase accepts, and the call a build emits is the one the declaring
+module compiled.
+
+This took the total from 857 to 847, and `core/platform.ts`,
+`runtime/model-build.ts`, `runtime/sglang-build.ts` and
+`runtime/triton-build.ts` read whole. A re-export written under another name —
+`export { a as b } from "./x.ts"` — is not read: the names are the ones the
+source writes unchanged, and no source of the compiler renames one.
 
 ### 4bv. The type a method writes for its result
 
@@ -1904,7 +1927,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-857 refusals over 95 sources, 16 of them read whole. The report reads the
+847 refusals over 95 sources, 20 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2008,6 +2031,7 @@ What was closed this session, and what each was worth:
 | a signature a refused module still offers (§4bt) | 945 → 916 |
 | a field a modifier is written in front of (§4bu) | 916 → 903 |
 | the type a method writes for its result (§4bv) | 903 → 857 |
+| a module that re-exports (§4bw) | 857 → 847 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

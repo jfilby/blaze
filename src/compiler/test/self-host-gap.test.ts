@@ -106,3 +106,25 @@ test("a refused module still offers the signatures of what it exports", async ()
   assert.deepEqual(report.clean, ["cli.ts"], "the caller's calls are read through the signature");
   assert.deepEqual(report.refused.map((one) => one.path), ["lib.ts"]);
 });
+
+test("a module that re-exports a name offers the declaration the other module wrote", async () => {
+  const directory = await tree({
+    "impl.ts": "export function readText(path: string): string {\n  return path;\n}\n",
+    "platform.ts": 'export { readText } from "./impl.ts";\n',
+    "cli.ts": [
+      'import { readText } from "./platform.ts";',
+      "export function trimmed(path: string): string {",
+      "  return readText(path).trim();",
+      "}",
+      "",
+    ].join("\n"),
+  });
+
+  const report = await selfHostGap(directory);
+  // The re-exporting module compiles nothing: what it offers is another
+  // module's name, and the signature a caller reads is the one that module
+  // wrote. Without the follow the call would answer `any`, and `trim` would be
+  // a method of nothing.
+  assert.deepEqual(report.clean, ["cli.ts", "impl.ts", "platform.ts"]);
+  assert.equal(report.total, 0);
+});

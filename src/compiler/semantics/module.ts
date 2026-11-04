@@ -336,6 +336,15 @@ export interface ModuleAnalysis {
    */
   signatures?: DeclaredFunction[];
   /**
+   * The modules this file offers names from, as `export { a } from "./x.ts"`
+   * writes.
+   *
+   * The names are the other module's: this file compiles nothing of them, and
+   * what it offers is the name. A file that imports one resolves it through
+   * this list to the module that wrote the function.
+   */
+  reexports?: readonly { specifier: string; names: readonly string[] }[];
+  /**
    * True when the read waited for the module graph to link a declaration an
    * import names. The graph reads such a file again once its imports are bound,
    * which is the read that answers what this one deferred.

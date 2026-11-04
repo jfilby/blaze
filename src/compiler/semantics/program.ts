@@ -137,6 +137,11 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
       const named = offeredValuesByPath.find((one) => one.path === to);
       const available = Object.keys(target.functions).filter((name) => internal[to]?.has(name) !== true);
       if (named !== undefined) for (const name of named.values.keys()) available.push(name);
+      // A file that re-exports another module's names offers those names: the
+      // function is compiled by the module that declares it, and the link
+      // reaches it by the name the re-export wrote.
+      const reexporting = records.find((one) => one.path === to);
+      for (const entry of reexporting?.analysis.reexports ?? []) available.push(...entry.names);
       if (available.length === 0) {
         throw contractPhaseError(`${record.path} imports "${entry.specifier}" (line ${entry.line}), which exports nothing`);
       }
@@ -303,7 +308,11 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
     const declaredTypes = record.analysis.types?.declarations.size ?? 0;
     const offered = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
     const declaredValues = offered === undefined ? 0 : offered.size;
-    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && !(record.path === request.entry.path && body !== undefined)) {
+    // A file that only re-exports offers the names another module writes: it
+    // compiles nothing, and a file that imports one of them reaches the
+    // function the other module declared.
+    const declaredReexports = (record.analysis.reexports ?? []).reduce((count, entry) => count + entry.names.length, 0);
+    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && declaredReexports === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);
