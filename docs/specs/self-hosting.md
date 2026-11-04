@@ -888,6 +888,48 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cy. A default a call may leave out, a padded text, and the shape a slice keeps
+
+    const bump = (x: number, by: number = 1) => x + by;   // a default
+    for (let at: number = from; ...)                      // an index with a type
+    name.padEnd(16)                                       // a padded text
+    sections.slice(1).map((s) => `  ${s.name}`)           // a list's elements
+
+**An arrow's parameter takes a default.** The default is written where the arrow
+is and used where the call is, so a *value written out* — `null`, `false`, `0`,
+`""` — is the same value at both: the call writes it where it left the parameter
+out. A default that reads a name is that name in the arrow's own scope, which
+the call does not have, and is refused as before. The compiler's own sources
+write exactly the literals, so `(name, shape = null) => ...` is read now.
+
+**A for loop's index states its type.** `for (let at: PlacedBlock | null = from;
+...)` is the counted loop with the annotation the source wrote; the annotation is
+erased like every other, and the loop reads the value at the `=`.
+
+**A padded text.** `text.padEnd(width)` is the text and the fill — a space where
+the source names none — repeated as many times as the width is short by. The
+fill must be one character, since a longer one is truncated by the language and
+a repetition is not.
+
+**A list method that keeps its elements keeps their shape.** `slice` answers a
+list of the elements it kept, but only `at` and `find` carried the element's
+*shape*: `sections.slice(1).map((section) => section.name.padEnd(16))` had an
+element of the opaque reference, so the callback's `section` was a value of no
+type and every method on it was refused. `slice` now records the list's element
+shape on its answer, as `filter` and `sort` already did.
+
+**A boxed text passed to a text parameter.** A text local is held in a cell so
+that a nested function can write it, and the C backend hands the cell to a
+parameter declared `boxedtext`. It handed the cell to *every* parameter, so a
+call of a helper that takes the string itself was given `char**` where
+`const char*` was expected — an incompatible pointer the C compiler only warns
+about, which reads as a pointer where a string was expected. The parameter's
+declared type now decides. (A separate, older bug remains in the inliner for a
+body with a boxed text: joining a repeated text with `+` prints garbage or
+crashes. It is not this slice's and is written down here.)
+
+The total went from 432 to 428.
+
 ### 4cx. A string is not a bracket, and a function type is a signature
 
     if (text === "(" || text === "[") ...          // a string, not an arrow
@@ -2789,6 +2831,7 @@ What was closed this session, and what each was worth:
 | the infinities, the greatest of a list, a compound length, a local `undefined`, and a bracket in a constant (§4cu–§4cv) | 480 → 472 |
 | a field through a reference, the shape an assignment reads, a for-of over a constant, a key held in a name, `Array.from`, and the benchmark's gate (§4cw) | 472 → 447 |
 | a string is not a bracket, a readonly result type, a conditional arm, the constant scan's annotations, a function type as a signature, and a class across a type-only import or re-export (§4cx) | 447 → 432 |
+| an arrow's default, a typed loop index, a padded text, and the shape a slice keeps (§4cy) | 432 → 428 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

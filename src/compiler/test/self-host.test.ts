@@ -101,9 +101,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * for-of over a constant, a key held in a name, `Array.from` and the gate the
  * benchmark's own lowering writes to 447, and a string that is not a bracket,
  * with a function type read as the signature it is and a class carried across a
- * type-only import or a re-export, to 432.
+ * type-only import or a re-export, to 432, and an arrow's default, a typed loop
+ * index, a padded text and the shape a slice keeps, to 428.
  */
-const REFUSAL_BUDGET = 432;
+const REFUSAL_BUDGET = 428;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

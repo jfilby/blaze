@@ -1056,7 +1056,13 @@ class FunctionEmitter {
     call.args.forEach((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;
       const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
-      if (argument.k === "local" && isTextType(argument.type) && this.boxedTexts.has(argument.name)) {
+      // A text local is held in a cell, and a parameter declared `boxedtext` is
+      // handed the cell: that is how a mutable text a nested function writes
+      // travels. A parameter declared `text` is the string itself, so the value
+      // is read through the cell — passing the cell made the callee a pointer
+      // where a string was expected.
+      const parameter = builtin !== null ? null : call.signature.params[index]?.type;
+      if (argument.k === "local" && isTextType(argument.type) && this.boxedTexts.has(argument.name) && parameter === "boxedtext") {
         args.push(this.names.read(argument.name));
       } else {
         args.push(this.expression(argument, targetType, depth));

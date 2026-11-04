@@ -596,6 +596,32 @@ function textValue(value: Expression): string | null {
   return part.k === "text" ? part.value : null;
 }
 
+/**
+ * Whether an expression is a value written out, which is the same value
+ * wherever it is read.
+ *
+ * An arrow's default is written where the arrow is and read where the call is,
+ * so a value that reads a name is that name in the arrow's own scope. The
+ * literals a source writes for a default — `null`, `false`, `0`, `""` — are
+ * values in both places.
+ */
+function isWrittenValue(expression: Expression): boolean {
+  switch (expression.k) {
+    case "literal":
+    case "bigint":
+    case "null":
+      return true;
+    case "text":
+      return expression.parts.every((part) => part.k === "text");
+    case "buffer":
+      return expression.values.every(isWrittenValue);
+    case "object":
+      return expression.fields.every((field) => isWrittenValue(field.value));
+    default:
+      return false;
+  }
+}
+
 /** The whole number a literal names, or null where it is not one. */
 function numberValue(value: Expression): bigint | null {
   if (value.k === "literal" || value.k === "bigint") {
@@ -2797,7 +2823,7 @@ interface ArrowBinding {
   /** The type each capture was held at when the arrow was written. */
   captureTypes: TypeExpr[];
   /** The parameters the arrow itself was written with. */
-  params: { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
+  params: { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression }[];
   /**
    * Where the rest parameter is, when the arrow declares one.
    *
@@ -2993,6 +3019,9 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
 const COLLECTION_CONSTRUCTORS: ReadonlySet<string> = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
 
 /** The operators that stand in front of a value, as opposed to between two. */
+/** Where a loop's initialiser states the type of the name it declares. */
+const LOOP_INIT_STOPS: ReadonlySet<string> = new Set(["=", "of", ";"]);
+
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
 /**
@@ -8177,6 +8206,12 @@ class TypeScriptParser {
       this.synchronize();
       return { kind: "expression", value: this.hole(), line: start.line };
     }
+    // `for (let line: string | null = from; ...)`: the annotation is erased
+    // like every other, and what the loop reads is the value at the `=`.
+    if (this.at(":")) {
+      this.next();
+      this.skipBalancedTypeTokens(LOOP_INIT_STOPS);
+    }
     if (this.at("of")) return this.readForOf(start, variable.text, null);
     this.expect("=");
     const from = this.readExpression();
@@ -9685,8 +9720,19 @@ class TypeScriptParser {
             binding.params.map((param) => param.shape ?? null),
           );
           const rest = binding.rest;
+          // A parameter the call leaves out is the default the arrow wrote. The
+          // default is a value written out, so reading it here is reading the
+          // same value the arrow did.
+          const supplied = args.slice();
+          if (rest === undefined) {
+            for (let at = supplied.length; at < binding.params.length; at += 1) {
+              const fallback = binding.params[at]?.default;
+              if (fallback === undefined) break;
+              supplied.push(fallback);
+            }
+          }
           const callArgs = rest === undefined
-            ? args
+            ? supplied
             : [
                 ...args.slice(0, rest),
                 {
@@ -10884,6 +10930,8 @@ class TypeScriptParser {
       shape: ResolvedType | null;
       /** The parameter is the rest of the call's arguments, as one list. */
       rest?: boolean;
+      /** The value a call writes when it leaves the parameter out. */
+      default?: Expression;
     }
     const params: ArrowParam[] = [];
     /** What a parameter written as a pattern binds, read where the body starts. */
@@ -10936,15 +10984,24 @@ class TypeScriptParser {
           type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
           shape = this.lastAnnotationShape();
         }
+        // A default is the value a call writes when it leaves the parameter
+        // out, and the call stands where the arrow was written — so a value
+        // written out is the same value at both. A default that reads a name is
+        // that name in the arrow's own scope, which the call does not have.
+        let fallback: Expression | undefined;
         if (this.at("=")) {
-          this.report(
-            "an arrow function's parameter takes a default",
-            "a default is stated by a function the module declares; write the value at the call instead",
-          );
-          this.next();
-          this.readExpression();
+          const equals = this.next();
+          const written = this.readExpression();
+          if (isWrittenValue(written)) fallback = written;
+          else {
+            this.report(
+              "an arrow function's parameter takes a default",
+              "a default is stated by a function the module declares; write the value at the call instead",
+              equals,
+            );
+          }
         }
-        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape };
+        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape, ...(fallback === undefined ? {} : { default: fallback }) };
         if (rest) parameter.rest = true;
         params.push(parameter);
         if (!this.accept(",")) break;
@@ -11011,7 +11068,12 @@ class TypeScriptParser {
         function: liftedName,
         captures: [],
         captureTypes: [],
-        params: params.map((param) => ({ name: param.name, type: param.type, shape: param.shape })),
+        params: params.map((param) => ({
+          name: param.name,
+          type: param.type,
+          shape: param.shape,
+          ...(param.default === undefined ? {} : { default: param.default }),
+        })),
         returns: stated ?? ANY_TYPE,
         returnsShape: statedShape,
       };
@@ -11309,7 +11371,7 @@ class TypeScriptParser {
    */
   private liftArrow(
     name: string,
-    params: readonly { name: string; type: TypeExpr; rest?: boolean; shape?: ResolvedType | null }[],
+    params: readonly { name: string; type: TypeExpr; rest?: boolean; shape?: ResolvedType | null; default?: Expression }[],
     returns: TypeExpr,
     body: Statement[],
     captures: readonly string[],
@@ -11317,7 +11379,12 @@ class TypeScriptParser {
   ): ArrowBinding {
     const captureTypes = captures.map((capture) => this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE);
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
-    const written = params.map((param) => ({ name: param.name, type: param.type, shape: param.shape ?? null }));
+    const written = params.map((param) => ({
+      name: param.name,
+      type: param.type,
+      shape: param.shape ?? null,
+      ...(param.default === undefined ? {} : { default: param.default }),
+    }));
     const lifted: TypeScriptFunction = {
       name,
       params: [...captured, ...written],
@@ -11928,6 +11995,24 @@ class TypeScriptParser {
     if (method === "replace" && args.length === 2) {
       return call("blaze_rt_regex_replace", [...head, args[1] as Expression], TEXT_RESULT);
     }
+    // `text.padEnd(width)` and `text.padStart(width, fill)` are the text with
+    // the fill repeated to the width it is short by. The fill is one character
+    // — the default is a space — so repeating it exactly as many times as the
+    // width is short by is the padding the language writes.
+    if ((method === "padEnd" || method === "padStart") && (args.length === 1 || args.length === 2)) {
+      const width = args[0] as Expression;
+      const fill = args[1] ?? { k: "text" as const, parts: [{ k: "text" as const, value: " " }] };
+      const character = fill.k === "text" && fill.parts.length === 1 && fill.parts[0]?.k === "text"
+        ? Array.from((fill.parts[0] as { value: string }).value)
+        : [];
+      if (character.length === 1 && this.repeatable(receiver) && this.repeatable(width)) {
+        const short = { k: "binary" as const, op: "-", left: width, right: { k: "lengthOf" as const, of: receiver } };
+        const padding = call(this.repeatHelper(this.peek().line).name, [fill, short]);
+        return method === "padEnd"
+          ? { k: "binary", op: "+", left: receiver, right: padding }
+          : { k: "binary", op: "+", left: padding, right: receiver };
+      }
+    }
     if (method === "split" && args.length === 1) {
       return call("blaze_rt_regex_split", head, { kind: "slice", of: TEXT_RESULT });
     }
@@ -12147,6 +12232,24 @@ class TypeScriptParser {
       const helper = this.repeatHelper(this.peek().line);
       return call(helper.name, [receiver, args[0] as Expression]);
     }
+    // `text.padEnd(width)` and `text.padStart(width, fill)` are the text with
+    // the fill repeated to the width it is short by. The fill is one character
+    // — the default is a space — so repeating it exactly as many times as the
+    // width is short by is the padding the language writes.
+    if ((method === "padEnd" || method === "padStart") && (args.length === 1 || args.length === 2)) {
+      const width = args[0] as Expression;
+      const fill = args[1] ?? { k: "text" as const, parts: [{ k: "text" as const, value: " " }] };
+      const character = fill.k === "text" && fill.parts.length === 1 && fill.parts[0]?.k === "text"
+        ? Array.from((fill.parts[0] as { value: string }).value)
+        : [];
+      if (character.length === 1 && this.repeatable(receiver) && this.repeatable(width)) {
+        const short = { k: "binary" as const, op: "-", left: width, right: { k: "lengthOf" as const, of: receiver } };
+        const padding = call(this.repeatHelper(this.peek().line).name, [fill, short]);
+        return method === "padEnd"
+          ? { k: "binary", op: "+", left: receiver, right: padding }
+          : { k: "binary", op: "+", left: padding, right: receiver };
+      }
+    }
     if (method === "split" && args.length === 1) {
       // An empty separator and a separator of several characters are both
       // fields the helper cuts, and a regular expression was taken above.
@@ -12258,6 +12361,12 @@ class TypeScriptParser {
     if (method === "at") {
       const found = this.elementShapeOf(receiver, element);
       if (found !== null) this.expressionShapes.set(call, found);
+    }
+    // `a.slice(from, to)` answers a list of the elements it kept, so its
+    // elements are the list's: a field read through one is the field the
+    // declaration wrote, which is what `.slice(1).map(...)` reads.
+    if (method === "slice") {
+      this.expressionShapes.set(call, { kind: "list", of: this.elementShapeOf(receiver, element) ?? { kind: "any" } });
     }
     return call;
   }

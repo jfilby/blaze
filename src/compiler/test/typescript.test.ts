@@ -3999,3 +3999,74 @@ test("an export list may rename the name it offers", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("an arrow's parameter takes a default a call may leave out", () => {
+  // The default is written where the arrow is and used where the call is, so a
+  // value written out is the same value at both: `(x, by = 1) => x + by` called
+  // as `bump(n)` is `bump(n, 1)`. A default that reads a name is that name in
+  // the arrow's own scope, which the call does not have, and stays refused.
+  const source = [
+    "export function f(n: number): number {",
+    "  const bump = (x: number, by: number = 1): number => x + by;",
+    "  return bump(n) + bump(n, 5);",
+    "}",
+    "",
+  ].join("");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(2));\n` }, "main.ts", "f");
+  assert.match(ir, /__closure_main_0 \[arg\[f64\] local\[f64\] n arg\[f64\] const\[f64\] 1\]/, "the call writes the default it left out");
+
+  const reading = [
+    "export function g(n: number): number {",
+    "  const bump = (x: number, by: number = n): number => x + by;",
+    "  return bump(1);",
+    "}",
+    "",
+  ].join("\n");
+  const refused = readTypeScriptModule(reading, "main.ts", false).refused;
+  assert.equal(refused.length, 1, "a default that reads a name is refused");
+  assert.match(refused[0]?.message ?? "", /takes a default/);
+});
+
+test("a for loop's index states its type", () => {
+  // `for (let at: number = from; ...)` is the counted loop with the type the
+  // source wrote; the annotation is erased like every other.
+  const source = [
+    "export function f(from: number): number {",
+    "  let total = 0;",
+    "  for (let at: number = from; at < 10; at += 1) total += at;",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(1));\n` }, "main.ts", "f");
+  assert.match(ir, /for\[f64\] at from local\[f64\] from to const\[f64\] 10/, "the loop counts from the written start");
+});
+
+test("padEnd and padStart are the text repeated to the width it is short by", () => {
+  // The fill is one character — a space where the source names none — and the
+  // padding is that character repeated as many times as the text is short.
+  const source = [
+    "export function f(name: string): string {",
+    "  return `${name.padEnd(8)}|${name.padStart(4, `0`)}`;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(\"a\"));\n` }, "main.ts", "f");
+  assert.match(ir, /sub\[f64\] const\[f64\] 8 \[length\[usize\] local\[text\] name\]/, "the padding is the width short by the text");
+});
+
+test("a list method that keeps its elements keeps their shape", () => {
+  // `sections.slice(1)` answers a list of the sections it kept, so a field read
+  // through an element of it is the field the declaration wrote.
+  const source = [
+    "interface ReadSection { name: string; size: number }",
+    "export function f(sections: ReadSection[]): string[] {",
+    "  return sections.slice(1).map((section) => `  ${section.name.padEnd(16)} ${section.size}`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

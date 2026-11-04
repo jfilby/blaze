@@ -1030,6 +1030,24 @@ test("flatMap is the lists its callback answers, one after another", async () =>
   }
 });
 
+test("an arrow's default is the value its call left out", async () => {
+  // The default is the value written where the arrow is, so a call that leaves
+  // the parameter out writes it there.
+  const source = [
+    "export function demo(): string {",
+    "  const bump = (x: number, by: number = 1): number => x + by;",
+    "  const text = (name: string, suffix: string = `!`): string => name + suffix;",
+    "  return `${bump(2)} ${bump(2, 10)} ${text(`ab`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "3 12 ab!", `the ${backend} backend writes the default its call left out`);
+  }
+});
+
 test("Array.from writes the answer of its callback at every index of a length", async () => {
   // `Array.from({ length: n }, (_, i) => v)` is n answers, each read at its
   // index. The count is read once, before the walk, and the callback is the
