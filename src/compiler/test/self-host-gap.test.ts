@@ -128,3 +128,28 @@ test("a module that re-exports a name offers the declaration the other module wr
   assert.deepEqual(report.clean, ["cli.ts", "impl.ts", "platform.ts"]);
   assert.equal(report.total, 0);
 });
+
+test("an exported constant another module builds is read at the type it declares", async () => {
+  const directory = await tree({
+    "lib.ts": [
+      "export interface Entry { name: string; size: number }",
+      "function entry(name: string, size: number): Entry { return { name, size }; }",
+      "export const TABLE: readonly Entry[] = [entry(`a`, 1), entry(`b`, 2)];",
+      "",
+    ].join("\n"),
+    "cli.ts": [
+      'import { TABLE } from "./lib.ts";',
+      "export function total(): number {",
+      "  return TABLE.map((one) => one.size).length;",
+      "}",
+      "",
+    ].join("\n"),
+  });
+
+  const report = await selfHostGap(directory);
+  // The table is built by calls, so the module holds it rather than writing it
+  // out; what crosses the link is the type the declaration states, which is
+  // what says the list's elements are records.
+  assert.deepEqual(report.clean, ["cli.ts", "lib.ts"]);
+  assert.equal(report.total, 0);
+});

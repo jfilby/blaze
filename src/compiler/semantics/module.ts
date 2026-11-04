@@ -326,6 +326,17 @@ export interface ModuleAnalysis {
    */
   constants?: unknown;
   /**
+   * The type each exported top-level declaration writes, where its value is not
+   * a constant the file wrote out.
+   *
+   * A table built by calls — `export const ABI: readonly Entry[] = [entry(…)]` —
+   * is a value the module holds rather than one the file wrote, so what crosses
+   * to a file that imports the name is what the declaration *says*: a list of
+   * records is a list whose elements `map` walks, and a record is one whose
+   * fields a member chain reads.
+   */
+  valueShapes?: ReadonlyMap<string, unknown>;
+  /**
    * What the module offers a file that names it, for a declaration this read
    * could not hold.
    *

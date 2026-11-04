@@ -109,7 +109,8 @@ lowered it to 991, what a collection's value holds to 945, and the signatures a
 refused module still offers to 916, and a field a modifier is written in front
 of to 903, and the type a method writes for its result to 857, a module that re-exports to
 847, a closure a layout field holds to 725, and the type a top-level declaration
-writes to 698, a default read at its parameter's type to 689.
+writes to 698, a default read at its parameter's type to 689, and the type an
+exported constant offers to 680.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -881,6 +882,34 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4ca. The type an exported constant offers
+
+    export const SQLITE_ABI: readonly SqliteEntry[] = [
+      sqliteEntry("blaze_sqlite_open", "double", …),
+      …
+    ];
+
+A value built by calls is not a constant expression the file wrote out, so the
+constant scan records only its field names and the link offers only the values
+the file wrote. A module that imports the name then held a value of no type:
+`SQLITE_ABI.map((entry) => entry.symbol)` was `"map" is not a method this
+program compiles`, in `runtime/sqlite-build.ts`.
+
+The annotation of an exported declaration is now offered beside the value, as
+the *shape* it resolves to rather than the tokens that write it — the tokens
+are another file's, and the shape is what crosses. A file that imports the name
+reads it at that shape when no declaration of its own shadows it: a list of
+records is a list whose elements `map` walks and whose fields a member chain
+reads.
+
+The shape is resolved in the file that writes the declaration, against the
+table that file ended its read with. An annotation that names a type from yet
+another module — a chain of imports — is read as the opaque reference in that
+read, and the shape it would have named does not cross; no source of the
+compiler offers one.
+
+This took the total from 689 to 680, and `runtime/nim.ts` reads whole.
 
 ### 4bz. A default read at the parameter's type, and a collection in an entry
 
@@ -2019,7 +2048,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-689 refusals over 95 sources, 27 of them read whole. The report reads the
+680 refusals over 95 sources, 28 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2040,7 +2069,7 @@ what is missing. The largest buckets now, in order:
 | --- | --- | --- |
 | 69 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
 | 33 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 31 | `"map"`, 14 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"`, 8 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 28 | `"map"`, 13 `"filter"`, 9 `"has"`, 11 `"find"`, 10 `"every"`, 8 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
 | 18 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
 | 15 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
@@ -2134,6 +2163,7 @@ What was closed this session, and what each was worth:
 | a closure a layout field holds (§4bx) | 847 → 725 |
 | the type a top-level declaration writes (§4by) | 725 → 698 |
 | a default read at the parameter's type (§4bz) | 698 → 689 |
+| the type an exported constant offers (§4ca) | 689 → 680 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

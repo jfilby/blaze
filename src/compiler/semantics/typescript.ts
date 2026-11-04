@@ -1000,7 +1000,7 @@ interface ScannedFile {
    * against is the one the module graph builds, and a read with imports bound
    * is the read that resolves it.
    */
-  annotations: Map<string, { start: number; end: number }>;
+  annotations: Map<string, { start: number; end: number; exported: boolean }>;
 }
 
 /**
@@ -1249,7 +1249,7 @@ function writtenName(tokens: readonly Token[], name: string): boolean {
 function scanConstants(tokens: readonly Token[]): ScannedFile {
   const found = new Map<string, ConstantInfo>();
   const shapes = new Map<string, ConstantInfo>();
-  const annotations = new Map<string, { start: number; end: number }>();
+  const annotations = new Map<string, { start: number; end: number; exported: boolean }>();
   const state = new Set<string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1309,7 +1309,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           else if (written === "=" && depth === 0) break;
           equals += 1;
         }
-        if (equals > from) annotations.set(name, { start: from, end: equals });
+        if (equals > from) annotations.set(name, { start: from, end: equals, exported: offered });
       }
       if (tokens[equals]?.text !== "=") {
         index += 1;
@@ -3263,7 +3263,9 @@ class TypeScriptParser {
    * what the value holds: a list of records is a list `map` walks, and a record
    * is one whose fields a member chain reads.
    */
-  private constantAnnotations: ReadonlyMap<string, { start: number; end: number }> = new Map();
+  private constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map();
+  /** The shapes a link bound for the values this file imports, by name. */
+  importedValueShapes: ReadonlyMap<string, ResolvedType> = new Map();
   /** The shape each annotation names, resolved once per read. */
   private readonly constantAnnotationShapes = new Map<string, ResolvedType>();
 
@@ -3279,7 +3281,7 @@ class TypeScriptParser {
     typeTable?: TypeTable,
     importedTypeNames: ReadonlySet<string> = new Set(),
     importedRenames: ReadonlyMap<string, string> = new Map(),
-    constantAnnotations: ReadonlyMap<string, { start: number; end: number }> = new Map(),
+    constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3640,7 +3642,9 @@ class TypeScriptParser {
         // A name a body declares is the body's own: `valueTypes` holds the
         // declaration the body wrote, and the file's constant of the same name
         // is not the one the body reads.
-        else if (!this.valueTypes.has(value.name)) shape = this.constantAnnotationShape(value.name);
+        else if (!this.valueTypes.has(value.name)) {
+          shape = this.importedValueShapes.get(value.name) ?? this.constantAnnotationShape(value.name);
+        }
         break;
       }
       case "member": {
@@ -5061,12 +5065,14 @@ class TypeScriptParser {
     for (const entry of this.reexports) {
       imports.push({ specifier: entry.specifier, names: [...entry.names], default: false, line: entry.line });
     }
+    const valueShapes = this.exportedValueShapes();
     return {
       path,
       imports,
       typeImports,
       types: this.typeTable,
       classes: this.classTable,
+      ...(valueShapes.size === 0 ? {} : { valueShapes }),
       ...(this.droppedExports.length === 0 ? {} : { signatures: this.droppedExports }),
       ...(this.reexports.length === 0 ? {} : { reexports: this.reexports }),
       functions,
@@ -11001,6 +11007,17 @@ class TypeScriptParser {
    * from. The annotation is the declaration's own statement about it, and a
    * list it names is a list whose elements a `map` walks.
    */
+  /** The shapes the annotations of this file's exported declarations write. */
+  private exportedValueShapes(): Map<string, ResolvedType> {
+    const shapes = new Map<string, ResolvedType>();
+    for (const [name, annotation] of this.constantAnnotations) {
+      if (!annotation.exported) continue;
+      const shape = this.constantAnnotationShape(name);
+      if (shape !== null && shape.kind !== "any") shapes.set(name, shape);
+    }
+    return shapes;
+  }
+
   private constantAnnotationShape(name: string): ResolvedType | null {
     const annotation = this.constantAnnotations.get(name);
     if (annotation === undefined) return null;
@@ -14748,6 +14765,11 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     scanned.annotations,
   );
   parser.wideBigint = wideBigint;
+  // The type each imported value's declaration writes, for a value whose own
+  // module holds rather than writes out: a list built by calls is still a list
+  // of the element the annotation names.
+  const linkedValueShapes = (context as { valueShapes?: ReadonlyMap<string, ResolvedType> } | undefined)?.valueShapes;
+  if (linkedValueShapes !== undefined) parser.importedValueShapes = linkedValueShapes;
   const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
   if (linkedFunctions !== undefined) {
     for (const [linked, signature] of linkedFunctions) parser.seedFunction(linked, signature);

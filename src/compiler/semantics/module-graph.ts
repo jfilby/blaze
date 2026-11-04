@@ -96,6 +96,9 @@ export interface ModuleGraphRequest {
 export interface OfferedValues {
   path: string;
   values: ReadonlyMap<string, unknown>;
+  /** The type each offered declaration writes, where its value is not one the
+   *  file wrote out. */
+  shapes: ReadonlyMap<string, unknown>;
 }
 
 /** The values every module of the program offers, in discovery order. */
@@ -103,7 +106,10 @@ export function offeredValues(records: readonly ModuleRecord[]): OfferedValues[]
   const offered: OfferedValues[] = [];
   for (const record of records) {
     const values = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
-    if (values !== undefined) offered.push({ path: record.path, values });
+    const shapes = record.analysis.valueShapes as ReadonlyMap<string, unknown> | undefined;
+    if (values !== undefined || shapes !== undefined) {
+      offered.push({ path: record.path, values: values ?? new Map(), shapes: shapes ?? new Map() });
+    }
   }
   return offered;
 }
@@ -201,8 +207,9 @@ function importedValuesOf(
   imports: readonly ModuleImport[],
   resolved: readonly string[],
   offered: readonly OfferedValues[],
-): Map<string, unknown> {
+): { values: Map<string, unknown>; shapes: Map<string, unknown> } {
   const values = new Map<string, unknown>();
+  const shapes = new Map<string, unknown>();
   imports.forEach((entry, index) => {
     if (entry.default) return;
     const target = offered.find((one) => one.path === resolved[index]);
@@ -210,6 +217,8 @@ function importedValuesOf(
     for (const name of entry.names ?? []) {
       const held = target.values.get(name);
       if (held !== undefined) values.set(name, held);
+      const shape = target.shapes.get(name);
+      if (shape !== undefined) shapes.set(name, shape);
     }
     // A value the file reads under another name is bound under that name: the
     // exported name is what the other module offers, and the alias is what this
@@ -217,9 +226,11 @@ function importedValuesOf(
     for (const rename of entry.renames ?? []) {
       const held = target.values.get(rename.imported);
       if (held !== undefined) values.set(rename.local, held);
+      const shape = target.shapes.get(rename.imported);
+      if (shape !== undefined) shapes.set(rename.local, shape);
     }
   });
-  return values;
+  return { values, shapes };
 }
 
 /** The candidate files an import specifier may name, joined onto the importer. */
@@ -408,15 +419,17 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
         }
       }
     }
-    const values = importedValuesOf(record.analysis.imports, record.resolved, offered);
+    const imported = importedValuesOf(record.analysis.imports, record.resolved, offered);
+    const values = imported.values;
     // The signatures of the functions this file calls are what a call answers,
     // and the graph has read the modules that write them by now.
     const functions = importedFunctionsOf(record, records);
-    if (!namesAType && !namesAClass && values.size === 0 && functions.size === 0 && record.analysis.awaitingLink !== true) continue;
+    if (!namesAType && !namesAClass && values.size === 0 && imported.shapes.size === 0 && functions.size === 0 && record.analysis.awaitingLink !== true) continue;
     const second = reader(record.source, record.path, record.path === request.entry.path, {
       table: record.analysis.types,
       classes: record.analysis.classes,
       values,
+      valueShapes: imported.shapes,
       functions,
       linked: true,
     });

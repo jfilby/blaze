@@ -3165,3 +3165,19 @@ test("a set or a map held in a dictionary answers its own questions", () => {
   const read = readTypeScriptModule(source, "main.ts", false);
   assert.deepEqual(read.refused, []);
 });
+
+test("an exported constant offers the type its declaration writes", () => {
+  // The value is built by a call, so it is not a constant expression the file
+  // wrote out. The annotation is still the file's statement about the name,
+  // and it is what a module that imports it reads it at.
+  const source = [
+    "export interface Entry { name: string }",
+    "function entry(name: string): Entry { return { name }; }",
+    "export const TABLE: readonly Entry[] = [entry(`a`)];",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  const shapes = read.analysis.valueShapes;
+  assert.ok(shapes !== undefined, "the declaration offers the type it writes");
+  assert.ok(shapes.has("TABLE"), "the exported name is the one offered");
+});
