@@ -3428,3 +3428,32 @@ test("a value a map holds is the record its type names, so its fields and its sp
   assert.match(ir, /at \[add\[f64\] \[load_field\[f64\] local\[ref<any>\] item Object1 at\] const\[f64\] 1\]/, "the field the spread writes is read from the element");
   assert.match(ir, /wide \[load_field\[f64\] local\[ref<any>\] item Object1 wide\]/, "the field the spread copies is read from the element");
 });
+
+test("Extract and Exclude read the type they name the members of", () => {
+  // `Extract<Loop, { kind: string }>` names the members of `Loop`, and the type
+  // reader keeps a union of records as one record whose members' fields are all
+  // there, the ones only a member writes optional. What a value typed through
+  // it holds is therefore the union it names the members of, which is what the
+  // reads behind it are written at.
+  const source = [
+    "interface Counted { kind: string; from: number; marks?: string[] }",
+    "interface Each { kind: string; of: string }",
+    "type Loop = Counted | Each;",
+    "type NotEach = Exclude<Loop, Each>;",
+    "export function marks(loop: Extract<Loop, { kind: string }>): number {",
+    "  const counted: Counted = { kind: `counted`, from: 1, marks: [] };",
+    "  const marks = loop.marks ?? [];",
+    "  return marks.length + counted.from;",
+    "}",
+    "export function from(loop: NotEach): number {",
+    "  return loop.from;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "marks");
+  assert.match(ir, /load_field\[\[\]text\] local\[ref<any>\] loop Object1 marks/, "a member's field is read through the type Extract names");
+  assert.match(ir, /coalesce\[\[\]text\] [^\n]* \[buffer\[\[text; 0\]\] element\[text\] 0 \]/, "the empty list takes the member's element type");
+  const excluded = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "from");
+  assert.match(excluded, /load_field\[f64\] local\[ref<any>\] loop Object1 from/, "Exclude reads the type whose members it names");
+});

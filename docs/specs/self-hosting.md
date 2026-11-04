@@ -114,7 +114,8 @@ exported constant offers to 680, and the type a call reads its arguments at to
 622, the shape a value has across the arm of a conditional to 609, a view of a
 block to 602, a whole number of sixty-four bits to 580, the field a conditional
 spread leaves out to 574, the error stream to 566, the monotonic clock to 559,
-and the record a collection's element is to 548.
+the record a collection's element is to 548, and the members `Extract` and
+`Exclude` name to 537.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -886,6 +887,26 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4cj. The members Extract and Exclude name
+
+    reductions?: Reduction[];
+    function loopMark(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
+      const reductions = loop.reductions ?? [];
+
+`Extract<T, U>` and `Exclude<T, U>` were names the type reader did not know, so
+a parameter written at one held nothing: `loop.reductions` was `any`, the `??`
+had no element type to settle the empty list with, and the list was refused as
+one nothing had said the type of.
+
+A union of records is read as one record whose fields are every member's, the
+ones only a member writes optional, and the reader keeps no literal text — so
+the member a discriminant names is not a distinction it can make. `Extract` and
+`Exclude` therefore read the whole of `T`: the wider of the two, which keeps
+every field any member writes and reads the layout that writes it, and refuses a
+field two members write at different types rather than guessing between them.
+
+This took the total from 548 to 537.
 
 ### 4ci. The record a collection's element is
 
@@ -2276,7 +2297,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-548 refusals over 95 sources, 30 of them read whole. The report reads the
+537 refusals over 95 sources, 30 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2389,6 +2410,7 @@ What was closed this session, and what each was worth:
 | the error stream (§4cg) | 574 → 566 |
 | the monotonic clock (§4ch) | 566 → 559 |
 | the record a collection's element is (§4ci) | 559 → 548 |
+| the members Extract and Exclude name (§4cj) | 548 → 537 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

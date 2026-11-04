@@ -974,6 +974,18 @@ class TypeText {
       case "NonNullable":
       case "Awaited":
         return first;
+      // `Extract<T, U>` is the members of `T` that `U` names, and `Exclude<T, U>`
+      // is the ones it does not. The type reader keeps a union of records as one
+      // record with the fields every member writes and the others beside them as
+      // optional, and it keeps no literal text: the member a discriminant names
+      // is not a distinction it can make. The whole of `T` is therefore what is
+      // read. It is the wider type of the two, so a field only the member
+      // `Extract` keeps writes is still one the layout that writes it answers,
+      // and a read of a field two members write at different types is refused
+      // by the layouts rather than guessed.
+      case "Extract":
+      case "Exclude":
+        return first;
       case "Record":
         return { kind: "record", fields: new Map(), index: args[1] ?? ANY_TYPE };
       case "Function":
