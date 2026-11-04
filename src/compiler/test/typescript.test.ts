@@ -3068,3 +3068,66 @@ test("a call of a field the declaration types as a function is a call through th
     "the call is made through the value the field holds",
   );
 });
+
+test("a top-level constant is read at the type its declaration writes", () => {
+  // The value is a list of calls, which is not a constant expression the file
+  // wrote out. The annotation is what says the list holds records, so `map`
+  // written after the name walks elements whose fields it can read.
+  const source = [
+    "interface Entry { name: string; size: number }",
+    "function entry(name: string, size: number): Entry { return { name, size }; }",
+    "const TABLE: readonly Entry[] = [entry(`a`, 1), entry(`b`, 2)];",
+    "export function total(): number {",
+    "  return TABLE.map((one) => one.size).length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "the name is read at the list its declaration writes");
+});
+
+test("a word the keyword table does not carry is a name, not a refusal", () => {
+  // Every object inherits `constructor` and `toString`, so a lookup that walked
+  // the prototype found a function there and refused an assignment written to
+  // the name `constructor` as the keyword.
+  const source = [
+    "export function bump(): number {",
+    "  let constructor = 1;",
+    "  constructor = constructor + 1;",
+    "  return constructor;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "`constructor` is a name the language allows");
+});
+
+test("a spread of a dictionary is refused, not read as an empty record", () => {
+  // A dictionary is keyed by a value the program computes, so its fields are
+  // not the fields a record of fields has: copying none of them is an object
+  // that lost every entry. The read refuses it rather than answering `{}`.
+  const source = [
+    "export function copy(table: Record<string, string>): Record<string, string> {",
+    "  return { ...table };",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.equal(read.count, 1);
+  assert.match(read.refused[0]?.message ?? "", /an object spread reads a constant object/);
+});
+
+test("a table of truths is a constant the file wrote, and a spread copies it", () => {
+  // A boolean written out is a constant, so a table of them is the file's
+  // value rather than state: `{ ...RESERVED }` is the entries it wrote, not a
+  // refused spread.
+  const source = [
+    "const RESERVED: Record<string, true> = { alpha: true, beta: true };",
+    "export function copy(): Record<string, true> {",
+    "  return { ...RESERVED };",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "the table is a constant the spread copies");
+});

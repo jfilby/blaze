@@ -348,6 +348,18 @@ export const REFUSED_KEYWORDS: Record<string, string> = {
   async: "a function whose answer is a promise carrying what its body returns",
 };
 
+/**
+ * The reason a word is a refused keyword, when the table itself carries it.
+ *
+ * A lookup asks the table's own keys rather than its prototype's: every object
+ * inherits `constructor` and `toString`, so reading the map by name found a
+ * function there and refused a statement that wrote `constructor.internal = …`
+ * as the keyword `constructor`.
+ */
+export function refusedKeyword(text: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(REFUSED_KEYWORDS, text) ? REFUSED_KEYWORDS[text] : undefined;
+}
+
 /** The refused constructs whose own `{ ... }` is skipped with them. */
 const REFUSED_WITH_BODY: ReadonlySet<string> = new Set(["class", "enum", "namespace", "struct", "with"]);
 
@@ -978,6 +990,17 @@ interface ScannedFile {
    * anything.
    */
   shapes: Map<string, ConstantInfo>;
+  /**
+   * The type each top-level declaration writes, as the tokens that write it.
+   *
+   * A constant's value is read where it is used, and its annotation is what
+   * says what the value holds: `const RUNTIME_ABI: readonly RuntimeEntry[]`
+   * names a list of records, which is what `map` written after the name walks.
+   * The range is kept rather than a resolved type because the table it resolves
+   * against is the one the module graph builds, and a read with imports bound
+   * is the read that resolves it.
+   */
+  annotations: Map<string, { start: number; end: number }>;
 }
 
 /**
@@ -1226,6 +1249,7 @@ function writtenName(tokens: readonly Token[], name: string): boolean {
 function scanConstants(tokens: readonly Token[]): ScannedFile {
   const found = new Map<string, ConstantInfo>();
   const shapes = new Map<string, ConstantInfo>();
+  const annotations = new Map<string, { start: number; end: number }>();
   const state = new Set<string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1275,6 +1299,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // starts.
       let equals = index + 2;
       if (tokens[equals]?.text === ":") {
+        const from = equals + 1;
         let depth = 0;
         equals += 1;
         while (equals < tokens.length) {
@@ -1284,6 +1309,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           else if (written === "=" && depth === 0) break;
           equals += 1;
         }
+        if (equals > from) annotations.set(name, { start: from, end: equals });
       }
       if (tokens[equals]?.text !== "=") {
         index += 1;
@@ -1366,7 +1392,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state, shapes };
+  return { constants: found, state, shapes, annotations };
 }
 
 /** Marks the constants an `export { ... }` list of this file offers. */
@@ -2445,6 +2471,7 @@ function constantRange(tokens: readonly Token[], start: number, end: number): bo
     if (token.kind === "number" || token.kind === "bigint" || token.kind === "string" || token.kind === "regex") continue;
     if (token.kind === "punct" && operators.has(token.text)) continue;
     if (token.kind === "ident" && token.text === "BigInt") continue;
+    if (token.kind === "ident" && (token.text === "true" || token.text === "false")) continue;
     return false;
   }
   return true;
@@ -3229,6 +3256,16 @@ class TypeScriptParser {
   private readonly expressionShapes = new Map<Expression, ResolvedType>();
   /** The token run the last annotation read, so its shape can be read after it. */
   private lastTypeRange: { start: number; end: number } | null = null;
+  /**
+   * The type each top-level declaration writes, by the name it declares.
+   *
+   * A file's constant is read where it is used, and the annotation is what says
+   * what the value holds: a list of records is a list `map` walks, and a record
+   * is one whose fields a member chain reads.
+   */
+  private constantAnnotations: ReadonlyMap<string, { start: number; end: number }> = new Map();
+  /** The shape each annotation names, resolved once per read. */
+  private readonly constantAnnotationShapes = new Map<string, ResolvedType>();
 
   constructor(
     tokens: Token[],
@@ -3242,6 +3279,7 @@ class TypeScriptParser {
     typeTable?: TypeTable,
     importedTypeNames: ReadonlySet<string> = new Set(),
     importedRenames: ReadonlyMap<string, string> = new Map(),
+    constantAnnotations: ReadonlyMap<string, { start: number; end: number }> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3252,6 +3290,7 @@ class TypeScriptParser {
     this.classTable = classTable ?? scanClasses(tokens);
     this.allTokens = allTokens ?? tokens;
     this.constants = constants;
+    this.constantAnnotations = constantAnnotations;
     this.state = state;
     this.shapes = shapes;
     this.typeTable = typeTable ?? scanTypeTable(tokens);
@@ -3598,6 +3637,10 @@ class TypeScriptParser {
         const known = this.valueShapes.get(value.name);
         if (known !== undefined) shape = known;
         else if (this.valueRegexes.has(value.name)) shape = { kind: "record", fields: new Map(), index: null };
+        // A name a body declares is the body's own: `valueTypes` holds the
+        // declaration the body wrote, and the file's constant of the same name
+        // is not the one the body reads.
+        else if (!this.valueTypes.has(value.name)) shape = this.constantAnnotationShape(value.name);
         break;
       }
       case "member": {
@@ -6765,7 +6808,7 @@ class TypeScriptParser {
     // `type` is an identifier the language allows anywhere a name goes: only a
     // statement that writes a type alias declares a type, and every other use
     // of the name — `type = null`, `type.kind` — reads a value like any name.
-    const refused = token.text === "type" && !this.typeOnlyDeclarationAt() ? undefined : REFUSED_KEYWORDS[token.text];
+    const refused = token.text === "type" && !this.typeOnlyDeclarationAt() ? undefined : refusedKeyword(token.text);
     if (refused !== undefined) {
       this.report(`"${token.text}" is not supported`, refused, token);
       // A refused construct that carries a body is skipped as the body it
@@ -10940,6 +10983,30 @@ class TypeScriptParser {
     }
   }
 
+  /**
+   * What a top-level name's annotation says it holds, where the read has no
+   * better answer.
+   *
+   * A constant whose value is a call — `const RUNTIME_ABI = [entry(...), …]` —
+   * is not a value the file wrote out, so the read has no value to take a shape
+   * from. The annotation is the declaration's own statement about it, and a
+   * list it names is a list whose elements a `map` walks.
+   */
+  private constantAnnotationShape(name: string): ResolvedType | null {
+    const annotation = this.constantAnnotations.get(name);
+    if (annotation === undefined) return null;
+    const known = this.constantAnnotationShapes.get(name);
+    if (known !== undefined) return known;
+    try {
+      const resolved = resolveAnnotation(this.allTokens, annotation.start, annotation.end, this.typeTable);
+      this.constantAnnotationShapes.set(name, resolved);
+      return resolved;
+    } catch {
+      this.notePendingType(typeText(this.allTokens, annotation.start, annotation.end));
+      return null;
+    }
+  }
+
   /** The signature a member's declaration types it at, when it types one. */
   private memberFunctionType(value: Expression & { k: "member" }): FunctionType | null {
     const shape = this.shapeOf(value);
@@ -12750,7 +12817,7 @@ class TypeScriptParser {
     // whatever came next, and the build failed on the expression after it rather
     // than on the word that was written.
     if (token.kind === "ident" && token.text === "yield") {
-      this.report(`"${token.text}" is not supported`, REFUSED_KEYWORDS[token.text], token);
+      this.report(`"${token.text}" is not supported`, refusedKeyword(token.text) ?? "", token);
       this.readExpression();
       return this.hole();
     }
@@ -12876,7 +12943,7 @@ class TypeScriptParser {
           for (const field of spread.fields) put(field.name, field.value, true);
         } else {
           const shape = this.shapeOf(spread);
-          if (shape !== null && shape.kind === "record" && readsOnce(spread)) {
+          if (shape !== null && shape.kind === "record" && shape.index === null && readsOnce(spread)) {
             for (const name of shape.fields.keys()) {
               put(name, { k: "member", base: spread, field: name }, true);
             }
@@ -13617,6 +13684,7 @@ class TypeScriptParser {
       this.typeTable,
       this.importedTypeNames,
       this.importedValueRenames,
+      this.constantAnnotations,
     );
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
@@ -14664,6 +14732,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     typeTable,
     importedNames(tokens),
     importedRenames(tokens),
+    scanned.annotations,
   );
   parser.wideBigint = wideBigint;
   const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;

@@ -90,7 +90,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
-import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, tokenize, unescape } from "./typescript.ts";
+import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, refusedKeyword, tokenize, unescape } from "./typescript.ts";
 import { BUILTINS, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import {
@@ -660,9 +660,9 @@ class ProgramParser {
     if (this.at("try")) {
       return this.tryStatement();
     }
-    const refusedKeyword = REFUSED_KEYWORDS[token.text];
-    if (refusedKeyword !== undefined) {
-      this.fail(`"${token.text}" is not part of a program`, token, refusedKeyword);
+    const refused = refusedKeyword(token.text);
+    if (refused !== undefined) {
+      this.fail(`"${token.text}" is not part of a program`, token, refused);
       this.skipBlock();
       return null;
     }
@@ -1950,7 +1950,7 @@ class ProgramParser {
     }
     if (token.kind === "ident" && token.text === "yield") {
       this.next();
-      this.fail(`"${token.text}" is not part of a program`, token, REFUSED_KEYWORDS[token.text]);
+      this.fail(`"${token.text}" is not part of a program`, token, refusedKeyword(token.text));
       return this.value();
     }
     if (token.kind === "ident" && token.text === "function") {
