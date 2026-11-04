@@ -102,4 +102,5 @@ tests all live there. Run commands from it.
 For every change or fix, add a test (or tests) to the test suite to prevent
 regressions. But don't duplicate tests.
 
-If confidence is high you can make up to 5 changes before running all tests.
+If confidence is high you can make between 5 and 10 changes before running all
+tests.
