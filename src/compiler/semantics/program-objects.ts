@@ -63,6 +63,11 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
       return { kind: "type", type: { kind: "slice", of: { kind: "primitive", name: value.element } } };
     case "object":
       return { kind: "object", key: keyOf(value, held) };
+    // An arrow is a reference to the code it names, which is the value a
+    // function-typed field holds. The body it writes is walked by the resolver,
+    // and the function it becomes is called through that reference.
+    case "arrow":
+      return { kind: "type", type: ANY_REF };
     // A string the body wrote out is a pointer to the bytes it names, which
     // is how the backends carry one: the field is a reference to the text, and
     // the reader of the literal handles the value it points at.

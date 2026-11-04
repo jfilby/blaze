@@ -9488,6 +9488,17 @@ class TypeScriptParser {
         // `p.add(q)`: a method is a function whose first argument is the
         // instance the source called it on.
         if (target.k === "member") {
+          // `sink.write(text)` where `write` is a field the declaration types as
+          // a function: the call is made through the value the field holds,
+          // exactly as a call of a name held at a function type is. It is read
+          // before the arguments are, because the signature is what an argument
+          // is read at.
+          const heldFunction = this.memberFunctionType(target);
+          if (heldFunction !== null) {
+            const args = this.readCallArguments(heldFunction.params);
+            replace({ k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns });
+            continue;
+          }
           const callLine = this.peek().line;
           const callback = this.collectionCallbackParameters(target.base, target.field);
           // A callback handed to a method of a value whose type this read does
@@ -10927,6 +10938,16 @@ class TypeScriptParser {
       this.forgetList(value.left);
       this.forgetList(value.right);
     }
+  }
+
+  /** The signature a member's declaration types it at, when it types one. */
+  private memberFunctionType(value: Expression & { k: "member" }): FunctionType | null {
+    const shape = this.shapeOf(value);
+    if (shape === null || shape.kind !== "function") return null;
+    return {
+      params: shape.params.map((param) => this.typeExprOfShape(param)),
+      returns: this.typeExprOfShape(shape.returns),
+    };
   }
 
   private valueTypeOf(value: Expression): TypeExpr {

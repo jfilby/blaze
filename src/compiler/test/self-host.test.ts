@@ -80,9 +80,11 @@ import { selfHostGap } from "./self-host-gap.ts";
  * the parameters and result the declaration writes. Reading a `readonly` field
  * of an inline object type as the field it names lowered it to 903, and the
  * type a method writes for its result to 857, and a module that re-exports
- * another module's names to 847.
+ * another module's names to 847, and a closure a layout field holds to 725: an
+ * arrow is a reference and a function-typed field is called through the value
+ * it holds.
  */
-const REFUSAL_BUDGET = 847;
+const REFUSAL_BUDGET = 725;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

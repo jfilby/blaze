@@ -787,6 +787,20 @@ class TypeText {
     return present[0] as ResolvedType;
   }
 
+  /** What one parameter of a function type holds, from the text it is written. */
+  private parameterType(text: string): ResolvedType {
+    const written = text.trim();
+    const colon = written.indexOf(":");
+    if (colon < 0) return ANY_TYPE;
+    const type = written.slice(colon + 1).trim();
+    if (type === "") return ANY_TYPE;
+    try {
+      return resolveTypeText(this.table, type, this.params, this.seen);
+    } catch {
+      return ANY_TYPE;
+    }
+  }
+
   private intersection(): ResolvedType {
     let type = this.postfix();
     while (this.take("&")) {
@@ -837,15 +851,21 @@ class TypeText {
     // `readonly T[]` is the list `T[]` is.
     if (this.word("readonly")) return this.postfix();
     if (this.text[this.at] === "(") {
-      const save = this.at;
-      this.skipBalanced("(", ")");
+      const close = this.findBalanced(this.at, "(", ")");
+      const inner = close < 0 ? "" : this.text.slice(this.at + 1, close);
+      this.at = close < 0 ? this.text.length : close + 1;
       this.space();
-      if (this.take("=>")) return { kind: "function", params: [], returns: this.union() };
-      this.at = save + 1;
-      const inner = this.union();
-      this.space();
-      this.take(")");
-      return inner;
+      if (this.take("=>")) {
+        // A function type states its parameters, and a call through a value
+        // held at one is written against them: `(text: string) => void` takes a
+        // text, which is what an argument is read at.
+        return {
+          kind: "function",
+          params: this.splitMembers(inner).map((one) => this.parameterType(one)),
+          returns: this.union(),
+        };
+      }
+      return inner.trim() === "" ? ANY_TYPE : resolveTypeText(this.table, inner, this.params, this.seen);
     }
     if (this.text[this.at] === "{") {
       const close = this.findBalanced(this.at, "{", "}");

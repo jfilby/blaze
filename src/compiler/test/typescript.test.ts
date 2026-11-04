@@ -3042,3 +3042,29 @@ test("a method's result is the type its signature writes, whatever form it write
   assert.match(ir, /field name/, "the result's fields are laid out");
   assert.match(ir, /load_field\[[^\]]+\] local\[[^\]]+\] made [^\]]+ name/, "the spread copies them");
 });
+
+test("a call of a field the declaration types as a function is a call through the value it holds", () => {
+  // `write` is a field of `Sink` whose type is a function, not a method of a
+  // class: `sink.write(text)` calls the value the field holds, and the call is
+  // written as the invocation it is rather than refused as an unknown method.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        "interface Sink { write(text: string): void }",
+        "export function greet(sink: Sink): void {",
+        '  sink.write("hello");',
+        "}",
+        'greet({ write: (text: string): void => { console.log(text); } });',
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "greet",
+  );
+  assert.match(
+    ir,
+    /call\[void\] through \[load_field\[ref<any>\] local\[ref<any>\] sink [^\]]+ write\]/,
+    "the call is made through the value the field holds",
+  );
+});

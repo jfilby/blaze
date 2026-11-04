@@ -950,3 +950,26 @@ test("a counter a nested loop of its own shadows is not a read of the outer one"
     "i64",
   );
 });
+
+test("an arrow a program writes as a field is a reference, not a wide number", () => {
+  // A function-typed field holds the address of the code it names, which is a
+  // reference. The program pass used to lay a value it had no simpler answer
+  // for out as the widest number a field can hold, so an object literal whose
+  // field was an arrow had a `u256` field — and the call the source wrote
+  // through it was a call of a wide number.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        "const actions = { run: () => { console.log(`go`); } };",
+        "actions.run();",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const layouts = Object.values(phase.objectLayouts);
+  const actions = layouts.find((layout) => layout.fields.some((field) => field.name === "run"));
+  assert.ok(actions, "the literal is laid out");
+  assert.equal(actions.fields[0]?.type, "ref<any>", "the field holds the code the arrow names");
+});

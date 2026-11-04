@@ -3824,3 +3824,24 @@ test("a module re-exports another module's function and the program calls it", a
   );
   assert.equal(output.trim(), "HI!");
 });
+
+test("a function-typed field is called through the value the caller wrote", async () => {
+  // `Sink` is an interface whose `write` is a function, and the value the
+  // program passes is an object literal whose `write` is an arrow that reads a
+  // name from the function around it. The call in `greet` goes through the
+  // field, so the arrow is carried as the value the field holds.
+  const output = await agreesWithNode([
+    "interface Sink { write(text: string): void }",
+    "function greet(sink: Sink): void {",
+    '  sink.write("hello");',
+    '  sink.write(" world");',
+    "}",
+    "export function runIt(): void {",
+    '  const mark = ">";',
+    "  greet({ write: (text: string): void => { console.log(mark + text); } });",
+    "}",
+    "runIt();",
+    "",
+  ].join("\n"));
+  assert.equal(output, ">hello\n> world\n");
+});

@@ -107,8 +107,8 @@ laid out with the bar its first member is written after lowered it to 1841,
 and carrying the classes one module declares to the files that import them
 lowered it to 991, what a collection's value holds to 945, and the signatures a
 refused module still offers to 916, and a field a modifier is written in front
-of to 903, and the type a method writes for its result to 857, and a module that re-exports to
-847.
+of to 903, and the type a method writes for its result to 857, a module that re-exports to
+847, and a closure a layout field holds to 725.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -880,6 +880,41 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bx. A closure a layout field holds
+
+    interface Sink { write(text: string): void }
+
+    function greet(sink: Sink): void {
+      sink.write("hello");
+    }
+
+`Sink.write` is a field whose type is a function, not a class method. Two reads
+stood between it and the IR. The frontend asked for a method of a class the
+file carries, found none, and refused — a call through a value the declaration
+types as a function was outside the subset. And the layout pass, for a literal
+written in a *program's* statements, laid a value it had no simpler answer for
+out as the widest number a field can hold: `{ write: (t) => … }` became an
+object with one `u256` field, and calling one was `Object1.write is a u256, not
+a void` even after the call was read.
+
+The call is now the invocation it is: a member whose shape is a function is
+read against the parameters and result the declaration writes, and lowered as
+`invoke` with the field as the value it is called through. A function type
+states its parameters — `(text: string) => void` — which is what an argument is
+read at. The program pass reads an arrow as the reference to the code it names,
+which is what a function-typed field holds.
+
+`toolchain/program-emit.ts` goes from 95 refusals to 12, and the value-model
+item the queue was waiting on closes for every arrow written in a function body:
+the C backend already builds and calls the closure that arrow becomes, and so
+does the machine backend once the pass specializes the call. What is still not
+carried is an arrow written directly in a *program's* statements and stored in a
+field: that value is a bare code address (`functionRef`), the backends pass one
+to a callback site by name and do not store it, so such a program is read and
+laid out and then fails to link. No source of the compiler writes one.
+
+This took the total from 847 to 725.
 
 ### 4bw. A module that re-exports
 
@@ -1927,7 +1962,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-847 refusals over 95 sources, 20 of them read whole. The report reads the
+725 refusals over 95 sources, 20 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -1946,13 +1981,13 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 68 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
-| 41 | `"map"`, 14 `"filter"`, 14 `"has"`, 12 `"find"`, 10 `"every"`, 10 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
-| 34 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 19 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
+| 70 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 42 | `"map"`, 14 `"filter"`, 14 `"has"`, 13 `"find"`, 10 `"every"`, 10 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 37 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
+| 21 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
 | 15 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
-| 13 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
-| 12 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
+| 12 | `"." follows a complete value` | a member chain after a construct the parser recovered from, read as a new statement |
+| 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
 | 10 | `"startsWith"`, 9 `"trim"`, 9 `"split"`, 8 `"join"`, 8 `"set"`, 8 `"at"` | text and list methods on a value the read cannot type; the method exists, the receiver is the gap |
 | 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
 | 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
@@ -1964,18 +1999,12 @@ a verdict — the per-file delta is read before a slice is accepted.
 
 The value-model slices still open, in the order they block the self-build:
 
-- **A closure in a layout field.** `toolchain/program-emit.ts` is 95 refusals
-  and almost all of them are one shape: `this.target.prelude(...)`,
-  `this.target.escape(...)`, `this.target.release(...)`. `ProgramTarget` is an
-  interface whose fields are *functions*, and a value of it is an object
-  literal whose fields are arrows — in `toolchain/c-target.ts` and its
-  neighbours. Reading the call is not enough: a program that passes
-  `{ write: (t) => { … } }` to a function and calls `sink.write(t)` is refused
-  by the IR today, with `Object1.write is a u256, not a void`. The layout pass
-  writes the field as the unshaped reference and the invocation of a closure
-  read out of a field is not carried. Every one of these sites — and
-  `compiler.ts`'s `JsonStore` methods and `ai/backend.ts`'s reporter — waits on
-  that one value-model item.
+- **A function reference stored as a value.** An arrow written directly in a
+  program's statements is a bare code address (`functionRef`), not the closure
+  an arrow in a function body becomes: a callback site takes it by name, and no
+  backend stores one in a field. Every call through a function-typed field that
+  the compiler now reads is written in a function body, so this is a residual
+  of §4bx rather than a block.
 - **An empty list in a field.** `{ children: [] }` needs the element type the
   field's interface states, and the linked read still refuses the literal where
   the interface, or the field's use, does not name it. It is the largest
@@ -2044,6 +2073,7 @@ What was closed this session, and what each was worth:
 | a field a modifier is written in front of (§4bu) | 916 → 903 |
 | the type a method writes for its result (§4bv) | 903 → 857 |
 | a module that re-exports (§4bw) | 857 → 847 |
+| a closure a layout field holds (§4bx) | 847 → 725 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
