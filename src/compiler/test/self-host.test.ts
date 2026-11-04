@@ -93,10 +93,13 @@ import { selfHostGap } from "./self-host-gap.ts";
  * to 537, the list a narrowed value is, with the record a spread names, to 529,
  * a type a module re-exports to 518, an object written into a list to 515, the
  * type a top-level allocation writes to 509, the element a list method answers
- * to 494, a string that is not a bracket to 488, and a key that asks a
- * dictionary to 485.
+ * to 494, a string that is not a bracket to 488, a key that asks a dictionary
+ * to 485, the record an arrow answers, with the element's shape across a spread
+ * and a text helper that is a read, to 480, and the infinities, the greatest of
+ * a list, a compound length, a local `undefined` and a bracket in a constant to
+ * 472.
  */
-const REFUSAL_BUDGET = 485;
+const REFUSAL_BUDGET = 472;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

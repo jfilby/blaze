@@ -799,7 +799,7 @@ function holdsBigint(value: Expression): boolean {
  * tests the value before `?.` and then reads it again inside the branch, so a
  * call or an allocation may not be there: two reads of it are two of them.
  */
-function repeatableExpression(value: Expression): boolean {
+function repeatableExpression(value: Expression, pure?: (name: string) => boolean): boolean {
   switch (value.k) {
     case "ident":
     case "literal":
@@ -809,20 +809,20 @@ function repeatableExpression(value: Expression): boolean {
     case "length":
       return true;
     case "member":
-      return repeatableExpression(value.base);
+      return repeatableExpression(value.base, pure);
     case "index":
-      return repeatableExpression(value.base) && repeatableExpression(value.index);
+      return repeatableExpression(value.base, pure) && repeatableExpression(value.index, pure);
     // An operation over values that read the same way twice reads the same way
     // twice: `tokens[at + 1]?.kind` asks for one number and reads one element,
     // and asking for the number again is the same number.
     case "binary":
-      return repeatableExpression(value.left) && repeatableExpression(value.right);
+      return repeatableExpression(value.left, pure) && repeatableExpression(value.right, pure);
     case "unary":
-      return repeatableExpression(value.operand);
+      return repeatableExpression(value.operand, pure);
     case "conditional":
-      return repeatableExpression(value.condition) && repeatableExpression(value.then) && repeatableExpression(value.otherwise);
+      return repeatableExpression(value.condition, pure) && repeatableExpression(value.then, pure) && repeatableExpression(value.otherwise, pure);
     case "lengthOf":
-      return repeatableExpression(value.of);
+      return repeatableExpression(value.of, pure);
     // A text's own methods read the text and answer a new one: `text.slice(a,
     // b)` and `text.trim()` name the same text twice, so a value that asks one
     // of them twice is asking the same question. A compiled function is where
@@ -834,8 +834,12 @@ function repeatableExpression(value: Expression): boolean {
     // then `get`, and both are reads of the same dictionary.
     case "call":
       return (
-        (value.name.startsWith("text.") || value.name.startsWith("blaze_rt_dict_")) &&
-        value.args.every((arg) => repeatableExpression(arg))
+        ((value.name.startsWith("text.") || value.name.startsWith("blaze_rt_dict_")) &&
+          value.args.every((arg) => repeatableExpression(arg, pure))) ||
+        // A text method the frontend lowered to a function of the file is a
+        // read of the text it was handed: the helper writes its own answer and
+        // nothing else, so it is safe to ask twice.
+        (pure?.(value.name) === true && value.args.every((arg) => repeatableExpression(arg, pure)))
       );
     default:
       return false;
@@ -1223,7 +1227,8 @@ function constantList(tokens: readonly Token[], open: number, close: number): bo
     // The list may end with a comma, which names no element.
     if (start === end && start === close) continue;
     if (start === end) return false;
-    if (tokens[start]?.text === "[") {
+    // A string whose text is `[` is a string, not a nested list.
+    if (mark(tokens[start]) === "[") {
       const nested = closingBracket(tokens, start);
       if (nested !== end + 1 || !constantList(tokens, start, nested - 1)) return false;
       continue;
@@ -3287,6 +3292,15 @@ class TypeScriptParser {
   /** The suffix the next collection helper takes, so each is a name of its own. */
   private collectCount = 0;
   /**
+   * The helpers the frontend wrote as a text's own method.
+   *
+   * `repeat`, `split` and `indexOf` are lowered to a function of the file, and
+   * that function only reads the text it was handed: asking the same question
+   * twice is asking the same question, so a value that names one is read as
+   * often as the expression needs it.
+   */
+  private pureTextHelpers = new Set<string>();
+  /**
    * The type of a value the frontend built rather than read.
    *
    * `resultType` answers what a name, a literal or an operation is; it cannot
@@ -3348,6 +3362,8 @@ class TypeScriptParser {
   importedValueShapes: ReadonlyMap<string, ResolvedType> = new Map();
   /** The shape each annotation names, resolved once per read. */
   private readonly constantAnnotationShapes = new Map<string, ResolvedType>();
+  /** The shape each written-out list constant holds, read once per read. */
+  private readonly constantWrittenShapes = new Map<string, ResolvedType | null>();
 
   constructor(
     tokens: Token[],
@@ -3733,6 +3749,10 @@ class TypeScriptParser {
         // is not the one the body reads.
         else if (!this.valueTypes.has(value.name)) {
           shape = this.importedValueShapes.get(value.name) ?? this.constantAnnotationShape(value.name);
+          // A constant the file writes out as a list is a list of what its
+          // elements are, whether or not its declaration names a type:
+          // `const OPERATORS = ["+", "-"]` is read by `OPERATORS.find(f)`.
+          if (shape === null) shape = this.constantWrittenShape(value.name);
         }
         break;
       }
@@ -3829,6 +3849,35 @@ class TypeScriptParser {
     }
     if (shape !== null) this.expressionShapes.set(value, shape);
     return shape;
+  }
+
+  /**
+   * The shape an arrow answers, where its body writes one result.
+   *
+   * An arrow whose declaration names no result type still writes the value it
+   * answers: `(x) => ({ name: x, at: 1 })` is a record of two fields, and a
+   * list of those is a list whose elements hold them. A body with more than one
+   * result is not read here — the arms would have to agree field by field, and
+   * a value that answers one on each path is left to the type it states.
+   */
+  private resultShapeOf(body: readonly Statement[]): ResolvedType | null {
+    const values: Expression[] = [];
+    const bare = { found: false };
+    collectResults(body, values, bare);
+    if (bare.found || values.length !== 1) return null;
+    return this.shapeOf(values[0] as Expression);
+  }
+
+  /** The shape an arrow answers, by the callback a list method was handed. */
+  private callbackReturnsShape(callback: Expression): ResolvedType | null {
+    if (callback.k === "arrow") return this.arrowBindings.get(callback.name)?.returnsShape ?? null;
+    if (callback.k === "ident") return this.valueArrows.get(callback.name)?.returnsShape ?? null;
+    return null;
+  }
+
+  /** Whether a value answers the same thing when it is read a second time. */
+  private repeatable(value: Expression): boolean {
+    return repeatableExpression(value, (name) => this.pureTextHelpers.has(name));
   }
 
   /** The shape a contract type stands for, which keeps only what it says. */
@@ -7576,21 +7625,33 @@ class TypeScriptParser {
    * is a value: a longer list is a block of its own, so the write is the list
    * at that length rather than a size written into it. The first `n` elements
    * are the slice up to `n`, and a longer list is that slice followed by the
-   * empty elements it gains. Nothing answers the write, so only `=` is read.
+   * empty elements it gains. A compound write — `a.length -= n` — is the same
+   * write at the length it had less `n`. Nothing answers the write, so only the
+   * assignment forms are read.
    */
   private lengthAssign(base: Expression, owner: TypeExpr, op: string, value: Expression, line: number): Statement | null {
-    if (op !== "=") return null;
+    if (op !== "=" && op !== "+=" && op !== "-=") return null;
     // The write goes back into the place the list is held in, which is the name
     // or the field the source wrote.
     let place: { target: string; base: string | null } | null = null;
     if (base.k === "ident") place = { target: base.name === "this" ? "self" : base.name, base: null };
     else if (base.k === "member" && base.base.k === "ident") place = { target: base.field, base: base.base.name === "this" ? "self" : base.base.name };
     if (place === null) return null;
+    // A compound write states the length the list keeps rather than the one it
+    // is given: `a.length -= n` is `a.length = len(a) - n`.
+    let wanted: Expression = value;
+    if (op !== "=") {
+      wanted = {
+        k: "binary",
+        op: op === "+=" ? "+" : "-",
+        left: { k: "lengthOf", of: base },
+        right: value,
+      };
+    }
     // The count is read once, because it is written three times.
-    let wanted = value;
-    if (value.k !== "literal" && value.k !== "ident") {
+    if (wanted.k !== "literal" && wanted.k !== "ident") {
       const held = `__length${this.fieldCount++}`;
-      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: value, line });
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: wanted, line });
       this.valueTypes.set(held, NUMBER_RESULT);
       wanted = { k: "ident", name: held };
     }
@@ -8931,7 +8992,7 @@ class TypeScriptParser {
   private membership(key: Expression, object: Expression): Expression {
     const constant = object.k === "ident" ? this.constants.get(object.name) : undefined;
     if (constant?.fields !== undefined) {
-      if (!repeatableExpression(key)) {
+      if (!this.repeatable(key)) {
         this.report(
           "a record's keys read the key once",
           "write the key into a name first, as in const k = f(); k in TABLE",
@@ -9165,7 +9226,7 @@ class TypeScriptParser {
     if (args.length !== 1 || value === undefined) return null;
     // The value is written more than once, so it has to be one reading it: a
     // call written in the argument would run once per mention.
-    if (!repeatableExpression(value)) {
+    if (!this.repeatable(value)) {
       this.report(
         `Number.${field} reads its value more than once`,
         "write the value into a name first, as in const n = f(); Number.isInteger(n)",
@@ -9417,7 +9478,7 @@ class TypeScriptParser {
       // that is not one is read into a name before the statement, which is the
       // value the source read — unless the chain is a loop condition, which is
       // read every turn and has no statement of its own to be read before.
-      if (!repeatableExpression(target)) {
+      if (!this.repeatable(target)) {
         const held = this.loopCondition ? null : this.writeTarget(target, this.peek().line);
         if (held === null) {
           this.report(
@@ -10083,6 +10144,35 @@ class TypeScriptParser {
           continue;
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
+        // `Math.max(...xs)` and `Math.min(...xs)` are the greatest and the
+        // smallest element of the list. A list may be empty, and neither has a
+        // greatest element then: the answer is the infinity the fold starts
+        // from, which is `-Infinity` for the greatest and `Infinity` for the
+        // smallest. The helper folds every element against it.
+        if (
+          (target.name === "Math.max" || target.name === "Math.min") &&
+          this.at("(") &&
+          this.peek(1).text === "..."
+        ) {
+          const line = this.peek().line;
+          this.next();
+          this.next();
+          const list = this.readExpression();
+          this.expect(")");
+          const type = this.valueTypeOf(list);
+          if (type.kind !== "slice" && type.kind !== "array") {
+            this.report(
+              `${target.name} reduces a list`,
+              `the value the spread names is a list of numbers, as in ${target.name}(...xs)`,
+              this.peek(),
+            );
+            replace(this.hole());
+            continue;
+          }
+          const helper = this.reductionHelper(target.name === "Math.max" ? "max" : "min", line);
+          replace({ k: "call", name: helper.name, args: [list] });
+          continue;
+        }
         // `f(...xs)` hands the function the elements of the list, and the
         // number of them is the number of parameters the declaration states.
         // The list is written where the arguments were, so each one is an
@@ -10216,6 +10306,22 @@ class TypeScriptParser {
         // `Number.MAX_SAFE_INTEGER` and its neighbours are numbers the
         // language writes down, not values the runtime holds.
         if (target.k === "ident" && target.name === "Number") {
+          // The infinities have no decimal to write: they are the quotient of
+          // one and zero, which is the float division the emitters write as
+          // `1.0 / 0.0`. `MAX_SAFE_INTEGER` and its neighbours are numbers the
+          // language writes down.
+          if (field.text === "POSITIVE_INFINITY" || field.text === "NEGATIVE_INFINITY") {
+            const one: Expression = { k: "literal", text: "1" };
+            const value: Expression = {
+              k: "binary",
+              op: "/",
+              left: field.text === "NEGATIVE_INFINITY" ? { k: "unary", op: "-", operand: one } : one,
+              right: { k: "literal", text: "0" },
+            };
+            this.expressionTypes.set(value, NUMBER_RESULT);
+            replace(value);
+            continue;
+          }
           const written =
             field.text === "MAX_SAFE_INTEGER" ? "9007199254740991"
               : field.text === "MIN_SAFE_INTEGER" ? "-9007199254740991"
@@ -10811,6 +10917,12 @@ class TypeScriptParser {
           return known.kind === "ref" && known.of === null && known.name === undefined ? null : known;
         },
       );
+    // An arrow that answers an object literal names no result type, but the
+    // fields it writes are read where the arrow is used: `list.map((x) =>
+    // ({ name: x }))` is a list of a record, and `entry.name` of one element is
+    // the field the literal wrote. The shape is read here, while the body's
+    // names are still in scope.
+    const inferredReturnsShape = statedShape === null ? this.resultShapeOf(body) : null;
     this.valueTypes = savedTypes;
     this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
@@ -10885,8 +10997,9 @@ class TypeScriptParser {
     );
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
     // The shape the arrow's declaration writes is what a call of it answers,
-    // beside the type the contract can spell.
-    binding.returnsShape = statedShape;
+    // beside the type the contract can spell. An arrow that writes no
+    // declaration answers the shape its body's one result wrote.
+    binding.returnsShape = statedShape ?? inferredReturnsShape;
     // The map or set an arrow answers is the one its declaration states, and a
     // call of the arrow is a call whose answer is a collection: the call names
     // the lifted function, so the collection is recorded under that name. A
@@ -11233,9 +11346,19 @@ class TypeScriptParser {
     const returns = helper.returns;
     if (returns.kind === "slice" || returns.kind === "array") {
       const keepsElement = method === "filter" || method === "sort";
-      const element = keepsElement
-        ? this.elementShapeOf(receiver, elements) ?? { kind: "any" as const }
-        : this.shapeOfTypeExpr(returns.of);
+      let element: ResolvedType;
+      if (keepsElement) {
+        element = this.elementShapeOf(receiver, elements) ?? { kind: "any" };
+      } else if (method === "map") {
+        // `map` answers a list of what the callback answered, so its element
+        // shape is that answer.
+        element = this.callbackReturnsShape(callback) ?? this.shapeOfTypeExpr(returns.of);
+      } else {
+        // `flatMap` — and a `reduce` whose accumulator is a list — answers the
+        // list the callback answered. Its element is what that list holds.
+        const held = this.callbackReturnsShape(callback);
+        element = held !== null && held.kind === "list" ? held.of : this.shapeOfTypeExpr(returns.of);
+      }
       this.expressionShapes.set(call, { kind: "list", of: element });
     }
     // `find` answers the element it found, or nothing, so what the answer holds
@@ -11440,6 +11563,30 @@ class TypeScriptParser {
     }
     this.constantCollectionValues.set(name, collection);
     return collection;
+  }
+
+  /**
+   * The shape a written-out list constant holds.
+   *
+   * `const OPERATORS = ["+", "-"]` names a list of texts, and the declaration
+   * writes no type for it: what it holds is read from the values the file wrote.
+   * The list is read once per name, and only a constant whose value starts with
+   * `[` is asked — an object or an allocation has its own shape already.
+   */
+  private constantWrittenShape(name: string): ResolvedType | null {
+    const known = this.constantWrittenShapes.get(name);
+    if (known !== undefined) return known;
+    const constant = this.constants.get(name);
+    const range = constant?.expression?.range;
+    const first = range === undefined ? undefined : this.allTokens[range.start];
+    if (range === undefined || first?.text !== "[") {
+      this.constantWrittenShapes.set(name, null);
+      return null;
+    }
+    const value = this.constantValue(name, constant?.expression);
+    const shape = value === null ? null : this.shapeOf(value);
+    this.constantWrittenShapes.set(name, shape);
+    return shape;
   }
 
   /** The signature a member's declaration types it at, when it types one. */
@@ -11857,6 +12004,14 @@ class TypeScriptParser {
     if (method === "slice" && (args.length === 1 || args.length === 2)) {
       return call("text.slice", [receiver, ...args]);
     }
+    // `text.charAt(i)` is the one-character field starting at `i`. A position
+    // past the end is the empty text, which is the slice a text answers past
+    // its own end.
+    if (method === "charAt" && args.length === 1) {
+      const at = args[0] as Expression;
+      if (!this.repeatable(at)) return null;
+      return call("text.slice", [receiver, at, { k: "binary", op: "+", left: at, right: { k: "literal", text: "1" } }]);
+    }
     if (method === "includes" && args.length === 1) {
       return {
         k: "binary",
@@ -11870,7 +12025,7 @@ class TypeScriptParser {
       // needle is long compared with the needle: one reading for both forms,
       // so a chain that asks both is the same two slices it is.
       const needle = args[0] as Expression;
-      if (!repeatableExpression(needle)) return null;
+      if (!this.repeatable(needle)) return null;
       return {
         k: "binary",
         op: "===",
@@ -11885,7 +12040,7 @@ class TypeScriptParser {
     if (method === "startsWith" && args.length === 2) {
       const needle = args[0] as Expression;
       const at = args[1] as Expression;
-      if (!repeatableExpression(needle) || !repeatableExpression(at)) return null;
+      if (!this.repeatable(needle) || !this.repeatable(at)) return null;
       const stop: Expression = { k: "binary", op: "+", left: at, right: { k: "lengthOf", of: needle } };
       return {
         k: "binary",
@@ -11896,7 +12051,7 @@ class TypeScriptParser {
     }
     if (method === "endsWith" && args.length === 1) {
       const needle = args[0] as Expression;
-      if (!repeatableExpression(needle)) return null;
+      if (!this.repeatable(needle)) return null;
       const start: Expression = {
         k: "binary",
         op: "-",
@@ -12369,6 +12524,7 @@ class TypeScriptParser {
     this.liftedArrows.set(name, helper);
     const made = { name, returns };
     this.collectHelpers.set(key, made);
+    this.pureTextHelpers.add(name);
     return made;
   }
 
@@ -12379,6 +12535,64 @@ class TypeScriptParser {
    * The count is floored before the loop, which is what the language does with
    * a count that is not whole, and a count below one repeats nothing.
    */
+  /**
+   * The function `Math.max(...xs)` or `Math.min(...xs)` folds the list with.
+   *
+   * The fold starts at the identity the operation has over no elements — the
+   * negative infinity for a greatest, the positive one for a smallest — so an
+   * empty list answers that rather than the zero a first-element fold would
+   * have to special-case.
+   */
+  private reductionHelper(kind: "max" | "min", line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["reduce", kind]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const element: Expression = { k: "index", base: ident("numbers"), index: ident("i") };
+    const best = (): Expression => ident("best");
+    const length = (): Expression => ({ k: "length", buffer: "numbers" });
+    // The identity: `-1 / 0` is the negative infinity, `1 / 0` the positive.
+    const identity: Expression = {
+      k: "binary",
+      op: "/",
+      left: kind === "max" ? { k: "unary", op: "-", operand: number("1") } : number("1"),
+      right: number("0"),
+    };
+    const body: Statement[] = [
+      { kind: "declare", name: "best", type: null, init: identity, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: length(),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [{
+          kind: "if",
+          condition: { k: "binary", op: kind === "max" ? ">" : "<", left: element, right: best() },
+          then: [{ kind: "assign", target: "best", op: "=", value: element, line }],
+          otherwise: [],
+          line,
+        }],
+        line,
+      },
+      { kind: "result", value: best(), line },
+    ];
+    const params = [{ name: "numbers", type: { kind: "slice", of: NUMBER_RESULT } as TypeExpr }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
+  }
+
   private repeatHelper(line: number): { name: string; returns: TypeExpr } {
     const key = JSON.stringify(["repeat"]);
     const known = this.collectHelpers.get(key);
@@ -12420,6 +12634,7 @@ class TypeScriptParser {
     this.liftedArrows.set(name, helper);
     const made = { name, returns };
     this.collectHelpers.set(key, made);
+    this.pureTextHelpers.add(name);
     return made;
   }
 
@@ -12527,6 +12742,7 @@ class TypeScriptParser {
     this.liftedArrows.set(name, helper);
     const made = { name, returns };
     this.collectHelpers.set(key, made);
+    this.pureTextHelpers.add(name);
     return made;
   }
 
@@ -12660,7 +12876,7 @@ class TypeScriptParser {
     if (written.values === undefined) {
       if (method !== "has" || args.length !== 1) return null;
       const value = args[0] as Expression;
-      if (!repeatableExpression(value)) {
+      if (!this.repeatable(value)) {
         this.report(
           "a set's membership reads the value once",
           "write the value into a name first, as in const x = f(); SEEN.has(x)",
@@ -12680,7 +12896,7 @@ class TypeScriptParser {
     }
     if (method !== "get" || args.length !== 1) return null;
     const value = args[0] as Expression;
-    if (!repeatableExpression(value)) {
+    if (!this.repeatable(value)) {
       this.report(
         "a map's value reads the key once",
         "write the key into a name first, as in const k = f(); TABLE.get(k)",
@@ -13451,7 +13667,15 @@ class TypeScriptParser {
     }
     if (token.kind === "ident") {
       if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
-      if (token.text === "null" || token.text === "undefined") return { k: "null" };
+      if (token.text === "null") return { k: "null" };
+      if (token.text === "undefined") {
+        // `undefined` is the absent value, and it is also a name a body may
+        // declare: `const undefined: string[] = []` is a list the source keeps
+        // and writes through. The name the body declared is the one it reads;
+        // the word is the absent value where the body declared none.
+        if (!this.valueTypes.has("undefined") && !this.valueShapes.has("undefined")) return { k: "null" };
+        return { k: "ident", name: "undefined" };
+      }
       if (token.text === "new") return this.readAllocation();
       if (token.text === "process" && this.at(".") && this.peek(1).text === "argv") {
         this.next();
@@ -13750,6 +13974,13 @@ class TypeScriptParser {
     let pieces = 0;
     let element: TypeExpr | null = expected;
     /**
+     * What the element holds, where the spread the element type came from says
+     * it. `[...m.values()]` is a list of the map's value type, which the
+     * contract erases to the opaque reference; the spread's own shape is the
+     * record the fields are read at.
+     */
+    let elementShape: ResolvedType | null = expectedElementShape;
+    /**
      * Reads one written value at the type the list holds it at.
      *
      * A list of lists is one list whose elements are lists, so the inner list
@@ -13775,7 +14006,7 @@ class TypeScriptParser {
     };
     const settleRun = (): void => {
       if (element === null) return;
-      for (const written of run) this.applyExpected(written, { kind: "slice", of: element }, expectedElementShape);
+      for (const written of run) this.applyExpected(written, { kind: "slice", of: element }, elementShape);
     };
     const flush = (): void => {
       if (run.length === 0) return;
@@ -13807,6 +14038,12 @@ class TypeScriptParser {
         const type = this.valueTypeOf(spread);
         if (element === null && (type.kind === "slice" || type.kind === "array") && !this.holdsUnsettledArray(spread)) {
           element = type.of;
+          // The element the spread stands for keeps the shape the spread says,
+          // where it says one: a call that answers a list of records records
+          // its element shape, and the literal joins that list element by
+          // element.
+          const spreadShape = this.shapeOf(spread);
+          if (spreadShape !== null && spreadShape.kind === "list") elementShape = spreadShape.of;
           settleRun();
         }
         joined = joined === null ? spread : { k: "binary", op: "+", left: joined, right: spread };
@@ -13815,6 +14052,10 @@ class TypeScriptParser {
         const value = readWritten(false);
         if (element === null && !this.holdsUnsettledArray(value)) {
           element = this.valueTypeOf(value);
+          // The value the literal wrote says what its element holds, not only
+          // what its type is: `[item, item]` is a list of the record `item` is,
+          // and the contract's spelling of that is the opaque reference.
+          if (elementShape === null) elementShape = this.shapeOf(value);
           settleRun();
         }
         run.push(value);
@@ -13858,7 +14099,7 @@ class TypeScriptParser {
       const settle = (value: Expression): Expression => {
         if (element !== null) {
           this.expressionTypes.set(value, { kind: "slice", of: element });
-          const shape = expectedElementShape ?? this.shapeOfTypeExpr(element);
+          const shape = elementShape ?? this.shapeOfTypeExpr(element);
           this.expressionShapes.set(value, { kind: "list", of: shape });
         }
         return answer(value);

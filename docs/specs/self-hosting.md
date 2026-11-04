@@ -888,6 +888,93 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cv. A compound length, a local `undefined`, and a bracket in a constant
+
+    code.length -= 2;
+    const undefined: string[] = [];
+    const OPERATORS = ["+", "-", "(", ")", "[", "]"];
+
+Three smaller readings, each its own construct.
+
+`a.length -= n` is the list as its first `len(a) - n` elements: the same write
+`a.length = n` is, at the length it had less `n`. Only the plain assignment was
+read, so the compound form fell through to the expression grammar and was
+reported as an unexpected operator.
+
+`undefined` names the absent value, and it is also a name a body may declare.
+A body that writes `const undefined: string[] = []` reads the name it declared;
+the absent value is what an undeclared `undefined` is.
+
+`constantList` split a written-out list on its commas and read an element whose
+text began with `[` as a nested list. A *string* whose text is `[` is one token
+and a string, not a bracket: the list was therefore not a constant, and `find`
+written on the name was a method of nothing. The element test now asks the
+token's punctuation, the way the signature scan does.
+
+With 4cu this took the total from 480 to 472.
+
+### 4cu. The infinities, and the greatest of a list
+
+    Number.POSITIVE_INFINITY
+    Number.NEGATIVE_INFINITY
+    Math.max(...values)
+
+A number literal has no spelling for infinity, so the frontend writes the
+quotient it is: `1 / 0` is the positive infinity and `-1 / 0` the negative one,
+which is the float division the emitters already write as `1.0 / 0.0`.
+
+`Math.max(...xs)` and `Math.min(...xs)` were refused as a spread argument of a
+call whose parameters are not declared. They are the greatest and the smallest
+element of the list, and a list may be empty: the fold starts at the identity —
+the negative infinity for a greatest, the positive one for a smallest — rather
+than at the first element, which an empty list does not have. The helper is a
+function of the file like `repeat`'s, and the initial value is the quotient
+above. `semantics/python-program.ts`, `toolchain/benchmark.ts` and
+`util/sets.ts` are now read whole.
+
+Together with 4cv this took the total from 480 to 472. (The identity read
+retires the earlier note that `Math.max(...list)` was deliberately
+unimplemented: the object pass accepts the quotient, so there is a correct
+empty-list answer after all.)
+
+### 4ct. A text helper is a read, and `charAt`
+
+    source.startsWith(quote.repeat(3), start)
+
+`startsWith` asks for the needle twice — once for its length, once for the
+comparison — so a needle that is not a name or a literal is refused. A text
+method the frontend lowers to a function of its own — `repeat`, `split`, the
+`indexOf` that starts at a position — writes an answer of its own and nothing
+else, so asking it twice is asking the same question. Those helper names are now
+marked as reads, and the methods that need their argument twice accept them.
+`charAt` is the one-character field a position starts, which is the slice up to
+one past it, added beside `slice`.
+
+This is the last of the batch that took the total from 485 to 480.
+
+### 4cs. A spread of a list keeps the element's shape
+
+    const repeated = [...counts.values()];
+    repeated.map((entry) => ({ ...entry, reason: … }))
+
+A list literal that begins with a spread takes the spread's *type* for its
+element type. The contract erases a record to the opaque reference, so
+`[...m.values()]` was a list of the opaque type: an element was a reference with
+no fields, and `{ ...entry }` had nothing to copy. The spread's own *shape* is
+now carried to the literal, so the element keeps the record the map's value type
+names. `semantics/repair.ts` reads further.
+
+### 4cr. An arrow answers the record it wrote
+
+    lines.map((line, at) => ({ line, at })).at(0).line.trim()
+
+`map` answers a list of what its callback answered. The element's shape was
+`shapeOfTypeExpr(returns.of)`, and `returns.of` is the callback's *type*: for an
+arrow that writes an object literal and names no result type, that is the opaque
+reference, so a field of the answer was a field of nothing. An arrow with one
+result now records the shape of the value it answers — `{ line, at }` is a
+record of a text and a number — and `map` reads its element shape from it.
+
 ### 4cq. A key asks a dictionary
 
     if (name in args) return { unusable: `line ${line} gives ${name} twice` };
@@ -2546,6 +2633,8 @@ What was closed this session, and what each was worth:
 | the element a list method answers (§4co) | 509 → 494 |
 | a string is not a bracket (§4cp) | 494 → 488 |
 | a key asks a dictionary (§4cq) | 488 → 485 |
+| an arrow answers the record it wrote, a spread keeps the element's shape, and a text helper is a read (§4cr–§4ct) | 485 → 480 |
+| the infinities, the greatest of a list, a compound length, a local `undefined`, and a bracket in a constant (§4cu–§4cv) | 480 → 472 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

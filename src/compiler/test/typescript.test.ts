@@ -2348,6 +2348,137 @@ test("`in` asks a dictionary whether it holds the key", () => {
   assert.match(JSON.stringify(analyzedBody(source, "asked")), /blaze_rt_dict_has/);
 });
 
+test("a map callback's object literal keeps the fields it wrote", () => {
+  // `list.map((x) => ({ name: x }))` answers a list of a record the callback
+  // wrote, and the declaration names no type for it: the fields are read where
+  // the callback's one result is, so `entry.name` of an element is a text and
+  // `.trim()` written on it is a text method.
+  const source = [
+    "export function f(lines: string[]): number {",
+    "  return lines.map((line, at) => ({ line, at })).at(0).line.trim().length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a spread of a collection's values keeps the element's shape", () => {
+  // `[...counts.values()]` is a list of the map's value type, which the
+  // contract erases to the opaque reference. The spread's own shape is the
+  // record, so `{ ...entry }` copies the fields the record declares.
+  const source = [
+    "interface Counted { value: string; count: number }",
+    "interface Out { value: string; count: number; reason: string }",
+    "function reason(value: string): string { return value; }",
+    "export function f(counts: Map<string, Counted>): Out[] {",
+    "  const repeated = [...counts.values()];",
+    "  return repeated.map((entry) => ({ ...entry, reason: reason(entry.value) }));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a text helper is a read, so a needle it answers may be asked twice", () => {
+  // `source.startsWith(quote.repeat(3), 2)` reads the needle twice — once for
+  // the length, once for the comparison. The repetition is a function of the
+  // file that writes its own answer and nothing else, so asking it twice is
+  // asking the same question.
+  const source = [
+    "export function f(source: string, quote: string): boolean {",
+    "  return source.startsWith(quote.repeat(3), 2);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("the infinities are the float quotients they are", () => {
+  // A number literal has no spelling for infinity, and the language's words for
+  // it are a quotient: `1 / 0` is the positive infinity and `-1 / 0` the
+  // negative one. The emitters already write a float division as one.
+  const positive = analyzedBody(
+    "export function f(): number { return Number.POSITIVE_INFINITY; }",
+    "f",
+  ) as { kind: string; value?: { k?: string; op?: string } }[];
+  const negative = analyzedBody(
+    "export function f(): number { return Number.NEGATIVE_INFINITY; }",
+    "f",
+  ) as { kind: string; value?: { k?: string; op?: string } }[];
+  assert.equal(positive[0]?.value?.op, "/");
+  assert.equal(negative[0]?.value?.op, "/");
+  assert.equal((negative[0]?.value as { left?: { op?: string } }).left?.op, "-");
+});
+
+test("the greatest of a list folds from negative infinity", () => {
+  // A list may be empty, and no element is greatest then: the fold starts at
+  // `-1 / 0`, which is the negative infinity, and every element is compared
+  // against it. `Math.min` starts at the positive one.
+  const source = [
+    "export function f(values: number[]): number {",
+    "  return Math.max(...values);",
+    "}",
+    "",
+  ].join("\n");
+  const analysis = typescript.analyze(source, "main.ts");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const helper = analysis.functions.find((declared) => declared.internal === true && declared.name.startsWith("__collect_"));
+  assert.ok(helper !== undefined, "the fold is a function of the file");
+  assert.deepEqual(helper.params.map((param) => param.name), ["numbers"]);
+});
+
+test("a list's length is written by a compound assignment", () => {
+  // `code.length -= 2` is the list as its first `len(code) - 2` elements, the
+  // same write `code.length = n` is.
+  const source = [
+    "export function f(code: number[]): number {",
+    "  code.length -= 2;",
+    "  return code.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a body that declares undefined reads the name it declared", () => {
+  // `undefined` names the absent value, and it is also a name a body may
+  // declare: `const undefined: string[] = []` is a list the source writes
+  // through. The name the body declared is the one it reads.
+  const source = [
+    "export function f(names: string[]): string[] {",
+    "  const undefined: string[] = [];",
+    "  for (const name of names) undefined.push(name);",
+    "  return undefined;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("charAt is the one-character field a position starts", () => {
+  const body = analyzedBody(
+    "export function f(text: string): string { return text.charAt(0); }",
+    "f",
+  ) as { kind: string; value?: { k?: string; name?: string } }[];
+  assert.equal(body[0]?.value?.k, "call");
+  assert.equal(body[0]?.value?.name, "text.slice");
+});
+
+test("a constant list whose values spell brackets is a constant", () => {
+  // A string whose text is `[` is a string, not a nested list. The scan read
+  // the element as a bracket, so the whole list was state and `find` written on
+  // it was a method of nothing.
+  const source = [
+    "const OPERATORS = [`+`, `-`, `(`, `)`, `[`, `]`];",
+    "export function f(source: string): number {",
+    "  const operator = OPERATORS.find((candidate) => source.startsWith(candidate));",
+    "  return operator === undefined ? 0 : operator.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a field of a field is written through a name of its own", () => {
   // The IR writes one field of one name, so `a.b.c = value` reads `a.b` into a
   // name first: an object is a reference, and writing through the name is
