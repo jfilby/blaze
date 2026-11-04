@@ -888,6 +888,79 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cw. A field through a reference, the shape an assignment reads, and `Array.from`
+
+    const body = statement.loop.body;            // the declaration the cycle names
+    v = { k: "call", name: "x", args: [] };      // read at the shape `v` declares
+    for (const rule of RULES) ...                // the constant the file wrote
+    "k" in n                                     // the key the source holds
+    Array.from({ length: n }, (_, i) => v)       // n answers, at their indexes
+
+Several readings, each its own construct.
+
+**A field through a reference.** A record is expanded with the declarations it
+is currently inside marked, so a type that names itself writes a `ref` where the
+cycle closes. `fieldOfType` marked the declaration as seen *before* handing it
+to the expansion, so the expansion answered that reference and a field of it was
+not written: `statement.loop.body.statements` stopped at `ref Block`, and every
+list method on it was a method of nothing. The expansion marks the declaration
+itself, and the caller no longer marks it first. The `ref` that remains in the
+expansion is the recursion, and resolving it in the field's own table is what
+reads the field.
+
+**The shape an assignment reads.** A name whose declaration names a union of
+shapes is held at the contract's opaque reference, and the shape lives beside it
+in `valueShapes`. An assignment read its value at the contract type alone, so
+`v = { k: "call", ..., args: [] }` had no field type for `args` and the empty
+list was unsettled. An assignment now reads at the shape the declaration named,
+so the object literal is read field by field and an empty list takes the
+field's element type. The shape is the *declaration's*: narrowing is kept in its
+own table, so a write is read at the whole type and not the arm a guard settled.
+
+**A for-of over a constant.** A loop whose source is a name read the element
+from `valueShapes`, which only a declaration in the body writes. The constant a
+file writes above the body is read by `shapeOf`, which the index read already
+asks: the loop and `RULES[0]` now keep the same record, and a list field of one
+element is the list the body maps.
+
+**A key held in a name.** `` `key in record` `` was answered for a key written
+out, and for a value that is a dictionary; a record of fields with the key in a
+name was refused. Every field a record declares is laid out, so the answer is
+whether the key names one of them: the chain the written key's path builds,
+with the key asked once per name. A key that runs on every mention is refused
+the way the written key's path refuses it.
+
+**A record a value is asserted to be.** `value as Record<string, unknown>` names
+the dictionary the value is, but the assertion was erased and the `unknown` the
+declaration wrote was all a `key in value` could see. An `as` now keeps the
+shape it names beside the value (a `satisfies` does not: it promises nothing the
+value did not already say), so the question is the dictionary's `has`.
+
+**`Array.from({ length: n }, (_, i) => v)`.** The count is read once, into a
+helper that allocates it and writes the callback's answer at each index. The
+callback is handed the element at the index and the index, and a sparse list's
+element is the absent value — which the value model has none of. A callback that
+*reads* its element is therefore refused rather than handed a number the
+language would not hand it; the form the sources write, `(_, i) => v`, names the
+element and reads the index alone. (An earlier note said `Array.from` waited on
+a list a call answers having no length; the length a list was built at is now
+carried by the IR, which is what the helper allocates at.)
+
+**A print may end its argument with a comma.** `console.log(v,)` and
+`process.stderr.write(v,)` read the one argument and expect the `)`; a call's
+argument list already accepted the trailing comma, and a print did not.
+
+**The gate the benchmark's lowering writes.** The wide-number lowering fired on
+a source that mentioned `splitScalarEndo` and `CURVE`, which is a heuristic over
+text: the lowering's *own* source mentions both — a comment writes `CURVE.P`,
+and a rewrite names `splitScalarEndo` — so the compiler lowered its own lowering
+and left a source the tokenizer could not split (`unterminated regular
+expression`). The gate now asks for the declarations the benchmark writes, a
+`function splitScalarEndo(` and a `const CURVE`, which a mention is not.
+
+The total went from 472 to 447, and `semantics/typescript-wide-lowering.ts`
+reads whole.
+
 ### 4cv. A compound length, a local `undefined`, and a bracket in a constant
 
     code.length -= 2;
@@ -2506,7 +2579,9 @@ The second finding is why `Array.from` is not in this session's slices:
 call *answers*, and a list a call answers has no length at all — it is a
 pointer, and the count of its elements is left behind with the callee's frame,
 unless the caller can recover it from the runtime's allocation header as
-`map`'s can. That is a value-model slice, not a syntax one, and it waits.
+`map`'s can. That is a value-model slice, not a syntax one, and it waits. (The
+length a list was built at is carried by the IR now, and the form is read in
+§4cw.)
 
 ## The next slices
 
@@ -2635,6 +2710,7 @@ What was closed this session, and what each was worth:
 | a key asks a dictionary (§4cq) | 488 → 485 |
 | an arrow answers the record it wrote, a spread keeps the element's shape, and a text helper is a read (§4cr–§4ct) | 485 → 480 |
 | the infinities, the greatest of a list, a compound length, a local `undefined`, and a bracket in a constant (§4cu–§4cv) | 480 → 472 |
+| a field through a reference, the shape an assignment reads, a for-of over a constant, a key held in a name, `Array.from`, and the benchmark's gate (§4cw) | 472 → 447 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
@@ -2785,22 +2861,22 @@ to carry those without a rewrite into numeric arrays:
   a dynamic object for JSON; this makes that shape writable and iterable, while
   the layout pass keeps its static objects beside it.
 - **Arrays.** A length inside the block so `push` is linear, arrays of arrays,
-  and `slice`, `splice`, `shift`, `unshift`, `concat`, `Array.from` and
-  `Array.isArray`. Text and reference arrays already exist, and the growth the
-  source does through a name or a field is lowered to the helper that walks the
-  block. A written-out list is now a block the runtime hands out, in the C
-  backend as in the machine backend, so a list a function returns or a
-  constructor stores in a field outlives the frame that wrote it; an empty list
-  is built the same way when the declaration, field or return type names its
-  element. The element type now travels through `as` and `satisfies`, the arms
-  of a conditional, the right side of `??`, an object field, a call argument and
-  a nested list, so `condition ? [] : [1]` is a list of numbers without a
-  separate annotation. `this.items.push(x)` writes the field back into the
-  object it was read from, and `a.push(x, y)` is one block and one copy for
-  every value. `at` and `slice` read one element and copy a
+  and `slice`, `splice`, `shift`, `unshift`, `concat` and `Array.isArray` (and
+  the `Array.from({ length: n }, f)` form, §4cw). Text and reference arrays
+  already exist, and the growth the source does through a name or a field is
+  lowered to the helper that walks the block. A written-out list is now a block
+  the runtime hands out, in the C backend as in the machine backend, so a list a
+  function returns or a constructor stores in a field outlives the frame that
+  wrote it; an empty list is built the same way when the declaration, field or
+  return type names its element. The element type now travels through `as` and
+  `satisfies`, the arms of a conditional, the right side of `??`, an object
+  field, a call argument and a nested list, so `condition ? [] : [1]` is a list
+  of numbers without a separate annotation. `this.items.push(x)` writes the
+  field back into the object it was read from, and `a.push(x, y)` is one block
+  and one copy for every value. `at` and `slice` read one element and copy a
   range. What is still missing is `splice`, `shift`, `unshift`, `concat`, the
-  `Array` constructors, and a list whose element is itself a list as a field of
-  a class.
+  remaining `Array` constructors, and a list whose element is itself a list as
+  a field of a class.
 - **Maps and sets.** A value is a number, a text, a truth or a reference, and a
   key is text or a reference: a reference key is the handle itself, written as
   the address it carries, so two names for one object are one key. `get`, `set`,

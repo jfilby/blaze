@@ -1030,6 +1030,27 @@ test("flatMap is the lists its callback answers, one after another", async () =>
   }
 });
 
+test("Array.from writes the answer of its callback at every index of a length", async () => {
+  // `Array.from({ length: n }, (_, i) => v)` is n answers, each read at its
+  // index. The count is read once, before the walk, and the callback is the
+  // function the arrow became: the values it captured travel with it, and the
+  // element it is handed is the absent one a sparse index has.
+  const source = [
+    "export function demo(): string {",
+    "  const prefix = `p`;",
+    "  const parts = Array.from({ length: 3 }, (_, index) => `${prefix}${index}`);",
+    "  const none = Array.from({ length: 0 }, () => 1);",
+    "  return `${parts.join(`, `)}|${none.length}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "p0, p1, p2|0", `the ${backend} backend walks the length`);
+  }
+});
+
 test("a list pushed to in a loop keeps what every turn appended", async () => {
   // `push` answers a longer list, so the turn stores a block a function built
   // into a name that outlives it. The loop may only reuse a turn's storage when

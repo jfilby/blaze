@@ -95,11 +95,13 @@ import { selfHostGap } from "./self-host-gap.ts";
  * type a top-level allocation writes to 509, the element a list method answers
  * to 494, a string that is not a bracket to 488, a key that asks a dictionary
  * to 485, the record an arrow answers, with the element's shape across a spread
- * and a text helper that is a read, to 480, and the infinities, the greatest of
+ * and a text helper that is a read, to 480, the infinities, the greatest of
  * a list, a compound length, a local `undefined` and a bracket in a constant to
- * 472.
+ * 472, and a field through a reference, with the shape an assignment reads, a
+ * for-of over a constant, a key held in a name, `Array.from` and the gate the
+ * benchmark's own lowering writes to 447.
  */
-const REFUSAL_BUDGET = 472;
+const REFUSAL_BUDGET = 447;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

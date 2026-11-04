@@ -3734,3 +3734,166 @@ test("Extract and Exclude read the type they name the members of", () => {
   const excluded = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "from");
   assert.match(excluded, /load_field\[f64\] local\[ref<any>\] loop Object1 from/, "Exclude reads the type whose members it names");
 });
+
+test("a field of a record a recursive type names is read through the reference it is", () => {
+  // `Loop.body` is the `Block` the type expands to, and expanding `Block`
+  // writes `Statement[]`, which writes `Loop` again. The expansion cuts the
+  // cycle with a reference to the declaration it is already inside, so a body
+  // read from there is a `ref Block`: the fields are the declaration's, and the
+  // list methods on them are the list's.
+  const source = [
+    "interface Block { statements: Statement[] }",
+    "type Statement = { k: `loop`; loop: Loop } | { k: `set`; name: string };",
+    "type Loop = { kind: `while`; body: Block } | { kind: `counted`; body: Block };",
+    "export function count(block: Block): number {",
+    "  let total = 0;",
+    "  for (const statement of block.statements) {",
+    "    if (statement.k !== `loop` || statement.loop.kind !== `while`) continue;",
+    "    const body = statement.loop.body;",
+    "    if (body.statements.find((one) => one.k === `set`) !== undefined) total += 1;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("an assignment reads its value at the shape the name was declared with", () => {
+  // The declaration names a union of shapes, which the contract spells as one
+  // reference. The fields are the declaration's, and the value written over the
+  // name is read at them: `args: []` is the empty list of the `P` the record
+  // holds rather than a list with no element type.
+  const source = [
+    "type P = { k: `call`; name: string; args: P[] } | { k: `text`; value: string };",
+    "export function f(): P {",
+    "  let v: P = { k: `text`, value: `` };",
+    "  v = { k: `call`, name: `x`, args: [] };",
+    "  return v;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "f");
+  assert.match(ir, /set v = \[new_object\[ref<Object1>\] Object1 k \[text "call"\]/, "the assigned value is the record the name was declared as");
+});
+
+test("a for-of walks a constant the file wrote, keeping the record its elements are", () => {
+  // The constant is read from the file rather than declared in the body, so the
+  // loop's element is the record the constant's annotation names. Its fields
+  // are read field by field, and a list field is the list the walk maps.
+  const source = [
+    "interface RuleArg { name: string }",
+    "interface Rule { name: string; args: RuleArg[] }",
+    "const RULES: readonly Rule[] = [{ name: `one`, args: [{ name: `a` }] }];",
+    "export function f(): string {",
+    "  const lines: string[] = [];",
+    "  for (const rule of RULES) lines.push(rule.args.map((a) => a.name).join(`,`));",
+    "  return lines.join(`|`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a record a value is asserted to be answers whether it holds a key", () => {
+  // `value as Record<string, unknown>` names the dictionary the value is, and
+  // `key in value` is the dictionary's `has`. The assertion is what the read
+  // keeps: the declaration of `n` writes `unknown`, and the cast is the only
+  // thing that says the value is a dictionary.
+  const source = [
+    "export function read(node: unknown): boolean {",
+    "  const n = node as Record<string, unknown>;",
+    "  return `k` in n;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(read({}));\n` }, "main.ts", "read");
+  assert.match(ir, /dict_has|blaze_rt_dict_has/, "the question is the dictionary's own has");
+});
+
+test("a key held in a name is asked of a record's fields", () => {
+  // A record lays every field it declares out, so `k in record` is whether the
+  // key is one of their names, whatever the key is written as. The chain is
+  // the one a constant object's keys are, and the key is the same question.
+  const source = [
+    "export function f(operation: string): string {",
+    "  const names = { add: `add`, sub: `sub` } as const;",
+    "  if (operation in names) return `yes`;",
+    "  return `no`;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f("add"));\n` }, "main.ts", "f");
+  assert.match(ir, /select/, "the question is the chain of the names the record wrote");
+});
+
+test("a print may end its argument with a comma", () => {
+  // `console.log(value,)` and `process.stderr.write(value,)` end the argument
+  // list with a comma that names no argument, as a call's arguments do.
+  const source = [
+    "export function f(): void {",
+    "  console.log(`a`,);",
+    "  process.stderr.write(`b`,);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Array.from writes the answers its callback gives at the indexes of a length", () => {
+  // `Array.from({ length: n }, (_, i) => v)` is n answers, each at its index.
+  // The count is read once, and the callback is handed the absent element — the
+  // null reference — and the index. The helper's body is the walk, and the
+  // answer is the list it fills.
+  const source = [
+    "export function f(count: number): string {",
+    "  return Array.from({ length: count }, (_, index) => `p${index}`).join(`, `);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(3));\n` }, "main.ts", "f");
+  assert.match(ir, /call\[\[\]text\] __collect_/, "the list is the helper's answer");
+  const helper = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(3));\n` }, "main.ts", ir.match(/__collect_[\w]+/)?.[0] ?? "");
+  assert.match(helper, /for\[i64\] i from const\[i64\] 0 to /, "the helper walks the indexes of the length");
+  assert.match(helper, /call\[text\] through local\[ref<any>\] fn \[arg\[f64\] const\[f64\] 0 arg\[f64\] local\[i64\] i\]/, "the callback is handed the element and the index");
+});
+
+test("an Array.from that is not a length and a callback is refused where it is written", () => {
+  // The description is read where the call wrote it, so a form the read does
+  // not know is one refusal at the call and the statement after it is read
+  // where it is: the argument list is not re-read from past its `(`.
+  const source = [
+    "export function f(n: number): number {",
+    "  const list = Array.from({ length: n, other: 1 }, (_, i) => i);",
+    "  return list.length;",
+    "}",
+    "",
+  ].join("\n");
+  const refused = readTypeScriptModule(source, "main.ts", false).refused;
+  assert.equal(refused.length, 1, "the call is the one construct refused");
+  assert.match(refused[0]?.message ?? "", /length description/);
+});
+
+test("a source that only mentions the secp256k1 names is not the benchmark", () => {
+  // The lowering rewrites the benchmark's own source, so a file that merely
+  // writes the names — a comment naming `CURVE.P`, a pattern naming
+  // `splitScalarEndo` — must not be lowered: the rewrite reads its own text as
+  // the benchmark and leaves a source the tokenizer cannot split.
+  const source = [
+    "/** `CURVE.P`, as every modular call that leaves its modulus implicit means it. */",
+    "const CURVE_P = 1n;",
+    "export function rewrite(text: string): string {",
+    "  const pattern = /if \\(!USE_ENDOMORPHISM\\) \\{([\\s\\S]*?)return p;\\s*\\}\\s*let \\{ k1neg[\\s\\S]*?return k1p\\.add\\(k2p\\);/;",
+    "  return text.replace(pattern, ``);",
+    "}",
+    "export function drop(text: string): string {",
+    "  return text.replace(/function splitScalarEndo[\\s\\S]*?^\\}\\n/m, ``);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

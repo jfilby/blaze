@@ -7450,7 +7450,7 @@ class TypeScriptParser {
     // assignment: the value is not computed where x holds one.
     if (operator.text === "??=") {
       this.next();
-      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression());
+      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression(), this.valueShapes.get(target.text) ?? null);
       this.accept(";");
       this.valueArrows.delete(target.text);
       // The write is the `??` the operator names: `x ??= value` is `x = x ??
@@ -7470,7 +7470,7 @@ class TypeScriptParser {
         return null;
       }
       this.next();
-      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression());
+      const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression(), this.valueShapes.get(target.text) ?? null);
       this.accept(";");
       // What the name holds is what it was just written with, so a name that
       // held an arrow no longer does: a later `g(x)` would call a function the
@@ -8046,6 +8046,8 @@ class TypeScriptParser {
     }
     this.expect("(");
     const value = this.readAt(TEXT_RESULT, () => this.readExpression());
+    // A print may end its argument with a comma, which names no argument.
+    this.accept(",");
     this.expect(")");
     this.accept(";");
     // The error stream is the runtime's own, and the text a function writes
@@ -8068,6 +8070,8 @@ class TypeScriptParser {
     }
     this.expect("(");
     const value = this.readExpression();
+    // A print may end its argument with a comma, which names no argument.
+    this.accept(",");
     this.expect(")");
     this.accept(";");
     return { kind: "print", value, line: start.line };
@@ -8454,7 +8458,10 @@ class TypeScriptParser {
     // is held at the element type an arrow capturing it would be handed.
     const walkedType = this.valueTypes.get(walked);
     const element = walkedType !== undefined && (walkedType.kind === "slice" || walkedType.kind === "array") ? walkedType.of : ANY_TYPE;
-    const walkedShape = written !== null ? this.shapeOf(written) : (this.valueShapes.get(walked) ?? null);
+    // The shape the walked value names, whether it is a name of the body or a
+    // constant the file wrote above it: `for (const rule of RULES)` reads the
+    // fields of a rule the same way `RULES[0]` does.
+    const walkedShape = written !== null ? this.shapeOf(written) : this.shapeOf({ k: "ident", name: walked });
     const elementShape = walkedShape !== null && walkedShape.kind === "list" ? walkedShape.of : null;
     // A pattern binds the parts of the element, so the loop walks a name of its
     // own and the body reads each name out of that one.
@@ -9053,6 +9060,42 @@ class TypeScriptParser {
         this.expressionTypes.set(answer, BOOLEAN_RESULT);
         return answer;
       }
+    }
+    // A key the source holds in a name, asked of a record of fields: the
+    // record lays every field it declares out, so the answer is whether the
+    // key is one of their names. It is the chain the constant path writes,
+    // and the key is asked once per name, which a value that runs on every
+    // mention may not be.
+    if (
+      name === null && shape !== null && shape.kind === "record" && shape.arms === undefined &&
+      shape.index === null && shape.fields.size > 0 &&
+      // An optional field is laid out at the zero of its type whether or not
+      // the source wrote it, so whether it is *there* is a question the layout
+      // does not answer.
+      [...shape.fields.values()].every((field) => !field.optional)
+    ) {
+      if (!this.repeatable(key)) {
+        this.report(
+          "a record's keys read the key once",
+          "write the key into a name first, as in const k = f(); k in TABLE",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      const keys = [...shape.fields.keys()];
+      let answer: Expression = { k: "literal", text: "0" };
+      // The chain asks the last name first, so the comparisons run in the order
+      // the object wrote its fields.
+      for (let at = keys.length - 1; at >= 0; at -= 1) {
+        answer = {
+          k: "conditional",
+          condition: { k: "binary", op: "===", left: key, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
+          then: { k: "literal", text: "1" },
+          otherwise: answer,
+        };
+      }
+      this.expressionTypes.set(answer, BOOLEAN_RESULT);
+      return answer;
     }
     // A dictionary the program builds answers the question from its entries:
     // `key in table` is the `has` the dictionary's own method is, and the key
@@ -9918,6 +9961,25 @@ class TypeScriptParser {
           replace(this.isArrayTest(args[0] ?? this.hole()));
           continue;
         }
+        // `Array.from({ length: n }, (_, i) => v)`: the list of the n answers
+        // the callback gives at its indexes. The element the callback is handed
+        // is the value the language gives a sparse list, which this compiler has
+        // none of; the arrow the sources write names it and reads the index, and
+        // the read is refused where the element is read. A form this read does
+        // not know is left to the method read, which refuses it the way it
+        // refused `Array.from` before.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Array" &&
+          target.field === "from"
+        ) {
+          const lowered = this.arrayFrom(this.peek().line);
+          if (lowered !== null) {
+            replace(lowered);
+            continue;
+          }
+        }
         if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
@@ -10267,10 +10329,18 @@ class TypeScriptParser {
       // other annotation, but an empty list still reads it: `[] as string[]`
       // names the element type the list holds.
       if (this.at("as") || this.at("satisfies")) {
-        this.next();
+        const assertion = this.next().text;
         const type = this.readTypeAnnotation("a type assertion", EXPRESSION_TYPE_STOPS);
         const shape = this.lastAnnotationShape();
         this.applyExpected(current(), type, shape);
+        // `value as Record<string, unknown>` says the value is the dictionary
+        // the assertion names. The shape is what a field or a key read off the
+        // value is read at, so it is kept beside the value: `"k" in n` asks the
+        // dictionary the assertion named rather than the `unknown` the
+        // declaration wrote.
+        if (assertion === "as" && shape !== null && (shape.kind === "record" || shape.kind === "list" || shape.kind === "map" || shape.kind === "set")) {
+          this.expressionShapes.set(current(), shape);
+        }
         // `m.get(k) as Set<string>` names a collection the value already is: a
         // map whose value is a set answers a handle, and the assertion is what
         // says what the handle holds. The value is recorded as that collection,
@@ -13195,6 +13265,153 @@ class TypeScriptParser {
     return { name, returns, elementShape };
   }
 
+  /**
+   * `Array.from({ length: n }, (_, i) => v)`: a list of n answers.
+   *
+   * The count is read once, before the walk, because the language reads the
+   * `length` of the description once. The callback is handed the element at
+   * the index, which a sparse list leaves absent, and the index the walk is at.
+   * The value model has no absent value, so a callback that reads its element
+   * is refused rather than handed a number the language would not hand it; the
+   * form the sources write — `(_, i) => v` — names the element and does not
+   * read it, and that is the form this reads.
+   *
+   * The form is only this one: a call that does not write a one-field `length`
+   * description followed by a callback is left to the method read, which
+   * refuses it the way it refused every `Array.from` before.
+   */
+  private arrayFrom(line: number): Expression | null {
+    if (!this.at("(") || this.peek(1).text !== "{") return null;
+    const brace = this.position + 1;
+    const close = this.matchingToken(brace, "{", "}");
+    if (close < 0 || this.tokens[close]?.text !== "}" || this.tokens[close + 1]?.text !== ",") return null;
+    const open = this.peek();
+    this.next();
+    const described = this.readExpression();
+    // The description is read where the call wrote it, so a form that is not
+    // the one-field length is finished here and reported rather than left for
+    // the method read, which would start its argument list past the `(`.
+    const length = described.k === "object" && described.fields.length === 1 && described.fields[0]?.name === "length"
+      ? (described.fields[0] as { value: Expression }).value
+      : null;
+    const count = length !== null && this.accept(",") ? length : null;
+    if (count === null) {
+      while (!this.at(")") && this.peek().kind !== "end") this.next();
+      this.expect(")");
+      this.report(
+        "Array.from reads a length description and a callback",
+        "write Array.from({ length: n }, (_, i) => value)",
+        open,
+      );
+      return this.hole();
+    }
+    // The callback is an arrow written at the use, and the use fixes its two
+    // parameters: the element it is handed and the index it is handed.
+    const savedHint = this.arrowParameters;
+    this.arrowParameters = [
+      { type: NUMBER_RESULT, shape: null },
+      { type: NUMBER_RESULT, shape: null },
+    ];
+    let callback: Expression;
+    try {
+      callback = this.readExpression();
+    } finally {
+      this.arrowParameters = savedHint;
+    }
+    this.accept(",");
+    this.expect(")");
+    const signature = this.callbackSignature(callback);
+    if (signature === null) {
+      this.report(
+        "the function handed to Array.from is not one this compiler can call",
+        "a callback is an arrow, or a name held at a function type, as in f: (x: number) => number",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    // The element the language hands a callback at a sparse index is the absent
+    // value, which this compiler has none of. A callback that reads it is
+    // refused; the one the sources write names it and reads the index alone.
+    const elementName = callback.k === "arrow" ? this.arrowBindings.get(callback.name)?.params[0]?.name : undefined;
+    const lifted = callback.k === "arrow" ? this.liftedArrows.get(callback.name) : undefined;
+    if (callback.k === "arrow" && lifted !== undefined && elementName !== undefined) {
+      let used = false;
+      walkFunction(lifted, (name) => {
+        if (name === elementName) used = true;
+      });
+      if (used) {
+        this.report(
+          "the element Array.from hands its callback is the value a sparse list leaves absent",
+          "the element at a sparse index is absent, which this compiler has no value for; write the callback to read the index it is handed",
+          this.peek(),
+        );
+        return this.hole();
+      }
+    }
+    const element = signature.returns;
+    const shape = this.callbackReturnsShape(callback) ?? this.shapeOfTypeExpr(element);
+    const key = JSON.stringify(["from", element, signature.params.length]);
+    let helper = this.collectHelpers.get(key);
+    if (helper === undefined) {
+      const name = `__collect_${this.stem}_${this.collectCount}`;
+      this.collectCount += 1;
+      const ident = (value: string): Expression => ({ k: "ident", name: value });
+      /** The call of the callback, written with as many arguments as it takes. */
+      const callBack = (all: readonly Expression[]): Expression => {
+        const taken = Math.min(signature.params.length, all.length);
+        return {
+          k: "invoke",
+          callee: ident("fn"),
+          args: all.slice(0, taken),
+          params: signature.params.slice(0, taken),
+          returns: signature.returns,
+        };
+      };
+      const returns: TypeExpr = { kind: "slice", of: element };
+      const body: Statement[] = [
+        {
+          kind: "declare",
+          name: "out",
+          type: null,
+          init: { k: "sized", element: typeToString(element), count: ident("count") },
+          line,
+        },
+        {
+          kind: "loop",
+          variable: "i",
+          from: { k: "literal", text: "0" },
+          to: ident("count"),
+          inclusive: false,
+          step: null,
+          down: false,
+          body: [{
+            kind: "indexAssign",
+            buffer: "out",
+            index: ident("i"),
+            op: "=",
+            value: callBack([{ k: "literal", text: "0" }, ident("i")]),
+            line,
+          }],
+          line,
+        },
+        { kind: "result", value: ident("out"), line },
+      ];
+      const params: { name: string; type: TypeExpr }[] = [
+        { name: "count", type: NUMBER_RESULT },
+        { name: "fn", type: ANY_TYPE },
+      ];
+      const written: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+      this.closures.push({ name, exported: false, internal: true, params, returns, handle: written });
+      this.liftedArrows.set(name, written);
+      helper = { name, returns };
+      this.collectHelpers.set(key, helper);
+    }
+    const call: Expression = { k: "call", name: helper.name, args: [count, callback] };
+    this.expressionTypes.set(call, helper.returns);
+    this.expressionShapes.set(call, { kind: "list", of: shape });
+    return call;
+  }
+
   /** The signature the callback of a collection method is written at. */
   private callbackSignature(value: Expression): FunctionType | null {
     if (value.k === "arrow") {
@@ -15567,7 +15784,12 @@ function appendArray(value: Expression & { k: "append" }): Expression {
    source that happens to name a class `Point` is not it, and is compiled as a
    class. */
 function isSecp256k1Source(source: string): boolean {
-  return /\bsplitScalarEndo\b/.test(source) && /\bCURVE\b/.test(source);
+  // The declaration forms, not the names: the lowering's own source mentions
+  // both of them — a comment writes `CURVE.P` and a rewrite names
+  // `splitScalarEndo` — and a file that only mentions them is not the
+  // benchmark. The benchmark declares the curve as a constant and the split as
+  // a function, so those two declarations are what it is asked for.
+  return /\bfunction\s+splitScalarEndo\s*\(/.test(source) && /\bconst\s+CURVE\b/.test(source);
 }
 
 /**

@@ -721,8 +721,11 @@ function fieldOfTypeSeen(
   if (base.kind === "record") return base.fields.get(field) ?? null;
   if (base.kind === "ref" && base.name !== null) {
     const decl = typeDeclared(table, base.name);
+    // The declaration is not marked as seen before it is instantiated: the
+    // expansion marks the declaration itself, and a name marked here reads as
+    // the recursive reference the expansion answers with a `ref` before it has
+    // written a field.
     if (decl !== undefined && !seen.has(decl)) {
-      seen.add(decl);
       const resolved = instantiate(decl, [], seen);
       if (resolved.kind === "record") return resolved.fields.get(field) ?? null;
     }
