@@ -113,8 +113,8 @@ writes to 698, a default read at its parameter's type to 689, the type an
 exported constant offers to 680, and the type a call reads its arguments at to
 622, the shape a value has across the arm of a conditional to 609, a view of a
 block to 602, a whole number of sixty-four bits to 580, the field a conditional
-spread leaves out to 574, the error stream to 566, and the monotonic clock to
-559.
+spread leaves out to 574, the error stream to 566, the monotonic clock to 559,
+and the record a collection's element is to 548.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -886,6 +886,29 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4ci. The record a collection's element is
+
+    for (const [index, fixup] of fixups.entries()) {
+      this.fixups[index] = { ...fixup, at: fixup.at - bytes };
+    }
+    for (const [name, item] of items) total += item.at;
+
+Two loops bind an element and then read its fields, and both were refused for
+the same reason. A loop's binding is held at the *type* the collection spells,
+and that type is the opaque reference a record of a declaration spells — the
+fields are gone. The *shape* the declaration named is what the body reads, and
+the loop did not keep it: `{ ...fixup }` was `an object spread reads a constant
+object`, and `item.at` degraded to the reference itself.
+
+A list's element is now read at the shape of the list's own, and a map's value
+at the `valueShape` the collection already carried. Position 1 of
+`list.entries()` and the value position of a map entry are bound to the record,
+so the fields are read where they are written and a spread writes the other
+fields through. `semantics/liveness.ts` and `semantics/power-of-two.ts` are now
+read whole.
+
+This took the total from 559 to 548.
 
 ### 4ch. The monotonic clock in whole nanoseconds
 
@@ -2253,7 +2276,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-559 refusals over 95 sources, 28 of them read whole. The report reads the
+548 refusals over 95 sources, 30 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2365,6 +2388,7 @@ What was closed this session, and what each was worth:
 | a field a conditional spread leaves out (§4cf) | 580 → 574 |
 | the error stream (§4cg) | 574 → 566 |
 | the monotonic clock (§4ch) | 566 → 559 |
+| the record a collection's element is (§4ci) | 559 → 548 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

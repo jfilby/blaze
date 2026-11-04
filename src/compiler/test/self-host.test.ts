@@ -88,9 +88,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * at the type the declaration states to 622, and the shape a value has across
  * the arm of a conditional to 609, a view of a block to 602, a whole number of
  * sixty-four bits to 580, the field a conditional spread leaves out to 574, and
- * the error stream to 566, and the monotonic clock to 559.
+ * the error stream to 566, the monotonic clock to 559, and the record a
+ * collection's element is to 548.
  */
-const REFUSAL_BUDGET = 559;
+const REFUSAL_BUDGET = 548;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

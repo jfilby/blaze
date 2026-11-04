@@ -3381,3 +3381,50 @@ test("a function reads the monotonic clock as the whole nanoseconds it measures 
   assert.match(ir, /ge\[bool\] i64 local\[i64\] finished local\[i64\] started/, "two readings compare as whole numbers");
   assert.match(ir, /sub\[i64\]/, "the duration is the difference of two whole numbers");
 });
+
+test("an element a list's entries loop binds is the record its declaration names", () => {
+  // `for (const [index, fixup] of fixups.entries())` binds each element of the
+  // list. The element's type is the one the list declares, and the list names
+  // `Fixup`; the record is what the body reads, so spreading the element writes
+  // the fields the interface wrote rather than being refused as no object at
+  // all.
+  const source = [
+    "interface Fixup { at: number; wide: boolean }",
+    "export function widen(fixups: Fixup[], from: number, bytes: number): Fixup {",
+    "  let moved: Fixup = { at: 0, wide: false };",
+    "  for (const [index, fixup] of fixups.entries()) {",
+    "    if (fixup.at > from) moved = { ...fixup, at: fixup.at - bytes };",
+    "  }",
+    "  return moved;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}widen([], 0, 1);\n` }, "main.ts", "widen");
+  assert.match(ir, /new_object\[ref<Object1>\] Object1 at \[sub\[f64\]/, "the field the spread writes over is the written one");
+  assert.match(ir, /wide \[load_field\[f64\] local\[ref<any>\] fixup Object1 wide\]/, "the field the spread copies is read from the element");
+});
+
+test("a value a map holds is the record its type names, so its fields and its spread are read", () => {
+  // `for (const [name, item] of items)` reads the value a map holds. The type
+  // the declaration spells is the reference, and the record is the shape the
+  // declaration named: the loop binds the record, so the fields are read where
+  // they are written and a spread writes the other fields through.
+  const source = [
+    "interface Item { at: number; wide: boolean }",
+    "export function widen(items: Map<string, Item>): number {",
+    "  const first: Item = { at: 0, wide: false };",
+    "  let total = first.at;",
+    "  for (const [name, item] of items) {",
+    "    const copy: Item = { ...item, at: item.at + 1 };",
+    "    total += copy.at;",
+    "  }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "widen");
+  assert.match(ir, /at \[add\[f64\] \[load_field\[f64\] local\[ref<any>\] item Object1 at\] const\[f64\] 1\]/, "the field the spread writes is read from the element");
+  assert.match(ir, /wide \[load_field\[f64\] local\[ref<any>\] item Object1 wide\]/, "the field the spread copies is read from the element");
+});

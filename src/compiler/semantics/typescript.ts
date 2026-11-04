@@ -8356,8 +8356,12 @@ class TypeScriptParser {
     this.walkCount += 1;
     this.valueTypes.set(index, NUMBER_RESULT);
     const body: Statement[] = [];
-    const bind = (name: string, type: TypeExpr, readName: string): Statement => {
-      const shape = this.shapeOfTypeExpr(type);
+    const bind = (name: string, type: TypeExpr, readName: string, shapeHint: ResolvedType | null = null): Statement => {
+      // The value a map holds is the type the declaration spells, and a record
+      // of a declaration spells only the reference: the fields are the shape
+      // the declaration named, which the collection carries for this.
+      const written = shapeHint ?? this.shapeOfTypeExpr(type);
+      const shape = this.shapeForRead(written) ?? written;
       this.valueTypes.set(name, type);
       if (shape.kind !== "any") this.valueShapes.set(name, shape);
       else this.valueShapes.delete(name);
@@ -8390,7 +8394,7 @@ class TypeScriptParser {
         const key = binding.index === 0;
         const value = binding.index === 1;
         if (key) body.push(bind(binding.name, collection.key, keyRead));
-        else if (value) body.push(bind(binding.name, collection.value, this.valueReadName(collection.value)));
+        else if (value) body.push(bind(binding.name, collection.value, this.valueReadName(collection.value), collection.valueShape ?? null));
         else {
           this.report(
             "a map entry is a key and a value",
@@ -8453,9 +8457,20 @@ class TypeScriptParser {
     const index = `__at${this.walkCount}`;
     this.walkCount += 1;
     this.valueTypes.set(index, NUMBER_RESULT);
+    // The element the list holds is the record its declaration wrote, and the
+    // body reads the fields of that record: the type an element is carried at
+    // spells only the reference, so the shape is read off the list's own.
+    const receiverShape = this.shapeOf(receiver);
+    const elementShape = receiverShape !== null && receiverShape.kind === "list" ? receiverShape.of : null;
     const body: Statement[] = [];
     const bind = (name: string, type: TypeExpr, read: Expression): Statement => {
-      const shape = this.shapeOfTypeExpr(type);
+      // The element of a list is held at the type the list declares, and that
+      // type may be a name — `Fixup[]` names the `Fixup` each element is. A
+      // name is not the record it stands for, and the body reads the fields of
+      // the record: spreading the element is the fields the interface wrote.
+      const bare = type.kind === "ref" && type.name === undefined;
+      const written = bare && elementShape !== null ? elementShape : this.shapeOfTypeExpr(type);
+      const shape = this.shapeForRead(written) ?? written;
       this.valueTypes.set(name, type);
       if (shape.kind !== "any") this.valueShapes.set(name, shape);
       else this.valueShapes.delete(name);
