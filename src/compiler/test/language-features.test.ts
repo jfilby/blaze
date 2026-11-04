@@ -3845,3 +3845,20 @@ test("a function-typed field is called through the value the caller wrote", asyn
   ].join("\n"));
   assert.equal(output, ">hello\n> world\n");
 });
+
+test("a set held in a map is a handle the questions written after it reach", async () => {
+  // The map holds the set's handle, and the value a key answers is the set the
+  // program wrote there: `has` is the dictionary's own question about it.
+  const output = await agreesWithNode([
+    "export function hit(): number {",
+    "  const sets = new Map<string, Set<string>>();",
+    "  const seen = new Set<string>();",
+    '  seen.add("alpha");',
+    '  sets.set("x", seen);',
+    '  return sets.get("x").has("alpha") ? 1 : 0;',
+    "}",
+    "console.log(hit());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1");
+});

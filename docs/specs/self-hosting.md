@@ -109,7 +109,7 @@ lowered it to 991, what a collection's value holds to 945, and the signatures a
 refused module still offers to 916, and a field a modifier is written in front
 of to 903, and the type a method writes for its result to 857, a module that re-exports to
 847, a closure a layout field holds to 725, and the type a top-level declaration
-writes to 698.
+writes to 698, a default read at its parameter's type to 689.
 The sources read whole are now `ai/model.ts`, `core/errors.ts`, `core/ir.ts`,
 `core/semantic-ir.ts`, `core/types.ts`, `runtime/http-needs.ts`,
 `semantics/builtins.ts`, `semantics/contract-build.ts`,
@@ -881,6 +881,26 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 `{ children: [a, b] }` cannot be one `Node`. The compiler's own IR nodes are
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
+
+### 4bz. A default read at the parameter's type, and a collection in an entry
+
+    method(types: ModuleTypeBinding[] = [], renames: ModuleTypeBinding[] = []): …
+
+`TypeScriptParser` is a class, and every method of it wrote defaults like these.
+The wrapper a shorter arity calls fills a default where the call was made, and
+it read the tokens of the default with nothing said about what they hold: `[]`
+was an empty list of no element type, and the read refused it. A free
+function's own declaration already read the default at the parameter's
+annotation; the class path now does the same, at the type *and* the shape the
+annotation writes.
+
+A set or a map held in a dictionary is one handle, and the entry holds it as
+the number it is. The read of `get` — and of an index — answered the number and
+nothing else, so `internal[to].has(name)` asked a `has` of a number. What a key
+answers is now the collection the value's shape names, which is what the
+questions written after it are asked of.
+
+This took the total from 698 to 689.
 
 ### 4by. The type a top-level declaration writes
 
@@ -1999,7 +2019,7 @@ unless the caller can recover it from the runtime's allocation header as
 
 ### What the measurement says now
 
-698 refusals over 95 sources, 27 of them read whole. The report reads the
+689 refusals over 95 sources, 27 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -2018,9 +2038,9 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 68 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
-| 37 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
-| 30 | `"map"`, 14 `"filter"`, 14 `"has"`, 11 `"find"`, 10 `"every"`, 8 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
+| 69 | `an object spread reads a constant object` | a conditional spread (`...(x ? {} : { field: x })`, about forty) or a spread of a value whose record the read does not hold — `{ ...this.loop(...) }` |
+| 33 | `an empty array needs the type of its elements` | an empty literal whose element type the use states: an object field, a map value, or a local |
+| 31 | `"map"`, 14 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"`, 8 `"includes"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
 | 18 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
 | 15 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
 | 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
@@ -2113,6 +2133,7 @@ What was closed this session, and what each was worth:
 | a module that re-exports (§4bw) | 857 → 847 |
 | a closure a layout field holds (§4bx) | 847 → 725 |
 | the type a top-level declaration writes (§4by) | 725 → 698 |
+| a default read at the parameter's type (§4bz) | 698 → 689 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

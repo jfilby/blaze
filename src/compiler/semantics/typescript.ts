@@ -4416,7 +4416,16 @@ class TypeScriptParser {
       const args = params.map((param, index): Expression => {
         if (index < arity) return { k: "ident", name: param.name };
         const name = `__default${index}`;
-        const value = this.withClassContext(info, params, self, () => this.readRange(param.defaultStart, param.defaultEnd));
+        // The parameter's annotation is what a default is read at: a default
+        // written as an empty list is a list of the elements the parameter
+        // states, exactly as it is in a function's own declaration.
+        const value = this.withClassContext(info, params, self, () =>
+          this.readAt(
+            this.typeForName(param.typeName, param.line),
+            () => this.readRange(param.defaultStart, param.defaultEnd),
+            this.shapeForName(param.typeName),
+          ),
+        );
         statements.push({ kind: "declare", name, type: null, init: value, line: method.line });
         return { k: "ident", name };
       });
@@ -12196,10 +12205,14 @@ class TypeScriptParser {
       this.expressionTypes.set(chosen, answer);
       // A map whose value the source named keeps the fields that name holds,
       // so a member chain written through the value reads them.
-      if (kind === "reference") {
-        const shape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
-        if (shape.kind !== "any") this.expressionShapes.set(chosen, shape);
-      }
+      const valueShape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
+      if (kind === "reference" && valueShape.kind !== "any") this.expressionShapes.set(chosen, valueShape);
+      // A set or a map held in a dictionary is one handle, and the entry holds
+      // it as the number it is: the value a key answers is a collection of its
+      // own, and the questions written after it — `has`, `add`, `get` — are the
+      // dictionary's.
+      const nested = this.collectionOfShape(valueShape);
+      if (nested !== null) this.collectionExpressions.set(chosen, nested);
       return chosen;
     }
     // `m.keys()` and `m.values()` are the entries read out by position. The

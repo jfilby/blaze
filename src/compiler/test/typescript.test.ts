@@ -3131,3 +3131,37 @@ test("a table of truths is a constant the file wrote, and a spread copies it", (
   const read = readTypeScriptModule(source, "main.ts", false);
   assert.deepEqual(read.refused, [], "the table is a constant the spread copies");
 });
+
+test("a class method's default is read at the type its parameter states", () => {
+  // The wrapper a shorter arity calls fills the default where the call was
+  // made, and the parameter's annotation is what an empty list there holds —
+  // the same answer a free function's declaration gives.
+  const source = [
+    "class Names {",
+    "  count(types: string[] = [], renames: readonly string[] = []): number {",
+    "    return types.length + renames.length;",
+    "  }",
+    "}",
+    "export function size(names: Names): number { return names.count(); }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, [], "the defaults are lists of the elements the parameters name");
+});
+
+test("a set or a map held in a dictionary answers its own questions", () => {
+  // A set is one handle, so a dictionary holds it as the number it is; what a
+  // key answers is the collection of its own, and `has` written after it is the
+  // dictionary's question about that collection.
+  const source = [
+    "export function found(sets: Map<string, Set<string>>, key: string, name: string): boolean {",
+    "  return sets.get(key).has(name);",
+    "}",
+    "export function nested(tables: Map<string, Map<string, number>>, a: string, b: string): number {",
+    "  return tables.get(a).get(b);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, []);
+});
