@@ -2096,6 +2096,16 @@ The value-model slices still open, in the order they block the self-build:
   field's interface states, and the linked read still refuses the literal where
   the interface, or the field's use, does not name it. It is the largest
   single-construct bucket left.
+- **A byte view of a block.** `toolchain/elf64.ts` writes its ELF header through
+  `new DataView(bytes.buffer)` and `setUint16`/`setUint32`/`setBigUint64`, and
+  copies a block with `bytes.set(source, offset)`. A typed array is a block the
+  IR already lays out, but a view that reads and writes a chosen width at a
+  chosen offset, and a block copied into another, are not part of the value
+  model: the calls are refused and the ELF writer waits on them.
+- **The host's stdio.** `process.stdout.write` and `process.stderr.write` are
+  the way a program prints without a newline, and `process` is not a value the
+  frontend models. Every site the report still refuses for `"write"` is one of
+  the two, or a stream another host hands the program.
 - **An absent value.** A default parameter and an optional parameter need a
   value that is not the zero of the type. `function optionNumber(value: string |
   undefined, ..., maximum?: number)` is the first function of `cli.ts`, and a
