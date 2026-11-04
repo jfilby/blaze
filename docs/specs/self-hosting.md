@@ -888,6 +888,83 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4cx. A string is not a bracket, and a function type is a signature
+
+    if (text === "(" || text === "[") ...          // a string, not an arrow
+    ): readonly { name: string }[] {               // a type, not the body
+    c ? (value as T) : other                       // a value, not an arrow
+    export const SAVED: readonly number[] = [...]  // the annotation, kept
+    const strip = createCommentStripper();         // a name held at a signature
+    strip(raw).trim()                              // the call the signature states
+
+Seven readings, and one of them changed the report by more than a hundred
+refusals' worth of code being read at all.
+
+**A string is not a bracket.** `if (text === "(" || text === "[")` writes the
+character as the text it is, and the token that holds it is a *string*.
+`arrowAt`, which decides whether a `(` begins an arrow's parameter list, compared
+the token's text and not its kind, so the string `"("` was read as the bracket,
+its `)` was found in the unrelated code that followed, and the next `=>` in the
+file made it an arrow. The statement's remaining tokens were then read as that
+arrow's body — and every method of the compiler's own parser that compares a
+character to a bracket was refused from there. A bracket is punctuation; a
+string is a value. (`bodyAfterReturnType` and the constant scan had the same
+class of bug for `>>`, below.)
+
+**A return type that is a readonly list of records is not the body.** A class
+member's body is the brace `bodyAfterReturnType` finds after the result type.
+`): readonly { name: string }[] {` writes `readonly` before an object type, and
+the brace after a word was read as the body: the method's body became the type,
+and every member after it was lost — which is why `this.valueTypeOf(...)` inside
+the class was "not a method this program compiles" for methods the class does
+declare. `readonly` is the one modifier a class writes before an object type,
+and it is now part of the type.
+
+**A conditional arm in parentheses is not an arrow.** `c ? (value as T) : other`
+writes a `:` after a parenthesised value, and `arrowAt` read it as an arrow's
+result type: the scan for the type's end only stopped at `=>`, so it ran to the
+next arrow in the file and took the arm for one. A `,`, `;`, `)`, `]`, `}`,
+`?`, `:`, `=` or a logical operator at the type's own depth ends an annotation
+too, and each is now a stop.
+
+**An annotation the constant scan keeps.** `export const NAME: T = ...` is a
+constant of the file with the type it writes, and the scan that turns a
+declaration into a constant skipped the word `export` by skipping to the next
+statement — which lost the constant *after* every `export interface` as well.
+`export`, `declare` and `default` now skip only themselves, an interface body is
+skipped as a whole, and `>>` closes two type arguments in the annotation:
+`Record<string, Record<A, B>>` had left the scan's depth open, so the `=` of the
+value was never found and the declaration after it was lost with it.
+
+**A function type is a signature.** No contract type spells a function, so a
+result or a parameter declared as one was erased to the opaque reference. But a
+signature is what a call is read against: `const strip = createCommentStripper()`
+holds the `(line: string) => string` the declaration answers, and `strip(raw)` is
+that call, so `strip(raw).trim()` is a text method. The signature is kept beside
+the types, declared functions answer one, and a call of a name reads the
+arguments and result the signature states. A parameter declared as a function is
+the same thing for its callback: `walkValues(value, (one) => ...)` hands `one`
+the type the declaration gave the callback, and the signature crosses the link
+with the rest of the import — a function-typed *parameter* was erased there even
+when the declared result's shape was already carried.
+
+**A class crosses a type-only import, and a re-export.** `import type { Logger }`
+names a class the file reads through a value it was handed; the methods written
+on that value are the class's, and nothing is imported at run time either way:
+what crosses the link is the description. The same description is followed
+through `export { Logger } from "./x.ts"`, and since a module that imports a
+class also offers it, the binding runs to a fixed point — which module is read
+first is not fixed.
+
+**An export list may rename.** `export { sleep as setTimeout }` offers the value
+it names under the name the `as` writes; the list was read as a list of plain
+names, and the `as` ended it.
+
+The total went from 447 to 432, and `toolchain/asm-text.ts` and
+`semantics/region.ts` read whole. The arrow fix alone was worth twelve
+refusals, because the parser had been refusing its own source from the first
+comparison to a bracket.
+
 ### 4cw. A field through a reference, the shape an assignment reads, and `Array.from`
 
     const body = statement.loop.body;            // the declaration the cycle names
@@ -2711,6 +2788,7 @@ What was closed this session, and what each was worth:
 | an arrow answers the record it wrote, a spread keeps the element's shape, and a text helper is a read (§4cr–§4ct) | 485 → 480 |
 | the infinities, the greatest of a list, a compound length, a local `undefined`, and a bracket in a constant (§4cu–§4cv) | 480 → 472 |
 | a field through a reference, the shape an assignment reads, a for-of over a constant, a key held in a name, `Array.from`, and the benchmark's gate (§4cw) | 472 → 447 |
+| a string is not a bracket, a readonly result type, a conditional arm, the constant scan's annotations, a function type as a signature, and a class across a type-only import or re-export (§4cx) | 447 → 432 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

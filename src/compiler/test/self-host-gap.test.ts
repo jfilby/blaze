@@ -181,3 +181,58 @@ test("an exported constant another module builds is read at the type it declares
   assert.deepEqual(report.clean, ["cli.ts", "lib.ts"]);
   assert.equal(report.total, 0);
 });
+
+test("a callback parameter is typed by the imported signature", async () => {
+  // `walk(values, (one) => ...)` hands `one` the type the declaration states
+  // for its callback. The parameter is a function type, which no contract type
+  // spells, so the shape the signature keeps travels the link beside the types:
+  // without it `one` is a value of no type and a method on its field is refused.
+  const directory = await tree({
+    "lib.ts": [
+      "export interface Shape { name: string }",
+      "export function walk(values: Shape[], visit: (one: Shape) => void): void {",
+      "  for (const value of values) visit(value);",
+      "}",
+      "",
+    ].join("\n"),
+    "cli.ts": [
+      'import { walk } from "./lib.ts";',
+      "export function names(values: { name: string }[]): number {",
+      "  let letters = 0;",
+      "  walk(values, (one) => {",
+      "    letters += one.name.trim().length;",
+      "  });",
+      "  return letters;",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  const report = await selfHostGap(directory);
+  assert.deepEqual(report.refused, [], "the imported callback signature types the arrow's parameter");
+});
+
+test("a class a type-only import names, and a class a module re-exports, cross the link", async () => {
+  // `import type { Logger }` names a class the file reads through a value it
+  // is handed: the methods written on that value are the class's. A module that
+  // re-exports the class offers the declaration the module that wrote it holds.
+  const directory = await tree({
+    "lib.ts": [
+      "export class Logger {",
+      "  write(text: string): void {}",
+      "}",
+      "",
+    ].join("\n"),
+    "middle.ts": 'export { Logger } from "./lib.ts";\n',
+    "cli.ts": [
+      'import type { Logger } from "./lib.ts";',
+      'import { Logger as Shared } from "./middle.ts";',
+      "export function both(one: Logger, two: Shared): void {",
+      '  one.write("a");',
+      '  two.write("b");',
+      "}",
+      "",
+    ].join("\n"),
+  });
+  const report = await selfHostGap(directory);
+  assert.deepEqual(report.refused, [], "the class description crosses a type-only import and a re-export");
+});

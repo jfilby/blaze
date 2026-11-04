@@ -97,11 +97,13 @@ import { selfHostGap } from "./self-host-gap.ts";
  * to 485, the record an arrow answers, with the element's shape across a spread
  * and a text helper that is a read, to 480, the infinities, the greatest of
  * a list, a compound length, a local `undefined` and a bracket in a constant to
- * 472, and a field through a reference, with the shape an assignment reads, a
+ * 472, a field through a reference, with the shape an assignment reads, a
  * for-of over a constant, a key held in a name, `Array.from` and the gate the
- * benchmark's own lowering writes to 447.
+ * benchmark's own lowering writes to 447, and a string that is not a bracket,
+ * with a function type read as the signature it is and a class carried across a
+ * type-only import or a re-export, to 432.
  */
-const REFUSAL_BUDGET = 447;
+const REFUSAL_BUDGET = 432;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

@@ -155,7 +155,11 @@ function skipAngles(tokens: readonly Token[], open: number): number {
  * body.
  */
 function bodyAfterReturnType(tokens: readonly Token[], start: number, limit: number): number {
-  const continues: ReadonlySet<string> = new Set([":", "|", "&", "is", "keyof", "typeof", "<", ",", "(", "[", "=>"]);
+  // `readonly` is the one modifier a class writes in front of an object type —
+  // `: readonly { line: number }[]` — and the brace after it is the type, not
+  // the body. Every other word before a brace may be the name of a result
+  // whose body is the brace that follows.
+  const continues: ReadonlySet<string> = new Set([":", "|", "&", "is", "keyof", "typeof", "<", ",", "(", "[", "=>", "readonly"]);
   let previous = ":";
   for (let at = start; at < limit; at += 1) {
     const token = tokens[at];
@@ -633,26 +637,28 @@ export function bindImportedClasses(
     names: string[] | null;
     renames?: readonly { local: string; imported: string }[];
   }[],
-  targets: ReadonlyMap<string, ClassTable>,
-): void {
+  offered: (specifier: string, name: string) => ClassInfo | undefined,
+): boolean {
+  let added = false;
   for (const entry of imports) {
-    const target = targets.get(entry.specifier);
-    if (target === undefined) continue;
     for (const imported of entry.names ?? []) {
-      const info = target.classes.get(imported);
-      if (info === undefined) continue;
+      const info = offered(entry.specifier, imported);
+      if (info === undefined || table.classes.has(imported)) continue;
       table.classes.set(imported, importedClass(info));
       table.names.add(imported);
+      added = true;
     }
     // `import { Encoder as Code }` binds the class under the name the file
     // reads; the methods are still the ones the module compiled.
     for (const rename of entry.renames ?? []) {
-      const info = target.classes.get(rename.imported);
-      if (info === undefined) continue;
+      const info = offered(entry.specifier, rename.imported);
+      if (info === undefined || table.classes.has(rename.local)) continue;
       table.classes.set(rename.local, importedClass(info));
       table.names.add(rename.local);
+      added = true;
     }
   }
+  return added;
 }
 
 /** The method a class has under a name, as the class or the base it inherits from. */

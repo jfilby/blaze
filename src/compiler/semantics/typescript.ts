@@ -1296,6 +1296,24 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       index += 1;
       continue;
     }
+    // `export`, `declare` and `default` are words in front of a declaration,
+    // and the declaration is what this scan reads: skipping the word alone is
+    // what makes `export const NAME: T = ...` a constant of the file with the
+    // type it writes. Skipping to the next statement instead lost the constant
+    // *after* every `export interface`, which is where the file's own types are
+    // declared.
+    if (token.text === "export" || token.text === "declare" || token.text === "default") {
+      index += 1;
+      continue;
+    }
+    // An interface is a type and declares nothing the running file holds, so
+    // its body is skipped as a whole.
+    if (token.text === "interface" || token.text === "enum") {
+      let brace = index;
+      while (brace < tokens.length && tokens[brace].text !== "{") brace += 1;
+      index = closing(brace);
+      continue;
+    }
     // A function or a class body is not the top of the file: the declaration a
     // function writes is its own, and only the file's constants are read here.
     if (token.text === "function" || token.text === "class") {
@@ -1325,6 +1343,13 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           const written = mark(tokens[equals]);
           if (written === "<" || written === "(" || written === "[" || written === "{") depth += 1;
           else if (written === ">" || written === ")" || written === "]" || written === "}") depth -= 1;
+          // `>>` and `>>>` are one token each and close two or three type
+          // arguments: `Record<string, Record<A, B>>` is a depth this scan
+          // otherwise leaves open, and the `=` it is looking for then reads as
+          // part of the type. The `=` of the value was never found, and the
+          // declaration after the annotation was skipped along with it.
+          else if (written === ">>") depth -= 2;
+          else if (written === ">>>") depth -= 3;
           else if (written === "=" && depth === 0) break;
           equals += 1;
         }
@@ -2829,6 +2854,12 @@ export interface ImportedFunction {
   returns: TypeExpr;
   /** What the result holds where the contract type erased it. */
   shape?: ResolvedType;
+  /**
+   * What each parameter is, where the type erased it: a parameter declared as a
+   * function is a signature, and the arrow a call writes there is read against
+   * the parameters and result it states.
+   */
+  paramShapes?: readonly (ResolvedType | null)[];
   /** The map or set the function answers, when it answers one. */
   collection?: CollectionValue;
 }
@@ -2967,8 +2998,15 @@ const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 /**
  * Where an arrow function's result type ends. The `=>` that follows it is not
  * part of the type, so the scanner stops before it.
+ *
+ * A `:` also follows a parenthesised group in a conditional — `c ? (v as T) : u`
+ * — and the scanner it guards is the one that reads a *result type* without
+ * knowing the group was a value. Without the rest of the stops the scan ran on
+ * to the next `=>` in the file and took the conditional's arm for an arrow. A
+ * `,`, `;`, `)` or `]` at the type's own depth ends an annotation too, and none
+ * of them is a type's own token, so each one is a stop.
  */
-const ARROW_RETURN_STOPS: ReadonlySet<string> = new Set(["=>"]);
+const ARROW_RETURN_STOPS: ReadonlySet<string> = new Set(["=>", ",", ";", ")", "]", "}", "?", ":", "=", "&&", "||"]);
 
 class TypeScriptParser {
   tokens: Token[];
@@ -3038,6 +3076,17 @@ class TypeScriptParser {
    * and it is what a destructuring of that call reads its fields from.
    */
   private declaredReturnShapes = new Map<string, ResolvedType>();
+  /**
+   * The signature a declaration's result is, where the result is itself a
+   * function type.
+   *
+   * A name declared with the call that answers one — `const strip =
+   * createCommentStripper()` — is held at that signature, and a call of the
+   * name is the call the signature states: the arguments are read against it
+   * and the result is what it answers. No type this IR holds spells a function,
+   * so the signature is kept beside the types rather than in them.
+   */
+  private declaredFunctionReturns = new Map<string, FunctionType>();
   /**
    * What each function of the file takes, by its name.
    *
@@ -5292,6 +5341,7 @@ class TypeScriptParser {
   seedFunction(name: string, signature: ImportedFunction): void {
     this.declaredReturns.set(name, signature.returns);
     this.declaredParams.set(name, signature.params);
+    if (signature.paramShapes !== undefined) this.declaredParamShapes.set(name, signature.paramShapes);
     if (signature.shape !== undefined) this.declaredReturnShapes.set(name, signature.shape);
     if (signature.collection !== undefined) this.declaredCollections.set(name, signature.collection);
   }
@@ -5438,6 +5488,12 @@ class TypeScriptParser {
         // signature to the read of the declaration itself.
         continue;
       }
+      // A function whose result is itself a function — `(): (line: string) =>
+      // string` — is a value a name can be held at, and a call of that name is
+      // the call the annotation states. The type reader keeps no function type,
+      // so the signature is read here beside it.
+      const answerType = this.functionTypeFrom(after, finish);
+      if (answerType !== null) this.declaredFunctionReturns.set(name.text, answerType);
       try {
         const shape = resolveAnnotation(tokens, after, finish, this.typeTable);
         this.declaredReturns.set(name.text, this.typeExprOfShape(shape));
@@ -5812,6 +5868,13 @@ class TypeScriptParser {
         continue;
       }
       names.push(name.text);
+      // `export { sleep as setTimeout }` offers the value it names under the
+      // name the `as` writes. The declaration is the one the file wrote, so the
+      // name marked as exported is `sleep`; the rename is read past.
+      if (this.at("as")) {
+        this.next();
+        if (this.peek().kind === "ident") this.next();
+      }
       if (!this.accept(",")) break;
     }
     this.expect("}");
@@ -6974,7 +7037,11 @@ class TypeScriptParser {
         return { kind: "declare", name: name.text, type: ANY_TYPE, init: { k: "null" }, line: name.line };
       }
       this.valueArrows.delete(name.text);
-      if (annotationFunction !== null) this.valueFunctions.set(name.text, annotationFunction);
+      // What the name holds is what it was declared with: a name declared with
+      // the call that answers a function is that function, exactly as a name
+      // declared with the annotation is.
+      const named = annotationFunction ?? (init.k === "call" ? (this.declaredFunctionReturns.get(init.name) ?? null) : null);
+      if (named !== null) this.valueFunctions.set(name.text, named);
       else this.valueFunctions.delete(name.text);
       // A map is a handle and a set is a map, so what the name holds is kept
       // beside it: the declaration says it, or the `new Map(...)` it is
@@ -10620,7 +10687,15 @@ class TypeScriptParser {
     if (this.arrowAt() === null) return read();
     const savedHint = this.arrowParameters;
     const savedPending = this.pendingArrow;
-    if (callback !== null) this.arrowParameters = callback;
+    // A parameter declared as a function is a signature, and the arrow written
+    // at it is read against the parameters and result that signature states:
+    // `walkValues(value, (one) => ...)` hands `one` the type the declaration
+    // gave the callback, not the opaque value a type this contract cannot spell
+    // would be.
+    const signature = callback ?? (shape !== null && shape.kind === "function"
+      ? shape.params.map((param) => ({ type: this.typeExprOfShape(param), shape: param }))
+      : null);
+    if (signature !== null) this.arrowParameters = signature;
     // The element the callback is handed is the element of a list this read
     // cannot type yet, so a parameter nothing else fixes is a value the link
     // will type: a method written on it waits for the link rather than being
@@ -10718,24 +10793,29 @@ class TypeScriptParser {
   private arrowAt(): { async: boolean } | null {
     let head = this.position;
     let isAsync = false;
-    if (this.tokens[head]?.text === "async") {
+    if (this.tokens[head]?.kind === "ident" && this.tokens[head]?.text === "async") {
       const next = this.tokens[head + 1];
-      const arrowAfterName = next?.kind === "ident" && this.tokens[head + 2]?.text === "=>";
-      if (next?.text !== "(" && !arrowAfterName) return null;
+      const open = next?.kind === "punct" && next.text === "(";
+      const arrowAfterName = next?.kind === "ident" && this.tokens[head + 2]?.kind === "punct" && this.tokens[head + 2]?.text === "=>";
+      if (!open && !arrowAfterName) return null;
       isAsync = true;
       head += 1;
     }
     const token = this.tokens[head];
     if (token === undefined) return null;
-    if (token.text === "(") {
+    // A string is not a bracket: `text === "("` writes the character as the
+    // text it is, and the token that holds it is a string. Reading one as the
+    // parameter list of an arrow is how `if (text === "(" || text === "[")`
+    // became an arrow whose parameter is a bracket.
+    if (token.kind === "punct" && token.text === "(") {
       const close = this.matchingToken(head, "(", ")");
       if (close < 0) return null;
       let after = close + 1;
-      if (this.tokens[after]?.text === ":") {
+      if (this.tokens[after]?.kind === "punct" && this.tokens[after]?.text === ":") {
         after = this.typeEndAt(after + 1, ARROW_RETURN_STOPS);
       }
-      if (this.tokens[after]?.text !== "=>") return null;
-    } else if (!(token.kind === "ident" && this.tokens[head + 1]?.text === "=>")) {
+      if (!(this.tokens[after]?.kind === "punct" && this.tokens[after]?.text === "=>")) return null;
+    } else if (!(token.kind === "ident" && this.tokens[head + 1]?.kind === "punct" && this.tokens[head + 1]?.text === "=>")) {
       return null;
     }
     return { async: isAsync };
@@ -10874,7 +10954,9 @@ class TypeScriptParser {
       this.expect(")");
     } else {
       const name = this.next();
-      if (name.kind !== "ident") return this.missing("expected a parameter name", name);
+      if (name.kind !== "ident") {
+        return this.missing("expected a parameter name", name);
+      }
       const hinted = hints?.[0] ?? null;
       const type: TypeExpr = hinted?.type ?? ANY_TYPE;
       params.push({

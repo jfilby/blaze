@@ -3897,3 +3897,105 @@ test("a source that only mentions the secp256k1 names is not the benchmark", () 
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a return type that is a readonly list of records is not the method's body", () => {
+  // `): readonly { name: string }[] {` writes an object type before the body.
+  // The brace after `readonly` is the type's, and a scan that read it as the
+  // body left every member after this one unread — a method written below was
+  // "not a method this program compiles".
+  const source = [
+    "class Parser {",
+    "  private names = new Map<string, number>();",
+    "  params(): readonly { name: string; at: number }[] {",
+    "    return [];",
+    "  }",
+    "  later(): number {",
+    "    return this.names.size;",
+    "  }",
+    "}",
+    "export function f(p: Parser): number { return p.params().length + p.later(); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a conditional arm in parentheses is a value, not an arrow", () => {
+  // `c ? (v as T) : other` writes a `:` after the group, and the scan that
+  // reads an arrow's result type ran from there to the next `=>` in the file.
+  // The arm is a value, and the conditional is the select it means.
+  const source = [
+    "interface Rec { a: number }",
+    "export function other(): Rec { return { a: 1 }; }",
+    "export function f(flag: boolean, value: unknown): Rec {",
+    "  const picked = flag ? (value as Rec) : other();",
+    "  return picked;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(\"run\");\n` }, "main.ts", "f");
+  assert.match(ir, /select/, "the conditional is one chosen value");
+});
+
+test("a string that holds a bracket is not an arrow's parameter list", () => {
+  // `if (text === "(" || text === "[")` writes the character as the text it
+  // is. The token is a string, not the bracket, and reading it as an arrow's
+  // parameter list made the rest of the statement an arrow's body.
+  const source = [
+    "export function isOpen(text: string): boolean {",
+    "  if (text === \"(\" || text === \"[\") return true;",
+    "  return text === \")\" || text === \"]\";",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("an exported constant keeps the type it writes, and a nested type argument closes", () => {
+  // `export const NAME: T = ...` is a constant of the file with the type it
+  // writes, and a constant written after an `export interface` is one too.
+  // `Record<string, Record<A, B>>` closes two angles with one `>>`, which the
+  // scan that finds the value's `=` must count as two.
+  const source = [
+    "export interface Entry { name: string }",
+    "const LIMITS: Record<string, Record<string, number>> = { a: { b: 1 } };",
+    "const ONE: readonly number[] = [1, 2];",
+    "export const SAVED: readonly number[] = [3, 4];",
+    "export function f(): number[] {",
+    "  return SAVED.filter((n) => n > ONE.length);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a call of the function a declaration answers answers its result", () => {
+  // `const strip = create()` is a name held at the signature the declaration
+  // states, and `strip(text)` is that call: what it answers is the result the
+  // signature names, so a text method written after it is a text method.
+  const source = [
+    "export function create(): (line: string) => string {",
+    "  return (line: string): string => line;",
+    "}",
+    "export function f(raw: string): string {",
+    "  const strip = create();",
+    "  return strip(raw).trim();",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(\"run\");\n` }, "main.ts", "f");
+  assert.match(ir, /through local\[ref<any>\] strip/, "the call is made through the value the name holds");
+});
+
+test("an export list may rename the name it offers", () => {
+  // `export { sleep as setTimeout }` offers the value under the name the list
+  // writes. The `as` is the rename, not a second exported name.
+  const source = [
+    "function sleep(ms: number): number { return ms; }",
+    "export { sleep as setTimeout };",
+    "export function f(): number { return 1; }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

@@ -22,9 +22,9 @@ import type { Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
-import type { ClassTable } from "./typescript-classes.ts";
+import type { ClassInfo, ClassTable } from "./typescript-classes.ts";
 import { bindImportedTypes } from "./typescript-types.ts";
-import type { TypeTable } from "./typescript-types.ts";
+import type { ResolvedType, TypeTable } from "./typescript-types.ts";
 
 /** An error of the contract phase, which is where the graph is read. */
 export function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -147,9 +147,15 @@ function importedFunctionsOf(
         params: declared.params.map((param) => param.type),
         returns: declared.returns,
       };
-      const handle = declared.handle as { returnsShape?: ImportedFunction["shape"]; collection?: ImportedFunction["collection"] } | undefined;
+      const handle = declared.handle as {
+        returnsShape?: ImportedFunction["shape"];
+        collection?: ImportedFunction["collection"];
+        params?: readonly { shape?: ResolvedType | null }[];
+      } | undefined;
       if (handle?.returnsShape !== undefined) signature.shape = handle.returnsShape;
       if (handle?.collection !== undefined) signature.collection = handle.collection;
+      const paramShapes = handle?.params?.map((param) => param.shape ?? null);
+      if (paramShapes !== undefined) signature.paramShapes = paramShapes;
       functions.set(local, signature);
     }
   });
@@ -181,6 +187,36 @@ function declaredOffered(
     const target = records.get(record.resolved[index] ?? "");
     if (target === undefined) continue;
     const found = declaredOffered(target, name, records, seen);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The class a module offers under a name, following a re-export.
+ *
+ * `export { Diagnostics } from "./diagnostics.ts"` offers a class the other
+ * module declares: a file that imports the name from the re-exporting module
+ * reads the fields and methods of the class the declaring module wrote, and the
+ * description of it is the one there.
+ */
+function classOffered(
+  record: ModuleRecord,
+  name: string,
+  records: ReadonlyMap<string, ModuleRecord>,
+  seen: Set<string>,
+): ClassInfo | undefined {
+  if (seen.has(record.path)) return undefined;
+  seen.add(record.path);
+  const held = record.analysis.classes?.classes.get(name);
+  if (held !== undefined) return held;
+  for (const entry of record.analysis.reexports ?? []) {
+    if (!entry.names.includes(name)) continue;
+    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+    if (index < 0) continue;
+    const target = records.get(record.resolved[index] ?? "");
+    if (target === undefined) continue;
+    const found = classOffered(target, name, records, seen);
     if (found !== undefined) return found;
   }
   return undefined;
@@ -383,16 +419,41 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   for (const record of records.values()) {
     if (record.analysis.classes !== undefined) classTables.set(record.path, record.analysis.classes);
   }
-  for (const record of records.values()) {
+  // A class a module re-exports under a name it imports is bound in that
+  // module's own table, and a file that imports it from there reads it. Which
+  // module is read first is not fixed, so the binding runs again while it adds
+  // anything: the description crosses one module at a time.
+  let classesLinked = true;
+  while (classesLinked) {
+    classesLinked = false;
+    for (const record of records.values()) {
     const table = record.analysis.classes;
     if (table === undefined) continue;
-    const targets = new Map<string, ClassTable>();
+    const targets = new Map<string, ModuleRecord>();
     for (let index = 0; index < record.analysis.imports.length; index += 1) {
-      const target = classTables.get(record.resolved[index] as string);
+      const target = records.get(record.resolved[index] as string);
       const entry = record.analysis.imports[index] as { specifier: string };
       if (target !== undefined) targets.set(entry.specifier, target);
     }
-    bindImportedClasses(table, record.analysis.imports, targets);
+    // A type-only import names a class the file reads through a value it was
+    // handed — `private readonly diagnostics: Diagnostics` — and the methods
+    // written on that value are the class's. Nothing is imported at run time
+    // either way: what crosses is the description.
+    for (let index = 0; index < (record.analysis.typeImports?.length ?? 0); index += 1) {
+      const target = records.get(record.typeResolved[index] as string);
+      const entry = record.analysis.typeImports?.[index] as { specifier: string } | undefined;
+      if (target !== undefined && entry !== undefined) targets.set(entry.specifier, target);
+    }
+    const typeNames = (record.analysis.typeImports ?? []).map((entry) => ({
+      specifier: entry.specifier,
+      names: null as string[] | null,
+      renames: entry.names.map((name) => ({ local: name.local, imported: name.imported })),
+    }));
+    if (bindImportedClasses(table, [...record.analysis.imports, ...typeNames], (specifier, name) => {
+      const target = targets.get(specifier);
+      return target === undefined ? undefined : classOffered(target, name, records, new Set());
+    })) classesLinked = true;
+    }
   }
   // A file is read again with the table its imports now fill, and with the
   // values its imports bind. Its runtime imports were resolved by the first
