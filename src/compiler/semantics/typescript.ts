@@ -3076,6 +3076,7 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "at",
   "slice",
   "fill",
+  "concat",
 ]);
 
 /** The constructors a `new` expression names to allocate a map or a set. */
@@ -10136,6 +10137,43 @@ class TypeScriptParser {
           replace(made);
           continue;
         }
+        // `BigInt.asIntN(bits, value)` and `asUintN` wrap a whole number to a
+        // width: the low bits of it, and for the signed one the sign of the
+        // highest of those bits carried up. The width is a number a program may
+        // compute, so the wrap is the runtime's.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "BigInt" &&
+          (target.field === "asIntN" || target.field === "asUintN")
+        ) {
+          const args = this.readCallArguments([NUMBER_RESULT, BIGINT_RESULT]);
+          const bits = args[0];
+          const value = args[1];
+          const held = value === undefined ? null : this.valueTypeOf(value);
+          const whole = held !== null && held.kind === "primitive" && (held.name === "i64" || held.name === "u64");
+          if (bits === undefined || value === undefined || args.length !== 2 || !whole) {
+            this.report(
+              `BigInt.${target.field} wraps a whole number to a width`,
+              "as in BigInt.asIntN(64, value), over a bigint",
+              this.peek(),
+            );
+            return this.hole();
+          }
+          // A width of the whole carrier is the number itself.
+          if (bits.k === "literal" && Number(bits.text) >= 64) {
+            replace(value);
+            continue;
+          }
+          const wrapped: Expression = {
+            k: "call",
+            name: target.field === "asIntN" ? "blaze_rt_as_int_n" : "blaze_rt_as_uint_n",
+            args: [bits, value],
+          };
+          this.expressionTypes.set(wrapped, BIGINT_RESULT);
+          replace(wrapped);
+          continue;
+        }
         // `Buffer.byteLength(text, "utf8")` is the number of bytes the text is
         // written as, which is what the runtime already measures for a managed
         // string and a literal alike. The encoding is the one a text is written
@@ -10403,6 +10441,32 @@ class TypeScriptParser {
           // Anything else is the runtime's own stringify, which the backends
           // lower for a text, a number and a value the runtime holds.
           replace({ k: "call", name: "JSON.stringify", args: [written] });
+          continue;
+        }
+        // `Uint8Array.from(list)` and the views beside it: a typed array is a
+        // block of one element type, and a list of that type already is one.
+        // The copy the source may write is a block of the same elements.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.field === "from" &&
+          target.base.name in TYPED_ARRAYS
+        ) {
+          const args = this.readCallArguments([ANY_TYPE]);
+          const source = args[0];
+          const held = source === undefined ? null : this.valueTypeOf(source);
+          const wanted = TYPED_ARRAYS[target.base.name] as string;
+          const element = held !== null && (held.kind === "slice" || held.kind === "array") ? held.of : null;
+          const same = element !== null && (element.kind === "text" ? wanted === "text" : element.kind === "primitive" && element.name === wanted);
+          if (source === undefined || args.length !== 1 || !same) {
+            this.report(
+              `${target.base.name}.from copies a list of its elements`,
+              `as in ${target.base.name}.from(list)`,
+              this.peek(),
+            );
+            return this.hole();
+          }
+          replace(source);
           continue;
         }
         // `Array.isArray(value)`: whether the value is a list. An array is a
@@ -11991,6 +12055,27 @@ class TypeScriptParser {
     ) {
       return this.sequenceMethod(method, elements, receiver, args, line);
     }
+    // `a.concat(b, c)` is the lists written one after another, which is the
+    // list `a + b + c` is: each is a block, and the sum is a block of both.
+    if (method === "concat" && args.length >= 1) {
+      let joined: Expression = receiver;
+      for (const written of args) {
+        const held = this.valueTypeOf(written);
+        if (held.kind !== "slice" && held.kind !== "array") {
+          this.report(
+            "concat joins lists",
+            "a list is the only value a list is joined with",
+            this.peek(),
+          );
+          return this.hole();
+        }
+        joined = { k: "binary", op: "+", left: joined, right: written };
+      }
+      this.expressionTypes.set(joined, { kind: "slice", of: elements });
+      const shape = this.elementShapeOf(receiver, elements);
+      this.expressionShapes.set(joined, { kind: "list", of: shape ?? { kind: "any" } });
+      return joined;
+    }
     // `a.fill(v)` takes the value every element becomes, and the list is the
     // answer. It is not a callback method: the value is written into each
     // element rather than read out of one.
@@ -12005,6 +12090,21 @@ class TypeScriptParser {
       const shape = this.elementShapeOf(receiver, elements);
       this.expressionShapes.set(filled, { kind: "list", of: shape ?? { kind: "any" } });
       return filled;
+    }
+    // `a.sort()` with no comparator is the order the language gives: numbers by
+    // their value and texts by what they say, which is the comparison `<` is
+    // for each. A list of anything else needs the comparator its source writes.
+    if (method === "sort" && args.length === 0 &&
+      (elements.kind === "text" ||
+        (elements.kind === "primitive" && elements.name !== "bool" && elements.name !== "i256" && elements.name !== "u256"))) {
+      const helper = this.sortDefaultHelper(elements, line);
+      if (helper !== null) {
+        const sorted: Expression = { k: "call", name: helper.name, args: [receiver] };
+        this.expressionTypes.set(sorted, helper.returns);
+        const shape = this.elementShapeOf(receiver, elements);
+        this.expressionShapes.set(sorted, { kind: "list", of: shape ?? { kind: "any" } });
+        return sorted;
+      }
     }
     const callback = args[0];
     if (callback === undefined) {
@@ -13970,6 +14070,83 @@ class TypeScriptParser {
   }
 
   /**
+   * The function an `a.sort()` with no comparator becomes.
+   *
+   * The order the language gives a list of numbers or of texts is the one `<`
+   * is for each, so the insertion sort is written with that comparison where a
+   * comparator would be called. The list is sorted where it lies, and the value
+   * the call answers is a block of its own so that the length of the answer
+   * travels with it — the same shape a sort with a comparator has.
+   */
+  private sortDefaultHelper(element: TypeExpr, line: number): { name: string; returns: TypeExpr } | null {
+    if (element.kind !== "text" && !(element.kind === "primitive" && !["bool", "i256", "u256"].includes(element.name))) {
+      return null;
+    }
+    const key = JSON.stringify(["sortDefault", element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const length = (): Expression => ({ k: "length", buffer: "items" });
+    const at = (index: Expression): Expression => ({ k: "index", base: ident("items"), index });
+    const plusOne = (index: Expression): Expression => ({ k: "binary", op: "+", left: index, right: number("1") });
+    const items: TypeExpr = { kind: "slice", of: element };
+    const returns: TypeExpr = { kind: "slice", of: element };
+    const body: Statement[] = [
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("1"),
+        to: length(),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "declare", name: "value", type: null, init: at(ident("i")), line },
+          { kind: "declare", name: "j", type: null, init: { k: "binary", op: "-", left: ident("i"), right: number("1") }, line },
+          {
+            kind: "while",
+            condition: {
+              k: "binary",
+              op: "&&",
+              left: { k: "binary", op: ">=", left: ident("j"), right: number("0") },
+              right: { k: "binary", op: ">", left: at(ident("j")), right: ident("value") },
+            },
+            body: [
+              { kind: "indexAssign", buffer: "items", index: plusOne(ident("j")), op: "=", value: at(ident("j")), line },
+              { kind: "update", name: "j", op: "--", prefix: false, line },
+            ],
+            line,
+          },
+          { kind: "indexAssign", buffer: "items", index: plusOne(ident("j")), op: "=", value: ident("value"), line },
+        ],
+        line,
+      },
+      { kind: "declare", name: "out", type: null, init: { k: "sized", element: typeToString(element), count: length() }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: length(),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [{ kind: "indexAssign", buffer: "out", index: ident("i"), op: "=", value: at(ident("i")), line }],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "items", type: items }];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { name, returns };
+  }
+
+  /**
    * The function a `keys()` or a `values()` of a collection is lowered to.
    *
    * The entries are read one by one into a block of the element type, because
@@ -14756,19 +14933,29 @@ class TypeScriptParser {
     expected: ResolvedType & { kind: "record" },
     put: (name: string, value: Expression, spread: boolean) => void,
   ): boolean {
-    const empty = (arm: Expression): boolean => arm.k === "object" && arm.fields.length === 0;
+    // An arm read at a union of shapes holds every field the layout needs; the
+    // fields the source wrote are the ones the spread is about.
+    const writtenNames = (arm: Expression): readonly string[] | null =>
+      arm.k === "object" ? (arm.written ?? arm.fields.map((field) => field.name)) : null;
+    const empty = (arm: Expression): boolean => {
+      const names = writtenNames(arm);
+      return names !== null && names.length === 0;
+    };
     const written = empty(conditional.then)
       ? conditional.otherwise
       : empty(conditional.otherwise)
         ? conditional.then
         : null;
-    if (written === null || written.k !== "object" || written.fields.length === 0) return false;
+    if (written === null || written.k !== "object") return false;
+    const names = writtenNames(written) ?? [];
+    if (names.length === 0) return false;
     const holdsThen = written === conditional.then;
-    for (const field of written.fields) {
+    const fields = names.map((name) => written.fields.find((field) => field.name === name)).filter((field) => field !== undefined);
+    for (const field of fields) {
       const declared = expected.fields.get(field.name);
       if (declared === undefined || this.absenceExpression(declared.type) === null) return false;
     }
-    for (const field of written.fields) {
+    for (const field of fields) {
       const declared = expected.fields.get(field.name) as ResolvedField;
       this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
       const absent = this.absenceExpression(declared.type) as Expression;
@@ -14972,7 +15159,7 @@ class TypeScriptParser {
         padded.push(held ?? { name: field, value: this.zeroFor(this.typeExprOfShape(declared.type)) });
       }
       padded.push({ name: "__arm", value: { k: "literal", text: String(arm) } });
-      return { k: "object", fields: padded };
+      return { k: "object", fields: padded, written: [...written.keys()] };
     }
     return { k: "object", fields };
   }
@@ -15670,6 +15857,22 @@ class TypeScriptParser {
       const whole = from === undefined
         || (isNumberLiteral(from, "0") && (to === undefined || (to.k === "lengthOf" && buffer.k === "ident" && to.of.k === "ident" && to.of.name === buffer.name)));
       if (!whole) {
+        // A view of part of a block is a window of it: the block moved by the
+        // offset, and as many bytes as the source wrote of it. A view with no
+        // length reaches the end of the block.
+        const held = this.valueTypeOf(buffer);
+        const sequence = held.kind === "slice" || held.kind === "array" ? held : null;
+        if (sequence !== null && from !== undefined) {
+          const count: Expression = to ?? { k: "binary", op: "-", left: { k: "lengthOf", of: buffer }, right: from };
+          const viewed: Expression = {
+            k: "buffer",
+            element: typeToString(sequence.of),
+            values: [],
+            view: { of: buffer, offset: from, count },
+          };
+          this.expressionTypes.set(viewed, { kind: "slice", of: sequence.of });
+          return viewed;
+        }
         this.report(
           "a view of part of a buffer is not part of the subset",
           "view the whole buffer, as in new DataView(bytes.buffer)",
@@ -15686,6 +15889,9 @@ class TypeScriptParser {
     // of `n` elements, cleared, which is what a read past what the program
     // filled answers. `new Array(a, b)` names the elements instead.
     if (view.kind === "ident" && view.text === "Array") {
+      // `new Array<T>(n)` states the element type it is read at, which is
+      // erased with every other type before the count is read.
+      if (this.at("<")) this.skipTypeParameters();
       if (!this.accept("(")) {
         this.report("an array is allocated with a count", "as in new Array(n)", view);
         return this.hole();

@@ -1058,6 +1058,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["memory"] },
   ),
   entry(
+    "blaze_rt_as_int_n",
+    "int64_t",
+    [["bits", "double"], ["value", "int64_t"]],
+    "Wraps a whole number to the signed width it names, as BigInt.asIntN does.",
+    "Returns the number the low bits read back as, sign extended.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_as_uint_n",
+    "int64_t",
+    [["bits", "double"], ["value", "int64_t"]],
+    "Wraps a whole number to the unsigned width it names, as BigInt.asUintN does.",
+    "Returns the number the low bits read back as, zero extended.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_now_ms",
     "double",
     [],
@@ -3965,6 +3981,24 @@ double blaze_rt_number_same(double left, double right) {
   memcpy(&a, &left, sizeof a);
   memcpy(&b, &right, sizeof b);
   return a == b ? 1.0 : 0.0;
+}
+
+/* A whole number wrapped to a width: the low bits of the number, and for the
+   signed one the sign of the highest of those bits carried up. A width of the
+   whole carrier is the number itself. */
+int64_t blaze_rt_as_uint_n(double bits, int64_t value) {
+  if (bits <= 0.0) return 0;
+  if (bits >= 64.0) return value;
+  const uint64_t mask = (UINT64_C(1) << (unsigned)bits) - UINT64_C(1);
+  return (int64_t)((uint64_t)value & mask);
+}
+
+int64_t blaze_rt_as_int_n(double bits, int64_t value) {
+  if (bits <= 0.0) return 0;
+  if (bits >= 64.0) return value;
+  const unsigned shift = 64u - (unsigned)bits;
+  const int64_t narrowed = (int64_t)((uint64_t)value << shift);
+  return narrowed >> shift;
 }
 
 /* The wall clock, which is the one a build stamps its records with. The

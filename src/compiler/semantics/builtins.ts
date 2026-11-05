@@ -72,6 +72,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
   "blaze_rt_number_same": { params: [F64, F64], returns: BOOLEAN, arity: 2 },
   "blaze_rt_text_length": { params: [TEXT], returns: F64, arity: 1 },
+  "blaze_rt_as_int_n": { params: [F64, I64], returns: I64, arity: 2 },
+  "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
   "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
   "blaze_rt_string_new": { params: [POINTER, F64], returns: TEXT, arity: 2 },

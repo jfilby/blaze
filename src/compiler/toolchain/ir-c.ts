@@ -352,6 +352,10 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_number_same(${args[0]}, ${args[1]})`;
     case "blaze_rt_text_length":
       return `((double)blaze_rt_text_length(${args[0]}))`;
+    case "blaze_rt_as_int_n":
+      return `blaze_rt_as_int_n(${args[0]}, ${args[1]})`;
+    case "blaze_rt_as_uint_n":
+      return `blaze_rt_as_uint_n(${args[0]}, ${args[1]})`;
     case "blaze_rt_now_ms":
       return `blaze_rt_now_ms()`;
     case "blaze_rt_timestamp_iso":

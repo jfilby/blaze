@@ -888,6 +888,59 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dg. A conditional spread into a union of shapes
+
+    { k: `num`, ...(yes ? { async: true } : {}) }    // an arm of a union
+
+The zero a conditional spread writes (§4db) is the field's type, and the type of
+a field of a union of shapes is the union layout: every arm's fields, with the
+ones the source did not write laid out as their zero. Reading the spread's arms
+at that same shape therefore padded both arms with every field, and neither arm
+was the one that wrote — the spread was refused by its own padding. An object
+read at a union now says which fields the source wrote, and the spread is read
+from those: the arm that writes nothing is the arm that wrote nothing.
+
+Nineteen refusals went, and `semantics/typescript-program.ts` reads whole.
+
+### 4df. A wrapped whole number, the default order, and a view of part of a block
+
+    BigInt.asIntN(bits, value)             // the low bits, sign extended
+    BigInt.asUintN(bits, value)
+    a.sort()                               // the order `<` gives the elements
+    new Array<T>(n)                        // the type erased before the count
+    new DataView(bytes.buffer, at, 4)      // a window of four bytes
+
+**A whole number wrapped to a width.** `BigInt.asIntN(bits, value)` keeps the
+low `bits` of a whole number and carries the sign of the highest of them up;
+`asUintN` keeps them as they are. The width is a number a program computes —
+`integerBits(name)` in the contract evaluator is — so the wrap is the runtime's:
+one entry point for each, over an `i64`. A width of the whole carrier is the
+number itself. The Nim adapter answers both.
+
+**Texts are ordered by what they say.** A comparison of two texts is the text
+operand the backends already lower, but the read gave every ordering the
+comparison of two numbers, so `a < b` over two texts was a comparison of a text
+as an f64. The two sides of an ordering are read as texts when both are.
+
+**`a.sort()` with no comparator.** The order the language gives a list of
+numbers or of texts is the one `<` is for each, so the insertion sort is written
+with that comparison where a comparator would be called: numbers by their value
+and texts by what they say.
+
+**A typed allocation states its element type.** `new Array<T>(n)` is the count
+the source wrote; the type is erased before the count is read.
+
+**A view of part of a block.** `new DataView(bytes.buffer, at, 4)` is the block
+moved by the offset and as many bytes as the source wrote of it, which is the
+window `bytes.subarray` already produced.
+
+**A typed array built from a list is the list.** `Uint8Array.from(list)` and the
+views beside it name the block of one element type, and a list of that type is
+already one. **`a.concat(b)`** is the list `a + b` is: each is a block, and the
+sum is a block of both.
+
+The total went from 299 to 290.
+
 ### 4de. A method of an object literal, and an element of a field
 
     const counter = { add(by: number) { total += by; } }   // a method
@@ -3033,6 +3086,8 @@ What was closed this session, and what each was worth:
 | a map under a number key, a window of a block, and the bytes of a text (§4dc) | 341 → 319 |
 | the clock, and the bytes of a text read back (§4dd) | 319 → 306 |
 | a method of an object literal, and an element of a field (§4de) | 306 → 299 |
+| a wrapped whole number, the default order, and a view of part of a block (§4df) | 299 → 290 |
+| a conditional spread into a union of shapes (§4dg) | 290 → 271 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

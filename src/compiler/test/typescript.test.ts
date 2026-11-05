@@ -3527,8 +3527,8 @@ test("a view of a block reads and writes the bytes of it", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 
-  // A view of part of a block is not the block: an offset or a length the
-  // stores are not checked against would be a write past the view.
+  // A view of part of a block is a window of it: the block moved by the offset,
+  // and as many bytes as the source wrote of it.
   const partial = [
     "export function f(bytes: Uint8Array): number {",
     "  const view = new DataView(bytes.buffer, 1, 4);",
@@ -3536,8 +3536,7 @@ test("a view of a block reads and writes the bytes of it", () => {
     "}",
     "",
   ].join("\n");
-  const read = readTypeScriptModule(partial, "main.ts", false);
-  assert.match(read.refused[0]?.message ?? "", /a view of part of a buffer is not part of the subset/);
+  assert.deepEqual(readTypeScriptModule(partial, "main.ts", false).refused, []);
 });
 
 test("a sixty-four bit view of a block is a store and a load of a whole number", () => {
@@ -4339,6 +4338,23 @@ test("an element of the object a field holds is written through the field", () =
     "  }",
     "}",
     "export function f(c: Counter): number { return c.bump(`a`); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a conditional spread into a union of shapes writes the field it holds", () => {
+  // An object at a union of shapes is laid out as every arm, so each arm of a
+  // conditional spread holds the fields the layout needs. The fields the source
+  // wrote are the ones the spread is about, and the others are the zero.
+  const source = [
+    "interface Add { k: `add`; async?: boolean; bigint?: boolean }",
+    "interface Num { k: `num`; text: string }",
+    "interface Text { k: `text`; text: string }",
+    "type S = Add | Num | Text;",
+    "export function f(yes: boolean, big: boolean): S {",
+    "  return { k: `num`, text: `x`, ...(yes === true ? { async: true } : {}), ...(big ? { bigint: true } : {}) };",
+    "}",
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);

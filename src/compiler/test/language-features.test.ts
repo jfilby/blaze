@@ -1224,6 +1224,46 @@ test("a choice of a length and a number is a number", async () => {
   }
 });
 
+test("a list sorts by itself, and a view of part of a buffer is a window", async () => {
+  // The order the language gives a list of numbers or texts is the one `<` is
+  // for each; a view of part of a block is the block moved by the offset.
+  const source = [
+    "export function demo(): string {",
+    "  const names = [`c`, `a`, `b`];",
+    "  names.sort();",
+    "  const values = [3, 1, 2];",
+    "  values.sort();",
+    "  const bytes = new Uint8Array([1, 2, 3, 4, 5, 6]);",
+    "  const view = new DataView(bytes.buffer, 1, 4);",
+    "  return `${names.join(``)} ${values.join(``)} ${view.getUint8(0)} ${view.byteLength}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "abc 123 2 4", `the ${backend} backend sorts and views`);
+  }
+});
+
+test("BigInt.asIntN and asUintN wrap a whole number to a width", async () => {
+  // The low bits of the number, and for the signed one the sign of the highest
+  // of them carried up: a width of the whole carrier is the number itself.
+  const source = [
+    "export function demo(): string {",
+    "  const wide = 300n;",
+    "  const negative = -1n;",
+    "  return `${BigInt.asIntN(8, wide)} ${BigInt.asUintN(8, negative)} ${BigInt.asIntN(64, negative)} ${BigInt.asUintN(4, 15n)} ${BigInt.asIntN(4, 9n)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "44 255 -1 15 -7", `the ${backend} backend wraps the number to the width`);
+  }
+});
+
 test("an element of a field, an unshift spread and a pop of a value", async () => {
   // Three writes the sources make: an element of the record a field holds, the
   // front of a list with the elements another list holds, and the last element

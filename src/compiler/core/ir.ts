@@ -73,7 +73,16 @@ export type Expression =
    * it.
    */
   | { k: "call"; name: string; args: Expression[]; returns?: TypeExpr }
-  | { k: "object"; fields: { name: string; value: Expression }[] }
+  | {
+      k: "object";
+      fields: { name: string; value: Expression }[];
+      /**
+       * The fields the source wrote, where `fields` holds more than those: an
+       * object at a union of shapes is laid out as every arm, and the fields
+       * the source did not write are the zero the layout needs.
+       */
+      written?: readonly string[];
+    }
   /**
    * `new Float64Array(n)`: a typed array of a count the program settles on when
    * it runs. `element` is the contract type its elements are held at, which is

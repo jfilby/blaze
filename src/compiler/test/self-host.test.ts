@@ -108,9 +108,11 @@ import { selfHostGap } from "./self-host-gap.ts";
  * `slice()`, to 359, and a conditional spread that writes the zero of the field
  * it leaves out, to 341, and a map under a number key, a window of a block and
  * the bytes of a text, to 319, and the clock with a text decoder's bytes, to
- * 306, and a method of an object literal with the element of a field, to 299.
+ * 306, a method of an object literal with the element of a field to 299, and a
+ * wrapped whole number with the default order and a view of part of a block to
+ * 290, and a conditional spread into a union of shapes, to 271.
  */
-const REFUSAL_BUDGET = 299;
+const REFUSAL_BUDGET = 271;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

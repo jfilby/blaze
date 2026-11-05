@@ -1696,11 +1696,21 @@ class FunctionBody {
       // A comparison is read at one width, and a literal written beside a wide
       // number is read at that width: `0 < curve.n` is a comparison of two wide
       // numbers.
+      // Two texts are ordered by what they say, which is the comparison the
+      // text operand names; a number beside one is not the question this asks.
+      const bothText = isText(left.value.type) && isText(right.value.type);
       const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
       const leftValue = wide === null ? left.value : this.widenLiteral(left.value, wide);
       const rightValue = wide === null ? right.value : this.widenLiteral(right.value, wide);
       return {
-        value: { k: "compare", type: BOOLEAN, op: ordering, operand: this.operand(leftValue, rightValue), left: leftValue, right: rightValue },
+        value: {
+          k: "compare",
+          type: BOOLEAN,
+          op: ordering,
+          operand: bothText ? TEXT : this.operand(leftValue, rightValue),
+          left: bothText ? this.asText(leftValue) : leftValue,
+          right: bothText ? this.asText(rightValue) : rightValue,
+        },
         inferred: asType(BOOL),
       };
     }

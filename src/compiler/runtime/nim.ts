@@ -1245,6 +1245,19 @@ proc blaze_rt_dict_set_text*(dict: float64, key: cstring, value: cstring): float
 ## copied into a block this runtime laid out, whose size carries the length, and
 ## the pointer is what the entry holds.
 
+proc blaze_rt_as_uint_n*(bits: float64, value: int64): int64 {.exportc, cdecl.} =
+  ## A whole number wrapped to the unsigned width it names.
+  if bits <= 0.0: return 0
+  if bits >= 64.0: return value
+  value and ((1'i64 shl int(bits)) - 1)
+
+proc blaze_rt_as_int_n*(bits: float64, value: int64): int64 {.exportc, cdecl.} =
+  ## A whole number wrapped to the signed width it names, sign extended.
+  if bits <= 0.0: return 0
+  if bits >= 64.0: return value
+  let shift = 64 - int(bits)
+  (value shl shift) shr shift
+
 proc blaze_rt_now_ms*(): float64 {.exportc, cdecl.} =
   ## The wall clock in milliseconds since the Unix epoch.
   epochTime() * 1000.0
