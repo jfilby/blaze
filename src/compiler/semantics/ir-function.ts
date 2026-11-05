@@ -1151,6 +1151,28 @@ class FunctionBody {
         };
       }
       case "buffer": {
+        // `bytes.subarray(from, to)` is a window of a block another name holds:
+        // the block moved by the offset, and the elements it reaches are the
+        // count the source wrote. Nothing is allocated and nothing is copied.
+        if (expression.view !== undefined) {
+          const element = parseType(expression.element);
+          const type: TypeExpr = { kind: "slice", of: element };
+          return {
+            value: {
+              k: "buffer",
+              type,
+              element,
+              length: null,
+              count: this.typed(expression.view.count, WHOLE, line).value,
+              view: {
+                of: this.typed(expression.view.of, null, line).value,
+                offset: this.typed(expression.view.offset, WHOLE, line).value,
+              },
+              values: [],
+            },
+            inferred: asType(type),
+          };
+        }
         // `new Float64Array([1, 2, 3])` is a block whose length the program
         // wrote down, and the elements take the type of the array they are
         // written into rather than the type they were written at.
@@ -1492,7 +1514,10 @@ class FunctionBody {
     if (builtin !== null) {
       this.builtinArity(expression.name, builtin, expression.args.length, line);
       const args = expression.args.map((argument, at) => this.typed(argument, asType(builtin.params[at]), line));
-      const returns = builtin.returns;
+      // What the read of the call knows it answers, where the builtin's own
+      // result is the opaque value the ABI carries: a map of lists answers the
+      // list it holds, and the call that lowers to the block is typed as one.
+      const returns = expression.returns ?? builtin.returns;
       const extreme = EXTREMES[expression.name];
       if (extreme !== undefined) {
         return {

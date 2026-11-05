@@ -177,16 +177,25 @@ function declaredOffered(
 ): DeclaredFunction | undefined {
   if (seen.has(record.path)) return undefined;
   seen.add(record.path);
-  const held = record.analysis.functions.find((one) => one.name === name && one.exported) ??
-    (record.analysis.signatures ?? []).find((one) => one.name === name);
-  if (held !== undefined) return held;
+  // `export { f as g }` offers `f` under the name `g`: the declaration is the
+  // one `f` names, and the caller writes `g`.
+  const renamed = record.analysis.exportNames?.find((one) => one.exported === name);
+  const local = renamed === undefined ? name : renamed.local;
+  const held = record.analysis.functions.find((one) => one.name === local && (one.exported || renamed !== undefined)) ??
+    (record.analysis.signatures ?? []).find((one) => one.name === local);
+  if (held !== undefined) {
+    return renamed === undefined ? held : { ...held, name };
+  }
   for (const entry of record.analysis.reexports ?? []) {
-    if (!entry.names.includes(name)) continue;
+    // A re-export may offer the other module's name under another name here.
+    const offered = entry.renames?.find((one) => one.exported === name);
+    const wanted = offered === undefined ? name : offered.local;
+    if (!entry.names.includes(wanted)) continue;
     const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
     if (index < 0) continue;
     const target = records.get(record.resolved[index] ?? "");
     if (target === undefined) continue;
-    const found = declaredOffered(target, name, records, seen);
+    const found = declaredOffered(target, wanted, records, seen);
     if (found !== undefined) return found;
   }
   return undefined;
@@ -208,15 +217,19 @@ function classOffered(
 ): ClassInfo | undefined {
   if (seen.has(record.path)) return undefined;
   seen.add(record.path);
-  const held = record.analysis.classes?.classes.get(name);
+  const renamed = record.analysis.exportNames?.find((one) => one.exported === name);
+  const local = renamed === undefined ? name : renamed.local;
+  const held = record.analysis.classes?.classes.get(local);
   if (held !== undefined) return held;
   for (const entry of record.analysis.reexports ?? []) {
-    if (!entry.names.includes(name)) continue;
+    const offered = entry.renames?.find((one) => one.exported === name);
+    const wanted = offered === undefined ? name : offered.local;
+    if (!entry.names.includes(wanted)) continue;
     const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
     if (index < 0) continue;
     const target = records.get(record.resolved[index] ?? "");
     if (target === undefined) continue;
-    const found = classOffered(target, name, records, seen);
+    const found = classOffered(target, wanted, records, seen);
     if (found !== undefined) return found;
   }
   return undefined;

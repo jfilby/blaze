@@ -3210,8 +3210,8 @@ test("a refused read still answers the imports it did read", () => {
     "  return total;",
     "}",
     "",
-    "export function refused(): number {",
-    "  return new Date().getTime();",
+    "export function refused(target: object): number {",
+    "  return new WeakRef(target) === undefined ? 0 : 1;",
     "}",
     "",
   ].join("\n");
@@ -3558,7 +3558,7 @@ test("a sixty-four bit view of a block is a store and a load of a whole number",
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
-test("a spread of a conditional writes a reference field only when it holds", () => {
+test("a spread of a conditional writes a field only when it holds", () => {
   // `...(c ? {} : { tail })` writes `tail` on one arm and leaves the field at
   // its zero on the other. For a reference the zero is the null reference,
   // which is what the language's `undefined` is: the field is absent when the
@@ -3574,20 +3574,18 @@ test("a spread of a conditional writes a reference field only when it holds", ()
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 
-  // The zero of a text is a value a program may have meant, so a text field is
-  // not read as absent.
+  // The zero of a text is the empty text, and of a number zero: a record is
+  // laid out field by field, so the field is there either way and holds the
+  // zero on the arm that writes nothing.
   const text = [
-    "interface Handle { name: string; label?: string }",
+    "interface Handle { name: string; label?: string; count?: number }",
     "export function f(c: boolean, label: string): number {",
-    "  const one: Handle = { name: `a`, ...(c ? {} : { label }) };",
+    "  const one: Handle = { name: `a`, ...(c ? {} : { label }), ...(c ? {} : { count: 2 }) };",
     "  return one.name.length;",
     "}",
     "",
   ].join("\n");
-  assert.match(
-    readTypeScriptModule(text, "main.ts", false).refused[0]?.message ?? "",
-    /an object spread reads a constant object/,
-  );
+  assert.deepEqual(readTypeScriptModule(text, "main.ts", false).refused, []);
 });
 
 test("a spread copies the fields of the record its value names", () => {
@@ -4069,4 +4067,238 @@ test("a list method that keeps its elements keeps their shape", () => {
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a coalesce keeps the collection of the arm that names one", () => {
+  // `m.get(k) ?? new Set<number>()` is a set. The shape of the whole is the
+  // contract type of the left arm — the opaque reference — so a method written
+  // on it was not the dictionary's.
+  const source = [
+    "export function f(offsets: Map<number, Set<number>>, index: number): number {",
+    "  const seen = offsets.get(index) ?? new Set<number>();",
+    "  seen.add(1);",
+    "  return seen.has(index) ? seen.size : 0;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Object.is compares two numbers by what they are", () => {
+  // `Object.is(a, b)` differs from `===` for a NaN and for `-0`: the bits are
+  // the question, which the runtime answers. Two texts answer `===`.
+  const source = [
+    "export function same(a: number, b: number): boolean { return Object.is(a, b); }",
+    "export function negative(a: number): boolean { return Object.is(a, -0); }",
+    "export function text(a: string, b: string): boolean { return Object.is(a, b); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(same(1, 1));\n` }, "main.ts", "same");
+  assert.match(ir, /blaze_rt_number_same/, "two numbers are compared by the runtime");
+});
+
+test("a hex text is a text, and may be padded", () => {
+  // `x.toString(16)` is a `fixed` value: a text. `padStart` is a method of it.
+  const source = [
+    "export function hex(value: number): string {",
+    "  return value.toString(16).padStart(8, `0`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a module offers the names it imports from another one", () => {
+  // `export { availableParallelism }` where the name was imported offers what
+  // the module it came from offers. A list that renames the name it offers is
+  // read under the name a caller writes.
+  const source = [
+    'import { join } from "./path.ts";',
+    "export { join, join as joinPath };",
+    "export function f(a: string, b: string): string { return join(a, b); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a closure reads a declaration written below it", () => {
+  // The binding is hoisted to the block and the closure runs after the
+  // declaration has run, so `walked` is the set the declaration wrote even
+  // though the arrow is written above it.
+  const source = [
+    "interface Block { id: string }",
+    "export function f(b: Block): void {",
+    "  const walk = (one: Block): void => {",
+    "    if (walked.has(one)) return;",
+    "    walked.add(one);",
+    "  };",
+    "  const walked = new Set<Block>();",
+    "  const names: string[] = [];",
+    "  const label = (): number => names.length;",
+    "  walk(b);",
+    "  if (label() === 0) names.push(b.id);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a push on an element of a list of lists writes the element back", () => {
+  // `scopes[at].push(name)` grows the list the element holds, and the list is
+  // written back at its index: a push answers the list the name has after it.
+  const source = [
+    "export function f(scopes: string[][], at: number, name: string): string[] {",
+    "  scopes[at].push(name);",
+    "  scopes[at].pop();",
+    "  return scopes[at];",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", {
+    "main.ts": [
+      "export function f(at: number, name: string): string[] {",
+      "  const scopes: string[][] = [[]];",
+      "  scopes[at].push(name);",
+      "  return scopes[at];",
+      "}",
+      "console.log(f(0, \"b\").length);",
+      "",
+    ].join("\n"),
+  }, "main.ts", "f");
+  assert.match(ir, /set_element scopes/, "the grown list is written back at its index");
+});
+
+test("a map of lists holds the list each key answers", () => {
+  // A dictionary entry is one double, so a list is copied into a block the
+  // runtime laid out: the block's header says how long it is, and the pointer
+  // is what the entry carries.
+  const source = [
+    "export function f(m: Map<string, string[]>, k: string): number {",
+    "  m.set(k, [`a`]);",
+    "  m.set(k, []);",
+    "  const held = m.get(k);",
+    "  let count = 0;",
+    "  if (held !== undefined) {",
+    "    held.push(`b`);",
+    "    m.set(k, held);",
+    "    count = held.length;",
+    "  }",
+    "  return m.has(k) ? count : 0;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", {
+    "main.ts": [
+      "export function f(k: string): number {",
+      "  const m = new Map<string, string[]>();",
+      "  m.set(k, [`a`]);",
+      "  const held = m.get(k);",
+      "  return held === undefined ? 0 : held.length;",
+      "}",
+      "console.log(f(\"a\"));",
+      "",
+    ].join("\n"),
+  }, "main.ts", "f");
+  assert.match(ir, /blaze_rt_dict_set_seq/, "the list is copied into the entry");
+  assert.match(ir, /blaze_rt_dict_get_seq/, "the entry is read back as the list it is");
+});
+
+test("slice with no arguments is the list copied", () => {
+  // `a.slice()` is `a.slice(0)`: from the first element to the last.
+  const source = [
+    "export function f(items: readonly string[]): string[] {",
+    "  const copy = items.slice();",
+    "  copy.push(`x`);",
+    "  return copy;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a conditional spread writes the zero of the field it leaves out", () => {
+  // A record is laid out field by field from its type, so a field the literal
+  // leaves out is the zero of its type. The spread writes that zero, which is
+  // the value the field would have held, so a condition that holds false
+  // leaves the object the object pass would have built.
+  const source = [
+    "interface Options { depth?: number; label?: string; flag?: boolean; names?: string[] }",
+    "export function f(depth: number | undefined, yes: boolean): Options {",
+    "  return {",
+    "    ...(depth === undefined ? {} : { depth }),",
+    "    ...(yes ? { flag: true } : {}),",
+    "    ...(yes ? { label: `x` } : {}),",
+    "    ...(yes ? { names: [`a`] } : {}),",
+    "  };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(1, true).flag ? 1 : 0);\n` }, "main.ts", "f");
+  assert.match(ir, /new_object|newObject|object/, "the record is laid out with every field");
+});
+
+test("subarray is a window of the block, not a copy of it", () => {
+  // A typed array's elements are bytes, and a window of one starts at the
+  // offset the source wrote and is as long as it wrote of it.
+  const source = [
+    "export function f(bytes: Uint8Array, at: number, end: number): number {",
+    "  const part = bytes.subarray(at, end);",
+    "  return part.length + part[0];",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(new Uint8Array(4), 1, 3));\n` }, "main.ts", "f");
+  assert.match(ir, /buffer\[\[\]u8\] element\[u8\] view/, "the block is the window the source wrote of it");
+});
+
+test("Buffer.byteLength measures the bytes of a text", () => {
+  // The runtime measures a managed string and a literal alike, and the
+  // encoding a text is written in is the one a source asks for: utf8.
+  const source = [
+    "export function f(text: string): number {",
+    "  return Buffer.byteLength(text, `utf8`) + Buffer.byteLength(`ab`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(f(\"a\"));\n` }, "main.ts", "f");
+  assert.match(ir, /blaze_rt_text_length/, "the runtime measures the text");
+});
+
+test("a date is the clock it is read from", () => {
+  // A date is the milliseconds since the epoch: `new Date()` is the wall
+  // clock, and its stamp is the ISO text the runtime writes. A date held as a
+  // value of its own is the host's, and is refused.
+  const source = [
+    "export function stamp(): string { return new Date().toISOString(); }",
+    "export function now(): number { return Date.now(); }",
+    "export function at(ms: number): number { return new Date(ms).getTime(); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(stamp().length);\n` }, "main.ts", "stamp");
+  assert.match(ir, /blaze_rt_timestamp_iso/, "the stamp is the runtime's ISO text");
+});
+
+test("a text decoder reads the bytes of the text they are", () => {
+  // A compiled text is utf8, so a decoder is the one thing a source asks of
+  // it: the text those bytes are written as.
+  const source = [
+    "export function name(bytes: Uint8Array): string {",
+    "  const decoder = new TextDecoder();",
+    "  return decoder.decode(bytes);",
+    "}",
+    "export function inline(bytes: Uint8Array): string {",
+    "  return new TextDecoder().decode(bytes);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(name(new Uint8Array(1)).length);\n` }, "main.ts", "name");
+  assert.match(ir, /blaze_rt_string_new/, "the bytes are copied into a text");
 });

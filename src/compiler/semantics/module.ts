@@ -347,6 +347,12 @@ export interface ModuleAnalysis {
    */
   signatures?: DeclaredFunction[];
   /**
+   * A declaration this file offers under another name, as `export { f as g }`
+   * writes. The declaration is still compiled under the name it was written
+   * with; the name a caller imports is the one the list offers.
+   */
+  exportNames?: readonly { local: string; exported: string }[];
+  /**
    * The modules this file offers names from, as `export { a } from "./x.ts"`
    * writes.
    *
@@ -354,7 +360,16 @@ export interface ModuleAnalysis {
    * what it offers is the name. A file that imports one resolves it through
    * this list to the module that wrote the function.
    */
-  reexports?: readonly { specifier: string; names: readonly string[] }[];
+  reexports?: readonly {
+    specifier: string;
+    names: readonly string[];
+    /**
+     * The names the other module declares, where this one offers them under
+     * another: `export { sleep as setTimeout } from "./x.ts"` offers `sleep`
+     * as `setTimeout`.
+     */
+    renames?: readonly { local: string; exported: string }[];
+  }[];
   /**
    * True when the read waited for the module graph to link a declaration an
    * import names. The graph reads such a file again once its imports are bound,

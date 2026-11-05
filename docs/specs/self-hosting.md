@@ -888,6 +888,168 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dd. The clock, and the bytes of a text read back
+
+    new Date().toISOString()          // the host's clock, written as ISO 8601
+    Date.now()                        // the milliseconds it is
+    new TextDecoder().decode(bytes)   // the text the bytes are
+
+**A date is the clock.** A source asks a date for two things: its stamp and its
+time. Both are runtime answers: `blaze_rt_now_ms` reads the wall clock in
+milliseconds, which is the number a date is held as, and `blaze_rt_timestamp_iso`
+writes it as the UTC ISO 8601 text the language writes. `new Date(ms)` is the
+milliseconds the source wrote, and `Date.now()` the same clock. A date held as a
+value of its own is the host's `Date`, which this compiler has no value for, and
+stays refused. The Nim adapter answers both from `std/times`.
+
+**A text decoder reads bytes back as text.** `new TextDecoder().decode(bytes)`
+is the text those bytes are written as, and the one encoding a compiled text is
+written in is utf8: the bytes are copied into a managed string by the runtime's
+own `blaze_rt_string_new`. A decoder is no value of its own — `const decoder =
+new TextDecoder()` holds a zero nothing reads — so what the read has to know is
+the name it was bound to, which the read types with the marker the decoder is.
+
+The total went from 319 to 306.
+
+### 4dc. A map under a number key, a window of a block, and the bytes of a text
+
+    new Map<number, number[]>()                // the key is the number
+    bytes.subarray(from, to)                   // the block, moved
+    Buffer.byteLength(text, "utf8")            // the bytes a text is
+
+**A map under a number key.** The dictionary's number key is the bits of the
+double written as text, and the sequence-valued entry points were written for a
+text key only. The same two entries are now written for a number key, which is
+the key the number-valued entries already use, and the read asks the key it was
+declared with. Five refusals in `toolchain/ir-wasm.ts` were maps of byte arrays
+keyed by number.
+
+**A window of a block.** `bytes.subarray(from, to)` is the block another value
+holds, moved by the offset and as long as the source wrote of it: the IR's
+buffer already had a `view` for a window of a block, and nothing in the frontend
+produced one. The read now produces it, the element size says which arrays are
+blocks of bytes a window may reach, and a length of a window is the count it was
+taken at rather than a header it does not have. A view of any sequence is a
+window, which is what a typed array bound to a name is.
+
+**The bytes of a text.** `Buffer.byteLength(text, "utf8")` is the number of bytes
+the text is written as, which the runtime already measures for a managed string
+and a literal alike; the encoding a source writes is the one a text is.
+
+The total went from 341 to 319, and the two together with the conditional spread
+of §4db are one batch.
+
+### 4db. A conditional spread writes the zero of the field it leaves out
+
+    { ...(c ? { async: true } : {}) }      // a truth the object may not carry
+
+Sixty-three refusals were one construct: an object literal that spreads a field
+only when a condition holds. The `? {} : { field: v }` form was read only where
+the field's type had `null` for its zero — a reference — because the compiler
+had no value that says "absent". It does not need one: a record here is laid out
+field by field from the type it is held at, so a field the literal leaves out
+*is* the zero of its type, written by the object pass when the object is built.
+The spread now writes that zero explicitly — false for a truth, 0 for a number,
+the empty text for a text, the empty list for a list, null for a reference —
+which is the value the field would have held anyway. A condition that holds
+false therefore leaves the object the object pass would have built, and the
+sources' `...(c ? { bigint: true } : {})` is read.
+
+The object pass had to learn the same shape for a choice of two lists: an empty
+list written out is an array of no length and one a name holds is a slice, and
+`describe` saw them as different, so the field was laid out as the unshaped
+handle. Two sequence arms of the same element are now the slice they are.
+
+The total went from 359 to 341.
+
+### 4da. A map of lists, a declaration read before it is written, and a push on an element
+
+    const kinds = new Map<string, string[]>();   // an entry is one double
+    kinds.set(k, seen);                          // the list is copied
+    const seen = kinds.get(k);                   // the block, or NULL
+    const walk = (b) => walked.add(b);           // the set declared below it
+    const walked = new Set<Block>();
+    positions[i].push(kind);                     // the element written back
+    items.slice()                                // the list copied
+
+**A map of lists.** A dictionary entry is one double, and a list is a block and
+a length, so a map could hold no list at all: `a map here holds a slice<text>,
+which a key cannot answer` was the largest single cluster left. The block is
+now what the entry carries. `m.set(k, list)` copies the list into a block the
+runtime laid out and stores the pointer; the copy matters twice, because the
+block's header says how many bytes it holds — which is the length the read
+answers — and because a list written out at the call site is a block of the
+stack its writer frees. `m.get(k)` answers that block, typed as the list the map
+holds, or NULL where the key is absent, which is the `undefined` the language
+reads. `has`, `delete`, `size` and the keyed entries are the dictionary's own.
+Two ABI entries carry it (`blaze_rt_dict_set_seq`, `blaze_rt_dict_get_seq`) and
+the Nim adapter answers both. Nineteen refusals went at once, and with them the
+`set`, `push` and empty-list refusals that followed from a value of no type:
+the total fell by forty-nine.
+
+**A declaration read before it is written.** `const walk = (x) => walked.add(x);
+const walked = new Set<Block>();` is a body the sources write: the binding is
+hoisted to the block and the closure runs after the declaration. Reading the
+block left to right made `walked` a name of no type, and every method written on
+it was a method of nothing. The declarations at a block's own level are now read
+before its statements — the annotation, the `new Set<...>()` it allocates, the
+class it names and the signature it states — and the declaration itself then
+confirms them.
+
+**A push on an element of a list of lists.** `positions[i].push(kind)` is a push
+on the list the element holds, and the grown list is written back at its index:
+the element is read, grown, and assigned. `a[i] = v` already wrote through a
+name, and this is the same write with the append on the right.
+
+**`slice()` copies.** `a.slice()` is `a.slice(0)`: from the first element to the
+last. The method took one or two arguments, so the whole-list copy — which the
+compiler's own sources write in the arrow default it fills — was refused.
+
+**A concatenation of nothing is zero long.** `a + []` allocated one element of
+room when the sum was empty, so the block's header said one element and a length
+read off it answered one. A block of no elements is a block of no bytes.
+
+The total went from 408 to 359, and `ai/model.ts` and
+`semantics/whole-numbers.ts` read whole.
+
+### 4cz. A coalesce that keeps a collection, `Object.is`, and a re-export
+
+    offsets.get(i) ?? new Set<number>()     // a set either way
+    Object.is(a, b)                          // the same value, not `===`
+    x.toString(16).padStart(8, "0")          // a hex text is a text
+    export { availableParallelism }          // an imported name offered
+    export { f as g }                        // offered under another name
+
+**A coalesce keeps the collection one of its arms names.** `m.get(k) ?? new
+Set()` is a set, but `shapeOf` read the whole as the *contract* type of the left
+arm — the opaque reference a set is carried as — so `collectionOfExpression`
+answered nothing for it and `add`, `has` and `size` were methods of no type.
+The coalesce asks each arm for the collection it names, and a declaration whose
+initializer is one records the collection it holds; the two together cleared
+seventeen refusals across six files, because `x ?? new Set()` and
+`x ?? new Map()` are how the compiler's own passes start an accumulator.
+
+**`Object.is` compares two numbers by their bits.** The language's same-value
+question differs from `===` twice: a NaN is the same as itself and `-0` is not
+`0`. Two numbers are compared by the runtime's `blaze_rt_number_same`, which
+compares the eight bytes; two texts, truths or references answer `===`, which
+already compares texts by what they say. The ABI entry is one C function, and
+the machine backend calls it through the same symbol.
+
+**A `fixed` value is a text.** `x.toString(16)` is lowered to a `fixed` value,
+and `shapeOf` knew `text` but not `fixed`, so `padStart` written on a hex text
+was not a text method; the value is also a pure read, so a method that needs it
+twice may ask twice.
+
+**A module offers the names it imports.** `export { availableParallelism }`
+where the name was imported is a re-export, not an export of a declaration the
+file does not have. The name resolves through the import's specifier, and the
+list's `as` is carried: `export { f as g }` offers `f` under `g`, which
+`declaredOffered` and `classOffered` follow through a re-export as well as
+directly.
+
+The total went from 428 to 415, and `core/platform-node.ts` reads whole.
+
 ### 4cy. A default a call may leave out, a padded text, and the shape a slice keeps
 
     const bump = (x: number, by: number = 1) => x + by;   // a default
@@ -2832,6 +2994,11 @@ What was closed this session, and what each was worth:
 | a field through a reference, the shape an assignment reads, a for-of over a constant, a key held in a name, `Array.from`, and the benchmark's gate (§4cw) | 472 → 447 |
 | a string is not a bracket, a readonly result type, a conditional arm, the constant scan's annotations, a function type as a signature, and a class across a type-only import or re-export (§4cx) | 447 → 432 |
 | an arrow's default, a typed loop index, a padded text, and the shape a slice keeps (§4cy) | 432 → 428 |
+| a coalesce that keeps a collection, `Object.is`, a hex text, and a re-export (§4cz) | 428 → 415 |
+| a map of lists, a declaration read before it is written, a push on an element, and `slice()` (§4da) | 408 → 359 |
+| a conditional spread writes the zero of the field it leaves out (§4db) | 359 → 341 |
+| a map under a number key, a window of a block, and the bytes of a text (§4dc) | 341 → 319 |
+| the clock, and the bytes of a text read back (§4dd) | 319 → 306 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

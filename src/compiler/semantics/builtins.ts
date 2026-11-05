@@ -42,6 +42,8 @@ const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 const U64: TypeExpr = { kind: "primitive", name: "u64" };
 const U256: TypeExpr = { kind: "primitive", name: "u256" };
 const ANY: TypeExpr = { kind: "ref", of: null };
+const POINTER: TypeExpr = { kind: "ptr", of: { kind: "primitive", name: "u8" } };
+const BOOLEAN: TypeExpr = { kind: "primitive", name: "bool" };
 
 /**
  * What a call of the SQLite facility has an effect on.
@@ -68,10 +70,21 @@ export const ARGV = "argv";
 
 export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
+  "blaze_rt_number_same": { params: [F64, F64], returns: BOOLEAN, arity: 2 },
+  "blaze_rt_text_length": { params: [TEXT], returns: F64, arity: 1 },
+  "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
+  "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
+  "blaze_rt_string_new": { params: [POINTER, F64], returns: TEXT, arity: 2 },
   "blaze_rt_dict_new": { params: [], returns: F64, arity: 0 },
   "blaze_rt_dict_get": { params: [F64, TEXT], returns: F64, arity: 2 },
   "blaze_rt_dict_set": { params: [F64, TEXT, F64], returns: F64, arity: 3 },
   "blaze_rt_dict_get_ref": { params: [F64, TEXT], returns: ANY, arity: 2 },
+  // The block is handed over as the pointer it is, not as the dynamic value a
+  // sequence becomes: the runtime copies the elements and keeps the pointer.
+  "blaze_rt_dict_set_seq": { params: [F64, TEXT, POINTER, F64, F64], returns: F64, arity: 5 },
+  "blaze_rt_dict_get_seq": { params: [F64, TEXT], returns: ANY, arity: 2 },
+  "blaze_rt_dict_set_seq_numkey": { params: [F64, F64, POINTER, F64, F64], returns: F64, arity: 5 },
+  "blaze_rt_dict_get_seq_numkey": { params: [F64, F64], returns: ANY, arity: 2 },
   "blaze_rt_dict_set_ref": { params: [F64, TEXT, ANY], returns: F64, arity: 3 },
   "blaze_rt_dict_get_text": { params: [F64, TEXT], returns: TEXT, arity: 2 },
   "blaze_rt_dict_set_text": { params: [F64, TEXT, TEXT], returns: F64, arity: 3 },

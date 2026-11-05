@@ -614,11 +614,40 @@ function isWrittenValue(expression: Expression): boolean {
     case "text":
       return expression.parts.every((part) => part.k === "text");
     case "buffer":
-      return expression.values.every(isWrittenValue);
+      return expression.view === undefined && expression.values.every(isWrittenValue);
     case "object":
       return expression.fields.every((field) => isWrittenValue(field.value));
     default:
       return false;
+  }
+}
+
+/**
+ * The bytes one element of a typed array is, or null where the element is not
+ * a number a typed array holds. It is what tells a window of a block from a
+ * window of values: only a block of numbers has bytes a window may reach.
+ */
+function numericWidth(type: TypeExpr): number | null {
+  if (type.kind !== "primitive") return null;
+  switch (type.name) {
+    case "u8":
+    case "i8":
+      return 1;
+    case "u16":
+    case "i16":
+      return 2;
+    case "u32":
+    case "i32":
+    case "f32":
+      return 4;
+    case "i64":
+    case "u64":
+    case "f64":
+    case "usize":
+    case "isize":
+      return 8;
+    default:
+      return null;
   }
 }
 
@@ -848,6 +877,11 @@ function repeatableExpression(value: Expression, pure?: (name: string) => boolea
     case "conditional":
       return repeatableExpression(value.condition, pure) && repeatableExpression(value.then, pure) && repeatableExpression(value.otherwise, pure);
     case "lengthOf":
+      return repeatableExpression(value.of, pure);
+    // A number written as text at a fixed width reads the number it was given:
+    // `x.toString(16)` asks the same question twice, and the padding of it is
+    // the padding of the same text.
+    case "fixed":
       return repeatableExpression(value.of, pure);
     // A text's own methods read the text and answer a new one: `text.slice(a,
     // b)` and `text.trim()` name the same text twice, so a value that asks one
@@ -1795,6 +1829,11 @@ function walkFunction(
         return;
       case "buffer":
         for (const value of expression.values) read(value);
+        if (expression.view !== undefined) {
+          read(expression.view.of);
+          read(expression.view.offset);
+          read(expression.view.count);
+        }
         return;
       case "text":
         for (const part of expression.parts) if (part.k === "value") read(part.value);
@@ -1989,6 +2028,11 @@ function arrowCaptures(
         return;
       case "buffer":
         for (const value of expression.values) read(value);
+        if (expression.view !== undefined) {
+          read(expression.view.of);
+          read(expression.view.offset);
+          read(expression.view.count);
+        }
         return;
       case "text":
         for (const part of expression.parts) if (part.k === "value") read(part.value);
@@ -2274,7 +2318,19 @@ function boxExpression(value: Expression, name: string, box: Boxed): Expression 
     case "sized":
       return { ...value, count: boxExpression(value.count, name, box) };
     case "buffer":
-      return { ...value, values: value.values.map((element) => boxExpression(element, name, box)) };
+      return {
+        ...value,
+        values: value.values.map((element) => boxExpression(element, name, box)),
+        ...(value.view === undefined
+          ? {}
+          : {
+              view: {
+                of: boxExpression(value.view.of, name, box),
+                offset: boxExpression(value.view.offset, name, box),
+                count: boxExpression(value.view.count, name, box),
+              },
+            }),
+      };
     case "text":
       return {
         ...value,
@@ -2317,6 +2373,7 @@ function boxExpression(value: Expression, name: string, box: Boxed): Expression 
         ...(value.base === null && value.target === name && box.list
           ? { target: BOXED_FIELD, base: box.name }
           : {}),
+        ...(value.index === undefined ? {} : { index: boxExpression(value.index, name, box) }),
         values: value.values.map((element) => boxExpression(element, name, box)),
       };
   }
@@ -2459,7 +2516,13 @@ function expressionReadsUpdate(value: Expression, name: string): boolean {
     case "sized":
       return expressionReadsUpdate(value.count, name);
     case "buffer":
-      return value.values.some((element) => expressionReadsUpdate(element, name));
+      return (
+        value.values.some((element) => expressionReadsUpdate(element, name)) ||
+        (value.view !== undefined &&
+          (expressionReadsUpdate(value.view.of, name) ||
+            expressionReadsUpdate(value.view.offset, name) ||
+            expressionReadsUpdate(value.view.count, name)))
+      );
     case "text":
       return value.parts.some((part) => part.k === "value" && expressionReadsUpdate(part.value, name));
     case "fixed":
@@ -3507,7 +3570,14 @@ class TypeScriptParser {
    * What this file offers is the name, and the link follows it to the module
    * that compiled the function.
    */
-  private readonly reexports: { specifier: string; names: string[]; line: number }[] = [];
+  private readonly reexports: {
+    specifier: string;
+    names: string[];
+    renames?: { local: string; exported: string }[];
+    line: number;
+  }[] = [];
+  /** `export { f as g }` of this file's own declarations, as local to offered. */
+  private readonly localExportRenames: { local: string; exported: string }[] = [];
   /**
    * Statements a single read produced past the first one, as a destructuring
    * declaration is a temporary and a binding for each name. The next block
@@ -3802,6 +3872,15 @@ class TypeScriptParser {
       const answered = this.declaredCollections.get(value.name);
       if (answered !== undefined) return answered;
     }
+    // `a ?? b` is the collection of whichever arm names one: `m.get(k) ?? new
+    // Set()` is a set, and the arm that writes nothing is not the value's shape.
+    // The shape of the whole is the *contract* type of the left arm — the
+    // opaque reference — so a method written on it was not the dictionary's.
+    if (value.k === "binary" && value.op === "??") {
+      const held = this.collectionOfExpression(value.left);
+      if (held !== null) return held;
+      return this.collectionOfExpression(value.right);
+    }
     return this.collectionOfShape(this.shapeOf(value));
   }
 
@@ -3871,6 +3950,9 @@ class TypeScriptParser {
         shape = { kind: "primitive", name: "f64" };
         break;
       case "text":
+        // A text is a text however it was written: `x.toString(16)` is a
+        // `fixed` value, and every text method is a method of it.
+      case "fixed":
         shape = { kind: "text" };
         break;
       case "buffer": {
@@ -4167,7 +4249,10 @@ class TypeScriptParser {
       case "binary":
         return this.holdsUnsettledArray(value.left) || this.holdsUnsettledArray(value.right);
       case "buffer":
-        return value.values.some((written) => this.holdsUnsettledArray(written));
+        return (
+          value.values.some((written) => this.holdsUnsettledArray(written)) ||
+          (value.view !== undefined && this.holdsUnsettledArray(value.view.count))
+        );
       case "object":
         return value.fields.some((field) => this.holdsUnsettledArray(field.value));
       default:
@@ -5307,13 +5392,31 @@ class TypeScriptParser {
     for (const declaration of declarations) {
       for (const entry of declaration.entries) declared.add(entry.name);
     }
+    // The names the file's imports bind, so a list that offers one is the
+    // re-export it is: `export { availableParallelism }` where the name was
+    // imported from `node:os` offers what that module offers.
+    const importedValueFrom = new Map<string, string>();
+    for (const entry of imports) {
+      for (const name of entry.names ?? []) importedValueFrom.set(name, entry.specifier);
+      for (const rename of entry.renames ?? []) importedValueFrom.set(rename.local, entry.specifier);
+    }
     for (const name of Object.keys(namesExported)) {
-      if (!declared.has(name)) {
+      if (declared.has(name)) continue;
+      const specifier = importedValueFrom.get(name);
+      if (specifier === undefined) {
         this.report(
           `"${name}" is exported but not declared here`,
           `a module offers the functions it declares; ${path} declares ${declared.size === 0 ? "none" : [...declared].map((name) => `"${name}"`).join(", ")}`,
         );
+        continue;
       }
+      const rename = this.localExportRenames.find((one) => one.local === name);
+      this.reexports.push({
+        specifier,
+        names: [name],
+        ...(rename === undefined ? {} : { renames: [rename] }),
+        line: 0,
+      });
     }
     // A re-export names another module, so that module is read like one this
     // file imports: the graph has to resolve it to follow the name.
@@ -5330,6 +5433,7 @@ class TypeScriptParser {
       ...(valueShapes.size === 0 ? {} : { valueShapes }),
       ...(this.droppedExports.length === 0 ? {} : { signatures: this.droppedExports }),
       ...(this.reexports.length === 0 ? {} : { reexports: this.reexports }),
+      ...(this.localExportRenames.length === 0 ? {} : { exportNames: this.localExportRenames }),
       functions,
       default: defaultExport,
       body,
@@ -5788,9 +5892,18 @@ class TypeScriptParser {
     if (exported && this.at("{")) {
       const list = this.readExportNames();
       if (list.from === null) {
+        // A list of this file's own declarations offers them under the names
+        // it writes. A name it imported is not declared here, and is answered
+        // once the imports are known: see `parseModule`.
         for (const name of list.names) namesExported[name] = true;
+        for (const rename of list.renames) this.localExportRenames.push(rename);
       } else {
-        this.reexports.push({ specifier: list.from, names: list.names, line: this.peek().line });
+        this.reexports.push({
+          specifier: list.from,
+          names: list.names,
+          ...(list.renames.length === 0 ? {} : { renames: list.renames }),
+          line: this.peek().line,
+        });
       }
       return null;
     }
@@ -5874,10 +5987,18 @@ class TypeScriptParser {
     return isDefault ? parsed.name : null;
   }
 
-  /** `export { f, g }`: the names the file offers, and the `from` they may come from. */
-  private readExportNames(): { names: string[]; from: string | null } {
+  /**
+   * `export { f, g }`: the names the file offers, the names it offers them
+   * under, and the `from` they may come from.
+   *
+   * `names` are the names the file holds — the declaration's own name, or the
+   * name an import binds — and `renames` is the list of the ones a caller reads
+   * under another name.
+   */
+  private readExportNames(): { names: string[]; renames: { local: string; exported: string }[]; from: string | null } {
     this.next();
     const names: string[] = [];
+    const renames: { local: string; exported: string }[] = [];
     while (!this.at("}") && this.peek().kind !== "end") {
       const name = this.next();
       if (name.kind !== "ident") {
@@ -5898,11 +6019,15 @@ class TypeScriptParser {
       }
       names.push(name.text);
       // `export { sleep as setTimeout }` offers the value it names under the
-      // name the `as` writes. The declaration is the one the file wrote, so the
-      // name marked as exported is `sleep`; the rename is read past.
+      // name the `as` writes. The declaration is the one the file wrote, and
+      // the name a caller imports is the one the list offers.
       if (this.at("as")) {
         this.next();
-        if (this.peek().kind === "ident") this.next();
+        const alias = this.peek();
+        if (alias.kind === "ident") {
+          this.next();
+          renames.push({ local: name.text, exported: alias.text });
+        }
       }
       if (!this.accept(",")) break;
     }
@@ -5918,11 +6043,11 @@ class TypeScriptParser {
       this.accept(";");
       if (specifier.kind !== "string") {
         this.report("a re-export names the module it comes from", `as in export { a } from "./x.ts"`, specifier);
-        return { names, from: null };
+        return { names, renames, from: null };
       }
-      return { names, from: specifier.text };
+      return { names, renames, from: specifier.text };
     }
-    return { names, from: null };
+    return { names, renames, from: null };
   }
 
   /**
@@ -6437,7 +6562,7 @@ class TypeScriptParser {
    */
   private dictionaryCall(
     key: TypeExpr,
-    operation: "set" | "setText" | "setRef" | "get" | "getText" | "getRef" | "has" | "delete" | "keyAt",
+    operation: "set" | "setText" | "setRef" | "get" | "getText" | "getRef" | "setSeq" | "getSeq" | "has" | "delete" | "keyAt",
   ): string | null {
     const kind = this.keyKind(key);
     if (kind === null) return null;
@@ -6453,6 +6578,8 @@ class TypeScriptParser {
     if (operation === "getText") return `blaze_rt_dict_get${suffix}_text`;
     if (operation === "getRef") return `blaze_rt_dict_get${suffix}_ref`;
     if (operation === "set") return `blaze_rt_dict_set${suffix}`;
+    if (operation === "setSeq") return `blaze_rt_dict_set_seq${suffix}`;
+    if (operation === "getSeq") return `blaze_rt_dict_get_seq${suffix}`;
     if (operation === "setText") return `blaze_rt_dict_set${suffix}_text`;
     return `blaze_rt_dict_set${suffix}_ref`;
   }
@@ -6917,6 +7044,11 @@ class TypeScriptParser {
       this.report('expected "{"', "a function body is written in braces");
       return [];
     }
+    // The declarations the block writes at its own level are known before its
+    // statements are read: a closure written above one reads it, because the
+    // binding is hoisted to the block and the closure runs after the
+    // declaration has run.
+    this.prescanLocals();
     // A block reads the values a test settled in the block around it, and
     // everything it settles itself is forgotten where the block ends.
     const outer = this.narrowed;
@@ -6955,6 +7087,110 @@ class TypeScriptParser {
       this.narrowed = outer;
     }
     return statements;
+  }
+
+  /**
+   * The declarations a block writes at its own level, read before its
+   * statements.
+   *
+   * JavaScript hoists a declaration's binding to the block, and a closure
+   * written above the declaration reads the value the declaration has written
+   * by the time the closure runs: `const walk = (x) => walked.add(x); const
+   * walked = new Set<Block>();` is a body the source writes, and reading it
+   * left to right made `walked` a name of no type. What each name is — the
+   * annotation it writes, the `new Set<...>()` it allocates, or the class it is
+   * declared as — is read here, and the declaration itself then confirms it.
+   *
+   * Only the block's own level is scanned: a name a block inside it declares is
+   * that block's, and is read where the block is.
+   */
+  private prescanLocals(): void {
+    const open = this.position - 1;
+    if (this.tokens[open]?.text !== "{") return;
+    const close = this.blockEnd(open);
+    if (close < 0) return;
+    const tokens = this.tokens;
+    let depth = 0;
+    for (let at = open + 1; at < close; at += 1) {
+      const token = tokens[at];
+      if (token === undefined || token.kind === "end") return;
+      if (token.kind === "punct") {
+        if (token.text === "{" || token.text === "(" || token.text === "[") depth += 1;
+        else if (token.text === "}" || token.text === ")" || token.text === "]") depth -= 1;
+        continue;
+      }
+      if (depth !== 0) continue;
+      if (token.text !== "const" && token.text !== "let" && token.text !== "var") continue;
+      const name = tokens[at + 1];
+      if (name === undefined || name.kind !== "ident" || this.valueTypes.has(name.text)) continue;
+      const cursor = at + 2;
+      if (tokens[cursor]?.text === ":") {
+        // The annotation runs to the `=` of the value it initialises, or to the
+        // `;` of a declaration that writes none.
+        let end = cursor + 1;
+        let inner = 0;
+        while (end < close) {
+          const written = tokens[end]?.kind === "punct" ? (tokens[end] as Token).text : "";
+          if (written === "<" || written === "(" || written === "[" || written === "{") inner += 1;
+          else if (written === ">" || written === ")" || written === "]" || written === "}") inner -= 1;
+          else if (written === ">>") inner -= 2;
+          else if (written === ">>>") inner -= 3;
+          else if (inner === 0 && (written === "=" || written === ";")) break;
+          end += 1;
+        }
+        this.prescanDeclaration(name.text, cursor + 1, end);
+        continue;
+      }
+      // `const seen = new Set<Block>()` names the collection the name holds in
+      // the allocation itself.
+      if (tokens[cursor]?.text !== "=" || tokens[cursor + 1]?.text !== "new") continue;
+      const head = tokens[cursor + 2];
+      if (head === undefined || head.kind !== "ident") continue;
+      if (head.text !== "Set" && head.text !== "Map" && head.text !== "WeakSet" && head.text !== "WeakMap") continue;
+      const collection = this.prescanCollection(cursor + 2);
+      if (collection !== null) this.valueCollections.set(name.text, collection);
+    }
+  }
+
+  /** The type, shape, collection, class and signature a declaration writes. */
+  private prescanDeclaration(name: string, start: number, end: number): void {
+    if (end <= start) return;
+    // A declaration this scan cannot resolve is one the read of the declaration
+    // reports, and the scan writes nothing for it.
+    const saved = this.diagnostics;
+    this.diagnostics = new Diagnostics();
+    try {
+      const signature = this.functionTypeFrom(start, end);
+      if (signature !== null) this.valueFunctions.set(name, signature);
+      const collection = this.annotationCollectionAt(start, new Set(["=", ";"]));
+      const shape = resolveAnnotation(this.tokens, start, end, this.typeTable);
+      this.valueTypes.set(name, this.typeExprOfShape(shape));
+      const read = this.shapeForRead(shape);
+      if (read !== null) this.valueShapes.set(name, read);
+      const held = collection ?? this.collectionOfShape(shape);
+      if (held !== null) this.valueCollections.set(name, held);
+      const head = this.tokens[start];
+      if (head !== undefined && head.kind === "ident" && this.classTable.names.has(head.text)) {
+        this.valueClasses.set(name, head.text);
+      }
+    } catch {
+      this.valueTypes.delete(name);
+    } finally {
+      this.diagnostics = saved;
+    }
+  }
+
+  /** The collection a `new Set<...>` or `new Map<...>` allocation names. */
+  private prescanCollection(at: number): CollectionValue | null {
+    const saved = this.diagnostics;
+    this.diagnostics = new Diagnostics();
+    try {
+      return this.annotationCollectionAt(at, new Set(["("]));
+    } catch {
+      return null;
+    } finally {
+      this.diagnostics = saved;
+    }
   }
 
   /** A body that follows a keyword: a block, or the one statement written. */
@@ -7079,6 +7315,10 @@ class TypeScriptParser {
         annotationMap ??
         this.collectionExpressions.get(init) ??
         (init.k === "call" ? this.declaredCollections.get(init.name) : undefined) ??
+        // `m.get(k) ?? new Set()` is the arm that names a collection, and a
+        // name bound to it holds one: what the arm is is read the same way a
+        // method written on the name is.
+        this.collectionOfExpression(init) ??
         null;
       if (collection !== null) this.valueCollections.set(name.text, collection);
       else this.valueCollections.delete(name.text);
@@ -8092,10 +8332,7 @@ class TypeScriptParser {
     // its own line it is the write that keeps it. A field is written back into
     // the field it was read from, with the object it belongs to unchanged.
     if (value.k === "append") {
-      const array: Expression =
-        value.base === null
-          ? { k: "ident", name: value.target }
-          : { k: "member", base: { k: "ident", name: value.base }, field: value.target };
+      const array: Expression = appendArray(value);
       let call: Expression;
       if (value.spreads === undefined) {
         call = { k: "call", name: value.helper, args: [array, ...value.values] };
@@ -8111,6 +8348,9 @@ class TypeScriptParser {
             : { k: "buffer", element, values: [written] };
           call = { k: "binary", op: "+", left: call, right: joined };
         });
+      }
+      if (value.index !== undefined) {
+        return { kind: "indexAssign", buffer: value.target, index: value.index, op: "=", value: call, line: token.line };
       }
       if (value.base === null) {
         return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
@@ -9817,6 +10057,60 @@ class TypeScriptParser {
           );
           return this.hole();
         }
+        // `Object.is(a, b)` is the question of whether two values are the same
+        // value, which the language answers differently from `===` in two
+        // places: a NaN is the same as itself, and `-0` is not `0`. Two numbers
+        // are compared by the bits they are held as, which the runtime does;
+        // two texts, truths or references answer `===`, which compares texts by
+        // what they say and the others by the value they hold.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Object" &&
+          target.field === "is"
+        ) {
+          const args = this.readCallArguments();
+          if (args.length !== 2) {
+            this.report("Object.is compares two values", `it was given ${args.length}`, this.peek());
+            return this.hole();
+          }
+          const numeric = (type: TypeExpr): boolean => type.kind === "primitive" && type.name !== "bool";
+          const left = args[0] as Expression;
+          const right = args[1] as Expression;
+          const made: Expression = numeric(this.valueTypeOf(left)) || numeric(this.valueTypeOf(right))
+            ? { k: "call", name: "blaze_rt_number_same", args: [left, right] }
+            : { k: "binary", op: "===", left, right };
+          this.expressionTypes.set(made, BOOLEAN_RESULT);
+          replace(made);
+          continue;
+        }
+        // `Buffer.byteLength(text, "utf8")` is the number of bytes the text is
+        // written as, which is what the runtime already measures for a managed
+        // string and a literal alike. The encoding is the one a text is written
+        // in: a source asks for utf8 or asks for nothing.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Buffer" &&
+          target.field === "byteLength"
+        ) {
+          const args = this.readCallArguments([TEXT_RESULT, TEXT_RESULT]);
+          const length = args[0];
+          const encoding = args[1];
+          const utf8 = encoding === undefined || (encoding.k === "text" && textValue(encoding) === "utf8");
+          if (length === undefined || !utf8 || args.length > 2) {
+            this.report(
+              "Buffer.byteLength measures a text written as utf8",
+              "the source writes Buffer.byteLength(text) or Buffer.byteLength(text, `utf8`)",
+              this.peek(),
+            );
+            return this.hole();
+          }
+          const measured: Expression = { k: "call", name: "blaze_rt_text_length", args: [length] };
+          this.expressionTypes.set(measured, NUMBER_RESULT);
+          replace(measured);
+          continue;
+        }
         // `Object.keys(TABLE)` and `Object.values(TABLE)` over a constant object
         // are the names or the values it was written with, which the file
         // already holds. An object built at run time has no shape the parser
@@ -10145,17 +10439,98 @@ class TypeScriptParser {
           // with no name is one the link will name.
           const waitsForLink = this.importsArePending();
           const expectedParams = this.expectedMethodParams(target.base, target.field);
+          // `m.set(k, v)` writes one key and one value, so the arguments are
+          // read at the key and value types the map was declared with: an empty
+          // list written as the value is built at the element type the map
+          // holds, and an object literal written there keeps its fields.
+          const heldCollectionHere = this.collectionOfExpression(target.base);
+          const setTypes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && target.field === "set"
+            ? [heldCollectionHere.key, heldCollectionHere.value]
+            : expectedParams.map((param) => param.type);
+          const setShapes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && target.field === "set"
+            ? [null, heldCollectionHere.valueShape ?? this.shapeOfTypeExpr(heldCollectionHere.value)]
+            : expectedParams.map((param) => param.shape);
           const args = this.readCallArguments(
-            expectedParams.map((param) => param.type),
+            setTypes,
             callback,
             target.field === "push" || target.field === "splice",
             waitsForLink,
             this.writtenElementType(target.base, target.field),
-            expectedParams.map((param) => param.shape),
+            setShapes,
             this.writtenElementShape(target.base, target.field),
           );
           const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
           const receiver = target.base;
+          // `Date.now()` is the clock, and a date's time is the number it is
+          // held as; its stamp is the text `blaze_rt_timestamp_iso` writes.
+          if (
+            target.base.k === "ident" &&
+            target.base.name === "Date" &&
+            target.field === "now" &&
+            args.length === 0
+          ) {
+            const now: Expression = { k: "call", name: "blaze_rt_now_ms", args: [] };
+            this.expressionTypes.set(now, NUMBER_RESULT);
+            replace(now);
+            continue;
+          }
+          if ((target.field === "toISOString" || target.field === "getTime") && args.length === 0) {
+            const held = this.valueTypeOf(receiver);
+            if (held.kind === "primitive" && held.name === "f64") {
+              if (target.field === "getTime") {
+                replace(receiver);
+                continue;
+              }
+              const stamp: Expression = { k: "call", name: "blaze_rt_timestamp_iso", args: [] };
+              this.expressionTypes.set(stamp, TEXT_RESULT);
+              replace(stamp);
+              continue;
+            }
+          }
+          // `new TextDecoder().decode(bytes)` is the text those bytes are
+          // written as: the runtime copies them into a managed string.
+          if (target.field === "decode" && args.length === 1) {
+            const held = this.valueTypeOf(receiver);
+            const decoder = held.kind === "ref" && held.name === "__TextDecoder";
+            const bytes = this.valueTypeOf(args[0] as Expression);
+            const element = bytes.kind === "slice" || bytes.kind === "array" ? bytes.of : null;
+            if (decoder && element !== null && element.kind === "primitive" && element.name === "u8") {
+              const heldBytes = `__bytes${this.fieldCount++}`;
+              const sequence: TypeExpr = { kind: "slice", of: element };
+              this.pendingBefore.push({ kind: "declare", name: heldBytes, type: sequence, init: args[0] as Expression, line: callLine });
+              this.valueTypes.set(heldBytes, sequence);
+              const decoded: Expression = {
+                k: "call",
+                name: "blaze_rt_string_new",
+                args: [{ k: "ident", name: heldBytes }, { k: "length", buffer: heldBytes }],
+              };
+              this.expressionTypes.set(decoded, TEXT_RESULT);
+              replace(decoded);
+              continue;
+            }
+          }
+          // `bytes.subarray(from, to)` is a window of the same block: no bytes
+          // are copied, and what the source wrote of is what the stores of the
+          // window reach. A window with no `to` reaches the end of the block.
+          if (target.field === "subarray" && (args.length === 1 || args.length === 2)) {
+            const held = this.valueTypeOf(receiver);
+            const element = held.kind === "slice" || held.kind === "array" ? held.of : null;
+            const width = element === null ? null : numericWidth(element);
+            if (element !== null && width !== null) {
+              const offset = args[0] as Expression;
+              const stop = args[1] ?? { k: "lengthOf" as const, of: receiver };
+              const count: Expression = { k: "binary", op: "-", left: stop, right: offset };
+              const viewed: Expression = {
+                k: "buffer",
+                element: typeToString(element),
+                values: [],
+                view: { of: receiver, offset, count },
+              };
+              this.expressionTypes.set(viewed, { kind: "slice", of: element });
+              replace(viewed);
+              continue;
+            }
+          }
           // `m.get(k)`, `s.add(v)`: a map is a handle on the runtime's
           // dictionary, and its methods are the dictionary's. The receiver may
           // be a name, a field of an interface, or the map a function answered.
@@ -10220,6 +10595,30 @@ class TypeScriptParser {
             if (place === null && receiver.k === "member") {
               const owner = this.writeTarget(receiver.base, callLine);
               if (owner !== null) place = { target: receiver.field, base: owner };
+            }
+            // `positions[i].push(x)` is a push on the list the element holds.
+            // A list of lists is a block of blocks, so the element is read,
+            // grown, and written back at its index: the push answers the list
+            // the name has afterwards, exactly as a push on a name does.
+            if (place === null && receiver.k === "index" && receiver.base.k === "ident") {
+              const held = this.valueTypeOf(receiver);
+              if (
+                (held.kind === "slice" || held.kind === "array") &&
+                (target.field === "push" ? args.length >= 1 : args.length === 0)
+              ) {
+                const helper = spreads === null ? this.appendHelper(target.field, held.of, args.length, callLine) : null;
+                replace({
+                  k: "append",
+                  target: receiver.base.name,
+                  base: null,
+                  index: receiver.index,
+                  helper: helper?.name ?? "",
+                  op: target.field,
+                  values: args,
+                  ...(spreads === null ? {} : { spreads, element: held.of }),
+                });
+                continue;
+              }
             }
             const sequence = place === null ? null : this.valueTypeOf(receiver);
             if (
@@ -11995,24 +12394,6 @@ class TypeScriptParser {
     if (method === "replace" && args.length === 2) {
       return call("blaze_rt_regex_replace", [...head, args[1] as Expression], TEXT_RESULT);
     }
-    // `text.padEnd(width)` and `text.padStart(width, fill)` are the text with
-    // the fill repeated to the width it is short by. The fill is one character
-    // — the default is a space — so repeating it exactly as many times as the
-    // width is short by is the padding the language writes.
-    if ((method === "padEnd" || method === "padStart") && (args.length === 1 || args.length === 2)) {
-      const width = args[0] as Expression;
-      const fill = args[1] ?? { k: "text" as const, parts: [{ k: "text" as const, value: " " }] };
-      const character = fill.k === "text" && fill.parts.length === 1 && fill.parts[0]?.k === "text"
-        ? Array.from((fill.parts[0] as { value: string }).value)
-        : [];
-      if (character.length === 1 && this.repeatable(receiver) && this.repeatable(width)) {
-        const short = { k: "binary" as const, op: "-", left: width, right: { k: "lengthOf" as const, of: receiver } };
-        const padding = call(this.repeatHelper(this.peek().line).name, [fill, short]);
-        return method === "padEnd"
-          ? { k: "binary", op: "+", left: receiver, right: padding }
-          : { k: "binary", op: "+", left: padding, right: receiver };
-      }
-    }
     if (method === "split" && args.length === 1) {
       return call("blaze_rt_regex_split", head, { kind: "slice", of: TEXT_RESULT });
     }
@@ -12243,11 +12624,11 @@ class TypeScriptParser {
         ? Array.from((fill.parts[0] as { value: string }).value)
         : [];
       if (character.length === 1 && this.repeatable(receiver) && this.repeatable(width)) {
-        const short = { k: "binary" as const, op: "-", left: width, right: { k: "lengthOf" as const, of: receiver } };
+        const short = { k: "binary" as const, op: "-" as const, left: width, right: { k: "lengthOf" as const, of: receiver } };
         const padding = call(this.repeatHelper(this.peek().line).name, [fill, short]);
         return method === "padEnd"
-          ? { k: "binary", op: "+", left: receiver, right: padding }
-          : { k: "binary", op: "+", left: padding, right: receiver };
+          ? { k: "binary" as const, op: "+" as const, left: receiver, right: padding }
+          : { k: "binary" as const, op: "+" as const, left: padding, right: receiver };
       }
     }
     if (method === "split" && args.length === 1) {
@@ -12340,7 +12721,9 @@ class TypeScriptParser {
     args: readonly Expression[],
     line: number,
   ): Expression {
-    const wanted = method === "join" ? [0, 1] : method === "slice" ? [1, 2] : [1];
+    // `a.slice()` is the list copied, which is the same answer `a.slice(0)`
+    // gives: from the first element to the last.
+    const wanted = method === "join" ? [0, 1] : method === "slice" ? [0, 1, 2] : [1];
     if (!wanted.includes(args.length)) {
       this.report(
         `${method} takes ${wanted.join(" or ")} argument${wanted.length === 1 && wanted[0] === 1 ? "" : "s"}`,
@@ -12353,7 +12736,9 @@ class TypeScriptParser {
     // language does when it is given no separator.
     const extra = method === "join" && args.length === 0
       ? [{ k: "text" as const, parts: [{ k: "text" as const, value: "," }] }]
-      : [...args];
+      : method === "slice" && args.length === 0
+        ? [{ k: "literal" as const, text: "0" }]
+        : [...args];
     const helper = this.sequenceMethodHelper(method, element, extra.length, line);
     const call: Expression = { k: "call", name: helper.name, args: [receiver, ...extra] };
     // `a.at(i)` answers one element of the list, the way `find` does, so what
@@ -13230,6 +13615,9 @@ class TypeScriptParser {
         return null;
       }
       if (method === "set" && args.length === 2) {
+        if (this.storedKind(collection.value) === "sequence") {
+          return this.sequenceSet(receiver, collection, args[0] as Expression, args[1] as Expression);
+        }
         const name = this.collectionSetNameFor(collection);
         if (name === null) return null;
         return { name, args: [receiver, ...args], returns: NUMBER_RESULT };
@@ -13246,7 +13634,14 @@ class TypeScriptParser {
     };
     if (method === "get" && collection.kind === "map" && args.length === 1) {
       const kind = this.storedKind(collection.value);
-      if (kind === "other" || kind === "sequence") {
+      // A list is a block and a length, and an entry is one double: the block
+      // is copied when it is written, and the copy's header carries its length,
+      // so the pointer alone is the list a key answers. Only a text key is
+      // answered so far: the dictionary's numbered and reference keys are
+      // written for one value, not for a block.
+      const sequence = kind === "sequence" &&
+        (this.keyKind(collection.key) === "text" || this.keyKind(collection.key) === "number");
+      if (kind === "other" || (kind === "sequence" && !sequence)) {
         this.report(
           `a map here holds a ${typeToString(collection.value)}, which a key cannot answer`,
           "a map value is a number, a text, a truth or a reference",
@@ -13265,13 +13660,18 @@ class TypeScriptParser {
       // holds the handle, and the IR needs the type of the call to be the
       // reference it is rather than the double it is carried in. A number and a
       // truth are the double an entry holds, so they read as an entry.
-      const heldName =
-        kind === "text"
+      const heldName = sequence
+        ? this.dictionaryCall(collection.key, "getSeq") ?? "blaze_rt_dict_get_seq"
+        : kind === "text"
           ? this.dictionaryCall(collection.key, "getText") ?? "blaze_rt_dict_get_text"
           : kind === "reference"
             ? this.dictionaryCall(collection.key, "getRef") ?? "blaze_rt_dict_get_ref"
             : this.dictionaryCall(collection.key, "get") ?? "blaze_rt_dict_get";
       const read = call(heldName, [receiver, args[0] as Expression], collection.value);
+      // The runtime answers the block the list is; the read of the entry is
+      // the list the map holds, and the call is typed as it so a field, an
+      // index or a length written on it reads the list.
+      if (sequence) (read as Expression & { returns?: TypeExpr }).returns = collection.value;
       const held: Expression = kind === "bool"
         ? { k: "binary", op: "!=", left: read, right: { k: "literal", text: "0" } }
         : read;
@@ -13281,18 +13681,25 @@ class TypeScriptParser {
       // reference is expected is boxed into a handle, and a boxed number is
       // not the absence of an object: reading a field of one reads the
       // runtime's table as an object.
-      const otherwise: Expression = kind === "text"
+      // A sequence's absence is the null block: the runtime answers NULL for a
+      // key it does not hold, and a read of a list with no block is the absence
+      // the language spells `undefined`.
+      const otherwise: Expression = (kind === "text" && !sequence)
         ? { k: "text", parts: [{ k: "text", value: "" }] }
-        : kind === "reference"
+        : kind === "reference" || sequence
           ? { k: "null" }
           : { k: "literal", text: "0" };
       const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise };
-      const answer = kind === "reference" ? ANY_TYPE : kind === "bool" ? BOOLEAN_RESULT : collection.value;
+      const answer = sequence ? collection.value : kind === "reference" ? ANY_TYPE : kind === "bool" ? BOOLEAN_RESULT : collection.value;
       this.expressionTypes.set(chosen, answer);
       // A map whose value the source named keeps the fields that name holds,
       // so a member chain written through the value reads them.
       const valueShape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
       if (kind === "reference" && valueShape.kind !== "any") this.expressionShapes.set(chosen, valueShape);
+      if (sequence) {
+        const element = valueShape.kind === "list" ? valueShape.of : { kind: "any" as const };
+        this.expressionShapes.set(chosen, { kind: "list", of: element });
+      }
       // A set or a map held in a dictionary is one handle, and the entry holds
       // it as the number it is: the value a key answers is a collection of its
       // own, and the questions written after it — `has`, `add`, `get` — are the
@@ -13354,6 +13761,77 @@ class TypeScriptParser {
       : made;
     this.expressionTypes.set(answer, lowered.returns);
     return answer;
+  }
+
+  /**
+   * `m.set(k, list)` where the map holds lists.
+   *
+   * The list is copied into a block the runtime laid out, and the entry carries
+   * the pointer: the block's header says how many bytes it holds, which is the
+   * length the read of the entry answers. A copy is what makes the length
+   * travel with the entry, and it is also what keeps a list written out at the
+   * call site — a block of the stack the name that wrote it frees — from
+   * outliving its writer.
+   */
+  private sequenceSet(
+    receiver: Expression,
+    collection: CollectionValue,
+    key: Expression,
+    value: Expression,
+  ): { name: string; args: Expression[]; returns: TypeExpr } | null {
+    if (collection.value.kind !== "slice" && collection.value.kind !== "array") return null;
+    const element = collection.value.of;
+    const bytes = this.elementBytes(element);
+    if (bytes === null) {
+      this.report(
+        `a map here holds a list of ${typeToString(element)}`,
+        "a list a map holds is of numbers, texts, truths or references",
+        this.peek(),
+      );
+      return null;
+    }
+    const list: TypeExpr = { kind: "slice", of: element };
+    const copy = this.sequenceMethod("slice", element, value, [], this.peek().line);
+    const held = `__seq${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: held, type: list, init: copy, line: this.peek().line });
+    this.valueTypes.set(held, list);
+    const valueShape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
+    if (valueShape.kind === "list") this.valueShapes.set(held, valueShape);
+    return {
+      name: this.dictionaryCall(collection.key, "setSeq") ?? "blaze_rt_dict_set_seq",
+      args: [
+        receiver,
+        key,
+        { k: "ident", name: held },
+        { k: "length", buffer: held },
+        { k: "literal", text: String(bytes) },
+      ],
+      returns: NUMBER_RESULT,
+    };
+  }
+
+  /** How many bytes one element of a list is, or null where no list of it is held. */
+  private elementBytes(type: TypeExpr): number | null {
+    if (type.kind === "text" || type.kind === "ref" || type.kind === "slice" || type.kind === "array" || type.kind === "ptr") return 8;
+    if (type.kind !== "primitive") return null;
+    switch (type.name) {
+      case "bool":
+      case "u8":
+      case "i8":
+        return 1;
+      case "u16":
+      case "i16":
+        return 2;
+      case "u32":
+      case "i32":
+      case "f32":
+        return 4;
+      case "i256":
+      case "u256":
+        return 32;
+      default:
+        return 8;
+    }
   }
 
   /** The dictionary call that writes a map entry, by what its key and value are. */
@@ -14176,9 +14654,9 @@ class TypeScriptParser {
    * only when the condition holds.
    *
    * The answer is false where the spread is not one of the two forms this can
-   * read — an arm that writes no field and an arm that writes fields whose
-   * absence is the null reference — and the caller then refuses the spread the
-   * way it refused every one.
+   * read — an arm that writes no field and an arm that writes fields whose type
+   * has a zero — and the caller then refuses the spread the way it refused
+   * every one.
    */
   private spreadOfOneArm(
     conditional: Expression & { k: "conditional" },
@@ -14195,24 +14673,42 @@ class TypeScriptParser {
     const holdsThen = written === conditional.then;
     for (const field of written.fields) {
       const declared = expected.fields.get(field.name);
-      if (declared === undefined || !this.absenceIsNull(declared.type)) return false;
+      if (declared === undefined || this.absenceExpression(declared.type) === null) return false;
     }
     for (const field of written.fields) {
       const declared = expected.fields.get(field.name) as ResolvedField;
       this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
+      const absent = this.absenceExpression(declared.type) as Expression;
       put(field.name, {
         k: "conditional",
         condition: conditional.condition,
-        then: holdsThen ? field.value : { k: "null" },
-        otherwise: holdsThen ? { k: "null" } : field.value,
+        then: holdsThen ? field.value : absent,
+        otherwise: holdsThen ? absent : field.value,
       }, true);
     }
     return true;
   }
 
-  /** Whether a value of this type has `null` for the zero a field is written at. */
-  private absenceIsNull(type: ResolvedType): boolean {
-    return type.kind === "ref" || type.kind === "record" || type.kind === "any";
+  /**
+   * The value a field holds when the spread that would write it writes nothing.
+   *
+   * A record here is laid out field by field from the type it is held at, so a
+   * field the literal leaves out is the zero of its type: a number is zero, a
+   * truth is false, a text is empty, a list is empty and a reference is null.
+   * The spread writes that zero explicitly, which is the value the field would
+   * have held anyway, so a condition that holds false leaves the object the
+   * object pass would have built. A type with no such zero — a function, a
+   * collection that is a handle — is refused rather than guessed.
+   */
+  private absenceExpression(type: ResolvedType): Expression | null {
+    if (type.kind === "ref" || type.kind === "record" || type.kind === "any") return { k: "null" };
+    if (type.kind === "text") return { k: "text", parts: [] };
+    if (type.kind === "primitive") return { k: "literal", text: "0" };
+    if (type.kind === "list") {
+      const element = this.typeExprOfShape(type.of);
+      return { k: "buffer", element: typeToString(element), values: [] };
+    }
+    return null;
   }
 
   /** `{ left: a, right: b }`: an object allocated where it is written. */
@@ -14258,13 +14754,25 @@ class TypeScriptParser {
           }
         } else if (spread.k === "object") {
           for (const field of spread.fields) put(field.name, field.value, true);
-        } else if (spread.k === "conditional" && expected !== null && this.spreadOfOneArm(spread, expected, put)) {
+        } else if (spread.k === "conditional") {
           // `...(c ? {} : { field: v })` writes a field only when the condition
-          // holds. The arm that writes nothing leaves the field at the object's
-          // zero, and for a *reference* that zero is the absence the language's
-          // `undefined` is: `x.field === undefined` is already the null test the
-          // read writes. A number, a text or a list keeps its own zero, which a
-          // program may have meant, so those are refused rather than guessed.
+          // holds. The arm that writes nothing leaves the field at its zero,
+          // which the object's own type says; where the object is read at a
+          // union of shapes and no one arm is the object's, the written arm
+          // names the field and its type, and the zero is taken from there.
+          const emptyObject = (arm: Expression): boolean => arm.k === "object" && arm.fields.length === 0;
+          const writtenArm = emptyObject(spread.then) ? spread.otherwise : emptyObject(spread.otherwise) ? spread.then : null;
+          const armShape = writtenArm !== null && writtenArm.k === "object" ? this.shapeOf(writtenArm) : null;
+          const record = expected ?? (armShape !== null && armShape.kind === "record" && armShape.index === null ? armShape : null);
+          if (record === null || !this.spreadOfOneArm(spread, record, put)) {
+            if (!this.typeReadIsPending()) {
+              this.report(
+                "an object spread reads a constant object",
+                "write the fields out, or spread an object the file already wrote as a constant",
+                key,
+              );
+            }
+          }
         } else {
           const held = this.shapeOf(spread);
           const shape = held === null ? null : this.shapeForRead(held);
@@ -14930,6 +15438,67 @@ class TypeScriptParser {
         );
         return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params: written, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
+    }
+    // `new Date()` is the wall clock as the milliseconds since the epoch, and
+    // `new Date(ms)` is the milliseconds the source wrote. A date is a number
+    // here: the only thing a source asks of one is its stamp or its time.
+    if (view.kind === "ident" && view.text === "Date") {
+      if (!this.at("(")) {
+        this.report("a date is built with its arguments", `as in new Date()`, view);
+        return this.hole();
+      }
+      if (this.peek(1).text === ")") {
+        this.next();
+        this.next();
+        // A date is the milliseconds it is, and a source asks a date for its
+        // stamp or its time. A date held as a value of its own is a `Date` of
+        // the host, which this compiler has no value for.
+        const method = this.peek(1).text;
+        if (this.at(".") && (method === "toISOString" || method === "getTime")) {
+          const now: Expression = { k: "call", name: "blaze_rt_now_ms", args: [] };
+          this.expressionTypes.set(now, NUMBER_RESULT);
+          return now;
+        }
+        this.report(
+          "a date is read for its stamp or its time",
+          "as in new Date().toISOString() or new Date().getTime()",
+          view,
+        );
+        return this.hole();
+      }
+      const args = this.readCallArguments([NUMBER_RESULT]);
+      if (args.length === 1) return args[0] as Expression;
+      this.report(
+        "a date is built from the milliseconds it is",
+        "as in new Date(ms), or new Date() for the moment it is read",
+        view,
+      );
+      return this.hole();
+    }
+    // `new TextDecoder()` reads bytes as the text they are written as, which is
+    // the one encoding a compiled text is: utf8.
+    if (view.kind === "ident" && view.text === "TextDecoder") {
+      if (!this.accept("(")) {
+        this.report("a text decoder is created with its arguments", `as in new TextDecoder()`, view);
+        return this.hole();
+      }
+      while (!this.at(")") && this.peek().kind !== "end") {
+        this.report(
+          "a text decoder decodes utf8",
+          "the one encoding a compiled text is written in",
+          this.peek(),
+        );
+        this.next();
+      }
+      this.expect(")");
+      // The decoder is no value of its own: it is the one thing a source asks
+      // of it, which is the text its bytes are written as. The read holds it
+      // at a name of its own so that `const decoder = new TextDecoder()` reads,
+      // and the value that name holds is a zero nothing reads.
+      const marker: Expression = { k: "literal", text: "0" };
+      this.expressionTypes.set(marker, { kind: "ref", of: null, name: "__TextDecoder" });
+      this.expressionShapes.set(marker, { kind: "ref", name: "__TextDecoder" });
+      return marker;
     }
     // `new RegExp(pattern, flags)`: the same pair a written-out regular
     // expression is, with the pattern and the flags the source computed.
@@ -15881,7 +16450,11 @@ function dependsOn(expression: Expression, name: string): boolean {
     case "fixed":
       return dependsOn(expression.of, name);
     case "buffer":
-      return expression.values.some((value) => dependsOn(value, name));
+      return (
+        expression.values.some((value) => dependsOn(value, name)) ||
+        (expression.view !== undefined &&
+          (dependsOn(expression.view.of, name) || dependsOn(expression.view.offset, name) || dependsOn(expression.view.count, name)))
+      );
     case "text":
       return expression.parts.some((part) => part.k === "value" && dependsOn(part.value, name));
     case "conditional":
@@ -15957,6 +16530,9 @@ function describe(expression: Expression): string {
 
 /** The array a push or pop is written on, as the value expression it is. */
 function appendArray(value: Expression & { k: "append" }): Expression {
+  if (value.index !== undefined) {
+    return { k: "index", base: { k: "ident", name: value.target }, index: value.index };
+  }
   return value.base === null
     ? { k: "ident", name: value.target }
     : { k: "member", base: { k: "ident", name: value.base }, field: value.target };

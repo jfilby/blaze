@@ -53,15 +53,15 @@ test("a construct outside the subset is refused after the link, whoever imports 
     "cli.ts": [
       'import { TABLE } from "./lib.ts";',
       "",
-      "export function sum(): number {",
-      "  const day = new Date();",
+      "export function sum(target: object): number {",
+      "  const held = new WeakRef(target) === undefined ? 0 : 1;",
       "  let total = 0;",
       "  for (const value of Object.values(TABLE)) total += value;",
-      "  return total + day.getTime();",
+      "  return total + held;",
       "}",
       "",
     ].join("\n"),
-    "orphan.ts": "export function stamp(): number {\n  return new Date().getTime();\n}\n",
+    "orphan.ts": "export function stamp(target: object): number {\n  return new WeakRef(target) === undefined ? 0 : 1;\n}\n",
   });
 
   const report = await selfHostGap(directory);
@@ -71,7 +71,7 @@ test("a construct outside the subset is refused after the link, whoever imports 
   assert.deepEqual(refused, ["cli.ts", "orphan.ts"], "the link does not hide a construct the frontend does not read");
   for (const source of report.refused) {
     assert.ok(
-      source.messages.some((message) => message.includes("Date")),
+      source.messages.some((message) => message.includes("WeakRef")),
       `${source.path} names the construct it refused`,
     );
   }
@@ -82,8 +82,8 @@ test("a refused module still offers the signatures of what it exports", async ()
     "lib.ts": [
       "export type Outcome = { refused: string } | { applied: number };",
       "export function apply(n: number): Outcome {",
-      "  const stamp = new Date().getTime();",
-      "  return n > 0 ? { applied: n + stamp } : { refused: `no` };",
+      "  const held = new WeakRef({});",
+      "  return n > 0 && held !== undefined ? { applied: n } : { refused: `no` };",
       "}",
       "",
     ].join("\n"),
@@ -235,4 +235,37 @@ test("a class a type-only import names, and a class a module re-exports, cross t
   });
   const report = await selfHostGap(directory);
   assert.deepEqual(report.refused, [], "the class description crosses a type-only import and a re-export");
+});
+
+test("a module that re-exports an imported name offers what the other module wrote", async () => {
+  // `export { walk }` where `walk` was imported is the re-export it is: the
+  // function is compiled once, by the module that declares it, and a file that
+  // imports it through the middle module reaches it there. `export { f as g }`
+  // offers a declaration under the name a caller writes.
+  const directory = await tree({
+    "lib.ts": [
+      "export interface Shape { name: string }",
+      "export function walk(values: Shape[], visit: (one: Shape) => void): void {",
+      "  for (const value of values) visit(value);",
+      "}",
+      "function count(values: Shape[]): number { return values.length; }",
+      "export { count as counted };",
+      "",
+    ].join("\n"),
+    "middle.ts": 'export { walk } from "./lib.ts";\nexport { counted } from "./lib.ts";\n',
+    "cli.ts": [
+      'import { walk } from "./middle.ts";',
+      'import { counted } from "./middle.ts";',
+      "export function names(values: { name: string }[]): number {",
+      "  let letters = 0;",
+      "  walk(values, (one) => {",
+      "    letters += one.name.trim().length;",
+      "  });",
+      "  return letters + counted(values);",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  const report = await selfHostGap(directory);
+  assert.deepEqual(report.refused, [], "the re-exported signature is the declaring module's");
 });

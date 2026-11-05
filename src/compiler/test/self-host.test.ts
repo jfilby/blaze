@@ -102,9 +102,15 @@ import { selfHostGap } from "./self-host-gap.ts";
  * benchmark's own lowering writes to 447, and a string that is not a bracket,
  * with a function type read as the signature it is and a class carried across a
  * type-only import or a re-export, to 432, and an arrow's default, a typed loop
- * index, a padded text and the shape a slice keeps, to 428.
+ * index, a padded text and the shape a slice keeps, to 428, and a coalesce that
+ * keeps a collection, `Object.is`, a hex text and a re-export, to 415, and a map
+ * of lists, a declaration read before it is written, a push on an element and
+ * `slice()`, to 359, and a conditional spread that writes the zero of the field
+ * it leaves out, to 341, and a map under a number key, a window of a block and
+ * the bytes of a text, to 319, and the clock with a text decoder's bytes, to
+ * 306.
  */
-const REFUSAL_BUDGET = 428;
+const REFUSAL_BUDGET = 306;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

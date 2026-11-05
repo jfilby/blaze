@@ -1224,6 +1224,143 @@ test("a choice of a length and a number is a number", async () => {
   }
 });
 
+test("a date is the clock, and its stamp is the ISO text", async () => {
+  // The clock is the host's, and the stamp is UTC to the millisecond. The
+  // millisecond itself differs between two reads, so the shape is what both
+  // programs write: its length and the characters that place it.
+  const source = [
+    "export function demo(): string {",
+    "  const stamp = new Date().toISOString();",
+    "  const time = new Date().getTime();",
+    "  return `${stamp.length} ${stamp.startsWith(`20`)} ${stamp.indexOf(`T`)} ${stamp.endsWith(`Z`)} ${time > 1000000000000 ? `late` : `early`} ${Date.now() > 0 ? `clock` : `none`}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "24 true 10 true late clock", `the ${backend} backend stamps the clock`);
+  }
+});
+
+test("a text decoder reads the bytes of a utf8 text", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  const decoder = new TextDecoder();",
+    "  const first = decoder.decode(new Uint8Array([104, 105]));",
+    "  const second = new TextDecoder().decode(new Uint8Array([33]));",
+    "  return first + second;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "hi!", `the ${backend} backend reads the bytes as text`);
+  }
+});
+
+test("subarray is a window of the block it was taken of", async () => {
+  // No bytes are copied: the window is the block moved by the offset, and it
+  // is as long as the source wrote of it.
+  const source = [
+    "export function demo(): number {",
+    "  const bytes = new Uint8Array([1, 2, 3, 4, 5]);",
+    "  const part = bytes.subarray(1, 4);",
+    "  let total = 0;",
+    "  for (const one of part) total += one;",
+    "  const tail = bytes.subarray(3);",
+    "  return total * 1000 + part.length * 100 + part[2] * 10 + tail.length;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), String(9 * 1000 + 3 * 100 + 4 * 10 + 2), `the ${backend} backend views the block it was taken of`);
+  }
+});
+
+test("a conditional spread leaves the field the zero of its type", async () => {
+  // `...(yes ? { flag: true } : {})` writes a truth only when `yes` holds. A
+  // record's field exists either way, so the arm that writes nothing leaves it
+  // at the zero of a truth, which is what a test of it reads.
+  const source = [
+    "interface Options { flag?: boolean; depth?: number }",
+    "function read(yes: boolean, depth: number | undefined): string {",
+    "  const options: Options = {",
+    "    ...(yes ? { flag: true } : {}),",
+    "    ...(depth === undefined ? {} : { depth }),",
+    "  };",
+    "  return `${options.flag ? `yes` : `no`} ${options.depth === 0 ? `zero` : `other`}`;",
+    "}",
+    "console.log(read(true, undefined));",
+    "console.log(read(false, 0));",
+    "console.log(read(false, 2));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim().split("\n").join("|"), "yes other|no zero|no other", `the ${backend} backend writes the zero it left out`);
+  }
+});
+
+test("a map of lists holds each list whole, with its length", async () => {
+  // A dictionary entry is one double, and a list is a block and a length: the
+  // list is copied into a block the runtime laid out, whose header says how
+  // many bytes it holds, so the pointer alone is the list a key answers.
+  const source = [
+    "export function demo(): number {",
+    "  const lists = new Map<string, number[]>();",
+    "  lists.set(`a`, [1, 2]);",
+    "  lists.set(`b`, []);",
+    "  const held = lists.get(`a`);",
+    "  let total = 0;",
+    "  if (held !== undefined) {",
+    "    for (const one of held) total += one;",
+    "    held.push(3);",
+    "    lists.set(`a`, held);",
+    "  }",
+    "  const empty = lists.get(`b`);",
+    "  let emptyCount = -1;",
+    "  if (empty !== undefined) emptyCount = empty.length;",
+    "  const grown = lists.get(`a`);",
+    "  const grownCount = grown === undefined ? -1 : grown.length;",
+    "  lists.delete(`a`);",
+    "  const numbered = new Map<number, number[]>();",
+    "  numbered.set(7, [4, 5]);",
+    "  const seven = numbered.get(7);",
+    "  const sevenCount = seven === undefined ? -1 : seven.length;",
+    "  return total * 1000 + emptyCount * 100 + grownCount * 10 + (lists.has(`a`) ? 1 : 0) + sevenCount * 10000;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), String(2 * 10000 + 3 * 1000 + 0 * 100 + 3 * 10 + 0), `the ${backend} backend holds a list in a map`);
+  }
+});
+
+test("Object.is compares two numbers by the bits they are held as", async () => {
+  // `Object.is` is the same-value question: a NaN is the same as itself, and
+  // `-0` is not `0`, which `===` answers the other way round for both. A text
+  // is compared by what it says.
+  const source = [
+    "export function demo(): string {",
+    "  const zero = 0;",
+    "  const nan = 0 / zero;",
+    "  return `${Object.is(zero, -0)} ${Object.is(nan, nan)} ${Object.is(2, 2)} ${Object.is(`ab`, `ab`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "false true true true", `the ${backend} backend compares two numbers by their bits`);
+  }
+});
+
 test("a text repeated is the text appended that many times", async () => {
   // `text.repeat(n)` is a function of the file that appends the text to an
   // answer of its own, with the count floored the way the language floors it.

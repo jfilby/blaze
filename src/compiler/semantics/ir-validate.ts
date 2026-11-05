@@ -955,7 +955,10 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         if (value.view === null && value.values.length > 0) {
           problems.push(`${prefix}the array settles on a count and writes ${value.values.length} value(s) out`);
         }
-        if (value.view !== null && (!isReference(value.view.of.type) || !isSequence(value.view.of.type))) {
+        // A window of a block is taken of any sequence: a name bound to a
+        // typed array is an array of its length, one that came from a call is a
+        // slice, and both are a block of elements the window reaches into.
+        if (value.view !== null && !isSequence(value.view.of.type)) {
           problems.push(`${prefix}a view is taken of a ${typeText(value.view.of.type)}, which is not a block of bytes`);
         }
         if (value.view !== null && !isNumber(value.view.offset.type)) {
@@ -1582,9 +1585,17 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   }
 
   const returned = contractType(returns);
+  // A builtin that answers the opaque handle — the one double an entry of a
+  // dictionary is — may be typed by the read that called it as the reference
+  // that handle carries: `m.get(k)` answers the list the map holds, and the
+  // runtime function answers the block the list is. The ABI is the same
+  // pointer either way, and the read is what knows which.
+  const carried = builtin !== null &&
+    builtin.returns.kind === "ref" && builtin.returns.of === null && builtin.returns.name === undefined &&
+    isReference(call.returns);
   if (returned === null) {
     problems.push(`${prefix}${call.callee} declares a return type that is not a type`);
-  } else if (!typeEquals(returned, call.returns)) {
+  } else if (!carried && !typeEquals(returned, call.returns)) {
     problems.push(`${prefix}${call.callee} returns a ${typeText(call.returns)} and is declared to return a ${typeText(returned)}`);
   }
 

@@ -1057,6 +1057,30 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "For a caller that writes every byte before reading any: an array literal, an object literal and a built string each write their whole payload. Returns a managed pointer with one reference, owned by the caller.",
     { tags: ["memory"] },
   ),
+  entry(
+    "blaze_rt_now_ms",
+    "double",
+    [],
+    "Reads the wall clock in milliseconds since the Unix epoch.",
+    "Returns the number.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_timestamp_iso",
+    "const char*",
+    [],
+    "The current time as an ISO 8601 timestamp in UTC, to the millisecond.",
+    "Returns a managed string.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_number_same",
+    "double",
+    [["left", "double"], ["right", "double"]],
+    "Compares two numbers the way `Object.is` does.",
+    "Two numbers are the same when their bits are: -0 and 0 are different, and a NaN is the same as itself. Returns 1 or 0.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
   entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_md5_create", "double", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
@@ -1088,6 +1112,38 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
    */
   entry("blaze_rt_dict_get_ref", "double", [["dict", "double"], ["key", "const char*"]], "Reads one reference of a dictionary by its string key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_ref", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one reference of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_dict_set_seq",
+    "double",
+    [["dict", "double"], ["key", "const char*"], ["value", "void*"], ["count", "double"], ["size", "double"]],
+    "Copies a block of elements into a managed block and writes it into a dictionary by its string key.",
+    "The copy is a block the runtime lays out, so its length travels with it. Returns the dictionary.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_dict_get_seq",
+    "void*",
+    [["dict", "double"], ["key", "const char*"]],
+    "Reads one block of elements of a dictionary by its string key.",
+    "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_dict_set_seq_numkey",
+    "double",
+    [["dict", "double"], ["key", "double"], ["value", "void*"], ["count", "double"], ["size", "double"]],
+    "Copies a block of elements into a managed block and writes it into a dictionary under a number key.",
+    "The copy is a block the runtime lays out, so its length travels with it. Returns the dictionary.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_dict_get_seq_numkey",
+    "void*",
+    [["dict", "double"], ["key", "double"]],
+    "Reads one block of elements of a dictionary by a number key.",
+    "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_dict_get_text", "const char*", [["dict", "double"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
@@ -3900,6 +3956,36 @@ ${guarded ? "  if (text == NULL) return 0;" : ""}
   return blaze_rt_header_of((void*)text)->length - 1;
 }
 
+/* Object.is on two numbers: the bits are what the question is about, so -0 and
+   0 are different and a NaN is the same as itself, which == answers the other
+   way round for both. */
+double blaze_rt_number_same(double left, double right) {
+  uint64_t a;
+  uint64_t b;
+  memcpy(&a, &left, sizeof a);
+  memcpy(&b, &right, sizeof b);
+  return a == b ? 1.0 : 0.0;
+}
+
+/* The wall clock, which is the one a build stamps its records with. The
+   milliseconds are the double a source holds a date as, and the stamp is the
+   text an ISO 8601 timestamp writes: UTC, to the millisecond, with the Z the
+   language writes for it. */
+double blaze_rt_now_ms(void) {
+  struct timespec parts;
+  clock_gettime(CLOCK_REALTIME, &parts);
+  return (double)parts.tv_sec * 1000.0 + (double)parts.tv_nsec / 1000000.0;
+}
+
+const char* blaze_rt_timestamp_iso(void) {
+  const time_t now = time(NULL);
+  struct tm parts;
+  gmtime_r(&now, &parts);
+  char text[32];
+  const size_t written = strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%S.000Z", &parts);
+  return blaze_rt_string_new((const unsigned char*)text, written);
+}
+
 const char* blaze_rt_string_clone(const char* text) {
   return blaze_rt_string_new((const unsigned char*)text, blaze_rt_string_length(text));
 }
@@ -4158,6 +4244,29 @@ double blaze_rt_dict_get_ref(double dict, const char* key) {
   return blaze_rt_dict_get(dict, key);
 }
 
+/* A sequence is a block and a length, and a dictionary entry is one double:
+   the block the source wrote is copied into a block the runtime laid out, whose
+   header says how many bytes it holds, so the pointer alone carries the length
+   the read needs. The copy is what keeps a list written out at the call site —
+   a block of the stack the name that wrote it frees — from outliving it. */
+double blaze_rt_dict_set_seq(double dict, const char* key, void* value, double count, double size) {
+  const size_t elements = (size_t)count;
+  const size_t bytes = elements * (size_t)size;
+  void* copy = blaze_rt_allocate(bytes);
+  if (copy == NULL) blaze_rt_raise("out of memory");
+  if (bytes > 0 && value != NULL) memcpy(copy, value, bytes);
+  return blaze_rt_dict_set(dict, key, (double)(uintptr_t)copy);
+}
+
+void* blaze_rt_dict_get_seq(double dict, const char* key) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  if (d == NULL || key == NULL) return NULL;
+  blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
+  if (e == NULL) return NULL;
+  return (void*)(uintptr_t)e->value;
+}
+
+
 double blaze_rt_dict_set_ref(double dict, const char* key, double value) {
   return blaze_rt_dict_set(dict, key, value);
 }
@@ -4298,6 +4407,18 @@ double blaze_rt_dict_set_numkey_ref(double dict, double key, double value) {
 double blaze_rt_dict_has_numkey(double dict, double key) {
   char buffer[32];
   return blaze_rt_dict_has(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+}
+
+/* A sequence under a number key: the copy and the block are the text-keyed
+   ones, and the key is the text the number is written as. */
+double blaze_rt_dict_set_seq_numkey(double dict, double key, void* value, double count, double size) {
+  char buffer[32];
+  return blaze_rt_dict_set_seq(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value, count, size);
+}
+
+void* blaze_rt_dict_get_seq_numkey(double dict, double key) {
+  char buffer[32];
+  return blaze_rt_dict_get_seq(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
 double blaze_rt_dict_delete_numkey(double dict, double key) {

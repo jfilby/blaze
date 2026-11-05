@@ -63,7 +63,16 @@ export type Expression =
   | { k: "index"; base: Expression; index: Expression }
   | { k: "slice"; base: Expression; start: Expression | null; stop: Expression | null; step: Expression | null }
   | { k: "member"; base: Expression; field: string }
-  | { k: "call"; name: string; args: Expression[] }
+  /**
+   * A call of a name.
+   *
+   * `returns` is what the read of the call knows it answers, where that is
+   * more than the builtin states: `m.get(k)` over a map of lists answers the
+   * list the map holds, and the runtime function it lowers to answers the
+   * block the list is. Nothing but a builtin the read has typed itself writes
+   * it.
+   */
+  | { k: "call"; name: string; args: Expression[]; returns?: TypeExpr }
   | { k: "object"; fields: { name: string; value: Expression }[] }
   /**
    * `new Float64Array(n)`: a typed array of a count the program settles on when
@@ -71,8 +80,19 @@ export type Expression =
    * the view written, so an `Int32Array` is four bytes an element and not eight.
    */
   | { k: "sized"; element: string; count: Expression }
-  /** `new Float64Array([1, 2, 3])`: a typed array of the elements written out. */
-  | { k: "buffer"; element: string; values: Expression[] }
+  /**
+   * `new Float64Array([1, 2, 3])`: a typed array of the elements written out,
+   * or — with a `view` — a window of a block another value holds, as
+   * `bytes.subarray(from, to)` writes. A view is the block it looks into rather
+   * than a block of its own, and how many elements it holds is what it was
+   * taken of, from the offset it starts at.
+   */
+  | {
+      k: "buffer";
+      element: string;
+      values: Expression[];
+      view?: { of: Expression; offset: Expression; count: Expression };
+    }
   /** A template string: text as written, with the values it interpolates. */
   | { k: "text"; parts: TextPart[] }
   /**
@@ -148,6 +168,13 @@ export type Expression =
       target: string;
       /** The name the target field belongs to, or null where the target is a name. */
       base: string | null;
+      /**
+       * The element of `target` the append is written on, as `a[i].push(x)`
+       * writes it. The element is written back where the array is the element
+       * of another one: a push answers the list it was written on, and the
+       * block that holds it is the write the statement keeps.
+       */
+      index?: Expression;
       helper: string;
       op: "push" | "pop";
       /** The values a push adds, in the order it writes them; a pop adds none. */

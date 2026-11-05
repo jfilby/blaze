@@ -348,7 +348,8 @@ class BodyTypes {
           // A string is a reference the contract language does not spell, so
           // what a use infers of it is the same as what it infers of any other
           // reference.
-          return { kind: "type", type: builtin.returns.kind === "text" ? ANY_REF : builtin.returns };
+          const answer = expression.returns ?? builtin.returns;
+          return { kind: "type", type: answer.kind === "text" ? ANY_REF : answer };
         }
         // A function with default parameters is callable at a shorter arity
         // through the overload the module declares for it, which is the name
@@ -380,6 +381,14 @@ class BodyTypes {
         this.expression(expression.count);
         return { kind: "type", type: { kind: "array", of: parseType(expression.element), length: null } };
       case "buffer":
+        if (expression.view !== undefined) {
+          // A window of a block another value holds is a list of the elements
+          // it reaches, and the count is read from the values it was taken of.
+          this.expression(expression.view.of);
+          this.expression(expression.view.offset);
+          this.expression(expression.view.count);
+          return { kind: "type", type: { kind: "slice", of: parseType(expression.element) } };
+        }
         for (const value of expression.values) this.expression(value);
         return {
           kind: "type",
@@ -432,6 +441,20 @@ class BodyTypes {
           value.kind === "type" && value.type.kind === "ref" && value.type.name !== undefined;
         if (expression.then.k === "null" && shaped(second)) return second;
         if (expression.otherwise.k === "null" && shaped(first)) return first;
+        // A choice of two lists is one list: the block a name holds is a slice
+        // and one written out is an array of its length, and the field that
+        // holds either holds a list of the element they share. Reading it as
+        // the unshaped reference laid the field out as a handle and the list
+        // the other arm holds could not be stored in it.
+        const sequenceArm = (value: Inferred): Extract<TypeExpr, { kind: "array" | "slice" | "ptr" }> | null =>
+          value.kind === "type" && (value.type.kind === "array" || value.type.kind === "slice" || value.type.kind === "ptr")
+            ? value.type
+            : null;
+        const firstList = sequenceArm(first);
+        const secondList = sequenceArm(second);
+        if (firstList !== null && secondList !== null && typeToString(firstList.of) === typeToString(secondList.of)) {
+          return { kind: "type", type: { kind: "slice", of: firstList.of } };
+        }
         return { kind: "type", type: ANY_REF };
       }
       case "update":

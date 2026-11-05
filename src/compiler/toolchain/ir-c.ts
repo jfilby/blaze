@@ -348,6 +348,16 @@ function builtinExpression(name: string, args: string[]): string {
       // The argument is read twice, so it is bound: a value the IR calls is a
       // call that would otherwise run twice.
       return `({ double blaze_operand = ${args[0]}; double blaze_rounded = floor(blaze_operand + 0.5); (blaze_rounded == 0.0 && blaze_operand < 0.0) ? -0.0 : blaze_rounded; })`;
+    case "blaze_rt_number_same":
+      return `blaze_rt_number_same(${args[0]}, ${args[1]})`;
+    case "blaze_rt_text_length":
+      return `((double)blaze_rt_text_length(${args[0]}))`;
+    case "blaze_rt_now_ms":
+      return `blaze_rt_now_ms()`;
+    case "blaze_rt_timestamp_iso":
+      return `blaze_rt_timestamp_iso()`;
+    case "blaze_rt_string_new":
+      return `blaze_rt_string_new((const unsigned char*)(${args[0]}), (size_t)(${args[1]}))`;
     case "blaze_rt_dict_new":
       return `blaze_rt_dict_new()`;
     case "blaze_rt_dict_get":
@@ -356,6 +366,14 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_set(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_ref":
       return `blaze_rt_dict_get_ref(${args[0]}, ${args[1]})`;
+    case "blaze_rt_dict_set_seq":
+      return `blaze_rt_dict_set_seq(${args[0]}, ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
+    case "blaze_rt_dict_get_seq":
+      return `((void*)blaze_rt_dict_get_seq(${args[0]}, ${args[1]}))`;
+    case "blaze_rt_dict_set_seq_numkey":
+      return `blaze_rt_dict_set_seq_numkey(${args[0]}, ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
+    case "blaze_rt_dict_get_seq_numkey":
+      return `((void*)blaze_rt_dict_get_seq_numkey(${args[0]}, ${args[1]}))`;
     case "blaze_rt_dict_set_ref":
       return `blaze_rt_dict_set_ref(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_text":
@@ -1974,7 +1992,11 @@ class FunctionEmitter {
    */
   private settledLength(value: SemanticValue): boolean {
     if (value.k === "local") return true;
-    if (value.k === "buffer") return value.view === null;
+    // A window of a block carries the count it was taken at, which is the
+    // length the name bound to it is given. A window with no count reaches the
+    // end of the block it looks into, which is a length this emitter cannot
+    // settle: it reads the block it was taken of instead.
+    if (value.k === "buffer") return value.view === null || value.count !== null;
     return value.k === "arith" && value.op === "arrayConcat";
   }
 
@@ -2098,7 +2120,11 @@ class FunctionEmitter {
       `const size_t ${block}_n = ${block}_llen + ${block}_rlen; ` +
       `${elementName}* ${block}_left = ${leftExpr}; ` +
       `${elementName}* ${block}_right = ${rightExpr}; ` +
-      `${elementName}* ${block} = (${elementName}*)${RUNTIME_NAME}_allocate((${block}_n == 0 ? 1 : ${block}_n) * sizeof(${elementName})); ` +
+      // A block of no elements is a block the runtime laid out with a length
+      // of zero, which is the length a list that concatenated to nothing has.
+      // Handing it one element of room made `a + []` answer a list of one
+      // cleared element, and a length read off it said one.
+      `${elementName}* ${block} = (${elementName}*)${RUNTIME_NAME}_allocate(${block}_n * sizeof(${elementName})); ` +
       `if (${block} == NULL) ${RUNTIME_NAME}_raise("out of memory"); ` +
       `for (size_t ${block}_i = 0; ${block}_i < ${block}_llen; ${block}_i++) ${block}[${block}_i] = ${block}_left[${block}_i]; ` +
       `for (size_t ${block}_i = 0; ${block}_i < ${block}_rlen; ${block}_i++) ${block}[${block}_llen + ${block}_i] = ${block}_right[${block}_i]; ` +
