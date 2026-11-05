@@ -15152,6 +15152,12 @@ class TypeScriptParser {
    */
   private absenceExpression(type: ResolvedType): Expression | null {
     if (type.kind === "ref" || type.kind === "record" || type.kind === "any") return { k: "null" };
+    // A function is a closure, which is a reference: the zero of one is the
+    // null closure, which is what a field a source never wrote holds.
+    if (type.kind === "function") return { k: "null" };
+    // A map and a set are one handle on the runtime's dictionary, and the zero
+    // the runtime reads as no dictionary at all is the empty one.
+    if (type.kind === "map" || type.kind === "set") return { k: "literal", text: "0" };
     if (type.kind === "text") return { k: "text", parts: [] };
     if (type.kind === "primitive") return { k: "literal", text: "0" };
     if (type.kind === "list") {
@@ -15257,6 +15263,18 @@ class TypeScriptParser {
           const shape = held === null ? null : this.shapeForRead(held);
           if (shape !== null && shape.kind === "record" && shape.index === null && readsOnce(spread)) {
             for (const name of shape.fields.keys()) {
+              put(name, { k: "member", base: spread, field: name }, true);
+            }
+          } else if (
+            // The value's own shape is not held — a method of another module,
+            // a value the link has not named — and the use says what the object
+            // is: the fields the use names are the fields the spread copies.
+            expected !== null &&
+            expected.index === null &&
+            expected.arms === undefined &&
+            readsOnce(spread)
+          ) {
+            for (const name of expected.fields.keys()) {
               put(name, { k: "member", base: spread, field: name }, true);
             }
           } else if (!this.typeReadIsPending()) {

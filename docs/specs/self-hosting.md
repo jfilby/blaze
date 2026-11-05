@@ -888,6 +888,22 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dm. A spread whose value the read does not shape
+
+    { ...built.outcome, refused: `no` }      // the fields the use names
+    ...(debug ? { onPrompt: printPrompt } : {})   // a function's zero is null
+    ...(names ? { valueShapes: names } : {})      // a map's zero is no dictionary
+
+Two readings of the same shape. A spread of a value whose own shape is not held
+— a method of another module, a value the link has not named — copies the fields
+the *use* names, which are the fields the object it is written into has. And a
+conditional spread needs the zero of the field's type where the function, the
+map and the set had none: a function is a closure, so its zero is the null
+closure; a map and a set are one handle on the runtime's dictionary, so their
+zero is no dictionary at all.
+
+The total went from 236 to 231.
+
 ### 4dl. A rest field
 
     const { statements, ...whatItDoes } = definition
@@ -3180,6 +3196,7 @@ What was closed this session, and what each was worth:
 | a map that answers a list (§4dj) | 251 → 246 |
 | a record spread into a record (§4dk) | 246 → 241 |
 | a rest field (§4dl) | 241 → 236 |
+| a spread whose value the read does not shape (§4dm) | 236 → 231 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

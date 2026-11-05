@@ -4479,3 +4479,36 @@ test("a rest field binds what is left of the record", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a spread of a value whose shape is not held copies the fields the use names", () => {
+  // The value's own shape is not held — a method of another module, a value the
+  // link has not named — and the use says what the object is: the fields the
+  // use names are the fields the spread copies.
+  const source = [
+    "interface Outcome { applied: number; refused: string }",
+    "declare function build(): unknown;",
+    "export function f(built: { outcome: unknown }): Outcome {",
+    "  return { ...built.outcome, refused: `no` };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a conditional spread writes the zero of a function, a map and a set", () => {
+  // A function is a closure and a map is a handle: the zero of the first is the
+  // null closure, and of the second the empty dictionary.
+  const source = [
+    "interface Options { onPrompt?: (text: string) => void; names?: Map<string, string>; seen?: Set<string> }",
+    "declare function printPrompt(text: string): void;",
+    "export function f(debug: boolean, names: Map<string, string> | undefined, seen: Set<string> | undefined): Options {",
+    "  return {",
+    "    ...(debug === true ? { onPrompt: printPrompt } : {}),",
+    "    ...(names === undefined ? {} : { names }),",
+    "    ...(seen === undefined ? {} : { seen }),",
+    "  };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
