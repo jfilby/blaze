@@ -48,7 +48,12 @@ export type TextPart = { k: "text"; value: string } | { k: "value"; value: Expre
  * so what the frontend accepts is exactly what travels on.
  */
 export type Expression =
-  | { k: "literal"; text: string }
+  /**
+   * A number. `boolean` is set on `0` and `1` the source wrote as `false` and
+   * `true`: the value is the number the language holds a truth as, and the
+   * field it is written into is a truth.
+   */
+  | { k: "literal"; text: string; boolean?: true }
   | { k: "bigint"; text: string }
   | { k: "ident"; name: string }
   | { k: "null" }

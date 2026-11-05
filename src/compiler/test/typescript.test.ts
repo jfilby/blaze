@@ -587,28 +587,6 @@ test("an object spread copies the fields of a typed object", () => {
   assert.equal(returned?.fields?.[1]?.value.k, "literal", "the field after the spread is the one held");
 });
 
-test("an object spread of a value whose reads would repeat is refused", () => {
-  // A call written under a spread would run once per field, which is not the
-  // value the source wrote. A name or a field of one is the value the spread
-  // needs, and anything else is refused where it is written.
-  assert.match(
-    diagnostic(() =>
-      typescript.analyze(
-        [
-          "interface Base { a: string; b: number }",
-          "function make(): Base { return { a: `x`, b: 1 }; }",
-          "export function f(): Base {",
-          "  return { ...make() };",
-          "}",
-          "",
-        ].join("\n"),
-        "main.ts",
-      ),
-    ),
-    /an object spread reads a constant object/,
-  );
-});
-
 test("`Omit` and `Pick` are the fields they keep", () => {
   // The keys are string literals, so a record's fields are selected by name:
   // `Omit` removes them and `Pick` keeps them. What is left is a record the
@@ -3693,7 +3671,7 @@ test("an element a list's entries loop binds is the record its declaration names
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}widen([], 0, 1);\n` }, "main.ts", "widen");
   assert.match(ir, /new_object\[ref<Object1>\] Object1 at \[sub\[f64\]/, "the field the spread writes over is the written one");
-  assert.match(ir, /wide \[load_field\[f64\] local\[ref<any>\] fixup Object1 wide\]/, "the field the spread copies is read from the element");
+  assert.match(ir, /wide \[load_field\[bool\] local\[ref<any>\] fixup Object1 wide\]/, "the field the spread copies is read from the element");
 });
 
 test("a value a map holds is the record its type names, so its fields and its spread are read", () => {
@@ -3717,7 +3695,7 @@ test("a value a map holds is the record its type names, so its fields and its sp
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log("run");\n` }, "main.ts", "widen");
   assert.match(ir, /at \[add\[f64\] \[load_field\[f64\] local\[ref<any>\] item Object1 at\] const\[f64\] 1\]/, "the field the spread writes is read from the element");
-  assert.match(ir, /wide \[load_field\[f64\] local\[ref<any>\] item Object1 wide\]/, "the field the spread copies is read from the element");
+  assert.match(ir, /wide \[load_field\[bool\] local\[ref<any>\] item Object1 wide\]/, "the field the spread copies is read from the element");
 });
 
 test("Extract and Exclude read the type they name the members of", () => {
@@ -4596,4 +4574,76 @@ test("a call of an imported function answers the shape its module resolved", () 
   );
   assert.match(ir, /load_field\[\[\]ref<any>\] local\[ref<Object1>\] result Object1 failures/, "the failures are the list the result names");
   assert.match(ir, /__collect_main_0/, "the failures are walked as a list");
+});
+
+test("a spread of a call reads the call once into a name of its own", () => {
+  // The record a call answers is spread field by field, and the call runs once:
+  // it is read into a name before the statement, and every field reads that
+  // one answer.
+  const source = [
+    "interface Info { steps: number; region: boolean }",
+    "interface Loop { kind: string; steps: number; region: boolean }",
+    "function info(n: number): Info { return { steps: n, region: false }; }",
+    "export function f(n: number): Loop {",
+    "  return { kind: `while`, ...info(n) };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": source + "console.log(f(1));\n" }, "main.ts", "f");
+  assert.match(ir, /let object\[ref<Object1>\] __spread0 mutable = \[call\[ref<Object1>\] info/, "the call is read into a name of its own");
+  assert.match(ir, /load_field\[f64\] local\[ref<Object1>\] __spread0 Object1 steps/, "a field is read from that name");
+});
+
+test("a method of an imported class answers the shape its module resolved", () => {
+  // `failure.toJSON()` answers `Serialized`, a type this file never names. The
+  // shape crosses the link with the class, resolved where the method is
+  // declared, so the object the spread writes is the record the method builds.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import { Failure, toFailure } from "./errors.ts";',
+        "export function f(): string {",
+        "  const failure = toFailure(`x`);",
+        "  const record = { ...failure.toJSON(), project: `p` };",
+        "  return `${record.category} ${record.project}`;",
+        "}",
+        "console.log(f());",
+        "",
+      ].join("\n"),
+      "errors.ts": [
+        "export interface Serialized { category: string; stage: string }",
+        "export class Failure extends Error {",
+        "  readonly category = `x`;",
+        "  readonly stage = `y`;",
+        "  toJSON(): Serialized {",
+        "    return { category: this.category, stage: this.stage };",
+        "  }",
+        "}",
+        "export function toFailure(cause: unknown): Failure { return new Failure(); }",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "f",
+  );
+  assert.match(ir, /let object\[ref<Object\d+>\] __spread0 mutable = \[call\[ref<Object\d+>\] Failure_toJSON/, "the method's answer is the record it built");
+  assert.match(ir, /load_field\[[^\]]+\] local\[ref<Object\d+>\] __spread0 Object\d+ category/, "a field is read from that record");
+});
+
+test("a truth a literal writes is a truth the field holds", () => {
+  // `false` is held as the number zero, and the source wrote a truth: the field
+  // it is written into is a truth, so `to_text` prints `false` and not `0`.
+  const source = [
+    "interface Info { steps: number; region: boolean }",
+    "export function f(): string {",
+    "  const info: Info = { steps: 3, region: false };",
+    "  return `${info.region}`;",
+    "}",
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source + "console.log(f());\n" }, "main.ts", "f");
+  assert.match(ir, /field region: bool/, "the field a truth is written into is a truth");
+  assert.match(ir, /load_field\[bool\].* region/, "the field is read as a truth");
 });

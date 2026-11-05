@@ -16,7 +16,7 @@
  */
 
 import type { Token } from "./typescript.ts";
-import { typeText } from "./typescript-types.ts";
+import { typeText, type ResolvedType } from "./typescript-types.ts";
 
 /** One parameter of a method or constructor, as the source declared it. */
 export interface ClassParam {
@@ -46,6 +46,12 @@ export interface ClassMethod {
   name: string;
   params: ClassParam[];
   returnTypeName: string;
+  /**
+   * What the result holds, where the module that declares the method resolved
+   * it: a method a file imports answers a type its declaring module wrote, and
+   * the importing file's type table may not name it.
+   */
+  returnsShape?: ResolvedType;
   /** The `{` that opens the body, and the token after the `}` that closes it. */
   bodyStart: number;
   bodyEnd: number;

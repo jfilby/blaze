@@ -817,6 +817,14 @@ ${anchor}
     return expression;
   }
 
+  handle(expression: string): string {
+    return `cast[float64](cast[uint](${expression}))`;
+  }
+
+  shaped(type: SemanticType, expression: string): string {
+    return `cast[${nimParameter(type)}](cast[uint](${expression}))`;
+  }
+
   argvCount(): string {
     return `${RUNTIME_NAME}_argv_count().csize_t`;
   }

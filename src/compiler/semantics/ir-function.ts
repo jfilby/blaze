@@ -1061,8 +1061,14 @@ class FunctionBody {
     switch (expression.k) {
       case "literal": {
         // A number written in the source is a double unless a use fixes it to
-        // another width, and a whole literal is still a double.
-        return { value: { k: "const", type: numberAt(expect) ?? F64, text: expression.text }, inferred: DOUBLE };
+        // another width, and a whole literal is still a double. `true` and
+        // `false` are truths the source wrote, so a use that says nothing takes
+        // the truth they are rather than the double they are held as.
+        const written = numberAt(expect) ?? (expression.boolean === true ? BOOL : F64);
+        return {
+          value: { k: "const", type: written, text: expression.text },
+          inferred: { kind: "type", type: written },
+        };
       }
       case "bigint": {
         // A bigint is a whole number, and a whole number here is an `i64`. A

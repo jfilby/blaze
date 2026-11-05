@@ -1247,6 +1247,48 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("a recursive record holds the records it is made of", async () => {
+  // The answer of a function that builds a node is the node's layout, and a
+  // field that holds one is a reference to the same layout: the tree a caller
+  // walks is the tree the builder wrote.
+  const source = [
+    "function checksum(node: any): number {",
+    "  if (!node.left) return 1;",
+    "  return 1 + checksum(node.left) + checksum(node.right);",
+    "}",
+    "function createTree(depth: number): any {",
+    "  return depth-- > 0",
+    "    ? { left: createTree(depth), right: createTree(depth) }",
+    "    : { left: null, right: null };",
+    "}",
+    "console.log(`${checksum(createTree(3))}`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "15", `the ${backend} backend walks the recursive record`);
+  }
+});
+
+test("a spread of a call is the record the call answered", async () => {
+  // The call is read once into a name of the statement's own, and every field
+  // the spread copies reads that one answer.
+  const source = [
+    "interface Info { steps: number; region: boolean }",
+    "function info(n: number): Info { return { steps: n, region: false }; }",
+    "export function demo(): string {",
+    "  const made = { kind: `while`, ...info(3) };",
+    "  return `${made.kind} ${made.steps} ${made.region}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "while 3 false", `the ${backend} backend spreads the call's record`);
+  }
+});
+
 test("an empty list beside a set is walked as the set is", async () => {
   // `values ?? []` and `c ? [] : values` are iterated: the empty list holds the
   // set's element, so both loops walk texts.

@@ -115,10 +115,11 @@ import { selfHostGap } from "./self-host-gap.ts";
  * holds the record its promise carries to 261, and a map of the pairs a
  * callback writes to 251, a map that answers a list to 246, and a record spread
  * into a record to 241, a rest field to 236, a spread whose value the read does
- * not shape to 231, an empty list a loop walks beside a set to 221, and the
- * module graph read after the modules it imports, to 220.
+ * not shape to 231, an empty list a loop walks beside a set to 221, the module
+ * graph read after the modules it imports to 220, and a spread of a call with a
+ * method of a class another module declares, to 213.
  */
-const REFUSAL_BUDGET = 220;
+const REFUSAL_BUDGET = 213;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

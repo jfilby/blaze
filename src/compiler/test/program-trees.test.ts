@@ -65,10 +65,10 @@ test("the C driver declares the objects, takes the arguments and calls the progr
   const { resolved } = await trees();
   const driver = generateProgramDriver(resolved);
 
-  // A field that holds a reference is a handle the runtime passes around, and
-  // a handle is a double: the field is one, and the object is the same size
-  // everywhere it is declared.
-  assert.match(driver, /struct Object1 \{\n {2}double left; \/\* \+0 \*\/\n {2}double right; \/\* \+8 \*\/\n\}; \/\* 16 bytes, align 8 \*\//);
+  // A field that holds a reference holds the pointer the layout names: the
+  // answer of the function that builds a node is the node's own layout, and the
+  // object is the same size everywhere it is declared.
+  assert.match(driver, /struct Object1 \{\n {2}struct Object1\* left; \/\* \+0 \*\/\n {2}struct Object1\* right; \/\* \+8 \*\/\n\}; \/\* 16 bytes, align 8 \*\//);
   // The declaration of a function the driver links names the type it hands
   // back and leaves the parameters out: a parameter the source wrote no type
   // for is carried as a double or as a pointer, and the driver has to guess
@@ -139,7 +139,7 @@ test("a Nim object is the payload the C side wrote, and not a cell in front of i
   }
   const { resolved } = await trees();
   const host = generateProgramHostSource(resolved);
-  assert.match(host, /type\n {2}Object1\* = object\n {4}left\*: pointer\n {4}right\*: pointer/);
+  assert.match(host, /type\n {2}Object1\* = object\n {4}left\*: ptr Object1\n {4}right\*: ptr Object1/);
   // The prototype the host hands the C compiler names a `void*` for it, because
   // Nim gives its own object type a C name of its own: the C compiler refused
   // the call with "assignment to `tyObject_Object1 *` from incompatible pointer

@@ -720,7 +720,7 @@ function elementOfSequenceType(type: TypeExpr): TypeExpr | null {
 function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
   switch (value.k) {
     case "literal":
-      return NUMBER_RESULT;
+      return value.boolean === true ? BOOLEAN_RESULT : NUMBER_RESULT;
     case "bigint": {
       let number: bigint | null = null;
       try { number = BigInt(value.text); } catch { /* not a valid bigint */ }
@@ -832,7 +832,7 @@ function sameResult(left: TypeExpr, right: TypeExpr): boolean {
 function defaultParameterType(value: Expression): TypeExpr {
   switch (value.k) {
     case "literal":
-      return NUMBER_RESULT;
+      return value.boolean === true ? BOOLEAN_RESULT : NUMBER_RESULT;
     case "bigint":
       return resultType(value, new Map());
     case "text":
@@ -3292,6 +3292,8 @@ class TypeScriptParser {
    * settles is reported once, after the whole expression has been read.
    */
   private readonly unsettledArrays = new Map<Expression, Token>();
+  /** How many spreads have been read into a name of the statement's own. */
+  private spreadCount = 0;
   /**
    * The names this file's imports bind.
    *
@@ -3983,7 +3985,7 @@ class TypeScriptParser {
         break;
       }
       case "literal":
-        shape = { kind: "primitive", name: "f64" };
+        shape = { kind: "primitive", name: value.boolean === true ? "bool" : "f64" };
         break;
       case "text":
         // A text is a text however it was written: `x.toString(16)` is a
@@ -4167,7 +4169,9 @@ class TypeScriptParser {
       if (type.name === "i256" || type.name === "u256") {
         return { k: "bigint", text: "0n" };
       }
-      return { k: "literal", text: "0" };
+      // The zero of a truth is `false`, and the marker keeps it the truth the
+      // field is declared at rather than the number zero it is held as.
+      return type.name === "bool" ? { k: "literal", text: "0", boolean: true } : { k: "literal", text: "0" };
     }
     if (type.kind === "text") return { k: "text", parts: [{ k: "text", value: "" }] };
     if (type.kind === "slice" || type.kind === "array") {
@@ -10679,7 +10683,7 @@ class TypeScriptParser {
                 null,
                 params.map((param) => param.shape),
               );
-              replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), args, found.method.returnTypeName, found.method.line));
+              replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), args, found.method.returnTypeName, found.method.line, found.method.returnsShape));
               continue;
             }
           }
@@ -11042,7 +11046,7 @@ class TypeScriptParser {
             );
             return this.hole();
           }
-          replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), [receiver, ...args], found.method.returnTypeName, found.method.line));
+          replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), [receiver, ...args], found.method.returnTypeName, found.method.line, found.method.returnsShape));
           continue;
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
@@ -11321,7 +11325,7 @@ class TypeScriptParser {
             }
             const getter = findGetter(this.classTable, owner.name, field.text, true);
             if (getter !== null) {
-              replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [], getter.getter.returnTypeName, getter.getter.line));
+              replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [], getter.getter.returnTypeName, getter.getter.line, getter.getter.returnsShape));
               continue;
             }
           }
@@ -11344,7 +11348,7 @@ class TypeScriptParser {
         if (getterOwner !== null) {
           const getter = findGetter(this.classTable, getterOwner, field.text, false);
           if (getter !== null) {
-            replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [target], getter.getter.returnTypeName, getter.getter.line));
+            replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [target], getter.getter.returnTypeName, getter.getter.line, getter.getter.returnsShape));
             continue;
           }
         }
@@ -12418,17 +12422,25 @@ class TypeScriptParser {
    * built. Without it `this.read(t).trim()` was a method of nothing, and the
    * text methods written after a call were refused.
    */
-  private typedCall(name: string, args: readonly Expression[], returnTypeName: string, line: number): Expression {
+  private typedCall(
+    name: string,
+    args: readonly Expression[],
+    returnTypeName: string,
+    line: number,
+    knownShape: ResolvedType | undefined = undefined,
+  ): Expression {
     const call: Expression = { k: "call", name, args: [...args] };
     if (returnTypeName.trim() === "" || returnTypeName.trim() === "void") return call;
-    const type = this.typeForName(returnTypeName, line);
+    const type = knownShape !== undefined ? this.typeExprOfShape(knownShape) : this.typeForName(returnTypeName, line);
     if (type.kind !== "void") this.expressionTypes.set(call, type);
     // What the declaration writes for its result is the fields a member chain
     // written after the call reads. The contract's spelling of a record is the
     // opaque reference, so the shape is kept beside the type: `{ ...made }`
-    // copies the fields `make()` said it answers.
+    // copies the fields `make()` said it answers. A method of an imported class
+    // answers a type its declaring module wrote, which this file may not name:
+    // the shape the link resolved with the class is what the answer holds.
     try {
-      const shape = resolveTypeName(this.typeTable, returnTypeName.trim());
+      const shape = knownShape ?? resolveTypeName(this.typeTable, returnTypeName.trim());
       if (shape.kind !== "any") this.expressionShapes.set(call, shape);
     } catch {
       // A return type this read cannot resolve names nothing a shape can say.
@@ -15071,7 +15083,10 @@ class TypeScriptParser {
       return { k: "call", name: "Promise.await", args: [this.readUnary()] };
     }
     if (token.kind === "ident") {
-      if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0" };
+      // `true` and `false` are the numbers a truth is held as, and the marker
+      // keeps them truths: a field a literal writes is a truth, and the text it
+      // prints as is `true` and not `1`.
+      if (token.text === "true" || token.text === "false") return { k: "literal", text: token.text === "true" ? "1" : "0", boolean: true };
       if (token.text === "null") return { k: "null" };
       if (token.text === "undefined") {
         // `undefined` is the absent value, and it is also a name a body may
@@ -15238,7 +15253,9 @@ class TypeScriptParser {
     // the runtime reads as no dictionary at all is the empty one.
     if (type.kind === "map" || type.kind === "set") return { k: "literal", text: "0" };
     if (type.kind === "text") return { k: "text", parts: [] };
-    if (type.kind === "primitive") return { k: "literal", text: "0" };
+    if (type.kind === "primitive") {
+      return type.name === "bool" ? { k: "literal", text: "0", boolean: true } : { k: "literal", text: "0" };
+    }
     if (type.kind === "list") {
       const element = this.typeExprOfShape(type.of);
       return { k: "buffer", element: typeToString(element), values: [] };
@@ -15340,9 +15357,20 @@ class TypeScriptParser {
         } else {
           const held = this.shapeOf(spread);
           const shape = held === null ? null : this.shapeForRead(held);
-          if (shape !== null && shape.kind === "record" && shape.index === null && readsOnce(spread)) {
+          // A spread of a call is the record the call answered, and a field is
+          // read of it once per field: the call is read into a name of the
+          // statement's own first, so its work runs once and every field reads
+          // that one answer.
+          let source = spread;
+          if (shape !== null && shape.kind === "record" && shape.index === null && !readsOnce(spread)) {
+            const name = `__spread${this.spreadCount}`;
+            this.spreadCount += 1;
+            this.pendingBefore.push({ kind: "declare", name, type: null, init: spread, line: key.line });
+            source = { k: "ident", name };
+          }
+          if (shape !== null && shape.kind === "record" && shape.index === null) {
             for (const name of shape.fields.keys()) {
-              put(name, { k: "member", base: spread, field: name }, true);
+              put(name, { k: "member", base: source, field: name }, true);
             }
           } else if (
             // The value's own shape is not held — a method of another module,
@@ -15356,7 +15384,11 @@ class TypeScriptParser {
             for (const name of expected.fields.keys()) {
               put(name, { k: "member", base: spread, field: name }, true);
             }
-          } else if (!this.typeReadIsPending()) {
+          } else if (!this.typeReadIsPending() && !this.pendingHolds(spread)) {
+            // A value the link has not named yet — a method of an imported
+            // class, a call of an imported function — is not a constant this
+            // read can say has no fields: the read that follows the link holds
+            // the declaration and copies the fields there.
             this.report(
               "an object spread reads a constant object",
               "write the fields out, or spread an object the file already wrote as a constant",

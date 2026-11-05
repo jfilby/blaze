@@ -56,8 +56,8 @@ test("an object a program allocates is laid out once, and named in the type that
     size: 16,
     align: 8,
     fields: [
-      { name: "left", type: "ref<any>", offset: 0 },
-      { name: "right", type: "ref<any>", offset: 8 },
+      { name: "left", type: "ref<Object1>", offset: 0 },
+      { name: "right", type: "ref<Object1>", offset: 8 },
     ],
   });
 

@@ -51,6 +51,11 @@ import {
   walkValues,
 } from "../core/semantic-ir.ts";
 
+/** Whether a value of this type is a reference to an object the program laid out. */
+function isReferenced(type: SemanticType): boolean {
+  return type.kind === "ref" && type.name !== undefined;
+}
+
 /**
  * The operator the source wrote for the one the IR states. The targets spell
  * operators as the source language writes them, so the walk translates the one
@@ -257,6 +262,14 @@ export interface ProgramTarget {
   ): string;
   /** One argument of a call, placed in the type its parameter takes. */
   argument(type: SemanticType, expression: string): string;
+  /**
+   * A reference held at a layout, in the dynamic handle the ABI carries every
+   * value in. A parameter the source wrote no type for is a dynamic value, and
+   * the pointer a reference is does not turn into one by itself.
+   */
+  handle(expression: string): string;
+  /** The dynamic handle read back as the reference its layout names. */
+  shaped(type: SemanticType, expression: string): string;
   /** How many arguments the program was started with, and one of them. */
   argvCount(): string;
   argv(index: string): string;
@@ -1062,7 +1075,14 @@ class ProgramEmitter {
     }
     const argumentsText: string[] = [];
     call.args.forEach((argument, index) => {
-      const type = call.argTypes[index] ?? argument.type;
+      // The argument is placed in the type its parameter takes: a reference a
+      // function answers is a pointer, and a parameter the source wrote no type
+      // for takes the dynamic handle the ABI carries a value in.
+      const writtenParameter = call.signature.params[index]?.type;
+      const parameterType = writtenParameter !== undefined && writtenParameter !== "text" && writtenParameter !== "boxedtext"
+        ? parseType(writtenParameter)
+        : null;
+      const type = parameterType ?? call.argTypes[index] ?? argument.type;
       // A string a function writes through is shared through a cell, and the
       // cell is what the function is given: what is passed is the name of the
       // cell and not the text it holds, for the text in the cell is what the
@@ -1115,6 +1135,17 @@ class ProgramEmitter {
   private expression(value: SemanticValue, as: SemanticType | null = null): string {
     const text = this.raw(value, as);
     if (as === null) return text;
+    // A parameter the source wrote no type for takes the dynamic handle, and a
+    // reference held at a layout is a pointer: the two are the same address
+    // written two ways, and the conversion is the one the ABI makes.
+    const asDynamic = as.kind === "ref" && as.of === null && as.name === undefined;
+    const carriedDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    if (asDynamic && !carriedDynamic && !isTextType(value.type) && isReferenced(value.type)) {
+      return this.target.handle(text);
+    }
+    if (carriedDynamic && as.kind === "ref" && as.name !== undefined) {
+      return this.target.shaped(as, text);
+    }
     // Only a number is written as another number: a reference and a string are
     // the one the value carries, and the resolver has already chosen the type
     // every use reads it as.

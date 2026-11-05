@@ -512,6 +512,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // length of the array it answers, which is refused where such a call is
     // written rather than where every call of every function is declared.
     const returns = parseType(signature.returns);
+    // The machine backend hands every reference back in a register as the
+    // pointer it is; the C backend hands an unshaped one back as a double.
+    const returnType = this.lowering === "machine" && returns.kind === "ref" ? "void*" : cDeclarationType(returns);
     // A parameter name is source text that has to survive being a C
     // identifier, and a program is free to call a parameter `double`. An
     // extern declaration only needs the names to be well formed, so they are
@@ -521,7 +524,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // either a double or a pointer depending on how the body reads it. An
     // empty parameter list leaves the call to the definition, so the link does
     // not depend on a type the driver has to guess.
-    return `extern ${cDeclarationType(returns)} ${cSymbolName(signature.symbol)}()${cSymbolLabel(signature.symbol)};`;
+    return `extern ${returnType} ${cSymbolName(signature.symbol)}()${cSymbolLabel(signature.symbol)};`;
   }
 
   openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
@@ -1666,6 +1669,17 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       return `(${cDeclarationType(type.of)}*)(${expression})`;
     }
     return expression;
+  }
+
+  handle(expression: string): string {
+    // The machine backend holds every reference in a register as the pointer
+    // it is; the C backend holds a reference the source left unshaped in the
+    // double the ABI carries a value in, and a pointer is not one by itself.
+    return this.lowering === "machine" ? expression : `((double)(uintptr_t)(${expression}))`;
+  }
+
+  shaped(type: SemanticType, expression: string): string {
+    return this.lowering === "machine" ? expression : `(${declaredType(type)})(uintptr_t)(${expression})`;
   }
 
   argvCount(): string {

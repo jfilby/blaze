@@ -945,7 +945,68 @@ and a callback that answers nothing is `forEach`.
 
 The total went from 251 to 246.
 
-### 4dn. An empty list a loop walks beside a set, an answer that names nothing, and a module read after its imports
+### 4dp. A spread of a call, and a method of a class another module declares
+
+    { kind: `while`, ...this.loopInfo(body) }      // the record the call answered
+    { ...failure.toJSON(), project: id }           // a method of an imported class
+
+A spread copies the fields of the record its value names, and the record a call
+answers is not known until the callee's body has been walked: `Info` is a shape
+the object pass builds, and the function that answers one names it only after
+its body has been read. The layout pass now walks every body again with the
+answers the round before settled, and stops when no answer changed. A call's
+answer is then the layout its callee builds, so a field copied out of it is the
+field's type and not the opaque reference.
+
+A field read through a value held at a layout's name — `ref<ObjectN>`, which is
+how a function's answer is spelled once the pass has named it — is that
+layout's field; the type table names no such declaration, so the layout pass is
+what says it.
+
+A method of a class another module declares answers a type the declaring module
+wrote, and the file that calls the method may not import that name. The shape is
+resolved where the method is declared and crosses the link with the class, so
+`failure.toJSON()` answers the record `Serialized` and `{ ...failure.toJSON() }`
+copies its fields. A spread of a value the link has not named yet is deferred
+rather than refused, as every other pending value is.
+
+A spread whose value is a call is read into a name of the statement's own, so
+the call runs once and every copied field reads that one answer.
+
+The total went from 220 to 213.
+
+### 4dq. A truth a literal writes is a truth the field holds
+
+    { region: false }        // the field is a truth, and prints `false`
+
+`true` and `false` are held as the numbers one and zero, and a literal written
+into a field was typed as the double that number is: the field the source wrote
+a truth into was laid out as a double, and the text it printed was `0` rather
+than `false`. The literal keeps the truth the source wrote, marked on the
+literal itself, so the layout pass, the type of an unannotated default and the
+inference of a return all read it as a truth. No refusal changed; the IR a field
+of a record is built as did.
+
+### 4dr. A reference a program body hands to a function
+
+    console.log(`${checksum(createTree(3))}`)     // a node, handed to `any`
+
+A function a program body calls has a parameter type the body does not write,
+and the driver's call passed each argument as the type the argument happened to
+have. A node builder answers `ref<Object1>` — a pointer — and the walker takes
+`any`, which the C backend carries as the double the ABI holds a value in: the
+pointer was handed over as a pointer to a parameter read as a double. The call
+is now placed in the type its parameter takes, and the two reference
+conversions are the target's: the C backend boxes a pointer into the double a
+dynamic value is and unboxes it back, while the machine backend holds every
+reference in a register as the pointer it is and needs neither. The declaration
+the driver writes follows the same rule, so the machine build declares a
+reference as a pointer and the C build declares an unshaped one as a double.
+
+No refusal changed; the program a body calls a function from is the one that
+has to run it, and this is the call it makes.
+
+### 4dn. An empty list a loop walks beside a set### 4dn. An empty list a loop walks beside a set### 4dn. An empty list a loop walks beside a set, an answer that names nothing, and a module read after its imports
 
     values ?? []                          // walked as the dictionary it is
     c ? [] : values                       // no entries where the set is absent
@@ -3234,6 +3295,9 @@ What was closed this session, and what each was worth:
 | a rest field (§4dl) | 241 → 236 |
 | a spread whose value the read does not shape (§4dm) | 236 → 231 |
 | an empty list a loop walks beside a set, an answer that names nothing, and a module read after its imports (§4dn) | 231 → 220 |
+| a spread of a call, and a method of a class another module declares (§4dp) | 220 → 213 |
+| a truth a literal writes is a truth the field holds (§4dq) | 213 → 213 |
+| a reference a program body hands to a function (§4dr) | 213 → 213 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

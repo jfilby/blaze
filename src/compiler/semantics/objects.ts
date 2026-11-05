@@ -188,6 +188,15 @@ class BodyTypes {
    * nothing else names the fields the source wrote.
    */
   private readonly table: TypeTable | null;
+  /**
+   * The field a layout lays out, where the value is held at the layout's name.
+   *
+   * A function that answers an object narrows its contract to the layout its
+   * body builds, so a caller holds the answer at `ref<ObjectN>` — a name no
+   * type declaration writes. What a field of that answer holds is the shape
+   * the layout pass laid out, which is what this asks.
+   */
+  private readonly layoutField: ((layout: string, field: string) => Inferred | null) | null;
 
   constructor(
     path: string,
@@ -195,11 +204,13 @@ class BodyTypes {
     params: readonly { name: string; type: TypeExpr }[],
     callees: Map<string, TypeExpr>,
     table: TypeTable | null = null,
+    layoutField: ((layout: string, field: string) => Inferred | null) | null = null,
   ) {
     this.path = path;
     this.functionName = functionName;
     this.callees = callees;
     this.table = table;
+    this.layoutField = layoutField;
     for (const param of params) this.environment.set(param.name, { kind: "type", type: param.type });
   }
 
@@ -329,7 +340,7 @@ class BodyTypes {
   private expression(expression: Expression): Inferred {
     switch (expression.k) {
       case "literal":
-        return { kind: "type", type: F64 };
+        return { kind: "type", type: expression.boolean === true ? BOOL : F64 };
       case "bigint": {
         const trimmed = expression.text.trim();
         let literal: bigint | null = null;
@@ -378,6 +389,10 @@ class BodyTypes {
         // through the reference has the same shape the declaration has.
         const declared = this.declaredField(base, expression.field);
         if (declared !== null) return { kind: "type", type: declared };
+        if (base.kind === "type" && base.type.kind === "ref" && base.type.name !== undefined) {
+          const laid = this.layoutField?.(base.type.name, expression.field) ?? null;
+          if (laid !== null) return laid;
+        }
         return { kind: "type", type: ANY_REF };
       }
       case "call": {
@@ -1279,6 +1294,15 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
         continue;
       }
       if (describe(known.value) === describe(field.value)) continue;
+      // A shape the fold has already unified with one that says what its
+      // reference points at holds the shaped field, and the unshaped reference
+      // the key was written from is the same reference: a body read again in a
+      // later round writes the key it wrote before.
+      if (unshapedReference(field.value)) continue;
+      if (unshapedReference(known.value)) {
+        known.value = field.value;
+        continue;
+      }
       throw objectsError(
         `${body.path}: ${body.functionName} writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,
         "an object is one object to the program, so one field holds one type; write the field in the literal so the two objects have different shapes",
@@ -1334,58 +1358,113 @@ export function resolveObjects(
     return { names, layouts, keys: new Map(programBody.keys) };
   }
 
-  // The declared return of every function is known before any body is walked,
-  // because one function's body may call another's.
+  // A body is walked once for the objects it writes, and again when a function
+  // it calls has an answer the first walk could not name: a call's result is the
+  // object the callee's body builds, and the callee's contract names that object
+  // only after that body has been walked. Every round re-reads the bodies with
+  // the answers the round before settled, and the rounds stop when no answer
+  // changed.
   const bodies = new Map<string, BodyTypes>();
-  for (const caller of callers.values()) {
-    const definition = caller.contract.definition;
-    const body = new BodyTypes(
-      caller.file.path,
-      caller.name,
-      caller.contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) })),
-      callees,
-      types.get(caller.file.path) ?? null,
-    );
-    body.statements(definition.statements);
-    bodies.set(caller.name, body);
-    mergeShape(shapes, owners, body);
-  }
-  // The objects a program body writes are merged after the function bodies, so
-  // a shape a function writes keeps the name it had before a body could write
-  // one beside it: the counter moves on from where the walk of the functions
-  // left it, and a shape both wrote is one shape either way.
-  mergeProgramShapes(shapes, owners, programShapes);
+  const names = new Map<string, string>();
+  let remapped = new Map<string, string>();
+  const walk = (): void => {
+    bodies.clear();
+    callees.clear();
+    for (const [name, caller] of callers) callees.set(name, parseType(caller.contract.function.returns));
+    for (const caller of callers.values()) {
+      const definition = caller.contract.definition;
+      const body = new BodyTypes(
+        caller.file.path,
+        caller.name,
+        caller.contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) })),
+        callees,
+        types.get(caller.file.path) ?? null,
+        (layout, field) => {
+          for (const [key, name] of names) {
+            if (name !== layout) continue;
+            const shape = shapes.get(key);
+            return shape?.fields.find((entry) => entry.name === field)?.value ?? null;
+          }
+          return null;
+        },
+      );
+      body.statements(definition.statements);
+      bodies.set(caller.name, body);
+      mergeShape(shapes, owners, body);
+    }
+    // The objects a program body writes are merged after the function bodies, so
+    // a shape a function writes keeps the name it had before a body could write
+    // one beside it: the counter moves on from where the walk of the functions
+    // left it, and a shape both wrote is one shape either way.
+    mergeProgramShapes(shapes, owners, programShapes);
 
-  // Two shapes that differ only where one of them says nothing about what a
-  // reference points at are one object, and the keys that changed are written
-  // back into every body that named them: a body holds the object in the name it
-  // bound the value to, and a traversal that reads a field through a name bound
-  // before the fold would look the old key up and find nothing.
-  const remapped = uniteShapes(shapes);
-  if ([...remapped].some(([key, root]) => key !== root)) {
-    const folded = new Map<string, Shape>();
-    for (const [key, root] of remapped) {
-      const shape = shapes.get(key);
-      if (shape === undefined) continue;
-      const held = folded.get(root);
-      if (held === undefined) {
-        folded.set(root, { key: root, fields: shape.fields.map((field) => ({ ...field })) });
-        continue;
-      }
-      for (const field of shape.fields) {
-        const known = held.fields.find((entry) => entry.name === field.name);
-        if (known === undefined) {
-          held.fields.push({ name: field.name, value: field.value });
+    // Two shapes that differ only where one of them says nothing about what a
+    // reference points at are one object, and the keys that changed are written
+    // back into every body that named them: a body holds the object in the name it
+    // bound the value to, and a traversal that reads a field through a name bound
+    // before the fold would look the old key up and find nothing.
+    remapped = uniteShapes(shapes);
+    if ([...remapped].some(([key, root]) => key !== root)) {
+      const folded = new Map<string, Shape>();
+      for (const [key, root] of remapped) {
+        const shape = shapes.get(key);
+        if (shape === undefined) continue;
+        const held = folded.get(root);
+        if (held === undefined) {
+          folded.set(root, { key: root, fields: shape.fields.map((field) => ({ ...field })) });
           continue;
         }
-        // A field one literal wrote as a reference and another as a null is a
-        // reference: the null is a value the reference can hold.
-        if (unshapedReference(known.value)) known.value = field.value;
+        for (const field of shape.fields) {
+          const known = held.fields.find((entry) => entry.name === field.name);
+          if (known === undefined) {
+            held.fields.push({ name: field.name, value: field.value });
+            continue;
+          }
+          // A field one literal wrote as a reference and another as a null is a
+          // reference: the null is a value the reference can hold.
+          if (unshapedReference(known.value)) known.value = field.value;
+        }
+      }
+      shapes.clear();
+      for (const [key, shape] of folded) shapes.set(key, shape);
+      for (const body of bodies.values()) body.renameObjects(remapped);
+    }
+    // A name a shape already has is kept: a contract was narrowed to it in an
+    // earlier round, and a new number would name another object.
+    for (const [key, root] of remapped) {
+      if (key !== root && names.has(key) && !names.has(root)) names.set(root, names.get(key) as string);
+    }
+    for (const key of shapes.keys()) {
+      if (!names.has(key)) names.set(key, `Object${names.size + 1}`);
+    }
+  };
+  let changed = true;
+  for (let round = 0; changed && round <= callers.size; round += 1) {
+    walk();
+    changed = false;
+    for (const caller of callers.values()) {
+      const body = bodies.get(caller.name);
+      if (body === undefined) continue;
+      const result = body.result();
+      if (result === null || result.kind !== "object") continue;
+      // `any` said a reference without saying to what; the body says which.
+      const declared = parseType(caller.contract.function.returns);
+      const key = remapped.get(result.key) ?? result.key;
+      const layout = names.get(key);
+      if (declared.kind === "ref" && declared.of === null && declared.name === undefined && layout !== undefined) {
+        caller.contract.function.returns = `ref<${layout}>`;
+        changed = true;
       }
     }
-    shapes.clear();
-    for (const [key, shape] of folded) shapes.set(key, shape);
-    for (const body of bodies.values()) body.renameObjects(remapped);
+  }
+  // A shape no body of the last round wrote is a shape an earlier round read
+  // with an answer it did not yet have: it is not an object the program has.
+  const used = new Set<string>(programShapes.keys());
+  for (const body of bodies.values()) {
+    for (const key of body.registered.keys()) used.add(key);
+  }
+  for (const key of [...shapes.keys()]) {
+    if (!used.has(key)) shapes.delete(key);
   }
 
   // Every literal a program body wrote, filed under the key it survived as: the
@@ -1396,9 +1475,7 @@ export function resolveObjects(
     literalKeys.set(literal, remapped.get(key) ?? key);
   }
 
-  const names = new Map<string, string>();
   const ordered = [...shapes.values()];
-  ordered.forEach((shape, index) => names.set(shape.key, `Object${index + 1}`));
   const layouts = new Map<string, ObjectLayout>();
   for (const shape of ordered) {
     const name = names.get(shape.key) as string;
@@ -1417,7 +1494,7 @@ export function resolveObjects(
     if (!callers.has(declared.name) || aliases.has(declared.name)) continue;
     const result = bodies.get(declared.name)?.result();
     if (result === undefined || result === null || result.kind !== "object") continue;
-    const layout = names.get(result.key);
+    const layout = names.get(remapped.get(result.key) ?? result.key);
     if (layout !== undefined) aliases.set(declared.name, layout);
   }
 
@@ -1436,13 +1513,6 @@ export function resolveObjects(
     // decided here: it is a property of the whole graph, and `resolveCalls`
     // decides it immediately after this pass runs.
     definition.calls = body.called.map((callee) => ({ callee, strategy: "call" }));
-    const result = body.result();
-    if (result === null || result.kind !== "object") continue;
-    // `any` said a reference without saying to what; the body says which.
-    const declared = parseType(caller.contract.function.returns);
-    if (declared.kind === "ref" && declared.of === null && declared.name === undefined) {
-      caller.contract.function.returns = `ref<${names.get(result.key)}>`;
-    }
   }
 
   return { names, layouts: written, keys: literalKeys };

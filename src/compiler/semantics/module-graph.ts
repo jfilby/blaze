@@ -22,8 +22,8 @@ import type { Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
-import type { ClassInfo, ClassTable } from "./typescript-classes.ts";
-import { bindImportedTypes } from "./typescript-types.ts";
+import type { ClassInfo, ClassMethod, ClassTable } from "./typescript-classes.ts";
+import { bindImportedTypes, resolveTypeName } from "./typescript-types.ts";
 import type { ResolvedType, TypeTable } from "./typescript-types.ts";
 
 /** An error of the contract phase, which is where the graph is read. */
@@ -246,7 +246,7 @@ function classOffered(
   const renamed = record.analysis.exportNames?.find((one) => one.exported === name);
   const local = renamed === undefined ? name : renamed.local;
   const held = record.analysis.classes?.classes.get(local);
-  if (held !== undefined) return held;
+  if (held !== undefined) return withMethodShapes(held, record);
   for (const entry of record.analysis.reexports ?? []) {
     const offered = entry.renames?.find((one) => one.exported === name);
     const wanted = offered === undefined ? name : offered.local;
@@ -259,6 +259,37 @@ function classOffered(
     if (found !== undefined) return found;
   }
   return undefined;
+}
+
+/**
+ * The class a module declared, with what each method answers resolved against
+ * the table the module wrote it in.
+ *
+ * A method's result type is a name in the declaring module, and the file that
+ * calls the method may not import that name: `failure.toJSON()` answers
+ * `SerializedCompilerError`, which `compiler.ts` never names. The shape is
+ * resolved where the declaration is, and it crosses the link with the class.
+ */
+function withMethodShapes(info: ClassInfo, record: ModuleRecord): ClassInfo {
+  const types = record.analysis.types;
+  if (types === undefined) return info;
+  const shaped = (method: ClassMethod): ClassMethod => {
+    if (method.returnsShape !== undefined || method.returnTypeName.trim() === "" || method.returnTypeName.trim() === "void") return method;
+    try {
+      const shape = resolveTypeName(types, method.returnTypeName.trim());
+      return shape.kind === "any" ? method : { ...method, returnsShape: shape };
+    } catch {
+      return method;
+    }
+  };
+  return {
+    ...info,
+    constructor: info.constructor === null ? null : shaped(info.constructor),
+    methods: info.methods.map(shaped),
+    staticMethods: info.staticMethods.map(shaped),
+    getters: info.getters.map(shaped),
+    staticGetters: info.staticGetters.map(shaped),
+  };
 }
 
 /** Reads each file at most once, so a diamond import costs one read. */
