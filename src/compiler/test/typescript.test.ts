@@ -4702,3 +4702,17 @@ test("a record built from a callback's pairs is the entries it writes", () => {
   const ir = irOf("typescript", { "main.ts": source + "console.log(f([]).size);\n" }, "main.ts", "f");
   assert.match(ir, /call\[f64\] __collect_main_0/);
 });
+
+test("an arrow the use holds at a function type answers what that type says", () => {
+  // `const reader: ModuleReader = read ?? ((...) => ({ ... }))` states the
+  // record the arrow answers, so an empty list it writes is the type's list.
+  const source = [
+    "interface ModuleRecord { path: string; refused: string[]; count: number }",
+    "type ModuleReader = (source: string, path: string) => ModuleRecord;",
+    "export function make(read: ModuleReader | undefined): ModuleReader {",
+    "  return read ?? ((source: string) => ({ path: source, refused: [], count: 0 }));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

@@ -987,7 +987,19 @@ literal itself, so the layout pass, the type of an unannotated default and the
 inference of a return all read it as a truth. No refusal changed; the IR a field
 of a record is built as did.
 
-### 4du. A record built from a callback's pairs
+### 4dv. An arrow the use holds at a function type
+
+    const reader: ModuleReader = read ?? ((source, path) => ({ ... }))
+
+A type alias written as a function type states what an arrow answers, and the
+arrow was read with no result type: an empty list it writes in its result object
+was a list no use had said the element type of. The arrow now takes its result
+type and shape from the function type the use expects, so the fields it writes
+are read at the record the alias names.
+
+The total went from 204 to 203.
+
+### 4du. A record built from a callback's pairs### 4du. A record built from a callback's pairs
 
     Object.fromEntries(units.map((unit) => [unit.name, unit]))
 
@@ -3357,6 +3369,7 @@ What was closed this session, and what each was worth:
 | a promise a method answers (§4ds) | 213 → 213 |
 | a hash is the runtime's SHA-256 hasher (§4dt) | 213 → 206 |
 | a record built from a callback's pairs (§4du) | 206 → 204 |
+| an arrow the use holds at a function type (§4dv) | 204 → 203 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

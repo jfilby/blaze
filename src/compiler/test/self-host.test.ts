@@ -119,9 +119,9 @@ import { selfHostGap } from "./self-host-gap.ts";
  * graph read after the modules it imports to 220, and a spread of a call with a
  * method of a class another module declares to 213, and a hash that is the
  * runtime's SHA-256 hasher to 206, and a record built from a callback's pairs,
- * to 204.
+ * to 204, and an arrow the use holds at a function type, to 203.
  */
-const REFUSAL_BUDGET = 204;
+const REFUSAL_BUDGET = 203;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

@@ -11848,6 +11848,13 @@ class TypeScriptParser {
         isAsync,
       );
       statedShape = this.lastAnnotationShape();
+    } else if (this.expectedShape !== null && this.expectedShape.kind === "function") {
+      // An arrow the use holds at a function type answers what that type says:
+      // `const reader: ModuleReader = request.reader ?? ((...) => ({ ... }))`
+      // states the record the arrow answers, so the fields it writes are read
+      // at the type the alias names.
+      stated = this.typeExprOfShape(this.expectedShape.returns);
+      statedShape = this.expectedShape.returns;
     }
     // A method of an object literal writes its body where an arrow writes its
     // `=>`: `{ start(controller) { ... } }` is the arrow that body is.
