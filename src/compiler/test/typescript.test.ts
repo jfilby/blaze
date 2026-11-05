@@ -4687,3 +4687,18 @@ test("a hash is the runtime's SHA-256 hasher", () => {
   assert.match(ir, /blaze_rt_sha256_update/);
   assert.match(ir, /blaze_rt_sha256_digest/);
 });
+
+test("a record built from a callback's pairs is the entries it writes", () => {
+  // `Object.fromEntries(list.map((item) => [k, v]))` is a loop of one write
+  // each: an entry is two values of two types, which a list cannot hold.
+  const source = [
+    "interface Unit { name: string; at: number }",
+    "export function f(units: Unit[]): Record<string, Unit> {",
+    "  return Object.fromEntries(units.map((unit) => [unit.name, unit]));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": source + "console.log(f([]).size);\n" }, "main.ts", "f");
+  assert.match(ir, /call\[f64\] __collect_main_0/);
+});

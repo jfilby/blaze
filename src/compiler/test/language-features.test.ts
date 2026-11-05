@@ -1247,6 +1247,27 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("Object.fromEntries of a callback's pairs is the entries it writes", async () => {
+  // `Object.fromEntries(items.map((item) => [item.key, item]))` is a loop of
+  // one write each: an entry is two values of two types, which a list cannot
+  // hold, and the record the call answers is the dictionary it wrote.
+  const source = [
+    "interface Entry { name: string; value: number }",
+    "export function demo(): string {",
+    "  const entries: Entry[] = [{ name: `a`, value: 1 }, { name: `b`, value: 2 }];",
+    "  const byName = Object.fromEntries(entries.map((entry) => [entry.name, entry]));",
+    "  const a = byName.a;",
+    "  return `${Object.keys(byName).length} ${a === undefined ? 0 : a.value}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 1", `the ${backend} backend builds the record from the pairs`);
+  }
+});
+
 test("a method's promise is awaited as the value it carries", async () => {
   const source = [
     "class Store {",

@@ -10399,6 +10399,21 @@ class TypeScriptParser {
           target.base.name === "Object" &&
           target.field === "fromEntries"
         ) {
+          // `Object.fromEntries(list.map((item) => [k, v]))` is the dictionary
+          // the callback writes: an entry is two values of two types, which a
+          // compiled list cannot hold, so the call is read as the loop of
+          // writes it means, exactly as `new Map(list.map(...))` is.
+          if (this.at("(") && this.pairMapAt(this.position + 1) !== null) {
+            this.next();
+            const collection: CollectionValue = { kind: "map", key: NUMBER_RESULT, value: NUMBER_RESULT };
+            const made = this.readPairMap(collection);
+            if (made !== null) {
+              this.expressionTypes.set(made, NUMBER_RESULT);
+              this.collectionExpressions.set(made, collection);
+              replace(made);
+              continue;
+            }
+          }
           const args = this.readCallArguments();
           const source = args[0];
           const sourceCollection = source === undefined ? null : this.collectionOfExpression(source);
@@ -15864,13 +15879,13 @@ class TypeScriptParser {
    * a list of two written values — the call is read as the loop of writes it
    * means, and the list never exists.
    */
-  private pairMapAt(): { dot: number; open: number; close: number } | null {
-    const open = this.position - 1;
+  private pairMapAt(from = this.position): { dot: number; open: number; close: number; method: string } | null {
+    const open = from - 1;
     const close = this.matchingToken(open, "(", ")");
     if (close < 0) return null;
     let depth = 0;
-    let found: { dot: number; open: number; close: number } | null = null;
-    for (let at = this.position; at < close; at += 1) {
+    let found: { dot: number; open: number; close: number; method: string } | null = null;
+    for (let at = from; at < close; at += 1) {
       const token = this.tokens[at];
       if (token === undefined) return null;
       if (token.kind === "punct") {
@@ -15890,7 +15905,11 @@ class TypeScriptParser {
           this.tokens[at + 2]?.text === "("
         ) {
           const end = this.matchingToken(at + 2, "(", ")");
-          if (end === close - 1) found = { dot: at, open: at + 2, close };
+          // A call may end its arguments with a comma, which names no argument:
+          // `Object.fromEntries(list.map(f),)` is the same call.
+          if (end === close - 1 || (end === close - 2 && this.tokens[close - 1]?.text === ",")) {
+            found = { dot: at, open: at + 2, close, method: this.tokens[at + 1]?.text as string };
+          }
         }
       }
     }
@@ -15912,8 +15931,8 @@ class TypeScriptParser {
   }
 
   /** `new Map(<source>.map(<callback>))`, as the loop of writes it is. */
-  private readPairMap(collection: CollectionValue): Expression | null {
-    const at = this.pairMapAt();
+  private readPairMap(collection: CollectionValue, from = this.position): Expression | null {
+    const at = this.pairMapAt(from);
     if (at === null) return null;
     const line = this.peek().line;
     // The list the callback walks is read to the `.` and no further.
@@ -15929,7 +15948,7 @@ class TypeScriptParser {
     this.arrowParameters = shape === null ? null : [{ type: this.typeExprOfShape(shape), shape }];
     const callback = this.readArrow(false);
     this.arrowParameters = null;
-    if (this.position !== at.close - 1) return null;
+    if (this.position !== at.close - 1 && !(this.position === at.close - 2 && this.tokens[at.close - 1]?.text === ",")) return null;
     if (callback.k !== "arrow") return null;
     const lifted = this.liftedArrows.get(callback.name);
     if (lifted === undefined) return null;
@@ -15945,6 +15964,13 @@ class TypeScriptParser {
     if (this.keyKind(keyType) !== "text") return null;
     collection.key = keyType;
     collection.value = valueType;
+    // The pair is read where it is written, so the arrow is never called: the
+    // loop of writes is what the program has, and the closure the read lifted
+    // is not a function of it. A list of the two values of a pair is not a
+    // list a compiled program can hold, so leaving it behind is a function the
+    // backend cannot write.
+    this.liftedArrows.delete(callback.name);
+    this.closures = this.closures.filter((one) => one.name !== callback.name);
     const setName = this.collectionSetNameFor(collection);
     if (setName === null) return null;
     const name = `__collect_${this.stem}_${this.collectCount}`;

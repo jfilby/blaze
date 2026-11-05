@@ -987,7 +987,27 @@ literal itself, so the layout pass, the type of an unannotated default and the
 inference of a return all read it as a truth. No refusal changed; the IR a field
 of a record is built as did.
 
-### 4dt. A hash is the runtime's SHA-256 hasher
+### 4du. A record built from a callback's pairs
+
+    Object.fromEntries(units.map((unit) => [unit.name, unit]))
+
+`Object.fromEntries` copied a map or a record, and a list of pairs was refused
+because an entry is two values of two types and a compiled list holds one. The
+call is now read as the loop of writes it means, with the pair machinery
+`new Map(list.map(...))` already has: the callback is read against the element
+the list holds, the pair it answers is its result, and the helper loops the list
+and writes one entry per element. Nothing of the pair exists at run time. A call
+may end its arguments with a comma, so a map call followed by one is still the
+only argument.
+
+The arrow is read where its pair is, which means the arrow is never called: the
+closure the read lifted is dropped, because a list of the two values of a pair
+is not a list a backend can write. That applies to `new Map(list.map(...))` as
+well, where the closure was left behind before.
+
+The total went from 206 to 204.
+
+### 4dt. A hash is the runtime's SHA-256 hasher### 4dt. A hash is the runtime's SHA-256 hasher
 
     createHash("sha256").update(text, "utf8").digest("hex")
 
@@ -3336,6 +3356,7 @@ What was closed this session, and what each was worth:
 | a reference a program body hands to a function (§4dr) | 213 → 213 |
 | a promise a method answers (§4ds) | 213 → 213 |
 | a hash is the runtime's SHA-256 hasher (§4dt) | 213 → 206 |
+| a record built from a callback's pairs (§4du) | 206 → 204 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
