@@ -4716,3 +4716,28 @@ test("an arrow the use holds at a function type answers what that type says", ()
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a record rebuilt from the entries of a record is the entries it writes", () => {
+  // `Object.fromEntries(Object.entries(node).map(([name, entry]) => [name, f(entry)]))`
+  // is a loop over the entries of the record itself: the callback is the loop
+  // of writes the record answers.
+  const source = [
+    "interface Layout { name: string; offset: number }",
+    "export function f(layouts: Record<string, Layout>): Record<string, number> {",
+    "  return Object.fromEntries(Object.entries(layouts).map(([name, value]) => [name, value.offset]));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const cast = [
+    "type Choice = { k: string; left: number; right: number } | { k: string; operand: number };",
+    "declare function callsRewritten(node: Choice): Choice;",
+    "export function f(node: Choice): Record<string, Choice> {",
+    "  return Object.fromEntries(",
+    "    Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, callsRewritten(entry as Choice)]),",
+    "  );",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(cast, "main.ts", false).refused, []);
+});

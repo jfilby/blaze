@@ -999,6 +999,24 @@ are read at the record the alias names.
 
 The total went from 204 to 203.
 
+### 4dw. A record rebuilt from the entries of a record
+
+    Object.fromEntries(Object.entries(node as Record<string, unknown>).map(([name, v]) => [name, f(v)]))
+    Object.fromEntries(files.flatMap((file) => Object.entries(file.functions)))
+
+An entry of an object is read by position in a loop and in a map, and a
+callback that takes the pair names the two values at once: a mapping over the
+entries of a record is the loop of the record's own entries. That loop now
+lowers through the pair machinery — the callback is read under the loop flags,
+so the entries are marked rather than refused, and a destructured pair's names
+are read as the pair parts they bind. Where the loop walks the entries of a
+dictionary, the two parts are the key and the value the dictionary reports at
+that position. A flat map whose callback answers the entries of each element's
+record concatenates those entries, in element order, into the record the call
+answers: each element's dictionary is read and its entries copied in turn.
+
+    The total went from 203 to 200.
+
 ### 4du. A record built from a callback's pairs### 4du. A record built from a callback's pairs
 
     Object.fromEntries(units.map((unit) => [unit.name, unit]))
@@ -3370,6 +3388,7 @@ What was closed this session, and what each was worth:
 | a hash is the runtime's SHA-256 hasher (§4dt) | 213 → 206 |
 | a record built from a callback's pairs (§4du) | 206 → 204 |
 | an arrow the use holds at a function type (§4dv) | 204 → 203 |
+| a record rebuilt from the entries of a record (§4dw) | 203 → 200 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

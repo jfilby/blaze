@@ -1247,6 +1247,23 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("Object.fromEntries of a callback's pairs mapping the entries of a record", async () => {
+  const source = [
+    "interface Layout { name: string; offset: number }",
+    "export function demo(): string {",
+    "  const layouts: Record<string, Layout> = { a: { name: `a`, offset: 3 }, b: { name: `b`, offset: 4 } };",
+    "  const offsets = Object.fromEntries(Object.entries(layouts).map(([name, v]) => [name, 7]));",
+    "  return `${Object.keys(offsets).length} ${offsets.a ?? 0} ${offsets.b ?? 0}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 7 7", `the ${backend} backend rebuilds the record from its entries`);
+  }
+});
+
 test("Object.fromEntries of a callback's pairs is the entries it writes", async () => {
   // `Object.fromEntries(items.map((item) => [item.key, item]))` is a loop of
   // one write each: an entry is two values of two types, which a list cannot
