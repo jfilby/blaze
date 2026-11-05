@@ -4647,3 +4647,43 @@ test("a truth a literal writes is a truth the field holds", () => {
   assert.match(ir, /field region: bool/, "the field a truth is written into is a truth");
   assert.match(ir, /load_field\[bool\].* region/, "the field is read as a truth");
 });
+
+test("a promise a method answers carries the payload its declaration states", () => {
+  // A method's result is a text the class scan kept, so `Promise<T>` is peeled
+  // the way an async function's annotation is: `await store.list()` holds the
+  // list the promise carries, and the list's methods are the list's.
+  const source = [
+    "class Store {",
+    "  async list(path: string): Promise<string[]> { return [path]; }",
+    "}",
+    "export async function f(store: Store): Promise<number> {",
+    "  const found = await store.list(`a`);",
+    "  return found.map((one) => one.length).length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a hash is the runtime's SHA-256 hasher", () => {
+  // `createHash("sha256").update(text, "utf8").digest("hex")` is the one
+  // hasher the runtime carries: the chain is three calls of its ABI, and the
+  // value a name holds is the handle the runtime made.
+  const source = [
+    "export function hashText(text: string): string {",
+    "  return createHash(`sha256`).update(text, `utf8`).digest(`hex`);",
+    "}",
+    "export function two(): string {",
+    "  const hasher = createHash(`sha256`);",
+    "  hasher.update(`a`);",
+    "  hasher.update(`b`);",
+    "  return hasher.digest(`hex`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", { "main.ts": source + "console.log(hashText(`abc`));\n" }, "main.ts", "hashText");
+  assert.match(ir, /blaze_rt_sha256_create/);
+  assert.match(ir, /blaze_rt_sha256_update/);
+  assert.match(ir, /blaze_rt_sha256_digest/);
+});

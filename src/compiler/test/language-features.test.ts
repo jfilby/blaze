@@ -1247,6 +1247,25 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("a method's promise is awaited as the value it carries", async () => {
+  const source = [
+    "class Store {",
+    "  async list(path: string): Promise<string[]> { return [path, `${path}/`]; }",
+    "}",
+    "export async function demo(): Promise<string> {",
+    "  const store = new Store();",
+    "  const found = await store.list(`a`);",
+    "  return found.map((one) => one.length).join(`-`);",
+    "}",
+    "console.log(await demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1-2", `the ${backend} backend awaits the method's list`);
+  }
+});
+
 test("a recursive record holds the records it is made of", async () => {
   // The answer of a function that builds a node is the node's layout, and a
   // field that holds one is a reference to the same layout: the tree a caller

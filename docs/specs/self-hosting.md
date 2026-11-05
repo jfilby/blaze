@@ -987,7 +987,43 @@ literal itself, so the layout pass, the type of an unannotated default and the
 inference of a return all read it as a truth. No refusal changed; the IR a field
 of a record is built as did.
 
-### 4dr. A reference a program body hands to a function
+### 4dt. A hash is the runtime's SHA-256 hasher
+
+    createHash("sha256").update(text, "utf8").digest("hex")
+
+The compiler's fingerprint, every candidate key and the cache key are SHA-256
+digests, and the runtime carried only MD5: `createHash` was a name no function
+of the program declared. The runtime now carries SHA-256 (FIPS 180-4) beside
+MD5, with the three ABI entries a hasher is, and the frontend lowers the chain
+to them: `createHash("sha256")` is the handle the runtime made,
+`hash.update(text)` feeds it and `hash.digest("hex")` answers the digest. A name
+a hasher is bound to is a handle too, so a chain written as statements reads the
+same. An algorithm other than sha256 is refused by name.
+
+The runtime test checks the digests at the lengths the padding is a question at
+— nothing, fewer bytes than the length field, the fifty-six bytes that start a
+second block, a full block and more than one — and two updates are the digest of
+the two texts joined.
+
+The total went from 213 to 206, and `core/json-store.ts` reads whole.
+
+### 4ds. A promise a method answers### 4ds. A promise a method answers
+
+    async list(path: string): Promise<string[]> { ... }
+    const found = await store.list(path)          // the list the promise carries
+
+An async function's annotation is read as the value the promise carries, and a
+method's result is a text the class scan kept whole: `Promise<string[]>` was
+`any`, so the value the await held was no list and its methods were refused. The
+payload is peeled from the method's result text the way it is peeled from an
+async function's, and the await of a method call reads the type and shape the
+call itself was written at, which the declaration table does not hold for a
+method.
+
+No refusal changed; the call is the value it always was, and this is what the
+wait reads out of it.
+
+### 4dr. A reference a program body hands to a function### 4dr. A reference a program body hands to a function
 
     console.log(`${checksum(createTree(3))}`)     // a node, handed to `any`
 
@@ -3298,6 +3334,8 @@ What was closed this session, and what each was worth:
 | a spread of a call, and a method of a class another module declares (§4dp) | 220 → 213 |
 | a truth a literal writes is a truth the field holds (§4dq) | 213 → 213 |
 | a reference a program body hands to a function (§4dr) | 213 → 213 |
+| a promise a method answers (§4ds) | 213 → 213 |
+| a hash is the runtime's SHA-256 hasher (§4dt) | 213 → 206 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

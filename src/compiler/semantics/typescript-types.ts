@@ -1177,6 +1177,20 @@ export function resolveAnnotation(tokens: readonly Token[], from: number, to: nu
 }
 
 /** Resolves an annotation already written as one text, as a class field is. */
+/**
+ * The `T` a type text writes as `Promise<T>`, or null where it writes no
+ * promise.
+ *
+ * A method's declared result is a text the class scan kept, and an async
+ * method's promise is the value its caller's `await` holds: the payload is what
+ * the method answers, as an async function's annotation states it.
+ */
+export function promisePayloadText(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("Promise<") || !trimmed.endsWith(">")) return null;
+  return trimmed.slice("Promise<".length, -1).trim();
+}
+
 export function resolveTypeName(table: TypeTable, typeName: string): ResolvedType {
   return resolveTypeText(table, typeName);
 }

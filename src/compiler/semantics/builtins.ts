@@ -76,6 +76,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
   "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
+  // A SHA-256 hasher is one handle the runtime keeps: the program makes it,
+  // feeds it texts and reads the digest it answers.
+  "blaze_rt_sha256_create": { params: [], returns: F64, arity: 0 },
+  "blaze_rt_sha256_update": { params: [F64, TEXT], returns: F64, arity: 2 },
+  "blaze_rt_sha256_digest": { params: [F64], returns: TEXT, arity: 1 },
   "blaze_rt_string_new": { params: [POINTER, F64], returns: TEXT, arity: 2 },
   "blaze_rt_dict_new": { params: [], returns: F64, arity: 0 },
   "blaze_rt_dict_get": { params: [F64, TEXT], returns: F64, arity: 2 },

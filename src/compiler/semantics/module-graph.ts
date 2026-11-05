@@ -23,7 +23,7 @@ import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from ".
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
 import type { ClassInfo, ClassMethod, ClassTable } from "./typescript-classes.ts";
-import { bindImportedTypes, resolveTypeName } from "./typescript-types.ts";
+import { bindImportedTypes, promisePayloadText, resolveTypeName } from "./typescript-types.ts";
 import type { ResolvedType, TypeTable } from "./typescript-types.ts";
 
 /** An error of the contract phase, which is where the graph is read. */
@@ -276,7 +276,7 @@ function withMethodShapes(info: ClassInfo, record: ModuleRecord): ClassInfo {
   const shaped = (method: ClassMethod): ClassMethod => {
     if (method.returnsShape !== undefined || method.returnTypeName.trim() === "" || method.returnTypeName.trim() === "void") return method;
     try {
-      const shape = resolveTypeName(types, method.returnTypeName.trim());
+      const shape = resolveTypeName(types, promisePayloadText(method.returnTypeName) ?? method.returnTypeName.trim());
       return shape.kind === "any" ? method : { ...method, returnsShape: shape };
     } catch {
       return method;

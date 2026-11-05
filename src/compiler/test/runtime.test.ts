@@ -1313,3 +1313,58 @@ test("a block released inside an open region is not handed out again by the slab
   assert.equal(out.stdout.trim(), "distinct");
 });
 
+
+test("the SHA-256 hasher answers the digest the runtime is named for", async () => {
+  // The self-hosting fingerprint is `createHash("sha256")`, so the runtime has
+  // to answer the digest the algorithm names. The lengths are the ones the
+  // padding is a question at: nothing, fewer bytes than the length field,
+  // exactly the fifty-six bytes that start a second block, a full block, and
+  // more than one.
+  const vectors: [number, string][] = [
+    [0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+    [55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"],
+    [56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"],
+    [64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"],
+    [1000, "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"],
+  ];
+  const checks = vectors.map(([length, digest]) => {
+    const text = "a".repeat(length);
+    return [
+      "  hasher = blaze_rt_sha256_create();",
+      `  blaze_rt_sha256_update(hasher, ${JSON.stringify(text)});`,
+      `  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "${digest}") != 0) return ${100 + length};`,
+    ].join("\n");
+  });
+  const probe = [
+    "#include <stdio.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  /* `createHash`, one update, and the digest of the text. */",
+    '  double hasher = blaze_rt_sha256_create();',
+    '  blaze_rt_sha256_update(hasher, "abc");',
+    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 1;',
+    "  /* Two updates are the update of the two texts joined. */",
+    "  hasher = blaze_rt_sha256_create();",
+    '  blaze_rt_sha256_update(hasher, "a");',
+    '  blaze_rt_sha256_update(hasher, "bc");',
+    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 2;',
+    ...checks,
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-sha256-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("debug"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, `the digest is the one the algorithm names (exit ${result.code})`);
+});

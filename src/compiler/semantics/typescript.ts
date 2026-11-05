@@ -75,6 +75,7 @@ import {
   collectionOfType,
   elementOfType,
   fieldOfType,
+  promisePayloadText,
   resolveAnnotation,
   resolveTypeName,
   scanTypeTable,
@@ -3294,6 +3295,10 @@ class TypeScriptParser {
   private readonly unsettledArrays = new Map<Expression, Token>();
   /** How many spreads have been read into a name of the statement's own. */
   private spreadCount = 0;
+  /** The values a SHA-256 hasher the runtime made is, as handles. */
+  private readonly hashers = new Set<Expression>();
+  /** The names a hasher is bound to, so `hash.update` reads the handle. */
+  private readonly hasherNames = new Set<string>();
   /**
    * The names this file's imports bind.
    *
@@ -4023,6 +4028,13 @@ class TypeScriptParser {
             shape = carried;
             break;
           }
+          // A method the class scan read is not a name the declaration table
+          // holds; the shape was kept beside the call where it was written.
+          const held = this.expressionShapes.get(awaited);
+          if (held !== undefined) {
+            shape = held;
+            break;
+          }
         }
         const declared = this.declaredReturnShapes.get(value.name);
         if (declared !== undefined) {
@@ -4127,8 +4139,11 @@ class TypeScriptParser {
    * own name so a caller can read its fields without having built it itself.
    */
   private returnTypeForName(typeName: string, line: number): TypeExpr {
-    if (this.classTable.names.has(typeName)) return { kind: "ref", of: null, name: typeName };
-    return this.typeForName(typeName, line);
+    // A method that answers a promise answers what the promise carries: the
+    // value a caller's `await` holds is the payload the annotation states.
+    const payload = promisePayloadText(typeName) ?? typeName;
+    if (this.classTable.names.has(payload)) return { kind: "ref", of: null, name: payload };
+    return this.typeForName(payload, line);
   }
 
   /**
@@ -7353,6 +7368,9 @@ class TypeScriptParser {
           this.bindingArrow = wasBinding;
           this.declaringArrow = wasDeclaring;
         }
+        // A hasher a name holds is that name's, so `hash.update` written
+        // below reads the handle the runtime made.
+        if (this.hashers.has(init)) this.hasherNames.add(name.text);
         this.accept(";");
       } else if (type === null) {
         this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
@@ -10733,6 +10751,28 @@ class TypeScriptParser {
           );
           const spreads = target.field === "push" || target.field === "splice" || target.field === "unshift" ? this.argumentSpreads : null;
           const receiver = target.base;
+          // `hash.update(text)` feeds the runtime's SHA-256 hasher and
+          // `hash.digest("hex")` answers the digest it holds: the hasher is one
+          // handle, and the two calls are the runtime's own.
+          const hashing = this.hashers.has(receiver) || (receiver.k === "ident" && this.hasherNames.has(receiver.name));
+          if (hashing) {
+            if (target.field === "update" && (args.length === 1 || args.length === 2)) {
+              const fed: Expression = { k: "call", name: "blaze_rt_sha256_update", args: [receiver, args[0] as Expression] };
+              this.expressionTypes.set(fed, NUMBER_RESULT);
+              this.hashers.add(fed);
+              replace(fed);
+              continue;
+            }
+            if (target.field === "digest" && args.length === 1) {
+              const digest: Expression = { k: "call", name: "blaze_rt_sha256_digest", args: [receiver] };
+              this.expressionTypes.set(digest, TEXT_RESULT);
+              replace(digest);
+              continue;
+            }
+            this.report("a hasher updates a text and digests it", "as in hash.update(text).digest(`hex`)", this.peek());
+            replace(this.hole());
+            continue;
+          }
           // `Date.now()` is the clock, and a date's time is the number it is
           // held as; its stamp is the text `blaze_rt_timestamp_iso` writes.
           if (
@@ -11104,6 +11144,23 @@ class TypeScriptParser {
               this.peek(),
             );
           }
+        }
+        // `createHash("sha256")` is the runtime's SHA-256 hasher: a program
+        // hashes a text with sha256, and the hasher is the handle the chain
+        // reads. An algorithm the runtime does not carry is refused by name.
+        if (target.name === "createHash") {
+          const algorithm = args[0];
+          const named = algorithm !== undefined && algorithm.k === "text" && algorithm.parts.length === 1 && algorithm.parts[0]?.k === "text";
+          if (!named || (algorithm as { parts: { value: string }[] }).parts[0]?.value !== "sha256") {
+            this.report("a hash of this program is sha256", "write createHash(`sha256`)", this.peek());
+            replace(this.hole());
+            continue;
+          }
+          const made: Expression = { k: "call", name: "blaze_rt_sha256_create", args: [] };
+          this.expressionTypes.set(made, NUMBER_RESULT);
+          this.hashers.add(made);
+          replace(made);
+          continue;
         }
         // `parseInt(text, 10)` is the number the text states, which is what
         // `parseInt(text)` reads; the radix is the one the language writes.
@@ -12431,7 +12488,9 @@ class TypeScriptParser {
   ): Expression {
     const call: Expression = { k: "call", name, args: [...args] };
     if (returnTypeName.trim() === "" || returnTypeName.trim() === "void") return call;
-    const type = knownShape !== undefined ? this.typeExprOfShape(knownShape) : this.typeForName(returnTypeName, line);
+    const type = knownShape !== undefined
+      ? this.typeExprOfShape(knownShape)
+      : this.typeForName(promisePayloadText(returnTypeName) ?? returnTypeName, line);
     if (type.kind !== "void") this.expressionTypes.set(call, type);
     // What the declaration writes for its result is the fields a member chain
     // written after the call reads. The contract's spelling of a record is the
@@ -12440,8 +12499,8 @@ class TypeScriptParser {
     // answers a type its declaring module wrote, which this file may not name:
     // the shape the link resolved with the class is what the answer holds.
     try {
-      const shape = knownShape ?? resolveTypeName(this.typeTable, returnTypeName.trim());
-      if (shape.kind !== "any") this.expressionShapes.set(call, shape);
+      const written = knownShape ?? resolveTypeName(this.typeTable, promisePayloadText(returnTypeName) ?? returnTypeName.trim());
+      if (written.kind !== "any") this.expressionShapes.set(call, written);
     } catch {
       // A return type this read cannot resolve names nothing a shape can say.
     }
@@ -12653,6 +12712,11 @@ class TypeScriptParser {
         if (carried !== undefined) return carried;
         const imported = this.declaredFunctionReturns.get(awaited.name);
         if (imported !== undefined) return imported.returns;
+        // A method of a class is no name a declaration in this file holds: the
+        // call itself was typed where it was written, and the await holds what
+        // that call answers.
+        const held = this.expressionTypes.get(awaited);
+        if (held !== undefined) return held;
       }
       const written = this.liftedArrows.get(value.name);
       if (written !== undefined) return written.returns;
