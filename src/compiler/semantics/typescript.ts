@@ -3100,6 +3100,13 @@ const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
  */
 const ARROW_RETURN_STOPS: ReadonlySet<string> = new Set(["=>", ",", ";", ")", "]", "}", "?", ":", "=", "&&", "||"]);
 
+/**
+ * Where a method's result type ends: the body's brace follows it, where an
+ * arrow's `=>` follows an arrow's. A method states its type and then writes its
+ * body, so the brace is the end of the type and not a brace inside it.
+ */
+const METHOD_RETURN_STOPS: ReadonlySet<string> = new Set(["{", ";", "=", ","]);
+
 class TypeScriptParser {
   tokens: Token[];
   private readonly path: string;
@@ -3982,6 +3989,19 @@ class TypeScriptParser {
         }
         const answer = this.valueTypeOf(value);
         shape = this.shapeOfTypeExpr(answer);
+        break;
+      }
+      case "arrow": {
+        // An arrow held in a field is the function the field is: the signature
+        // it lifted to is what a call through the field is read against.
+        const lifted = this.liftedArrows.get(value.name);
+        if (lifted !== undefined) {
+          shape = {
+            kind: "function",
+            params: lifted.params.map((param) => this.shapeOfTypeExpr(param.type)),
+            returns: this.shapeOfTypeExpr(lifted.returns),
+          };
+        }
         break;
       }
       case "conditional": {
@@ -8061,7 +8081,27 @@ class TypeScriptParser {
   private readIndexedAssignment(): Statement | null {
     const start = this.position;
     const buffer = this.next();
-    if (buffer.kind !== "ident" || !this.at("[")) {
+    if (buffer.kind !== "ident") {
+      this.position = start;
+      return null;
+    }
+    // `this.counters[kind] += 1` writes an element of the object the field
+    // holds. The object is a reference, so the write goes through a name of the
+    // statement's own and lands in the same object.
+    let place: string = buffer.text === "this" && this.currentClass !== null ? "self" : buffer.text;
+    if (this.at(".") && this.tokens[this.position + 1]?.kind === "ident" && this.tokens[this.position + 2]?.text === "[") {
+      const field = this.tokens[this.position + 1] as Token;
+      const member: Expression = { k: "member", base: { k: "ident", name: place }, field: field.text };
+      this.next();
+      this.next();
+      const held = this.writeTarget(member, buffer.line);
+      if (held === null) {
+        this.position = start;
+        return null;
+      }
+      place = held;
+    }
+    if (!this.at("[")) {
       this.position = start;
       return null;
     }
@@ -8077,19 +8117,25 @@ class TypeScriptParser {
     const value = this.readExpression();
     this.accept(";");
     // `record[name] = value` writes one entry of the dictionary the record is.
-    // The write is the dictionary's own, by the value the entry holds.
-    const heldCollection = operator.text === "="
-      ? this.collectionOfExpression({ k: "ident", name: buffer.text })
-      : null;
+    // The write is the dictionary's own, by the value the entry holds, and a
+    // compound write is the entry read and the operator applied to it.
+    const heldCollection = this.collectionOfExpression({ k: "ident", name: place });
     if (heldCollection !== null && heldCollection.kind === "map") {
       const setName = this.collectionSetNameFor(heldCollection);
-      if (setName !== null) {
+      const compound = operator.text !== "=" && operator.text !== "??=" ? COMPOUND_OPERATORS[operator.text] : null;
+      if (setName !== null && (operator.text === "=" || operator.text === "??=" || compound !== null)) {
+        const read = operator.text === "="
+          ? null
+          : this.collectionMethod({ k: "ident", name: place }, heldCollection, "get", [index]);
+        const written: Expression = read === null
+          ? value
+          : { k: "binary", op: compound ?? "??", left: read, right: value };
         return {
           kind: "expression",
           value: {
             k: "call",
             name: setName,
-            args: [{ k: "ident", name: buffer.text }, index, value],
+            args: [{ k: "ident", name: place }, index, written],
           },
           line: buffer.line,
         };
@@ -8098,13 +8144,13 @@ class TypeScriptParser {
     if (operator.text === "??=") {
       return {
         kind: "indexAssign",
-        buffer: buffer.text,
+        buffer: place,
         index,
         op: "=",
         value: {
           k: "binary",
           op: "??",
-          left: { k: "index", base: { k: "ident", name: buffer.text }, index },
+          left: { k: "index", base: { k: "ident", name: place }, index },
           right: value,
         },
         line: buffer.line,
@@ -8112,7 +8158,7 @@ class TypeScriptParser {
     }
     return {
       kind: "indexAssign",
-      buffer: buffer.text,
+      buffer: place,
       index,
       op: operator.text as AssignOperator,
       value,
@@ -8126,6 +8172,12 @@ class TypeScriptParser {
     if (base.kind !== "ident" || !this.at(".")) {
       this.position = start;
       return null;
+    }
+    // `this.counters[kind] = v` writes an element of the object the field
+    // holds, which the indexed reader writes through a name of its own.
+    if (this.tokens[this.position + 1]?.kind === "ident" && this.tokens[this.position + 2]?.text === "[") {
+      this.position = start;
+      return this.readIndexedAssignment();
     }
     // The chain the write goes through: the fields it names and the calls
     // written between them. The last field is the one written, and everything
@@ -10453,13 +10505,13 @@ class TypeScriptParser {
           const args = this.readCallArguments(
             setTypes,
             callback,
-            target.field === "push" || target.field === "splice",
+            target.field === "push" || target.field === "splice" || target.field === "unshift",
             waitsForLink,
             this.writtenElementType(target.base, target.field),
             setShapes,
             this.writtenElementShape(target.base, target.field),
           );
-          const spreads = target.field === "push" || target.field === "splice" ? this.argumentSpreads : null;
+          const spreads = target.field === "push" || target.field === "splice" || target.field === "unshift" ? this.argumentSpreads : null;
           const receiver = target.base;
           // `Date.now()` is the clock, and a date's time is the number it is
           // held as; its stamp is the text `blaze_rt_timestamp_iso` writes.
@@ -10575,7 +10627,7 @@ class TypeScriptParser {
             (receiver.k === "ident" || (receiver.k === "member" && receiver.base.k === "ident")) &&
             (this.valueTypeOf(receiver).kind === "slice" || this.valueTypeOf(receiver).kind === "array")
           ) {
-            const lowered = this.listFrontMethod(receiver, target.field, args, callLine);
+            const lowered = this.listFrontMethod(receiver, target.field, args, spreads, callLine);
             if (lowered !== null) {
               replace(lowered);
               continue;
@@ -10621,6 +10673,32 @@ class TypeScriptParser {
               }
             }
             const sequence = place === null ? null : this.valueTypeOf(receiver);
+            const valueSequence = this.valueTypeOf(receiver);
+            const elements = valueSequence.kind === "slice" || valueSequence.kind === "array" ? valueSequence : null;
+            if (place === null && target.field === "pop" && args.length === 0 && elements !== null) {
+              // A list no name holds is read into a name of its own, and the
+              // answer is its last element: the one a pop takes out, which is
+              // the zero of its type where there is none.
+              const sequenceType: TypeExpr = { kind: "slice", of: elements.of };
+              const name = `__popped${this.fieldCount++}`;
+              this.pendingBefore.push({ kind: "declare", name, type: sequenceType, init: receiver, line: callLine });
+              this.valueTypes.set(name, sequenceType);
+              const last: Expression = {
+                k: "index",
+                base: { k: "ident", name },
+                index: { k: "binary", op: "-", left: { k: "length", buffer: name }, right: { k: "literal", text: "1" } },
+              };
+              this.expressionTypes.set(last, elements.of);
+              const guarded: Expression = {
+                k: "conditional",
+                condition: { k: "binary", op: ">", left: { k: "length", buffer: name }, right: { k: "literal", text: "0" } },
+                then: last,
+                otherwise: this.zeroFor(elements.of),
+              };
+              this.expressionTypes.set(guarded, elements.of);
+              replace(guarded);
+              continue;
+            }
             if (
               place !== null &&
               sequence !== null &&
@@ -11310,9 +11388,9 @@ class TypeScriptParser {
    * value that escapes that name is refused where it is written, because a
    * closure with an environment is a thing no backend of this compiler carries.
    */
-  private readArrow(isAsync: boolean): Expression {
+  private readArrow(isAsync: boolean, method = false): Expression {
     const start = this.peek();
-    if (isAsync) this.next();
+    if (isAsync && this.tokens[this.position]?.text === "async") this.next();
     const line = start.line;
     // The types the use wrote for this arrow's parameters. A nested arrow is a
     // callback of a call of its own, so the hint is taken and cleared here.
@@ -11426,10 +11504,16 @@ class TypeScriptParser {
     let stated: TypeExpr | null = null;
     let statedShape: ResolvedType | null = null;
     if (this.accept(":")) {
-      stated = this.readTypeAnnotation("an arrow function's result type", ARROW_RETURN_STOPS, isAsync);
+      stated = this.readTypeAnnotation(
+        "an arrow function's result type",
+        method ? METHOD_RETURN_STOPS : ARROW_RETURN_STOPS,
+        isAsync,
+      );
       statedShape = this.lastAnnotationShape();
     }
-    if (!this.accept("=>")) this.report('expected "=>"', `near "${this.peek().text}"`);
+    // A method of an object literal writes its body where an arrow writes its
+    // `=>`: `{ start(controller) { ... } }` is the arrow that body is.
+    if (!method && !this.accept("=>")) this.report('expected "=>"', `near "${this.peek().text}"`);
     // The body is a scope of its own: a name it declares is not the function's,
     // and a name it reads from neither is a value it captured. The loops the
     // arrow is written in are not loops it can leave either: `break` in the
@@ -12769,6 +12853,7 @@ class TypeScriptParser {
     receiver: Expression,
     method: "shift" | "unshift",
     args: readonly Expression[],
+    spreads: readonly boolean[] | null,
     line: number,
   ): Expression | null {
     // The caller reads a name or a field of one, so the place is the receiver.
@@ -12796,8 +12881,16 @@ class TypeScriptParser {
       return { k: "ident", name: taken };
     }
     // `unshift` writes the values in front of the list, in the order the source
-    // wrote them, and answers the length it has afterwards.
-    const front: Expression = { k: "buffer", element: typeToString(element), values: [...args] };
+    // wrote them, and answers the length it has afterwards. A spread writes the
+    // elements of the list it names, which is the concatenation of that list
+    // with the ones around it.
+    let front: Expression = { k: "buffer", element: typeToString(element), values: [] };
+    args.forEach((written, at) => {
+      const piece: Expression = spreads?.[at] === true
+        ? written
+        : { k: "buffer", element: typeToString(element), values: [written] };
+      front = { k: "binary", op: "+", left: front, right: piece };
+    });
     this.pendingBefore.push(this.writePlace(written, { k: "binary", op: "+", left: front, right: place }, line));
     return { k: "lengthOf", of: place };
   }
@@ -14788,6 +14881,41 @@ class TypeScriptParser {
             );
           }
         }
+        if (!this.accept(",")) break;
+        continue;
+      }
+      // `{ start(controller) { ... } }` is a method: the field is named by the
+      // key and holds the arrow the body is, and `async read(path) { ... }` is
+      // an async one. A method may state type parameters, which are erased with
+      // every other type.
+      if (key.kind === "ident" && (this.at("(") || this.at("<"))) {
+        if (this.at("<")) this.skipTypeParameters();
+        const declared = expected?.fields.get(key.text);
+        if (declared !== undefined && declared.type.kind === "function") {
+          this.arrowParameters = declared.type.params.map((param) => ({
+            type: this.typeExprOfShape(param),
+            shape: param,
+          }));
+        }
+        put(key.text, this.readArrow(false, true));
+        if (!this.accept(",")) break;
+        continue;
+      }
+      if (
+        key.kind === "ident" &&
+        key.text === "async" &&
+        this.peek().kind === "ident" &&
+        this.peek(1).text === "("
+      ) {
+        const named = this.next();
+        const declared = expected?.fields.get(named.text);
+        if (declared !== undefined && declared.type.kind === "function") {
+          this.arrowParameters = declared.type.params.map((param) => ({
+            type: this.typeExprOfShape(param),
+            shape: param,
+          }));
+        }
+        put(named.text, this.readArrow(true, true));
         if (!this.accept(",")) break;
         continue;
       }

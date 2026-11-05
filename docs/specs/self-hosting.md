@@ -888,6 +888,39 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4de. A method of an object literal, and an element of a field
+
+    const counter = { add(by: number) { total += by; } }   // a method
+    this.counters[kind] += 1                              // an entry of a field
+    all.unshift(...bindings)                              // the front of a list
+    line.split(` `).pop()                                 // the last of a value
+
+**An object literal's method.** `{ start(controller) { ... } }` is a field named
+by the key holding the arrow its body is, which is the value the compiler
+already has for a function. A method may state type parameters, which are erased
+with every other type, and its result type ends where its body's brace begins —
+the one place an annotation ends at a brace rather than at a `=>`. The field is
+what a call through the object reads, so a method written this way is called the
+way a function-typed field is. This was also the parse that failed: the
+`expected "}"` on those files left everything after the literal unread, and a
+top-level `function` after it was reported as one declared inside a function.
+
+**An element of the object a field holds.** `this.counters[kind] += 1` writes an
+entry of the record the field holds. The object is a reference, so the write
+goes through a name of the statement's own and lands in the same object; a
+record's entry is the dictionary's, so a compound write is the entry read and
+the operator applied to it, and the write is the dictionary's own.
+
+**The front of a list with a spread.** `all.unshift(...bindings)` writes the
+elements of the list it names in front of the list, which is the concatenation
+the two lists added are; `push(...xs)` already did that.
+
+**The last element of a list no name holds.** `line.split(` `).pop()` is the
+last element of the list the call answered: read into a name of its own, and the
+answer is its last element, or the zero of its type where it holds none.
+
+The total went from 306 to 299, and `toolchain/assembler.ts` reads whole.
+
 ### 4dd. The clock, and the bytes of a text read back
 
     new Date().toISOString()          // the host's clock, written as ISO 8601
@@ -2999,6 +3032,7 @@ What was closed this session, and what each was worth:
 | a conditional spread writes the zero of the field it leaves out (§4db) | 359 → 341 |
 | a map under a number key, a window of a block, and the bytes of a text (§4dc) | 341 → 319 |
 | the clock, and the bytes of a text read back (§4dd) | 319 → 306 |
+| a method of an object literal, and an element of a field (§4de) | 306 → 299 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

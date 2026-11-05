@@ -4302,3 +4302,44 @@ test("a text decoder reads the bytes of the text they are", () => {
   const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(name(new Uint8Array(1)).length);\n` }, "main.ts", "name");
   assert.match(ir, /blaze_rt_string_new/, "the bytes are copied into a text");
 });
+
+test("an object literal's method is the arrow its body is", () => {
+  // `{ start(controller) { ... } }` is a field named by the key, holding the
+  // arrow the body is: the call through the field is the call of that arrow.
+  const source = [
+    "interface Runner { run<T>(task: () => T): T }",
+    "export function f(n: number): number {",
+    "  const runner: Runner = {",
+    "    run<T>(task: () => T): T { return task(); },",
+    "  };",
+    "  let total = 0;",
+    "  const counter = {",
+    "    add(by: number): void { total += by; },",
+    "  };",
+    "  counter.add(n);",
+    "  return runner.run((): number => total);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("an element of the object a field holds is written through the field", () => {
+  // `this.counters[kind] += 1` writes an element of the record the field
+  // holds: the object is a reference, so the write lands in the same object
+  // through a name of the statement's own.
+  const source = [
+    "class Counter {",
+    "  private counters: Record<string, number> = { a: 0 };",
+    "  private names: string[] = [];",
+    "  bump(kind: string): number {",
+    "    this.counters[kind] += 1;",
+    "    this.names[0] = kind;",
+    "    return this.counters[kind];",
+    "  }",
+    "}",
+    "export function f(c: Counter): number { return c.bump(`a`); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

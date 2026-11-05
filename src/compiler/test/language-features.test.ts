@@ -1224,6 +1224,36 @@ test("a choice of a length and a number is a number", async () => {
   }
 });
 
+test("an element of a field, an unshift spread and a pop of a value", async () => {
+  // Three writes the sources make: an element of the record a field holds, the
+  // front of a list with the elements another list holds, and the last element
+  // of a list no name holds.
+  const source = [
+    "class Counter {",
+    "  private counters: Record<string, number> = { a: 0 };",
+    "  bump(kind: string): number {",
+    "    this.counters[kind] += 1;",
+    "    return this.counters[kind];",
+    "  }",
+    "}",
+    "export function demo(): string {",
+    "  const counter = new Counter();",
+    "  counter.bump(`a`);",
+    "  counter.bump(`a`);",
+    "  const all: string[] = [`b`];",
+    "  all.unshift(...[`x`, `y`]);",
+    "  const last = `a b c`.split(` `).pop();",
+    "  return `${counter.bump(`a`)} ${all.join(`-`)} ${last}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "3 x-y-b c", `the ${backend} backend writes the field's element and the list's front`);
+  }
+});
+
 test("a date is the clock, and its stamp is the ISO text", async () => {
   // The clock is the host's, and the stamp is UTC to the millisecond. The
   // millisecond itself differs between two reads, so the shape is what both
