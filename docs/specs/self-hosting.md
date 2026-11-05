@@ -888,6 +888,17 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dl. A rest field
+
+    const { statements, ...whatItDoes } = definition
+
+The fields a destructuring pattern does not name are the rest of the record.
+The pattern now binds them as a record of their own — an object written out of
+the remaining fields, held at the shape they are — so a field of the rest reads
+the field the declaration wrote.
+
+The total went from 241 to 236.
+
 ### 4dk. A record spread into a record
 
     { ...objectLayouts }                  // every entry the dictionary holds
@@ -3168,6 +3179,7 @@ What was closed this session, and what each was worth:
 | a map of the pairs a callback writes (§4di) | 261 → 251 |
 | a map that answers a list (§4dj) | 251 → 246 |
 | a record spread into a record (§4dk) | 246 → 241 |
+| a rest field (§4dl) | 241 → 236 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

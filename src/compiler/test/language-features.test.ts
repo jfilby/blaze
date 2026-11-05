@@ -1247,6 +1247,23 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("a rest field binds what is left of the record", async () => {
+  const source = [
+    "interface Pair { left: number; right: number; name: string }",
+    "export function demo(): string {",
+    "  const pair: Pair = { left: 1, right: 2, name: `x` };",
+    "  const { left, ...rest } = pair;",
+    "  return `${left} ${rest.right} ${rest.name}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 2 x", `the ${backend} backend binds what is left of the record`);
+  }
+});
+
 test("a record spread into a record is the entries of both", async () => {
   const source = [
     "export function demo(): string {",

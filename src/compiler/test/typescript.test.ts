@@ -4465,3 +4465,17 @@ test("a record spread into a record is the entries of both", () => {
   }, "main.ts", "f");
   assert.match(ir, /blaze_rt_dict_len/, "the two records are one dictionary");
 });
+
+test("a rest field binds what is left of the record", () => {
+  // `const { a, ...rest } = value` binds every field the pattern does not
+  // name: the record that is left, whose fields are the ones not written.
+  const source = [
+    "interface Definition { statements: number[]; objects: string; calls: number }",
+    "export function f(definition: Definition): string {",
+    "  const { statements, ...whatItDoes } = definition;",
+    "  return `${whatItDoes.objects} ${statements.length} ${whatItDoes.calls}`;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

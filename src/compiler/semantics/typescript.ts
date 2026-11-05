@@ -7551,7 +7551,17 @@ class TypeScriptParser {
     const open = this.next();
     if (open.text === "{") {
       const fields: { name: string; field: string }[] = [];
+      // `const { a, ...rest } = value` binds the fields the pattern does not
+      // name: what is left of the record, as the record it is.
+      let rest: string | null = null;
       while (!this.at("}") && this.peek().kind !== "end") {
+        if (this.accept("...")) {
+          const bound = this.next();
+          if (bound.kind !== "ident") this.report("a destructured field binds a name", `near "${bound.text}"`, bound);
+          else rest = bound.text;
+          if (!this.accept(",")) break;
+          continue;
+        }
         const written = this.next();
         if (written.kind !== "ident") {
           this.report("a destructured field is named", `near "${written.text}"`, written);
@@ -7611,6 +7621,31 @@ class TypeScriptParser {
           line,
         });
       });
+      if (rest !== null) {
+        if (baseShape === null || baseShape.kind !== "record" || baseShape.index !== null) {
+          this.report(
+            `a rest field binds the fields of a record`,
+            `the value ${rest} reads has no fields a rest could bind`,
+            open,
+          );
+        } else {
+          const named = new Set(fields.map((entry) => entry.field));
+          const remaining = new Map(
+            [...baseShape.fields].filter(([name]) => !named.has(name)),
+          );
+          const value: Expression = {
+            k: "object",
+            fields: [...remaining.keys()].map((name) => ({
+              name,
+              value: { k: "member", base, field: name } as Expression,
+            })),
+          };
+          const shape: ResolvedType = { kind: "record", fields: remaining, index: null };
+          this.valueShapes.set(rest, shape);
+          this.valueTypes.set(rest, this.typeExprOfShape(shape));
+          this.pending.push({ kind: "declare", name: rest, type: null, init: value, line });
+        }
+      }
       const first = head ?? this.pending.shift();
       return first ?? ({ kind: "expression", value: this.hole(), line } satisfies Statement);
     }
