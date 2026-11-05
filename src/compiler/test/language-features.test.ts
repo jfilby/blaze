@@ -1247,6 +1247,23 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("a record spread into a record is the entries of both", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  const a: Record<string, number> = { x: 1, y: 2 };",
+    "  const b: Record<string, number> = { y: 3, z: 4 };",
+    "  const both = { ...a, ...b };",
+    "  return `${both.x} ${both.y} ${both.z} ${Object.keys(both).length}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 3 4 3", `the ${backend} backend merges the two records`);
+  }
+});
+
 test("a map whose callback answers a list is a list of the lists it answered", async () => {
   const source = [
     "export function demo(): string {",

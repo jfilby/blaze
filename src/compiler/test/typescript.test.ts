@@ -1992,21 +1992,31 @@ test("a value that is not a function is refused where a callback is expected", (
   );
 });
 
-test("a map that answers a list is refused, because a list of lists is not a value", () => {
+test("a map that answers a list is a list of the lists it answered", () => {
+  // An element of a list may itself be a list, so a map whose callback answers
+  // one is the list of them; only a pointer, a mask or nothing has no element a
+  // list holds.
+  const source = [
+    "export function g(a: Float64Array): number[][] {",
+    "  const b = a.map((x: number): number[] => [x]);",
+    "  return b;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   assert.match(
     diagnostic(() =>
       typescript.analyze(
         [
-          "export function g(a: Float64Array): number {",
-          "  const b = a.map((x: number): number[] => [x]);",
-          "  return b.length;",
+          "export function h(a: Float64Array): number[] {",
+          "  return a.map((x: number): void => {});",
           "}",
           "",
         ].join("\n"),
         "main.ts",
       ),
     ),
-    /the function map walks the array with must answer a number, a truth, a text or a reference/,
+    /must answer a value a list holds/,
   );
 });
 
@@ -3349,19 +3359,29 @@ test("a word the keyword table does not carry is a name, not a refusal", () => {
   assert.deepEqual(read.refused, [], "`constructor` is a name the language allows");
 });
 
-test("a spread of a dictionary is refused, not read as an empty record", () => {
-  // A dictionary is keyed by a value the program computes, so its fields are
-  // not the fields a record of fields has: copying none of them is an object
-  // that lost every entry. The read refuses it rather than answering `{}`.
+test("a spread of a dictionary is the entries it holds, not an empty record", () => {
+  // A dictionary is keyed by a value the program computes, so its entries are
+  // copied by the loop that reads them: the record the spread writes holds
+  // every entry the dictionary had.
   const source = [
     "export function copy(table: Record<string, string>): Record<string, string> {",
     "  return { ...table };",
     "}",
     "",
   ].join("\n");
-  const read = readTypeScriptModule(source, "main.ts", false);
-  assert.equal(read.count, 1);
-  assert.match(read.refused[0]?.message ?? "", /an object spread reads a constant object/);
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", {
+    "main.ts": [
+      "export function copy(): string {",
+      "  const table: Record<string, string> = { a: `x` };",
+      "  const all = { ...table };",
+      "  return all.a;",
+      "}",
+      "console.log(copy());",
+      "",
+    ].join("\n"),
+  }, "main.ts", "copy");
+  assert.match(ir, /blaze_rt_dict_get_text/, "the entry is read from the record it was copied into");
 });
 
 test("a table of truths is a constant the file wrote, and a spread copies it", () => {
@@ -3602,19 +3622,16 @@ test("a spread copies the fields of the record its value names", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 
-  // A dictionary has no fields to copy: what it holds is written by name, and a
-  // spread of one would have to guess them.
+  // A dictionary's entries are read by the loop that copies them, which is the
+  // record the spread writes.
   const dictionary = [
     "export function copy(all: Record<string, number>): number {",
     "  const one = { ...all };",
-    "  return 1;",
+    "  return one.size;",
     "}",
     "",
   ].join("\n");
-  assert.match(
-    readTypeScriptModule(dictionary, "main.ts", false).refused[0]?.message ?? "",
-    /an object spread reads a constant object/,
-  );
+  assert.deepEqual(readTypeScriptModule(dictionary, "main.ts", false).refused, []);
 });
 
 test("a function writes to the output and to the error stream, and ends a line only where the source does", () => {
@@ -4417,4 +4434,34 @@ test("an awaited call is the record its promise carries", () => {
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a record spread into a record is the entries of both", () => {
+  // A `Record` is a dictionary: `{ ...a, ...b }` is every entry of both, in the
+  // order the source wrote them, and a later key writes over an earlier one.
+  const source = [
+    "type Layouts = Record<string, number>;",
+    "export function f(a: Layouts, b: Layouts): Layouts {",
+    "  return { ...a, ...b, extra: 1 };",
+    "}",
+    "export function g(a: Layouts, b: Layouts): Layouts {",
+    "  const both = { ...a, ...b };",
+    "  return both;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", {
+    "main.ts": [
+      "export function f(): number {",
+      "  const a: Record<string, number> = { x: 1 };",
+      "  const b: Record<string, number> = { y: 2 };",
+      "  const both = { ...a, ...b };",
+      "  return both.size;",
+      "}",
+      "console.log(f());",
+      "",
+    ].join("\n"),
+  }, "main.ts", "f");
+  assert.match(ir, /blaze_rt_dict_len/, "the two records are one dictionary");
 });

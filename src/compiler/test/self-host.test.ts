@@ -113,9 +113,10 @@ import { selfHostGap } from "./self-host-gap.ts";
  * 290, a conditional spread into a union of shapes to 271, and a push on a
  * choice of two places with the keys of a layout to 265, and an await that
  * holds the record its promise carries to 261, and a map of the pairs a
- * callback writes to 251, and a map that answers a list, to 246.
+ * callback writes to 251, a map that answers a list to 246, and a record spread
+ * into a record, to 241.
  */
-const REFUSAL_BUDGET = 246;
+const REFUSAL_BUDGET = 241;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

@@ -11221,6 +11221,18 @@ class TypeScriptParser {
             }
           }
         }
+        // `record.field` where the record is a dictionary is the entry the key
+        // names: a `Record<string, V>` is read by its key, which is the text
+        // the field is written with.
+        const asDictionary = this.collectionOfExpression(target);
+        if (asDictionary !== null && asDictionary.kind === "map" && this.keyKind(asDictionary.key) === "text" && !this.at("(")) {
+          const key: Expression = { k: "text", parts: [{ k: "text", value: field.text }] };
+          const read = this.collectionMethod(target, asDictionary, "get", [key]);
+          if (read !== null) {
+            replace(read);
+            continue;
+          }
+        }
         // `this.size`: a member a class reads through a getter is the body the
         // getter is, and the instance it reads is the receiver.
         const getterOwner = this.classOfExpression(target);
@@ -15117,6 +15129,15 @@ class TypeScriptParser {
   /** `{ left: a, right: b }`: an object allocated where it is written. */
   private readObject(): Expression {
     const fields: { name: string; value: Expression }[] = [];
+    /**
+     * The entries an object read at a `Record` is made of, in the order the
+     * source wrote them: a field is one entry, and a spread of a dictionary is
+     * every entry it holds. A later part writes over an earlier key, which is
+     * what the language's last write is.
+     */
+    const parts: ({ field: { name: string; value: Expression } } | { dictionary: Expression })[] = [];
+    /** The dictionary the literal is, where a spread of one says so and the use does not. */
+    let dictionary: CollectionValue | null = null;
     // The shape a field is written at may be a name this module declares — a
     // recursive type writes its own name, as `Node` does inside `children` — and
     // a name is not the record it stands for, so it is resolved here.
@@ -15129,6 +15150,7 @@ class TypeScriptParser {
     // replaces anything.
     const spreadFields = new Set<string>();
     const put = (name: string, value: Expression, spread = false): void => {
+      parts.push({ field: { name, value } });
       const at = fields.findIndex((field) => field.name === name);
       if (at >= 0 && (spread || spreadFields.has(name))) {
         fields[at] = { name, value };
@@ -15138,6 +15160,19 @@ class TypeScriptParser {
       }
       fields.push({ name, value });
       if (spread) spreadFields.add(name);
+    };
+    /** The dictionary the whole literal is, from the use or from a spread. */
+    const dictionaryAt = (spread: Expression): CollectionValue | null => {
+      if (expected !== null && expected.index !== null) {
+        return { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(expected.index) };
+      }
+      if (expected !== null) return null;
+      const held = this.collectionOfExpression(spread);
+      if (held !== null && held.kind === "map") return held;
+      const shape = this.shapeOf(spread);
+      return shape !== null && shape.kind === "record" && shape.index !== null
+        ? { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(shape.index) }
+        : null;
     };
     while (!this.at("}") && this.peek().kind !== "end") {
       const key = this.next();
@@ -15157,6 +15192,12 @@ class TypeScriptParser {
           }
         } else if (spread.k === "object") {
           for (const field of spread.fields) put(field.name, field.value, true);
+        } else if (dictionaryAt(spread) !== null) {
+          // `{ ...d }` at a `Record` is every entry the dictionary `d` holds:
+          // the parts are merged in the order they are written, which is a copy
+          // of each dictionary one after another.
+          dictionary = dictionaryAt(spread) as CollectionValue;
+          parts.push({ dictionary: spread });
         } else if (spread.k === "conditional") {
           // `...(c ? {} : { field: v })` writes a field only when the condition
           // holds. The arm that writes nothing leaves the field at its zero,
@@ -15253,17 +15294,57 @@ class TypeScriptParser {
     // An object literal written at a `Record<string, V>` is the dictionary its
     // type names: each field is one entry of the dictionary, keyed by the name
     // the source wrote. A literal at a record of fields is laid out as fields.
-    if (expected !== null && expected.index !== null) {
-      const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(expected.index) };
+    const dictionaryTarget = dictionary ?? (expected !== null && expected.index !== null
+      ? { kind: "map" as const, key: TEXT_RESULT, value: this.typeExprOfShape(expected.index) }
+      : null);
+    if (dictionaryTarget !== null) {
+      const collection = dictionaryTarget;
       const pairs = fields.map((field) => ({
         key: { k: "text", parts: [{ k: "text", value: field.name }] } as Expression,
         value: field.value,
       }));
+      const line = this.peek().line;
+      // A spread of a dictionary writes entries the literal does not name, so
+      // the entries are the parts merged: each field is a dictionary of one,
+      // and each spread is a dictionary of its own.
+      if (parts.some((part) => "dictionary" in part)) {
+        const helper = this.collectionMergeHelper(collection, line);
+        const written: Expression[] = [];
+        for (const part of parts) {
+          if ("dictionary" in part) written.push(part.dictionary);
+          else {
+            const one = {
+              key: { k: "text", parts: [{ k: "text", value: part.field.name }] } as Expression,
+              value: part.field.value,
+            };
+            const single = this.collectionPairsHelper(collection, [one], line);
+            this.expressionTypes.set(single, NUMBER_RESULT);
+            written.push(single);
+          }
+        }
+        const listed: Expression = { k: "buffer", element: "f64", values: written };
+        const merged: Expression = { k: "call", name: helper.name, args: [listed] };
+        this.collectionExpressions.set(merged, collection);
+        this.expressionTypes.set(merged, NUMBER_RESULT);
+        // The value is a dictionary keyed by text, and a member read on it is
+        // the entry that key names.
+        this.expressionShapes.set(merged, {
+          kind: "record",
+          fields: new Map(),
+          index: this.shapeOfTypeExpr(collection.value),
+        });
+        return merged;
+      }
       const call = pairs.length === 0
         ? { k: "call", name: "blaze_rt_dict_new", args: [] } as Expression
-        : this.collectionPairsHelper(collection, pairs, this.peek().line);
+        : this.collectionPairsHelper(collection, pairs, line);
       this.collectionExpressions.set(call, collection);
       this.expressionTypes.set(call, NUMBER_RESULT);
+      this.expressionShapes.set(call, {
+        kind: "record",
+        fields: new Map(),
+        index: this.shapeOfTypeExpr(collection.value),
+      });
       return call;
     }
     // An object written at a union of shapes is laid out as every arm: the
@@ -15793,6 +15874,77 @@ class TypeScriptParser {
       return this.collectionFromLiteralHelper(collection, collection.key, written, view.line);
     }
     return this.collectionFromArrayHelper(collection, element, source, view.line);
+  }
+
+  /**
+   * The function a `Record` object literal with spreads becomes.
+   *
+   * The parts are dictionaries, in the order the source wrote them, and the
+   * answer is a dictionary of every entry: a later part writes over a key an
+   * earlier one wrote, which is the language's last write. The value a part
+   * holds is read and written by what the dictionary holds, so a text stays a
+   * text and a reference a reference.
+   */
+  private collectionMergeHelper(collection: CollectionValue, line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["merge", collection.kind, collection.key, collection.value]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const set = this.collectionSetNameFor(collection) as string;
+    const keyRead = this.keyReadName(collection);
+    const valueRead = this.valueReadName(collection.value);
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      {
+        kind: "loop",
+        variable: "p",
+        from: number("0"),
+        to: { k: "length", buffer: "parts" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "declare", name: "part", type: null, init: { k: "index", base: ident("parts"), index: ident("p") }, line },
+          {
+            kind: "loop",
+            variable: "i",
+            from: number("0"),
+            to: { k: "call", name: "blaze_rt_dict_len", args: [ident("part")] },
+            inclusive: false,
+            step: null,
+            down: false,
+            body: [
+              {
+                kind: "expression",
+                value: {
+                  k: "call",
+                  name: set,
+                  args: [
+                    ident("out"),
+                    { k: "call", name: keyRead, args: [ident("part"), ident("i")] },
+                    { k: "call", name: valueRead, args: [ident("part"), ident("i")] },
+                  ],
+                },
+                line,
+              },
+            ],
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "parts", type: { kind: "slice", of: NUMBER_RESULT } as TypeExpr }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { name, returns };
   }
 
   /** The values a written-out list holds, or null when the source is not one. */

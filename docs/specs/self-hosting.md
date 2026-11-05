@@ -888,6 +888,23 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dk. A record spread into a record
+
+    { ...objectLayouts }                  // every entry the dictionary holds
+    { ...a, extra: 1 }                    // and the entries written beside it
+
+A `Record<string, V>` is a dictionary, and `{ ...a, ...b }` is every entry of
+both in the order the source wrote them, a later key writing over an earlier
+one. The spread of a dictionary was refused — the fields a literal names are
+laid out field by field, and a dictionary has entries it does not name. The
+literal is now the parts merged: each field is a dictionary of one entry, each
+spread is a dictionary of its own, and a helper copies every part's entries into
+one dictionary in order, reading and writing each entry by what it holds. A
+member read on a dictionary — `both.size`, `both.extra` — is the entry that key
+names, and `Object.keys` is the entries it holds.
+
+The total went from 246 to 241.
+
 ### 4dj. A map that answers a list
 
     [1, 2].map((x) => [x, x + 1])      // a list of the lists it answered
@@ -3150,6 +3167,7 @@ What was closed this session, and what each was worth:
 | an await that holds the record its promise carries (§4dh) | 265 → 261 |
 | a map of the pairs a callback writes (§4di) | 261 → 251 |
 | a map that answers a list (§4dj) | 251 → 246 |
+| a record spread into a record (§4dk) | 246 → 241 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
