@@ -1415,6 +1415,16 @@ class FunctionBody {
    */
   private layoutsWith(inferred: Inferred, what: string, field: string, use: Inferred, line: number): string[] {
     if (inferred.kind === "object") return [this.layoutFor(inferred.key, line)];
+    // A reference that names the layout it points at is that layout: the
+    // program wrote the name, so a field read through it is that layout's
+    // field and no other. `Info` and a literal that writes the same field name
+    // are two layouts, and only the one the reference names is the value.
+    if (inferred.kind === "type") {
+      const named = layoutOf(inferred.type) as { name?: string } | null;
+      if (named !== null && typeof named.name === "string" && this.objects[named.name] !== undefined) {
+        return [named.name];
+      }
+    }
     // A reference to nothing in particular behind it: `p.x` in a body whose
     // `p` is an `any` asks what is behind `p`, not for a reference.
     const unshaped = use.kind === "type" && use.type.kind === "ref" && use.type.of === null;

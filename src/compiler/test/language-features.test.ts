@@ -1247,6 +1247,49 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("an empty list beside a set is walked as the set is", async () => {
+  // `values ?? []` and `c ? [] : values` are iterated: the empty list holds the
+  // set's element, so both loops walk texts.
+  const source = [
+    "function namesReadBy(value: string): Set<string> { return new Set([value, `${value}!`]); }",
+    "export function demo(): string {",
+    "  const byKey = new Map<string, Set<string>>();",
+    "  byKey.set(`a`, new Set([`x`, `y`]));",
+    "  let total = 0;",
+    "  for (const name of byKey.get(`a`) ?? []) total += name.length;",
+    "  for (const name of `ab` === `` ? [] : namesReadBy(`ab`)) total += name.length;",
+    "  for (const name of byKey.get(`missing`) ?? []) total += name.length;",
+    "  return `${total}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "7", `the ${backend} backend walks the empty list beside a set`);
+  }
+});
+
+test("an empty list a flat map answers is built at the other returns' type", async () => {
+  const source = [
+    "interface Field { name: string }",
+    "export function demo(): string {",
+    "  const fields: Field[] = [{ name: `a` }, { name: `` }, { name: `b` }];",
+    "  const kept = fields.flatMap((field) => {",
+    "    if (field.name === ``) return [];",
+    "    return [field];",
+    "  });",
+    "  return `${kept.length} ${kept.map((field) => field.name).join(`-`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 a-b", `the ${backend} backend settles the empty return`);
+  }
+});
+
 test("a rest field binds what is left of the record", async () => {
   const source = [
     "interface Pair { left: number; right: number; name: string }",

@@ -163,6 +163,32 @@ function importedFunctionsOf(
 }
 
 /**
+ * The records to read again, each after the records it imports.
+ *
+ * A module is read again once the modules it imports have been, because what
+ * it links is their analysis: a signature's result shape, a value's shape, a
+ * class's description. A module a file imports from is written after it in the
+ * answer, so a pass over this order reads the deepest module first. A circular
+ * import names a module already being read, and the record is placed where the
+ * cycle closes rather than read twice.
+ */
+function bindingOrder(records: ReadonlyMap<string, ModuleRecord>): ModuleRecord[] {
+  const order: ModuleRecord[] = [];
+  const seen = new Set<string>();
+  const visit = (record: ModuleRecord): void => {
+    if (seen.has(record.path)) return;
+    seen.add(record.path);
+    for (const path of [...record.resolved, ...record.typeResolved]) {
+      const imported = records.get(path);
+      if (imported !== undefined) visit(imported);
+    }
+    order.push(record);
+  };
+  for (const record of records.values()) visit(record);
+  return order;
+}
+
+/**
  * The declaration a module offers under a name, following a re-export.
  *
  * `export { a } from "./x.ts"` offers a name the other module writes: this file
@@ -471,9 +497,15 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   // A file is read again with the table its imports now fill, and with the
   // values its imports bind. Its runtime imports were resolved by the first
   // read and are unchanged, so only the analysis is replaced.
-  const offered = offeredValues([...records.values()]);
-  for (const record of records.values()) {
+  //
+  // The files are read in the order a module depends on another: what a file
+  // imports is read before it, so a signature it links carries the shapes the
+  // module that declares them resolved. A file read before the module that
+  // declares the type its result names states no shape for that result, and
+  // the field a caller reads through it is the opaque reference.
+  for (const record of bindingOrder(records)) {
     if (record.analysis.types === undefined) continue;
+    const offered = offeredValues([...records.values()]);
     const imports = record.analysis.typeImports ?? [];
     // A second read is only needed when an import names a module that actually
     // declares a type or a class, or offers a value. A runtime import binds

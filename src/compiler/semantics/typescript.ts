@@ -426,11 +426,17 @@ const WIDE_RESULT: TypeExpr = { kind: "primitive", name: "u256" };
  * knows and `resultType` does not — a call answers what its callee answers, and
  * a field of a parameter is the field its shape declares. It answers null where
  * it has nothing better than `resultType`.
+ *
+ * `saysNothing` marks a returned value that names no type of its own — an
+ * empty list whose use has not said what it holds. It is not the witness the
+ * result is read from: the returns that write values are, and the empty list is
+ * built at their type.
  */
 function inferredResult(
   body: readonly Statement[],
   params: readonly { name: string; type: TypeExpr }[],
   known?: (value: Expression, scope: ReadonlyMap<string, TypeExpr>) => TypeExpr | null,
+  saysNothing?: (value: Expression) => boolean,
 ): TypeExpr {
   const scope = new Map<string, TypeExpr>(params.map((param) => [param.name, param.type]));
   describeDeclarations(body, scope);
@@ -442,7 +448,13 @@ function inferredResult(
   // type the contract can state: the bare return is not a value to unify with.
   if (bare.found) return ANY_TYPE;
   let found: TypeExpr | null = null;
+  /** The type an empty list on its own would have been read at. */
+  let unsaid: TypeExpr | null = null;
   for (const value of written) {
+    if (saysNothing?.(value) === true) {
+      unsaid ??= known?.(value, scope) ?? resultType(value, scope);
+      continue;
+    }
     const type = known?.(value, scope) ?? resultType(value, scope);
     if (found === null) {
       found = type;
@@ -450,7 +462,9 @@ function inferredResult(
     }
     if (!sameResult(found, type)) return ANY_TYPE;
   }
-  return found ?? NOTHING;
+  // A body whose every return is an empty list says nothing about what it
+  // answers, and the list it wrote is the only type it named.
+  return found ?? unsaid ?? NOTHING;
 }
 
 /** What each name the body declares holds, as the body reads it. */
@@ -3889,6 +3903,14 @@ class TypeScriptParser {
       if (held !== null) return held;
       return this.collectionOfExpression(value.right);
     }
+    // `c ? values : []` is the collection the arm that writes one names. The
+    // other arm writes no entries, which is the absence the collection is read
+    // as, and a loop over the choice walks the entries the one arm holds.
+    if (value.k === "conditional") {
+      const held = this.collectionOfExpression(value.then);
+      if (held !== null) return held;
+      return this.collectionOfExpression(value.otherwise);
+    }
     return this.collectionOfShape(this.shapeOf(value));
   }
 
@@ -3940,7 +3962,13 @@ class TypeScriptParser {
           }
         }
         if (shape === null) {
-          const owner = this.classOfExpression(value.base);
+          // A value whose shape names a class — the answer of a map that holds
+          // one, a value another module handed over — reads the field the class
+          // declares. The type table names the class and not its fields, so the
+          // class table is what says them.
+          const owner = base !== null && base.kind === "ref" && base.name !== null && this.classTable.names.has(base.name)
+            ? base.name
+            : this.classOfExpression(value.base);
           if (owner !== null) {
             const field = findField(this.classTable, owner, value.field, true) ??
               findField(this.classTable, owner, value.field, false);
@@ -4305,6 +4333,19 @@ class TypeScriptParser {
     return shape === null || shape.kind === "any" ? null : shape;
   }
 
+  /**
+   * The list type an empty list beside a set is built at.
+   *
+   * `values ?? []` and `c ? [] : values` where `values` is a set are iterated:
+   * the empty list and the set are walked the same way, so the list is built at
+   * the element the set holds.
+   */
+  private setElementListType(value: Expression): TypeExpr | null {
+    const collection = this.collectionOfExpression(value);
+    if (collection === null || collection.kind !== "set") return null;
+    return { kind: "slice", of: collection.key };
+  }
+
   /** The array type a value names, where its use has settled every empty list in it. */
   private settledArrayType(value: Expression): TypeExpr | null {
     if (this.holdsUnsettledArray(value)) return null;
@@ -4522,6 +4563,13 @@ class TypeScriptParser {
 
   /** The class a value is known to hold, or null where nothing says. */
   private classOfExpression(expression: Expression): string | null {
+    // A value whose recorded shape names a class is an instance of it: a key
+    // of a map that holds instances answers one, and the method written on it
+    // is the class's.
+    const recorded = this.expressionShapes.get(expression);
+    if (recorded !== undefined && recorded.kind === "ref" && recorded.name !== null && this.classTable.names.has(recorded.name)) {
+      return recorded.name;
+    }
     switch (expression.k) {
       case "ident": {
         const known = this.valueClasses.get(expression.name);
@@ -9275,7 +9323,23 @@ class TypeScriptParser {
     this.next();
     const then = this.withNarrowing(this.narrowingOf(condition, true), () => this.readExpression());
     this.expect(":");
-    const otherwise = this.withNarrowing(this.narrowingOf(condition, false), () => this.readExpression());
+    let otherwise = this.withNarrowing(this.narrowingOf(condition, false), () => this.readExpression());
+    // `c ? [] : values` where `values` is a set is the set where it is there
+    // and no entries where it is not: a set is one handle on the runtime's
+    // dictionary, and the absence of one is zero, which holds no entries. The
+    // empty list is a block of elements and a loop that walked it as a set
+    // would read an element as a dictionary.
+    const empty = (arm: Expression): boolean => arm.k === "buffer" && arm.values.length === 0;
+    if (empty(then) !== empty(otherwise)) {
+      const setArm = empty(then) ? otherwise : then;
+      if (this.setElementListType(setArm) !== null) {
+        this.unsettledArrays.delete((empty(then) ? then : otherwise) as Expression);
+        if (empty(then)) {
+          return { k: "conditional", condition, then: { k: "literal", text: "0" }, otherwise };
+        }
+        otherwise = { k: "literal", text: "0" };
+      }
+    }
     // An arm is read at the type of the arm that has one, or at the type the
     // use of the whole conditional states: `c ? { v: 1, pre: [] } : expand(x)`
     // takes the fields the call answers for the literal. A use that states a
@@ -9334,6 +9398,12 @@ class TypeScriptParser {
         (this.expectedType.kind === "slice" || this.expectedType.kind === "array")
         ? this.expectedType
         : null;
+      // `values ?? []` where `values` is a set is `values`: the absence of a
+      // set is the zero handle, and a dictionary that is zero holds no entries.
+      if (right.k === "buffer" && right.values.length === 0 && this.setElementListType(left) !== null) {
+        this.unsettledArrays.delete(right);
+        continue;
+      }
       const type = expected ?? this.settledArrayType(left) ?? this.settledArrayType(right);
       if (type !== null) this.applyExpected(left, type, this.expectedShape);
       if (type !== null) this.applyExpected(right, type, this.expectedShape);
@@ -11805,7 +11875,16 @@ class TypeScriptParser {
           const known = this.valueTypeOf(value);
           return known.kind === "ref" && known.of === null && known.name === undefined ? null : known;
         },
+        (value) => this.holdsUnsettledArray(value),
       );
+    // An empty list a return answers is built at the type the other returns
+    // name: the list says nothing about what it holds, so the return that
+    // writes values says it.
+    if (stated === null && (returns.kind === "slice" || returns.kind === "array")) {
+      const written: Expression[] = [];
+      collectResults(body, written);
+      for (const value of written) this.applyExpected(value, returns, null);
+    }
     // An arrow that answers an object literal names no result type, but the
     // fields it writes are read where the arrow is used: `list.map((x) =>
     // ({ name: x }))` is a list of a record, and `entry.name` of one element is

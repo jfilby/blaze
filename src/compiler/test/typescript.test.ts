@@ -4512,3 +4512,88 @@ test("a conditional spread writes the zero of a function, a map and a set", () =
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("an empty list a return answers is built at the type the other returns name", () => {
+  // `return []` in one arm says nothing about what the function answers; the
+  // arm that writes a value says it, and the empty list is the same list.
+  const source = [
+    "interface Field { name: string }",
+    "export function f(fields: Field[]): Field[] {",
+    "  return fields.flatMap((field) => {",
+    "    if (field.name === ``) return [];",
+    "    return [field];",
+    "  });",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("an empty list beside a set is built at the set's element", () => {
+  // `values ?? []` and `c ? [] : values` are iterated: the empty list and the
+  // set are walked the same way, so the list holds the set's element.
+  const source = [
+    "function namesReadBy(value: string): Set<string> { return new Set([value]); }",
+    "export function f(answer: string | null, handed: Map<string, Set<string>>, key: string): number {",
+    "  let total = 0;",
+    "  for (const name of answer === null ? [] : namesReadBy(answer)) total += name.length;",
+    "  for (const name of handed.get(key) ?? []) total += name.length;",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a map that holds a class answers the fields its declaration names", () => {
+  // The map's value type names a class, which the type table names and does not
+  // spell out: the class table is what says the fields of one.
+  const source = [
+    "class Body {",
+    "  readonly called: string[] = [];",
+    "}",
+    "export function f(bodies: Map<string, Body>, name: string): string[] {",
+    "  const body = bodies.get(name);",
+    "  if (body === undefined) return [];",
+    "  return body.called.map((callee) => callee);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a call of an imported function answers the shape its module resolved", () => {
+  // The result type is declared in a third module, so the file that declares
+  // the function links it: the graph reads the modules a file imports before
+  // the file itself, and the signature it hands over carries the shape.
+  const ir = irOf(
+    "typescript",
+    {
+      "main.ts": [
+        'import { verify } from "./lib.ts";',
+        "export function run(): string {",
+        "  const result = verify();",
+        "  return result.failures.map((failure) => failure.reason).join(`-`);",
+        "}",
+        "console.log(run());",
+        "",
+      ].join("\n"),
+      "lib.ts": [
+        'import type { Result } from "./types.ts";',
+        "export function verify(): Result {",
+        "  return { passed: true, failures: [] };",
+        "}",
+        "",
+      ].join("\n"),
+      "types.ts": [
+        "export interface Failure { reason: string }",
+        "export interface Result { passed: boolean; failures: Failure[] }",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+    "run",
+  );
+  assert.match(ir, /load_field\[\[\]ref<any>\] local\[ref<Object1>\] result Object1 failures/, "the failures are the list the result names");
+  assert.match(ir, /__collect_main_0/, "the failures are walked as a list");
+});

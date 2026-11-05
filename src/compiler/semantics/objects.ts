@@ -22,6 +22,7 @@ import { builtinFor } from "./builtins.ts";
 import { wholeText } from "./whole-arithmetic.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import type { LiteralKeys } from "./program-objects.ts";
+import { fieldOfType, resolveTypeName, type ResolvedType, type TypeTable } from "./typescript-types.ts";
 import type { ProgramValue } from "./module.ts";
 
 /** The number a reference takes: one pointer. */
@@ -122,6 +123,28 @@ function fieldLayout(type: TypeExpr): { size: number; align: number } {
   return { size, align: size };
 }
 
+/**
+ * The contract type a resolved type is held at.
+ *
+ * A record and a collection are the opaque reference the contract spells; the
+ * fields of a record are read where the declaration is, and this is what a
+ * field read is held at.
+ */
+function contractTypeOf(type: ResolvedType): TypeExpr {
+  switch (type.kind) {
+    case "primitive":
+      return { kind: "primitive", name: type.name };
+    case "text":
+      return { kind: "text" };
+    case "list":
+      return { kind: "slice", of: contractTypeOf(type.of) };
+    case "ref":
+      return type.name === null ? ANY_REF : { kind: "ref", of: null, name: type.name };
+    default:
+      return ANY_REF;
+  }
+}
+
 /** The width of a scalar, which is also the alignment it is placed at. */
 function scalarSize(name: PrimitiveTypeName): number {
   switch (name) {
@@ -156,17 +179,42 @@ class BodyTypes {
   readonly path: string;
   readonly functionName: string;
   private readonly callees: Map<string, TypeExpr>;
+  /**
+   * The types the module declares, which say what a field of a reference holds.
+   *
+   * The contract spells a record as the opaque reference, so the fields are not
+   * in it: `info(n).steps` is a field of the record `Info` only when the
+   * declaration that names it is read. A program phase hands the table over;
+   * nothing else names the fields the source wrote.
+   */
+  private readonly table: TypeTable | null;
 
   constructor(
     path: string,
     functionName: string,
     params: readonly { name: string; type: TypeExpr }[],
     callees: Map<string, TypeExpr>,
+    table: TypeTable | null = null,
   ) {
     this.path = path;
     this.functionName = functionName;
     this.callees = callees;
+    this.table = table;
     for (const param of params) this.environment.set(param.name, { kind: "type", type: param.type });
+  }
+
+  /** The type a field of the reference a value is held at declares. */
+  private declaredField(base: Inferred, name: string): TypeExpr | null {
+    if (this.table === null || base.kind !== "type") return null;
+    if (base.type.kind !== "ref" || base.type.name === undefined) return null;
+    let resolved: ResolvedType;
+    try {
+      resolved = resolveTypeName(this.table, base.type.name);
+    } catch {
+      return null;
+    }
+    const field = fieldOfType(this.table, resolved, name);
+    return field === null ? null : contractTypeOf(field.type);
   }
 
   /** The type every return of the function gives, when they agree. */
@@ -324,6 +372,12 @@ class BodyTypes {
       case "member": {
         const base = this.expression(expression.base);
         if (base.kind === "object") return this.field(base.key, expression.field);
+        // The field of a reference the type table names is the type the
+        // declaration gives it: `info(n).steps` is a number because `Info`
+        // says its `steps` is one, and an object literal that writes the field
+        // through the reference has the same shape the declaration has.
+        const declared = this.declaredField(base, expression.field);
+        if (declared !== null) return { kind: "type", type: declared };
         return { kind: "type", type: ANY_REF };
       }
       case "call": {
@@ -1247,6 +1301,7 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
 export function resolveObjects(
   files: readonly FileContract[],
   programBody: { shapes: ReadonlyMap<string, Shape>; keys: LiteralKeys } = { shapes: new Map(), keys: new Map() },
+  types: ReadonlyMap<string, TypeTable> = new Map(),
 ): { names: Map<string, string>; layouts: Record<string, ObjectLayout>; keys: Map<ProgramValue & { k: "object" }, string> } {
   const programShapes = programBody.shapes;
   const shapes = new Map<string, Shape>();
@@ -1289,6 +1344,7 @@ export function resolveObjects(
       caller.name,
       caller.contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) })),
       callees,
+      types.get(caller.file.path) ?? null,
     );
     body.statements(definition.statements);
     bodies.set(caller.name, body);

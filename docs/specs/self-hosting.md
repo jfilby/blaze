@@ -945,7 +945,43 @@ and a callback that answers nothing is `forEach`.
 
 The total went from 251 to 246.
 
-### 4di. A map of the pairs a callback writes
+### 4dn. An empty list a loop walks beside a set, an answer that names nothing, and a module read after its imports
+
+    values ?? []                          // walked as the dictionary it is
+    c ? [] : values                       // no entries where the set is absent
+    fields.flatMap((f) => { if (...) return []; return [f]; })
+    result.failures.map(...)              // the shape the declaring module resolved
+
+An empty list has no element of its own, so the use has to say what it holds.
+A `for..of` over `values ?? []` or `c ? [] : values` where `values` is a set was
+refused: the set is one handle on the runtime's dictionary and the empty list is
+a block of elements, so the loop cannot walk the choice as one value. The choice
+is now read as the set — the absence of a set is the zero handle, and the
+runtime's `len` of no dictionary is zero — so the loop takes the arm that names
+the set and the arm that writes nothing is no turns. A loop that walked the
+empty list as a dictionary would have read an element of a block as an entry.
+
+An unannotated arrow that answers `[]` on one path and a value on another was
+refused: the returns were read before the arrow had a result type. The empty
+list says nothing about what the function answers, so it is not the witness the
+result is inferred from; the returns that write values are, and the empty list
+is then built at that type.
+
+A signature the module graph hands a caller carries the shape its declaring
+module resolved, and a module read before the module that declares the type its
+result names states no shape at all. The second read — the one that replaces
+each file's analysis once the imports are bound — walked the records in
+discovery order, so the entry was read before the modules it imports. It now
+walks them in dependency order, so `verify()` returning `Result` from a third
+module answers a list at `result.failures`, and the contract's `ref<any>` no
+longer erases a field a caller reads. A map whose value names a class answers
+the fields of that class, which the class table states and the type table only
+names.
+
+The total went from 231 to 220. The `"map" is not a method` group fell from
+eleven to six, and `semantics/module-graph.ts` reads whole.
+
+### 4di. A map of the pairs a callback writes### 4di. A map of the pairs a callback writes
 
     new Map(items.map((item) => [item.key, item.value]))
 
@@ -3197,6 +3233,7 @@ What was closed this session, and what each was worth:
 | a record spread into a record (§4dk) | 246 → 241 |
 | a rest field (§4dl) | 241 → 236 |
 | a spread whose value the read does not shape (§4dm) | 236 → 231 |
+| an empty list a loop walks beside a set, an answer that names nothing, and a module read after its imports (§4dn) | 231 → 220 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

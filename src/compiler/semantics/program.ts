@@ -27,6 +27,7 @@ import { parseContract } from "./contract.ts";
 import type { Frontend, ProgramBody } from "./module.ts";
 import { contractPhaseError, offeredValues, readModuleGraph, type ModuleRecord } from "./module-graph.ts";
 import { resolveObjects } from "./objects.ts";
+import type { TypeTable } from "./typescript-types.ts";
 import { programShapes } from "./program-objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
 import { resolveCalls } from "./calls.ts";
@@ -324,8 +325,15 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   // because a field is often what another function returns. A program body
   // writes objects of its own beside the ones the functions write, so its
   // literals are merged into the same shapes before any name is handed out.
+  // The types each module declares are what says what a field of a reference
+  // holds: a contract spells a record as the opaque reference, and the layout
+  // pass reads the fields through the declaration.
+  const types = new Map<string, TypeTable>();
+  for (const record of records) {
+    if (record.analysis.types !== undefined) types.set(record.path, record.analysis.types);
+  }
   const objects =
-    resolveObjects(files, body === undefined ? undefined : programShapes(body));
+    resolveObjects(files, body === undefined ? undefined : programShapes(body), types);
   const objectNames = objects.names;
   // Which of the calls that pass recorded is written out rather than made is
   // a property of the whole graph, so it is decided here, once the graph is
