@@ -1247,6 +1247,22 @@ test("a map of a callback's pairs is the entries it writes", async () => {
   }
 });
 
+test("a map whose callback answers a list is a list of the lists it answered", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  const pairs = [1, 2].map((x) => [x, x + 1]);",
+    "  const first = pairs[0];",
+    "  return `${pairs.length} ${first === undefined ? `none` : first.join(`-`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 1-2", `the ${backend} backend maps to a list of lists`);
+  }
+});
+
 test("the keys and values of a record are the fields it was laid out with", async () => {
   // A value the read holds at a record is a layout: its keys are the fields it
   // was laid out with, and its values are those fields read.

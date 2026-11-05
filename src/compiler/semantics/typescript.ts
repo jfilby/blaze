@@ -12201,10 +12201,15 @@ class TypeScriptParser {
       );
       return this.hole();
     }
-    if (method === "map" && (signature.returns.kind === "void" || signature.returns.kind === "slice" || signature.returns.kind === "array" || signature.returns.kind === "ptr" || signature.returns.kind === "mask")) {
+    // A map that answers a list is a list of the lists it answered, which is a
+    // list of lists: an element here may be a list, and the block a map builds
+    // is a block of them. A pointer or a mask is not an element a list holds,
+    // and a map that answers nothing is a loop for what it does — that is
+    // `forEach`, and it is refused here.
+    if (method === "map" && (signature.returns.kind === "void" || signature.returns.kind === "ptr" || signature.returns.kind === "mask")) {
       this.report(
-        "the function map walks the array with must answer a number, a truth, a text or a reference",
-        "a map of a list is a list of what the function answered, and a list of lists is not a value here",
+        "the function map walks the array with must answer a value a list holds",
+        "a map answers a list of what the function answered, and a function that answers nothing is forEach",
         this.peek(),
       );
       return this.hole();

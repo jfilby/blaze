@@ -888,6 +888,19 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dj. A map that answers a list
+
+    [1, 2].map((x) => [x, x + 1])      // a list of the lists it answered
+
+An element of a list may itself be a list — `string[][]` is a value the sources
+hold — so a `map` whose callback answers a list is the list of the lists it
+answered. The read refused every list answer because a typed array was the only
+element a map was thought to build; an element here may be a list, and the block
+a map builds is a block of them. A pointer or a mask is still not an element,
+and a callback that answers nothing is `forEach`.
+
+The total went from 251 to 246.
+
 ### 4di. A map of the pairs a callback writes
 
     new Map(items.map((item) => [item.key, item.value]))
@@ -3136,6 +3149,7 @@ What was closed this session, and what each was worth:
 | a push on a choice of two places, and the keys of a layout (§4dh) | 271 → 265 |
 | an await that holds the record its promise carries (§4dh) | 265 → 261 |
 | a map of the pairs a callback writes (§4di) | 261 → 251 |
+| a map that answers a list (§4dj) | 251 → 246 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
