@@ -15519,6 +15519,13 @@ class TypeScriptParser {
       call = { k: "call", name: "blaze_rt_dict_new", args: [] };
     } else if (kind === "map" && this.at("[") && this.peek(1).text === "[") {
       call = this.readCollectionPairs(collection, view);
+    } else if (kind === "map" && this.pairMapAt() !== null) {
+      // `new Map(items.map((item) => [item.key, item.value]))`: the map is the
+      // entries the callback writes, which is a loop of one write each rather
+      // than a list of pairs a list here cannot hold.
+      const made = this.readPairMap(collection);
+      if (made === null) return this.hole();
+      call = made;
     } else {
       const savedSource = this.readingCollectionSource;
       this.readingCollectionSource = true;
@@ -15532,6 +15539,128 @@ class TypeScriptParser {
     this.collectionExpressions.set(call, collection);
     this.expressionTypes.set(call, NUMBER_RESULT);
     return call;
+  }
+
+  /**
+   * Where `new Map(<source>.map(<callback>))` splits, as the index of the `.`
+   * and of the callback's parentheses, or null where the argument is not that.
+   *
+   * The map is the entries the callback writes, and an entry is two values of
+   * two types, which a list cannot hold. Where the callback answers a pair —
+   * a list of two written values — the call is read as the loop of writes it
+   * means, and the list never exists.
+   */
+  private pairMapAt(): { dot: number; open: number; close: number } | null {
+    const open = this.position - 1;
+    const close = this.matchingToken(open, "(", ")");
+    if (close < 0) return null;
+    let depth = 0;
+    let found: { dot: number; open: number; close: number } | null = null;
+    for (let at = this.position; at < close; at += 1) {
+      const token = this.tokens[at];
+      if (token === undefined) return null;
+      if (token.kind === "punct") {
+        if (token.text === "(" || token.text === "[" || token.text === "{") {
+          depth += 1;
+          continue;
+        }
+        if (token.text === ")" || token.text === "]" || token.text === "}") {
+          depth -= 1;
+          continue;
+        }
+        if (
+          depth === 0 &&
+          token.text === "." &&
+          this.tokens[at + 1]?.kind === "ident" &&
+          this.tokens[at + 1]?.text === "map" &&
+          this.tokens[at + 2]?.text === "("
+        ) {
+          const end = this.matchingToken(at + 2, "(", ")");
+          if (end === close - 1) found = { dot: at, open: at + 2, close };
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Reads an expression that ends at a token, without reading past it. */
+  private readBounded(stop: number): Expression {
+    const saved = this.tokens;
+    const bounded = saved.slice();
+    const last = bounded[stop];
+    if (last !== undefined) bounded[stop] = { ...last, kind: "end", text: "" };
+    this.tokens = bounded;
+    try {
+      return this.readExpression();
+    } finally {
+      this.tokens = saved;
+    }
+  }
+
+  /** `new Map(<source>.map(<callback>))`, as the loop of writes it is. */
+  private readPairMap(collection: CollectionValue): Expression | null {
+    const at = this.pairMapAt();
+    if (at === null) return null;
+    const line = this.peek().line;
+    // The list the callback walks is read to the `.` and no further.
+    const source = this.readBounded(at.dot);
+    if (this.position !== at.dot) return null;
+    this.position = at.open + 1;
+    // The callback is read against the element the source's list holds.
+    const held = this.valueTypeOf(source);
+    const sequence = held.kind === "slice" || held.kind === "array" ? held : null;
+    if (sequence === null) return null;
+    const elementShape = this.shapeOf(source);
+    const shape = elementShape !== null && elementShape.kind === "list" ? elementShape.of : null;
+    this.arrowParameters = shape === null ? null : [{ type: this.typeExprOfShape(shape), shape }];
+    const callback = this.readArrow(false);
+    this.arrowParameters = null;
+    if (this.position !== at.close - 1) return null;
+    if (callback.k !== "arrow") return null;
+    const lifted = this.liftedArrows.get(callback.name);
+    if (lifted === undefined) return null;
+    // The pair the callback answers: a result that is a list of two values.
+    const pair = pairOfBody(lifted.body);
+    if (pair === null) return null;
+    const params = new Set(lifted.params.map((param) => param.name));
+    const element = (): Expression => ({ k: "index", base: { k: "ident", name: "item" }, index: { k: "ident", name: "at" } });
+    const first = substituteParams(pair.first, params, element);
+    const second = substituteParams(pair.second, params, element);
+    const keyType = this.valueTypeOf(pair.first);
+    const valueType = this.valueTypeOf(pair.second);
+    if (this.keyKind(keyType) !== "text") return null;
+    collection.key = keyType;
+    collection.value = valueType;
+    const setName = this.collectionSetNameFor(collection);
+    if (setName === null) return null;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: sequence.of };
+    const paramsOut = [{ name: "item", type: items }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      {
+        kind: "loop",
+        variable: "at",
+        from: { k: "literal", text: "0" },
+        to: { k: "length", buffer: "item" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "expression", value: { k: "call", name: setName, args: [{ k: "ident", name: "out" }, first, second] }, line },
+        ],
+        line,
+      },
+      { kind: "result", value: { k: "ident", name: "out" }, line },
+    ];
+    const helper: TypeScriptFunction = { name, params: paramsOut, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params: paramsOut, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.position = at.close;
+    this.next();
+    return { k: "call", name, args: [source] };
   }
 
   /** The `new Map([...])` written as pairs of values, lowered to one helper. */
@@ -16978,6 +17107,80 @@ function describe(expression: Expression): string {
     case "append":
       return `${describe(appendArray(expression))}.${expression.op}`;
   }
+}
+
+/** The two values a callback answers as a pair, or null where it answers one. */
+function pairOfBody(body: readonly Statement[]): { first: Expression; second: Expression } | null {
+  const results: Expression[] = [];
+  const collect = (statements: readonly Statement[]): void => {
+    for (const statement of statements) {
+      if (statement.kind === "result" && statement.value !== null) results.push(statement.value);
+      if (statement.kind === "if") {
+        collect(statement.then ?? []);
+        collect(statement.otherwise ?? []);
+      }
+    }
+  };
+  collect(body);
+  if (results.length !== 1) return null;
+  const values = writtenListValues(results[0] as Expression);
+  if (values === null || values.length !== 2) return null;
+  return { first: values[0] as Expression, second: values[1] as Expression };
+}
+
+/** The values a list written out holds, through the copy it is joined with. */
+function writtenListValues(value: Expression): Expression[] | null {
+  if (value.k === "buffer") return value.values;
+  if (value.k === "binary" && value.op === "+") {
+    const left = writtenListValues(value.left);
+    const right = writtenListValues(value.right);
+    if (left !== null && right !== null) return [...left, ...right];
+  }
+  return null;
+}
+
+/**
+ * An expression with the names of a callback's parameters read as the element
+ * the loop is on: the pair a callback writes, read for each entry.
+ */
+function substituteParams(value: Expression, params: ReadonlySet<string>, element: () => Expression): Expression {
+  const walk = (one: Expression): Expression => {
+    switch (one.k) {
+      case "ident":
+        return params.has(one.name) ? element() : one;
+      case "member":
+        return { ...one, base: walk(one.base) };
+      case "index":
+        return { ...one, base: walk(one.base), index: walk(one.index) };
+      case "call":
+        return { ...one, args: one.args.map(walk) };
+      case "binary":
+        return { ...one, left: walk(one.left), right: walk(one.right) };
+      case "unary":
+        return { ...one, operand: walk(one.operand) };
+      case "conditional":
+        return { ...one, condition: walk(one.condition), then: walk(one.then), otherwise: walk(one.otherwise) };
+      case "lengthOf":
+        return { ...one, of: walk(one.of) };
+      case "length":
+        // `name.length` is held as the name the length is of, and the name a
+        // loop reads it on is the element.
+        return params.has(one.buffer) ? { k: "lengthOf", of: element() } : one;
+      case "fixed":
+        return { ...one, of: walk(one.of) };
+      case "text":
+        return { ...one, parts: one.parts.map((part) => (part.k === "value" ? { ...part, value: walk(part.value) } : part)) };
+      case "object":
+        return { ...one, fields: one.fields.map((field) => ({ ...field, value: walk(field.value) })) };
+      case "buffer":
+        return { ...one, values: one.values.map(walk) };
+      case "arrow":
+        return one;
+      default:
+        return one;
+    }
+  };
+  return walk(value);
 }
 
 /** The array a push or pop is written on, as the value expression it is. */

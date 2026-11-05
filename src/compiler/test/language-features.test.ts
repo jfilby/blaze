@@ -1224,6 +1224,29 @@ test("a choice of a length and a number is a number", async () => {
   }
 });
 
+test("a map of a callback's pairs is the entries it writes", async () => {
+  // `new Map(items.map((item) => [item.key, item.value]))` is a loop of one
+  // write each; an entry is two values of two types, which a list cannot hold.
+  const source = [
+    "interface Module { path: string; source: string }",
+    "function describe(at: number): string { return `n${at}`; }",
+    "export function demo(): string {",
+    "  const modules: Module[] = [{ path: `a`, source: `x` }, { path: `b`, source: `y` }];",
+    "  const byPath = new Map(modules.map((module) => [module.path, module.source]));",
+    "  const byName = new Map([`p`, `q`].map((name) => [name, describe(name.length)]));",
+    "  const second = byPath.get(`b`);",
+    "  const q = byName.get(`q`);",
+    "  return `${byPath.size} ${second === undefined ? `none` : second} ${q === undefined ? `none` : q}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 y n1", `the ${backend} backend builds the map from the pairs`);
+  }
+});
+
 test("the keys and values of a record are the fields it was laid out with", async () => {
   // A value the read holds at a record is a layout: its keys are the fields it
   // was laid out with, and its values are those fields read.

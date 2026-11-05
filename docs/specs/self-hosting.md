@@ -888,6 +888,24 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4di. A map of the pairs a callback writes
+
+    new Map(items.map((item) => [item.key, item.value]))
+
+An entry of a map is two values of two types, and a list here holds one element
+type: `items.map((item) => [item.key, item.value])` was a list of pairs a
+compiled list cannot hold, and the call was refused. The map is now read as the
+loop of writes it means. `new Map(<list>.map(<callback>))` is recognised at the
+token level — the argument is exactly a `.map(` call that closes where the map
+does — and the list is read to the `.` and no further. The callback is read
+against the element the list holds, and the pair it answers is its result: a
+list of two written values. The helper the call becomes loops over the list and
+writes one entry per element, with the callback's parameters read as the element
+the loop is on. Nothing of the pair exists at run time, which is what makes a
+pair of two types possible at all.
+
+The total went from 261 to 251.
+
 ### 4dh. A push on a choice of two places, and the keys of a layout
 
     (c ? this.statics : this.fields).push(name)   // the place it names
@@ -3117,6 +3135,7 @@ What was closed this session, and what each was worth:
 | a conditional spread into a union of shapes (§4dg) | 290 → 271 |
 | a push on a choice of two places, and the keys of a layout (§4dh) | 271 → 265 |
 | an await that holds the record its promise carries (§4dh) | 265 → 261 |
+| a map of the pairs a callback writes (§4di) | 261 → 251 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
