@@ -4359,3 +4359,62 @@ test("a conditional spread into a union of shapes writes the field it holds", ()
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a push on a conditional of two places writes the one it names", () => {
+  // `(c ? a : b).push(x)` is the push on whichever the condition names, so the
+  // statement it becomes is the `if` over the two writes.
+  const source = [
+    "class C {",
+    "  private statics: string[] = [];",
+    "  private fields: string[] = [];",
+    "  add(isStatic: boolean, name: string): void {",
+    "    (isStatic ? this.statics : this.fields).push(name);",
+    "  }",
+    "}",
+    "export function f(c: C): void { c.add(true, `a`); }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const ir = irOf("typescript", {
+    "main.ts": [
+      "export function f(yes: boolean, a: string[], b: string[]): string[] {",
+      "  (yes ? a : b).push(`x`);",
+      "  return yes ? a : b;",
+      "}",
+      "console.log(f(true, [], []).length);",
+      "",
+    ].join("\n"),
+  }, "main.ts", "f");
+  assert.match(ir, /if local\[bool\] yes/, "the two writes are the arms of one choice");
+});
+
+test("Object.keys and Object.values read the fields a record was laid out with", () => {
+  const source = [
+    "interface Pair { left: number; right: number }",
+    "export function f(pair: Pair): number {",
+    "  let total = Object.keys(pair).length;",
+    "  for (const one of Object.values(pair)) total += one;",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("an awaited call is the record its promise carries", () => {
+  // `async function f(): Promise<Outcome>` states the shape of the value the
+  // promise carries, and `await f()` holds that value.
+  const source = [
+    "interface Compiled { headerPath: string; sourcePath: string }",
+    "async function compile(): Promise<Compiled> {",
+    "  return { headerPath: `a`, sourcePath: `b` };",
+    "}",
+    "export async function f(): Promise<string> {",
+    "  const compiled = await compile();",
+    "  const both = { ...compiled };",
+    "  return both.headerPath;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

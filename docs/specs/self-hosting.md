@@ -888,6 +888,33 @@ typed `array<T,n>` from the length of the literal, so `{ children: [] }` and
 written exactly that way, so this blocks the self-build — at the object pass,
 which the gap report does not measure.
 
+### 4dh. A push on a choice of two places, and the keys of a layout
+
+    (c ? this.statics : this.fields).push(name)   // the place it names
+    Object.keys(reported)                         // the fields it was laid out with
+
+**A push on a conditional.** The receiver of a push is a place the statement
+writes back into, and a conditional names two of them. The push is the push on
+whichever the condition chooses, so the statement it becomes is the `if` over
+the two writes: each list is grown where it is the one the source meant.
+
+**The keys of a layout.** A value the read holds at a record is a layout: its
+fields are the keys it was laid out with, and a key the program wrote only when
+a condition held is still a field of it. `Object.keys` is the list of those
+names and `Object.values` the fields read, which is a list only where every
+field is the same type.
+
+**An await holds the record its promise carries.** `async function f():
+Promise<Outcome>` states the type the promise carries, which is the shape a
+caller's `await f()` holds. The annotation's shape was resolved over the whole
+`Promise<Outcome>`, which names no declaration, so the awaited value was the
+unshaped reference and a field or a spread of it was refused. The payload is
+peeled before its shape is resolved, and `await` of a call reads the payload's
+type and shape.
+
+The total went from 271 to 261, and `semantics/typescript-classes.ts` reads
+whole.
+
 ### 4dg. A conditional spread into a union of shapes
 
     { k: `num`, ...(yes ? { async: true } : {}) }    // an arm of a union
@@ -3088,6 +3115,8 @@ What was closed this session, and what each was worth:
 | a method of an object literal, and an element of a field (§4de) | 306 → 299 |
 | a wrapped whole number, the default order, and a view of part of a block (§4df) | 299 → 290 |
 | a conditional spread into a union of shapes (§4dg) | 290 → 271 |
+| a push on a choice of two places, and the keys of a layout (§4dh) | 271 → 265 |
+| an await that holds the record its promise carries (§4dh) | 265 → 261 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

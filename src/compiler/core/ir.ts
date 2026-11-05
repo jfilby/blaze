@@ -196,6 +196,14 @@ export type Expression =
       spreads?: readonly boolean[];
       /** The element type of the array, which a written value is joined at. */
       element?: TypeExpr;
+      /**
+       * The two places a conditional names, as `(c ? a : b).push(x)` writes
+       * them. The push is the push on whichever the condition chooses, so the
+       * statement it becomes is the `if` over the two writes.
+       */
+      arms?: readonly { target: string; base: string | null }[];
+      /** The condition that chooses between `arms`. */
+      condition?: Expression;
     };
 
 export type AssignOperator = "=" | "+=" | "*=" | "-=" | "/=" | "//=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "**=";

@@ -1224,6 +1224,25 @@ test("a choice of a length and a number is a number", async () => {
   }
 });
 
+test("the keys and values of a record are the fields it was laid out with", async () => {
+  // A value the read holds at a record is a layout: its keys are the fields it
+  // was laid out with, and its values are those fields read.
+  const source = [
+    "interface Pair { left: number; right: number }",
+    "export function demo(): string {",
+    "  const pair: Pair = { left: 1, right: 2 };",
+    "  const values = Object.values(pair);",
+    "  return `${values.length} ${values[0] + values[1]} ${Object.keys(pair).join(`,`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 3 left,right", `the ${backend} backend reads the record's fields`);
+  }
+});
+
 test("a list sorts by itself, and a view of part of a buffer is a window", async () => {
   // The order the language gives a list of numbers or texts is the one `<` is
   // for each; a view of part of a block is the block moved by the offset.

@@ -3983,6 +3983,17 @@ class TypeScriptParser {
         break;
       }
       case "call": {
+        // `await f()` is the value the promise `f` answers carries, and the
+        // shape the declaration states for that value is the one the awaited
+        // value holds.
+        const awaited = value.name === "Promise.await" ? value.args[0] : undefined;
+        if (awaited !== undefined && awaited.k === "call") {
+          const carried = this.declaredReturnShapes.get(awaited.name);
+          if (carried !== undefined) {
+            shape = carried;
+            break;
+          }
+        }
         const declared = this.declaredReturnShapes.get(value.name);
         if (declared !== undefined) {
           shape = declared;
@@ -6363,7 +6374,7 @@ class TypeScriptParser {
     this.next();
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
     const returnType = this.readTypeAnnotation("a return type", new Set(["{", "=", ";"]), isAsync);
-    const returnShape = this.lastAnnotationShape();
+    const returnShape = this.lastAnnotationShape(isAsync);
     // A signature with no body is an overload: it names how the function below
     // it is called, and the body the declaration after it writes is the one
     // that runs.
@@ -6794,17 +6805,28 @@ class TypeScriptParser {
   }
 
   /** The shape of the annotation the last read consumed, or null. */
-  private lastAnnotationShape(): ResolvedType | null {
+  private lastAnnotationShape(promisePayload = false): ResolvedType | null {
     const range = this.lastTypeRange;
     if (range === null) return null;
+    let start = range.start;
+    let end = range.end;
+    // `async function f(): Promise<Outcome>` states the type the promise
+    // carries, which is the shape a caller's `await f()` holds.
+    if (promisePayload) {
+      const payload = this.promisePayload(start, end);
+      if (payload !== null) {
+        start = payload.start;
+        end = payload.end;
+      }
+    }
     try {
-      const shape = resolveAnnotation(this.tokens, range.start, range.end, this.typeTable);
+      const shape = resolveAnnotation(this.tokens, start, end, this.typeTable);
       // An imported declaration the module graph has not linked resolves to
       // the `any` this read cannot tell from a type the source spelled as one.
-      if (shape.kind === "any") this.notePendingType(typeText(this.tokens, range.start, range.end));
+      if (shape.kind === "any") this.notePendingType(typeText(this.tokens, start, end));
       return shape;
     } catch {
-      this.notePendingType(typeText(this.tokens, range.start, range.end));
+      this.notePendingType(typeText(this.tokens, start, end));
       return null;
     }
   }
@@ -8384,6 +8406,31 @@ class TypeScriptParser {
     // `a.push(x)` answers the array the name holds afterwards, so written on
     // its own line it is the write that keeps it. A field is written back into
     // the field it was read from, with the object it belongs to unchanged.
+    if (value.k === "append" && value.arms !== undefined && value.condition !== undefined) {
+      const writeArm = (arm: { target: string; base: string | null }): Statement => {
+        const array: Expression = arm.base === null
+          ? { k: "ident", name: arm.target }
+          : { k: "member", base: { k: "ident", name: arm.base }, field: arm.target };
+        const call = value.spreads === undefined
+          ? { k: "call", name: value.helper, args: [array, ...value.values] } as Expression
+          : value.values.reduce<Expression>((inner, written, at) => {
+              const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
+              const joined: Expression = value.spreads?.[at] === true ? written : { k: "buffer", element, values: [written] };
+              return { k: "binary", op: "+", left: inner, right: joined };
+            }, array);
+        return arm.base === null
+          ? { kind: "assign", target: arm.target, op: "=", value: call, line: token.line }
+          : { kind: "memberAssign", base: arm.base, field: arm.target, op: "=", value: call, line: token.line };
+      };
+      const arms = value.arms;
+      return {
+        kind: "if",
+        condition: value.condition,
+        then: [writeArm(arms[0] as { target: string; base: string | null })],
+        otherwise: [writeArm(arms[1] as { target: string; base: string | null })],
+        line: token.line,
+      };
+    }
     if (value.k === "append") {
       const array: Expression = appendArray(value);
       let call: Expression;
@@ -10712,6 +10759,40 @@ class TypeScriptParser {
               const owner = this.writeTarget(receiver.base, callLine);
               if (owner !== null) place = { target: receiver.field, base: owner };
             }
+            // `(c ? a : b).push(x)` is the push on whichever the condition
+            // names: the statement is the `if` over the two writes, so each
+            // list is grown where it is the one the source meant.
+            if (place === null && receiver.k === "conditional") {
+              const armOf = (arm: Expression): { target: string; base: string | null } | null =>
+                arm.k === "ident"
+                  ? { target: arm.name, base: null }
+                  : arm.k === "member" && arm.base.k === "ident"
+                    ? { target: arm.field, base: arm.base.name }
+                    : null;
+              const left = armOf(receiver.then);
+              const right = armOf(receiver.otherwise);
+              const held = this.valueTypeOf(receiver);
+              if (
+                left !== null &&
+                right !== null &&
+                (held.kind === "slice" || held.kind === "array") &&
+                (target.field === "push" ? args.length >= 1 : args.length === 0)
+              ) {
+                const helper = spreads === null ? this.appendHelper(target.field, held.of, args.length, callLine) : null;
+                replace({
+                  k: "append",
+                  target: left.target,
+                  base: left.base,
+                  arms: [left, right],
+                  condition: receiver.condition,
+                  helper: helper?.name ?? "",
+                  op: target.field,
+                  values: args,
+                  ...(spreads === null ? {} : { spreads, element: held.of }),
+                });
+                continue;
+              }
+            }
             // `positions[i].push(x)` is a push on the list the element holds.
             // A list of lists is a block of blocks, so the element is read,
             // grown, and written back at its index: the push answers the list
@@ -12421,6 +12502,15 @@ class TypeScriptParser {
       if (shape !== null) return this.typeExprOfShape(shape);
     }
     if (value.k === "call") {
+      // `await f()` is the value the promise carries, which is the type the
+      // declaration states for it.
+      const awaited = value.name === "Promise.await" ? value.args[0] : undefined;
+      if (awaited !== undefined && awaited.k === "call") {
+        const carried = this.declaredReturns.get(awaited.name);
+        if (carried !== undefined) return carried;
+        const imported = this.declaredFunctionReturns.get(awaited.name);
+        if (imported !== undefined) return imported.returns;
+      }
       const written = this.liftedArrows.get(value.name);
       if (written !== undefined) return written.returns;
       const declared = this.declaredReturns.get(value.name);
@@ -12460,6 +12550,34 @@ class TypeScriptParser {
       if (collection !== null && collection.kind === "map") {
         const read = this.collectionMethod(value, collection, method, []);
         if (read !== null) return read;
+      }
+    }
+    // A value the read holds at a record is a layout: its fields are the keys
+    // it was laid out with, and a key the program wrote only when a condition
+    // held is still a field of it. A list of the values is a list of one
+    // element type, so it is answered only where every field is that type.
+    const shape = args.length === 1 && value !== undefined ? this.shapeOf(value) : null;
+    if (shape !== null && shape.kind === "record" && shape.index === null && shape.arms === undefined) {
+      const names = [...shape.fields.keys()];
+      if (method === "keys") {
+        const keys: Expression = {
+          k: "buffer",
+          element: "text",
+          values: names.map((name): Expression => ({ k: "text", parts: [{ k: "text", value: name }] })),
+        };
+        this.expressionTypes.set(keys, { kind: "slice", of: TEXT_RESULT });
+        return keys;
+      }
+      const types = names.map((name) => this.typeExprOfShape((shape.fields.get(name) as ResolvedField).type));
+      const element = types[0];
+      if (element !== undefined && types.every((one) => typeToString(one) === typeToString(element))) {
+        const listed: Expression = {
+          k: "buffer",
+          element: typeToString(element),
+          values: names.map((name): Expression => ({ k: "member", base: value as Expression, field: name })),
+        };
+        this.expressionTypes.set(listed, { kind: "slice", of: element });
+        return listed;
       }
     }
     const constant = args.length === 1 && value !== undefined && value.k === "ident"
@@ -16864,6 +16982,12 @@ function describe(expression: Expression): string {
 
 /** The array a push or pop is written on, as the value expression it is. */
 function appendArray(value: Expression & { k: "append" }): Expression {
+  if (value.arms !== undefined && value.arms[0] !== undefined) {
+    const arm = value.arms[0];
+    return arm.base === null
+      ? { k: "ident", name: arm.target }
+      : { k: "member", base: { k: "ident", name: arm.base }, field: arm.target };
+  }
   if (value.index !== undefined) {
     return { k: "index", base: { k: "ident", name: value.target }, index: value.index };
   }
