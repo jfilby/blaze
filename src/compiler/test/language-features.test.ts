@@ -1285,6 +1285,25 @@ test("Object.fromEntries of a callback's pairs is the entries it writes", async 
   }
 });
 
+test("a text splits at most as many fields as its limit names", async () => {
+  const source = [
+    "export function demo(): string {",
+    '  const a = "ab".split("b", 1).join("~");',
+    '  const b = "a,b,c,d".split(",", 2).join("|");',
+    '  const c = "a,b,c".split(",").join("+");',
+    '  const d = "abc".split("b", 0).length;',
+    '  const e = "xyz".split("z", 5).join("-");',
+    "  return `${a} ${b} ${c} ${d} ${e}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a a|b a+b+c 0 xy-", `the ${backend} backend cuts at most the fields its limit names`);
+  }
+});
+
 test("a text replaces the first asking of its needle", async () => {
   const source = [
     "export function demo(): string {",

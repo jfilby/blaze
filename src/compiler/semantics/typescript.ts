@@ -13337,11 +13337,15 @@ class TypeScriptParser {
           : { k: "binary" as const, op: "+" as const, left: padding, right: receiver };
       }
     }
-    if (method === "split" && args.length === 1) {
+    if (method === "split" && (args.length === 1 || args.length === 2)) {
       // An empty separator and a separator of several characters are both
-      // fields the helper cuts, and a regular expression was taken above.
-      const helper = this.splitHelper(this.peek().line);
-      return call(helper.name, [receiver, args[0] as Expression]);
+      // fields the helper cuts, and a regular expression was taken above. The
+      // limit is how many fields the list keeps at most: the helper cuts them
+      // and then keeps that many.
+      const helper = this.splitHelper(this.peek().line, args.length === 2);
+      return call(helper.name, args.length === 2
+        ? [receiver, args[0] as Expression, args[1] as Expression]
+        : [receiver, args[0] as Expression]);
     }
     if (method === "slice" && (args.length === 1 || args.length === 2)) {
       return call("text.slice", [receiver, ...args]);
@@ -14023,8 +14027,8 @@ class TypeScriptParser {
     return made;
   }
 
-  private splitHelper(line: number): { name: string; returns: TypeExpr } {
-    const key = JSON.stringify(["split"]);
+  private splitHelper(line: number, withLimit: boolean): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["split", withLimit]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
@@ -14037,6 +14041,21 @@ class TypeScriptParser {
     const add = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "+", left, right });
     const less = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
     const equal = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "===", left, right });
+    // The number of fields the list keeps when a limit is written: no more
+    // than the count the text names, and none where the limit names none.
+    const keep = (): Expression => withLimit
+      ? {
+          k: "conditional",
+          condition: less(ident("limit"), number("0")),
+          then: number("0"),
+          otherwise: {
+            k: "conditional",
+            condition: less(ident("limit"), ident("count")),
+            then: ident("limit"),
+            otherwise: ident("count"),
+          },
+        }
+      : ident("count");
     const slice = (value: Expression, start: Expression, stop: Expression | null): Expression =>
       call("text.slice", stop === null ? [value, start] : [value, start, stop]);
     const search = (from: Expression): Expression => call("text.indexOf", [slice(ident("text"), from, null), ident("sep")]);
@@ -14092,12 +14111,13 @@ class TypeScriptParser {
         ],
         line,
       },
-      { kind: "declare", name: "out", type: null, init: { k: "sized", element: "text", count: ident("count") }, line },
+      { kind: "declare", name: "keep", type: null, init: keep(), line },
+      { kind: "declare", name: "out", type: null, init: { k: "sized", element: "text", count: ident("keep") }, line },
       {
         kind: "if",
         condition: emptySeparator(),
         then: [
-          loop(lengthOf(ident("text")), [
+          loop(ident("keep"), [
             {
               kind: "indexAssign",
               buffer: "out",
@@ -14110,7 +14130,7 @@ class TypeScriptParser {
         ],
         otherwise: [
           { kind: "assign", target: "at", op: "=", value: number("0"), line },
-          loop(ident("count"), writeField()),
+          loop(ident("keep"), writeField()),
         ],
         line,
       },
@@ -14120,6 +14140,7 @@ class TypeScriptParser {
     const params = [
       { name: "text", type: TEXT_RESULT },
       { name: "sep", type: TEXT_RESULT },
+      ...(withLimit ? [{ name: "limit", type: NUMBER_RESULT }] : []),
     ];
     const returns: TypeExpr = { kind: "slice", of: TEXT_RESULT };
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };

@@ -1017,6 +1017,19 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ee. A text splits at most as many fields as its limit names
+
+    literal.split("\0", 1)
+
+The split helper cut every field a separator named, and a limit was refused
+where the call was read. It now takes the limit as a third parameter and
+keeps at most that many fields — none where the limit names none — so the
+list it answers is the first that many fields of the cut. The no-limit form
+is the helper it was; only the key it is written under says the limit is
+there.
+
+    The total went from 189 to 188.
+
 ### 4ed. A text replaces the asking of its needle
 
     request.replace(`run`, `bench 2`)
@@ -3494,6 +3507,7 @@ What was closed this session, and what each was worth:
 | a list is reversed where it lies (§4eb) | 194 → 192 |
 | a spread stands beside a value in Math.max (§4ec) | 192 → 191 |
 | a text replaces the asking of its needle (§4ed) | 191 → 189 |
+| a text splits at most as many fields as its limit names (§4ee) | 189 → 188 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

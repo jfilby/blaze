@@ -560,6 +560,18 @@ test("a text replaces the asking of its needle", () => {
   assert.deepEqual(readTypeScriptModule(missed, "main.ts", false).refused, []);
 });
 
+test("a text splits at most as many fields as its limit names", () => {
+  // `text.split(sep, limit)` keeps at most the fields the limit names: the
+  // helper cuts them and then keeps that many, none where the limit is zero.
+  const source = [
+    "export function f(request: string): string[] {",
+    "  return request.split(`,`, 2);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.
