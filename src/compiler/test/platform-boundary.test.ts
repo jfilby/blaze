@@ -18,6 +18,7 @@ import { join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { readdirEntries, stat } from "../core/platform.ts";
 
 const COMPILER_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -76,4 +77,19 @@ test("the platform adapter is the file the boundary names", async () => {
   assert.ok(nodeImports(ADAPTER, adapter).length > 0, "the adapter is where the Node modules are named");
   const boundary = await readFile(join(COMPILER_ROOT, "core/platform.ts"), "utf8");
   assert.deepEqual(nodeImports("core/platform.ts", boundary), [], "the platform interface names no host module");
+});
+
+test("a directory entry answers the two questions the compiler asks of it", async () => {
+  // The entry a listing answers is `DirectoryEntry`, the shape the boundary
+  // states, so a source that asks whether an entry is a file reads the same
+  // answer a native adapter gives without the host's type crossing with it.
+  const entries = await readdirEntries(COMPILER_ROOT);
+  const entry = entries.find((one) => one.name === "cli.ts");
+  assert.ok(entry !== undefined, "the compiler's own entry is listed");
+  assert.equal(entry.isFile(), true);
+  assert.equal(entry.isDirectory(), false);
+  const info = await stat(join(COMPILER_ROOT, "cli.ts"));
+  assert.ok(info.size > 0, "the size of a file the compiler reads is its bytes");
+  assert.equal(info.isFile(), true);
+  assert.equal(info.isDirectory(), false);
 });

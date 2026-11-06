@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, mkdir, readdir, readFile, rename, writeFile, basename, dirname, extname, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -2640,7 +2640,7 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
 
 export async function listProjects(cwd: string): Promise<string[]> {
   const store = createJsonStore(join(cwd, STATE_DIRECTORY));
-  const entries = await readdir(store.resolve("projects"), { withFileTypes: true }).catch(() => []);
+  const entries = await readdirEntries(store.resolve("projects")).catch(() => []);
   return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
 }
 

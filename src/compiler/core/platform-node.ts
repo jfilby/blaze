@@ -20,22 +20,23 @@ import {
   mkdtemp,
   open,
   readFile,
-  readdir,
+  readdir as nodeReaddir,
   rename,
   rm,
-  stat,
+  stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
+import type { DirectoryEntry, FileInfo } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename,
-  dirname,
-  extname,
-  isAbsolute,
+  dirname as nodeDirname,
+  extname as nodeExtname,
+  isAbsolute as nodeIsAbsolute,
   join,
-  normalize,
+  normalize as nodeNormalize,
   posix,
-  relative,
+  relative as nodeRelative,
   resolve,
   sep,
 } from "node:path";
@@ -54,23 +55,18 @@ export {
   cpus,
   createHash,
   createInterface,
-  dirname,
   existsSync,
-  extname,
   fileURLToPath,
-  isAbsolute,
   join,
   mkdir,
   mkdtemp,
-  normalize,
   open,
   parseArgs,
   posix,
   randomUUID,
   readFile,
   readFileSync,
-  readdir,
-  relative,
+  nodeReaddir as readdir,
   rename,
   resolve,
   rm,
@@ -79,8 +75,61 @@ export {
   sleep as setTimeout,
   spawn,
   spawnSync,
-  stat,
   tmpdir,
   writeFile,
   writeFileSync,
 };
+
+/**
+ * The entries of a directory, each with what it is.
+ *
+ * The host's own entry type answers the same questions, but it is the host's:
+ * a compiler source is written against `DirectoryEntry`, so listing a
+ * directory reads the same in a native adapter that never had a Node module to
+ * import.
+ */
+export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
+  return nodeReaddir(path, { withFileTypes: true });
+}
+
+/** What a file is: its size in bytes, and whether it is a file or a directory. */
+export async function stat(path: string): Promise<FileInfo> {
+  return nodeStat(path);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Path work                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * The path operations answer the texts they are given, and the compiler asks
+ * them as its own functions rather than as the host's: a source that joins or
+ * shortens a path reads the answer at `text`, which is what it is. `join` and
+ * `resolve` take any number of parts and stay the host's, because a rest
+ * parameter is a list a call is read against and none of these needs one.
+ */
+
+/** The directory part of a path. */
+export function dirname(path: string): string {
+  return nodeDirname(path);
+}
+
+/** The extension of a path, including the dot, or the empty text. */
+export function extname(path: string): string {
+  return nodeExtname(path);
+}
+
+/** Whether a path is absolute. */
+export function isAbsolute(path: string): boolean {
+  return nodeIsAbsolute(path);
+}
+
+/** A path with its empty and `.` parts taken out. */
+export function normalize(path: string): string {
+  return nodeNormalize(path);
+}
+
+/** The path that reaches `to` from `from`. */
+export function relative(from: string, to: string): string {
+  return nodeRelative(from, to);
+}

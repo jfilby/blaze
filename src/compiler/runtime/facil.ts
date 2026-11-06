@@ -12,7 +12,7 @@
  * into a single relocatable object that the program driver links.
  */
 
-import { readdir, stat, writeFile, availableParallelism, fileURLToPath, dirname, resolve } from "../core/platform.ts";
+import { readdirEntries, stat, writeFile, availableParallelism, fileURLToPath, dirname, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run, runAsync } from "../core/process.ts";
 import { mapConcurrent } from "../core/concurrency.ts";
@@ -1939,7 +1939,7 @@ export async function buildFacilRuntime(
      <fiobj.h>, etc., and http.c needs <http1_parser.h> one level deeper). */
   const includeDirs: string[] = [];
   const collect = async (dir: string): Promise<void> => {
-    for await (const entry of await readdir(dir, { withFileTypes: true })) {
+    for await (const entry of await readdirEntries(dir)) {
       const full = `${dir}/${entry.name}`;
       if (entry.isDirectory()) {
         includeDirs.push(full);

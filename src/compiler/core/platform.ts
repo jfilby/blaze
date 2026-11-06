@@ -12,6 +12,28 @@
  * sources that ask changing.
  */
 
+/**
+ * One entry a directory lists: its name, and what it is.
+ *
+ * The shape is the compiler's own rather than the host's: a source that lists
+ * a directory asks whether an entry is a file or a directory, and a native
+ * adapter answers the same two questions without carrying the host's type.
+ */
+export interface DirectoryEntry {
+  readonly name: string;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}
+
+/**
+ * What a file is: its size in bytes, and whether it is a file or a directory.
+ */
+export interface FileInfo {
+  readonly size: number;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}
+
 export {
   appendFile,
   availableParallelism,
@@ -36,6 +58,7 @@ export {
   readFile,
   readFileSync,
   readdir,
+  readdirEntries,
   relative,
   rename,
   resolve,

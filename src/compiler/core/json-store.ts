@@ -7,7 +7,7 @@
  * has been renamed into place is still there after the power goes out.
  */
 
-import { createHash, readFile, mkdir, open, readdir, rename, rm, stat, writeFile, dirname, isAbsolute, normalize, relative, resolve, sep } from "./platform.ts";
+import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, stat, writeFile, dirname, isAbsolute, normalize, relative, resolve, sep } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
 
 export interface JsonStore {
@@ -250,7 +250,7 @@ export function createJsonStore(root: string): JsonStore {
 
     async list(relativePath: string): Promise<string[]> {
       try {
-        return (await readdir(resolveInStore(relativePath), { withFileTypes: true })).map((entry) => entry.name);
+        return (await readdirEntries(resolveInStore(relativePath))).map((entry) => entry.name);
       } catch (cause) {
         // A directory nobody created is a directory with nothing in it: the
         // caller is asking what projects exist, and one that does not is none.

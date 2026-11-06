@@ -1017,6 +1017,38 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fn. The host's directory entry, and a path, as the compiler's own types
+
+    const entries = await readdir(dir, { withFileTypes: true });
+    if (entry.isDirectory()) walk(entry.name);
+    found.set(relative(root, path).split(sep).join("/"), text);
+
+`readdir` and `stat` were re-exported from the host, so the compiler's own
+sources were written against the host's type: `entry.isDirectory()` was a
+method of nothing, because the declaration of the entry was a Node module the
+tree does not hold. The boundary's whole point is that the source asks its own
+platform for the data it needs, so `core/platform.ts` now states the two shapes
+the compiler reads — `DirectoryEntry`, which is a name and the two questions
+"is this a file" and "is this a directory", and `FileInfo`, which is a size and
+the same two questions — and the adapter answers them. `readdirEntries` is the
+operation the compiler actually asks for, and `stat` keeps its name with the
+compiler's answer type.
+
+The pure path work was the host's for the same reason: `relative(root, path)`
+was a call of a name the linked read knew nothing about, so the `split` written
+after it was a method of nothing. `dirname`, `extname`, `isAbsolute`,
+`normalize` and `relative` are now the compiler's functions answering `text`,
+declared in the adapter with the host's implementation behind them. `join` and
+`resolve` take any number of parts and stay the host's until the rest parameter
+of a call is read against a declaration on the other side of the link.
+
+`core/version.ts` and `core/json-store.ts` lose the refusals this named, and
+`core/version.ts` reads whole. Two places remain that name a host value: a
+`catch` on a promise (`readdir(...).catch(() => [])`, `compiler.ts`) and the
+entries a host value answers where no platform function declared the type.
+
+    The total went from 131 to 124.
+
 ### 4fm. A call of what a call answered, and the callee of an indirect call
 
     createCommandCode({ apiKey, baseUrl })(configuration.model)
@@ -3905,15 +3937,13 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-537 refusals over 95 sources, 30 of them read whole. The report reads the
+124 refusals over 95 sources, 63 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
-what waited for one. The buckets the standalone read used to own are gone:
-`new Map(scope.slots)`, `Object.values(file.functions)` and an empty list in a
-field another module types are read whole, so is every member read through a
-union laid out with a leading bar (§4bp), and so is every method written on an
-instance of a class another module declares (§4br).
+what waited for one. `core/version.ts` reads whole now that a directory entry
+and a path are the compiler's own types (§4fn), which is the one source the
+slices since the last measurement closed.
 
 The number was five times larger than the standalone read's 421 because that
 read was counting with a hand over the rest of the file: the first imported type
@@ -3924,17 +3954,18 @@ what is missing. The largest buckets now, in order:
 
 | refusals | refusal | what it needs |
 | --- | --- | --- |
-| 58 | `an object spread reads a constant object` | a conditional spread whose field is a number, a text, a truth or a list — the absent value those need (§4cf reads the reference ones) — or a spread of a value whose record the read does not hold |
-| 25 | `an empty array needs the type of its elements` | an empty literal whose element type no use states: a value a callback answers, a field an assignment replaces, or a name a `Map` answers |
-| 24 | `"map" is not a method`, 13 `"filter"`, 12 `"has"`, 11 `"find"`, 10 `"every"` | a receiver the linked read still cannot type: a list a value returned from a function that read nothing of it, `builtinFor(name).params` (see §4br), or a value narrowed inside a `switch` |
-| 17 | `"push" is not a method this program compiles` | the same receiver as `"map"`, written as a push |
-| 14 | `the function map walks the array with must answer a number, a truth, a text or a reference` | a callback that answers an object, which needs a list of lists |
-| 10 | `in` asks a value whose fields the type does not write down | a union of shapes whose tag the read does not keep (§4k) |
-| 9 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle, read as a value rather than in a loop |
-| 8 | `"set" is not a method`, 7 `"bigint"`, 7 `"get"` | text and list methods on a value the read cannot type |
-| 8 | `a map here holds a slice<ref<any>>, which a key cannot answer` | a list stored in a dictionary, which is one value-model item below |
-| 8 | `a spread argument is not part of the call subset` | `f(...xs)` where the declaration is a builtin, or a list spread into a push |
-| 8 | `expected ")"` | a construct the parser stopped in the middle of, which the report's line cannot name |
+| 7 | `in` asks a value whose fields the type does not write down` | a dynamic value whose fields no layout writes: `"k" in n.value` where the field is `unknown`, which is the writable dynamic object §3 still owes |
+| 7 | `only a named function is called` | four calls of package providers (the AI SDK transport, §5) and a callee an expression answers: `this.target[method]`, `(a ?? b)(url)` |
+| 5 | `"map" is not a method` | a receiver the linked read cannot type: a promise, a host value whose declaration is a Node module, or a value an imported declaration erases |
+| 4 | `"..." is not a value a program can read` | a list spread in a program body, whose arrays are numbers |
+| 4 | `"catch"`, 4 `"then"` and 2 `"allSettled"` | a promise a body chains: the runtime has the promise and the await, not the methods of it |
+| 4 | `JSON.stringify writes a list whose values are written where the list is` | a list of one element type is not a dynamic value the runtime's stringify walks |
+| 3 | `"off"`, 3 `"once"` and the rest of `core/terminal-title.ts` | Node's streams and process events, which the host boundary has not replaced |
+| 3 | `JSON.stringify writes one value` | the indent a third argument names |
+| 5 | `a program cannot allocate Map` or `Set` | the collections a program body builds |
+| 3 | `an empty array needs the type of its elements` | an empty literal whose element type no use states, still in the IR text parsers |
+| 2 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
+| 2 | `a function may not be declared inside a function` | a nested declaration, in the terminal title and in `recursion.ts` |
 
 A refusal listed here is still not always a construct the frontend cannot read:
 a file is linked against the declarations of other files, and a file that is
@@ -4098,6 +4129,7 @@ What was closed this session, and what each was worth:
 | a whole number written in base two (§4fk) | 134 → 133 |
 | a list joined with a value, and a loop that awaits (§4fl) | 133 → 132 |
 | a call of what a call answered, and the callee of an indirect call (§4fm) | 132 → 131 |
+| the host's directory entry and path work as the compiler's own types (§4fn) | 131 → 124 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

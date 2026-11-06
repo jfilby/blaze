@@ -11469,7 +11469,7 @@ class TypeScriptParser {
         // the value it answered, exactly as a call of a name or a field held at
         // a function type is. The signature is the one the answer's type
         // writes, and the arguments are read at its parameters.
-        if (target.k !== "ident" && target.k !== "member") {
+        if (target.k !== "ident") {
           const held = this.expressionFunctionType(target);
           if (held !== null) {
             const args = this.readCallArguments(held.params);

@@ -23,7 +23,7 @@
  * object that may be linked as it stands.
  */
 
-import { createHash, readFile, readdir, join, relative, sep, fileURLToPath } from "./platform.ts";
+import { createHash, readFile, readdirEntries, join, relative, sep, fileURLToPath } from "./platform.ts";
 
 export const COMPILER_VERSION = "0.1.0";
 
@@ -118,7 +118,7 @@ export interface Fingerprints {
 export async function fingerprintSources(root: string): Promise<Fingerprints> {
   const found = new Map<string, string>();
   const walk = async (directory: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true });
+    const entries = await readdirEntries(directory);
     entries.sort((left, right) => (left.name < right.name ? -1 : 1));
     for (const entry of entries) {
       if (NOT_COMPILER[entry.name] === true) continue;
