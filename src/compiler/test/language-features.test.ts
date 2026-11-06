@@ -1285,6 +1285,22 @@ test("Object.fromEntries of a callback's pairs is the entries it writes", async 
   }
 });
 
+test("reverse writes the list it was handed in mirror order", async () => {
+  const source = [
+    "export function demo(): string {",
+    '  const names = [`aa`, `b`, `cc`, `dd`, `e`];',
+    "  const turned = names.reverse();",
+    '  return `${turned.join(`-`)} ${names.length}`;',
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "e-dd-cc-b-aa 5", `the ${backend} backend mirrors the list in place`);
+  }
+});
+
 test("Promise.all settles a list of promises into the values they carry", async () => {
   const source = [
     "export async function demo(): Promise<string> {",

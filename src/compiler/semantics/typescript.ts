@@ -3087,6 +3087,7 @@ const COLLECTION_METHODS: ReadonlySet<string> = new Set([
   "findIndex",
   "reduce",
   "sort",
+  "reverse",
   "join",
   "includes",
   "indexOf",
@@ -12411,6 +12412,21 @@ class TypeScriptParser {
       this.expressionShapes.set(filled, { kind: "list", of: shape ?? { kind: "any" } });
       return filled;
     }
+    // `a.reverse()` writes the list it was handed in mirror order, and the list
+    // is the answer. It is not a callback method: nothing is read out of an
+    // element, and the elements keep the shape they were read at.
+    if (method === "reverse") {
+      if (args.length !== 0) {
+        this.report("reverse takes no arguments", "as in a.reverse()", this.peek());
+        return this.hole();
+      }
+      const helper = this.collectionHelper("reverse", elements, { params: [elements], returns: elements }, false, line);
+      const reversed: Expression = { k: "call", name: helper.name, args: [receiver, { k: "literal", text: "0" }] };
+      this.expressionTypes.set(reversed, helper.returns);
+      const shape = this.elementShapeOf(receiver, elements);
+      this.expressionShapes.set(reversed, { kind: "list", of: shape ?? { kind: "any" } });
+      return reversed;
+    }
     // `a.sort()` with no comparator is the order the language gives: numbers by
     // their value and texts by what they say, which is the comparison `<` is
     // for each. A list of anything else needs the comparator its source writes.
@@ -15138,6 +15154,30 @@ class TypeScriptParser {
               ]),
               answer(ident("acc")),
             ];
+        break;
+      }
+      case "reverse": {
+        returns = { kind: "slice", of: element };
+        // A reverse writes the array it was handed, so it answers the array it
+        // wrote. Two ends walk to the middle, swapping each pair once; where
+        // they meet is the middle element, which is its own mirror and stays.
+        body = [
+          declare("i", number("0")),
+          declare("last", { k: "binary", op: "-", left: length(), right: number("1") }),
+          {
+            kind: "while",
+            condition: { k: "binary", op: "<", left: ident("i"), right: ident("last") },
+            body: [
+              declare("held", at(ident("i"))),
+              { kind: "indexAssign", buffer: "items", index: ident("i"), op: "=", value: at(ident("last")), line },
+              { kind: "indexAssign", buffer: "items", index: ident("last"), op: "=", value: ident("held"), line },
+              { kind: "update", name: "i", op: "++", prefix: false, line },
+              { kind: "update", name: "last", op: "--", prefix: false, line },
+            ],
+            line,
+          },
+          answer(ident("items")),
+        ];
         break;
       }
       case "sort": {

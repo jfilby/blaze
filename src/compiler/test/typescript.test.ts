@@ -513,6 +513,21 @@ test("Date.parse reads a date text as the milliseconds it names", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("reverse and fill write the list they were handed", () => {
+  // `a.reverse()` is the list itself mirrored, and `a.fill(v)` is the list
+  // with every element written: both are collection methods the frontend
+  // writes a helper for, with no callback between them.
+  const source = [
+    "export function f(): string {",
+    '  const names = [`aa`, `b`];',
+    "  return names.reverse().join(`-`);",
+    "}",
+    'console.log("run");',
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.

@@ -1017,6 +1017,19 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4eb. A list is reversed where it lies
+
+    block.statements = kept.reverse();
+    sides.reverse();
+
+`reverse` was refused as no method of a list. It is the collection method
+the frontend writes a helper for, like `fill`: the helper walks two ends to
+the middle, swapping each pair once, and answers the list it wrote. The
+elements keep the shape they were read at, so a chain of the reversed list
+reads its fields the second time.
+
+    The total went from 194 to 192.
+
 ### 4ea. Date.parse reads a date text back
 
     Date.parse(build?.updatedAt ?? "")
@@ -3452,6 +3465,7 @@ What was closed this session, and what each was worth:
 | the await of a call through an interface member (§4dy) | 198 → 197 |
 | Promise.all settles a list into the values it carries (§4dz) | 197 → 196 |
 | Date.parse reads a date text back (§4ea) | 196 → 194 |
+| a list is reversed where it lies (§4eb) | 194 → 192 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
