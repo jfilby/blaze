@@ -2658,6 +2658,43 @@ test("a list's length is written by a compound assignment", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("a length written through two fields is the list the inner field holds", () => {
+  // `holder.inner.entries.length = 0` names a list that is a field of a field.
+  // The value before the last field is read into a name of its own — an object
+  // is a reference, so the write lands on the object the source named — and the
+  // list is written at that length. The outer `entries` field is the one the
+  // write goes into, not a copy of the list.
+  const source = [
+    "interface Inner { entries: number[]; }",
+    "interface Outer { inner: Inner; }",
+    "export function cleared(outer: Outer): number {",
+    "  outer.inner.entries.length = 0;",
+    "  return outer.inner.entries.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const body = analyzedBody(source, "cleared") as readonly { kind: string; field?: string }[];
+  assert.ok(
+    body.some((statement) => statement.kind === "memberAssign" && statement.field === "entries"),
+    "the write goes back into the field the list is held in",
+  );
+});
+
+test("a name holding a choice of two regular expressions is a regex", () => {
+  // `const whole = a ? /x/ : /y/` is the two texts a regular expression is,
+  // chosen once: `whole[0]` and `whole[1]` are the pattern and the flags
+  // whichever arm ran, so `whole.test(text)` is the match the pattern asks.
+  const source = [
+    "export function matches(value: string, minimum: number): boolean {",
+    "  const whole = minimum === 0 ? /^(?:0|[1-9]\\d*)$/ : /^[1-9]\\d*$/;",
+    "  return whole.test(value);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a body that declares undefined reads the name it declared", () => {
   // `undefined` names the absent value, and it is also a name a body may
   // declare: `const undefined: string[] = []` is a list the source writes

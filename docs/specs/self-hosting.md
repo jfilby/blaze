@@ -1017,6 +1017,49 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fg. A name holding a choice of two regular expressions is a regex
+
+    const whole = minimum === 0 ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
+    if (!whole.test(value)) ...
+
+A regular expression is two texts — the pattern and the flags — and a literal is
+a block holding them. A name was a regular expression only when its initializer
+was a literal, so a name holding a choice between two literals was a plain list,
+and `whole.test(value)` had no receiver that answers `test`.
+
+Both arms of the choice are regular expressions, so whichever arm runs the name
+holds `[pattern, flags]`: the two parts are the name's two elements, and the
+existing lowering — `blaze_rt_regex_test(whole[0], whole[1], text)` — is already
+the right call. The declaration now records a name as a regular expression when
+its initializer is a literal, a name already known to hold one, or a choice
+between two of them.
+
+    The total stayed at 138. This file's count did not fall because the program
+    parser already counted the same function's body under a different message:
+    `optionNumber` is read as a module function now, so what is left of `cli.ts`
+    is the program grammar's own gaps.
+
+### 4ff. A length written through a field of a field
+
+    this.diagnostics.entries.length = saved.diagnostics
+
+`a.length = n` is the list as its first `n` elements, and the list is a value:
+the write is the list at that length, written back into the place that holds it.
+The place was the name itself or the field of a name, so a list held one field
+deeper had no place to write back to and the statement fell through to the
+expression reader, which is where the `=` became an unexpected token.
+
+A list held two fields deep writes back the same way the shorter forms do: the
+value before the last field — `this.diagnostics` — is read once into a name of
+the statement's own, and the write goes into that name's `entries` field. An
+object is a reference, so writing the field of the object the name holds is
+writing the field the source named, which is the rule a write through a chain of
+fields already followed. The test says the IR carries the `memberAssign` into
+`entries`, and the program the two backends deliver prints the truncated list
+node prints.
+
+    The total went from 139 to 138.
+
 ### 4fe. A record keyed by the numbers a source computed
 
     const size: Record<number, number> = { [SECTIONS.empty]: 0, [SECTIONS.text]: n }
@@ -3890,6 +3933,8 @@ What was closed this session, and what each was worth:
 | a buffer read as floats, and a spread written at the list's element (§4fc) | 148 → 143 |
 | `Buffer.from` reads a text as bytes, and latin1 writes them back (§4fd) | 143 → 141 |
 | a record keyed by the numbers a source computed (§4fe) | 141 → 139 |
+| a length written through a field of a field (§4ff) | 139 → 138 |
+| a name holding a choice of two regular expressions is a regex (§4fg) | 138 → 138 (the program parser counted the same body) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

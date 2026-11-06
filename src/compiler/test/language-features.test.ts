@@ -919,6 +919,52 @@ test("a list is written at a length, and a program writes without ending the lin
   }
 });
 
+test("a length written through two fields is the list the inner field holds", async () => {
+  // `this.sink.entries.length = n` names a list that is a field of a field. The
+  // write goes back into the inner field — the value before the last field is
+  // read once into a name of its own — so the list the holder keeps is the one
+  // at that length, and the outer object is the same object the source made.
+  const source = [
+    "class Sink {",
+    "  entries: number[] = [];",
+    "}",
+    "class Holder {",
+    "  sink: Sink = new Sink();",
+    "  add(n: number): void { this.sink.entries.push(n); }",
+    "  trim(n: number): void { this.sink.entries.length = n; }",
+    "}",
+    "export function demo(): string {",
+    "  const h = new Holder();",
+    "  h.add(1);",
+    "  h.add(2);",
+    "  h.add(3);",
+    "  h.trim(2);",
+    "  return `${h.sink.entries.join(`,`)} ${h.sink.entries.length}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1,2 2", `the ${backend} backend writes the inner list at that length`);
+  }
+});
+
+test("a name holding a choice of two regular expressions matches like node", async () => {
+  // The pattern chosen by the condition is the one the match asks, and both
+  // arms answer `test` the same way their literal does under node.
+  const source = [
+    "export function accepts(value: string, minimum: number): boolean {",
+    "  const whole = minimum === 0 ? /^(?:0|[1-9]\\d*)$/ : /^[1-9]\\d*$/;",
+    "  return whole.test(value);",
+    "}",
+    'console.log(accepts("0", 0), accepts("0", 1), accepts("12", 1), accepts("3x", 0));',
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source);
+  assert.equal(output.trim(), "true false true false");
+});
+
 test("splice is a range of a list replaced by the values written", async () => {
   // The answer is the range the call took out, read before the write, and the
   // list is the part before the range, the values, and the part after it. A

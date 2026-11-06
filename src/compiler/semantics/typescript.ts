@@ -7467,7 +7467,7 @@ class TypeScriptParser {
       const declaredShape = annotationShape ?? this.shapeOf(init);
       if (declaredShape !== null) this.valueShapes.set(name.text, declaredShape);
       else this.valueShapes.delete(name.text);
-      if (init.k === "buffer" && this.regexValues.has(init)) this.valueRegexes.add(name.text);
+      if (this.isRegexValue(init)) this.valueRegexes.add(name.text);
       else this.valueRegexes.delete(name.text);
       return { kind: "declare", name: name.text, type, init, line: name.line };
     }
@@ -8147,6 +8147,15 @@ class TypeScriptParser {
     let place: { target: string; base: string | null } | null = null;
     if (base.k === "ident") place = { target: base.name === "this" ? "self" : base.name, base: null };
     else if (base.k === "member" && base.base.k === "ident") place = { target: base.field, base: base.base.name === "this" ? "self" : base.base.name };
+    else if (base.k === "member") {
+      // `this.diagnostics.entries.length = n`: the list is a field of a field,
+      // and the write goes back into the field it is held in. The value before
+      // the last field is read into a name of its own, as a write through a
+      // chain of fields does — an object is a reference, so the field written
+      // on the name is the field the source named.
+      const owner = this.writeTarget(base.base, line);
+      if (owner !== null) place = { target: base.field, base: owner };
+    }
     if (place === null) return null;
     // A compound write states the length the list keeps rather than the one it
     // is given: `a.length -= n` is `a.length = len(a) - n`.
@@ -13428,6 +13437,22 @@ class TypeScriptParser {
    * A needle an `endsWith` reads twice must be a value that reads the same
    * twice; a call would run twice, which is not what the source wrote.
    */
+  /**
+   * Whether a value is a regular expression.
+   *
+   * A literal is one, a name already known to hold one is one, and a choice
+   * between two of them is one: both arms are the two texts a regular
+   * expression is, so the name holds `[pattern, flags]` whichever arm ran and
+   * `regexOf` reads the parts of it the same way. A conditional whose arms are
+   * not both regular expressions is a value of some other type.
+   */
+  private isRegexValue(value: Expression): boolean {
+    if (value.k === "buffer") return this.regexValues.has(value);
+    if (value.k === "ident") return this.valueRegexes.has(value.name);
+    if (value.k === "conditional") return this.isRegexValue(value.then) && this.isRegexValue(value.otherwise);
+    return false;
+  }
+
   /** The pattern and flags of a regular expression, or null where it is not one. */
   private regexOf(value: Expression): { pattern: Expression; flags: Expression } | null {
     if (value.k === "buffer" && this.regexValues.has(value) && value.values.length >= 2) {
