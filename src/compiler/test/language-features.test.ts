@@ -982,6 +982,26 @@ test("a whole number is written in base two", async () => {
   }
 });
 
+test("concat joins a list with a value by making it the last element", async () => {
+  // `a.concat(x)` accepts a value that is not a list: the language appends it as
+  // the last element, so the answer is `a` joined with the one-element list `x`.
+  const source = [
+    "export function demo(): string {",
+    "  const numbers: number[] = [1, 2];",
+    "  const grown = numbers.concat(3, 4);",
+    '  const texts: string[] = ["a"];',
+    '  const tail = texts.concat("b");',
+    "  return `${numbers.join(`,`)}|${grown.join(`,`)}|${tail.join(`,`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1,2|1,2,3,4|a,b", `the ${backend} backend appends the value`);
+  }
+});
+
 test("splice is a range of a list replaced by the values written", async () => {
   // The answer is the range the call took out, read before the write, and the
   // list is the part before the range, the values, and the part after it. A

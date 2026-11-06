@@ -8679,9 +8679,17 @@ class TypeScriptParser {
   /**
    * `for (let i = from; i < to; i++)`, the `<=`, `>` and `>=` forms, and
    * `for (const x of values)`, which walks a typed array instead.
+   *
+   * `for await (const x of values)` awaits each element a promise settles to.
+   * A compiled program runs straight through, so the elements are the values
+   * the iterable holds: where the source writes the `await` on the iterable —
+   * `of await readdir(...)` — the loop is the for-of it is, and the word is the
+   * marker it is. An iterable that is itself a promise is refused by the for-of
+   * reader, which walks a list.
    */
   private readLoop(): Statement {
     const start = this.next();
+    this.accept("await");
     this.expect("(");
     /** Where the header begins, for a loop read again as the while it is. */
     const header = this.position;
@@ -12748,12 +12756,20 @@ class TypeScriptParser {
       for (const written of args) {
         const held = this.valueTypeOf(written);
         if (held.kind !== "slice" && held.kind !== "array") {
-          this.report(
-            "concat joins lists",
-            "a list is the only value a list is joined with",
-            this.peek(),
-          );
-          return this.hole();
+          // `a.concat(x)` with a value that is not a list appends that value:
+          // the language makes it the last element, which is a one-element list
+          // of the element the answer holds. A value of another type is not one
+          // the list could hold, and is refused as before.
+          if (typeToString(held) !== typeToString(elements)) {
+            this.report(
+              "concat joins lists",
+              `a list is joined with a list of its elements, or with one element; the source wrote ${typeToString(held)}`,
+              this.peek(),
+            );
+            return this.hole();
+          }
+          joined = { k: "binary", op: "+", left: joined, right: { k: "buffer", element: typeToString(elements), values: [written] } };
+          continue;
         }
         joined = { k: "binary", op: "+", left: joined, right: written };
       }

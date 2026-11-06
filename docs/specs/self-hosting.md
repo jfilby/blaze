@@ -1017,6 +1017,27 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fl. A list joined with a value, and a loop that awaits
+
+    .filter((line) => line.length > 0)
+    .concat(`${sourceDir}${tlsBackend}`);
+    for await (const entry of await readdir(dir, { withFileTypes: true })) { … }
+
+`concat` was the lists written one after another, so an argument that was not a
+list was refused. The language accepts one: the value becomes the last element,
+which is the list joined with a one-element list of it, at the element the answer
+holds. A value of another type is still refused.
+
+`for await (const x of …)` had no reading at all: the loop reader saw `await`
+where the `(` was expected. A compiled program runs straight through and the
+source writes the `await` on the iterable where the iterable is a call, so the
+loop is the for-of it is. An iterable that is itself a promise is refused by the
+for-of reader, which walks a list.
+
+`runtime/facil.ts` is down to the `isDirectory` and `catch` refusals.
+
+    The total went from 133 to 132.
+
 ### 4fk. A whole number written in base two
 
     const bits = base === 0n ? 1 : base.toString(2).replace("-", "").length;
@@ -4039,6 +4060,7 @@ What was closed this session, and what each was worth:
 | a program asks the kind of a value with `typeof` (§4fi) | 136 → 135 |
 | a pattern names the elements of a value (§4fj) | 135 → 134 |
 | a whole number written in base two (§4fk) | 134 → 133 |
+| a list joined with a value, and a loop that awaits (§4fl) | 133 → 132 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

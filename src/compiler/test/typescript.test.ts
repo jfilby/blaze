@@ -2730,6 +2730,29 @@ test("a whole number is written in base two", () => {
   );
 });
 
+test("a list is joined with a value, and a loop may await", () => {
+  // `a.concat(x)` makes `x` the last element, and `for await (const x of …)` over
+  // an iterable the source already awaited is the for-of it is.
+  const source = [
+    "export function joined(names: string[]): string[] {",
+    '  return names.concat("tail", "end");',
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const looped = [
+    "interface Entry { readonly name: string }",
+    "declare function listing(dir: string): Promise<Entry[]>;",
+    "export async function count(dir: string): Promise<number> {",
+    "  let total = 0;",
+    "  for await (const entry of await listing(dir)) { total += 1; }",
+    "  return total;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(looped, "main.ts", false).refused, []);
+});
+
 test("a body that declares undefined reads the name it declared", () => {
   // `undefined` names the absent value, and it is also a name a body may
   // declare: `const undefined: string[] = []` is a list the source writes
