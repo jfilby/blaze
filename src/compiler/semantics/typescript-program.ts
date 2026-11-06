@@ -284,6 +284,8 @@ class ProgramParser {
   private valueClasses = new Map<string, string>();
   /** How many switches the reader has lowered, for naming their subjects. */
   private switchCount = 0;
+  /** How many values a `for ... of` read into a name of their own. */
+  private walkCount = 0;
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
@@ -925,9 +927,21 @@ class ProgramParser {
         this.next();
         this.next();
         this.next();
-        const of = this.identifier("the name of the buffer to walk");
+        // The buffer is a value, not only a name: `for (const file of
+        // phase.program.files)` walks a field of an object. A value that is a
+        // bare name walks as it was; any other value is read into a name of
+        // its own first, so the walk reads the name it was read into.
+        const of = this.value();
         this.expect(")");
-        return { kind: "forOf", variable: bound.text, of, body: this.statements(), line };
+        const body = this.statements();
+        if (of.k === "name") {
+          return { kind: "forOf", variable: bound.text, of: of.name, body, line };
+        }
+        const named = `walk${this.walkCount}`;
+        this.walkCount += 1;
+        const declared: ProgramStatement = { kind: "declare", name: named, mutable: false, type: null, value: of, line };
+        const loop: ProgramStatement = { kind: "forOf", variable: bound.text, of: named, body, line };
+        return { kind: "block", body: [declared, loop], line };
       }
       // The keyword only says how the index may change; a program counts on
       // the name either way.

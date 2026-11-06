@@ -611,6 +611,33 @@ test("a union that mixes records with values keeps the records it is", () => {
   for (const record of records) assert.equal(record.refusedCount, 0, record.refused[0]?.message);
 });
 
+test("a program walks a field of an object, not only a name", () => {
+  // `for (const file of phase.program.files)` walks a member chain: the value
+  // is read into a name of its own first, and the walk reads the name.
+  const source = [
+    "function outer(): number {",
+    "  return 1;",
+    "}",
+    "const program = { files: [1, 2] };",
+    "let total = 0;",
+    "for (const file of (program as unknown as { files: number[] }).files) {",
+    "  total += file;",
+    "}",
+    "console.log(total);",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", true);
+  const walked = read.analysis.body;
+  const block = walked.find((statement) => statement.kind === "block");
+  assert.ok(block !== undefined && block.kind === "block", "the walked value is read into a name of its own in a block");
+  const declaration = block.body[0] as { kind?: string; name?: string };
+  assert.equal(declaration.kind, "declare");
+  assert.match(declaration.name ?? "", /^walk\d+$/);
+  const loop = block.body[1] as { kind?: string; of?: string };
+  assert.equal(loop.kind, "forOf");
+  assert.equal(loop.of, declaration.name);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.
