@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4dx. An object spread in a program body
+
+    const o = { ...{ a: y }, b: 2 };
+    const p = { ...(flag ? { recompile: true } : {}) };
+
+The program parser read an object literal field by field and had no spread in
+it, so `...` was refused where a field's name was expected. A spread is now
+read beside the fields and kept in the literal: a spread of an object literal
+writes that literal's fields, and a spread of a conditional writes the fields
+either arm writes, which the layout pass expands when it files the shape. A
+spread of a value whose fields the pass cannot read takes no part in the
+shape, the same answer it gives a method a literal writes in shorthand.
+
+    The total went from 200 to 198.
+
 ### 4du. A record built from a callback's pairs### 4du. A record built from a callback's pairs
 
     Object.fromEntries(units.map((unit) => [unit.name, unit]))
@@ -3389,6 +3404,7 @@ What was closed this session, and what each was worth:
 | a record built from a callback's pairs (§4du) | 206 → 204 |
 | an arrow the use holds at a function type (§4dv) | 204 → 203 |
 | a record rebuilt from the entries of a record (§4dw) | 203 → 200 |
+| an object spread in a program body (§4dx) | 200 → 198 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

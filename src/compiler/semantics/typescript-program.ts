@@ -2103,9 +2103,19 @@ class ProgramParser {
   /** `{ a: 1, b: x.y }`: an object, allocated where it is written. */
   private objectLiteral(): ProgramValue {
     const fields: { name: string; value: ProgramValue }[] = [];
+    const spreads: ProgramValue[] = [];
     if (!this.at("}")) {
       for (;;) {
         if (this.at("}")) break;
+        if (this.at("...")) {
+          // `...rest`: the fields another value writes are not this literal's
+          // fields to write down, so the value spread is kept beside them and
+          // the layout pass expands the ones it can read.
+          this.next();
+          spreads.push(this.value());
+          if (!this.accept(",")) break;
+          continue;
+        }
         if (this.at("async")) this.next();
         let name: string;
         if (this.peek().kind === "string") {
@@ -2151,7 +2161,7 @@ class ProgramParser {
       }
     }
     this.expect("}");
-    return { k: "object", fields };
+    return spreads.length === 0 ? { k: "object", fields } : { k: "object", fields, spreads };
   }
 
   /**

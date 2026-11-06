@@ -97,6 +97,27 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
 }
 
 /**
+ * The fields a literal writes, spread or not.
+ *
+ * A spread of an object literal writes that literal's fields, and a spread of a
+ * conditional writes the fields either arm writes: both are expanded here, so
+ * the shape a literal is filed under is the shape it answers with. A spread of
+ * any other value writes fields this pass cannot read — a name, a call — and
+ * those fields take no part in the shape, the same answer the pass gives a
+ * method a literal writes in shorthand.
+ */
+export function expandedFields(value: ProgramValue & { k: "object" }): { name: string; value: ProgramValue }[] {
+  const out = [...value.fields];
+  for (const spread of value.spreads ?? []) {
+    if (spread.k === "object") out.push(...expandedFields(spread));
+    else if (spread.k === "conditional") {
+      for (const arm of [spread.then, spread.otherwise]) if (arm.k === "object") out.push(...expandedFields(arm));
+    }
+  }
+  return out;
+}
+
+/**
  * The key a literal is filed under.
  *
  * It is the form the contract pass writes: the fields as `[name, type]` pairs,
@@ -109,7 +130,7 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
  */
 function keyOf(value: ProgramValue & { k: "object" }, held: HeldType): string {
   const fields: (readonly [string, string])[] = [];
-  for (const field of value.fields) {
+  for (const field of expandedFields(value)) {
     const inferred = fieldType(field.value, held, field.name);
     if (inferred === null) return "";
     fields.push([field.name, describe(inferred)]);
@@ -311,6 +332,7 @@ class Walk {
         // declares in scope, so the literal is keyed with them rather than
         // guessed at.
         for (const field of value.fields) this.value(field.value);
+        for (const spread of value.spreads ?? []) this.value(spread);
         const shape = this.shapeOf(value);
         if (shape !== null && shape.key !== "") {
           this.shapes.set(shape.key, shape);
@@ -336,7 +358,7 @@ class Walk {
 
   private shapeOf(value: ProgramValue & { k: "object" }): Shape | null {
     const fields: { name: string; value: Inferred }[] = [];
-    for (const field of value.fields) {
+    for (const field of expandedFields(value)) {
       const inferred = this.fieldOf(field.value, field.name);
       if (inferred === null) {
         return null;
@@ -371,7 +393,7 @@ class Walk {
 
   private keyOf(value: ProgramValue & { k: "object" }): string {
     const fields: (readonly [string, string])[] = [];
-    for (const field of value.fields) {
+    for (const field of expandedFields(value)) {
       const inferred = this.fieldOf(field.value, field.name);
       if (inferred === null) return "";
       fields.push([field.name, describe(inferred)]);

@@ -73,6 +73,7 @@ import type {
   ProgramValue,
 } from "./module.ts";
 import type { CallEdge, Effect, FunctionSignature, ObjectLayout, PrimitiveTypeName, ProgramContract, TypeExpr } from "../core/types.ts";
+import { expandedFields } from "./program-objects.ts";
 import type { Expression, Statement } from "../core/ir.ts";
 import { ARGV, ARGV_LENGTH, SHARED, builtinFor, type BuiltinSignature } from "./builtins.ts";
 import { rulesFor, type LanguageRules } from "./language.ts";
@@ -1215,6 +1216,7 @@ function callsInValue(value: ProgramValue, called: string[]): void {
       return;
     case "object":
       for (const field of value.fields) callsInValue(field.value, called);
+      for (const spread of value.spreads ?? []) callsInValue(spread, called);
       return;
     case "fixed":
       callsInValue(value.of, called);
@@ -1453,6 +1455,7 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         return;
       case "object":
         for (const field of one.fields) value(field.value);
+        for (const spread of one.spreads ?? []) value(spread);
         return;
       case "field":
         value(one.object);
@@ -3534,9 +3537,9 @@ class ProgramResolver {
         const key = this.literalKeys.get(value);
         let layout = key === undefined ? undefined : this.objectLayoutNames.get(key);
         if ((key === undefined || layout === undefined) && value.fields.length > 0) {
-          const fieldNames = new Set(value.fields.map((field: any) => field.name));
+          const fieldNames = new Set(expandedFields(value).map((field: any) => field.name));
           const candidate = Object.values(this.objects).find((item: any) =>
-            item.fields.length === value.fields.length &&
+            item.fields.length === expandedFields(value).length &&
             item.fields.every((entry: any) => fieldNames.has(entry.name)),
           );
           if (candidate !== undefined) {
@@ -3556,7 +3559,7 @@ class ProgramResolver {
         // Every field is written as the type the layout gives it: a null is a
         // reference to nothing and holds no type of its own until the field it
         // is written into says which reference it is.
-        const fields = value.fields.map((field) => {
+        const fields = expandedFields(value).map((field) => {
           const declared = laid?.fields.find((entry) => entry.name === field.name)?.type;
           return {
             name: field.name,

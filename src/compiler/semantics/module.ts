@@ -129,8 +129,11 @@ export type ProgramValue =
   | { k: "element"; buffer: string; index: ProgramValue }
   /** One field of one object a value holds, read out of it. */
   | { k: "field"; object: ProgramValue; field: string }
-  /** An object literal, laid out by the program's own layout pass. */
-  | { k: "object"; fields: { name: string; value: ProgramValue }[] }
+  /** An object literal, laid out by the program's own layout pass. A field the
+   *  literal spreads in with `...` sits in `spreads`, in the order it was
+   *  written: the layout pass expands an object literal it spreads, and a
+   *  conditional spread expands the literals its arms write. */
+  | { k: "object"; fields: { name: string; value: ProgramValue }[]; spreads?: ProgramValue[] }
   | { k: "call"; function: string; args: ProgramValue[] }
   | { k: "binary"; op: ProgramBinaryOp; left: ProgramValue; right: ProgramValue }
   | { k: "unary"; op: ProgramUnaryOp; operand: ProgramValue }

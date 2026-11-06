@@ -455,6 +455,32 @@ test("a statement of a program outside the subset is reported once", () => {
   assert.match(message, /line 2: expected the name of a declared value/);
 });
 
+test("a program body reads an object spread, conditional or not", () => {
+  // A nested function makes the module parser hand the whole file to the
+  // program parser, where the spread was refused as a field name. A spread of
+  // an object literal writes that literal's fields, and a conditional spread
+  // writes the fields either arm writes: both are the literal's fields to the
+  // layout pass.
+  const source = [
+    "function outer(x: number): number {",
+    "  function inner(y: number): number { const o = { ...{ a: y }, b: 2 }; return o.b; }",
+    "  return inner(x);",
+    "}",
+    "console.log(outer(1));",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const conditional = [
+    "function outer(x: number): number {",
+    "  function inner(y: number): number { const o = { ...(y === 0 ? { a: 1 } : {}), b: 2 }; return o.b; }",
+    "  return inner(x);",
+    "}",
+    "console.log(outer(1));",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(conditional, "main.ts", false).refused, []);
+});
+
 test("a missing closing bracket ends its own construct, not the rest of the line", () => {
   // `if ("a" in x)` writes a condition the expression grammar does not carry.
   // The `)` is missing where the header expected it, and reading on to the one
