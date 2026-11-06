@@ -1004,6 +1004,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const value = isTextType(call.args[0]?.type) ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
         return `${RUNTIME_NAME}_to_number(${value})`;
       }
+      case "Number.parseInt": {
+        return `${RUNTIME_NAME}_parse_int(${argument(0)}, ${argument(1)})`;
+      }
+      case "String.fromCodePoint": {
+        return `${RUNTIME_NAME}_from_code_point(${argument(0)})`;
+      }
       // `Number(value)` is the whole of what a value is: a string is the
       // number its text states, a dynamic value is the number it holds, and a
       // number is itself.
@@ -1053,6 +1059,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // The text the program reads apart. A text argument is the pointer to
       // the bytes it names; anything else is what the runtime renders it as,
       // which is the wall a dynamic value crosses by.
+      case "text.codePointAt": {
+        return `${RUNTIME_NAME}_text_code_point_at(${argument(0)}, ${argument(1)})`;
+      }
       case "text.indexOf": {
         const left = argument(0);
         const right = argument(1);

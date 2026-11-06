@@ -4970,4 +4970,322 @@ test("a record rebuilt from the entries of a record is the entries it writes", (
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(cast, "main.ts", false).refused, []);
+  const captured = [
+    "export function go(node: unknown, n: number): Record<string, number> {",
+    "  return Object.fromEntries(",
+    "    Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, n]),",
+    "  );",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(captured, "main.ts", false).refused, []);
+});
+
+test("a text searched backwards asks at the last asking", () => {
+  // `path.lastIndexOf("/")` is the last position the needle is asked at: the
+  // field the needle is long, compared with the needle, walking down from the
+  // end of the text, and the position the source states where it writes one.
+  const source = [
+    "export function f(path: string): number {",
+    '  return path.lastIndexOf("/");',
+    "}",
+    "export function g(path: string, at: number): number {",
+    '  return path.lastIndexOf("/", at);',
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a list of lists flattened is the lists it holds one after another", () => {
+  // `module.data.flat()` is the byte lists it holds concatenated: each inner
+  // list is walked where it is read and its elements are appended to the answer.
+  const source = [
+    "export function f(rows: number[][]): number[] {",
+    "  return rows.flat();",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Promise.all over promises that answer nothing settles each one", () => {
+  // `await Promise.all([worker(), worker()])` where each worker answers nothing
+  // is each one awaited in order and nothing gathered: there is no value to collect.
+  const source = [
+    "declare function worker(): Promise<void>;",
+    "export async function f(): Promise<void> {",
+    "  await Promise.all([worker(), worker()]);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Object.assign writes the entries of the source into the target", () => {
+  // `Object.assign(layouts, other)` copies the entries of the source into the
+  // target the source named: each entry is written into the target in order.
+  const source = [
+    "interface Layout { a: number }",
+    "export function f(base: Record<string, Layout>, extra: Record<string, Layout>): Record<string, Layout> {",
+    "  return Object.assign(base, extra);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a for loop whose step is an assignment is the while it writes as a for", () => {
+  // `for (let open = ...; open >= 0; open = ...)` is a while loop with a step
+  // that is not the index moving by one: the step is the assignment the source
+  // wrote, running last in the body.
+  const source = [
+    "export function f(text: string): number {",
+    "  let found = -1;",
+    '  for (let open = text.indexOf("${"); open >= 0; open = text.indexOf("${", open + 2)) {',
+    "    found = open;",
+    "  }",
+    "  return found;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+test("entries sorted is the record the comparator orders", () => {
+  // `Object.fromEntries(Object.entries(r).sort(([a],[b]) => ...))` is the
+  // record the comparator orders: the helper sorts an order of its positions
+  // by the answer the callback wrote, reading each entry as the callback read it.
+  const source = [
+    "export function f(r: Record<string, unknown>): Record<string, unknown> {",
+    "  return Object.fromEntries(Object.entries(r).sort(([a], [b]) => ((a as string) < (b as string) ? -1 : 1)));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const byValue = [
+    "export function f(r: Record<string, number>): Record<string, number> {",
+    "  return Object.fromEntries(Object.entries(r).sort(([ka, va], [kb, vb]) => (va - vb)));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(byValue, "main.ts", false).refused, []);
+});
+
+test("an async method of an object literal states its type parameters", () => {
+  // `{ async read<T>(path: string): Promise<T> { ... } }` is a method: the
+  // `async` names the method's kind, and the type parameters are erased with
+  // every other type, as a non-async method's are.
+  const source = [
+    "interface Store { read<T>(path: string): Promise<T> }",
+    "export function f(): Store {",
+    "  return { async read<T>(path: string): Promise<T> { return path as unknown as T; } };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a map entry written as an asserted tuple is the entry it asserts", () => {
+  // `new Map([[k, v] as [string, number]])` is the entry the tuple asserts:
+  // the type is erased like every other assertion, and the pair is read.
+  const source = [
+    "export function f(k: string, v: number): Map<string, number> {",
+    "  return new Map([[k, v] as [string, number]]);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a typed array built from a list of numbers is the list written as its elements", () => {
+  // `Uint8Array.from(xs)` where `xs` is a list of numbers is each number
+  // written as the byte the array holds: the helper allocates the array and
+  // copies the list where it lies.
+  const source = [
+    "export function f(xs: number[]): Uint8Array {",
+    "  return Uint8Array.from(xs);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a number question reads its value twice where the value is a maths read", () => {
+  // `Number.isInteger(Math.log2(x))` asks the value more than once: the maths
+  // function reads the number it was handed, so asking twice is asking the
+  // same question.
+  const source = [
+    "export function f(right: number): boolean {",
+    "  return Number.isInteger(Math.log2(right));",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a whole number wrapped from a value that is a whole number reads", () => {
+  // `BigInt.asIntN(64, BigInt(text))` and `BigInt.asUintN(64, (BigInt(x) << 32n) | BigInt(y))`
+  // wrap values the read already holds as whole numbers.
+  const source = [
+    "export function f(text: string): number {",
+    "  return Number(BigInt.asIntN(64, BigInt(text)));",
+    "}",
+    "export function g(x: number): number {",
+    "  const b = BigInt.asUintN(64, (BigInt(Math.floor(x)) << 32n) | BigInt(Math.floor(x)) );",
+    "  return Number(b);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a text read at a byte position is the code point there", () => {
+  // `character.codePointAt(0)` is the character there, written as the number
+  // it is: the runtime decodes the text at that byte.
+  const source = [
+    "export function f(character: string): number {",
+    "  return character.codePointAt(0) ?? 0;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a nested map a class field writes is the map it was written as", () => {
+  // `readonly reads = new Map<string, Map<string, number>>()` holds what the
+  // type arguments say, and a value read through `bodies.values()` is an
+  // instance of the class whose field is asked.
+  const source = [
+    "class Body { readonly reads = new Map<string, Map<string, number>>(); }",
+    "export function f(bodies: Map<string, Body>): Map<string, Map<string, number>> {",
+    "  const totals = new Map<string, Map<string, number>>();",
+    "  for (const body of bodies.values()) {",
+    "    for (const [key, counts] of body.reads) {",
+    "      const total = totals.get(key);",
+    "      if (total === undefined) { totals.set(key, new Map(counts)); continue; }",
+    "    }",
+    "  }",
+    "  return totals;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a number read in its radix and a text of a code point read", () => {
+  // `Number.parseInt(text, 16)` is the number the text states in its radix,
+  // and `String.fromCodePoint(n)` is the text of the one code point it names.
+  const source = [
+    "export function f(digits: string): number {",
+    "  return Number.parseInt(digits, 16);",
+    "}",
+    "export function g(n: number): string {",
+    "  return String.fromCodePoint(n);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a text spread into a list is its characters", () => {
+  // `[...text]` is the characters of the text, so the list methods written
+  // after it read a list of texts and not the text itself.
+  const source = [
+    "export function f(text: string): string {",
+    "  return [...text].join(\"\");",
+    "}",
+    "export function g(text: string): string {",
+    "  return [...text.trim()].slice(0, 2).join(\"-\");",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Array.from of a text is the characters of the text", () => {
+  // `Array.from(text)` is the list of one-character texts the split helper cuts
+  // at the empty separator, and the length description is still the counted
+  // list it was.
+  const source = [
+    "export function f(text: string): string[] {",
+    "  return Array.from(text);",
+    "}",
+    "export function g(n: number): number[] {",
+    "  return Array.from({ length: n }, (_, i) => i + 1);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a shift or an unshift writes a field behind a call once", () => {
+  // `this.frame().block.releases.unshift(name)` is a place reached through a
+  // value: the value is read once into a name of the statement's own, and the
+  // list is written through the field of that name.
+  const source = [
+    "interface Block { releases: string[]; }",
+    "interface Frame { block: Block; }",
+    "class Keeper {",
+    "  private held: Frame;",
+    "  private frame(): Frame { return this.held; }",
+    "  own(name: string): void { this.frame().block.releases.unshift(name); }",
+    "  next(): string { return this.frame().block.releases.shift() ?? \"\"; }",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Object.hasOwn asks a constant record its own keys", () => {
+  // `Object.hasOwn(record, key)` is the question
+  // `Object.prototype.hasOwnProperty.call(record, key)` asks, written as the
+  // static the modern sources use.
+  const source = [
+    "const NAMES: Record<string, string> = { a: \"x\", b: \"y\" };",
+    "export function f(key: string): string {",
+    "  return Object.hasOwn(NAMES, key) ? NAMES[key] : \"other\";",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a choice of two text reads is a text", () => {
+  // `a.trim() || b.trim()` is a text chosen between two text reads, so the
+  // method written after the choice is a text method.
+  const source = [
+    "export function f(a: string, b: string): string[] {",
+    "  return (a.trim() || b.trim()).split(\"x\");",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a push on the list an indexed field holds writes the field it read", () => {
+  // `this.scopes[i].push(item)` is a push on the list the element holds: the
+  // block the index reads is a field of an object, so the object is read once
+  // into a name of the statement's own.
+  const source = [
+    "interface Named { name: string; }",
+    "class Scopes {",
+    "  private scopes: Named[][] = [];",
+    "  add(i: number, name: string): void { this.scopes[i].push({ name }); }",
+    "  count(i: number): number { return this.scopes[i].length; }",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Array.from of a list is a copy of the list", () => {
+  // `Array.from(list)` is the elements of the list in a block of its own, which
+  // is the slice from its first element on.
+  const source = [
+    "export function f(list: number[]): number[] {",
+    "  return Array.from(list);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });

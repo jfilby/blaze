@@ -1017,6 +1017,251 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ey. A push on the list an indexed field holds
+
+    this.scopes[this.scopes.length - 1].push({ name, emitted, type })
+
+A push on the list an element holds — `positions[i].push(x)` — was read when the
+block the index reads was a name, and refused when it was a field of an object.
+The object is now read once into a name of the statement's own, and the list is
+grown and written back at that index, which is the block the field holds: the
+push reaches the field the same way a push on a name reaches it.
+
+    The total went from 155 to 154.
+
+### 4ex. A choice of two text reads is a text
+
+    (a.trim() || b.trim()).split("x")
+
+`a || b` where both arms are calls read as `any`, because the type two arms have
+in common was asked of the scope rather than of what each arm answers. The
+choice of two arms is now the type both answer, so the choice of two text reads
+is a text and the method written after it is a text method. The C target boxed a
+text arm of `||` into the dynamic handle whatever the operator's own type was,
+which put a `double` beside the `const char*` of the other arm: an arm is boxed
+only where the value itself is the dynamic handle, as the `select` already
+stated.
+
+    The total went from 157 to 155.
+
+### 4ew. A spread of a text, `Array.from` of one, and a place behind a call
+
+    [...printable].slice(0, n).join("")
+    Array.from(text)
+    this.frame().block.releases.unshift(name)
+    Object.hasOwn(TABLE, key)
+
+A text spread into a list was the text itself, so the methods written after it
+were methods of no list. `[...printable]` is now the characters of the text —
+the fields the split helper cuts at the empty separator — and `Array.from` of a
+text is the same call. `Array.from` of a list is the slice from its first
+element on, which is a block of its own.
+
+A list a *field behind a call* names was refused as a place a shift or an
+unshift writes, because the write knew only a name and a field of one: the value
+is read once into a name of the statement's own, and the list is written through
+the field of that name, so the call runs the one time the source wrote it.
+
+`Object.hasOwn` is the question `Object.prototype.hasOwnProperty.call` asks,
+written as the static the modern sources use: it reads the same comparison chain
+of the names a constant record wrote.
+
+    The total went from 161 to 157.
+
+### 4ev. A number read in its radix and a text of a code point
+
+    Number.parseInt(text, 16)
+    String.fromCodePoint(code)
+
+`Number.parseInt` was refused as no function of `Number`, and
+`String.fromCodePoint` as none of `String`. The first is the number a text
+states in the base the call names, read as a runtime entry that skips the
+whitespace in front of the digits, takes an optional sign, and answers NaN
+where no digit in the radix is there. The second is the text of one code
+point, encoded as the UTF-8 bytes of the value and handed back as a managed
+text. Both are declared beside the other text entries, so every backend
+reaches them the way it reaches a slice or a trim.
+
+    The total went from 163 to 161.
+
+### 4eu. A nested map a class field writes is the map it was written as
+
+    readonly reads = new Map<string, Map<string, number>>()
+
+A field written as a nested map was read at `any` where the source wrote no
+annotation: the scanner that skips a field's type arguments stopped at the
+`>>` of the inner map, so the field's type ended where the inner map ends, and
+a value read through a loop that walks `values()` was an instance of no class.
+The nested angles are skipped whole, and a loop that binds an instance binds
+the class it is, which is what the field read asks.
+
+    The total went from 165 to 163.
+
+### 4et. A text read at a byte position is the code point there
+
+    character.codePointAt(0)
+
+`codePointAt` was refused as no method of a text. It is the character at the
+byte the source states, written as the number it is, decoded at run time from
+the UTF-8 value there. A text is walked by character, so the loop that walks
+one binds a text of one character, which is what `codePointAt` is asked of.
+
+    The total went from 166 to 165.
+
+### 4es. A whole number wrapped from a value that is a whole number reads
+
+    BigInt.asIntN(64, BigInt(text))
+    BigInt.asUintN(64, (BigInt(x) << 32n) | BigInt(y))
+
+`BigInt(text)` was left as a call of no type, and a binary over `BigInt`
+calls was read at `any` because the scope alone does not hold the type the
+call answers. The digits a text states still answer the call the source
+wrote, held at the whole number it is, and a binary over whole numbers is a
+whole number, read from what its sides answer rather than from what the
+scope holds.
+
+    The total went from 169 to 166.
+
+### 4er. A number question reads its value twice where the value is a maths read
+
+    Number.isInteger(Math.log2(x))
+
+A number question asks its value more than once, so a value that is a call
+was refused. A maths function reads the number it was handed, so asking
+twice is asking the same question, apart from `Math.random`, which answers
+anew each time it is asked.
+
+    The total went from 170 to 169.
+
+### 4eq. A typed array built from a list of numbers is the list written as its elements
+
+    Uint8Array.from(machine.rodata)
+
+A typed array built from a list of numbers was refused where the list's
+element and the array's are not the same: the copy is each number written as
+the element the array holds, allocated where it is written and copied where
+it lies.
+
+    The total went from 171 to 170.
+
+### 4ep. Entries sorted is the record the comparator orders
+
+    Object.fromEntries(Object.entries(r).sort(([a], [b]) => ...))
+
+Sorting the entries is sorting what the record holds: an order of its
+positions is sorted by the answer the callback wrote, reading each entry as
+the callback read it, and the record is written in that order. The `valueKey`
+statement that sorts still refuses for its replacer, so the report does not
+yet move for the sort alone.
+
+### 4eo. The captures a pairs callback reads are the helper's own
+
+    Object.fromEntries(Object.entries(r).map(([k, v]) => [k, n]))
+
+A callback that reads what the function around it holds was refused wherever
+it answered a pair: the helper that inlines the pair looked for the entry at
+the first parameter, which is the first capture where the callback captures,
+and read the entry as a capture. The entry is the one the callback was
+written with, and the captures are handed to the helper beside the walked
+value, which is what an arrow's own lifting does.
+
+    The total went from 176 to 171.
+
+### 4en. A map entry written as an asserted tuple is the entry it asserts
+
+    new Map([[k, v] as [string, number]])
+
+An entry written as `[k, v]` and asserted as `[string, number]` is the entry
+it asserts: the type is erased like every other assertion, and the pair is
+read. Without it the `as` was the next pair's start, and the list was refused
+where the entry ends.
+
+    The total went from 178 to 176.
+
+### 4em. An async method of an object literal states its type parameters
+
+    { async read<T>(path: string): Promise<T> { ... } }
+
+An async method written with type parameters was not read as one: the `async`
+branch required the `(` the method's name is followed by, and a generic method
+is followed by `<`. The type parameters are erased with every other type, as a
+non-async method's are, and the method is read.
+
+The report went from 176 to 178, because the methods the desync had hidden are
+real work: a module-scoped counter the methods write, the host's `stat` and
+`readdir` answers, and a `map` over the entries they name.
+
+### 4el. A for loop whose step is an assignment is the while it writes as a for
+
+    for (let open = ...; open >= 0; open = ...) { ... }
+
+A header that names the index and compares it with a bound was read as the
+counted loop, whose step is the index moving by one or by a count. A step that
+is the assignment the source wrote is not that step: the header is read again
+as the while loop it is, with the initialiser before the loop and the step
+last in the body.
+
+    The total went from 177 to 176.
+
+### 4ek. The entries of a source assigned into a dictionary
+
+    Object.assign(layouts, other)
+
+`Object.assign` over dictionaries copies the entries of each source into the
+target in order, so a later source overwrites an earlier key the way the
+language overwrites it. Where the target is a dictionary the call becomes the
+helper that writes each entry into it and answers it; a record target copies
+its fields field by field, which this slice does not take.
+
+    The total went from 178 to 177.
+
+### 4ej. A promise that answers nothing leaves no value to collect
+
+    await Promise.all(Array.from({ length: workers }, () => worker()))
+
+`Promise.all` over promises that answer nothing was refused: there is no value
+to collect. Each one is now awaited in order and nothing is gathered, which is
+what the source awaiting the call and discarding it means. The call answers
+nothing.
+
+    The total went from 179 to 178.
+
+### 4ei. A list of lists flattened is the lists it holds one after another
+
+    module.data.flat()
+
+`flat()` was refused as no method of a list. It is the concatenation of the
+lists the outer list holds, each inner list walked where it is read and its
+elements appended to the answer, which starts empty and carries the element
+shape the inner lists hold.
+
+    The total went from 180 to 179.
+
+### 4eh. A text searched backwards asks at the last asking
+
+    path.lastIndexOf("/")
+
+`lastIndexOf` was refused as no method of a text. It is the last position the
+needle is asked at, walked in order from the beginning to the position the
+source states — the end of the text where it states none, clamped the way the
+language clamps it — keeping the last hit of the field the needle is long,
+compared with the needle, which the helper walks with `text.slice`.
+
+    The total went from 181 to 180.
+
+### 4eg. A program walks a value that is not a bare name
+
+    for (const file of phase.program.files) { ... }
+
+The `for...of` span of the program parser had the name of the buffer to walk
+and no more, so a walk over a member chain was refused where the name ended.
+A value that is a bare name walks as it was; any other value is read into a
+name of the statement's own first, in a block of its own, so the walk reads the
+name it was read into and everything downstream can keep counting on the walk
+reading a name.
+
+    The total went from 186 to 181.
+
 ### 4ef. A union keeps the records it mixes with its values
 
     type Value = bigint | number | boolean | string | null | BufferValue;
@@ -3528,6 +3773,25 @@ What was closed this session, and what each was worth:
 | a text splits at most as many fields as its limit names (§4ee) | 189 → 188 |
 | a union keeps the records it mixes with its values (§4ef) | 188 → 187 |
 | a union keeps the records it mixes with its values (§4ef), once the leftover debug print left | 187 → 186 |
+| a program walks a value that is not a bare name (§4eg) | 186 → 181 |
+| a text searched backwards asks at the last asking (§4eh) | 181 → 180 |
+| a list of lists flattened is the lists it holds one after another (§4ei) | 180 → 179 |
+| a promise that answers nothing leaves no value to collect (§4ej) | 179 → 178 |
+| the entries of a source assigned into a dictionary (§4ek) | 178 → 177 |
+| a for loop whose step is an assignment is the while it writes as a for (§4el) | 177 → 176 |
+| an async method of an object literal states its type parameters (§4em) | 176 → 178 |
+| a map entry written as an asserted tuple is the entry it asserts (§4en) | 178 → 176 |
+| the captures a pairs callback reads are the helper's own (§4eo) | 176 → 171 |
+| entries sorted is the record the comparator orders (§4ep) | 171 → 171 (valueKey still refuses for its replacer) |
+| a typed array built from a list of numbers is the list written as its elements (§4eq) | 171 → 170 |
+| a number question reads its value twice where the value is a maths read (§4er) | 170 → 169 |
+| a whole number wrapped from a value that is a whole number reads (§4es) | 169 → 166 |
+| a text read at a byte position is the code point there (§4et) | 166 → 165 |
+| a nested map a class field writes is the map it was written as (§4eu) | 165 → 163 |
+| a number read in its radix and a text of a code point (§4ev) | 163 → 161 |
+| a spread of a text, `Array.from` of one, and a place behind a call (§4ew) | 161 → 157 |
+| a choice of two text reads is a text (§4ex) | 157 → 155 |
+| a push on the list an indexed field holds (§4ey) | 155 → 154 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

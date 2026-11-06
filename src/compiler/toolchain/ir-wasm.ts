@@ -3596,6 +3596,23 @@ class Body {
         this.callService("blaze_rt_to_number");
         return F64_TYPE;
       }
+      case "Number.parseInt": {
+        this.textArgument(argument(0));
+        this.value(argument(1), F64_TYPE);
+        this.callService("blaze_rt_parse_int");
+        return F64_TYPE;
+      }
+      case "String.fromCodePoint": {
+        this.value(argument(0), F64_TYPE);
+        this.callService("blaze_rt_from_code_point");
+        return TEXT;
+      }
+      case "text.codePointAt": {
+        this.textArgument(argument(0));
+        this.value(argument(1), F64_TYPE);
+        this.callService("blaze_rt_text_code_point_at");
+        return F64_TYPE;
+      }
       case "text.indexOf": {
         // Where the needle first says itself in the text. The two texts go
         // down at the offsets their bytes are at, and the service answers the

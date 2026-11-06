@@ -144,6 +144,12 @@ function skipAngles(tokens: readonly Token[], open: number): number {
     else if (token.text === ">") {
       depth -= 1;
       if (depth === 0) return index + 1;
+    } else if (token.text === ">>") {
+      depth -= 2;
+      if (depth === 0) return index + 1;
+    } else if (token.text === ">>>") {
+      depth -= 3;
+      if (depth === 0) return index + 1;
     } else if (token.text === ";" || token.text === "{") return open;
   }
   return open;

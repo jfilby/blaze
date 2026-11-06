@@ -170,6 +170,9 @@ const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: s
  * number too, and the host reads the whole number off it.
  */
 const TEXT_SERVICES: readonly HostService[] = [
+  { symbol: "blaze_rt_parse_int", params: ["i32", "f64"], result: "f64" },
+  { symbol: "blaze_rt_from_code_point", params: ["f64"], result: "i32" },
+  { symbol: "blaze_rt_text_code_point_at", params: ["i32", "f64"], result: "f64" },
   { symbol: "blaze_rt_text_index_of", params: ["i32", "i32"], result: "f64" },
   { symbol: "blaze_rt_text_slice", params: ["i32", "f64", "f64"], result: "i32" },
   { symbol: "blaze_rt_text_trim", params: ["i32"], result: "i32" },
@@ -1230,6 +1233,80 @@ export function blaze_rt_u256_equal(left, right) {
     source: `
 export function blaze_rt_print_u256(value) {
   writeOut(new TextEncoder().encode(wideText(readWide(value))));
+}
+`,
+  },
+  {
+    service: "blaze_rt_parse_int",
+    source: `
+export function blaze_rt_parse_int(text, radix) {
+  const str = new TextDecoder().decode(textBytes(text));
+  const base = Math.trunc(radix);
+  if (base < 2 || base > 36) return NaN;
+  let at = 0;
+  while (at < str.length && (str[at] === ' ' || str[at] === '\\t' || str[at] === '\\n' || str[at] === '\\r')) at += 1;
+  if (at >= str.length) return NaN;
+  let negative = false;
+  if (str[at] === '-') { negative = true; at += 1; }
+  else if (str[at] === '+') at += 1;
+  if (at >= str.length) return NaN;
+  let answer = 0;
+  let digits = 0;
+  while (at < str.length) {
+    const ch = str.charCodeAt(at);
+    let digit;
+    if (ch >= 48 && ch <= 57) digit = ch - 48;
+    else if (ch >= 97 && ch <= 122) digit = ch - 87;
+    else if (ch >= 65 && ch <= 90) digit = ch - 55;
+    else break;
+    if (digit >= base) break;
+    answer = answer * base + digit;
+    digits += 1;
+    at += 1;
+  }
+  if (digits === 0) return NaN;
+  return negative ? -answer : answer;
+}
+`,
+  },
+  {
+    service: "blaze_rt_from_code_point",
+    source: `
+export function blaze_rt_from_code_point(value) {
+  const code = Math.trunc(value);
+  if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return makeText(new TextEncoder().encode("\\uFFFD"));
+  return makeText(new TextEncoder().encode(String.fromCodePoint(code)));
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_code_point_at",
+    source: `
+export function blaze_rt_text_code_point_at(text, at) {
+  const bytes = textBytes(text);
+  const pos = Math.trunc(at);
+  if (pos < 0 || pos >= bytes.length) return NaN;
+  const b0 = bytes[pos];
+  if (b0 < 0x80) return b0;
+  if ((b0 & 0xe0) === 0xc0 && pos + 1 < bytes.length) {
+    const b1 = bytes[pos + 1];
+    if ((b1 & 0xc0) === 0x80) return ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+    return NaN;
+  }
+  if ((b0 & 0xf0) === 0xe0 && pos + 2 < bytes.length) {
+    const b1 = bytes[pos + 1];
+    const b2 = bytes[pos + 2];
+    if ((b1 & 0xc0) === 0x80 && (b2 & 0xc0) === 0x80) return ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+    return NaN;
+  }
+  if ((b0 & 0xf8) === 0xf0 && pos + 3 < bytes.length) {
+    const b1 = bytes[pos + 1];
+    const b2 = bytes[pos + 2];
+    const b3 = bytes[pos + 3];
+    if ((b1 & 0xc0) === 0x80 && (b2 & 0xc0) === 0x80 && (b3 & 0xc0) === 0x80) return ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+    return NaN;
+  }
+  return NaN;
 }
 `,
   },

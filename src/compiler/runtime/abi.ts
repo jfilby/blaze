@@ -1796,6 +1796,9 @@ const I256_DECLARATIONS: readonly string[] = [
  * for them where the source reads a text apart.
  */
 const TEXT_DECLARATIONS: readonly string[] = [
+  "double blaze_rt_parse_int(const char* text, double radix)",
+  "const char* blaze_rt_from_code_point(double value)",
+  "double blaze_rt_text_code_point_at(const char* text, double at)",
   "long long blaze_rt_text_index_of(const char* text, const char* needle)",
   "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
   "const char* blaze_rt_text_trim(const char* text)",
@@ -4084,12 +4087,92 @@ static int blaze_rt_text_is_space(char character) {
 /* Where a needle first says itself in a text, counted in bytes from the
    front, and nowhere (-1) when it never does. A text that is nothing holds
    no needle at all, and a needle that is nothing is nowhere in one. */
+/* The code point at a byte position: the text is bytes, so the position is a
+   byte and the character there is the UTF-8 value it starts. Past the end is
+   NaN, which is what the absent value is where the source wrote it. */
+double blaze_rt_text_code_point_at(const char* text, double at) {
+  if (text == NULL) return NAN;
+  const long long pos = (long long)at;
+  const long long length = (long long)blaze_rt_text_length(text);
+  if (pos < 0 || pos >= length) return NAN;
+  const unsigned char b0 = (unsigned char)text[pos];
+  if (b0 < 0x80) return (double)b0;
+  if ((b0 & 0xe0) == 0xc0 && pos + 1 < length) {
+    const unsigned char b1 = (unsigned char)text[pos + 1];
+    if ((b1 & 0xc0) == 0x80) return (double)(((b0 & 0x1f) << 6) | (b1 & 0x3f));
+    return NAN;
+  }
+  if ((b0 & 0xf0) == 0xe0 && pos + 2 < length) {
+    const unsigned char b1 = (unsigned char)text[pos + 1];
+    const unsigned char b2 = (unsigned char)text[pos + 2];
+    if ((b1 & 0xc0) == 0x80 && (b2 & 0xc0) == 0x80) return (double)(((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
+    return NAN;
+  }
+  if ((b0 & 0xf8) == 0xf0 && pos + 3 < length) {
+    const unsigned char b1 = (unsigned char)text[pos + 1];
+    const unsigned char b2 = (unsigned char)text[pos + 2];
+    const unsigned char b3 = (unsigned char)text[pos + 3];
+    if ((b1 & 0xc0) == 0x80 && (b2 & 0xc0) == 0x80 && (b3 & 0xc0) == 0x80) return (double)(((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f));
+    return NAN;
+  }
+  return NAN;
+}
 long long blaze_rt_text_index_of(const char* text, const char* needle) {
   if (text == NULL || needle == NULL) return -1;
   const char* at = strstr(text, needle);
   return at == NULL ? -1 : (long long)(at - text);
 }
 
+/* The number a text states in its radix: the digits are read in that base,
+   with an optional sign before them and leading whitespace skipped, and NaN
+   where no digits are there. */
+double blaze_rt_parse_int(const char* text, double radix) {
+  if (text == NULL) return NAN;
+  const int base = (int)radix;
+  if (base < 2 || base > 36) return NAN;
+  const char* at = text;
+  while (*at == ' ' || *at == '\\t' || *at == '\\n' || *at == '\\r') at += 1;
+  if (*at == '\\0') return NAN;
+  int negative = 0;
+  if (*at == '-') { negative = 1; at += 1; }
+  else if (*at == '+') at += 1;
+  if (*at == '\\0') return NAN;
+  double answer = 0;
+  int digits = 0;
+  while (*at != '\\0') {
+    int digit;
+    if (*at >= '0' && *at <= '9') digit = *at - '0';
+    else if (*at >= 'a' && *at <= 'z') digit = *at - 'a' + 10;
+    else if (*at >= 'A' && *at <= 'Z') digit = *at - 'A' + 10;
+    else break;
+    if (digit >= base) break;
+    answer = answer * (double)base + (double)digit;
+    digits += 1;
+    at += 1;
+  }
+  if (digits == 0) return NAN;
+  return negative ? -answer : answer;
+}
+/* The text of one code point: the UTF-8 value it is, copied into a managed
+   string. A value outside the range is the replacement character. */
+const char* blaze_rt_from_code_point(double value) {
+  const long long code = (long long)value;
+  if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return blaze_rt_string_new((const unsigned char*)"\xef\xbf\xbd", 3);
+  if (code < 0x80) {
+    const unsigned char bytes[1] = { (unsigned char)code };
+    return blaze_rt_string_new(bytes, 1);
+  }
+  if (code < 0x800) {
+    const unsigned char bytes[2] = { (unsigned char)(0xc0 | (code >> 6)), (unsigned char)(0x80 | (code & 0x3f)) };
+    return blaze_rt_string_new(bytes, 2);
+  }
+  if (code < 0x10000) {
+    const unsigned char bytes[3] = { (unsigned char)(0xe0 | (code >> 12)), (unsigned char)(0x80 | ((code >> 6) & 0x3f)), (unsigned char)(0x80 | (code & 0x3f)) };
+    return blaze_rt_string_new(bytes, 3);
+  }
+  const unsigned char bytes[4] = { (unsigned char)(0xf0 | (code >> 18)), (unsigned char)(0x80 | ((code >> 12) & 0x3f)), (unsigned char)(0x80 | ((code >> 6) & 0x3f)), (unsigned char)(0x80 | (code & 0x3f)) };
+  return blaze_rt_string_new(bytes, 4);
+}
 /* The bytes of a text between two indexes. An index below zero counts back
    from the end, an index past the end stops at the end, and a range that
    holds nothing answers an empty text: the language answers a read past the

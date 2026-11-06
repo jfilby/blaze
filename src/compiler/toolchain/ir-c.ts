@@ -1028,6 +1028,7 @@ class FunctionEmitter {
     // what the runtime renders as one — the wall a dynamic value crosses.
     if (
       call.callee === "text.indexOf" ||
+      call.callee === "text.codePointAt" ||
       call.callee === "text.slice" ||
       call.callee === "text.trim" ||
       call.callee === "text.trimStart" ||
@@ -1039,6 +1040,9 @@ class FunctionEmitter {
         const raw = this.expression(value, isTextType(value.type) ? TEXT : null, depth);
         return isTextType(value.type) || value.k === "text" ? raw : `${RUNTIME_NAME}_to_text(${raw})`;
       };
+      if (call.callee === "text.codePointAt") {
+        return `${RUNTIME_NAME}_text_code_point_at(${textOf(call.args[0])}, ${this.expression(call.args[1], null, depth)})`;
+      }
       if (call.callee === "text.indexOf") {
         return `((double)${RUNTIME_NAME}_text_index_of(${textOf(call.args[0])}, ${textOf(call.args[1])}))`;
       }
@@ -1172,6 +1176,12 @@ class FunctionEmitter {
       // runtime holds: a text arrives boxed, and the runtime reads the number
       // the value says out of it.
       return `${RUNTIME_NAME}_to_number(${args[0] ?? "0.0"})`;
+    }
+    if (call.callee === "Number.parseInt") {
+      return `${RUNTIME_NAME}_parse_int(${args[0] ?? "0.0"}, ${args[1] ?? "0.0"})`;
+    }
+    if (call.callee === "String.fromCodePoint") {
+      return `${RUNTIME_NAME}_from_code_point(${args[0] ?? "0.0"})`;
     }
     return builtinExpression(call.callee, args);
   }
@@ -1623,9 +1633,14 @@ class FunctionEmitter {
             `${value.op === "and" ? second : first} : ${value.op === "and" ? first : second}; })`
           );
         }
-        const right = isTextType(value.right.type)
+        // A text arm of an operator whose value is a text is that text, not the
+        // handle a dynamic value is: `a.trim() || b` is a text the program reads
+        // as one, and boxing it wrote a `double` where the other arm's
+        // `const char*` belongs. The two arms are boxed only where the value is
+        // the dynamic handle, as the `select` below states.
+        const right = isTextType(value.right.type) && !isTextType(value.type)
           ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`
-          : isNumber(value.right.type)
+          : isNumber(value.right.type) && !isNumber(value.type)
             ? `${RUNTIME_NAME}_box_number(${this.raw(value.right, depth)})`
             : this.raw(value.right, depth);
         return (

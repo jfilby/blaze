@@ -4592,3 +4592,267 @@ test("a program measures a duration on the clock the runtime reads", async () =>
     assert.equal(delivered.stdout, "measured\n");
   }
 });
+
+test("a text searched backwards asks at the last asking", async () => {
+  // `path.lastIndexOf("/")` walks the text backwards from the end, and with a
+  // position from there: the field the needle is long, compared with the needle.
+  const output = await agreesWithNode([
+    "export function last(path: string): number { return path.lastIndexOf(`/`); }",
+    "export function from(path: string, at: number): number { return path.lastIndexOf(`/`, at); }",
+    "console.log(`${last(`a/b/c`)} ${last(`abc`)} ${from(`a/b/c`, 3)}`);",
+    "console.log(`${last(`a/b/c`.slice(0, 0))} ${last(`xx`)}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "3 -1 3\n-1 -1");
+});
+
+test("a list of lists flattened is the lists it holds one after another", async () => {
+  // `rows.flat()` concatenates the inner lists in order, which is how the
+  // module lays down its data: each inner list is walked where it is read.
+  const output = await agreesWithNode([
+    "export function f(): number {",
+    "  const rows: number[][] = [[1, 2], [], [3]];",
+    "  let total = 0;",
+    "  for (const value of rows.flat()) total += value;",
+    "  return total;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
+test("Object.assign writes the entries of the source into the target", async () => {
+  // `Object.assign(target, source)` copies the entries of the source into the
+  // target: both dictionaries, written one entry at a time in order.
+  const output = await agreesWithNode([
+    "export function f(): number {",
+    "  const base: Record<string, number> = { a: 1 };",
+    "  const extra: Record<string, number> = { b: 2, a: 10 };",
+    "  Object.assign(base, extra);",
+    "  return (base[`a`] ?? 0) + (base[`b`] ?? 0);",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "12");
+});
+
+test("a for loop whose step is an assignment is the while it writes as a for", async () => {
+  // `for (let open = ...; open >= 0; open = ...)` runs the step last in the body.
+  const output = await agreesWithNode([
+    "export function f(text: string): number {",
+    "  let found = -1;",
+    '  for (let open = text.indexOf("${"); open >= 0; open = text.indexOf("${", open + 2)) {',
+    "    found = open;",
+    "  }",
+    "  return found;",
+    "}",
+    'console.log(f("a${1}b${2}c"));',
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});
+
+test("a map entry written as an asserted tuple is the entry it asserts", async () => {
+  // `new Map([[k, v] as [string, number]])` holds the entry the tuple states.
+  const output = await agreesWithNode([
+    "export function f(k: string, v: number): number {",
+    "  const m = new Map([[k, v] as [string, number]]);",
+    "  return m.get(k) ?? 0;",
+    "}",
+    "console.log(f(`a`, 42));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "42");
+});
+
+test("a record rebuilt from the entries of a record writes what the callback captured", async () => {
+  // `Object.fromEntries(Object.entries(r).map(([k, v]) => [k, n]))` writes
+  // the captured `n` for every entry: the helper takes the captures beside
+  // the walked record.
+  const output = await agreesWithNode([
+    "export function f(n: number): number {",
+    "  const r: Record<string, unknown> = { a: 0, b: 0 };",
+    "  const m = Object.fromEntries(Object.entries(r).map(([name, v]) => [name, n]));",
+    "  return (m[`a`] as number) + (m[`b`] as number);",
+    "}",
+    "console.log(f(7));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "14");
+});
+
+test("entries sorted is the record the comparator orders", async () => {
+  // `Object.fromEntries(Object.entries(r).sort(([a],[b]) => ...))` writes the
+  // entries in the order the comparator gives, which is how the record is
+  // canonicalized.
+  const output = await agreesWithNode([
+    "export function f(): string {",
+    "  const r: Record<string, number> = { b: 2, a: 1 };",
+    "  const m = Object.fromEntries(Object.entries(r).sort(([ka, va], [kb, vb]) => (va - vb)));",
+    "  return `${Object.keys(m).join(`,`)}:${((m[`a`] as number) + (m[`b`] as number))}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "a,b:3");
+});
+
+test("a typed array built from a list of numbers is the list written as its elements", async () => {
+  // `Uint8Array.from(xs)` copies the numbers into the array's elements.
+  const output = await agreesWithNode([
+    "export function f(): number {",
+    "  const bytes = Uint8Array.from([65, 66, 67]);",
+    "  return bytes[0] + bytes[1] + bytes[2];",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "198");
+});
+
+test("a text read at a byte position is the code point there", async () => {
+  // `character.codePointAt(0)` is the character there, written as the number
+  // it is.
+  const output = await agreesWithNode([
+    "export function f(character: string): number {",
+    "  return character.codePointAt(0) ?? 0;",
+    "}",
+    "console.log(f(`A`));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "65");
+});
+
+test("a nested map a class field writes is the map it was written as", async () => {
+  // A class field written as a nested map is copied through the loop that
+  // walks it: the entry the map answers is the map the field was written as.
+  const output = await agreesWithNode([
+    "class Body { readonly reads = new Map<string, Map<string, number>>(); }",
+    "export function f(): number {",
+    "  const b = new Body();",
+    "  b.reads.set(`k`, new Map([[`a`, 1]]));",
+    "  for (const [key, counts] of b.reads) return (counts.get(`a`) ?? 0);",
+    "  return 0;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1");
+});
+
+test("a number read in its radix and a text of a code point read", async () => {
+  // `Number.parseInt(text, 16)` reads the digits in their radix, and
+  // `String.fromCodePoint(n)` is the text of the one code point it names.
+  const output = await agreesWithNode([
+    "export function f(digits: string): number { return Number.parseInt(digits, 16); }",
+    "export function g(n: number): string { return String.fromCodePoint(n); }",
+    "console.log(`${f(\"ff\")} ${f(\"10\")} ${g(65)}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "255 16 A");
+});
+
+test("a text spread into a list is its characters and Array.from is the same list", async () => {
+  // `[...text]` is the characters of the text, one text each, which is the
+  // fields the split helper cuts at the empty separator; `Array.from(text)` is
+  // the same list.
+  const output = await agreesWithNode([
+    "export function first(text: string): string { return [...text].join(\"\"); }",
+    "export function head(text: string): string { return [...text].slice(0, 2).join(\"-\"); }",
+    "export function letters(text: string): number { return Array.from(text).length; }",
+    "console.log(`${first(\"abc\")} ${head(\"abcde\")} ${letters(\"hello\")}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "abc a-b 5");
+});
+
+test("Object.hasOwn answers whether a record wrote the key", async () => {
+  // The keys a constant record says are the names the file wrote, so the
+  // question is the comparisons those names are.
+  const output = await agreesWithNode([
+    "const TABLE = { a: 1, b: 2 };",
+    "export function f(key: string): string {",
+    "  return Object.hasOwn(TABLE, key) ? \"yes\" : \"no\";",
+    "}",
+    "console.log(`${f(\"a\")} ${f(\"b\")} ${f(\"c\")}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "yes yes no");
+});
+
+test("an unshift on a field behind a call writes the list it names", async () => {
+  // The value the field is reached through is read once, and the list is
+  // written through the field of the name that holds it.
+  const output = await agreesWithNode([
+    "interface Frame { releases: string[]; }",
+    "class Keeper {",
+    "  private held: Frame = { releases: [`one`] };",
+    "  private frame(): Frame { return this.held; }",
+    "  own(name: string): void { this.frame().releases.unshift(name); }",
+    "  all(): string { return this.frame().releases.join(\",\"); }",
+    "}",
+    "export function f(): string {",
+    "  const keeper = new Keeper();",
+    "  keeper.own(`zero`);",
+    "  keeper.own(`minus`);",
+    "  return keeper.all();",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "minus,zero,one");
+});
+
+test("a choice of two text reads is the text the choice holds", async () => {
+  // `a.trim() || b.trim()` is a text, and the split written after it cuts the
+  // one the choice answered.
+  const output = await agreesWithNode([
+    "export function f(a: string, b: string): string {",
+    "  return (a.trim() || b.trim()).split(\"x\").join(\"-\");",
+    "}",
+    "console.log(`${f(\"\", \" x \")} ${f(\"axb\", \"\")}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "- a-b");
+});
+
+test("a push on the list an indexed field holds grows that list", async () => {
+  // The list the element holds is read, grown and written back at its index,
+  // and the field the block came from is the one the write reaches.
+  const output = await agreesWithNode([
+    "class Scopes {",
+    "  private scopes: number[][] = [[1], []];",
+    "  add(i: number, value: number): void { this.scopes[i].push(value); }",
+    "  all(i: number): string { return this.scopes[i].join(\",\"); }",
+    "}",
+    "export function f(): string {",
+    "  const scopes = new Scopes();",
+    "  scopes.add(1, 5);",
+    "  scopes.add(1, 6);",
+    "  return `${scopes.all(0)}|${scopes.all(1)}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1|5,6");
+});
+
+test("Array.from of a list is a copy a write does not reach the source through", async () => {
+  const output = await agreesWithNode([
+    "export function copy(list: number[]): number[] {",
+    "  const other = Array.from(list);",
+    "  other[0] = 9;",
+    "  return other;",
+    "}",
+    "export function f(): string {",
+    "  const list = [1, 2];",
+    "  const other = copy(list);",
+    "  return `${list.join(\",\")}|${other.join(\",\")}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1,2|9,2");
+});

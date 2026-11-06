@@ -183,6 +183,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `text.indexOf(needle)` answers where the needle first says itself in the
    *  text, counted in bytes from the front, and -1 where it never does. */
   "text.indexOf": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** `text.codePointAt(at)` answers the code point at a byte position. */
+  "text.codePointAt": { params: [TEXT, F64], returns: F64, arity: 2 },
   /** `text.slice(start, stop)` answers the text between two indexes, and
    *  `text.slice(start)` the text from one index to the end. An index below
    *  zero counts back from the end, and an index past the end stops there. */
@@ -230,6 +232,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `JSON.stringify(value)` writes a value as the JSON text that holds it: the
    *  answer is a text, which is what a map key, a template and a hash are. */
   "JSON.stringify": { params: [ANY], returns: TEXT, arity: 1 },
+  /** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
+  "Number.parseInt": { params: [ANY, F64], returns: F64, arity: 2 },
+  /** `String.fromCodePoint(n)` is the text of the one code point it names. */
+  "String.fromCodePoint": { params: [F64], returns: TEXT, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
   /** `JSON.get(value, key)` reads one field of a dynamic object the runtime
    *  parsed, and answers the value the field names. A field the object does

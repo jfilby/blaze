@@ -10752,6 +10752,7 @@ class Machine {
     // convention puts them.
     if (
       call.callee === "text.indexOf" ||
+      call.callee === "text.codePointAt" ||
       call.callee === "text.slice" ||
       call.callee === "text.trim" ||
       call.callee === "text.trimStart" ||
@@ -10786,6 +10787,14 @@ class Machine {
         this.store(held);
         return held;
       };
+      if (call.callee === "text.codePointAt") {
+        const sliced = text(0);
+        this.at(call.args[1], NUMBER);
+        const held = this.hold(POINTER, "blaze_code_point_at");
+        this.store(held);
+        this.callSymbol("blaze_rt_text_code_point_at", [sliced, held], TEXT);
+        return;
+      }
       if (call.callee === "text.indexOf") {
         const left = text(0);
         const right = text(1);
@@ -10877,6 +10886,23 @@ class Machine {
       // The runtime holds the clock, and the reading is the whole number of
       // nanoseconds it answers in.
       this.runtime("_monotonic_ns");
+      return;
+    }
+    if (call.callee === "Number.parseInt") {
+      this.at(call.args[0], TEXT);
+      const text = this.hold(TEXT, "blaze_parse_int_text");
+      this.store(text);
+      this.at(call.args[1], NUMBER);
+      const held = this.hold(POINTER, "blaze_parse_int_radix");
+      this.store(held);
+      this.callSymbol("blaze_rt_parse_int", [text, held], TEXT);
+      return;
+    }
+    if (call.callee === "String.fromCodePoint") {
+      this.at(argument, NUMBER);
+      const held = this.hold(POINTER, "blaze_from_code_point");
+      this.store(held);
+      this.callSymbol("blaze_rt_from_code_point", [held], TEXT);
       return;
     }
     const library = MATH_LIBRARY[call.callee];
