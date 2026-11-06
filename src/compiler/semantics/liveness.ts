@@ -290,6 +290,7 @@ class Graph {
           node = this.make(events);
           break;
         case "call":
+          if (statement.call.through !== undefined) this.value(events, statement.call.through);
           for (const argument of statement.call.args) this.value(events, argument);
           // A name handed to the call is used where the call is made, after
           // every argument has been evaluated. Its read above is before a call
@@ -297,6 +298,11 @@ class Graph {
           // callee is handed is live across every call between the two.
           for (const argument of statement.call.args) {
             if (argument.k === "local") events.push({ k: "read", name: argument.name });
+          }
+          // A call made through a value reads that value where the call is
+          // made, for the same reason an argument is read there.
+          if (statement.call.through?.k === "local") {
+            events.push({ k: "read", name: statement.call.through.name });
           }
           if (this.valueCalls(statement.call.callee)) events.push({ k: "call" });
           node = this.make(events);
@@ -397,6 +403,7 @@ class Graph {
         events.push({ k: "read", name: value.name });
         return;
       case "call":
+        if (value.call.through !== undefined) this.value(events, value.call.through);
         for (const argument of value.call.args) this.value(events, argument);
         // A name handed to the call is used where the call is made, after every
         // argument has been evaluated. Its read above is before a call another
@@ -404,6 +411,9 @@ class Graph {
         // is live across every call between the two.
         for (const argument of value.call.args) {
           if (argument.k === "local") events.push({ k: "read", name: argument.name });
+        }
+        if (value.call.through?.k === "local") {
+          events.push({ k: "read", name: value.call.through.name });
         }
         // A builtin the backend answers with instructions is a call the IR
         // states and the code does not make, and a name live across one of

@@ -1017,6 +1017,42 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fm. A call of what a call answered, and the callee of an indirect call
+
+    createCommandCode({ apiKey, baseUrl })(configuration.model)
+    make()(model)
+    ops[0](5)
+
+A call was made through a name or a field, and a value a call answered was not
+one of them: `createX(...)(model)` was `only a named function is called`. The
+answer is a value of a function type — a declaration that returns an arrow
+(`createCommandCode`), a parameter typed at a function that returns one
+(`make: () => ((x: string) => string)`), a field of the record a call answered,
+or an element of a list of functions — and the call is the same indirect call a
+function-typed field already made. The callee's type states the parameters and
+the result, so the arguments are read at those and the value is an `invoke`.
+
+The shape of the answer is kept beside the `invoke` a name held at a function
+type makes, so `make()(x)` reads what `make` was declared to answer rather than
+the `any` the contract erases a function type to. The list element is read the
+same way: `ops[0](5)` is an invoke of the element the list's declaration types.
+
+That last form found a bug the read had hidden. An indirect call states its
+callee in `SemanticCall.through`, and no walk over an IR value visited that
+field: `valueChildren` answered a call's arguments alone. `dropUnread` then
+counted no read of the name holding the list, dropped its `let`, and the C
+backend emitted a call through a name the function never declared. The callee
+is a child now, in `valueChildren` and `withChildren`, and the liveness pass
+reads it before the arguments and again where the call is made, as it does an
+argument a callee is handed.
+
+The four calls of the package providers in `ai/backend.ts` are still refused:
+`createOpenAI` and its siblings are imported from packages the tree does not
+hold, so the frontend knows no type for what they answer. They are the
+transport §5 replaces, not a construct the language is missing.
+
+    The total went from 132 to 131.
+
 ### 4fl. A list joined with a value, and a loop that awaits
 
     .filter((line) => line.length > 0)
@@ -4061,6 +4097,7 @@ What was closed this session, and what each was worth:
 | a pattern names the elements of a value (§4fj) | 135 → 134 |
 | a whole number written in base two (§4fk) | 134 → 133 |
 | a list joined with a value, and a loop that awaits (§4fl) | 133 → 132 |
+| a call of what a call answered, and the callee of an indirect call (§4fm) | 132 → 131 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

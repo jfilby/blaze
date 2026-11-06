@@ -4533,6 +4533,27 @@ test("a set held in a map is a handle the questions written after it reach", asy
   assert.equal(output.trim(), "1");
 });
 
+test("a call of what a call answered is a call through the value it answered", async () => {
+  // The callee is not a name: it is the function the declaration answered, or
+  // the field of the record it answered. Each is a value of a function type,
+  // and the call is made through it at the signature that type states.
+  const output = await agreesWithNode([
+    "interface Op { apply: (x: number) => number }",
+    "function add(n: number): (x: number) => number {",
+    "  return (x: number): number => x + n;",
+    "}",
+    'function pick(kind: string): Op { return { apply: (x: number): number => x + 100 }; }',
+    "function twiceOf(make: () => ((x: number) => number)): number { return make()(7); }",
+    "export function run(): number {",
+    "  const ops: ((x: number) => number)[] = [(x: number): number => x * 2];",
+    '  return add(2)(3) + pick("a").apply(4) + twiceOf(() => add(1)) + ops[0](5);',
+    "}",
+    "console.log(run());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), String(5 + 104 + 8 + 10));
+});
+
 test("a call hands an object literal at the type the declaration states", async () => {
   // The arrow's parameter is an interface, and the value the caller writes is
   // an object literal whose `tags` field is an empty list: the declaration is

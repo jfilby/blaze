@@ -326,8 +326,12 @@ export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
     // The arguments of a call are values of their own: a name read in one and a
     // constant written into one are both what the body reads and computes, and
     // a walk that stops at the call answers "nothing here" for both.
+    // A call made through a value names that value in `through`, and it is
+    // read before the arguments are: it is the callee, and a walk that skipped
+    // it read nothing of the name the call is made through — a `let` holding
+    // only such a call's callee was dropped as unread.
     case "call":
-      return value.call.args;
+      return [...(value.call.through === undefined ? [] : [value.call.through]), ...value.call.args];
     case "closure":
       return value.captures;
     case "capture":
@@ -366,7 +370,13 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
     case "argv": return value.index === null ? value : { ...value, index: next() };
     // The types of the arguments are the ones the call was made with, and a
     // fold never changes a type, so the folded values line up with them.
-    case "call": return { ...value, call: { ...value.call, args: children } };
+    case "call": {
+      const through = value.call.through === undefined ? undefined : next();
+      return {
+        ...value,
+        call: { ...value.call, ...(through === undefined ? {} : { through }), args: children.slice(through === undefined ? 0 : 1) },
+      };
+    }
     case "newObject": return { ...value, fields: value.fields.map((field) => ({ ...field, value: next() })) };
     case "buffer": {
       // The children a buffer holds are the count, then the two sides of a

@@ -10361,7 +10361,16 @@ class TypeScriptParser {
           const signature = this.valueFunctions.get(target.name);
           if (signature !== undefined) {
             const args = this.readCallArguments(signature.params);
-            replace({ k: "invoke", callee: target, args, params: signature.params, returns: signature.returns });
+            const made: Expression = { k: "invoke", callee: target, args, params: signature.params, returns: signature.returns };
+            // What the value the callee holds answers is the shape its type
+            // states, kept beside the call so a call written on the answer —
+            // `make()(x)` where `make` returns a function — reads it.
+            const held = this.shapeOf(target);
+            if (held !== null && held.kind === "function") {
+              const answered = this.shapeForRead(held.returns);
+              if (answered !== null) this.expressionShapes.set(made, answered);
+            }
+            replace(made);
             continue;
           }
         }
@@ -11455,6 +11464,23 @@ class TypeScriptParser {
           }
           replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), [receiver, ...args], found.method.returnTypeName, found.method.line, found.method.returnsShape));
           continue;
+        }
+        // `make()(x)`: a call of what an expression answered is a call through
+        // the value it answered, exactly as a call of a name or a field held at
+        // a function type is. The signature is the one the answer's type
+        // writes, and the arguments are read at its parameters.
+        if (target.k !== "ident" && target.k !== "member") {
+          const held = this.expressionFunctionType(target);
+          if (held !== null) {
+            const args = this.readCallArguments(held.params);
+            const invoke: Expression = { k: "invoke", callee: target, args, params: held.params, returns: held.returns };
+            if (held.shape !== undefined) {
+              const answered = this.shapeForRead(held.shape);
+              if (answered !== null) this.expressionShapes.set(invoke, answered);
+            }
+            replace(invoke);
+            continue;
+          }
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
         // `Math.max(...xs)` and `Math.min(...xs)` are the greatest and the
@@ -13287,8 +13313,15 @@ class TypeScriptParser {
     return shape;
   }
 
-  /** The signature a member's declaration types it at, when it types one. */
-  private memberFunctionType(value: Expression & { k: "member" }): FunctionType | null {
+  /**
+   * The signature a value's declaration types it at, when it types a function.
+   *
+   * A field the declaration writes at a function type, and the answer of a
+   * call whose declaration writes one, are both values a call is made
+   * through: the parameters and the result the type states are what the call
+   * site reads its arguments at.
+   */
+  private expressionFunctionType(value: Expression): FunctionType | null {
     const shape = this.shapeOf(value);
     if (shape === null || shape.kind !== "function") return null;
     return {
@@ -13296,6 +13329,11 @@ class TypeScriptParser {
       returns: this.typeExprOfShape(shape.returns),
       shape: shape.returns,
     };
+  }
+
+  /** The signature a member's declaration types it at, when it types one. */
+  private memberFunctionType(value: Expression & { k: "member" }): FunctionType | null {
+    return this.expressionFunctionType(value);
   }
 
   private valueTypeOf(value: Expression): TypeExpr {
