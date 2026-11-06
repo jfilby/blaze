@@ -1017,6 +1017,38 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fo. A class built on another, and the absence a choice of texts answers
+
+    class BlockReader { protected readonly lines: IrLine[]; constructor(lines, binder) { … } }
+    class ProgramReader extends BlockReader { … }
+
+`semantics/ir-text.ts` reads a body with one reader and a program with another,
+and the two are a base and a subclass: every method of the base is a method of
+the two, and neither subclass writes a constructor. Inheritance was refused by
+name, so the file was two refusals away from whole.
+
+A class extends another in the same module now. The derived class is built by
+the nearest base's constructor — `new ProgramReader(lines, binder)` passes the
+arguments through, as the language does for a derived class with no constructor
+— and its object is one layout with the base's fields first and its own after,
+so a method written on the base reads the same field of the same object when it
+is called on the derived instance. A base another module declares is still
+refused, because the body of its constructor is not in this file's tokens.
+
+The test that reads a derived class hung the candidate instead of answering:
+`for (;;) { const line = this.peek(); if (line === null) break; … }` never
+broke. `peek` answers `this.at < this.lines.length ? this.lines[this.at] : null`,
+and the two backends disagreed about what the absent arm of a choice of texts
+is. The C backend wrote the empty text where `absenceOf` says the null pointer,
+so the `line === null` after it was false, the empty text was added to the sum,
+and the loop read the same absence again for every turn. The machine backend
+wrote the absence in the representation of the arm's own type — an unshaped
+reference, which is a `double` — leaving a float in `xmm0` where the text in
+`rax` was asked about. The C backend now answers `absenceOf` for the choice, and
+the machine reads an absent value at the type the use reads it at.
+
+    The total went from 124 to 123.
+
 ### 4fn. The host's directory entry, and a path, as the compiler's own types
 
     const entries = await readdir(dir, { withFileTypes: true });
@@ -3937,7 +3969,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-124 refusals over 95 sources, 63 of them read whole. The report reads the
+123 refusals over 95 sources, 63 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4130,6 +4162,7 @@ What was closed this session, and what each was worth:
 | a list joined with a value, and a loop that awaits (§4fl) | 133 → 132 |
 | a call of what a call answered, and the callee of an indirect call (§4fm) | 132 → 131 |
 | the host's directory entry and path work as the compiler's own types (§4fn) | 131 → 124 |
+| a class built on another, and the absence a choice of texts answers (§4fo) | 124 → 123 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

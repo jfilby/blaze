@@ -1698,12 +1698,12 @@ class FunctionEmitter {
         // limbs belong.
         const arm = (one: SemanticValue): string => {
           // An arm written `null` is the absence of the value the other arm
-          // wrote, so it is the zero of the type the choice is. `NULL` is not
-          // that zero in C: it is a `void*`, and a choice of numbers with one
-          // arm of `NULL` is not a conditional expression at all.
-          if (one.k === "nothing") {
-            return isTextType(value.type) ? '""' : absenceOf(value.type);
-          }
+          // wrote, so it is the zero of the type the choice is — the same zero
+          // `absenceOf` names, so that a `=== null` written after the choice
+          // asks about the arm that was taken. A text's absence is the null
+          // pointer, as it is for the coalesce and the null test: an empty text
+          // is a value the source wrote, and the two are not the same thing.
+          if (one.k === "nothing") return absenceOf(value.type);
           if (!isTextType(value.type) && (isTextType(one.type) || one.k === "text")) {
             return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
           }

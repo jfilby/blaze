@@ -4533,6 +4533,56 @@ test("a set held in a map is a handle the questions written after it reach", asy
   assert.equal(output.trim(), "1");
 });
 
+test("a choice of a text and nothing answers the absence it wrote", async () => {
+  // `x === null` is the null pointer for a text, so a choice whose other arm is
+  // `null` has to answer the null pointer too. It answered the empty text once,
+  // and a loop written `for (;;) { const line = peek(); if (line === null)
+  // break; }` never saw the absence and never ended.
+  const output = await agreesWithNode([
+    "function first(xs: string[], i: number): string | null {",
+    "  return i < xs.length ? xs[i] : null;",
+    "}",
+    "export function run(): number {",
+    '  const xs = ["a", "b"];',
+    "  return first(xs, 5) === null ? 1 : 0;",
+    "}",
+    "console.log(run());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1");
+});
+
+test("a class built on another is built by the base's constructor", async () => {
+  // A derived class with no constructor of its own is built by the base's: the
+  // arguments are passed through, the object holds the fields of both, and a
+  // method written on the base reads the same field of the same object when it
+  // is called on the derived instance.
+  const output = await agreesWithNode([
+    "class Reader {",
+    "  protected readonly lines: string[];",
+    "  protected at = 0;",
+    "  constructor(lines: string[]) { this.lines = lines; }",
+    "  protected peek(): string | null { return this.at < this.lines.length ? this.lines[this.at] : null; }",
+    "}",
+    "class Counter extends Reader {",
+    "  count(): number {",
+    "    let total = 0;",
+    "    for (;;) {",
+    "      const line = this.peek();",
+    "      if (line === null) break;",
+    "      total += line.length;",
+    "      this.at += 1;",
+    "    }",
+    "    return total;",
+    "  }",
+    "}",
+    'export function run(): number { return new Counter(["a", "bc", "def"]).count(); }',
+    "console.log(run());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), String(1 + 2 + 3));
+});
+
 test("a call of what a call answered is a call through the value it answered", async () => {
   // The callee is not a name: it is the function the declaration answered, or
   // the field of the record it answered. Each is a value of a function type,

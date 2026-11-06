@@ -4913,20 +4913,43 @@ class TypeScriptParser {
     return out;
   }
 
+  /**
+   * The constructor a class is built by: its own, or the nearest base's.
+   *
+   * A derived class with no constructor of its own is built by the base's —
+   * the language passes the arguments through, and the object it makes has the
+   * fields of both classes. The base has to be declared in this module,
+   * because the body of its constructor is read from this file's tokens; a
+   * class another module declares is refused, which is what the read of the
+   * subclass says.
+   */
+  private constructorOf(info: ClassInfo): { params: readonly ClassParam[]; body: ClassMethod | null } | null {
+    if (info.constructor !== null) return { params: info.constructor.params, body: info.constructor };
+    if (info.base === null || info.base === "Error") return null;
+    const base = this.classNamed(info.base);
+    if (base === undefined || base.start < 0) return null;
+    return this.constructorOf(base);
+  }
+
   /** Every function a class becomes: a constructor, methods, and static members. */
   private emitClass(info: ClassInfo): DeclaredFunction[] {
     const out: DeclaredFunction[] = [];
-    // `extends Error` is the one base a class may name: the language's errors
-    // are the one inheritance the compiler's own sources use, and the base is a
-    // `message` field rather than a second layout.
+    // A class built on another is built by the base's constructor, and the
+    // object it makes is one layout with the fields of both. `extends Error` is
+    // not a second layout: the message is a field of the error itself.
     if (info.base !== null && info.base !== "Error") {
-      this.report(
-        `class inheritance is not supported ("${info.name}" extends "${info.base}")`,
-        "write the fields and methods the class uses; a compiled class is one layout",
-        { kind: "ident", text: info.name, line: info.line },
-      );
+      const base = this.classNamed(info.base);
+      if (base === undefined || base.start < 0) {
+        this.report(
+          `class inheritance is not supported ("${info.name}" extends "${info.base}")`,
+          "write the fields and methods the class uses; a compiled class is one layout",
+          { kind: "ident", text: info.name, line: info.line },
+        );
+      }
     }
-    const params = info.constructor?.params ?? [];
+    const own = info.constructor;
+    const inherited = own === null ? this.constructorOf(info) : null;
+    const params: readonly ClassParam[] = own?.params ?? inherited?.params ?? [];
     const fields = this.fieldsOf(info, params);
     // A field written at a type another module declares is held as `any` by a
     // read that has not linked the declaration yet. The method written on the
@@ -4962,12 +4985,13 @@ class TypeScriptParser {
       );
       body.push({ kind: "memberAssign", base: "self", field: field.name, op: "=", value, line: field.line });
     }
-    if (info.constructor !== null) {
+    const constructorSource = own ?? inherited?.body ?? null;
+    if (constructorSource !== null) {
       body.push(
         ...this.withClassContext(info, params, true, () => {
-          this.position = info.constructor?.bodyStart ?? this.position;
+          this.position = constructorSource.bodyStart;
           const statements = this.readFunctionBlock();
-          if (this.position !== (info.constructor?.bodyEnd ?? this.position)) {
+          if (this.position !== constructorSource.bodyEnd) {
             this.report("a constructor body is a block of statements", `near "${this.peek().text}"`);
           }
           return statements;
@@ -4977,7 +5001,7 @@ class TypeScriptParser {
     body.push({ kind: "result", value: { k: "ident", name: "self" }, line: info.line });
     const constructorParams = this.methodParams(params);
     out.push(this.declared(info.name, constructorParams, this.referenceTo(info.name), body, info.exported, info.line));
-    out.push(...this.wrappers(info, { name: "constructor", params, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, info.name, this.referenceTo(info.name), false, info.exported));
+    out.push(...this.wrappers(info, { name: "constructor", params: [...params], returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, info.name, this.referenceTo(info.name), false, info.exported));
 
     // A getter is a method with no parameters whose name is read as a member,
     // so it is emitted beside the methods and called where it is read.
@@ -18146,7 +18170,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
           this.report("a class is constructed with its arguments", `as in new ${view.text}()`, view);
           return { k: "call", name: info.name, args: [] };
         }
-        const written = info.constructor?.params ?? [];
+        const written: readonly ClassParam[] = info.constructor?.params ?? this.constructorOf(info)?.params ?? [];
         const params = this.methodParams(written);
         const args = this.readCallArguments(
           params.map((param) => param.type),
@@ -18156,7 +18180,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
           null,
           params.map((param) => param.shape),
         );
-        return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params: written, returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
+        return { k: "call", name: methodFunctionName(info.name, { name: "constructor", params: [...written], returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, args.length), args };
       }
     }
     // `new Date()` is the wall clock as the milliseconds since the epoch, and

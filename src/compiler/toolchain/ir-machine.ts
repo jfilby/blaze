@@ -7129,6 +7129,16 @@ class Machine {
 
   /** A value read as the type a use fixes it at. */
   private at(value: SemanticValue, as: SemanticType | null): void {
+    // An absent value read at a type is the zero of that type, not the zero of
+    // the type the value was written at: `x ? xs[0] : null` is a text whose
+    // absent arm is the null pointer, and the null the source wrote carries no
+    // type of its own. Writing the absence in the representation of `ref<any>`
+    // left the accumulator a float where a pointer belongs, and `=== null`
+    // asked about whatever the other arm had left in the register.
+    if (value.k === "nothing" && as !== null) {
+      this.zero(as);
+      return;
+    }
     this.value(value);
     if (as === null) return;
     this.convert(value.type, as);
