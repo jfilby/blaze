@@ -717,6 +717,18 @@ function elementOfSequenceType(type: TypeExpr): TypeExpr | null {
   return type.kind === "slice" || type.kind === "array" ? type.of : null;
 }
 
+/**
+ * Whether a call is `structuredClone(x)`, the language's deep copy.
+ *
+ * The value it answers is a copy of the value it is handed, which is what makes
+ * the copy the source's own type and shape. A file that declares a function of
+ * the name is read as that function, which the caller checks against its own
+ * tables before asking this.
+ */
+function isStructuredClone(value: Expression): value is Expression & { k: "call"; name: string; args: Expression[] } {
+  return value.k === "call" && value.name === "structuredClone" && value.args.length === 1;
+}
+
 /** The type a value is held at, read with the names the body declared. */
 function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): TypeExpr {
   switch (value.k) {
@@ -4030,6 +4042,16 @@ class TypeScriptParser {
         break;
       }
       case "call": {
+        // `structuredClone(x)` is a copy of `x`, so the shape it holds is the
+        // shape `x` holds: a field of the copy is a field of the source.
+        if (
+          isStructuredClone(value) &&
+          !this.declaredReturnShapes.has(value.name) &&
+          !this.declaredFunctionReturns.has(value.name)
+        ) {
+          shape = this.shapeOf(value.args[0] as Expression);
+          break;
+        }
         // `await f()` is the value the promise `f` answers carries, and the
         // shape the declaration states for that value is the one the awaited
         // value holds.
@@ -11965,33 +11987,34 @@ class TypeScriptParser {
   }
 
   /**
-   * `x.toString(16)`: a number written as lowercase hexadecimal text.
+   * `x.toString(16)` and `x.toString(2)`: a number written as lowercase text in
+   * the radix the source names.
    *
-   * The radix is the one a program writes: sixteen. The digit count a `fixed`
-   * carries is negative for it, which is the marker the emitters read as "in
-   * base sixteen" (see `toText` in `toolchain/driver.ts`), so a function body
-   * and a program body write the same text for the same number.
+   * The digit count a `fixed` carries is negative for a radix, and which of the
+   * two it is is what the emitters read: `-1` is base sixteen and `-2` is base
+   * two (see `toText` in `toolchain/driver.ts`), so a function body and a
+   * program body write the same text for the same number.
    */
   private hexadecimal(of: Expression): Expression {
     const open = this.next();
     const radix = this.next();
-    if (radix.kind !== "number" || radix.text !== "16") {
+    if (radix.kind !== "number" || (radix.text !== "16" && radix.text !== "2")) {
       this.report(
-        "toString writes a number as hexadecimal text",
-        `the radix is 16, as in x.toString(16); the source wrote "${radix.text}"`,
+        "toString writes a whole number in base sixteen or base two",
+        `the radix is 16 or 2, as in x.toString(16) or x.toString(2); the source wrote "${radix.text}"`,
         radix,
       );
       while (!this.at(")") && this.peek().kind !== "end") this.next();
       this.expect(")");
       return of;
     }
-    if (!this.at(")")) this.report("x.toString(16) takes the one radix 16", `near "${this.peek().text}"`, this.peek());
+    if (!this.at(")")) this.report("x.toString(16) takes the radix 16 or 2", `near "${this.peek().text}"`, this.peek());
     this.expect(")");
     if (of.k === "text" || of.k === "fixed") {
       this.report("a number is what is written as hexadecimal text", "a string is already text; write it as it is", open);
       return of;
     }
-    return { k: "fixed", of, digits: -1 };
+    return { k: "fixed", of, digits: radix.text === "2" ? -2 : -1 };
   }
 
   /**
@@ -13286,6 +13309,18 @@ class TypeScriptParser {
       if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape);
     }
     if (value.k === "call") {
+      // `structuredClone(x)` is a deep copy of `x`, so it is the type `x` is:
+      // the copy has the fields the source has, at the types it wrote. The name
+      // is the language's own unless the file declares a function of it, which
+      // the lookups below answer first.
+      if (
+        isStructuredClone(value) &&
+        !this.declaredReturns.has(value.name) &&
+        !this.liftedArrows.has(value.name) &&
+        !this.declaredFunctionReturns.has(value.name)
+      ) {
+        return this.valueTypeOf(value.args[0] as Expression);
+      }
       // `await f()` is the value the promise carries, which is the type the
       // declaration states for it.
       const awaited = value.name === "Promise.await" ? value.args[0] : undefined;

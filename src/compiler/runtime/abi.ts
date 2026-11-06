@@ -2969,21 +2969,21 @@ int blaze_rt_u256_parse(blaze_u256* out, const char* text, size_t length) {
 }
 
 size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size) {
-  if (base != 10u && base != 16u) return 0;
+  if (base < 2u || base > 16u) return 0;
   char text[80];
   size_t used = 0;
-  if (base == 10u) {
+  if (base != 16u) {
     blaze_u256 rest = *value;
     const blaze_u256 zero = blaze_u256_zero();
-    const blaze_u256 ten = blaze_u256_of_u64(10u);
+    const blaze_u256 radix = blaze_u256_of_u64(base);
     while (!blaze_rt_u256_equal(&rest, &zero)) {
       unsigned __int128 remainder = 0;
       for (unsigned i = 4; i-- > 0;) {
         const unsigned __int128 current = (remainder << 64) | rest.limbs[i];
-        rest.limbs[i] = (uint64_t)(current / ten.limbs[0]);
-        remainder = current % ten.limbs[0];
+        rest.limbs[i] = (uint64_t)(current / radix.limbs[0]);
+        remainder = current % radix.limbs[0];
       }
-      if (used + 1u < sizeof text) text[used++] = (char)('0' + (unsigned)remainder);
+      if (used + 1u < sizeof text) text[used++] = "0123456789abcdef"[(unsigned)remainder];
     }
     if (used == 0u) text[used++] = '0';
     for (size_t i = 0; i < used / 2u; i += 1) {
@@ -3285,23 +3285,23 @@ int64_t blaze_rt_i256_to_i64(const blaze_i256* value) {
 
 /* A wide number as text. Decimal prints a leading minus when the value is negative and then the magnitude's digits; hexadecimal reads the limbs top down and skips the leading zeros. Only decimal and hexadecimal are answered. */
 size_t blaze_rt_i256_format(const blaze_i256* value, unsigned base, unsigned char* buffer, size_t size) {
-  if (base != 10u && base != 16u) return 0;
+  if (base < 2u || base > 16u) return 0;
   char text[80];
   size_t used = 0;
-  if (base == 10u) {
+  if (base != 16u) {
     blaze_i256 rest = *value;
     const int negative = blaze_i256_sign(&rest);
     if (negative) blaze_i256_negate(&rest);
     const blaze_i256 zero = blaze_i256_zero();
-    const blaze_i256 ten = blaze_i256_of_i64(10);
+    const blaze_i256 radix = blaze_i256_of_i64((int64_t)base);
     while (!blaze_rt_i256_equal(&rest, &zero)) {
       unsigned __int128 remainder = 0;
       for (unsigned i = 4; i-- > 0;) {
         const unsigned __int128 current = (remainder << 64) | rest.limbs[i];
-        rest.limbs[i] = (uint64_t)(current / ten.limbs[0]);
-        remainder = current % ten.limbs[0];
+        rest.limbs[i] = (uint64_t)(current / radix.limbs[0]);
+        remainder = current % radix.limbs[0];
       }
-      if (used + 1u < sizeof text) text[used++] = (char)('0' + (unsigned)remainder);
+      if (used + 1u < sizeof text) text[used++] = "0123456789abcdef"[(unsigned)remainder];
     }
     if (used == 0u) text[used++] = '0';
     /* The digits were collected least significant first, so reverse them to most significant first. */

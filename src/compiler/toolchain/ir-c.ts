@@ -1479,13 +1479,35 @@ class FunctionEmitter {
         // writing the source asked for, and this backend asks for the shortest
         // one. A body that asks for the other is refused here rather than
         // written as the number without them.
-        if (value.digits !== null) {
+        // A whole number of four limbs is written by the runtime's wide
+        // formatter, which takes the radix the source asked for. Only a double
+        // has no second writing here.
+        if (value.digits !== null && !isWideType(value.of.type)) {
           throw backendError(
             `${this.fn.symbol} writes a number with the digits the source asked for, which this backend cannot do`,
             "the C this backend writes a function body as has one formatter, and it writes the shortest text of a number",
           );
         }
         const name = this.temporary("blaze_text");
+        if (value.digits !== null) {
+          // A whole number of four limbs is written from its limbs by the
+          // runtime's formatter, which is handed the radix the source asked for,
+          // and the text is copied into the managed heap because the buffer is
+          // this function's own.
+          const signed = value.of.type.kind === "primitive" && value.of.type.name === "i256";
+          const wide = signed ? "blaze_i256" : "blaze_u256";
+          const base = value.digits === -2 ? 2 : 16;
+          const held = this.temporary("blaze_wide_text");
+          this.pending.push(`${wide} ${held} = ${this.raw(value.of, depth)};`);
+          const buffer = this.temporary("blaze_wide_buffer");
+          this.pending.push(`unsigned char ${buffer}[80];`);
+          const written = this.temporary("blaze_wide_written");
+          this.pending.push(
+            `const size_t ${written} = ${RUNTIME_NAME}_${signed ? "i256" : "u256"}_format(&${held}, ${base}u, ${buffer}, sizeof ${buffer});`,
+          );
+          this.pending.push(`const char* ${name} = ${RUNTIME_NAME}_string_new(${buffer}, ${written});`);
+          return name;
+        }
         this.asText(value.of, depth, name);
         return name;
       }

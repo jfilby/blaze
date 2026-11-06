@@ -1640,8 +1640,8 @@ proc blaze_rt_parse_int*(text: cstring, radix: float64): float64 {.exportc, cdec
 proc blaze_rt_from_code_point*(value: float64): cstring {.exportc, cdecl.} = nil
 proc blaze_rt_text_code_point_at*(text: cstring, at: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_text_bytes*(text: cstring): cstring {.exportc, cdecl.} = nil
-proc blaze_rt_view_load_float*(block: cstring, at: float64, width: float64): float64 {.exportc, cdecl.} = 0.0
-proc blaze_rt_view_store_float*(block: cstring, at: float64, value: float64, width: float64) {.exportc, cdecl.} = discard
+proc blaze_rt_view_load_float*(bytes: cstring, at: float64, width: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_view_store_float*(bytes: cstring, at: float64, value: float64, width: float64) {.exportc, cdecl.} = discard
 proc blaze_rt_md5_create*(): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_md5_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
 proc blaze_rt_md5_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0

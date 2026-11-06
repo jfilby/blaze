@@ -998,6 +998,49 @@ test("a function that returns from every path is compiled", async () => {
   assert.equal(delivered.stdout, "1 2 0 -1\n");
 });
 
+test("typeof answers the kind of a value, written out or computed", async () => {
+  // A value written out is a kind the text is, so the answer is the text itself.
+  // A value the program computes is asked at run time through `JSON.typeof`,
+  // which the module frontend lowers and the three backends carry.
+  const body = bodyOf('const kind = typeof 1;\nconsole.log(kind === "number");\n');
+  const declared = body[0] as { kind: string; value?: { k?: string } };
+  assert.equal(declared.kind, "declare");
+  assert.equal(declared.value?.k, "text", "a literal's kind is read where it is written");
+  assert.equal((declared.value as { parts?: { value?: string }[] }).parts?.[0]?.value, "number");
+  const { directory, binary } = await program(
+    [
+      'const answer = `${typeof 1} ${typeof -1} ${typeof "a"} ${typeof true} ${typeof 1n}`;',
+      'console.log(answer, typeof 1 === "number" ? "yes" : "no");',
+      "",
+    ].join("\n"),
+  );
+  const expected = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(expected.code, 0, expected.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, expected.stdout, "the built program answers the same kinds");
+});
+
+test("a pattern names the elements of a value", async () => {
+  // `const [a, b] = values` is the value read once into a name of the statement's
+  // own and each name one element of it, so a call in the value runs once and
+  // the pattern's names are the elements at their positions.
+  const body = bodyOf("const [first, second] = [1, 2];\nconsole.log(first, second);\n");
+  assert.deepEqual(
+    body.map((statement) => `${statement.kind}:${(statement as { name?: string }).name ?? ""}`),
+    ["declare:__pattern0", "declare:first", "declare:second", "print:"],
+    "the value is held once and each name is one element of it, in the scope's own statements",
+  );
+  const { directory, binary } = await program(
+    ["const values = [3, 4, 5];", "const [first, second] = values;", "console.log(first, second);", ""].join("\n"),
+  );
+  const expected = run("node", ["main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(expected.code, 0, expected.stderr);
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, expected.stdout, "the built program names the elements node names");
+});
+
 test("a function that falls off the end of a path is refused", () => {
   // The other half of the rule: an `if` with one arm that returns is not a
   // function that returns from every path, and the path that falls off the end

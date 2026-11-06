@@ -448,7 +448,7 @@ export function printSemanticValue(value: SemanticValue): string {
     case "isNull":
       return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
     case "toText":
-      return `[to_text${value.digits === null ? "" : value.digits < 0 ? "@hex" : `@${value.digits}`} ${printSemanticValue(value.of)}]`;
+      return `[to_text${value.digits === null ? "" : value.digits === -2 ? "@bin" : value.digits < 0 ? "@hex" : `@${value.digits}`} ${printSemanticValue(value.of)}]`;
     case "argv":
       return value.index === null
         ? `argv[${typeText(value.type)}]`
@@ -1331,14 +1331,13 @@ class IrScanner {
         });
       case "to_text": {
         // `to_text@9` is a number written at nine digits, `to_text@hex` is one
-        // written in base sixteen (which a negative count stands for), and
-        // `to_text` is one written as the language writes it.
-        if (asked !== null && asked !== "hex" && !/^\d+$/.test(asked)) this.refuse("the digits a number is written at", asked);
+        // written in base sixteen and `to_text@bin` one written in base two.
+        if (asked !== null && asked !== "hex" && asked !== "bin" && !/^\d+$/.test(asked)) this.refuse("the digits a number is written at", asked);
         return this.closing(bracketed, {
           k: "toText",
           type: TEXT,
           of: this.value(),
-          digits: asked === null ? null : asked === "hex" ? -1 : Number(asked),
+          digits: asked === null ? null : asked === "hex" ? -1 : asked === "bin" ? -2 : Number(asked),
         });
       }
       case "length":

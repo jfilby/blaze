@@ -286,6 +286,17 @@ class ProgramParser {
   private switchCount = 0;
   /** How many values a `for ... of` read into a name of their own. */
   private walkCount = 0;
+  /**
+   * The statements a pattern declaration wrote before the one the reader
+   * answers with.
+   *
+   * `const [a, b] = values` names one value and writes two declarations, and a
+   * statement is what the callers of `statement` push: the declarations are
+   * queued here and every reader of statements drains the queue first, so the
+   * names are declared in the scope the pattern was written in rather than in a
+   * block of the reader's making.
+   */
+  private pending: ProgramStatement[] = [];
   /** The class whose method is being read, or null in the program body. */
   private currentClass: ClassInfo | null = null;
 
@@ -555,17 +566,31 @@ class ProgramParser {
     const statements: ProgramStatement[] = [];
     while (this.peek().kind !== "end") {
       const statement = this.guardedStatement();
+      statements.push(...this.drainPending());
       if (statement !== null) statements.push(statement);
       this.accept(";");
     }
+    statements.push(...this.drainPending());
     return statements;
+  }
+
+  /** The statements a read queued before the one it answered with. */
+  private drainPending(): ProgramStatement[] {
+    const queued = this.pending;
+    this.pending = [];
+    return queued;
   }
 
   /** The statements a keyword is followed by, as a block or as one statement. */
   private statements(): ProgramStatement[] {
     if (this.at("{")) return this.braces();
     const statement = this.guardedStatement();
-    return statement === null ? [] : [statement];
+    const queued = this.drainPending();
+    const written = statement === null ? [] : [statement];
+    // A pattern written as the one statement of an arm needs a scope: its names
+    // are the arm's own, so the queued declarations and the statement are the
+    // block the arm runs.
+    return queued.length === 0 ? written : [{ kind: "block", body: [...queued, ...written], line: this.peek().line }];
   }
 
   /** A statement, or null when it does nothing: a lone `;`, or one refused. */
@@ -707,10 +732,12 @@ class ProgramParser {
     const body: ProgramStatement[] = [];
     while (this.peek().kind !== "end" && !this.at("}")) {
       const statement = this.guardedStatement();
+      body.push(...this.drainPending());
       if (statement !== null) body.push(statement);
       this.accept(";");
     }
     this.expect("}");
+    body.push(...this.drainPending());
     return body;
   }
 
@@ -780,6 +807,9 @@ class ProgramParser {
   private declaration(): ProgramStatement {
     const line = this.peek().line;
     const keyword = this.next().text;
+    // `const [a, b] = values` names the parts of a value rather than the value
+    // itself, and each name is one element of it.
+    if (this.at("[")) return this.destructured(keyword, line);
     const name = this.identifier("the name of a declared value");
     let type: string | null = null;
     let annotationClass: string | null = null;
@@ -794,6 +824,56 @@ class ProgramParser {
     if (held === null) this.valueClasses.delete(name);
     else this.valueClasses.set(name, held);
     return { kind: "declare", name, mutable: keyword !== "const", type, value, line };
+  }
+
+  /**
+   * `const [a, b] = values`: the pattern's names, each one element of the value.
+   *
+   * The value is read once into a name of the statement's own, because the
+   * pattern names as many elements of it as it writes names and a call in it
+   * must run once. A rest element — `...rest`, the list from that position on —
+   * is a slice of the value, which a program has no value for, so it is refused
+   * and the name still binds the element at its position to keep the body
+   * readable.
+   */
+  private destructured(keyword: string, line: number): ProgramStatement {
+    this.expect("[");
+    const names: { name: string; rest: boolean }[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      const rest = this.accept("...");
+      names.push({ name: this.identifier("the name of a declared value"), rest });
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    this.expect("=");
+    const value = this.value();
+    const rest = names.find((entry) => entry.rest);
+    if (rest !== undefined) {
+      this.fail(
+        "a rest element of a pattern is the list from that position on",
+        this.peek(),
+        `${PROGRAM_BODY}; a rest element needs a slice of the list, which a program does not carry`,
+      );
+    }
+    const held = `__pattern${this.walkCount++}`;
+    const written: ProgramStatement[] = [
+      { kind: "declare", name: held, mutable: false, type: null, value, line },
+    ];
+    for (const [index, entry] of names.entries()) {
+      this.valueClasses.delete(entry.name);
+      written.push({
+        kind: "declare",
+        name: entry.name,
+        mutable: keyword !== "const",
+        type: null,
+        value: { k: "element", buffer: held, index: { k: "number", text: String(index) } },
+        line,
+      });
+    }
+    // The names are the scope's, not a block's: all but the last are queued and
+    // the last is the statement this read answers with.
+    this.pending.push(...written.slice(0, -1));
+    return written[written.length - 1] as ProgramStatement;
   }
 
   /** `: Type`, which a program names with a single token. */
@@ -1494,6 +1574,22 @@ class ProgramParser {
    */
   private unary(): ProgramValue {
     const token = this.peek();
+    if (token.text === "typeof") {
+      // `typeof x` is the name of the kind `x` holds. A value written out is a
+      // kind the text is, so the answer is the text itself and no service is
+      // asked for; a value the program computes is asked at run time through
+      // the `JSON.typeof` the module frontend lowers and the three backends
+      // already carry. The operator binds tighter than `**`, as it does in the
+      // language, so it is read where a unary operator is.
+      this.next();
+      const enclosing = this.unaryOperand;
+      this.unaryOperand = true;
+      const operand = this.unary();
+      this.unaryOperand = enclosing;
+      const written = this.writtenKind(operand);
+      if (written !== null) return { k: "text", parts: [{ k: "text", value: written }] };
+      return { k: "call", function: "JSON.typeof", args: [operand] };
+    }
     if (token.kind === "punct" && (UNARY_OPS as readonly string[]).includes(token.text)) {
       this.next();
       const enclosing = this.unaryOperand;
@@ -1510,6 +1606,25 @@ class ProgramParser {
       return name.kind === "ident" ? { k: "name", name: name.text } : this.nothing();
     }
     return this.power();
+  }
+
+  /**
+   * The name `typeof` answers for a value written out, or null where the value
+   * is computed.
+   *
+   * A literal's kind is the syntax's to say: `1` is a number, `1n` a bigint, a
+   * text a string, and `null` an object. A sign in front of one does not change
+   * its kind. Anything else — a name, a field, a call — is a value whose kind
+   * only the run knows, and `JSON.typeof` is what asks it.
+   */
+  private writtenKind(value: ProgramValue): string | null {
+    if (value.k === "number") return "number";
+    if (value.k === "whole") return "bigint";
+    if (value.k === "boolean") return "boolean";
+    if (value.k === "text") return "string";
+    if (value.k === "null") return "object";
+    if (value.k === "unary" && (value.op === "-" || value.op === "+")) return this.writtenKind(value.operand);
+    return null;
   }
 
   /** `**`, which is right associative and whose right side may carry a sign. */
@@ -1830,7 +1945,10 @@ class ProgramParser {
     return { k: "fixed", of, digits: Number(digits.text) };
   }
 
-  /** `x.toString(16)`: a wide number written as lowercase hexadecimal text. */
+  /**
+   * `x.toString(16)` and `x.toString(2)`: a whole number written as lowercase
+   * text in the radix the source names.
+   */
   private hexString(of: ProgramValue): ProgramValue {
     const open = this.peek();
     this.next();
@@ -1839,19 +1957,19 @@ class ProgramParser {
       return of;
     }
     const token = this.peek();
-    if (token.kind !== "number" || token.text !== "16") {
-      this.fail("toString(16) writes a number as hexadecimal text", token);
+    if (token.kind !== "number" || (token.text !== "16" && token.text !== "2")) {
+      this.fail("toString writes a whole number in base sixteen or base two", token);
       this.skipArguments();
       return of;
     }
     this.next();
-    if (!this.at(")")) this.fail("x.toString(16) takes one radix", this.peek());
+    if (!this.at(")")) this.fail("x.toString(16) takes the radix 16 or 2", this.peek());
     this.expect(")");
     if (of.k === "text" || of.k === "fixed") {
-      this.fail("a number is what is written as hexadecimal text; a string is already text", open);
+      this.fail("a number is what is written in a radix; a string is already text", open);
       return of;
     }
-    return { k: "fixed", of, digits: -1 };
+    return { k: "fixed", of, digits: token.text === "2" ? -2 : -1 };
   }
 
 

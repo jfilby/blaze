@@ -9618,7 +9618,7 @@ class Machine {
       // A wide number is printed from its four limbs, and a narrow whole number
       // written in base sixteen is widened into the same four so one formatter
       // writes both.
-      const base = digits !== null && digits < 0 ? 16 : 10;
+      const base = digits === null ? 10 : digits === -2 ? 2 : digits < 0 ? 16 : 10;
       const slot = this.hold(isWideType(value.type) ? value.type : WIDE_UNSIGNED, "blaze_wide_text");
       if (isWideType(value.type)) this.wideValue(value);
       else this.wideFrom(value);

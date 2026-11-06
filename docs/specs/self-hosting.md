@@ -1017,6 +1017,106 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fk. A whole number written in base two
+
+    const bits = base === 0n ? 1 : base.toString(2).replace("-", "").length;
+
+`toString` answered base sixteen and nothing else, so a number written in base
+two — `base.toString(2)` in the compiler's own wide arithmetic — was refused
+where the radix was read.
+
+The digit count a `fixed` carries already marks a radix (`-1` is sixteen); `-2`
+is two. The runtime formatter, which took a base but answered only ten and
+sixteen, now divides by any radix from two to sixteen, with sixteen keeping the
+limb-by-limb nibble loop it had. The machine backend hands the formatter the
+radix the value carries, the C program driver widened it into the same
+formatter, and the IR text spells it `@bin` beside `@hex`.
+
+The reading test pins both forms — a function body and a program body — and the
+execution test builds a `u256` written in base two and sixteen with the C and
+machine backends and compares it with node. The C backend's function-body
+`toText` no longer refuses a radix for a whole number of four limbs: it widens
+the value into a `blaze_u256`/`blaze_i256`, formats it into a stack buffer with
+the radix, and copies the text into the managed heap before answering it. The
+wasm backend's wide branch still prints rather than returning text with a radix,
+which is the one half of this construct still missing.
+
+`semantics/whole-arithmetic.ts` is read whole.
+
+    The total went from 134 to 133.
+
+### 4fj. A pattern names the elements of a value
+
+    const [command, argument] = parsed.positionals;
+
+A program declared one name per statement, so a pattern — the names of a value
+rather than the value itself — was refused where the declaration reader expected
+a name. Each name of the pattern is one element of the value: the value is read
+once into a name of the statement's own, and every name is the element at its
+position, so a call in the value runs once and the names are the parts node
+would bind.
+
+The statements are the scope's own and not a block's: the declarations are
+queued beside the statement the reader answers with and every reader of
+statements drains the queue first, because a name declared inside a block a
+program never wrote would not be the name the next statement reads.
+
+A rest element — `...rest`, the list from that position on — is a slice of the
+value, and a program has no value for a slice of a list, so it is refused with
+its own message and `cli.ts` keeps that one refusal.
+
+    The total went from 135 to 134.
+
+### 4fi. A program asks the kind of a value with `typeof`
+
+    if (!this.at(")")) return this.value();
+    if (typeof values.from === "string") ...
+
+A program had no `typeof` at all: the word is an identifier to the expression
+reader, so `typeof values.from` left `values` where a `)` was expected and the
+record spread it sat in was refused.
+
+A value written out has a kind the syntax states — `1` a number, `1n` a bigint, a
+text a string, `true` a boolean, `null` an object — so the answer is the text
+itself and the emitter writes no call. A value the program computes is asked at
+run time, through the `JSON.typeof` the module frontend already lowers and the
+three backends already carry; a field of a record another module built is a
+dynamic handle there, which is what the runtime's tag lookup reads.
+
+The program-body test pins both halves: `typeof 1` is the text "number" in the
+body the frontend read, and a program that prints `typeof` of a number, a signed
+number, a text, a boolean and a bigint prints what node prints.
+
+Fixing the Nim runtime along the way: `blaze_rt_view_load_float` and
+`blaze_rt_view_store_float` named their first parameter `block`, which is a Nim
+keyword, so `blaze_rt.nim` did not compile at all and every Nim-driver test
+failed at the host link. The parameter is `bytes` now, and the driver tests that
+were failing pass.
+
+    The total went from 136 to 135.
+
+### 4fh. A copy made by `structuredClone` is the value it copies
+
+    const clone = structuredClone(fusion.callee);
+    clone.calls = [];
+
+`structuredClone` is the language's deep copy: the value it answers holds the
+fields its argument holds, at the types the argument wrote them. The frontend
+left the call untyped, so the copy was a value of unknown shape — `clone.calls`
+was a field of nothing, and the empty list written into it had no element type.
+The value was refused where it was written rather than where it was copied.
+
+A call to `structuredClone` is now the type and the shape of its argument,
+unless the file declares a function of that name, which the declaration tables
+answer first. `semantics/restructure.ts` is read whole and the map over the
+spliced block in `semantics/repair.ts` is a map over `SemanticStatement[]`.
+
+The runtime still has no deep copy of its own: this slice is the reader's half
+of the construct, and a program that calls `structuredClone` does not link
+until the clone a layout would write is added to the runtime.
+
+    The total went from 138 to 136.
+
 ### 4fg. A name holding a choice of two regular expressions is a regex
 
     const whole = minimum === 0 ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
@@ -3935,6 +4035,10 @@ What was closed this session, and what each was worth:
 | a record keyed by the numbers a source computed (§4fe) | 141 → 139 |
 | a length written through a field of a field (§4ff) | 139 → 138 |
 | a name holding a choice of two regular expressions is a regex (§4fg) | 138 → 138 (the program parser counted the same body) |
+| a copy made by `structuredClone` is the value it copies (§4fh) | 138 → 136 |
+| a program asks the kind of a value with `typeof` (§4fi) | 136 → 135 |
+| a pattern names the elements of a value (§4fj) | 135 → 134 |
+| a whole number written in base two (§4fk) | 134 → 133 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

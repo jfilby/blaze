@@ -111,11 +111,12 @@ static const char* program_wide_text(const blaze_u256* value) {
   return program_string(text, written);
 }
 
-/* The same number in lowercase hexadecimal, which is what x.toString(16)
-   is. */
-static const char* program_wide_hex_text(const blaze_u256* value) {
+/* The same number in a radix the source names, which is what x.toString(16)
+   and x.toString(2) are: sixteen is the hexadecimal form and two the binary
+   one. */
+static const char* program_wide_radix_text(const blaze_u256* value, unsigned base) {
   char text[80];
-  const size_t written = ${RUNTIME_NAME}_u256_format(value, 16, (unsigned char*)text, sizeof text);
+  const size_t written = ${RUNTIME_NAME}_u256_format(value, base, (unsigned char*)text, sizeof text);
   return program_string(text, written);
 }
 
@@ -1762,9 +1763,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // it is: `(-0.0004).toFixed(2)` is `-0.00` and not the zero the shortest
     // writing gives it.
     if (digits !== null && digits < 0) {
-      // A negative digit count marks a whole number written in hexadecimal,
-      // which is what `x.toString(16)` asks for, and the value keeps its width.
-      if (isWideType(type)) return `({ blaze_u256 blaze_wide_value = ${value}; program_wide_hex_text(&blaze_wide_value); })`;
+      // A negative digit count marks a whole number written in a radix the
+      // source names: sixteen for `x.toString(16)` and two for
+      // `x.toString(2)`. The value keeps its width either way.
+      const base = digits === -2 ? 2 : 16;
+      if (isWideType(type)) return `({ blaze_u256 blaze_wide_value = ${value}; program_wide_radix_text(&blaze_wide_value, ${base}u); })`;
       return `program_number_fixed((double)(${value}), 0)`;
     }
     if (digits !== null) return `program_number_fixed((double)(${value}), ${digits})`;

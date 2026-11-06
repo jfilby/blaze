@@ -965,6 +965,23 @@ test("a name holding a choice of two regular expressions matches like node", asy
   assert.equal(output.trim(), "true false true false");
 });
 
+test("a whole number is written in base two", async () => {
+  // `x.toString(2)` is the same whole number in another radix, which is the
+  // runtime's formatter asked for two instead of sixteen. The machine backend
+  // writes a function body's wide number from its limbs, so the radix is what
+  // the formatter is handed.
+  const source = [
+    "function inBinary(value: u256): string { return value.toString(2); }",
+    "function inHex(value: u256): string { return value.toString(16); }",
+    "console.log(inBinary(300n), inHex(300n));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "100101100 12c", `the ${backend} backend writes base two`);
+  }
+});
+
 test("splice is a range of a list replaced by the values written", async () => {
   // The answer is the range the call took out, read before the write, and the
   // list is the part before the range, the values, and the part after it. A

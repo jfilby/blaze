@@ -640,7 +640,8 @@ test("a program walks a field of an object, not only a name", () => {
 
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
-  // the pattern is not read as the statements that follow it.
+  // the pattern is not read as the statements that follow it. A rest element is
+  // the list from its position on, which a program has no slice for.
   const message = diagnostic(() =>
     programOf(
       "typescript",
@@ -656,7 +657,7 @@ test("a statement of a program outside the subset is reported once", () => {
   );
 
   assert.match(message, /1 construct of main\.ts is outside the subset the compiler reads/);
-  assert.match(message, /line 2: expected the name of a declared value/);
+  assert.match(message, /line 2: a rest element of a pattern is the list from that position on/);
 });
 
 test("a program body reads an object spread, conditional or not", () => {
@@ -2693,6 +2694,40 @@ test("a name holding a choice of two regular expressions is a regex", () => {
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a copy made by structuredClone is the value it copies", () => {
+  // `const clone = structuredClone(p)` is a deep copy of `p`, so it is a `P`:
+  // a field of the copy is the field the interface declares, and the empty list
+  // written into it is settled at the element type the field names. Without the
+  // copy's type the field was unknown and the list had no element type.
+  const source = [
+    "interface P { readonly items: number[]; }",
+    "export function cleared(p: P): number {",
+    "  const clone = structuredClone(p);",
+    "  clone.items = [];",
+    "  return clone.items.length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a whole number is written in base two", () => {
+  // `x.toString(2)` is the same lowering as `x.toString(16)` with the radix the
+  // source names: a `fixed` whose digit count marks the radix, in a function
+  // body and in a program body alike.
+  const body = [
+    "export function inBinary(value: u256): string {",
+    "  return value.toString(2);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(body, "main.ts", false).refused, []);
+  assert.deepEqual(
+    readTypeScriptModule("const x = 300n;\nconsole.log(x.toString(2));\n", "main.ts", true).refused,
+    [],
+  );
 });
 
 test("a body that declares undefined reads the name it declared", () => {
