@@ -121,9 +121,9 @@ import { selfHostGap } from "./self-host-gap.ts";
  * runtime's SHA-256 hasher to 206, and a record built from a callback's pairs,
  * to 204, and an arrow the use holds at a function type to 203, and a record rebuilt
  * from the entries of a record, to 200, and an object spread in a program
- * body to 198, and the await of a call through an interface member to 197.
+ * body to 198, the await of a call through an interface member to 197, and Promise.all settling a list into the values it carries, to 196.
  */
-const REFUSAL_BUDGET = 197;
+const REFUSAL_BUDGET = 196;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

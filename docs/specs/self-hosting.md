@@ -1017,6 +1017,18 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4dz. Promise.all settles a list into the values it carries
+
+    const written = await Promise.all(found.map(async (entry) => pair(entry)));
+
+`Promise.all` was refused as no method of `Promise`. It is read as the helper
+that settles each element of its list in order with the same `await` the
+source would write, and collects the payloads where they were written: for
+elements already carrying their payload it is the list itself, and for
+elements still behind a promise it is the value the promise settles to.
+
+    The total went from 197 to 196.
+
 ### 4dy. The await of a call through an interface member
 
     const found = (await store.list("x")).filter((entry) => entry.startsWith("a"));
@@ -3424,6 +3436,7 @@ What was closed this session, and what each was worth:
 | a record rebuilt from the entries of a record (§4dw) | 203 → 200 |
 | an object spread in a program body (§4dx) | 200 → 198 |
 | the await of a call through an interface member (§4dy) | 198 → 197 |
+| Promise.all settles a list into the values it carries (§4dz) | 197 → 196 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

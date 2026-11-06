@@ -480,6 +480,26 @@ test("the await of a call through an imported interface holds the payload it car
   );
 });
 
+test("Promise.all settles a list into the values its promises carry", () => {
+  // `await Promise.all(list.map(async (entry) => ...))` is the list of the
+  // answers, settled one by one: the helper reads the same element type the
+  // whole expression is used at.
+  const source = [
+    "declare function projectPaths(p: string, e: string): string;",
+    "declare function parseDate(s: string): number;",
+    "export async function f(found: string[]): Promise<string> {",
+    "  const written: [string, number][] = await Promise.all(",
+    "    found.map(async (entry) => {",
+    "      return [entry, parseDate(entry)] as [string, number];",
+    "    }),",
+    "  );",
+    "  return written[0]?.[0] ?? '';",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.

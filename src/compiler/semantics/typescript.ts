@@ -11065,6 +11065,13 @@ class TypeScriptParser {
             replace(regexed);
             continue;
           }
+          // `Promise.all(items)`: the list of the values each promise in it
+          // carries, settled one by one.
+          const settled = this.promiseAll(receiver, target.field, args, callLine);
+          if (settled !== null) {
+            replace(settled);
+            continue;
+          }
           // `a.map(f)`: a method of a typed array is a function of the file that
           // walks the array, so it is read before a method of a class is looked
           // for. A receiver that is not a sequence falls through to the classes
@@ -12624,6 +12631,100 @@ class TypeScriptParser {
       return [...left, ...right];
     }
     return null;
+  }
+
+  /**
+   * `Promise.all(items)`: the list of the values each promise in `items`
+   * carries, in the order it wrote them.
+   *
+   * A value that is not a promise is awaited as itself, so the helper settles
+   * each element with the same await the source would write and collects the
+   * payloads where they were written. The element type is the type each item
+   * answers, and an untyped list the link has not settled is refused or
+   * deferred by the same rule the collection methods follow.
+   */
+  private promiseAll(receiver: Expression, method: string, args: readonly Expression[], line: number): Expression | null {
+    if (!(receiver.k === "ident" && receiver.name === "Promise" && method === "all")) return null;
+    if (args.length !== 1) {
+      this.report(`Promise.all takes one argument`, `as in Promise.all(found.map(f))`, this.peek());
+      return this.hole();
+    }
+    const list = args[0] as Expression;
+    const type = this.valueTypeOf(list);
+    if (type.kind !== "slice" && type.kind !== "array") {
+      if (this.importsArePending() && this.pendingHolds(list)) {
+        const answered = this.hole();
+        this.deferred.add(answered);
+        return answered;
+      }
+      this.report(
+        "Promise.all settles a list",
+        "the value the call settles is a list of promises, as in Promise.all(found.map(f))",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const element = type.of;
+    if (element.kind === "void" || element.kind === "mask") {
+      this.report(
+        "Promise.all settles a list of values",
+        "a promise that answers nothing leaves no value to collect, as in Promise.all(found.map(f)) where f answers a value",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const helper = this.awaitAllHelper(element, line);
+    const call: Expression = { k: "call", name: helper.name, args: [list] };
+    this.expressionTypes.set(call, helper.returns);
+    const shape = this.shapeOf(list);
+    const held = shape !== null && shape.kind === "list" ? shape.of : null;
+    if (held !== null) this.expressionShapes.set(call, { kind: "list", of: held });
+    return call;
+  }
+
+  /** The helper `Promise.all` settles each element of one list with, once per element type. */
+  private awaitAllHelper(element: TypeExpr, line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["all", element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const items: TypeExpr = { kind: "slice", of: element };
+    const elementText = typeToString(element);
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const returns: TypeExpr = { kind: "slice", of: element };
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: { k: "sized", element: elementText, count: { k: "length", buffer: "items" } }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "length", buffer: "items" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          {
+            kind: "indexAssign",
+            buffer: "out",
+            index: ident("i"),
+            op: "=",
+            value: { k: "call", name: "Promise.await", args: [{ k: "index", base: ident("items"), index: ident("i") }] },
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "items", type: items }];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params: helper.params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
   }
 
   /** Drops the note that a list is still waiting for its element type. */

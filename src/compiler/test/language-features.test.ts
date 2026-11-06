@@ -1285,6 +1285,22 @@ test("Object.fromEntries of a callback's pairs is the entries it writes", async 
   }
 });
 
+test("Promise.all settles a list of promises into the values they carry", async () => {
+  const source = [
+    "export async function demo(): Promise<string> {",
+    "  const names = [`ab`, `bb`];",
+    "  const pairs = await Promise.all(names.map(async (entry) => { return entry.length * 2; }));",
+    "  return `${pairs.length} ${pairs[0] ?? 0} ${pairs[1] ?? 0}`;",
+    "}",
+    "console.log(await demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 4 4", `the ${backend} backend settles every promise of Promise.all in order`);
+  }
+});
+
 test("a method's promise is awaited as the value it carries", async () => {
   const source = [
     "class Store {",
