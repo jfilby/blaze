@@ -3532,6 +3532,11 @@ class Body {
         this.callService("blaze_rt_json_get");
         return DYNAMIC_TYPE;
       }
+      case "Date.parse": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_date_parse");
+        return F64_TYPE;
+      }
       case "JSON.typeof": {
         // The name `typeof` answers for a value the read could not type: the
         // value goes down as the handle or the number it is, and the host

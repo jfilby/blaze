@@ -279,6 +279,10 @@ function builtinExpression(name: string, args: string[]): string {
       // The error stream is the runtime's own, and a program writes there
       // through the entry that flushes the output it has already written.
       return `${RUNTIME_NAME}_print_error_text(${args[0]})`;
+    case "Date.parse":
+      // A date text read back to the milliseconds it names since the epoch,
+      // NaN where the text names none, which is the runtime's own reading.
+      return `${RUNTIME_NAME}_date_parse(${args[0]})`;
     case "process.hrtime.bigint":
       // The reading is the runtime's, and it is a whole number of nanoseconds:
       // a duration measured over two readings is the difference of two whole

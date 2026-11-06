@@ -1105,6 +1105,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_sha256_create", "double", [], "Creates a SHA-256 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
   entry("blaze_rt_sha256_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to a SHA-256 hasher.", "Returns the hasher.", { tags: ["object"] }),
   entry("blaze_rt_sha256_digest", "double", [["hasher", "double"]], "Finalizes and returns the SHA-256 hex digest.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
     "blaze_rt_env_get",
@@ -6006,6 +6007,125 @@ double blaze_rt_sha256_digest(double hasher) {
   for (int i=0;i<32;i++) { hex[i*2] = nibbles[digest[i] >> 4]; hex[i*2+1] = nibbles[digest[i] & 15]; }
   hex[64]=0;
   return blaze_dyn_text_handle(hex, 64);
+}
+
+/*
+ * Date.parse: an ISO-8601 date text read as the milliseconds since the epoch
+ * it names, NaN where the text names no date. The calendar is the proleptic
+ * Gregorian one over the whole text and the arithmetic is Howard Hinnant's
+ * days-from-civil, so no timezone is asked of the host: the zone the text
+ * ends in is what its UTC answer hangs from.
+ */
+static long long blaze_days_from_civil(long long y, int m, int d) {
+  y -= m <= 2;
+  long long era = (y >= 0 ? y : y - 399) / 400;
+  int yoe = (int)(y - era * 400);
+  int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+static int blaze_digit(const char* text, int at) {
+  if (text[at] < '0' || text[at] > '9') return -1;
+  return text[at] - '0';
+}
+
+double blaze_rt_date_parse(const char* text) {
+  if (text == NULL) return 0.0 / 0.0;
+  int year = 0, month = 0, day = 0;
+  for (int i = 0; i < 4; i++) {
+    int d = blaze_digit(text, i);
+    if (d < 0) return 0.0 / 0.0;
+    year = year * 10 + d;
+  }
+  if (text[4] != '-') return 0.0 / 0.0;
+  for (int i = 0; i < 2; i++) {
+    int d = blaze_digit(text, 5 + i);
+    if (d < 0) return 0.0 / 0.0;
+    month = month * 10 + d;
+  }
+  if (text[7] != '-') return 0.0 / 0.0;
+  for (int i = 0; i < 2; i++) {
+    int d = blaze_digit(text, 8 + i);
+    if (d < 0) return 0.0 / 0.0;
+    day = day * 10 + d;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return 0.0 / 0.0;
+  long long millis = 0;
+  int at = 10;
+  if (text[at] == 'T' || text[at] == ' ') {
+    at += 1;
+    int hour = 0, minute = 0, second = 0;
+    for (int i = 0; i < 2; i++) {
+      int d = blaze_digit(text, at + i);
+      if (d < 0) return 0.0 / 0.0;
+      hour = hour * 10 + d;
+    }
+    if (text[at + 2] != ':') return 0.0 / 0.0;
+    for (int i = 0; i < 2; i++) {
+      int d = blaze_digit(text, at + 3 + i);
+      if (d < 0) return 0.0 / 0.0;
+      minute = minute * 10 + d;
+    }
+    if (hour > 23 || minute > 59) return 0.0 / 0.0;
+    at += 5;
+    if (text[at] == ':') {
+      for (int i = 0; i < 2; i++) {
+        int d = blaze_digit(text, at + 1 + i);
+        if (d < 0) return 0.0 / 0.0;
+        second = second * 10 + d;
+      }
+      if (second > 60) return 0.0 / 0.0;
+      at += 3;
+    }
+    if (text[at] == '.') {
+      at += 1;
+      long long frac = 0;
+      int digits = 0;
+      while (blaze_digit(text, at) >= 0 && digits < 3) {
+        frac = frac * 10 + blaze_digit(text, at);
+        at += 1;
+        digits += 1;
+      }
+      while (blaze_digit(text, at) >= 0) at += 1;
+      if (digits == 0) return 0.0 / 0.0;
+      for (int i = digits; i < 3; i++) frac *= 10;
+      millis += frac;
+    }
+    long long offset = 0;
+    if (text[at] == '+' || text[at] == '-') {
+      int sign = text[at] == '+' ? 1 : -1;
+      int offHour = 0, offMinute = 0;
+      for (int i = 0; i < 2; i++) {
+        int d = blaze_digit(text, at + 1 + i);
+        if (d < 0) return 0.0 / 0.0;
+        offHour = offHour * 10 + d;
+      }
+      if (text[at + 3] == ':') {
+        for (int i = 0; i < 2; i++) {
+          int d = blaze_digit(text, at + 4 + i);
+          if (d < 0) return 0.0 / 0.0;
+          offMinute = offMinute * 10 + d;
+        }
+        at += 6;
+      } else {
+        for (int i = 0; i < 2; i++) {
+          int d = blaze_digit(text, at + 3 + i);
+          if (d < 0) return 0.0 / 0.0;
+          offMinute = offMinute * 10 + d;
+        }
+        at += 5;
+      }
+      offset = sign * (offHour * 60 + offMinute) * 60000LL;
+    } else if (text[at] == 'Z' || text[at] == 'z') {
+      at += 1;
+    } else if (text[at] != 0) {
+      return 0.0 / 0.0;
+    }
+    millis += (long long)((hour * 60 + minute) * 60 + second) * 1000LL - offset;
+  }
+  if (text[at] != 0) return 0.0 / 0.0;
+  return (double)(blaze_days_from_civil(year, month, day) * 86400000LL + millis);
 }
 
 void blaze_error_clear(void);

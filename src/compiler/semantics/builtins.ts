@@ -355,6 +355,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Promise.settle.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
   "Promise.settle.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
   "Promise.settle.nothing": { params: [], returns: ANY, arity: 0, effects: ["memory"] },
+  /**
+   * `Date.parse(text)` answers the milliseconds a date text names since the
+   * epoch, as the language fixes it: a text that is not a date answers NaN.
+   */
+  "Date.parse": { params: [TEXT], returns: F64, arity: 1 },
   /** `Promise.reject(message)` answers a promise that has already failed. */
   "Promise.reject": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
   /**

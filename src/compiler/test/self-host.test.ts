@@ -123,7 +123,7 @@ import { selfHostGap } from "./self-host-gap.ts";
  * from the entries of a record, to 200, and an object spread in a program
  * body to 198, the await of a call through an interface member to 197, and Promise.all settling a list into the values it carries, to 196.
  */
-const REFUSAL_BUDGET = 196;
+const REFUSAL_BUDGET = 194;
 
 /** One read of the tree, shared by the tests that read the report. */
 const measured = selfHostGap();

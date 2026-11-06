@@ -1017,6 +1017,20 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ea. Date.parse reads a date text back
+
+    Date.parse(build?.updatedAt ?? "")
+
+A date text is read to the milliseconds since the epoch by the runtime —
+`blaze_rt_date_parse` — which answers NaN where the text names no date: it
+parses the ISO form over a proleptic Gregorian calendar with the days-from-
+civil arithmetic, taking the zone the text ends in as what its UTC answer
+hangs from, so a text that names nothing settles to nothing. `Date` joins
+the namespaces a call may name, and `Date.parse` is the builtin that names
+the runtime entry.
+
+    The total went from 196 to 194.
+
 ### 4dz. Promise.all settles a list into the values it carries
 
     const written = await Promise.all(found.map(async (entry) => pair(entry)));
@@ -3437,6 +3451,7 @@ What was closed this session, and what each was worth:
 | an object spread in a program body (§4dx) | 200 → 198 |
 | the await of a call through an interface member (§4dy) | 198 → 197 |
 | Promise.all settles a list into the values it carries (§4dz) | 197 → 196 |
+| Date.parse reads a date text back (§4ea) | 196 → 194 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

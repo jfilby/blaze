@@ -1642,6 +1642,7 @@ proc blaze_rt_md5_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_sha256_create*(): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_sha256_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
 proc blaze_rt_sha256_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_date_parse*(text: cstring): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} = 0.0
 
 proc getenv(name: cstring): cstring {.importc: "getenv", header: "<stdlib.h>".}

@@ -10514,6 +10514,15 @@ class Machine {
       this.callSymbol("blaze_rt_to_text", [json], TEXT);
       return;
     }
+    if (call.callee === "Date.parse" && argument !== undefined) {
+      // The text goes down as the box it is, and the runtime reads it at the
+      // box; the answer is the fraction the language holds it as.
+      this.at(argument, TEXT);
+      const text = this.hold(TEXT, "blaze_date_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_date_parse", [text], NUMBER);
+      return;
+    }
     if (call.callee === "JSON.parse" && argument !== undefined) {
       const text = this.dynamicArgument(argument);
       this.callSymbol("blaze_rt_json_parse", [text], NUMBER);

@@ -1544,6 +1544,23 @@ test("an element of a field, an unshift spread and a pop of a value", async () =
   }
 });
 
+test("Date.parse reads a date back to the milliseconds it names", async () => {
+  const source = [
+    "export function demo(): string {",
+    '  const stamp = Date.parse("2026-11-06T03:21:45.123Z");',
+    '  const plain = Date.parse("1970-01-01");',
+    '  const offset = Date.parse("2026-11-06T05:00:00+01:30");',
+    "  return `${stamp} ${plain} ${offset}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1793935305123 0 1793935800000", `the ${backend} backend parses what the language parses`);
+  }
+});
+
 test("a date is the clock, and its stamp is the ISO text", async () => {
   // The clock is the host's, and the stamp is UTC to the millisecond. The
   // millisecond itself differs between two reads, so the shape is what both

@@ -500,6 +500,19 @@ test("Promise.all settles a list into the values its promises carry", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("Date.parse reads a date text as the milliseconds it names", () => {
+  // `Date.parse(updatedAt)` is a namespace call the runtime answers: the
+  // parse is the runtime's, and the text that names no date is NaN, which a
+  // build reads before asking for a parse at all.
+  const source = [
+    "export function f(stamp: string): number {",
+    "  return Date.parse(stamp) || 0;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.

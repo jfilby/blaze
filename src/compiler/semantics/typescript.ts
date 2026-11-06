@@ -247,7 +247,7 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
  * A namespace is a namespace and not a value: nothing reads one, and a call of
  * one is the only thing that may be written of it.
  */
-const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON"]);
+const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date"]);
 
 
 /** Statements the parser reads to the end of the statement and reports. */
@@ -5625,7 +5625,7 @@ class TypeScriptParser {
       // A function expression is not a declaration: it is written after `=`,
       // inside a call, or as the value of a field. Only a declaration carries a
       // name the whole file knows.
-      if (before !== null && !["export", "default", "async", ";", "}"].includes(before.text)) continue;
+      if (before !== null && !["export", "default", "async", "declare", ";", "}"].includes(before.text)) continue;
       const name = tokens[at + 1] as Token | undefined;
       if (name === undefined || name.kind !== "ident") continue;
       let open = at + 2;
@@ -10710,8 +10710,13 @@ class TypeScriptParser {
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
           // `http.requestPath(req)` is the HTTP call of that name. It is not a
           // static method of a class, so the class checks below are skipped.
-          replace({ k: "ident", name: `${target.base.name}.${target.field}` });
-          continue;
+          // `Date` carries `now` beside its `parse`, and the clock is read
+          // where it is written instead: neither name is a namespace the clock
+          // is asked through.
+          if (!(target.base.name === "Date" && target.field === "now")) {
+            replace({ k: "ident", name: `${target.base.name}.${target.field}` });
+            continue;
+          }
         }
         // `Point.fromAffine(p)`: a static method is a function of the class,
         // with no instance written before its arguments.

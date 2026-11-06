@@ -1314,6 +1314,44 @@ test("a block released inside an open region is not handed out again by the slab
 });
 
 
+test("the runtime reads a date text back to the milliseconds it names", async () => {
+  // `Date.parse` stands in the compiler's own build stamps, so the runtime
+  // has to answer what the platform answers for the texts `toISOString`
+  // writes: the millisecond past the epoch for every complete form, and NaN
+  // where the text names no date.
+  const probe = [
+    "#include <math.h>",
+    "#include <stdio.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    '  if (blaze_rt_date_parse("2026-11-06T03:21:45.123Z") != 1793935305123.0) return 1;',
+    '  if (blaze_rt_date_parse("1970-01-01") != 0.0) return 2;',
+    '  if (blaze_rt_date_parse("2026-11-06T05:00:00+01:30") != 1793935800000.0) return 3;',
+    '  if (!isnan(blaze_rt_date_parse("not a date"))) return 4;',
+    '  if (!isnan(blaze_rt_date_parse(""))) return 5;',
+    '  if (blaze_rt_date_parse("2024-02-29T12:00:00Z") != 1709208000000.0) return 6;',
+    '  if (blaze_rt_date_parse("2026-11-06") != 1793923200000.0) return 7;',
+    '  if (blaze_rt_date_parse("2026-11-06T03:21:45Z") != 1793935305000.0) return 8;',
+    `  ${RUNTIME_NAME}_finalize();`,
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const directory = await scratch("blaze-date-parse-");
+  await writeFile(join(directory, `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "runtime.c"), runtimeSourceSource("debug"), "utf8");
+  await writeFile(join(directory, "probe.c"), probe, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O2", "-I", directory, join(directory, "probe.c"), join(directory, "runtime.c"), "-o", binary, "-lm"], {
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(result.code, 0, `the milliseconds are the ones the language names (exit ${result.code})`);
+});
+
 test("the SHA-256 hasher answers the digest the runtime is named for", async () => {
   // The self-hosting fingerprint is `createHash("sha256")`, so the runtime has
   // to answer the digest the algorithm names. The lengths are the ones the
