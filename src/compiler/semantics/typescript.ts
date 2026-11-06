@@ -13362,6 +13362,30 @@ class TypeScriptParser {
         right: { k: "literal", text: "-1" },
       };
     }
+    // `text.replace(needle, replacement)` is the text with the needle's first
+    // asking replaced: what is before it, the replacement, and what is after
+    // it. A needle that is not there leaves the text it was asked of, and the
+    // empty needle asks at the beginning. `text.indexOf` is a runtime call
+    // that names no new service, so no helper is needed.
+    if (method === "replace" && args.length === 2) {
+      const needle = args[0] as Expression;
+      const replacement = args[1] as Expression;
+      if (!this.repeatable(needle) || !this.repeatable(replacement)) return null;
+      const at = call("text.indexOf", [receiver, needle]);
+      const before = call("text.slice", [receiver, { k: "literal", text: "0" }, at]);
+      const after = call("text.slice", [receiver, { k: "binary", op: "+", left: at, right: { k: "lengthOf", of: needle } }]);
+      return {
+        k: "conditional",
+        condition: { k: "binary", op: "===", left: at, right: { k: "literal", text: "-1" } },
+        then: receiver,
+        otherwise: {
+          k: "binary",
+          op: "+",
+          left: { k: "binary", op: "+", left: before, right: replacement },
+          right: after,
+        },
+      };
+    }
     if (method === "startsWith" && args.length === 1) {
       // The field the text holds from the beginning, which is the text the
       // needle is long compared with the needle: one reading for both forms,

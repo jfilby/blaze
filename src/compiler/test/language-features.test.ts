@@ -1285,6 +1285,24 @@ test("Object.fromEntries of a callback's pairs is the entries it writes", async 
   }
 });
 
+test("a text replaces the first asking of its needle", async () => {
+  const source = [
+    "export function demo(): string {",
+    '  const a = "***CO-ORD_ENDPOINT".replace("***CO-ORD_ENDPOINT", "http://x");',
+    '  const b = "hello world".replace("world", "blaze");',
+    '  const c = "hello".replace("nope", "x");',
+    '  const d = "abc".replace("", "-");',
+    "  return `${a} ${b} ${c} ${d}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "http://x hello blaze hello -abc", `the ${backend} backend replaces the first asking of the needle`);
+  }
+});
+
 test("Math.max folds a value spread beside a list", async () => {
   const source = [
     "export function demo(): string {",

@@ -1017,6 +1017,19 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ed. A text replaces the asking of its needle
+
+    request.replace(`run`, `bench 2`)
+
+A text method `replace` with a written needle was refused. It is the text
+before the first asking of the needle, the replacement, and the text after
+it — the three the language joins — and it is written over `text.indexOf`,
+so a text needs no new service: a needle that is not there leaves the text
+it was asked of, and the empty needle asks at the beginning. A regular
+expression was already taken above, by the regex reading.
+
+    The total went from 191 to 189.
+
 ### 4ec. A spread stands beside a value in Math.max
 
     Math.max(n, ...xs)
@@ -3480,6 +3493,7 @@ What was closed this session, and what each was worth:
 | Date.parse reads a date text back (§4ea) | 196 → 194 |
 | a list is reversed where it lies (§4eb) | 194 → 192 |
 | a spread stands beside a value in Math.max (§4ec) | 192 → 191 |
+| a text replaces the asking of its needle (§4ed) | 191 → 189 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

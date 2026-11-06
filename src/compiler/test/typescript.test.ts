@@ -540,6 +540,26 @@ test("Math.max folds the arguments a spread stands beside", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("a text replaces the asking of its needle", () => {
+  // `text.replace(needle, replacement)` is the text before the needle, the
+  // replacement, and the text after it; a needle that is not there leaves the
+  // text, and the empty needle asks at the beginning.
+  const source = [
+    "export function f(request: string): string {",
+    "  return request.replace(`run`, `bench 2`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+  const missed = [
+    "export function f(request: string): string {",
+    "  return request.replace(`absent`, `bench 2`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(missed, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.
