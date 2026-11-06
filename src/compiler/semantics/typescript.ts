@@ -6304,14 +6304,22 @@ class TypeScriptParser {
     this.valueFunctions = new Map();
     this.arrowBoxes = new Map();
     // A collection a file declares at the top is a name its functions read, so
-    // what each of them holds is carried into the function being read.
-    this.valueCollections = new Map(this.valueCollections);
+    // what each of them holds is carried into the function being read. What the
+    // function declares of its own is the function's: the bindings the body
+    // writes are put back where the file's were when the body is answered, so a
+    // name the next function declares is not read as the collection a function
+    // above it happened to bind. `declaring`'s `const slots = new Map(...)` made
+    // `innerScope`'s `slots` parameter a map, and its loop over a list was
+    // refused as a loop over entries.
+    const fileCollections = this.valueCollections;
+    this.valueCollections = new Map(fileCollections);
     this.iteratedCollections = new Map();
     this.iteratedSequences = new Map();
     let answered: CollectionValue | null = null;
     /** The rest parameter, when the function declares one. */
     let restAt: { element: TypeExpr; fixed: number } | null = null;
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => {
+      this.valueCollections = fileCollections;
       this.finishBoxes(body, params, true);
       const fn: TypeScriptFunction = {
         name: name.text,
@@ -7928,6 +7936,13 @@ class TypeScriptParser {
     if (target.kind !== "ident") {
       if (target.text === "[") {
         this.position = start;
+        // A statement that begins with a bracket is a tuple assignment only
+        // where an `=` follows the bracket's own end: `[a, b] = [b, a]` is one,
+        // and `[...text].forEach(f)` or `[1, 2].join()` are the expressions
+        // they are. Reading those as patterns refused them where the spread
+        // stood, which is every expression statement that begins with a list.
+        const close = closingBracket(this.tokens, start);
+        if (this.tokens[close]?.text !== "=") return null;
         return this.readTupleAssignment();
       }
       this.position = start;
@@ -10430,6 +10445,42 @@ class TypeScriptParser {
           replace(measured);
           continue;
         }
+        // `Buffer.from(text, "utf8")` is the bytes the text is written as,
+        // which is what the encoder answers, and `Buffer.from(bytes)` is a copy
+        // of the bytes it is handed: the same block under the type a byte array
+        // is, so a write into the copy does not reach the source.
+        if (
+          target.k === "member" &&
+          target.base.k === "ident" &&
+          target.base.name === "Buffer" &&
+          target.field === "from"
+        ) {
+          const args = this.readCallArguments();
+          const source = args[0];
+          const encoding = args[1];
+          const held = source === undefined ? null : this.valueTypeOf(source);
+          const utf8 = encoding === undefined || (encoding.k === "text" && textValue(encoding) === "utf8");
+          if (source !== undefined && held !== null && utf8 && (held.kind === "text" || held.kind === "fixed")) {
+            const encoded: Expression = { k: "call", name: "TextEncoder.encode", args: [source] };
+            this.expressionTypes.set(encoded, { kind: "slice", of: BYTE });
+            replace(encoded);
+            continue;
+          }
+          const element = held !== null && (held.kind === "slice" || held.kind === "array") ? held.of : null;
+          if (source !== undefined && element !== null && element.kind === "primitive" && element.name === "u8") {
+            const copy = this.typedFromHelper(element, BYTE, this.peek().line);
+            const made: Expression = { k: "call", name: copy.name, args: [source] };
+            this.expressionTypes.set(made, copy.returns);
+            replace(made);
+            continue;
+          }
+          this.report(
+            "Buffer.from copies a text or a byte array",
+            "the source writes Buffer.from(text, `utf8`) or Buffer.from(bytes)",
+            this.peek(),
+          );
+          return this.hole();
+        }
         // `Object.keys(TABLE)` and `Object.values(TABLE)` over a constant object
         // are the names or the values it was written with, which the file
         // already holds. An object built at run time has no shape the parser
@@ -10485,10 +10536,65 @@ class TypeScriptParser {
               continue;
             }
           }
-          // A target or source that is not a dictionary is a record the object
-          // pass lays out field by field: copying its fields is the lowering
-          // the record case writes, which this slice does not take. The
-          // arguments are read, so the refusal is the method read's own.
+          // A record is a reference, and the fields the source declares are the
+          // ones copied into the target: `Object.assign(statement, rewritten)`
+          // writes the fields of one statement over another and answers the one
+          // it wrote. Each source is read once into a name of the statement's
+          // own, because a field read of a call runs the call again, and the
+          // fields are written only after every source is known to fit.
+          const targetShape = first === undefined ? null : this.shapeOf(first);
+          const targetName = first !== undefined && first.k === "ident" ? first.name : null;
+          if (
+            first !== undefined &&
+            targetName !== null &&
+            args.length >= 2 &&
+            targetShape !== null &&
+            targetShape.kind === "record" &&
+            targetShape.index === null
+          ) {
+            const holds: { name: string; source: Expression; type: TypeExpr }[] = [];
+            const writes: { field: string; from: string }[] = [];
+            let usable = true;
+            for (let at = 1; at < args.length && usable; at += 1) {
+              const source = args[at] as Expression;
+              const shape = this.shapeOf(source);
+              if (shape === null || shape.kind !== "record" || shape.index !== null) {
+                usable = false;
+                break;
+              }
+              const held = `__assign${this.fieldCount++}`;
+              holds.push({ name: held, source, type: this.typeExprOfShape(shape) });
+              for (const field of shape.fields.keys()) {
+                if (!targetShape.fields.has(field)) {
+                  usable = false;
+                  break;
+                }
+                writes.push({ field, from: held });
+              }
+            }
+            if (usable) {
+              for (const hold of holds) {
+                this.pendingBefore.push({ kind: "declare", name: hold.name, type: null, init: hold.source, line: this.peek().line });
+                this.valueTypes.set(hold.name, hold.type);
+              }
+              for (const write of writes) {
+                this.pendingBefore.push({
+                  kind: "memberAssign",
+                  base: targetName,
+                  field: write.field,
+                  op: "=",
+                  value: { k: "member", base: { k: "ident", name: write.from }, field: write.field },
+                  line: this.peek().line,
+                });
+              }
+              replace(first);
+              continue;
+            }
+          }
+          // A target or source that is a record the object pass has not laid
+          // out, or a field the target does not write, is left to the method
+          // read's own refusal. The arguments are read, so the diagnostic is
+          // the one the source earns.
           this.report(
             `"assign" is not a method this program compiles`,
             "a method is declared by a class the same module or its imports carry",
@@ -10990,6 +11096,21 @@ class TypeScriptParser {
               const stamp: Expression = { k: "call", name: "blaze_rt_timestamp_iso", args: [] };
               this.expressionTypes.set(stamp, TEXT_RESULT);
               replace(stamp);
+              continue;
+            }
+          }
+          // `new TextEncoder().encode(text)` is the bytes the text is written
+          // as, which is the one encoding a compiled text is: the runtime copies
+          // them into a block of bytes of its own, which is the byte array the
+          // source reads.
+          if (target.field === "encode" && args.length === 1) {
+            const held = this.valueTypeOf(receiver);
+            const encoder = held.kind === "ref" && held.name === "__TextEncoder";
+            const written = this.valueTypeOf(args[0] as Expression);
+            if (encoder && (written.kind === "text" || written.kind === "fixed")) {
+              const encoded: Expression = { k: "call", name: "TextEncoder.encode", args: [args[0] as Expression] };
+              this.expressionTypes.set(encoded, { kind: "slice", of: BYTE });
+              replace(encoded);
               continue;
             }
           }
@@ -11576,6 +11697,31 @@ class TypeScriptParser {
             const written: Expression = { k: "text", parts: [{ k: "value", value: target }] };
             this.expressionTypes.set(written, TEXT_RESULT);
             replace(written);
+            continue;
+          }
+          // `bytes.toString("latin1")` is the text the bytes are written as
+          // under the one-byte encoding: each byte is the character of its
+          // value, and the characters are written as the utf8 text a compiled
+          // text holds them as.
+          const byteHeld = this.valueTypeOf(target);
+          const byteElement = byteHeld.kind === "slice" || byteHeld.kind === "array" ? byteHeld.of : null;
+          const namesEncoding = this.peek(1).kind === "string";
+          if (namesEncoding && byteElement !== null && byteElement.kind === "primitive" && byteElement.name === "u8") {
+            const args = this.readCallArguments([TEXT_RESULT]);
+            const encoding = args[0];
+            if (args.length === 1 && encoding !== undefined && encoding.k === "text" && textValue(encoding) === "latin1") {
+              const helper = this.latin1Helper(this.peek().line);
+              const read: Expression = { k: "call", name: helper.name, args: [target] };
+              this.expressionTypes.set(read, helper.returns);
+              replace(read);
+              continue;
+            }
+            this.report(
+              "a byte array is written as latin1",
+              "the source writes bytes.toString(`latin1`)",
+              this.peek(),
+            );
+            replace(this.hole());
             continue;
           }
           replace(this.hexadecimal(target));
@@ -13379,7 +13525,36 @@ class TypeScriptParser {
   private blockViewMethod(receiver: Expression, method: string, args: readonly Expression[]): Expression | null {
     const stores: Record<string, number> = { setUint8: 1, setUint16: 2, setUint32: 4, setBigUint64: 8, setBigInt64: 8 };
     const loads: Record<string, number> = { getUint8: 1, getUint16: 2, getUint32: 4, getBigUint64: 8, getBigInt64: 8 };
+    // A float is not a number the bytes state as a sum: four bytes read as an
+    // f32 and eight as an f64 are the bit pattern the float is, and the runtime
+    // is the one place that copies them into a number of the width they are.
+    const floatStores: Record<string, number> = { setFloat32: 4, setFloat64: 8 };
+    const floatLoads: Record<string, number> = { getFloat32: 4, getFloat64: 8 };
     const width = stores[method];
+    const floatWidth = floatStores[method];
+    if (floatWidth !== undefined) {
+      if (args.length < 2 || args.length > 3) return null;
+      if (args.length === 3 && !isNumberLiteral(args[2] as Expression, "1")) return null;
+      const call: Expression = {
+        k: "call",
+        name: "blaze_rt_view_store_float",
+        args: [receiver, args[0] as Expression, args[1] as Expression, { k: "literal", text: String(floatWidth) }],
+      };
+      this.expressionTypes.set(call, NOTHING);
+      return call;
+    }
+    const floatRead = floatLoads[method];
+    if (floatRead !== undefined) {
+      if (args.length < 1 || args.length > 2) return null;
+      if (args.length === 2 && !isNumberLiteral(args[1] as Expression, "1")) return null;
+      const call: Expression = {
+        k: "call",
+        name: "blaze_rt_view_load_float",
+        args: [receiver, args[0] as Expression, { k: "literal", text: String(floatRead) }],
+      };
+      this.expressionTypes.set(call, NUMBER_RESULT);
+      return call;
+    }
     if (width !== undefined) {
       if (args.length < 2 || args.length > 3) return null;
       if (args.length === 3 && !isNumberLiteral(args[2] as Expression, "1")) return null;
@@ -13410,6 +13585,55 @@ class TypeScriptParser {
     const call: Expression = { k: "call", name: helper, args: [receiver, at, source] };
     this.expressionTypes.set(call, NOTHING);
     return call;
+  }
+
+  /**
+   * The function `bytes.toString("latin1")` becomes: the text one byte per
+   * character is.
+   *
+   * A byte is the character of its value under the one-byte encoding, so the
+   * text is the code point of each byte written in turn: the characters above
+   * 127 are the two-byte utf8 sequences a compiled text holds them as.
+   */
+  private latin1Helper(line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["latin1"]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const params = [{ name: "bytes", type: { kind: "slice", of: BYTE } as TypeExpr }];
+    const returns: TypeExpr = TEXT_RESULT;
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: { k: "text", parts: [{ k: "text", value: "" }] }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "length", buffer: "bytes" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          {
+            kind: "assign",
+            target: "out",
+            op: "+=",
+            value: { k: "call", name: "String.fromCodePoint", args: [{ k: "index", base: ident("bytes"), index: ident("i") }] },
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    return made;
   }
 
   /** The function that writes a value of a width into a block at an offset. */
@@ -16108,6 +16332,10 @@ class TypeScriptParser {
     // itself are the duplicate the object pass refuses, so only a spread
     // replaces anything.
     const spreadFields = new Set<string>();
+    // A field written as `[key]: value` names no identifier, so the key is an
+    // expression the dictionary is built with rather than a name: each one is
+    // kept under a spelling of its own and used where the pairs are written.
+    const computedKeys = new Map<string, Expression>();
     const put = (name: string, value: Expression, spread = false): void => {
       parts.push({ field: { name, value } });
       const at = fields.findIndex((field) => field.name === name);
@@ -16257,6 +16485,23 @@ class TypeScriptParser {
         if (!this.accept(",")) break;
         continue;
       }
+      // `[SECTIONS.empty]: 0` is a field whose key the source computed. The key
+      // is an expression, so only a dictionary can hold one: the pairs the
+      // dictionary is built from are written with the key where the source wrote
+      // it, and a record — whose fields are names — has no field to name.
+      if (key.text === "[" && key.kind === "punct") {
+        const written = this.readExpression();
+        this.expect("]");
+        if (this.accept(":")) {
+          const computed = `__computed${this.fieldCount++}`;
+          computedKeys.set(computed, written);
+          put(computed, this.readExpression());
+        } else {
+          this.report("an object field needs a value", "write the value after the key", key);
+        }
+        if (!this.accept(",")) break;
+        continue;
+      }
       const name = key.kind === "ident" || key.kind === "string" ? key.text : null;
       if (name === null) {
         this.report("an object field is named", `near "${key.text}"`, key);
@@ -16287,9 +16532,17 @@ class TypeScriptParser {
     if (dictionaryTarget !== null) {
       const collection = dictionaryTarget;
       const pairs = fields.map((field) => ({
-        key: { k: "text", parts: [{ k: "text", value: field.name }] } as Expression,
+        key: computedKeys.get(field.name)
+          ?? ({ k: "text", parts: [{ k: "text", value: field.name }] } as Expression),
         value: field.value,
       }));
+      // A record whose keys the source computed as numbers is the dictionary
+      // keyed by numbers: `{ [SECTIONS.empty]: 0 }` at `Record<number, V>` is an
+      // entry of the number key, and the read of `size[n]` is the entry the
+      // number names. A name — `{ empty: 0 }` — keys the dictionary by text,
+      // which is the record of fields it looks like.
+      const numeric = pairs.length > 0 && pairs.every((pair) => this.keyKind(this.valueTypeOf(pair.key)) === "number");
+      if (numeric) collection.key = NUMBER_RESULT;
       const line = this.peek().line;
       // A spread of a dictionary writes entries the literal does not name, so
       // the entries are the parts merged: each field is a dictionary of one,
@@ -16470,6 +16723,24 @@ class TypeScriptParser {
         // nothing about the elements it stands for, and the literal is settled
         // by the values beside it or by the use that reads it.
         const type = this.valueTypeOf(spread);
+        // A spread whose elements are not the ones the list holds is written as
+        // the elements the list holds: `[...bytes]` in a list of numbers is a
+        // block of numbers, which is the element-by-element copy a typed array's
+        // own `from` writes. Without it the two blocks were joined as they
+        // stood, and the C target read a block of bytes as a block of doubles.
+        const spreadElement = type.kind === "slice" || type.kind === "array" ? type.of : null;
+        if (
+          element !== null &&
+          spreadElement !== null &&
+          !sameResult(spreadElement, element) &&
+          spreadElement.kind === "primitive" &&
+          element.kind === "primitive"
+        ) {
+          const converted = this.typedFromHelper(spreadElement, element, this.peek().line);
+          const copied: Expression = { k: "call", name: converted.name, args: [spread] };
+          this.expressionTypes.set(copied, converted.returns);
+          spread = copied;
+        }
         if (element === null && (type.kind === "slice" || type.kind === "array") && !this.holdsUnsettledArray(spread)) {
           element = type.of;
           // The element the spread stands for keeps the shape the spread says,
@@ -17810,6 +18081,26 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       );
       return this.hole();
     }
+    // `new TextEncoder()` writes a text as the bytes it is written as, which is
+    // the one encoding a compiled text is: utf8. The encoder is no value of its
+    // own, exactly as the decoder is none: it is held at a name of its own so
+    // that `const encoder = new TextEncoder()` reads, and what the name holds is
+    // a zero nothing reads.
+    if (view.kind === "ident" && view.text === "TextEncoder") {
+      if (!this.accept("(")) {
+        this.report("a text encoder is created with its arguments", `as in new TextEncoder()`, view);
+        return this.hole();
+      }
+      while (!this.at(")") && this.peek().kind !== "end") {
+        this.report("a text encoder writes utf8", "the one encoding a compiled text is written in", this.peek());
+        this.next();
+      }
+      this.expect(")");
+      const marker: Expression = { k: "literal", text: "0" };
+      this.expressionTypes.set(marker, { kind: "ref", of: null, name: "__TextEncoder" });
+      this.expressionShapes.set(marker, { kind: "ref", name: "__TextEncoder" });
+      return marker;
+    }
     // `new TextDecoder()` reads bytes as the text they are written as, which is
     // the one encoding a compiled text is: utf8.
     if (view.kind === "ident" && view.text === "TextDecoder") {
@@ -17851,6 +18142,26 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       };
       this.regexValues.add(value);
       return value;
+    }
+    // `new ArrayBuffer(n)` is a block of n bytes: the same block a typed array
+    // of bytes is, allocated where it is written and cleared, so a read of a
+    // byte nothing wrote is the zero the language answers it with. A `DataView`
+    // over one is that block, and the float reads of it are the bytes of the
+    // number at the offset.
+    if (view.kind === "ident" && (view.text === "ArrayBuffer" || view.text === "SharedArrayBuffer")) {
+      if (!this.at("(")) {
+        this.report("a buffer is allocated with a count of bytes", `as in new ${view.text}(n)`, view);
+        return this.hole();
+      }
+      const args = this.readCallArguments([NUMBER_RESULT]);
+      const count = args[0];
+      if (count === undefined || args.length !== 1) {
+        this.report("a buffer is allocated with a count of bytes", `as in new ${view.text}(n)`, view);
+        return this.hole();
+      }
+      const block: Expression = { k: "sized", element: "u8", count };
+      this.expressionTypes.set(block, { kind: "slice", of: BYTE });
+      return block;
     }
     // `new DataView(bytes.buffer)` is a view of a block of bytes, and a view of
     // a block here is the block: the bytes are the ones the typed array holds.

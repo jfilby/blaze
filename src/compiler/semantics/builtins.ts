@@ -185,6 +185,18 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "text.indexOf": { params: [TEXT, TEXT], returns: F64, arity: 2 },
   /** `text.codePointAt(at)` answers the code point at a byte position. */
   "text.codePointAt": { params: [TEXT, F64], returns: F64, arity: 2 },
+  /** `new TextEncoder().encode(text)` answers the bytes the text is written
+   *  as: the one encoding a compiled text is written in is utf8. */
+  /** The float a window of bytes holds at a byte offset, and the bytes a float
+   *  is written into: the reinterpretation a `DataView` asks for, which is the
+   *  C library's copy of four or eight bytes. */
+  "blaze_rt_view_load_float": { params: [POINTER, F64, F64], returns: F64, arity: 3 },
+  "blaze_rt_view_store_float": { params: [POINTER, F64, F64, F64], returns: { kind: "void" }, arity: 4 },
+  "TextEncoder.encode": {
+    params: [TEXT],
+    returns: { kind: "slice", of: { kind: "primitive", name: "u8" } },
+    arity: 1,
+  },
   /** `text.slice(start, stop)` answers the text between two indexes, and
    *  `text.slice(start)` the text from one index to the end. An index below
    *  zero counts back from the end, and an index past the end stops there. */

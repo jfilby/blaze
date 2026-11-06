@@ -811,7 +811,13 @@ class TypeText {
     const members = [this.intersection()];
     while (this.take("|")) members.push(this.intersection());
     if (members.length === 1) return members[0] as ResolvedType;
-    const present = members.filter((member) => member.kind !== "absent");
+    // A union written as names — `type Value = Left | Right` where both are
+    // interfaces — is the same union of records as the one written out member by
+    // member, and each name is resolved where it stands. Without that the first
+    // name was the whole union: a field only another member writes was a field
+    // of nothing, and the arm a value is could not be named.
+    const named = members.map((member) => this.resolveNamedMember(member));
+    const present = named.filter((member) => member.kind !== "absent");
     if (present.length === 0) return { kind: "absent" };
     if (present.length === 1) return present[0] as ResolvedType;
     // A union of records names the fields both write; a union that mixes
@@ -834,6 +840,21 @@ class TypeText {
       return { kind: "record", fields, index, arms: present };
     }
     return present[0] as ResolvedType;
+  }
+
+  /**
+   * A member of a union that is written as a name, resolved to the record the
+   * name declares.
+   *
+   * A name that states no record — a primitive alias, a collection — is the
+   * member it was, and a name this table does not hold is left for the link.
+   */
+  private resolveNamedMember(member: ResolvedType): ResolvedType {
+    if (member.kind !== "ref" || member.name === null) return member;
+    const decl = typeDeclared(this.table, member.name);
+    if (decl === undefined || this.seen.has(decl)) return member;
+    const resolved = instantiate(decl, [], this.seen);
+    return resolved.kind === "record" ? resolved : member;
   }
 
   /** What one parameter of a function type holds, from the text it is written. */

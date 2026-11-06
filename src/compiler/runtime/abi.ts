@@ -1799,6 +1799,9 @@ const TEXT_DECLARATIONS: readonly string[] = [
   "double blaze_rt_parse_int(const char* text, double radix)",
   "const char* blaze_rt_from_code_point(double value)",
   "double blaze_rt_text_code_point_at(const char* text, double at)",
+  "const unsigned char* blaze_rt_text_bytes(const char* text)",
+  "double blaze_rt_view_load_float(const unsigned char* block, double at, double width)",
+  "void blaze_rt_view_store_float(unsigned char* block, double at, double value, double width)",
   "long long blaze_rt_text_index_of(const char* text, const char* needle)",
   "const char* blaze_rt_text_slice(const char* text, long long start, long long stop)",
   "const char* blaze_rt_text_trim(const char* text)",
@@ -4116,6 +4119,47 @@ double blaze_rt_text_code_point_at(const char* text, double at) {
     return NAN;
   }
   return NAN;
+}
+/* The bytes a text is written as, copied into a block of its own. A text is a
+   UTF-8 sequence of bytes, and what the encoder half of the decoder answers is
+   the same bytes under the type a byte array is: the block's length is the
+   count of them, with no terminator, because a byte array is not a text. */
+const unsigned char* blaze_rt_text_bytes(const char* text) {
+  const size_t length = text == NULL ? 0 : blaze_rt_text_length(text);
+  unsigned char* bytes = (unsigned char*)blaze_rt_allocate_uninitialized(length == 0 ? 1 : length);
+  if (length > 0) memcpy(bytes, text, length);
+  blaze_rt_header_of(bytes)->length = length;
+  return bytes;
+}
+/* The float a window of bytes holds at a byte offset, and the bytes a float is
+   written into: a view of a block reads four bytes as an f32 or eight as an
+   f64, and the C library's copy is the reinterpretation, which the language
+   asks for exactly where a number is read out of the bytes another program
+   wrote (a module's own encoding, above all). */
+double blaze_rt_view_load_float(const unsigned char* block, double at, double width) {
+  if (block == NULL) return 0.0;
+  const size_t offset = (size_t)(long long)at;
+  if (width == 4) {
+    float value = 0.0f;
+    memcpy(&value, block + offset, sizeof value);
+    return (double)value;
+  }
+  if (width == 8) {
+    double value = 0.0;
+    memcpy(&value, block + offset, sizeof value);
+    return value;
+  }
+  return 0.0;
+}
+void blaze_rt_view_store_float(unsigned char* block, double at, double value, double width) {
+  if (block == NULL) return;
+  const size_t offset = (size_t)(long long)at;
+  if (width == 4) {
+    const float narrow = (float)value;
+    memcpy(block + offset, &narrow, sizeof narrow);
+    return;
+  }
+  if (width == 8) memcpy(block + offset, &value, sizeof value);
 }
 long long blaze_rt_text_index_of(const char* text, const char* needle) {
   if (text == NULL || needle == NULL) return -1;

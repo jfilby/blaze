@@ -366,6 +366,12 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_timestamp_iso()`;
     case "blaze_rt_string_new":
       return `blaze_rt_string_new((const unsigned char*)(${args[0]}), (size_t)(${args[1]}))`;
+    case "TextEncoder.encode":
+      return `((unsigned char*)blaze_rt_text_bytes(${args[0]}))`;
+    case "blaze_rt_view_load_float":
+      return `blaze_rt_view_load_float((const unsigned char*)(${args[0]}), ${args[1]}, ${args[2]})`;
+    case "blaze_rt_view_store_float":
+      return `blaze_rt_view_store_float((unsigned char*)(${args[0]}), ${args[1]}, ${args[2]}, ${args[3]})`;
     case "blaze_rt_dict_new":
       return `blaze_rt_dict_new()`;
     case "blaze_rt_dict_get":

@@ -10752,6 +10752,7 @@ class Machine {
     // convention puts them.
     if (
       call.callee === "text.indexOf" ||
+      call.callee === "TextEncoder.encode" ||
       call.callee === "text.codePointAt" ||
       call.callee === "text.slice" ||
       call.callee === "text.trim" ||
@@ -10787,6 +10788,31 @@ class Machine {
         this.store(held);
         return held;
       };
+      if (call.callee === "blaze_rt_view_load_float" || call.callee === "blaze_rt_view_store_float") {
+        // The float a window of bytes holds, and the bytes a float is written
+        // into: the block goes down as the address it is, and the offset, the
+        // value and the width as the numbers they are.
+        const block = this.hold(POINTER, "blaze_view_block");
+        this.at(call.args[0], BLOCK);
+        this.store(block);
+        const held: Held[] = [block];
+        const numbers = call.callee === "blaze_rt_view_load_float" ? [1, 2] : [1, 2, 3];
+        for (const at of numbers) {
+          this.at(call.args[at], NUMBER);
+          const one = this.hold(POINTER, "blaze_view_number");
+          this.store(one);
+          held.push(one);
+        }
+        this.callSymbol(call.callee, held, call.callee === "blaze_rt_view_load_float" ? NUMBER : { kind: "void" });
+        return;
+      }
+      if (call.callee === "TextEncoder.encode") {
+        // The bytes a text is written as: the block the service lays the bytes
+        // out in, which is the address a byte array is read at.
+        const bytes = text(0);
+        this.callSymbol("blaze_rt_text_bytes", [bytes], POINTER);
+        return;
+      }
       if (call.callee === "text.codePointAt") {
         const sliced = text(0);
         this.at(call.args[1], NUMBER);

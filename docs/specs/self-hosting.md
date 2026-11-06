@@ -1017,6 +1017,98 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fe. A record keyed by the numbers a source computed
+
+    const size: Record<number, number> = { [SECTIONS.empty]: 0, [SECTIONS.text]: n }
+
+A field written as `[key]: value` was refused as a field that is not named: a
+record's fields are names, and the dictionary a `Record` is was keyed by the
+spelling of every field. A key the source computed is an expression the
+dictionary is built with, and a record whose every key is a number is the
+dictionary keyed by numbers — the entries `size[n]` reads. A name the source
+wrote keys the dictionary by text, which is the record of fields it looks like.
+
+    The total went from 141 to 139.
+
+### 4fd. `Buffer.from` reads a text as bytes, and latin1 writes them back
+
+    Buffer.from(text, "utf8")
+    Buffer.from(bytes).toString("latin1")
+
+`Buffer.from(text, "utf8")` is the bytes the text is written as, which is what
+the encoder already answers, and `Buffer.from(bytes)` is a copy of the bytes it
+is handed. `toString("latin1")` is the text one byte per character is: each byte
+is the code point of the character, written as the utf8 text a compiled text
+holds it as, which is a function of the file and needs no new service.
+
+    The total went from 143 to 141.
+
+### 4fc. A buffer read as floats, and a spread written at the list's element
+
+    new DataView(new ArrayBuffer(8))          // a block of bytes and a view of it
+    view.setFloat64(0, value, true)           // the eight bytes the number is
+    view.getFloat64(0, true)
+    [...new TextEncoder().encode(text), 0]    // the bytes, in a list of numbers
+
+`new ArrayBuffer(n)` was refused as no typed array, and a DataView's float reads
+and writes as no methods: the bytes of a number are not a sum of them, and the
+one place that copies four bytes into an f32 or eight into an f64 is the C
+library. Two runtime entries now do that copy — `blaze_rt_view_load_float` and
+`blaze_rt_view_store_float` — and a buffer is a block of bytes, so `bytes.buffer`
+is the block the typed array is and the view of it is the same bytes.
+`body.buffer` on a typed array was a field of nothing before.
+
+A spread whose elements are not the ones the list holds was joined into the list
+as it stood, which put a block of bytes where a block of doubles belongs: the C
+target read the bytes as eight-byte elements and a program that spread a byte
+array into a list of numbers answered a pointer's digits. The elements are now
+written as the list holds them, which is the element-by-element copy the typed
+array's own `from` writes — a bug the widths of the two blocks made.
+
+    The total went from 148 to 143.
+
+### 4fb. A text encoder writes the bytes a text is written as
+
+    new TextEncoder().encode(text)
+
+The decoder was read and the encoder was not. `new TextEncoder()` is no value of
+its own, exactly as the decoder is none, and `encode` is the bytes the text is
+written as: the runtime copies them into a block of its own whose length is the
+count of them. The one encoding a compiled text is written in is utf8, so the
+two halves of it are one runtime entry each.
+
+    The total went from 152 to 148.
+
+### 4fa. The collection bindings a body writes are the body's own
+
+    function declaring(scope: Scope, slot: Slot): Scope { const slots = new Map(scope.slots); ... }
+    function innerScope(scope: Scope, slots: Slot[]): Scope { for (const slot of slots) ... }
+
+A module function starts from the collections the *file* holds, which is what
+lets a function read a map the file declares at the top. What the previous
+function bound was carried in as well, because nothing put the file's bindings
+back when a body was answered: `declaring`'s `const slots = new Map(...)` made
+`innerScope`'s `slots` parameter a map, and the loop over the list of slots was
+refused as a loop over entries. The file's own bindings are put back when a
+function is answered.
+
+    The total went from 153 to 152.
+
+### 4ez. A statement that begins with a bracket is the expression it writes
+
+    [...source.values()].forEach((value, index) => { total += value + index; })
+    [1, 2, 3].join("-")
+
+A statement that begins with `[` was read as a tuple assignment, because that is
+the one shape a bracket can begin a statement with: the pattern was read first
+and the `=` came after it. `[...text].forEach(f)` and `[1, 2, 3].join()` are
+expressions, and the spread inside the first of them was refused as a
+destructured element that binds no name. The bracket begins a pattern only where
+an `=` follows its own end, and the statements that are not one are the
+expressions they write.
+
+    The total went from 154 to 153.
+
 ### 4ey. A push on the list an indexed field holds
 
     this.scopes[this.scopes.length - 1].push({ name, emitted, type })
@@ -3792,6 +3884,12 @@ What was closed this session, and what each was worth:
 | a spread of a text, `Array.from` of one, and a place behind a call (§4ew) | 161 → 157 |
 | a choice of two text reads is a text (§4ex) | 157 → 155 |
 | a push on the list an indexed field holds (§4ey) | 155 → 154 |
+| a statement that begins with a bracket is the expression it writes (§4ez) | 154 → 153 |
+| the collection bindings a body writes are the body's own (§4fa) | 153 → 152 |
+| a text encoder writes the bytes a text is written as (§4fb) | 152 → 148 |
+| a buffer read as floats, and a spread written at the list's element (§4fc) | 148 → 143 |
+| `Buffer.from` reads a text as bytes, and latin1 writes them back (§4fd) | 143 → 141 |
+| a record keyed by the numbers a source computed (§4fe) | 141 → 139 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

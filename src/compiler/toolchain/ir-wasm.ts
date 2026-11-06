@@ -3607,6 +3607,13 @@ class Body {
         this.callService("blaze_rt_from_code_point");
         return TEXT;
       }
+      case "TextEncoder.encode": {
+        // The bytes a text is written as, laid out in a block of their own:
+        // the encoder's service, and the answer is the address of the block.
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_text_bytes");
+        return ADDRESS;
+      }
       case "text.codePointAt": {
         this.textArgument(argument(0));
         this.value(argument(1), F64_TYPE);

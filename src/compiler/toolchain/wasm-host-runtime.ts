@@ -173,6 +173,9 @@ const TEXT_SERVICES: readonly HostService[] = [
   { symbol: "blaze_rt_parse_int", params: ["i32", "f64"], result: "f64" },
   { symbol: "blaze_rt_from_code_point", params: ["f64"], result: "i32" },
   { symbol: "blaze_rt_text_code_point_at", params: ["i32", "f64"], result: "f64" },
+  { symbol: "blaze_rt_text_bytes", params: ["i32"], result: "i32" },
+  { symbol: "blaze_rt_view_load_float", params: ["i32", "f64", "f64"], result: "f64" },
+  { symbol: "blaze_rt_view_store_float", params: ["i32", "f64", "f64", "f64"], result: null },
   { symbol: "blaze_rt_text_index_of", params: ["i32", "i32"], result: "f64" },
   { symbol: "blaze_rt_text_slice", params: ["i32", "f64", "f64"], result: "i32" },
   { symbol: "blaze_rt_text_trim", params: ["i32"], result: "i32" },
@@ -1276,6 +1279,45 @@ export function blaze_rt_from_code_point(value) {
   const code = Math.trunc(value);
   if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return makeText(new TextEncoder().encode("\\uFFFD"));
   return makeText(new TextEncoder().encode(String.fromCodePoint(code)));
+}
+`,
+  },
+  {
+    service: "blaze_rt_view_load_float",
+    source: `
+export function blaze_rt_view_load_float(block, at, width) {
+  const offset = Math.trunc(at);
+  const data = view();
+  if (block === 0) return 0;
+  if (width === 4) return data.getFloat32(block + offset, true);
+  if (width === 8) return data.getFloat64(block + offset, true);
+  return 0;
+}
+`,
+  },
+  {
+    service: "blaze_rt_view_store_float",
+    source: `
+export function blaze_rt_view_store_float(block, at, value, width) {
+  if (block === 0) return;
+  const offset = Math.trunc(at);
+  const data = view();
+  if (width === 4) data.setFloat32(block + offset, value, true);
+  else if (width === 8) data.setFloat64(block + offset, value, true);
+}
+`,
+  },
+  {
+    service: "blaze_rt_text_bytes",
+    source: `
+export function blaze_rt_text_bytes(text) {
+  const bytes = textBytes(text);
+  const pointer = block(Math.max(1, bytes.length), ALIGNMENT, false);
+  if (bytes.length > 0) new Uint8Array(memory.buffer, pointer, bytes.length).set(bytes, 0);
+  /* A text of no bytes is a block of no elements: the length the allocator
+     wrote is the one byte it had to ask for, and the count is the answer. */
+  if (bytes.length === 0) view().setBigUint64(pointer - OVERHEAD + 16, 0n, true);
+  return pointer;
 }
 `,
   },

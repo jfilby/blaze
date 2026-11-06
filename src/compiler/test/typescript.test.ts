@@ -5289,3 +5289,140 @@ test("Array.from of a list is a copy of the list", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a statement that begins with a bracket is the expression it writes", () => {
+  // `[a, b] = [b, a]` is a tuple assignment, and `[...text].forEach(f)` or
+  // `[1, 2].join()` are the expressions they are: the bracket starts a pattern
+  // only where an `=` follows its own end.
+  const source = [
+    "export function swap(): number {",
+    "  let a = 1;",
+    "  let b = 2;",
+    "  [a, b] = [b, a];",
+    "  return a * 10 + b;",
+    "}",
+    "export function counted(source: Map<string, number>): number {",
+    "  let total = 0;",
+    "  [...source.values()].forEach((value, index) => { total += value + index; });",
+    "  return total;",
+    "}",
+    "export function joined(): string {",
+    "  return [1, 2, 3].join(\"-\");",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a collection one function binds is not read in the next", () => {
+  // `declaring` binds `const slots = new Map(...)`, and `innerScope`'s `slots`
+  // parameter is a list of slots: the bindings a body writes are put back where
+  // the file's were when the body is answered.
+  const source = [
+    "interface Slot { name: string; }",
+    "interface Scope { slots: Map<string, Slot>; visible: Set<string>; }",
+    "export function declaring(scope: Scope, slot: Slot): Scope {",
+    "  const slots = new Map(scope.slots);",
+    "  slots.set(slot.name, slot);",
+    "  return { slots, visible: scope.visible };",
+    "}",
+    "export function innerScope(scope: Scope, slots: Slot[]): Scope {",
+    "  if (slots.length === 0) return scope;",
+    "  const inner = new Map(scope.slots);",
+    "  for (const slot of slots) inner.set(slot.name, slot);",
+    "  return { slots: inner, visible: scope.visible };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a text encoder writes the bytes a text is written as", () => {
+  // `new TextEncoder().encode(text)` is the bytes the text is written as, one
+  // encoding: utf8. The block it answers is a byte array, and its length is the
+  // count of bytes rather than of characters.
+  const source = [
+    "export function encoded(text: string): number[] {",
+    "  const encoder = new TextEncoder();",
+    "  return [...encoder.encode(text)];",
+    "}",
+    "export function size(text: string): number {",
+    "  return new TextEncoder().encode(text).length;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a DataView over a buffer reads and writes the float at a byte offset", () => {
+  // `new ArrayBuffer(n)` is a block of n bytes, `bytes.buffer` the block a typed
+  // array is, and a DataView's float reads and writes are the bytes of the
+  // number at the offset.
+  const source = [
+    "export function roundTrip(value: number): number {",
+    "  const view = new DataView(new ArrayBuffer(8));",
+    "  view.setFloat64(0, value, true);",
+    "  return view.getFloat64(0, true);",
+    "}",
+    "export function narrow(value: number): number {",
+    "  const view = new DataView(new ArrayBuffer(4));",
+    "  view.setFloat32(0, value, true);",
+    "  return view.getFloat32(0, true);",
+    "}",
+    "export function window(bytes: Uint8Array): number {",
+    "  const view = new DataView(bytes.buffer, 2, 4);",
+    "  return view.getFloat32(0, true);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a spread of one element type into a list of another is written as it", () => {
+  // `[...bytes]` in a list of numbers is a block of numbers: the elements are
+  // written as the list holds them, and the two blocks are not joined as they
+  // stand.
+  const source = [
+    "export function spread(values: Uint8Array): number[] {",
+    "  return [...values];",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Buffer.from reads a text as bytes and bytes as a copy", () => {
+  // `Buffer.from(text, "utf8")` is the bytes the text is written as, which is
+  // what the encoder answers, and `Buffer.from(bytes)` is a copy a write does
+  // not reach the source through.
+  const source = [
+    "export function bytes(text: string): Uint8Array {",
+    "  return Buffer.from(text, \"utf8\");",
+    "}",
+    "export function copy(bytes: Uint8Array): Uint8Array {",
+    "  return Buffer.from(bytes);",
+    "}",
+    "export function read(bytes: Uint8Array): string {",
+    "  return Buffer.from(bytes).toString(\"latin1\");",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a record whose keys the source computed as numbers is keyed by numbers", () => {
+  // `{ [SECTIONS.empty]: 0 }` at `Record<number, V>` is an entry of the number
+  // key, and the read of `size[n]` is the entry that number names.
+  const source = [
+    "const SECTIONS = { empty: 0, text: 1 } as const;",
+    "export function f(a: number): Record<number, number> {",
+    "  const size: Record<number, number> = {",
+    "    [SECTIONS.empty]: 0,",
+    "    [SECTIONS.text]: a,",
+    "  };",
+    "  return size;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});

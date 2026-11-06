@@ -4856,3 +4856,137 @@ test("Array.from of a list is a copy a write does not reach the source through",
   ].join("\n"));
   assert.equal(output.trim(), "1,2|9,2");
 });
+
+test("a statement that begins with a bracket runs the expression it writes", async () => {
+  // The bracket starts a destructuring pattern only where an `=` follows it, so
+  // a swap and a call written on a list are the statements they look like.
+  const output = await agreesWithNode([
+    "export function swap(): number {",
+    "  let a = 1;",
+    "  let b = 2;",
+    "  [a, b] = [b, a];",
+    "  return a * 10 + b;",
+    "}",
+    "export function joined(): string {",
+    "  return [1, 2, 3].join(\"-\");",
+    "}",
+    "export function counted(source: Map<string, number>): number {",
+    "  let total = 0;",
+    "  [...source.values()].forEach((value, index) => { total += value + index; });",
+    "  return total;",
+    "}",
+    "export function f(): string {",
+    "  const counts = new Map([[`a`, 1], [`b`, 2]]);",
+    "  return `${swap()} ${joined()} ${counted(counts)}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "21 1-2-3 4");
+});
+
+test("a text encoder writes utf8 bytes and a decoder reads them back", async () => {
+  // The two halves of the one encoding: the bytes of a text, and the text those
+  // bytes are.
+  const output = await agreesWithNode([
+    "export function encoded(text: string): number[] {",
+    "  const encoder = new TextEncoder();",
+    "  return [...encoder.encode(text)];",
+    "}",
+    "export function decoded(bytes: number[]): string {",
+    "  return new TextDecoder().decode(Uint8Array.from(bytes));",
+    "}",
+    "export function f(): string {",
+    "  const bytes = encoded(`héllo`);",
+    "  return `${bytes.join(`,`)}|${bytes.length}|${decoded(bytes)}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "104,195,169,108,108,111|6|héllo");
+});
+
+test("a DataView reads and writes the float at a byte offset", async () => {
+  const output = await agreesWithNode([
+    "export function roundTrip(value: number): number {",
+    "  const view = new DataView(new ArrayBuffer(8));",
+    "  view.setFloat64(0, value, true);",
+    "  return view.getFloat64(0, true);",
+    "}",
+    "export function narrow(value: number): number {",
+    "  const view = new DataView(new ArrayBuffer(4));",
+    "  view.setFloat32(0, value, true);",
+    "  return view.getFloat32(0, true);",
+    "}",
+    "export function bits(value: number): string {",
+    "  const view = new DataView(new ArrayBuffer(8));",
+    "  view.setFloat64(0, value, true);",
+    "  const bytes: string[] = [];",
+    "  for (let at = 7; at >= 0; at -= 1) bytes.push(`${view.getUint8(at)}`);",
+    "  return bytes.join(`:`);",
+    "}",
+    "export function f(): string {",
+    "  return `${roundTrip(1.5)} ${narrow(0.1)} ${bits(1)}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1.5 0.10000000149011612 63:240:0:0:0:0:0:0");
+});
+
+test("a spread of bytes into a number list is a copy the source does not reach", async () => {
+  const output = await agreesWithNode([
+    "export function spread(values: Uint8Array): number[] {",
+    "  return [...values];",
+    "}",
+    "export function f(): string {",
+    "  const bytes = Uint8Array.from([65, 66, 67]);",
+    "  const numbers = spread(bytes);",
+    "  return `${numbers.join(`,`)}|${numbers.length}|${bytes.length}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "65,66,67|3|3");
+});
+
+test("Buffer.from reads a text as bytes and writes latin1 back", async () => {
+  const output = await agreesWithNode([
+    "export function bytes(text: string): Uint8Array {",
+    "  return Buffer.from(text, \"utf8\");",
+    "}",
+    "export function read(bytes: Uint8Array): string {",
+    "  return Buffer.from(bytes).toString(\"latin1\");",
+    "}",
+    "export function f(): string {",
+    "  const written = bytes(`h\u00e9`);",
+    "  const copy = Buffer.from(written);",
+    "  return `${written.length}|${read(copy)}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  // The bytes are utf8 and the decode is latin1, so the two characters of the
+  // encoding are the two characters of the text.
+  assert.equal(output.trim(), "3|h\u00c3\u00a9");
+});
+
+test("a record keyed by the numbers a source computed holds them", async () => {
+  const output = await agreesWithNode([
+    "const SECTIONS = { empty: 0, text: 1 } as const;",
+    "export function sizes(a: number): Record<number, number> {",
+    "  const size: Record<number, number> = {",
+    "    [SECTIONS.empty]: 7,",
+    "    [SECTIONS.text]: a,",
+    "  };",
+    "  return size;",
+    "}",
+    "export function f(): string {",
+    "  const size = sizes(5);",
+    "  return `${size[0]} ${size[1]}`;",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "7 5");
+});
