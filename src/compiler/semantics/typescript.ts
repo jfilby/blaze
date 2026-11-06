@@ -2931,6 +2931,8 @@ interface ArrowBinding {
 interface FunctionType {
   params: TypeExpr[];
   returns: TypeExpr;
+  /** The shape the returns name, for the await that unwraps it. */
+  shape?: ResolvedType;
 }
 
 /**
@@ -4022,8 +4024,8 @@ class TypeScriptParser {
         // shape the declaration states for that value is the one the awaited
         // value holds.
         const awaited = value.name === "Promise.await" ? value.args[0] : undefined;
-        if (awaited !== undefined && awaited.k === "call") {
-          const carried = this.declaredReturnShapes.get(awaited.name);
+        if (awaited !== undefined && (awaited.k === "call" || awaited.k === "invoke")) {
+          const carried = this.declaredReturnShapes.get((awaited as { name?: string }).name ?? "");
           if (carried !== undefined) {
             shape = carried;
             break;
@@ -10743,7 +10745,12 @@ class TypeScriptParser {
           const heldFunction = this.memberFunctionType(target);
           if (heldFunction !== null) {
             const args = this.readCallArguments(heldFunction.params);
-            replace({ k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns });
+            const invoke: Expression = { k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns };
+            if (heldFunction.shape !== undefined) {
+              const held = this.shapeForRead(heldFunction.shape);
+              if (held !== null) this.expressionShapes.set(invoke, held);
+            }
+            replace(invoke);
             continue;
           }
           const callLine = this.peek().line;
@@ -12494,6 +12501,12 @@ class TypeScriptParser {
     let current = value;
     for (;;) {
       if (this.deferred.has(current)) return true;
+      // The await of a deferred call is deferred with it: the promise is the
+      // call's, and the value it carries is unsettled for the same reason.
+      if (current.k === "call" && current.name === "Promise.await") {
+        current = current.args[0] as Expression;
+        continue;
+      }
       if (current.k !== "member" && current.k !== "index") break;
       if (current.k === "member" && this.pendingFields.has(current.field)) return true;
       current = current.base;
@@ -12714,6 +12727,7 @@ class TypeScriptParser {
     return {
       params: shape.params.map((param) => this.typeExprOfShape(param)),
       returns: this.typeExprOfShape(shape.returns),
+      shape: shape.returns,
     };
   }
 
@@ -12740,6 +12754,11 @@ class TypeScriptParser {
       // `await f()` is the value the promise carries, which is the type the
       // declaration states for it.
       const awaited = value.name === "Promise.await" ? value.args[0] : undefined;
+      if (awaited !== undefined && awaited.k === "invoke") {
+        const payload = promisePayloadText(typeToString(awaited.returns));
+        if (payload !== null) return this.typeForName(payload, 1);
+        return awaited.returns;
+      }
       if (awaited !== undefined && awaited.k === "call") {
         const carried = this.declaredReturns.get(awaited.name);
         if (carried !== undefined) return carried;

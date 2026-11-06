@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4dy. The await of a call through an interface member
+
+    const found = (await store.list("x")).filter((entry) => entry.startsWith("a"));
+
+The member call of an imported interface is read as an `invoke` of the
+signature the member declares, and its `await` lost the payload: the reader
+typed the awaited value by the name the call was declared under, which an
+`invoke` does not carry, so the filter's element was a number and the map of
+the filter's answer was refused as no method at all. An await now reads the
+`returns` of the invoke it unwraps (through `Promise<T>` where the call names
+it), `memberFunctionType` keeps the shape the member declares beside the
+call, the deferral of an unlinked read follows through `Promise.await` to
+the call it waits on, and an `invoke` whose callee member no layout holds a
+field for is refused at the IR rather than built as a jump to the object
+itself.
+
+    The total went from 198 to 197.
+
 ### 4dx. An object spread in a program body
 
     const o = { ...{ a: y }, b: 2 };
@@ -3405,6 +3423,7 @@ What was closed this session, and what each was worth:
 | an arrow the use holds at a function type (§4dv) | 204 → 203 |
 | a record rebuilt from the entries of a record (§4dw) | 203 → 200 |
 | an object spread in a program body (§4dx) | 200 → 198 |
+| the await of a call through an interface member (§4dy) | 198 → 197 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

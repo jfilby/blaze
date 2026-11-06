@@ -434,6 +434,52 @@ test("a refused function's return type is not read as its body", () => {
   assert.doesNotMatch(message, /is not a statement of a program/);
 });
 
+test("the await of a call through an imported interface holds the payload it carries", () => {
+  // `(await store.list("x")).filter((entry) => entry.startsWith("a"))` where
+  // `store.list` is a method of an imported interface: the call answers the
+  // promise its declaration writes, and the await holds the payload that
+  // promise carries — so the filter's element is a text, and the map of the
+  // filter's answer is a list a second walk reads.
+  const main = [
+    'import type { Store } from "./store.ts";',
+    "export async function f(store: Store): Promise<number> {",
+    '  const found = (await store.list("x")).filter((entry) => entry.startsWith("a"));',
+    "  return found.map((entry) => entry.length).length;",
+    "}",
+    'console.log("run");',
+    "",
+  ].join("\n");
+  const store = [
+    "export interface Store {",
+    "  list(relativePath: string): Promise<string[]>;",
+    "}",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": main, "store.ts": store }, "main.ts");
+  const contract = phase.program.files.find((file) => file.path === "main.ts")?.functions.f;
+  assert.ok(contract !== undefined, "f must be an export of the module");
+  // The call is still a call through a value: lowering its callee reads a
+  // field the class object lays out no field for, so the build refuses it
+  // where it is read rather than delivering a program that jumps to data.
+  const demo = [
+    "interface Store { list(path: string): Promise<string[]>; }",
+    "class Disk implements Store {",
+    "  async list(path: string): Promise<string[]> { return [`ab`, `acd`]; }",
+    "}",
+    "export async function demo(): Promise<string> {",
+    "  const store: Store = new Disk();",
+    '  const found = (await store.list("x")).filter((entry) => entry.startsWith("a"));',
+    "  return `${found.length}`;",
+    "}",
+    'console.log("run");',
+    "",
+  ].join("\n");
+  assert.match(
+    diagnostic(() => irOf("typescript", { "main.ts": demo }, "main.ts", "demo")),
+    /calls list, which is not a field of any object the program lays out/,
+  );
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.

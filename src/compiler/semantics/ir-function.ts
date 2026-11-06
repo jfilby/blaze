@@ -1324,7 +1324,21 @@ class FunctionBody {
    * declared with: the arguments are read at the types the call names.
    */
   private invoke(expression: Expression & { k: "invoke" }, line: number): Typed {
-    const callee = this.typed(expression.callee, null, line).value;
+    const calleeTyped = this.typed(expression.callee, null, line);
+    // A member that is no field of any layout the program lays out reads back
+    // as its base — field() answers that way for a read — but calling the
+    // object as the value it holds is a jump to data. The load that would
+    // hand the call its value does not exist where the method is behaviour of
+    // a class rather than a field of an object, and the call is refused here
+    // than built to crash.
+    if (expression.callee.k === "member" && calleeTyped.value.k === "local") {
+      throw this.error(
+        `calls ${expression.callee.field}, which is not a field of any object the program lays out`,
+        line,
+        "a method of a class is called as its function; a value held at a function type reads the field the object lays out",
+      );
+    }
+    const callee = calleeTyped.value;
     if (expression.params.length !== expression.args.length) {
       throw this.error(
         `calls a value with ${expression.args.length} argument${expression.args.length === 1 ? "" : "s"}, but it takes ${expression.params.length}`,
