@@ -1017,6 +1017,19 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ec. A spread stands beside a value in Math.max
+
+    Math.max(n, ...xs)
+
+The fold `Math.max(...xs)` read only a spread that was the whole of the call:
+a value argument beside the spread was a spread argument outside the call
+subset, and the call was refused. The call now scans its arguments for a
+spread; where one stands, every value beside it joins the list it precedes
+or follows — a value as a list of one — and the fold runs over the joined
+list. A call with no spread is the two-argument builtin it was.
+
+    The total went from 192 to 191.
+
 ### 4eb. A list is reversed where it lies
 
     block.statements = kept.reverse();
@@ -3466,6 +3479,7 @@ What was closed this session, and what each was worth:
 | Promise.all settles a list into the values it carries (§4dz) | 197 → 196 |
 | Date.parse reads a date text back (§4ea) | 196 → 194 |
 | a list is reversed where it lies (§4eb) | 194 → 192 |
+| a spread stands beside a value in Math.max (§4ec) | 192 → 191 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

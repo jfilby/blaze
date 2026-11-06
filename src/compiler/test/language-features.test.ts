@@ -1285,6 +1285,27 @@ test("Object.fromEntries of a callback's pairs is the entries it writes", async 
   }
 });
 
+test("Math.max folds a value spread beside a list", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  const base = 3;",
+    "  const xs = [1, 9, 2];",
+    "  const a = Math.max(base, ...xs);",
+    "  const b = Math.max(...xs, 4);",
+    "  const c = Math.max(...xs);",
+    "  const d = Math.min(base, ...xs);",
+    "  const e = Math.max(5, 2);",
+    "  return `${a} ${b} ${c} ${d} ${e}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "9 9 9 1 5", `the ${backend} backend folds the greatest and the smallest of a list spread beside a value`);
+  }
+});
+
 test("reverse writes the list it was handed in mirror order", async () => {
   const source = [
     "export function demo(): string {",

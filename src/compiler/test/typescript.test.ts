@@ -528,6 +528,18 @@ test("reverse and fill write the list they were handed", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("Math.max folds the arguments a spread stands beside", () => {
+  // `Math.max(n, ...xs)` is the greatest of one list: the value beside the
+  // spread joins it, and the fold answers over the joined list.
+  const source = [
+    "export function f(n: number, xs: number[]): number {",
+    "  return Math.max(n, ...xs);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
 test("a statement of a program outside the subset is reported once", () => {
   // The program body recovers at the statement it was reading, so the rest of
   // the pattern is not read as the statements that follow it.

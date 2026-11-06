@@ -11140,29 +11140,41 @@ class TypeScriptParser {
         // smallest element of the list. A list may be empty, and neither has a
         // greatest element then: the answer is the infinity the fold starts
         // from, which is `-Infinity` for the greatest and `Infinity` for the
-        // smallest. The helper folds every element against it.
+        // smallest. The helper folds every element against it. Value arguments
+        // beside a spread join the list they precede or follow.
         if (
           (target.name === "Math.max" || target.name === "Math.min") &&
           this.at("(") &&
-          this.peek(1).text === "..."
+          this.argumentsSpread()
         ) {
           const line = this.peek().line;
-          this.next();
-          this.next();
-          const list = this.readExpression();
-          this.expect(")");
-          const type = this.valueTypeOf(list);
-          if (type.kind !== "slice" && type.kind !== "array") {
-            this.report(
-              `${target.name} reduces a list`,
-              `the value the spread names is a list of numbers, as in ${target.name}(...xs)`,
-              this.peek(),
-            );
+          const args = this.readCallArguments([], null, true);
+          const spreads = this.argumentSpreads ?? args.map(() => false);
+          // The token scan found a spread in the list, so one is there.
+          let combined: Expression | null = null;
+          for (let at = 0; at < args.length; at += 1) {
+            const part: Expression = spreads[at] === true
+              ? (args[at] as Expression)
+              : { k: "buffer", element: "f64", values: [args[at] as Expression] };
+            const type = this.valueTypeOf(part);
+            if (type.kind !== "slice" && type.kind !== "array") {
+              this.report(
+                `${target.name} reduces a list`,
+                `the value the spread names is a list of numbers, as in ${target.name}(...xs)`,
+                this.peek(),
+              );
+              replace(this.hole());
+              combined = null;
+              break;
+            }
+            combined = combined === null ? part : { k: "binary", op: "+", left: combined, right: part };
+          }
+          if (combined === null) {
             replace(this.hole());
             continue;
           }
           const helper = this.reductionHelper(target.name === "Math.max" ? "max" : "min", line);
-          replace({ k: "call", name: helper.name, args: [list] });
+          replace({ k: "call", name: helper.name, args: [combined] });
           continue;
         }
         // `f(...xs)` hands the function the elements of the list, and the
@@ -11711,6 +11723,17 @@ class TypeScriptParser {
       return null;
     }
     return { async: isAsync };
+  }
+
+  /** Whether the arguments of the call at the parser spread a list. */
+  private argumentsSpread(): boolean {
+    if (!this.at("(")) return false;
+    const close = this.matchingToken(this.position, "(", ")");
+    if (close < 0) return false;
+    for (let at = this.position + 1; at < close; at += 1) {
+      if (this.tokens[at]?.text === "...") return true;
+    }
+    return false;
   }
 
   /** The index of the bracket that closes the one at `from`, or -1. */
