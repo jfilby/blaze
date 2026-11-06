@@ -814,10 +814,14 @@ class TypeText {
     const present = members.filter((member) => member.kind !== "absent");
     if (present.length === 0) return { kind: "absent" };
     if (present.length === 1) return present[0] as ResolvedType;
-    // A union of records names the fields both write; a union of anything else
-    // is the one member this compiler's values can hold. The first present
-    // member is that one, which is the rule the frontend already used.
-    if (present.every((member) => member.kind === "record")) {
+    // A union of records names the fields both write; a union that mixes
+    // records with members of another kind keeps the records' fields and
+    // every member as an arm, so a value the union holds can still be asked
+    // for a field only one arm writes and the arm it is can still be named.
+    // A union of members of no record is the one member this compiler's
+    // values can hold. The first present member is that one, which is the
+    // rule the frontend already used.
+    if (present.some((member) => member.kind === "record")) {
       const fields = new Map<string, ResolvedField>();
       let index: ResolvedType | null = null;
       for (const member of present) {

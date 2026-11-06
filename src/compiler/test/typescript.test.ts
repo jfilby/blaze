@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
 import { pythonFrontend } from "../semantics/python.ts";
-import { readTypeScriptModule } from "../semantics/typescript.ts";
+import { readTypeScriptModule, typeScriptFrontend } from "../semantics/typescript.ts";
+import { readModuleGraph } from "../semantics/module-graph.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { contractOf, diagnostic, irOf, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
@@ -570,6 +571,44 @@ test("a text splits at most as many fields as its limit names", () => {
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a union that mixes records with values keeps the records it is", () => {
+  // `type Value = bigint | number | boolean | string | null | BufferValue`
+  // keeps every arm: after the guards eliminate the values, the remainder is
+  // the record, and a member of it — and a method of a field — reads as it
+  // does on the record the remainder was.
+  const typeSrc = "export interface BufferValue { readonly type: string; readonly values: readonly Value[]; }\n" +
+    "export type Value = bigint | number | boolean | string | null | BufferValue;\n";
+  const main = 'import type { BufferValue, Value } from "./types.ts";\n' + [
+    "export function formatValue(value: Value): string {",
+    "  if (typeof value === \"bigint\") return value.toString();",
+    "  if (typeof value === \"boolean\") return value ? \"true\" : \"false\";",
+    "  if (typeof value === \"string\") return JSON.stringify(value);",
+    "  if (value === null) return \"null\";",
+    "  return `[${value.values.map(formatValue).join(\", \")}]`;",
+    "}",
+    "",
+  ].join("\n");
+  const records = readModuleGraph({
+    frontend: typeScriptFrontend,
+    entry: { path: "main.ts", source: main },
+    roots: ["types.ts"],
+    read: (path: string) => (path === "types.ts" ? typeSrc : null),
+    requireImports: false,
+    reader: (source: string, path: string, isEntry: boolean, context?: unknown) => {
+      try {
+        return readTypeScriptModule(source, path, isEntry, context);
+      } catch (error) {
+        return {
+          analysis: { path, imports: [], functions: [], default: null, body: [] },
+          refused: [{ line: 1, message: (error as Error).message, detail: "" }],
+          count: 1,
+        };
+      }
+    },
+  } as never);
+  for (const record of records) assert.equal(record.refusedCount, 0, record.refused[0]?.message);
 });
 
 test("a statement of a program outside the subset is reported once", () => {

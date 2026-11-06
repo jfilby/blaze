@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ef. A union keeps the records it mixes with its values
+
+    type Value = bigint | number | boolean | string | null | BufferValue;
+
+A union that mixed records with values of other kinds resolved to its first
+member only, so after the guards eliminated the values the record the
+remainder was had no fields the read could see, and a method of a field of
+the record was refused. The union now keeps every member as an arm beside the
+merged fields when any member is a record, so the remainder is still the
+record and a field of the record reads as it does on the record itself. A
+union of no record at all is the first member it was.
+
+    The total went from 188 to 187.
+
+The working tree then showed one refinement: a debug print that had been
+left behind in the frontend vanished, taking its own refusal with it.
+The total went 187 to 186 on the same slice once it left.
+
 ### 4ee. A text splits at most as many fields as its limit names
 
     literal.split("\0", 1)
@@ -3508,6 +3526,8 @@ What was closed this session, and what each was worth:
 | a spread stands beside a value in Math.max (§4ec) | 192 → 191 |
 | a text replaces the asking of its needle (§4ed) | 191 → 189 |
 | a text splits at most as many fields as its limit names (§4ee) | 189 → 188 |
+| a union keeps the records it mixes with its values (§4ef) | 188 → 187 |
+| a union keeps the records it mixes with its values (§4ef), once the leftover debug print left | 187 → 186 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
