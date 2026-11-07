@@ -7199,7 +7199,7 @@ class Machine {
         // The digits are part of what `toFixed(d)` means, so they are passed
         // on: dropping them answered the number as the shortest writing of it,
         // which is the number the source asked not to write.
-        this.asText(value.of, null, value.digits);
+        this.asText(value.of, null, value.digits, value.precision === true);
         return;
       case "call":
         this.callValue(value.call, value.type);
@@ -9542,9 +9542,10 @@ class Machine {
     // wrapper for the value alone wrote the number the way the shortest writing
     // of it goes — `255` where the source says `ff`.
     const digits = value.k === "toText" ? value.digits : null;
+    const precision = value.k === "toText" && value.precision === true;
     let inner = value;
     while (inner.k === "toText") inner = inner.of;
-    return this.asText(inner, measured, digits);
+    return this.asText(inner, measured, digits, precision);
   }
 
   /**
@@ -9560,7 +9561,7 @@ class Machine {
    * return says which of the two happened, so the caller reads a part that
    * arrived measured for nothing and measures the rest.
    */
-  private asText(value: SemanticValue, measured: Held | null = null, digits: number | null = null): boolean {
+  private asText(value: SemanticValue, measured: Held | null = null, digits: number | null = null, precision = false): boolean {
     /** A word written in place of a value, which is as long as the word is. */
     const word = (text: string): void => {
       if (measured !== null) {
@@ -9611,7 +9612,7 @@ class Machine {
       this.code.test(RAX);
       this.code.jcc("e", otherwise);
       this.code.movdXmm(XMM0, RAX);
-      this.formatNumber(measured, digits);
+      this.formatNumber(measured, digits, precision);
       this.code.jmp(end);
       this.code.bind(otherwise);
       word("null");
@@ -9651,7 +9652,7 @@ class Machine {
       return true;
     }
     this.at(value, NUMBER);
-    this.formatNumber(measured, digits);
+    this.formatNumber(measured, digits, precision);
     return true;
   }
 
@@ -9661,12 +9662,18 @@ class Machine {
    * counting it again over the result reads it a second time for an answer the
    * first read already gave.
    */
-  private formatNumber(measured: Held | null, digits: number | null = null): void {
+  private formatNumber(measured: Held | null, digits: number | null = null, precision = false): void {
     const buffer = this.scratch(64, "blaze_number");
     if (digits === null) {
       this.code.lea(RDI, frame(buffer));
       this.code.movRegImm(RSI, 64n);
       this.runtime("_format_number");
+    } else if (precision) {
+      // `blaze_rt_format_number_precision(value, digits, buffer, size)`.
+      this.code.movRegImm(RDI, BigInt(digits));
+      this.code.lea(RSI, frame(buffer));
+      this.code.movRegImm(RDX, 64n);
+      this.runtime("_format_number_precision");
     } else {
       // `blaze_rt_format_number_fixed(value, digits, buffer, size)`. The value
       // is already in the first floating point register; the whole arguments

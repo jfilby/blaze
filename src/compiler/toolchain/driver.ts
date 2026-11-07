@@ -135,6 +135,18 @@ static const char* program_number_fixed(double value, int digits) {
   return program_string(text, written);
 }
 
+/* A number written at a count of significant digits, which is what
+   x.toPrecision(p) is: p digits from the first one that is not zero, in full
+   unless the decimal exponent is below -6 or at least p.
+
+   The runtime writes it for the same reason the fixed form is written there:
+   the host and a compiled function have to answer the same text. */
+static const char* program_number_precision(double value, int digits) {
+  char text[512];
+  const size_t written = ${RUNTIME_NAME}_format_number_precision(value, digits, (unsigned char*)text, sizeof text);
+  return program_string(text, written);
+}
+
 /* A whole number written out, without the locale-aware formatting snprintf
    does for it. A double holds every i64 only up to 2^53, so a 64 bit integer is
    written by dividing by ten rather than by handing it to a printf. */
@@ -1737,7 +1749,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     return `program_string_compare(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle): string {
+  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle, precision = false): string {
     // A string is the text it is: it is already the bytes it names, and the
     // runtime is not asked to render it again.
     if (isTextType(type)) return value;
@@ -1763,6 +1775,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       const no = style === "python" ? "False" : "false";
       return `(${value} ? "${yes}" : "${no}")`;
     }
+    // A number written at a count of significant digits is written by the
+    // runtime as the language writes it: the digits the source asked for, in
+    // full or in exponential form, whichever the language chooses.
+    if (precision && digits !== null) return `program_number_precision((double)(${value}), ${digits})`;
     // A number written at a fixed number of digits is written at them whatever
     // it is: `(-0.0004).toFixed(2)` is `-0.00` and not the zero the shortest
     // writing gives it.

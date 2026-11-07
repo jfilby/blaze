@@ -102,7 +102,7 @@ export type ProgramValue =
   /** A string, with the values a template string interpolates. */
   | { k: "text"; parts: ProgramText[] }
   /** A number written as text at a fixed number of digits, as `x.toFixed(2)`. */
-  | { k: "fixed"; of: ProgramValue; digits: number }
+  | { k: "fixed"; of: ProgramValue; digits: number; precision?: true }
   /**
    * A buffer written out element by element, as a typed array literal is, and
    * the element type the view it was allocated from states. The view is what

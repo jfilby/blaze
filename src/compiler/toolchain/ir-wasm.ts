@@ -1920,7 +1920,7 @@ class Body {
         this.convert(TEXT, at);
         return;
       case "toText":
-        this.asText(value.of, value.digits);
+        this.asText(value.of, value.digits, value.precision === true);
         this.convert(TEXT, at);
         return;
       default:
@@ -2618,7 +2618,7 @@ class Body {
       return;
     }
     if (value.k === "toText") {
-      this.asText(value.of, value.digits);
+      this.asText(value.of, value.digits, value.precision === true);
       return;
     }
     if (value.k === "const" && isTextType(value.type)) {
@@ -2668,7 +2668,7 @@ class Body {
    * bytes are then copied into a text the runtime owns: a text the module
    * joins with another one has to be a text the runtime can measure and copy.
    */
-  private asText(value: SemanticValue, digits: number | null): void {
+  private asText(value: SemanticValue, digits: number | null, precision = false): void {
     const type = value.type;
     if (isTextType(type)) {
       this.text(value);
@@ -2716,6 +2716,10 @@ class Body {
     if (digits === null) {
       this.i64(64n);
       this.callService("blaze_rt_format_number");
+    } else if (precision) {
+      this.i32(digits);
+      this.i64(64n);
+      this.callService("blaze_rt_format_number_precision");
     } else {
       this.i32(digits);
       this.i64(64n);

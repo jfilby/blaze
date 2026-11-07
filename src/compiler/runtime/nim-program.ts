@@ -864,7 +864,7 @@ ${anchor}
     return `cmp(${left}, ${right})`;
   }
 
-  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle): string {
+  toText(value: string, type: SemanticType, digits: number | null, style: TextStyle, precision = false): string {
     // Nothing prints as the word for it, as the language does: `$(nil)` is the
     // empty string, which the source never printed.
     if (type.kind === "void" || (type.kind === "ref" && type.of === null)) return '"null"';
@@ -874,6 +874,9 @@ ${anchor}
       const yes = style === "python" ? "True" : "true";
       const no = style === "python" ? "False" : "false";
       return `(if ${value}: "${yes}" else: "${no}")`
+    }
+    if (precision && digits !== null) {
+      throw hostError("the Nim driver cannot write a number at significant digits");
     }
     // A number written at a fixed number of digits is written at them whatever
     // it is, and not at the digits the shortest writing would choose.

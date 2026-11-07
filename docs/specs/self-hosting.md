@@ -1017,6 +1017,29 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fs. A number written at its significant digits
+
+    return Number.isInteger(value) ? value.toString() : value.toPrecision(17);
+
+`toPrecision(p)` is the number written at `p` significant digits: in full while
+the decimal exponent is from -6 up to `p - 1`, and in exponential form outside
+that range, with a tie written away from zero. The frontend read `toFixed` and
+`toString`; the third writing a number at a count of digits was a method of
+nothing, so `semantics/frontend.ts` — whose f32 literal is written at seventeen
+digits — was the one source the linked read refused over it.
+
+The count is a literal in the source, as `toFixed`'s is. The lowered value
+carries it beside the number, and the machine, C and WebAssembly backends all
+ask the runtime for `blaze_rt_format_number_precision`, which is the twin of the
+fixed form: the digits are the library's scientific writing, scaled by the
+exponent, and a tie the library breaks to even is corrected on the exact value.
+A program body's driver writes it through the same runtime, and the IR text
+spells it `to_text@p17`.
+
+`semantics/frontend.ts` reads whole.
+
+    The total went from 104 to 103.
+
 ### 4fq. The JSON of a list a program builds, and the tuple type a pair is
 
     const fields: (readonly [string, string])[] = [];
@@ -4068,7 +4091,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-104 refusals over 95 sources, 67 of them read whole. The report reads the
+103 refusals over 95 sources, 68 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4125,9 +4148,9 @@ The value-model slices still open, in the order they block the self-build:
   `"object"` for the whole union and the arm that the number is was never
   compiled. Answering the question at run time is what `JSON.typeof` is for,
   but the union's shape has to be told apart from a single interface first —
-  and the arm it then narrows to a number needs `toPrecision`, which the
-  runtime does not carry. The two slices are one: a union asks its kind at run
-  time, and a number is written at its significant digits.
+  the shape carries `arms`, and a record of fields and a union of them are not
+  the same kind. The number arm now has `toPrecision` (§4fs), so what is left
+  is the union asking its kind at run time.
 - **A value whose type is an intersection of a union.** `DraftValue & { k:
   "buffer" | "sized" | "view" }` is a value of one of three kinds of the union,
   and a field of it — `held`, which is the array the block is — is the field of
@@ -4278,6 +4301,7 @@ What was closed this session, and what each was worth:
 | a promise a body chains (§4fp) | 123 → 112 |
 | the JSON of a list a program builds, and the tuple type a pair is (§4fq) | 112 → 108 |
 | Promise.allSettled reports how each promise settled (§4fr) | 108 → 104 |
+| a number written at its significant digits (§4fs) | 104 → 103 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

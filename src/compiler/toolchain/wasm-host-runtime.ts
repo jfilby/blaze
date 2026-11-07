@@ -99,6 +99,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_to_number",
   "blaze_rt_format_number",
   "blaze_rt_format_number_fixed",
+  "blaze_rt_format_number_precision",
   "blaze_rt_random",
   "blaze_rt_monotonic_ms",
   "blaze_rt_monotonic_ns",
@@ -523,6 +524,16 @@ function formatNumberFixed(value, digits) {
   return written;
 }
 
+/* A number written at a count of significant digits, which is what
+   x.toPrecision(p) writes: p digits from the first one that is not zero, in
+   full unless the decimal exponent is below -6 or at least p. The language's
+   own method writes it, so the host and a compiled program agree. */
+function formatNumberPrecision(value, digits) {
+  if (!Number.isFinite(value)) return formatNumber(value);
+  const wanted = digits < 1 ? 1 : digits > 100 ? 100 : digits;
+  return value.toPrecision(wanted);
+}
+
 function writeOut(bytes) {
   process.stdout.write(Buffer.from(bytes));
 }
@@ -878,6 +889,14 @@ export function blaze_rt_format_number(value, buffer, size) {
     source: `
 export function blaze_rt_format_number_fixed(value, digits, buffer, size) {
   return writeNumber(formatNumberFixed(value, digits), buffer, size);
+}
+`,
+  },
+  {
+    service: "blaze_rt_format_number_precision",
+    source: `
+export function blaze_rt_format_number_precision(value, digits, buffer, size) {
+  return writeNumber(formatNumberPrecision(value, digits), buffer, size);
 }
 `,
   },
@@ -1655,7 +1674,8 @@ export function hostRuntimeSource(services: readonly string[]): string {
       symbol.startsWith("blaze_rt_json_") ||
       symbol === "blaze_rt_to_text" ||
       symbol === "blaze_rt_format_number" ||
-      symbol === "blaze_rt_format_number_fixed",
+      symbol === "blaze_rt_format_number_fixed" ||
+      symbol === "blaze_rt_format_number_precision",
   );
   if (text.length > 0) parts.push(RUNTIME_TEXT);
   const hash = services.filter((symbol) => symbol.startsWith("blaze_rt_md5_"));

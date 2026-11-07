@@ -301,7 +301,7 @@ export interface ProgramTarget {
    * at its shortest decimal, a boolean and a null as the words the language
    * has for them.
    */
-  toText(expression: string, type: SemanticType, digits: number | null, style: TextStyle): string;
+  toText(expression: string, type: SemanticType, digits: number | null, style: TextStyle, precision?: boolean): string;
   /** The line that tests a value against nothing. */
   isNull(value: string, negate: boolean): string;
   /** The text of a value that is nothing. */
@@ -1224,7 +1224,7 @@ class ProgramEmitter {
         // A string carried into a string is the string itself: a driver builds
         // text out of pointers, and a number is the one thing it converts.
         if (isTextType(value.of.type)) return this.expression(value.of);
-        return this.target.toText(this.expression(value.of), value.of.type, value.digits, this.style());
+        return this.target.toText(this.expression(value.of), value.of.type, value.digits, this.style(), value.precision === true);
       case "argv":
         return value.index === null ? this.target.argvCount() : this.target.argv(this.expression(value.index));
       case "compare":

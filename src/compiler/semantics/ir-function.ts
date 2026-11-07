@@ -1210,7 +1210,7 @@ class FunctionBody {
             "a string is already text; write it as it is",
           );
         }
-        return { value: { k: "toText", type: TEXT, of, digits: expression.digits }, inferred: asType(USIZE) };
+        return { value: { k: "toText", type: TEXT, of, digits: expression.digits, ...(expression.precision === undefined ? {} : { precision: expression.precision }) }, inferred: asType(USIZE) };
       }
       case "text": {
         const parts: SemanticTextPart[] = [];

@@ -4455,6 +4455,39 @@ test("toString with no radix writes a value as the text it is", async () => {
   assert.equal(output.trim(), "12,255");
 });
 
+test("a number written at a count of significant digits is written at them", async () => {
+  // `toPrecision(p)` writes p significant digits rather than p digits after
+  // the point, in full unless the decimal exponent is below -6 or at least p,
+  // and a tie is written away from zero. The function body and the program
+  // body are two different backends, so both are asked.
+  const output = await agreesWithNode([
+    "function show(x: number): void {",
+    "  console.log(x.toPrecision(17));",
+    "  console.log(x.toPrecision(3));",
+    "  console.log(x.toPrecision(1));",
+    "}",
+    "show(123.456);",
+    "show(1 / 3);",
+    "show(0.1);",
+    "show(-1.5);",
+    "console.log((2.5).toPrecision(1));",
+    "console.log((1.25).toPrecision(2));",
+    "console.log((0).toPrecision(3));",
+    "console.log((123).toPrecision(5));",
+    "console.log((123).toPrecision(3));",
+    "console.log((1e-7).toPrecision(3));",
+    "console.log((1e21).toPrecision(3));",
+    "console.log((9.99).toPrecision(2));",
+    "console.log((9.5).toPrecision(1));",
+    "console.log((999).toPrecision(2));",
+    "console.log((0.0001234).toPrecision(3));",
+    "console.log((0.000001).toPrecision(3));",
+    "console.log((0.0000001).toPrecision(3));",
+    "",
+  ].join("\n"));
+  assert.match(output, /^123\.456/m);
+});
+
 test("a map is keyed by a reference, and answers the text it holds", async () => {
   const output = await agreesWithNode([
     "class Box {",

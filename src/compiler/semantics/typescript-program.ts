@@ -1688,6 +1688,7 @@ class ProgramParser {
         // writes a number into every element of an array. Both are written of
         // whatever the value is, and both answer the value they were written of.
         if (member === "toFixed" && this.at("(")) return this.fixed(value);
+        if (member === "toPrecision" && this.at("(")) return this.precision(value);
         if (member === "toString" && this.at("(")) return this.hexString(value);
         if (member === "fill" && this.at("(")) return this.filled(value);
         if (member === "length" && value.k === "name" && !this.at("(")) {
@@ -1943,6 +1944,30 @@ class ProgramParser {
       this.fail("a number is what is written at a fixed number of digits; a string is already text", open);
     }
     return { k: "fixed", of, digits: Number(digits.text) };
+  }
+
+  /**
+   * `x.toPrecision(p)`: the number written as text at `p` significant digits.
+   * The count is written out in the source, so it is a number the parser reads
+   * rather than a value it evaluates, and it is between one and a hundred.
+   */
+  private precision(of: ProgramValue): ProgramValue {
+    const open = this.peek();
+    this.next();
+    const digits = this.peek();
+    const count = digits.kind === "number" ? Number(digits.text) : Number.NaN;
+    if (digits.kind !== "number" || !/^\d+$/.test(digits.text) || count < 1 || count > 100) {
+      this.fail("the significant digits a number is written at are written out, as in x.toPrecision(17)", digits);
+      this.skipArguments();
+      return this.nothing();
+    }
+    this.next();
+    if (!this.at(")")) this.fail("x.toPrecision takes one count of digits", this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.fail("a number is what is written at a count of significant digits; a string is already text", open);
+    }
+    return { k: "fixed", of, digits: count, precision: true };
   }
 
   /**

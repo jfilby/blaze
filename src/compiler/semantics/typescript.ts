@@ -11882,6 +11882,10 @@ class TypeScriptParser {
           replace(this.fixed(target));
           continue;
         }
+        if (field.text === "toPrecision" && this.at("(")) {
+          replace(this.precision(target));
+          continue;
+        }
         if (field.text === "toString" && this.at("(")) {
           // `x.toString()` with no radix is the value written as the text a
           // template string writes: the digits of a whole number, the shortest
@@ -12154,6 +12158,39 @@ class TypeScriptParser {
       return of;
     }
     return { k: "fixed", of, digits: Number(digits.text) };
+  }
+
+  /**
+   * `x.toPrecision(p)`: the number written as text at `p` significant digits.
+   *
+   * The digits are written out in the source, so they are a number this reads
+   * rather than a value it evaluates, the same way `toFixed` reads them. The
+   * count is significant digits rather than digits after the point, and the
+   * language only writes between one and a hundred of them: a value outside
+   * that range is refused here rather than answered with a different number
+   * of digits than the source asked for.
+   */
+  private precision(of: Expression): Expression {
+    const open = this.next();
+    const digits = this.next();
+    const count = digits.kind === "number" ? Number(digits.text) : Number.NaN;
+    if (digits.kind !== "number" || !/^\d+$/.test(digits.text) || count < 1 || count > 100) {
+      this.report(
+        "the significant digits a number is written at are written out, as in x.toPrecision(17)",
+        `the count is a whole number from 1 to 100; the source wrote "${digits.text}"`,
+        digits,
+      );
+      while (!this.at(")") && this.peek().kind !== "end") this.next();
+      this.expect(")");
+      return of;
+    }
+    if (!this.at(")")) this.report("x.toPrecision takes one count of digits", `near "${this.peek().text}"`, this.peek());
+    this.expect(")");
+    if (of.k === "text" || of.k === "fixed") {
+      this.report("a number is what is written at a count of significant digits", "a string is already text; write it as it is", open);
+      return of;
+    }
+    return { k: "fixed", of, digits: count, precision: true };
   }
 
   /**

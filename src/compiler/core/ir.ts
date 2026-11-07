@@ -115,7 +115,7 @@ export type Expression =
    * rather than a value it evaluates — the same reason the program body reads it
    * that way.
    */
-  | { k: "fixed"; of: Expression; digits: number }
+  | { k: "fixed"; of: Expression; digits: number; precision?: true }
   | { k: "binary"; op: BinaryOp; left: Expression; right: Expression }
   | { k: "unary"; op: UnaryOp; operand: Expression }
   | { k: "conditional"; condition: Expression; then: Expression; otherwise: Expression }

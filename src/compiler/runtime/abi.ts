@@ -1516,6 +1516,19 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["output"] },
   ),
   entry(
+    "blaze_rt_format_number_precision",
+    "size_t",
+    [
+      ["value", "double"],
+      ["digits", "int"],
+      ["buffer", "unsigned char*"],
+      ["size", "size_t"],
+    ],
+    "Writes a number as text at a number of significant digits.",
+    "What x.toPrecision(p) writes: p significant digits, in full where the decimal exponent is from -6 up to p - 1 and in exponential form outside that range. A value that is not finite is written as the language writes it.",
+    { tags: ["output"] },
+  ),
+  entry(
     "blaze_rt_print_newline",
     "void",
     [],
@@ -5028,6 +5041,123 @@ size_t blaze_rt_format_number_fixed(double value, int digits, unsigned char* buf
     return blaze_rt_write_number(text, used - 1, buffer, size);
   }
   return blaze_rt_write_number(text, used, buffer, size);
+}
+
+size_t blaze_rt_format_number_precision(double value, int digits, unsigned char* buffer, size_t size) {
+  /* What x.toPrecision(p) writes: p significant digits, in full where the
+     decimal exponent is from -6 up to p - 1 and in exponential form outside
+     that range. A value that is not finite has no digits to write, so the
+     language's own writing of it is answered. */
+  if (!isfinite(value)) return blaze_rt_format_number(value, buffer, size);
+  const int wanted = digits < 1 ? 1 : (digits > 100 ? 100 : digits);
+  const int negative = signbit(value);
+  const double magnitude = negative ? -value : value;
+  if (magnitude == 0.0) {
+    /* A zero has no significant digit to write, so it is the whole part and
+       the zeros down to the last of the digits asked for: (0).toPrecision(3)
+       is 0.00. Its sign is not written, as the shortest writing of a zero does
+       not write it either. */
+    char zero[128];
+    int used = 0;
+    zero[used++] = '0';
+    if (wanted > 1) {
+      zero[used++] = '.';
+      for (int index = 1; index < wanted; index += 1) zero[used++] = '0';
+    }
+    zero[used] = '\\0';
+    return blaze_rt_write_number(zero, (size_t)used, buffer, size);
+  }
+  /* The p significant digits are the library's writing of the value in
+     scientific form, and its exponent is the decimal exponent. */
+  char scientific[128];
+  if (snprintf(scientific, sizeof scientific, "%.*e", wanted - 1, magnitude) < 0) {
+    return blaze_rt_format_number(NAN, buffer, size);
+  }
+  char significant[128];
+  int count = 0;
+  int exponent = 0;
+  for (int index = 0; scientific[index] != '\\0'; index += 1) {
+    if (scientific[index] == 'e') {
+      exponent = atoi(scientific + index + 1);
+      break;
+    }
+    if (scientific[index] == '.') continue;
+    if (scientific[index] >= '0' && scientific[index] <= '9') significant[count++] = scientific[index];
+  }
+  significant[count] = '\\0';
+  /* A tie is written away from zero and the C library breaks one to even. The
+     digit a tie is rounded at is the p-th significant digit, which is the same
+     decimal place as (p - 1 - exponent) digits after the point, so the test is
+     the one toFixed already uses. */
+  const int place = wanted - 1 - exponent;
+  if (place >= 0 && blaze_fixed_breaks_down(value, place)) {
+    int at = count - 1;
+    while (at >= 0 && significant[at] == '9') {
+      significant[at] = '0';
+      at -= 1;
+    }
+    if (at < 0) {
+      /* Every digit was a nine: the value grew by a place, and the writing is
+         one and the zeros down to the digit asked for, with the exponent one
+         higher. */
+      significant[0] = '1';
+      for (int index = 1; index < wanted; index += 1) significant[index] = '0';
+      count = wanted;
+      exponent += 1;
+    } else {
+      significant[at] = (char)(significant[at] + 1);
+    }
+    significant[count] = '\\0';
+  }
+  char text[160];
+  int used = 0;
+  if (negative) text[used++] = '-';
+  if (exponent < -6 || exponent >= wanted) {
+    /* The exponential form writes one digit before the point and p - 1 after
+       it, and the exponent with its sign and no zeros in front of it. */
+    text[used++] = significant[0];
+    if (wanted > 1) {
+      text[used++] = '.';
+      memcpy(text + used, significant + 1, (size_t)(wanted - 1));
+      used += wanted - 1;
+    }
+    text[used++] = 'e';
+    int scale = exponent;
+    if (scale < 0) {
+      text[used++] = '-';
+      scale = -scale;
+    } else {
+      text[used++] = '+';
+    }
+    char scale_text[4];
+    int scale_count = 0;
+    do {
+      scale_text[scale_count++] = (char)('0' + scale % 10);
+      scale /= 10;
+    } while (scale > 0);
+    while (scale_count > 0) text[used++] = scale_text[--scale_count];
+  } else if (exponent >= 0) {
+    /* Every significant digit is before the point, or some of them after it;
+       a value whose last digit is the unit keeps no point at all. */
+    const int point = exponent + 1;
+    memcpy(text + used, significant, (size_t)point);
+    used += point;
+    if (point < wanted) {
+      text[used++] = '.';
+      memcpy(text + used, significant + point, (size_t)(wanted - point));
+      used += wanted - point;
+    }
+  } else {
+    /* The value is below one: the zeros between the point and the first
+       significant digit belong to the writing. */
+    text[used++] = '0';
+    text[used++] = '.';
+    for (int index = 0; index < -exponent - 1; index += 1) text[used++] = '0';
+    memcpy(text + used, significant, (size_t)wanted);
+    used += wanted;
+  }
+  text[used] = '\\0';
+  return blaze_rt_write_number(text, (size_t)used, buffer, size);
 }
 
 void blaze_rt_print_number(double value) {

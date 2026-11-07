@@ -935,6 +935,69 @@ proc blaze_rt_format_number_fixed*(value: float64, digits: cint, buffer: ptr uin
   cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
   written
 
+proc blaze_rt_format_number_precision*(value: float64, digits: cint, buffer: ptr uint8, size: csize_t): csize_t {.exportc, cdecl.} =
+  ## What x.toPrecision(p) writes: p significant digits, in full where the
+  ## decimal exponent is from -6 up to p - 1 and in exponential form outside
+  ## that range. A value that is not finite is written as the language writes
+  ## it, which is what the shortest formatter answers.
+  if classify(value) in {fcNan, fcInf, fcNegInf}:
+    return blaze_rt_format_number(value, buffer, size)
+  let wanted = max(1, min(100, int(digits)))
+  let negative = value < 0.0
+  let magnitude = abs(value)
+  var text: string
+  if magnitude == 0.0:
+    ## A zero has no significant digit to write, so it is the whole part and
+    ## the zeros down to the last of the digits asked for.
+    text = "0"
+    if wanted > 1:
+      text.add(".")
+      text.add(repeat('0', wanted - 1))
+  else:
+    let scientific = formatFloat(magnitude, ffScientific, wanted - 1)
+    let mark = scientific.find('e')
+    let exponent = parseInt(scientific[mark + 1 .. ^1])
+    var significant = scientific[0 ..< mark].replace(".", "")
+    var placeExponent = exponent
+    ## A tie is written away from zero and the library breaks one to even: the
+    ## rounding place of p significant digits is the same place as
+    ## (p - 1 - exponent) digits after the point.
+    let place = wanted - 1 - placeExponent
+    if place >= 0 and blazeFixedBreaksDown(value, place):
+      var at = significant.len - 1
+      while at >= 0 and significant[at] == '9':
+        significant[at] = '0'
+        at -= 1
+      if at < 0:
+        significant = "1" & repeat('0', wanted - 1)
+        placeExponent += 1
+      else:
+        significant[at] = chr(ord(significant[at]) + 1)
+    if placeExponent < -6 or placeExponent >= wanted:
+      text = significant[0 ..< 1]
+      if wanted > 1:
+        text.add(".")
+        text.add(significant[1 ..< wanted])
+      text.add("e")
+      text.add(if placeExponent < 0: "-" else: "+")
+      text.add($abs(placeExponent))
+    elif placeExponent >= 0:
+      let point = placeExponent + 1
+      text = significant[0 ..< point]
+      if point < wanted:
+        text.add(".")
+        text.add(significant[point ..< wanted])
+    else:
+      text = "0." & repeat('0', -placeExponent - 1) & significant[0 ..< wanted]
+  if negative:
+    text = "-" & text
+  if size == 0:
+    return 0
+  let written = min(csize_t(text.len), size - 1)
+  if written > 0: copyMem(buffer, unsafeAddr text[0], int(written))
+  cast[ptr UncheckedArray[uint8]](buffer)[int(written)] = 0
+  written
+
 proc blaze_rt_print_newline*() {.exportc, cdecl.} =
   stdout.write("\\n")
 

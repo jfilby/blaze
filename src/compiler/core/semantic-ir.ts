@@ -438,7 +438,7 @@ export type SemanticValue =
   /** `a === null` and `a !== null`. */
   | { k: "isNull"; type: TypeExpr; operand: SemanticValue; negate: boolean }
   /** A number written as text, as a string carries it. */
-  | { k: "toText"; type: TextType; of: SemanticValue; digits: number | null }
+  | { k: "toText"; type: TextType; of: SemanticValue; digits: number | null; precision?: true }
   /** `process.argv`, or one of its arguments. */
   | { k: "argv"; type: SemanticType; index: SemanticValue | null }
   /**

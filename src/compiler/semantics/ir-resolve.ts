@@ -259,7 +259,7 @@ type DraftValue =
   /** A string the program builds. */
   | { k: "text"; parts: DraftTextPart[] }
   /** A number written as text at the number of digits the source asked for. */
-  | { k: "fixed"; of: DraftValue; digits: number }
+  | { k: "fixed"; of: DraftValue; digits: number; precision?: true }
   | { k: "call"; call: DraftCall }
   /** The length of an array. */
   | { k: "length"; buffer: string; bufferType: TypeExpr; type: PrimitiveTypeName }
@@ -3344,7 +3344,7 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: a string is already text; write it as it is`,
           );
         }
-        return { k: "fixed", of, digits: value.digits };
+        return { k: "fixed", of, digits: value.digits, ...(value.precision === undefined ? {} : { precision: value.precision }) };
       }
       case "name": {
         // A named program function is passed by name rather than by value, the
@@ -5678,7 +5678,7 @@ class ProgramLowering {
         return array;
       }
       case "fixed":
-        return { k: "toText", type: TEXT, of: this.value(value.of, null, line), digits: value.digits };
+        return { k: "toText", type: TEXT, of: this.value(value.of, null, line), digits: value.digits, ...(value.precision === undefined ? {} : { precision: value.precision }) };
       case "reference":
         return { k: "local", type: this.localType(value.held), name: value.name };
       case "text":
