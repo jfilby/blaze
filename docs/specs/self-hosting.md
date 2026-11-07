@@ -4120,6 +4120,19 @@ The value-model slices still open, in the order they block the self-build:
   `Record<string, string[]>` and a set of lists are refused where the value is
   read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
   its own whose handle is the entry — before a key can answer one.
+- **A value's kind where the type is a union.** `typeof value === "number"` on
+  a union of a bigint, a number, a text and a record: the read answered
+  `"object"` for the whole union and the arm that the number is was never
+  compiled. Answering the question at run time is what `JSON.typeof` is for,
+  but the union's shape has to be told apart from a single interface first —
+  and the arm it then narrows to a number needs `toPrecision`, which the
+  runtime does not carry. The two slices are one: a union asks its kind at run
+  time, and a number is written at its significant digits.
+- **A value whose type is an intersection of a union.** `DraftValue & { k:
+  "buffer" | "sized" | "view" }` is a value of one of three kinds of the union,
+  and a field of it — `held`, which is the array the block is — is the field of
+  the narrowed kinds. The read keeps the whole union, so `held.values` is a
+  field of nothing and its `map` is a method of nothing.
 - **The host's directory.** `process.cwd()` is the directory a build runs in.
   The clock and the two streams a program writes are read now (§4cg, §4ch), so
   this is what is left of the host object: one file, `ai/commandcode.ts`, asks
