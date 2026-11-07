@@ -4533,6 +4533,24 @@ test("a set held in a map is a handle the questions written after it reach", asy
   assert.equal(output.trim(), "1");
 });
 
+test("a list built while the program runs is the JSON it is written as", async () => {
+  // A list is a block of one element type, so its JSON is the brackets and the
+  // elements' JSON between them: a text is the runtime's own quoting of it and
+  // a list is the walk again for what the inner list holds. The declaration
+  // writes a pair as a tuple, which is the list of the values it names.
+  const output = await agreesWithNode([
+    "export function f(): string {",
+    "  const fields: (readonly [string, string])[] = [];",
+    '  fields.push(["a", "b"]);',
+    '  fields.push(["c", "d"]);',
+    "  return JSON.stringify(fields);",
+    "}",
+    "console.log(f());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), String(JSON.stringify([["a", "b"], ["c", "d"]])));
+});
+
 test("a promise a body chains runs the arm that settled it", async () => {
   // A compiled promise is settled by the time it is read, so `then` is the
   // conditional it means: the fulfilled arm reads the value the promise

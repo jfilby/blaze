@@ -1017,6 +1017,33 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fq. The JSON of a list a program builds, and the tuple type a pair is
+
+    const fields: (readonly [string, string])[] = [];
+    fields.push([field.name, describe(field.value.inferred)]);
+    const key = JSON.stringify(fields);
+
+A list written where it was read was already written as JSON; a list built while
+the program runs was refused, because a compiled list is a block of one element
+type and the text of its JSON is not a text the parser can build in place. The
+helper the compiler now writes walks the block once per element type: the
+brackets, a comma between the elements, and each element's own JSON — a text or
+a number is the runtime's stringify of the value it is, and a list is the helper
+again for what the inner list holds. An element that is an object is still
+refused: a compiled object holds no field names at run time, so its JSON is not
+a text this compiler can write. `semantics/ir-function.ts` and
+`semantics/program-objects.ts` read whole, and `semantics/objects.ts` is one
+refusal away.
+
+The other half is the annotation those three files write a pair as: a tuple,
+`(readonly [string, string])[]`. The type reader read a tuple — and a
+parenthesized type — as the opaque reference, so the list's elements were
+boxed as dynamic handles and the helper's block was a block of doubles. `[A, B]`
+is now the list of the values it names, which is the one layout a compiled list
+has, and what the three files declare is what they build.
+
+    The total went from 112 to 108.
+
 ### 4fp. A promise a body chains
 
     const present = await stat(cached).then(
@@ -4017,7 +4044,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-112 refusals over 95 sources, 65 of them read whole. The report reads the
+108 refusals over 95 sources, 67 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4212,6 +4239,7 @@ What was closed this session, and what each was worth:
 | the host's directory entry and path work as the compiler's own types (§4fn) | 131 → 124 |
 | a class built on another, and the absence a choice of texts answers (§4fo) | 124 → 123 |
 | a promise a body chains (§4fp) | 123 → 112 |
+| the JSON of a list a program builds, and the tuple type a pair is (§4fq) | 112 → 108 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

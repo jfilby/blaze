@@ -7047,6 +7047,23 @@ class TypeScriptParser {
     const arrays = this.arrayTypeFrom(from, end);
     if (arrays !== null) return arrays;
     const first = this.tokens[from] as Token;
+    // `[A, B]` is a tuple. The contract has no tuple, and a compiled list is a
+    // block of one element type: a tuple whose members are one type is that
+    // list, which is what the sources write a pair as.
+    if (first.text === "[") {
+      const close = this.matchingToken(from, "[", "]");
+      if (close > 0 && close === end - 1) {
+        const members = this.typeMembers(from + 1, close);
+        const held = members.length === 0 ? ANY_TYPE : this.typeFromTokens(members[0]?.start ?? from + 1, members[0]?.end ?? close, false);
+        return { kind: "slice", of: held };
+      }
+    }
+    // `(T)` is the type it holds: a function type writes `=>` after the close
+    // and falls through to the opaque reference below.
+    if (first.text === "(") {
+      const close = this.matchingToken(from, "(", ")");
+      if (close > 0 && close === end - 1) return this.typeFromTokens(from + 1, close, false);
+    }
     // A map or a set is the handle the runtime's dictionary is. What it holds
     // is kept beside the name it is bound to, and the contract spells the
     // handle: a double the runtime owns.
@@ -7126,6 +7143,28 @@ class TypeScriptParser {
       }
     }
     members.push({ start, end });
+    return members;
+  }
+
+  /** The members a tuple or a parameter list names, split at its top-level `,`. */
+  private typeMembers(from: number, end: number): { start: number; end: number }[] {
+    const members: { start: number; end: number }[] = [];
+    let depth = 0;
+    let start = from;
+    for (let at = from; at < end; at += 1) {
+      const token = this.tokens[at] as Token;
+      if (token.kind !== "punct") continue;
+      const text = token.text;
+      if (text === "(" || text === "[" || text === "{" || text === "<") depth += 1;
+      else if (text === ")" || text === "]" || text === "}" || text === ">") depth -= 1;
+      else if (text === ">>") depth -= 2;
+      else if (text === ">>>") depth -= 3;
+      else if (depth === 0 && text === ",") {
+        members.push({ start, end: at });
+        start = at + 1;
+      }
+    }
+    if (start < end) members.push({ start, end });
     return members;
   }
 
@@ -10947,6 +10986,17 @@ class TypeScriptParser {
           }
           const type = this.valueTypeOf(written);
           if (type.kind === "slice" || type.kind === "array") {
+            // A list built while the program runs is a block of one element
+            // type, and the JSON of it is the elements' JSON between brackets:
+            // a helper walks the block, and a list of lists is the helper of
+            // what the inner list holds.
+            const helper = this.jsonListHelper(type.of, this.peek().line);
+            if (helper.name !== "") {
+              const serialized: Expression = { k: "call", name: helper.name, args: [written] };
+              this.expressionTypes.set(serialized, TEXT_RESULT);
+              replace(serialized);
+              continue;
+            }
             this.report(
               "JSON.stringify writes a list whose values are written where the list is",
               "a list built while the program runs is a block of one element type, and its JSON is not a text the parser can build here",
@@ -14975,6 +15025,72 @@ class TypeScriptParser {
     const made = { name, returns };
     this.collectHelpers.set(key, made);
     this.pureTextHelpers.add(name);
+    return made;
+  }
+
+  /**
+   * The helper that writes a list as JSON, once per element type.
+   *
+   * A list is a block of one element type, so the text is the brackets and the
+   * elements' JSON between them: a text or a number is the runtime's own
+   * stringify of the value it is, and a list is this helper again for what the
+   * inner list holds. An element that is an object is refused: a compiled
+   * object holds no field names at run time, so the JSON of one is not a text
+   * this compiler can write.
+   */
+  private jsonListHelper(element: TypeExpr, line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["jsonList", element]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const readable =
+      element.kind === "text" ||
+      (element.kind === "primitive" && element.name !== "i256" && element.name !== "u256") ||
+      element.kind === "slice" ||
+      element.kind === "array";
+    if (!readable) return { name: "", returns: ANY_TYPE };
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const written = (value: string): Expression => ({ k: "text", parts: [{ k: "text", value }] });
+    const at = (): Expression => ({ k: "index", base: ident("items"), index: ident("i") });
+    // One element's JSON: an inner list is the helper for what it holds, and
+    // everything else is the runtime's stringify of the value it is.
+    const piece: Expression = element.kind === "slice" || element.kind === "array"
+      ? { k: "call", name: this.jsonListHelper(element.of, line).name, args: [at()] }
+      : { k: "call", name: "JSON.stringify", args: [at()] };
+    this.expressionTypes.set(piece, TEXT_RESULT);
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: written("["), line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "length", buffer: "items" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          {
+            kind: "if",
+            condition: { k: "binary", op: ">", left: ident("i"), right: number("0") },
+            then: [{ kind: "assign", target: "out", op: "+=", value: written(","), line }],
+            otherwise: [],
+            line,
+          },
+          { kind: "assign", target: "out", op: "+=", value: piece, line },
+        ],
+        line,
+      },
+      { kind: "result", value: { k: "binary", op: "+", left: ident("out"), right: written("]") }, line },
+    ];
+    const params = [{ name: "items", type: { kind: "slice", of: element } as TypeExpr }];
+    const returns = TEXT_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params: helper.params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
     return made;
   }
 
