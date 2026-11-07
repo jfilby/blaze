@@ -4638,6 +4638,32 @@ test("the entries of a map are a list of pairs a callback walks", async () => {
   }
 });
 
+test("Object.assign writes a field the target's declaration did not hold", async () => {
+  // `const withTypes = flag ? {} : { types }` holds a choice of two object
+  // literals, and `Object.assign(withTypes, { renames })` adds a field neither
+  // wrote. The literals are widened with the field — each arm writes the zero
+  // of what the other leaves out — so the choice is one layout and the field is
+  // the field the source then spreads.
+  const source = [
+    'import { f } from "./lib.ts";',
+    "console.log(f(true), f(false));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function f(flag: boolean): string {",
+    "  const withTypes = flag ? {} : { types: [`a`] };",
+    "  Object.assign(withTypes, { renames: [`b`] });",
+    "  const all = { ...withTypes };",
+    "  return `${(all.types ?? []).length}|${(all.renames ?? []).length}`;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "0|1 1|1", `the ${backend} backend widens the target`);
+  }
+});
+
 test("a module re-exports another module's function and the program calls it", async () => {
   // `export { a } from "./x.ts"` offers a name the other module writes: the
   // function is compiled once, by the module that declares it, and a caller

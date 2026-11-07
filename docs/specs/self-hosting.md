@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gk. `Object.assign` widens the object a declaration wrote
+
+    const withTypes = types.length === 0 ? {} : { types };
+    if (renames.length > 0) Object.assign(withTypes, { renames });
+
+The language lets an object grow a field, and the read of a record field is a
+layout: `renames` was a field neither arm of the choice wrote, so the assignment
+was refused. The object the declaration wrote is now widened with the fields the
+assignment adds — a choice of two literals is widened in both arms, and each arm
+writes the zero of the field the other leaves out, so the choice is one layout.
+A target whose value this body did not write is still refused. `semantics/repair.ts`
+already read whole; `semantics/typescript.ts` reads one refusal shorter.
+
+    The total went from 64 to 63.
+
 ### 4gj. The entries of a map are a list of pairs a callback walks
 
     const ordered = [...counters.entries()]
@@ -4402,7 +4417,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-64 refusals over 95 sources, 76 of them read whole. The report reads the
+63 refusals over 95 sources, 76 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4622,6 +4637,7 @@ What was closed this session, and what each was worth:
 | a method of an object type inside a field (§4gh) | 75 → 71 |
 | a template interpolation reads the shapes its imports bind (§4gi) | 71 → 69 |
 | the entries of a map are a list of pairs a callback walks (§4gj) | 69 → 64 |
+| `Object.assign` widens the object a declaration wrote (§4gk) | 64 → 63 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

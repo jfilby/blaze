@@ -3350,6 +3350,15 @@ class TypeScriptParser {
    * beside the type it was read from.
    */
   private declaredParamShapes = new Map<string, readonly (ResolvedType | null)[]>();
+  /**
+   * The value each name of a body was declared with, by the name it was bound
+   * at.
+   *
+   * `Object.assign` widens a record whose declaration wrote the object it is:
+   * the fields a later assignment adds are written into that literal, so the
+   * layout the program lays out holds them.
+   */
+  private declaredValues = new Map<string, Expression>();
   /** The type parameters a generic function declares, by the name it has. */
   private declaredTypeParameters = new Map<string, ReadonlySet<string>>();
   /** The result annotation of a function, where it is one name. */
@@ -4360,6 +4369,70 @@ class TypeScriptParser {
    * an empty text, a zero, a null reference, or an empty list. The assignment
    * the source writes then replaces it before anything reads it.
    */
+  /**
+   * An object a declaration wrote, with the fields an assignment added.
+   *
+   * A conditional of two literals is widened in both arms, because either arm
+   * may be the value the name holds. Anything else — a call, a field, a name —
+   * is a value this body did not write, and cannot grow a field it never
+   * declared.
+   */
+  private widenRecord(value: Expression, added: readonly { field: string; type: TypeExpr }[]): boolean {
+    if (value.k === "object") {
+      for (const field of added) {
+        if (value.fields.some((written) => written.name === field.field)) continue;
+        value.fields.push({ name: field.field, value: this.zeroFor(field.type) });
+      }
+      return true;
+    }
+    if (value.k === "conditional") {
+      if (!this.widenRecord(value.then, added) || !this.widenRecord(value.otherwise, added)) return false;
+      return this.unifyArms(value.then, value.otherwise);
+    }
+    return false;
+  }
+
+  /**
+   * Two arms of a choice, each writing every field the other writes.
+   *
+   * The read of a field of the choice is one layout only when both arms are
+   * one layout: an arm that leaves a field out is the zero of that field, which
+   * is the value the arm holds when that field is read. The types come from the
+   * arm that wrote the field.
+   */
+  private unifyArms(left: Expression, right: Expression): boolean {
+    if (left.k !== "object" || right.k !== "object") return false;
+    const written = (object: Expression & { k: "object" }): Map<string, TypeExpr> =>
+      new Map(object.fields.map((field) => [field.name, this.valueTypeOf(field.value)]));
+    const leftFields = written(left);
+    const rightFields = written(right);
+    for (const [name, type] of leftFields) {
+      if (!right.fields.some((field) => field.name === name)) right.fields.push({ name, value: this.zeroFor(type) });
+    }
+    for (const [name, type] of rightFields) {
+      if (!left.fields.some((field) => field.name === name)) left.fields.push({ name, value: this.zeroFor(type) });
+    }
+    return true;
+  }
+
+  /** The fields a declaration's object writes, through a choice of two of them. */
+  private writtenRecordShape(value: Expression): ResolvedType | null {
+    if (value.k === "object") {
+      const fields = new Map<string, ResolvedField>();
+      for (const field of value.fields) fields.set(field.name, { type: this.shapeOfTypeExpr(this.valueTypeOf(field.value)), optional: false });
+      return { kind: "record", fields, index: null };
+    }
+    if (value.k === "conditional") {
+      const then = this.writtenRecordShape(value.then);
+      const otherwise = this.writtenRecordShape(value.otherwise);
+      if (then === null || otherwise === null || then.kind !== "record" || otherwise.kind !== "record") return null;
+      const fields = new Map(then.fields);
+      for (const [name, field] of otherwise.fields) if (!fields.has(name)) fields.set(name, field);
+      return { kind: "record", fields, index: null };
+    }
+    return null;
+  }
+
   private zeroFor(type: TypeExpr): Expression {
     if (type.kind === "primitive") {
       if (type.name === "i256" || type.name === "u256") {
@@ -4641,6 +4714,7 @@ class TypeScriptParser {
     const savedClass = this.currentClass;
     const savedTypes = this.valueClasses;
     const savedValueTypes = this.valueTypes;
+    const savedDeclaredValues = this.declaredValues;
     const savedShapes = this.valueShapes;
     const savedArrows = this.valueArrows;
     const savedFunctions = this.valueFunctions;
@@ -4650,6 +4724,7 @@ class TypeScriptParser {
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.declaredValues = new Map();
     this.seedStateAllocations();
     this.valueShapes = new Map();
     this.valueArrows = new Map();
@@ -4670,6 +4745,7 @@ class TypeScriptParser {
       this.currentClass = savedClass;
       this.valueClasses = savedTypes;
       this.valueTypes = savedValueTypes;
+      this.declaredValues = savedDeclaredValues;
       this.valueShapes = savedShapes;
       this.valueArrows = savedArrows;
       this.valueFunctions = savedFunctions;
@@ -6538,6 +6614,7 @@ class TypeScriptParser {
     this.currentClass = null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.declaredValues = new Map();
     this.seedStateAllocations();
     this.valueShapes = new Map();
     this.valueArrows = new Map();
@@ -7878,6 +7955,7 @@ class TypeScriptParser {
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
       this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      this.declaredValues.set(name.text, init);
       // A name declared again is the value it was declared with, and nothing a
       // test settled about a name of the same spelling still holds.
       this.forgetNarrowing(name.text);
@@ -9432,11 +9510,13 @@ class TypeScriptParser {
   private discardedBody(): Statement[] {
     const saved = this.diagnostics;
     const savedTypes = this.valueTypes;
+    const savedDeclaredValues = this.declaredValues;
     const savedShapes = this.valueShapes;
     const savedClasses = this.valueClasses;
     const savedPending = this.pending;
     this.diagnostics = new Diagnostics();
     this.valueTypes = new Map(savedTypes);
+    this.declaredValues = new Map(savedDeclaredValues);
     this.valueShapes = new Map(savedShapes);
     this.valueClasses = new Map(savedClasses);
     this.pending = [];
@@ -9445,6 +9525,7 @@ class TypeScriptParser {
     } finally {
       this.diagnostics = saved;
       this.valueTypes = savedTypes;
+      this.declaredValues = savedDeclaredValues;
       this.valueShapes = savedShapes;
       this.valueClasses = savedClasses;
       this.pending = savedPending;
@@ -11081,6 +11162,13 @@ class TypeScriptParser {
             const holds: { name: string; source: Expression; type: TypeExpr }[] = [];
             const writes: { field: string; from: string }[] = [];
             let usable = true;
+            // The fields a source writes that the target's declaration did not
+            // hold are added to the object the target was declared with: the
+            // language lets an object grow a field, and the layout is written
+            // from the literal the declaration wrote. A target whose value no
+            // literal of this body wrote cannot grow, and is refused below.
+            const added: { field: string; type: TypeExpr }[] = [];
+            let widened = targetShape;
             for (let at = 1; at < args.length && usable; at += 1) {
               const source = args[at] as Expression;
               const shape = this.shapeOf(source);
@@ -11090,12 +11178,26 @@ class TypeScriptParser {
               }
               const held = `__assign${this.fieldCount++}`;
               holds.push({ name: held, source, type: this.typeExprOfShape(shape) });
-              for (const field of shape.fields.keys()) {
-                if (!targetShape.fields.has(field)) {
-                  usable = false;
-                  break;
+              for (const [field, declared] of shape.fields) {
+                if (!widened.fields.has(field)) {
+                  added.push({ field, type: this.typeExprOfShape(declared.type) });
+                  const fields = new Map(widened.fields);
+                  fields.set(field, { type: declared.type, optional: false });
+                  widened = { kind: "record", fields, index: widened.index };
                 }
                 writes.push({ field, from: held });
+              }
+            }
+            if (usable && added.length > 0) {
+              const initial = this.declaredValues.get(targetName);
+              const grew = initial !== undefined && this.widenRecord(initial, added);
+              if (!grew) usable = false;
+              else {
+                // A choice of two literals is widened in both: the fields the
+                // other arm wrote are added to each, so both are one layout.
+                const written = initial === undefined ? null : this.writtenRecordShape(initial);
+                if (written !== null) this.valueShapes.set(targetName, written);
+                else this.valueShapes.set(targetName, widened);
               }
             }
             if (usable) {
@@ -12896,6 +12998,7 @@ class TypeScriptParser {
     // body leaves a loop of that body, and one written around the arrow is a
     // loop the function the arrow lifted to is not inside.
     const savedTypes = this.valueTypes;
+    const savedDeclaredValues = this.declaredValues;
     const savedShapes = this.valueShapes;
     const savedClasses = this.valueClasses;
     const savedArrows = this.valueArrows;
@@ -12905,6 +13008,7 @@ class TypeScriptParser {
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
+    this.declaredValues = new Map(savedDeclaredValues);
     this.valueShapes = new Map(savedShapes);
     this.valueClasses = new Map(savedClasses);
     // The arrow body reads the names around it, and a name bound to an arrow is
@@ -13012,6 +13116,7 @@ class TypeScriptParser {
     // names are still in scope.
     const inferredReturnsShape = statedShape === null ? this.resultShapeOf(body) : null;
     this.valueTypes = savedTypes;
+    this.declaredValues = savedDeclaredValues;
     this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
     this.valueArrows = savedArrows;
@@ -19728,6 +19833,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     child.wideBigint = this.wideBigint;
     child.linked = this.linked;
     child.valueTypes = this.valueTypes;
+    child.declaredValues = this.declaredValues;
     // A template string interpolates a value the same file reads, and a list
     // another module offers is the shape its declaration names: the child
     // parser is that file's read and knows what the file's imports hold.
