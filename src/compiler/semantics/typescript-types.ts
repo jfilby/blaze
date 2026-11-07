@@ -115,13 +115,19 @@ export interface ResolvedField {
   type: ResolvedType;
   optional: boolean;
   /**
-   * The literal a field is declared as, where its annotation is one.
+   * The literals a field is declared as, where its annotation is one.
    *
    * A union of records is discriminated by a field such as `k: "buffer"`, and
    * the resolved type keeps only that the field is a text. The literal is what
    * a test `value.k === "buffer"` narrows the union by, so it is kept here.
    */
   literal?: string;
+  /**
+   * Every literal a field's annotation writes, as in `k: "buffer" | "sized"`.
+   * An intersection narrows a union by these, which is why the whole list is
+   * kept beside the one a simple tag writes.
+   */
+  literals?: readonly string[];
   /**
    * The names the field's annotation wrote that no declaration of the module
    * that wrote it holds.
@@ -741,6 +747,67 @@ function fieldOfTypeSeen(
   return null;
 }
 
+/** Every literal a field names, from its one literal or its list. */
+function literalsOf(field: ResolvedField | undefined): readonly string[] {
+  if (field === undefined) return [];
+  if (field.literals !== undefined) return field.literals;
+  return field.literal === undefined ? [] : [field.literal];
+}
+
+/** The fields of a record with the ones another record adds. */
+function withFields(fields: ReadonlyMap<string, ResolvedField>, add: ReadonlyMap<string, ResolvedField>): Map<string, ResolvedField> {
+  const merged = new Map(fields);
+  for (const [name, field] of add) if (!merged.has(name)) merged.set(name, field);
+  return merged;
+}
+
+/** The union record of a list of arms, with the fields they share. */
+function unionOfArms(arms: readonly ResolvedType[]): ResolvedType {
+  if (arms.length === 1) return arms[0] as ResolvedType;
+  const fields = new Map<string, ResolvedField>();
+  let index: ResolvedType | null = null;
+  for (const member of arms) {
+    if (member.kind !== "record") continue;
+    for (const [name, field] of member.fields) {
+      if (!fields.has(name)) fields.set(name, { ...field, optional: true });
+    }
+    if (member.index !== null) index = member.index;
+  }
+  return { kind: "record", fields, index, arms: [...arms] };
+}
+
+/**
+ * The intersection of two records.
+ *
+ * A tag field on one side keeps the arms of the other that write a literal the
+ * tag names: `DraftValue & { k: "buffer" | "sized" }` is the union of those two
+ * arms, not the whole union. A record with no arms is the fields of both, which
+ * is what an intersection of two plain records is.
+ */
+function intersectRecords(left: ResolvedType & { kind: "record" }, right: ResolvedType & { kind: "record" }): ResolvedType {
+  if (left.arms !== undefined) {
+    let tagName: string | null = null;
+    for (const [name, field] of right.fields) {
+      if (literalsOf(field).length === 0) continue;
+      tagName = name;
+      break;
+    }
+    if (tagName !== null) {
+      const allowed = literalsOf(right.fields.get(tagName));
+      const kept = left.arms.filter((arm) => {
+        if (arm.kind !== "record") return false;
+        return literalsOf(arm.fields.get(tagName)).some((literal) => allowed.includes(literal));
+      });
+      if (kept.length > 0) {
+        return unionOfArms(kept.map((arm) => arm.kind === "record" ? { ...arm, fields: withFields(arm.fields, right.fields) } : arm));
+      }
+    }
+    const fields = withFields(left.fields, right.fields);
+    return { ...left, fields, arms: left.arms.map((arm) => arm.kind === "record" ? { ...arm, fields: withFields(arm.fields, right.fields) } : arm) };
+  }
+  return { kind: "record", fields: withFields(left.fields, right.fields), index: left.index ?? right.index };
+}
+
 /** What an index read of a type answers, or null where the type names none. */
 export function elementOfType(table: TypeTable, base: ResolvedType): ResolvedType | null {
   if (base.kind === "list") return base.of;
@@ -883,14 +950,17 @@ class TypeText {
     let type = this.postfix();
     while (this.take("&")) {
       const right = this.postfix();
-      if (type.kind === "record" && right.kind === "record") {
-        const fields = new Map(type.fields);
-        for (const [name, field] of right.fields) {
-          if (!fields.has(name)) fields.set(name, field);
-        }
-        type = { kind: "record", fields, index: type.index ?? right.index };
-      } else if (type.kind === "any") {
-        type = right;
+      // A name stands for the record it declares: `DraftValue & { k: "view" }`
+      // is the union DraftValue with the arms the tag names, which is what a
+      // field only those arms write is read through.
+      const left = this.resolveNamedMember(type);
+      const other = this.resolveNamedMember(right);
+      if (left.kind === "record" && other.kind === "record") {
+        type = intersectRecords(left, other);
+      } else if (left.kind === "any") {
+        type = other;
+      } else {
+        type = left;
       }
     }
     return type;
@@ -1120,14 +1190,46 @@ class TypeText {
       if (optional) rest = rest.slice(1).trim();
       if (!rest.startsWith(":")) continue;
       const type = rest.slice(1).trim();
-      const literal = this.fieldLiteral(type);
+      const literals = this.fieldLiterals(type);
       fields.set(name[0], {
         type: resolveTypeText(this.table, type, this.params, this.seen),
         optional,
-        ...(literal === null ? {} : { literal }),
+        ...(literals === null ? {} : {
+          literal: literals.length === 1 ? literals[0] as string : undefined,
+          literals,
+        }),
       });
     }
     return { kind: "record", fields, index };
+  }
+
+  /** The literals a field annotation writes, where every member is one. */
+  private fieldLiterals(text: string): string[] | null {
+    const parts: string[] = [];
+    let depth = 0;
+    let quote = "";
+    let start = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index] as string;
+      if (quote !== "") {
+        if (char === quote && text[index - 1] !== "\\") quote = "";
+        continue;
+      }
+      if (char === "'" || char === '"' || char === "`") {
+        quote = char;
+        continue;
+      }
+      if (char === "{" || char === "(" || char === "[" || char === "<") depth += 1;
+      else if (char === "}" || char === ")" || char === "]" || char === ">") depth -= 1;
+      else if (char === "|" && depth === 0) {
+        parts.push(text.slice(start, index));
+        start = index + 1;
+      }
+    }
+    parts.push(text.slice(start));
+    const literals = parts.map((part) => this.fieldLiteral(part.trim()));
+    if (literals.some((one) => one === null)) return null;
+    return literals as string[];
   }
 
   /** The text a field annotation writes, where it writes one literal. */

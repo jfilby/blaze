@@ -550,10 +550,16 @@ function typeofName(type: TypeExpr): string {
   }
 }
 
+/** Whether a field's annotation names the literal. */
+function fieldHasLiteral(field: ResolvedField | undefined, literal: string): boolean {
+  if (field === undefined) return false;
+  return field.literal === literal || (field.literals?.includes(literal) ?? false);
+}
+
 /** The arm of a union whose tag field writes the literal, or null. */
 function armWithTag(shape: ResolvedType & { kind: "record" }, field: string, literal: string): ResolvedType | null {
   const arm = shape.arms?.find(
-    (one) => one.kind === "record" && one.fields.get(field)?.literal === literal,
+    (one) => one.kind === "record" && fieldHasLiteral(one.fields.get(field), literal),
   );
   return arm ?? null;
 }
@@ -569,7 +575,7 @@ function armWithTag(shape: ResolvedType & { kind: "record" }, field: string, lit
 function withoutTag(shape: ResolvedType & { kind: "record" }, field: string, literal: string): ResolvedType | null {
   const arms = shape.arms ?? [];
   const rest = arms.filter(
-    (one) => !(one.kind === "record" && one.fields.get(field)?.literal === literal),
+    (one) => !(one.kind === "record" && fieldHasLiteral(one.fields.get(field), literal)),
   );
   if (rest.length === 0 || rest.length === arms.length) return null;
   if (rest.length === 1) return rest[0] as ResolvedType;

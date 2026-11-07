@@ -1017,6 +1017,22 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gb. An intersection with a tag narrows a union to its arms
+
+    private buffer(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
+      const held = value.held;
+      ...
+      values: held.values.map((item) => this.value(item, element, line)),
+
+The type is a union narrowed to the three kinds of block, and the read kept the
+whole union: `value.held` was the first arm's `held` — a number, not the array
+the three arms hold — so `held.values` was a field of nothing. The intersection
+of a union with a tag now keeps the arms whose field writes a literal the tag
+names, and the tag may name several (`"buffer" | "sized" | "view"`). A field
+those arms share is read through them, and the resolver's `buffer` reads whole.
+
+    The total went from 88 to 87.
+
 ### 4ga. A callback declared below the arrow that uses it
 
     const walk = (items: string[]): void => { items.forEach(value); };
@@ -4244,7 +4260,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-88 refusals over 95 sources, 73 of them read whole. The report reads the
+87 refusals over 95 sources, 73 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4455,6 +4471,7 @@ What was closed this session, and what each was worth:
 | a map spread into a list is its entries (§4fy) | 94 → 91 |
 | a union narrows by its tag field (§4fz) | 91 → 90 |
 | a callback declared below the arrow that uses it (§4ga) | 90 → 88 |
+| an intersection with a tag narrows a union to its arms (§4gb) | 88 → 87 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

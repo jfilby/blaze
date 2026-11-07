@@ -3582,6 +3582,30 @@ test("a union narrows by its tag field", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("an intersection with a tag narrows a union to its arms", () => {
+  // `Value & { k: "view" }` is the union's view arm, and the field only that
+  // arm writes is read through it. A tag that names several arms keeps them
+  // all, which is the `DraftValue & { k: "buffer" | "sized" | "view" }` the
+  // resolver's own array reader is written at.
+  const source = [
+    "interface Literal { k: `literal`; held: { text: string } }",
+    "interface View { k: `view`; held: { values: number[] } }",
+    "interface Sized { k: `sized`; held: { values: number[] } }",
+    "type Value = Literal | View | Sized;",
+    "export function one(value: Value & { k: `view` }): number {",
+    "  const held = value.held;",
+    "  return held.values.length;",
+    "}",
+    "export function many(value: Value & { k: `view` | `sized` }): number {",
+    "  const held = value.held;",
+    "  return held.values.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the
