@@ -378,6 +378,15 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * epoch, as the language fixes it: a text that is not a date answers NaN.
    */
   "Date.parse": { params: [TEXT], returns: F64, arity: 1 },
+  /**
+   * The POSIX path operations `posix` names: the directory part of a path, the
+   * path with its `.` and `..` parts resolved, and two paths joined. The
+   * compiler reads its own imports through them, and a path is a text the
+   * runtime writes.
+   */
+  "posix.dirname": { params: [TEXT], returns: TEXT, arity: 1 },
+  "posix.normalize": { params: [TEXT], returns: TEXT, arity: 1 },
+  "posix.join": { params: [TEXT, TEXT], returns: TEXT, arity: 2 },
   /** `Promise.reject(message)` answers a promise that has already failed. */
   "Promise.reject": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
   /**

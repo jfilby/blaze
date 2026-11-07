@@ -1115,6 +1115,30 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Returns a borrowed string: the value the environment sets the name to, and the empty string where it sets nothing. The string is owned by the environment and is valid for the life of the process.",
     { tags: ["host"] },
   ),
+  entry(
+    "blaze_rt_path_dirname",
+    "const char*",
+    [["path", "const char*"]],
+    "The directory part of a POSIX path.",
+    "Returns a managed string: everything up to the last separator, '.' where the path names no directory, and '/' for a path directly under the root.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_path_normalize",
+    "const char*",
+    [["path", "const char*"]],
+    "A POSIX path with its '.' and '..' parts resolved.",
+    "Returns a managed string: repeated separators collapsed, '.' parts dropped, '..' parts cancelling the part before them where there is one, and a trailing separator removed unless the path is the root.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_path_join",
+    "const char*",
+    [["left", "const char*"], ["right", "const char*"]],
+    "Two POSIX paths joined.",
+    "Returns a managed string: the two paths joined by a separator and normalized as one path.",
+    { tags: ["host"] },
+  ),
   entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
   entry("blaze_rt_array_get", "double", [["array", "double"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
   entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
@@ -5533,6 +5557,146 @@ const char* blaze_rt_env_get(const char* name) {
   if (name == NULL) return "";
   const char* value = getenv(name);
   return value == NULL ? "" : value;
+}
+
+/* POSIX path work. A path is the text the source wrote, and the three
+   operations answer the managed text the language reads a path as. */
+
+/* The path with its empty, '.' and '..' parts resolved, written into OUT,
+   which holds at least strlen(PATH) + 2 bytes. Answers how many bytes it
+   wrote. */
+static size_t blaze_path_normalize_into(const char* path, char* out) {
+  const size_t length = strlen(path);
+  size_t* starts = (size_t*)malloc(sizeof(size_t) * (length + 2));
+  size_t* sizes = (size_t*)malloc(sizeof(size_t) * (length + 2));
+  const int absolute = length > 0 && path[0] == '/';
+  size_t count = 0;
+  size_t used = 0;
+  if (absolute) out[used++] = '/';
+  const char* at = path;
+  while (*at) {
+    while (*at == '/') at += 1;
+    if (*at == '\0') break;
+    const char* end = at;
+    while (*end != '\0' && *end != '/') end += 1;
+    const size_t part = (size_t)(end - at);
+    if (part == 1 && at[0] == '.') {
+      at = end;
+      continue;
+    }
+    if (part == 2 && at[0] == '.' && at[1] == '.') {
+      const int previousIsParent = count > 0 &&
+        sizes[count - 1] == 2 &&
+        out[starts[count - 1]] == '.' &&
+        out[starts[count - 1] + 1] == '.';
+      if (count > 0 && !previousIsParent) {
+        used = starts[count - 1];
+        if (used > (absolute ? 1 : 0)) used -= 1;
+        count -= 1;
+      } else if (!absolute) {
+        if (used > 0) out[used++] = '/';
+        starts[count] = used;
+        out[used++] = '.';
+        out[used++] = '.';
+        sizes[count] = 2;
+        count += 1;
+      }
+      at = end;
+      continue;
+    }
+    if (used > (absolute ? 1 : 0)) out[used++] = '/';
+    starts[count] = used;
+    memcpy(out + used, at, part);
+    used += part;
+    sizes[count] = part;
+    count += 1;
+    at = end;
+  }
+  /* A path written with a trailing separator keeps one: normalize("a/b/")
+     is "a/b/", and normalize("a/../") is "./". The root is the one path that
+     is written once however many separators reach it. */
+  const int trailing = length > 0 && path[length - 1] == '/';
+  if (count == 0) {
+    if (absolute) {
+      used = 1;
+      out[0] = '/';
+    } else {
+      used = 0;
+      out[used++] = '.';
+      if (trailing) out[used++] = '/';
+    }
+  } else if (trailing) {
+    out[used++] = '/';
+  }
+  out[used] = '\0';
+  free(starts);
+  free(sizes);
+  return used;
+}
+
+const char* blaze_rt_path_normalize(const char* path) {
+  if (path == NULL) path = "";
+  const size_t length = strlen(path);
+  char* out = (char*)malloc(length + 2);
+  const size_t used = blaze_path_normalize_into(path, out);
+  const char* answer = blaze_rt_string_new((const unsigned char*)out, used);
+  free(out);
+  return answer;
+}
+
+const char* blaze_rt_path_dirname(const char* path) {
+  if (path == NULL || path[0] == '\0') return blaze_rt_string_new((const unsigned char*)".", 1);
+  const int hasRoot = path[0] == '/';
+  const int length = (int)strlen(path);
+  /* The last separator that is followed by a part, as the language finds it:
+     a run of trailing separators names no part of its own, and "a//b" keeps
+     the separator before "b" in the directory it answers. */
+  int end = -1;
+  int matchedSlash = 1;
+  for (int at = length - 1; at >= 1; at -= 1) {
+    if (path[at] == '/') {
+      if (!matchedSlash) {
+        end = at;
+        break;
+      }
+    } else {
+      matchedSlash = 0;
+    }
+  }
+  if (end == -1) {
+    return hasRoot
+      ? blaze_rt_string_new((const unsigned char*)"/", 1)
+      : blaze_rt_string_new((const unsigned char*)".", 1);
+  }
+  /* Two root separators are kept, which the language writes as the directory
+     of a path directly under a double root: dirname("//a") is "//". */
+  if (hasRoot && end == 1) return blaze_rt_string_new((const unsigned char*)"//", 2);
+  return blaze_rt_string_new((const unsigned char*)path, (size_t)end);
+}
+
+const char* blaze_rt_path_join(const char* left, const char* right) {
+  if (left == NULL) left = "";
+  if (right == NULL) right = "";
+  const size_t leftLength = strlen(left);
+  const size_t rightLength = strlen(right);
+  char* combined = (char*)malloc(leftLength + rightLength + 2);
+  size_t used = 0;
+  if (leftLength > 0) {
+    memcpy(combined, left, leftLength);
+    used = leftLength;
+  }
+  if (rightLength > 0) {
+    if (used > 0) combined[used++] = '/';
+    memcpy(combined + used, right, rightLength);
+    used += rightLength;
+  }
+  combined[used] = '\0';
+  char* out = (char*)malloc(used + 2);
+  const size_t written = blaze_path_normalize_into(combined, out);
+  const char* answer = blaze_rt_string_new((const unsigned char*)out, written);
+  free(combined);
+  free(out);
+  return answer;
 }
 
 double blaze_rt_file_read(const char* path, const char* mode) {

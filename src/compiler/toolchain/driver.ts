@@ -1105,6 +1105,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // hands back the text it is set to, empty where it is not set at all.
       case "process.env":
         return `${RUNTIME_NAME}_env_get(${argument(0)})`;
+      case "posix.dirname":
+        return `${RUNTIME_NAME}_path_dirname(${argument(0)})`;
+      case "posix.normalize":
+        return `${RUNTIME_NAME}_path_normalize(${argument(0)})`;
+      case "posix.join":
+        return `${RUNTIME_NAME}_path_join(${argument(0)}, ${argument(1)})`;
       case "hasher.update":
         return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${RUNTIME_NAME}_to_text(${argument(1)}))`;
       case "hasher.update.digest":

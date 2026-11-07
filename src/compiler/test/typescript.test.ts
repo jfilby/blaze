@@ -3500,6 +3500,26 @@ test("typeof of a union of shapes is asked at run time", () => {
   assert.match(body, /text\.slice/);
 });
 
+test("the path namespace is read as the runtime's POSIX path work", () => {
+  // `posix.dirname`, `posix.join` and `posix.normalize` are the three path
+  // operations the compiler reads its own imports through. They are calls of
+  // the runtime's POSIX path work, not methods of a value the read cannot type.
+  const source = [
+    "export function read(path: string): string {",
+    "  return posix.normalize(posix.join(posix.dirname(path), `x`));",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => one.message).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "read")?.handle;
+  assert.ok(handle !== undefined, "read is a function of the module");
+  const body = JSON.stringify(handle);
+  assert.match(body, /posix\.dirname/);
+  assert.match(body, /posix\.join/);
+  assert.match(body, /posix\.normalize/);
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

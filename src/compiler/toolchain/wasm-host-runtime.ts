@@ -122,6 +122,9 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_md5_digest",
   "blaze_rt_file_read",
   "blaze_rt_env_get",
+  "blaze_rt_path_dirname",
+  "blaze_rt_path_normalize",
+  "blaze_rt_path_join",
 ];
 
 /**
@@ -532,6 +535,52 @@ function formatNumberPrecision(value, digits) {
   if (!Number.isFinite(value)) return formatNumber(value);
   const wanted = digits < 1 ? 1 : digits > 100 ? 100 : digits;
   return value.toPrecision(wanted);
+}
+
+/* POSIX path work, the twin of the C runtime's: a path is the text the source
+   wrote, and the three operations answer the text the language reads it as. */
+function pathNormalize(path) {
+  const absolute = path.startsWith("/");
+  const trailing = path.endsWith("/");
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+      else if (!absolute) parts.push("..");
+      continue;
+    }
+    parts.push(part);
+  }
+  if (parts.length === 0) return absolute ? "/" : trailing ? "./" : ".";
+  const joined = (absolute ? "/" : "") + parts.join("/");
+  return trailing ? joined + "/" : joined;
+}
+
+function pathDirname(path) {
+  if (path === "") return ".";
+  const hasRoot = path.startsWith("/");
+  let end = -1;
+  let matchedSlash = true;
+  for (let at = path.length - 1; at >= 1; at -= 1) {
+    if (path[at] === "/") {
+      if (!matchedSlash) {
+        end = at;
+        break;
+      }
+    } else {
+      matchedSlash = false;
+    }
+  }
+  if (end === -1) return hasRoot ? "/" : ".";
+  if (hasRoot && end === 1) return "//";
+  return path.slice(0, end);
+}
+
+function pathJoin(left, right) {
+  if (left === "") return pathNormalize(right);
+  if (right === "") return pathNormalize(left);
+  return pathNormalize(left + "/" + right);
 }
 
 function writeOut(bytes) {
@@ -1131,6 +1180,32 @@ export function blaze_rt_env_get(name) {
   const variable = new TextDecoder().decode(textBytes(name));
   const value = globalThis.process !== undefined ? globalThis.process.env[variable] : undefined;
   return makeText(typeof value === "string" ? value : "");
+}
+`,
+  },
+  {
+    service: "blaze_rt_path_dirname",
+    source: `
+export function blaze_rt_path_dirname(path) {
+  return makeText(pathDirname(new TextDecoder().decode(textBytes(path))));
+}
+`,
+  },
+  {
+    service: "blaze_rt_path_normalize",
+    source: `
+export function blaze_rt_path_normalize(path) {
+  return makeText(pathNormalize(new TextDecoder().decode(textBytes(path))));
+}
+`,
+  },
+  {
+    service: "blaze_rt_path_join",
+    source: `
+export function blaze_rt_path_join(left, right) {
+  const first = new TextDecoder().decode(textBytes(left));
+  const second = new TextDecoder().decode(textBytes(right));
+  return makeText(pathJoin(first, second));
 }
 `,
   },

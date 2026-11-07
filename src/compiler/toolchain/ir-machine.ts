@@ -10540,6 +10540,30 @@ class Machine {
       this.callSymbol("blaze_rt_date_parse", [text], NUMBER);
       return;
     }
+    if (call.callee === "posix.dirname" && argument !== undefined) {
+      this.at(argument, TEXT);
+      const text = this.hold(TEXT, "blaze_path_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_path_dirname", [text], TEXT);
+      return;
+    }
+    if (call.callee === "posix.normalize" && argument !== undefined) {
+      this.at(argument, TEXT);
+      const text = this.hold(TEXT, "blaze_path_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_path_normalize", [text], TEXT);
+      return;
+    }
+    if (call.callee === "posix.join" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const left = this.hold(TEXT, "blaze_path_left");
+      this.store(left);
+      this.at(call.args[1], TEXT);
+      const right = this.hold(TEXT, "blaze_path_right");
+      this.store(right);
+      this.callSymbol("blaze_rt_path_join", [left, right], TEXT);
+      return;
+    }
     if (call.callee === "JSON.parse" && argument !== undefined) {
       const text = this.dynamicArgument(argument);
       this.callSymbol("blaze_rt_json_parse", [text], NUMBER);

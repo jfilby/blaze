@@ -1728,6 +1728,77 @@ proc blaze_rt_env_get*(name: cstring): cstring {.exportc, cdecl.} =
     ""
   else:
     value
+
+proc blazePathManaged(text: string): cstring =
+  ## The text as the managed string the runtime hands a caller.
+  if text.len == 0:
+    return blaze_rt_string_new(nil, 0)
+  blaze_rt_string_new(unsafeAddr text[0], csize_t(text.len))
+
+proc blazePathNormalize(path: string): string =
+  ## The path with its empty, '.' and '..' parts resolved. A trailing
+  ## separator is kept, as the language keeps it: normalize("a/b/") is "a/b/"
+  ## and normalize("a/../") is "./".
+  let absolute = path.len > 0 and path[0] == '/'
+  let trailing = path.len > 0 and path[^1] == '/'
+  var parts: seq[string] = @[]
+  for part in path.split('/'):
+    if part.len == 0 or part == ".":
+      continue
+    if part == "..":
+      if parts.len > 0 and parts[^1] != "..":
+        parts.setLen(parts.len - 1)
+      elif not absolute:
+        parts.add("..")
+      continue
+    parts.add(part)
+  if parts.len == 0:
+    if absolute:
+      return "/"
+    return if trailing: "./" else: "."
+  let joined = parts.join("/")
+  let text = if absolute: "/" & joined else: joined
+  if trailing: text & "/" else: text
+
+proc blazePathDirname(path: string): string =
+  ## The directory of a path, found the way the language finds it: a run of
+  ## trailing separators names no part of its own, and "a//b" keeps the
+  ## separator before "b" in the directory it answers.
+  if path.len == 0:
+    return "."
+  let hasRoot = path[0] == '/'
+  var ending = -1
+  var matchedSlash = true
+  var at = path.len - 1
+  while at >= 1:
+    if path[at] == '/':
+      if not matchedSlash:
+        ending = at
+        break
+    else:
+      matchedSlash = false
+    at -= 1
+  if ending == -1:
+    return if hasRoot: "/" else: "."
+  if hasRoot and ending == 1:
+    return "//"
+  path[0 ..< ending]
+
+proc blaze_rt_path_dirname*(path: cstring): cstring {.exportc, cdecl.} =
+  let text = if path == nil: "" else: $path
+  blazePathManaged(blazePathDirname(text))
+
+proc blaze_rt_path_normalize*(path: cstring): cstring {.exportc, cdecl.} =
+  let text = if path == nil: "" else: $path
+  blazePathManaged(blazePathNormalize(text))
+
+proc blaze_rt_path_join*(left: cstring, right: cstring): cstring {.exportc, cdecl.} =
+  let first = if left == nil: "" else: $left
+  let second = if right == nil: "" else: $right
+  let combined = if first.len == 0: blazePathNormalize(second)
+    elif second.len == 0: blazePathNormalize(first)
+    else: blazePathNormalize(first & "/" & second)
+  blazePathManaged(combined)
 `;
 }
 

@@ -247,7 +247,7 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
  * A namespace is a namespace and not a value: nothing reads one, and a call of
  * one is the only thing that may be written of it.
  */
-const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date", "Promise"]);
+const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date", "Promise", "posix"]);
 
 
 /** Statements the parser reads to the end of the statement and reports. */

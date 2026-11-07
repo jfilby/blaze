@@ -1017,6 +1017,27 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fw. The path namespace the compiler reads its own imports through
+
+    return posix.normalize(posix.join(posix.dirname(from), candidate));
+
+The module graph resolves an import against the file it names, and it does that
+path work through the POSIX namespace: the directory of the importing file, the
+candidate joined to it, and the `..` parts resolved. A call of `posix.dirname`
+was a method of a value the read could not type, so `semantics/module-graph.ts`
+was refused over it. The namespace is now read as the runtime's path work —
+`posix.dirname`, `posix.join` and `posix.normalize` — and the runtime answers
+the POSIX write of each: the directory part (a double root keeps both
+separators, and a run of trailing separators names no part), the path joined and
+normalized, and a trailing separator kept where the source wrote one. The C
+runtime, the Nim adapter and the WebAssembly host answer the same text, and the
+C runtime's answers are compared to the host's own `path.posix` for the
+boundaries.
+
+`semantics/module-graph.ts` reads whole.
+
+    The total went from 98 to 97.
+
 ### 4fv. A block the file allocates at the top is typed by its constructor
 
     const FLOAT_BYTES = new DataView(new ArrayBuffer(8));
@@ -4148,7 +4169,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-98 refusals over 95 sources, 68 of them read whole. The report reads the
+97 refusals over 95 sources, 69 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4354,6 +4375,7 @@ What was closed this session, and what each was worth:
 | a union asks the kind of the value it holds (§4ft) | 103 → 102 |
 | a splice writes the field a chain of fields names (§4fu) | 102 → 101 |
 | a block the file allocates at the top is typed by its constructor (§4fv) | 101 → 98 |
+| the path namespace the compiler reads its own imports through (§4fw) | 98 → 97 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { writeProject } from "./project.ts";
 import { runBuild } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
@@ -98,6 +98,39 @@ test("every runtime the ABI describes is implemented on both sides of the bounda
     assert.ok(standalone.includes(`${item.symbol}(`), `${item.symbol} must be implemented by the compiler runtime`);
     assert.ok(adapter.includes(`proc ${item.symbol}*(`), `${item.symbol} must be implemented by the Nim adapter`);
   }
+});
+
+test("the path functions resolve a POSIX path the way the host does", async () => {
+  // `posix.dirname`, `posix.join` and `posix.normalize` are the path work the
+  // compiler does on its own imports. The host's own POSIX implementation is
+  // what the answers are compared to.
+  const root = await scratch("blaze-path-");
+  const plain = join(root, "plain");
+  await mkdir(plain);
+  await writeFile(join(plain, "blaze_rt.h"), runtimeHeaderSource(), "utf8");
+  await writeFile(join(plain, "blaze_rt.c"), runtimeSourceSource(), "utf8");
+  const dirs = ["/a/b/c", "a/b/", "a", "/", "", "//a", "/a/b//"];
+  const normals = ["a//b/./../c/", "/../x", "", "..", "../a", "/a/../../b", "a/.."];
+  const joins: [string, string][] = [["/a/b", "d/../e"], ["", ""], ["a", ""], ["", "a"], ["a/", "/b"], ["a", ".."]];
+  const calls: string[] = [];
+  for (const path of dirs) calls.push(`  printf("D%s\\n", blaze_rt_path_dirname("${path}"));`);
+  for (const path of normals) calls.push(`  printf("N%s\\n", blaze_rt_path_normalize("${path}"));`);
+  for (const [left, right] of joins) calls.push(`  printf("J%s\\n", blaze_rt_path_join("${left}", "${right}"));`);
+  await writeFile(
+    join(plain, "paths.c"),
+    ['#include <stdio.h>', '#include "blaze_rt.h"', "int main(void) {", "  blaze_rt_initialize();", ...calls, "  return 0;", "}", ""].join("\n"),
+    "utf8",
+  );
+  const built = run("gcc", ["-std=c11", "-O2", "-o", "paths", "paths.c", "blaze_rt.c", "-lm"], { cwd: plain, timeoutMs: 120_000 });
+  assert.equal(built.code, 0, built.stderr);
+  const delivered = run(join(plain, "paths"), [], { cwd: plain });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  const expected = [
+    ...dirs.map((path) => `D${posix.dirname(path)}`),
+    ...normals.map((path) => `N${posix.normalize(path)}`),
+    ...joins.map(([left, right]) => `J${posix.join(left, right)}`),
+  ];
+  assert.deepEqual(delivered.stdout.trim().split("\n"), expected);
 });
 
 test("a danger runtime still answers the ABI where its own arithmetic would not", async () => {

@@ -283,6 +283,12 @@ function builtinExpression(name: string, args: string[]): string {
       // A date text read back to the milliseconds it names since the epoch,
       // NaN where the text names none, which is the runtime's own reading.
       return `${RUNTIME_NAME}_date_parse(${args[0]})`;
+    case "posix.dirname":
+      return `${RUNTIME_NAME}_path_dirname(${args[0]})`;
+    case "posix.normalize":
+      return `${RUNTIME_NAME}_path_normalize(${args[0]})`;
+    case "posix.join":
+      return `${RUNTIME_NAME}_path_join(${args[0]}, ${args[1]})`;
     case "process.hrtime.bigint":
       // The reading is the runtime's, and it is a whole number of nanoseconds:
       // a duration measured over two readings is the difference of two whole

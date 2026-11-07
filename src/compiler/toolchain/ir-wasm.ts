@@ -3541,6 +3541,22 @@ class Body {
         this.callService("blaze_rt_date_parse");
         return F64_TYPE;
       }
+      case "posix.dirname": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_path_dirname");
+        return TEXT;
+      }
+      case "posix.normalize": {
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_path_normalize");
+        return TEXT;
+      }
+      case "posix.join": {
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_path_join");
+        return TEXT;
+      }
       case "JSON.typeof": {
         // The name `typeof` answers for a value the read could not type: the
         // value goes down as the handle or the number it is, and the host
