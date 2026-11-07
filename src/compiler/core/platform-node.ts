@@ -18,7 +18,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
-  open,
+  open as nodeOpen,
   readFile,
   readdir as nodeReaddir,
   rename,
@@ -60,7 +60,6 @@ export {
   join,
   mkdir,
   mkdtemp,
-  open,
   parseArgs,
   posix,
   randomUUID,
@@ -95,6 +94,22 @@ export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
 /** What a file is: its size in bytes, and whether it is a file or a directory. */
 export async function stat(path: string): Promise<FileInfo> {
   return nodeStat(path);
+}
+
+/**
+ * A file the compiler opened, and the two things it does with it: writes it
+ * through to the disk and closes it. The shape is the compiler's own, so a
+ * native implementation answers the same two methods without carrying the
+ * host's file handle.
+ */
+export interface FileHandle {
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Opens a file as the handle above, whatever the host's own handle is. */
+export async function open(path: string, mode: string): Promise<FileHandle> {
+  return nodeOpen(path, mode) as unknown as Promise<FileHandle>;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -3639,6 +3639,23 @@ test("an any callback takes the element the method hands it", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a file handle's two methods are read through the host boundary", () => {
+  // `open` answers the compiler's own handle, whose two methods are the ones
+  // `json-store` writes: `await handle.sync()` and `await handle.close()` are
+  // interface methods, not methods of a host type the read cannot see.
+  const source = [
+    "interface FileHandle { sync(): Promise<void>; close(): Promise<void>; }",
+    "declare function open(path: string, mode: string): Promise<FileHandle>;",
+    "export async function sync(path: string): Promise<void> {",
+    "  const handle = await open(path, `r`);",
+    "  try { await handle.sync(); } finally { await handle.close(); }",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

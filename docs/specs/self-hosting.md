@@ -1017,6 +1017,20 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ge. A file the compiler opens is the compiler's own handle
+
+    const handle = await open(path, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+
+`open` was re-exported from the host, so the handle it answered was a host type
+the read could not see, and `sync` and `close` were methods of nothing. The
+platform layer now declares the handle the compiler holds, with those two
+methods, and opens a file as that handle; the host's own handle is what is
+behind it. `core/json-store.ts` reads two refusals shorter (the file still has
+the JSON indent and the shared counter).
+
+    The total went from 85 to 83.
+
 ### 4gd. A callback annotated `any` takes the element the method hands it
 
     const candidate = Object.values(this.objects).find((item: any) =>
@@ -4291,7 +4305,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-85 refusals over 95 sources, 74 of them read whole. The report reads the
+83 refusals over 95 sources, 74 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4505,6 +4519,7 @@ What was closed this session, and what each was worth:
 | an intersection with a tag narrows a union to its arms (§4gb) | 88 → 87 |
 | a map value read through a fallback keeps its fields (§4gc) | 87 → 86 |
 | a callback annotated `any` takes the element the method hands it (§4gd) | 86 → 85 |
+| a file the compiler opens is the compiler's own handle (§4ge) | 85 → 83 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
