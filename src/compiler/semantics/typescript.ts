@@ -3350,6 +3350,12 @@ class TypeScriptParser {
    * beside the type it was read from.
    */
   private declaredParamShapes = new Map<string, readonly (ResolvedType | null)[]>();
+  /** The type parameters a generic function declares, by the name it has. */
+  private declaredTypeParameters = new Map<string, ReadonlySet<string>>();
+  /** The result annotation of a function, where it is one name. */
+  private declaredReturnSingle = new Map<string, string | null>();
+  /** Each parameter's annotation, where it is one name. */
+  private declaredParamSingle = new Map<string, readonly (string | null)[]>();
   /**
    * Whether the expression being read is the initialiser of a declaration, and
    * so may be an arrow that is only ever called by the name it is bound to.
@@ -4209,7 +4215,11 @@ class TypeScriptParser {
         }
         const declared = this.declaredReturnShapes.get(value.name);
         if (declared !== undefined) {
-          shape = declared;
+          // A function that answers the type of one of its parameters hands
+          // that argument back: `substituteShallow<T>(node: T, ...)` is the
+          // node it was given, and the shape the node holds is the answer's.
+          const handed = this.typeParameterAnswer(value);
+          shape = handed === null ? declared : handed.shape;
           break;
         }
         const answer = this.valueTypeOf(value);
@@ -5851,8 +5861,12 @@ class TypeScriptParser {
       const name = tokens[at + 1] as Token | undefined;
       if (name === undefined || name.kind !== "ident") continue;
       let open = at + 2;
+      const typeParameters = new Set<string>();
       if (text(open) === "<") {
-        // The erased type parameters of a generic function.
+        // The erased type parameters of a generic function. A function that
+        // answers one of them hands back the argument written at it, which is
+        // what a call of `identity<T>(value: T): T` is: the names are kept so
+        // the call's answer can be read at the argument.
         let angles = 0;
         let closed = -1;
         for (let scan = open; scan < tokens.length; scan += 1) {
@@ -5864,6 +5878,8 @@ class TypeScriptParser {
               closed = scan;
               break;
             }
+          } else if (angles === 1 && tokens[scan]?.kind === "ident") {
+            typeParameters.add(piece);
           }
         }
         if (closed < 0) continue;
@@ -5874,6 +5890,7 @@ class TypeScriptParser {
       if (close < 0) continue;
       const params: TypeExpr[] = [];
       const paramShapes: (ResolvedType | null)[] = [];
+      const paramSingles: (string | null)[] = [];
       // The parameter list, split at the commas of its own depth. A type
       // argument's comma is inside the angle brackets of the type.
       let segment = open + 1;
@@ -5910,17 +5927,21 @@ class TypeScriptParser {
         if (text(index) !== ":") {
           params.push(ANY_TYPE);
           paramShapes.push(null);
+          paramSingles.push(null);
           continue;
         }
         index += 1;
         const finish = Math.min(end, this.typeTokensEnd(index, PARAMETER_TYPE_STOPS));
+        const single = finish === index + 1 && tokens[index]?.kind === "ident" ? (tokens[index] as Token).text : null;
         try {
           const shape = resolveAnnotation(tokens, index, finish, this.typeTable);
           params.push(this.typeExprOfShape(shape));
           paramShapes.push(shape);
+          paramSingles.push(single);
         } catch {
           params.push(ANY_TYPE);
           paramShapes.push(null);
+          paramSingles.push(null);
         }
       }
       // A parameter written as a pattern binds names this scan does not read,
@@ -5929,7 +5950,9 @@ class TypeScriptParser {
       if (readable) {
         this.declaredParams.set(name.text, params);
         this.declaredParamShapes.set(name.text, paramShapes);
+        this.declaredParamSingle.set(name.text, paramSingles);
       }
+      if (typeParameters.size > 0) this.declaredTypeParameters.set(name.text, typeParameters);
       // The result type follows the parameter list: `: T` up to the body, or up
       // to the semicolon of an overload.
       let after = close + 1;
@@ -5939,6 +5962,10 @@ class TypeScriptParser {
       // is, which is the same read `skipFunctionBody` makes of a signature.
       const finish = this.typeTokensEnd(after, FUNCTION_BODY_STOPS);
       const last = text(finish);
+      this.declaredReturnSingle.set(
+        name.text,
+        finish === after + 1 && tokens[after]?.kind === "ident" ? (tokens[after] as Token).text : null,
+      );
       if (last !== "{" && last !== ";" && last !== "=" && finish < tokens.length && tokens[finish]?.kind !== "end") {
         // The declaration ends in a way this scan does not know: leave the
         // signature to the read of the declaration itself.
@@ -13316,7 +13343,14 @@ class TypeScriptParser {
     // A method this frontend has no reading of is a method of a class, and the
     // class is what says what it is.
     const sequence = this.valueTypeOf(receiver);
-    const elements = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+    let elements = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+    // A list another module offers is the shape its declaration names, and its
+    // contract type erases to the reference: `HOST_SERVICES.map(...)` is a list
+    // of the service the exported annotation writes.
+    if (elements === null) {
+      const shape = this.shapeOf(receiver);
+      if (shape !== null && shape.kind === "list") elements = this.typeExprOfShape(shape.of);
+    }
     // `for (const [index, element] of list.entries())` names the two parts of
     // an entry. A pair is not an element a typed array holds, so the loop walks
     // the list by position and this marks the expression it read.
@@ -14255,6 +14289,31 @@ class TypeScriptParser {
     }
   }
 
+  /**
+   * The value a call of a function that answers the type of one of its
+   * parameters answers.
+   *
+   * `substituteShallow<T>(node: T, scope: Scope): T` is the node it was given,
+   * and a compiled function cannot spell a type parameter: the answer is read
+   * at the argument the source wrote at that parameter, which is the value the
+   * call hands back.
+   */
+  private typeParameterAnswer(value: Expression & { k: "call" }): { type: TypeExpr; shape: ResolvedType } | null {
+    // A signature the scan did not keep a type-parameter list for is no
+    // identity: a name it erased is a name this cannot say anything about.
+    const parameters = this.declaredTypeParameters.get(value.name);
+    if (parameters === undefined || parameters.size === 0) return null;
+    const answer = this.declaredReturnSingle.get(value.name);
+    if (answer === null || answer === undefined || !parameters.has(answer)) return null;
+    const singles = this.declaredParamSingle.get(value.name);
+    if (singles === undefined) return null;
+    const at = singles.findIndex((single) => single === answer);
+    if (at < 0) return null;
+    const written = value.args[at];
+    if (written === undefined) return null;
+    return { type: this.valueTypeOf(written), shape: this.shapeOf(written) ?? { kind: "any" } };
+  }
+
   private valueTypeOf(value: Expression): TypeExpr {
     const recorded = this.expressionTypes.get(value);
     if (recorded !== undefined) return recorded;
@@ -14319,6 +14378,10 @@ class TypeScriptParser {
       // declaration states is the payload the promise carries, which is what
       // `await` reads out of it.
       if (this.promiseFunctions.has(value.name)) return { kind: "ref", of: null };
+      // A function that answers the type of one of its parameters answers the
+      // argument written at it.
+      const handed = this.typeParameterAnswer(value);
+      if (handed !== null) return handed.type;
       const declared = this.declaredReturns.get(value.name);
       if (declared !== undefined) return declared;
       // A builtin answers the type it is declared with, so `line.trim()` is a
@@ -19497,6 +19560,10 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     child.wideBigint = this.wideBigint;
     child.linked = this.linked;
     child.valueTypes = this.valueTypes;
+    // A template string interpolates a value the same file reads, and a list
+    // another module offers is the shape its declaration names: the child
+    // parser is that file's read and knows what the file's imports hold.
+    child.importedValueShapes = this.importedValueShapes;
     // A template string interpolates a value the block around it settled: the
     // text it writes is read with the same table the block was read with.
     child.fieldCount = this.fieldCount;

@@ -1017,6 +1017,54 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gi. A template interpolation reads the shapes its imports bind
+
+    const services = ${JSON.stringify(HOST_SERVICES.map((service) => service.symbol))};
+
+A template string is read by a parser of the same file, and that child parser
+was handed the file's tables but not the shapes its imports bind. `HOST_SERVICES`
+is a list another module declares, so inside the interpolation it was a value
+with no type and `.map` was a method of nothing. The child now carries the shapes
+the file's imports bind, as it already carried the rest of the file's tables.
+`toolchain/wasm.ts` reads two refusals shorter.
+
+    The total went from 71 to 69.
+
+### 4gh. A method of an object type inside a field is the function the call reads
+
+    interface Engine {
+      Module: {
+        exports(module: unknown): { name: string }[];
+      };
+    }
+
+A method written in an *inline* object type was dropped: the reader that reads
+`A: { ... }` handled `name: type` and skipped `name(params): type`, where the
+interface reader beside it kept methods as function-typed fields. `engine.Module.exports`
+was a field of an empty record, and the `map` after the call was a method of
+nothing. An inline member whose name is followed by `(` is now the function type
+its parameters and result write, so the call is the call of the function the
+field holds. `toolchain/wasm.ts` reads four refusals shorter, and the one left
+is the engine module it constructs, which is a host boundary.
+
+    The total went from 75 to 71.
+
+### 4gg. A generic function that answers its parameter's type hands the argument back
+
+    function substituteShallow<T>(node: T, scope: Scope): T { ... }
+    const rewritten = substituteShallow(statement, scope);
+    Object.assign(statement, rewritten);
+
+A compiled function cannot spell a type parameter, so the answer of an identity
+`T` erased to `any`: `rewritten` had no shape, and the record `Object.assign`
+copies was a before-and-after value it could not name. The scan now keeps a
+generic function's type-parameter names, its result annotation where it is one
+name, and each parameter's annotation the same way. A call whose answer is one of
+those names is read at the argument written at that parameter, which is the value
+the function hands back. `semantics/repair.ts` reads whole.
+
+    The total went from 76 to 75.
+
 ### 4gf. A compiled object knows the names its layout wrote
 
     const n = node as Record<string, unknown>;
@@ -4329,7 +4377,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-76 refusals over 95 sources, 74 of them read whole. The report reads the
+69 refusals over 95 sources, 75 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4545,6 +4593,9 @@ What was closed this session, and what each was worth:
 | a callback annotated `any` takes the element the method hands it (§4gd) | 86 → 85 |
 | a file the compiler opens is the compiler's own handle (§4ge) | 85 → 83 |
 | a compiled object knows the names its layout wrote (§4gf) | 83 → 76 |
+| a generic function that answers its parameter's type (§4gg) | 76 → 75 |
+| a method of an object type inside a field (§4gh) | 75 → 71 |
+| a template interpolation reads the shapes its imports bind (§4gi) | 71 → 69 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

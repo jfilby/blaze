@@ -3656,6 +3656,78 @@ test("a file handle's two methods are read through the host boundary", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a generic function that answers its parameter's type hands the argument back", () => {
+  // `identity<T>(node: T): T` is the value it was given, and a compiled
+  // function cannot spell a type parameter. The answer is read at the argument
+  // the source wrote at that parameter, so `b` is the record `a` is and `b.x`
+  // is the field the interface declares.
+  const source = [
+    "interface A { x: number }",
+    "function identity<T>(node: T): T { return node; }",
+    "export function read(a: A): number {",
+    "  const b = identity(a);",
+    "  return b.x;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
+test("a method of an object type inside a field is the function the call reads", () => {
+  // `Module: { exports(...): { name: string }[] }` writes a method of an inline
+  // object type. It is a field held at a function type, so a call of it is the
+  // call of the function the field holds and the `map` after it walks the list
+  // it answers.
+  const source = [
+    "interface Engine {",
+    "  Module: {",
+    "    exports(module: unknown): { name: string }[];",
+    "  };",
+    "}",
+    "export function names(engine: Engine): string[] {",
+    "  return engine.Module.exports(1).map((entry) => entry.name);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "names")?.handle;
+  assert.ok(handle !== undefined, "names is a function of the module");
+  assert.match(JSON.stringify(handle), /"k":"invoke","callee":\{"k":"member"/);
+});
+
+test("a template interpolation reads the shapes the file's imports bind", () => {
+  // The text a template string is built from is read by a parser of the same
+  // file, and a list another module offers is the shape its declaration names.
+  // Without that, `LIST.map(...)` inside the interpolation was a method of a
+  // value the child read could not type.
+  const files: Record<string, string> = {
+    "main.ts": [
+      'import { LIST } from "./lib.ts";',
+      "export function text(): string {",
+      "  return `${LIST.map((one) => one.symbol).join(`,`)}`;",
+      "}",
+      "",
+    ].join("\n"),
+    "lib.ts": [
+      "export interface Item { symbol: string }",
+      "export const LIST: readonly Item[] = [{ symbol: `a` }];",
+      "",
+    ].join("\n"),
+  };
+  const records = readModuleGraph({
+    frontend: typeScriptFrontend,
+    entry: { path: "main.ts", source: files["main.ts"] as string },
+    roots: ["lib.ts"],
+    read: (path) => files[path] ?? null,
+    requireImports: false,
+  });
+  const main = records.find((record) => record.path === "main.ts");
+  assert.ok(main !== undefined, "main.ts is a file of the graph");
+  assert.equal(main.refusedCount, 0, main.refused.map((one) => one.message).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

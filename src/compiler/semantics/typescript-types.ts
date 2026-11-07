@@ -1188,6 +1188,45 @@ class TypeText {
       }
       const optional = rest.startsWith("?");
       if (optional) rest = rest.slice(1).trim();
+      // A member written as a method is a field held at a function type: an
+      // object type inside a field — `Module: { exports(...): ... }` — names
+      // the methods a value of it answers, and a call of one is the call of
+      // the function the field holds.
+      if (rest.startsWith("(") || rest.startsWith("<")) {
+        let scan = rest;
+        if (scan.startsWith("<")) {
+          let angles = 0;
+          let at = 0;
+          for (; at < scan.length; at += 1) {
+            if (scan[at] === "<") angles += 1;
+            else if (scan[at] === ">") {
+              angles -= 1;
+              if (angles === 0) break;
+            }
+          }
+          if (angles !== 0) continue;
+          scan = scan.slice(at + 1).trim();
+        }
+        if (!scan.startsWith("(")) continue;
+        let depth = 0;
+        let at = 0;
+        for (; at < scan.length; at += 1) {
+          if (scan[at] === "(") depth += 1;
+          else if (scan[at] === ")") {
+            depth -= 1;
+            if (depth === 0) break;
+          }
+        }
+        if (depth !== 0) continue;
+        const params = scan.slice(0, at + 1);
+        const after = scan.slice(at + 1).trim();
+        const returns = after.startsWith(":") ? after.slice(1).trim() : "void";
+        fields.set(name[0], {
+          type: resolveTypeText(this.table, `${params} => ${returns}`, this.params, this.seen),
+          optional,
+        });
+        continue;
+      }
       if (!rest.startsWith(":")) continue;
       const type = rest.slice(1).trim();
       const literals = this.fieldLiterals(type);
