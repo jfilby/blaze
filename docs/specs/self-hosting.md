@@ -1017,6 +1017,27 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fu. A splice writes the field a chain of fields names
+
+    target.owner.statements.splice(at, 0, ...hoisted);
+
+A `splice` on a name or on a field of a name was the list written back where it
+was; a field of a field had no writable place, so the call was refused as a
+method of nothing. The chain's base is now read once into a name of the
+statement's own — a record is a reference, so writing the field through that
+name lands in the same object — and the list is read through that same name.
+
+The second half of the slice was not the frontend. The optimizer inlined the
+splice's answer into its one use, past the write, so the answer became the slice
+of the list *after* the splice: `splice(1, 1)` answered `3` where the source
+says `2`. `inlineSingleUses` moves a value to its read only when nothing writes
+the names it reads in between, and a field write was not one of the writes it
+knew. A `storeField` on an object now counts as a write of that object, so the
+answer stays where it was computed. `semantics/repair.ts` reads one refusal
+shorter.
+
+    The total went from 102 to 101.
+
 ### 4ft. A union asks the kind of the value it holds
 
     const extra = (this.program.extraFunctions ?? []).map((extraFn) =>
@@ -4109,7 +4130,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-102 refusals over 95 sources, 68 of them read whole. The report reads the
+101 refusals over 95 sources, 68 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4313,6 +4334,7 @@ What was closed this session, and what each was worth:
 | Promise.allSettled reports how each promise settled (§4fr) | 108 → 104 |
 | a number written at its significant digits (§4fs) | 104 → 103 |
 | a union asks the kind of the value it holds (§4ft) | 103 → 102 |
+| a splice writes the field a chain of fields names (§4fu) | 102 → 101 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

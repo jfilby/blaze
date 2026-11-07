@@ -1038,6 +1038,27 @@ test("splice is a range of a list replaced by the values written", async () => {
   }
 });
 
+test("splice writes the field a chain of fields names", async () => {
+  // `target.owner.statements.splice(...)` writes the field of the object the
+  // chain reaches, not of a name: the object is read once into a name of the
+  // statement's own, and the field written through it is the same field.
+  const source = [
+    "interface Items { values: number[] }",
+    "interface Holder { items: Items }",
+    "export function demo(): string {",
+    "  const holder: Holder = { items: { values: [1, 2, 3] } };",
+    "  const removed = holder.items.values.splice(1, 1, 9, 8);",
+    "  return `${removed.join(`,`)}|${holder.items.values.join(`,`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2|1,9,8,3", `the ${backend} backend splices the field of a field`);
+  }
+});
+
 test("shift takes the first element off a list and unshift puts one in front", async () => {
   // The list a name holds changes, so the element is read before the change and
   // the change is written beside the statement the call was read in: a shift

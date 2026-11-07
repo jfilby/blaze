@@ -2511,6 +2511,15 @@ function writesAnyOf(statement: SemanticStatement, names: ReadonlySet<string>): 
   if ((statement.k === "set" || statement.k === "step") && names.has(statement.name)) writes = true;
   if (statement.k === "setElement" && names.has(statement.buffer)) writes = true;
   if (statement.k === "let" && names.has(statement.slot.name)) writes = true;
+  // A field write changes the field of the object it names, so every value that
+  // reads a field of that object — or the object itself — is stale afterwards.
+  // The object may be a name or a chain of fields read from one, and every local
+  // the chain reaches is one the write changes.
+  if (statement.k === "storeField") {
+    walkSemanticValue(statement.object, (one) => {
+      if (one.k === "local" && names.has(one.name)) writes = true;
+    });
+  }
   return writes;
 }
 

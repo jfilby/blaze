@@ -11347,7 +11347,7 @@ class TypeScriptParser {
           // field the source named.
           if (
             target.field === "splice" &&
-            (receiver.k === "ident" || (receiver.k === "member" && receiver.base.k === "ident")) &&
+            (receiver.k === "ident" || receiver.k === "member") &&
             (this.valueTypeOf(receiver).kind === "slice" || this.valueTypeOf(receiver).kind === "array")
           ) {
             const lowered = this.spliceMethod(receiver, args, spreads, callLine);
@@ -14703,12 +14703,25 @@ class TypeScriptParser {
     line: number,
   ): Expression | null {
     let written: { target: string; base: string | null } | null = null;
+    let place: Expression = receiver;
     if (receiver.k === "ident") written = { target: receiver.name, base: null };
-    else if (receiver.k === "member" && receiver.base.k === "ident") written = { target: receiver.field, base: receiver.base.name };
+    else if (receiver.k === "member") {
+      // A chain `target.owner.statements` writes the field of the object
+      // `target.owner` names. The object is held in a name of the statement's
+      // own when the base is not a name itself, which is the same object: a
+      // record is a reference, so writing its field through the name lands in
+      // the value the chain read. The list is then read through that same name,
+      // so the optimizer sees the write and the reads as one place rather than
+      // two spellings of it.
+      const base = this.writeTarget(receiver.base, line);
+      if (base !== null) {
+        written = { target: receiver.field, base };
+        place = { k: "member", base: { k: "ident", name: base }, field: receiver.field };
+      }
+    }
     if (written === null) return null;
     const sequence = this.valueTypeOf(receiver);
     const element = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : ANY_TYPE;
-    const place: Expression = receiver;
     const number = (text: string): Expression => ({ k: "literal", text });
     const length: Expression = { k: "lengthOf", of: place };
     const at = args[0] ?? number("0");
