@@ -1017,6 +1017,27 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fx. An empty list in a call argument takes the type the call says
+
+    this.scopes.push({ id: block.id, names: ..., allocated: known === undefined ? [] : null });
+
+    return this.closed({ k: "buffer", ..., values: [] });
+
+Two calls in the compiler's own sources write an empty list inside a record
+argument. The first was read at the parameter of an unrelated class's `push`: a
+method name only one class answers was used as the call's type even though the
+receiver is a list, so `allocated: []` had no element type. A sequence receiver
+now answers the method itself, and the element the list holds gives the record
+its fields.
+
+The second was `closed<T>(value: T): T`, an identity whose type parameter
+erases to `any`: the argument had no type, and the `values: []` inside it had
+none either. A method that answers the type of its only parameter now reads that
+argument at the type the call itself is read at, which the enclosing `return`
+states. `toolchain/ir-wasm.ts` and `semantics/ir-text.ts` read whole.
+
+    The total went from 97 to 94.
+
 ### 4fw. The path namespace the compiler reads its own imports through
 
     return posix.normalize(posix.join(posix.dirname(from), candidate));
@@ -4169,7 +4190,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-97 refusals over 95 sources, 69 of them read whole. The report reads the
+94 refusals over 95 sources, 71 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4376,6 +4397,7 @@ What was closed this session, and what each was worth:
 | a splice writes the field a chain of fields names (§4fu) | 102 → 101 |
 | a block the file allocates at the top is typed by its constructor (§4fv) | 101 → 98 |
 | the path namespace the compiler reads its own imports through (§4fw) | 98 → 97 |
+| an empty list in a call argument takes the type the call says (§4fx) | 97 → 94 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

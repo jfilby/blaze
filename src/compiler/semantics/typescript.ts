@@ -4910,7 +4910,11 @@ class TypeScriptParser {
   private writtenElementShape(receiver: Expression, method: string): ResolvedType | null {
     if (method !== "push" && method !== "unshift") return null;
     const shape = this.shapeOf(receiver);
-    return shape !== null && shape.kind === "list" ? shape.of : null;
+    // The element the list holds is a name — an interface or a class — and the
+    // read needs the record the name stands for: an object literal written at
+    // it takes its fields, and an empty list inside it is the element type the
+    // record states.
+    return shape !== null && shape.kind === "list" ? this.shapeForRead(shape.of) : null;
   }
 
   /**
@@ -4923,12 +4927,35 @@ class TypeScriptParser {
    * written there is read with nothing said about its fields.
    */
   private expectedMethodParams(receiver: Expression, method: string): readonly { name: string; type: TypeExpr; shape: ResolvedType | null }[] {
+    // A sequence answers the method itself: `list.push(x)` is the array's push,
+    // not a method a class of the same name happens to declare. A method name a
+    // sole class answers is otherwise the fallback, and it read `scopes.push`
+    // at the parameter of an unrelated class's `push`.
+    const sequence = this.valueTypeOf(receiver);
+    if (sequence.kind === "slice" || sequence.kind === "array") return [];
     // A map or a set answers the method itself, and its arguments are not the
     // parameters of a class method that happens to share the name.
     if (this.collectionOfExpression(receiver) !== null) return [];
     const found = this.methodOwner(this.classOfExpression(receiver), method, false);
     if (found === null) return [];
-    return this.methodParams(found.method.params);
+    const params = this.methodParams(found.method.params);
+    // A method that answers the type of its only parameter is the identity, and
+    // a generic one erases to `any`: `closed<T>(value: T): T` hands its argument
+    // back, so the argument is read at the type the call itself is read at. An
+    // empty list inside that argument is then the element type the answer names,
+    // which nothing else in the call says.
+    const only = found.method.params[0];
+    if (
+      params.length === 1 &&
+      only !== undefined &&
+      only.typeName === found.method.returnTypeName &&
+      this.shapeForName(only.typeName) === null &&
+      !this.classTable.names.has(only.typeName) &&
+      this.expectedType !== null
+    ) {
+      return [{ ...(params[0] as { name: string; type: TypeExpr; shape: ResolvedType | null }), type: this.expectedType, shape: this.expectedShape }];
+    }
+    return params;
   }
 
   /** An instance of a class, as the reference the layout pass names. */

@@ -3520,6 +3520,44 @@ test("the path namespace is read as the runtime's POSIX path work", () => {
   assert.match(body, /posix\.normalize/);
 });
 
+test("an empty list in a pushed record takes the record's field type", () => {
+  // `scopes.push({ ..., allocated: [] })` is the array's push, not the `push`
+  // of a class the file happens to declare: the method name a sole class
+  // answers must not type the element. The element is the record the list
+  // holds, so `allocated` is the list its field declares.
+  const source = [
+    "interface Scope { id: string; allocated: number[] | null }",
+    "class Builder {",
+    "  scopes: Scope[] = [];",
+    "  open(id: string): void {",
+    "    this.scopes.push({ id, allocated: [] });",
+    "  }",
+    "}",
+    "class Other { push(value: number): void {} }",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => one.message).join("; "));
+});
+
+test("an identity method reads its argument at the type the call is read at", () => {
+  // `closed<T>(value: T): T` hands its argument back, and the call stands at a
+  // `Value`. The argument is read at that type, so the empty `values` inside it
+  // is the list of `Value` the field declares rather than a list of nothing.
+  const source = [
+    "interface Value { k: string; values: Value[] }",
+    "class Reader {",
+    "  closed<T>(value: T): T { return value; }",
+    "  read(): Value {",
+    "    return this.closed({ k: `empty`, values: [] });",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => one.message).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the
