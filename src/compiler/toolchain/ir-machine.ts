@@ -10594,6 +10594,28 @@ class Machine {
       this.accumulator = null;
       return;
     }
+    if (call.callee === "Promise.failed" || call.callee === "Promise.message") {
+      // The handle is the number the promise's address is, and the runtime
+      // reads the promise that address points at: a failed promise answers 1
+      // and the message it failed with, which is a text the runtime holds.
+      this.at(argument, NUMBER);
+      this.code.cvtFloatToInt(RAX, XMM0, false, true);
+      this.code.movRegReg(RDI, RAX);
+      const symbol = call.callee === "Promise.failed" ? "blaze_promise_failed" : "blaze_promise_message";
+      this.external(symbol);
+      this.callForeign(symbol);
+      if (call.callee === "Promise.message") {
+        // Reading the message is what handles the failure: the pending error
+        // flag is what an async function's promise settles on, so it is
+        // cleared here while the message is held.
+        const message = this.hold(TEXT, "blaze_message");
+        this.store(message);
+        this.external("blaze_error_clear");
+        this.callForeign("blaze_error_clear");
+        this.load(message);
+      }
+      return;
+    }
     if (call.callee === "Promise.await" || call.callee === "Promise.await.whole" || call.callee === "Promise.await.text" || call.callee === "Promise.await.bool" || call.callee === "Promise.await.value" || call.callee === "Promise.await.nothing") {
       this.at(call.args[0], NUMBER);
       // The handle is the number the promise's address is, and the runtime

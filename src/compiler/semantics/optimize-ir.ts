@@ -1333,8 +1333,10 @@ function readCounts(body: Body): Map<string, number> {
       // A compound assignment reads the name it writes: `text += more` is a
       // read of the text and a write of it, and a binding that is read only
       // that way is one this would otherwise drop, leaving the write naming a
-      // name the block never declared.
-      if (statement.k === "set" && statement.op !== "=") count(statement.name);
+      // name the block never declared. A plain `set` — `let x; if (c) x = 1;`
+      // — writes a name that is declared too, whether or not anything reads
+      // it, so it keeps the declaration as well.
+      if (statement.k === "set") count(statement.name);
     }
   };
   walk(body.entry);

@@ -4533,6 +4533,33 @@ test("a set held in a map is a handle the questions written after it reach", asy
   assert.equal(output.trim(), "1");
 });
 
+test("a promise a body chains runs the arm that settled it", async () => {
+  // A compiled promise is settled by the time it is read, so `then` is the
+  // conditional it means: the fulfilled arm reads the value the promise
+  // carries and the rejected arm reads the message it failed with, which is
+  // what handles the failure. A `catch` answers the value or the arm.
+  const output = await agreesWithNode([
+    "function resolveValue(n: number): Promise<number> {",
+    "  return Promise.resolve(n);",
+    "}",
+    "function failValue(n: number): Promise<number> {",
+    '  return Promise.reject("no");',
+    "}",
+    "export async function compute(): Promise<number> {",
+    "  const a = await resolveValue(3).then((v) => v * 2, () => -1);",
+    "  const b = await failValue(3).then((v) => v * 2, () => 7);",
+    "  const c = await resolveValue(5).catch(() => 0);",
+    "  return a + b + c;",
+    "}",
+    "export function start(): void {",
+    "  compute().then((total) => { console.log(total); });",
+    "}",
+    "start();",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), String(6 + 7 + 5));
+});
+
 test("a choice of a text and nothing answers the absence it wrote", async () => {
   // `x === null` is the null pointer for a text, so a choice whose other arm is
   // `null` has to answer the null pointer too. It answered the empty text once,

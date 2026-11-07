@@ -379,7 +379,14 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    */
   "Date.parse": { params: [TEXT], returns: F64, arity: 1 },
   /** `Promise.reject(message)` answers a promise that has already failed. */
-  "Promise.reject": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.reject": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
+  /**
+   * Whether a promise failed, and the message it failed with. A promise a
+   * compiled program makes is settled before it is read, so `p.then(onOk,
+   * onErr)` asks these where it stands.
+   */
+  "Promise.failed": { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1 },
+  "Promise.message": { params: [ANY], returns: TEXT, arity: 1 },
   /**
    * `asyncio.run(coroutine)` is the value the coroutine's promise carries: a
    * Python program has no top-level `await`, so this is how it reads one.

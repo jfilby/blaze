@@ -1356,6 +1356,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `(double)(uintptr_t)blaze_promise_settled_value(${argument(0)})`;
       case "Promise.settle.nothing":
         return `(double)(uintptr_t)blaze_promise_settled_null()`;
+      case "Promise.failed":
+        return `blaze_promise_failed((void*)(uintptr_t)${argument(0)})`;
+      case "Promise.message":
+        return `({ const char* blaze_message = blaze_promise_message((void*)(uintptr_t)${argument(0)}); blaze_error_clear(); blaze_message; })`;
       case "Promise.reject": {
         const arg = call.args[0];
         const text = arg === undefined

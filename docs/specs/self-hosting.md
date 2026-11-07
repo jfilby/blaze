@@ -1017,6 +1017,54 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fp. A promise a body chains
+
+    const present = await stat(cached).then(
+      (entry) => entry.isFile() && entry.size > 0,
+      () => false,
+    );
+    await rm(path, { force: true }).catch(() => undefined);
+    core.catch(() => undefined);
+
+A promise could be made, awaited and settled, and the three methods a body
+chains it with were methods of nothing: `then`, `catch` and `finally`. A
+compiled promise is settled by the time it is read — the executor runs where
+the promise is made — so the continuation is the conditional it means. `then`
+asks `Promise.failed`, hands the message to the rejected arm and the value the
+promise carries to the fulfilled arm; `catch` is the rejected arm alone and
+answers the value otherwise; `finally` runs its callback for what it does and
+answers the promise. The value an arm is handed is what the promise's
+declaration says it carries: `Promise<FileInfo>` is an entry in the callback,
+and `entry.isFile()` is the field the entry declares.
+
+The runtime already had `blaze_promise_failed` and `blaze_promise_message`,
+declared with the rest of the ABI; they are `Promise.failed` and
+`Promise.message` in the builtin table now, lowered by the C, machine and
+driver targets. Reading the message is what *handles* the failure: the pending
+error flag is what an async function's own promise settles on, so the builtin
+clears it, exactly as the arm of a `catch` block does. Without that, a failure
+one arm took leaked into the promise the enclosing async function answered, and
+a later `then` never ran — the test that reads a chain printed nothing.
+
+The continuation is written as an `if` over a name of the statement's own
+rather than as a choice of two values. An arm is a value in this IR, and a call
+that answers nothing is not one: the rejected arm is a call of the callback and
+a read of the message, and the arm that does not run must not clear the error.
+
+Three backend defects surfaced with it. A `void` value read at another type had
+its call dropped by the C conversion, so an arm that only ran for what it did
+compiled to nothing; a `set` of a name nothing reads kept the declaration alive
+only for compound operators, and a plain `set` in an arm lost it, which the
+validator refused by name. Both are fixed where they were.
+
+`runtime/facil.ts` and `runtime/standalone.ts` read whole now, and
+`compiler.ts` is down to three refusals. What is left of the promise surface is
+`Promise.allSettled`, whose records a list holds only once the value a promise
+carries is a record of its own (see §3), and `new Promise`, refused with the
+other allocations a function body writes.
+
+    The total went from 123 to 112.
+
 ### 4fo. A class built on another, and the absence a choice of texts answers
 
     class BlockReader { protected readonly lines: IrLine[]; constructor(lines, binder) { … } }
@@ -3969,7 +4017,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-123 refusals over 95 sources, 63 of them read whole. The report reads the
+112 refusals over 95 sources, 65 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4163,6 +4211,7 @@ What was closed this session, and what each was worth:
 | a call of what a call answered, and the callee of an indirect call (§4fm) | 132 → 131 |
 | the host's directory entry and path work as the compiler's own types (§4fn) | 131 → 124 |
 | a class built on another, and the absence a choice of texts answers (§4fo) | 124 → 123 |
+| a promise a body chains (§4fp) | 123 → 112 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

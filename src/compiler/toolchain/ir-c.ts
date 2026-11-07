@@ -328,6 +328,16 @@ function builtinExpression(name: string, args: string[]): string {
       return `(double)(uintptr_t)blaze_promise_settled_value(${args[0]})`;
     case "Promise.settle.nothing":
       return `(double)(uintptr_t)blaze_promise_settled_null()`;
+    case "Promise.reject":
+      return `(double)(uintptr_t)blaze_promise_rejected(${args[0]})`;
+    case "Promise.failed":
+      return `blaze_promise_failed((void*)(uintptr_t)(${args[0]}))`;
+    // The message a failure carries, read as the failure is handled: the
+    // pending error flag is what an async function's own promise settles on, so
+    // an arm that took the failure clears it here, exactly as the arm of a
+    // `catch` block does.
+    case "Promise.message":
+      return `({ const char* blaze_message = blaze_promise_message((void*)(uintptr_t)(${args[0]})); blaze_error_clear(); blaze_message; })`;
     // The whole numbers: a magnitude, a smaller, a larger, and the three
     // roundings that answer a whole number. The `Math` builtins above answer a
     // fraction, and a whole number is written as one, so each of these is the
@@ -1377,6 +1387,12 @@ class FunctionEmitter {
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     const written = this.raw(value, depth);
     const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
+    // A call that answers nothing is still a call: a use that reads it at
+    // another type takes the absence the call answered *after* it runs, so the
+    // call is not dropped from the program by the conversion.
+    if (value.type.kind === "void" && as !== null && as.kind !== "void") {
+      return `(${written}, ${asAny ? `${RUNTIME_NAME}_box_null()` : absenceOf(as)})`;
+    }
     if (asAny) {
       if (isTextType(value.type) || value.k === "text") {
         return `${RUNTIME_NAME}_box_string(${written})`;

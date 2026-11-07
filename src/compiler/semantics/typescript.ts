@@ -247,7 +247,7 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
  * A namespace is a namespace and not a value: nothing reads one, and a call of
  * one is the only thing that may be written of it.
  */
-const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date"]);
+const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date", "Promise"]);
 
 
 /** Statements the parser reads to the end of the statement and reports. */
@@ -4066,6 +4066,16 @@ class TypeScriptParser {
           // holds; the shape was kept beside the call where it was written.
           const held = this.expressionShapes.get(awaited);
           if (held !== undefined) {
+            shape = held;
+            break;
+          }
+        }
+        // `await p` where `p` is a name a continuation held answers the value
+        // it carries: the name holds the payload itself, so the shape is the
+        // one the name was given.
+        if (awaited !== undefined && awaited.k !== "call" && awaited.k !== "invoke") {
+          const held = this.shapeOf(awaited);
+          if (held !== null) {
             shape = held;
             break;
           }
@@ -11046,8 +11056,10 @@ class TypeScriptParser {
           // static method of a class, so the class checks below are skipped.
           // `Date` carries `now` beside its `parse`, and the clock is read
           // where it is written instead: neither name is a namespace the clock
-          // is asked through.
-          if (!(target.base.name === "Date" && target.field === "now")) {
+          // is asked through. `Promise.all` and `Promise.allSettled` settle a
+          // list and are read below, where the list is in hand.
+          const settlesAList = target.base.name === "Promise" && (target.field === "all" || target.field === "allSettled");
+          if (!settlesAList && !(target.base.name === "Date" && target.field === "now")) {
             replace({ k: "ident", name: `${target.base.name}.${target.field}` });
             continue;
           }
@@ -11094,6 +11106,7 @@ class TypeScriptParser {
           }
           const callLine = this.peek().line;
           const callback = this.collectionCallbackParameters(target.base, target.field);
+          const promiseCallbacks = this.promiseCallbackParameters(target.base, target.field);
           // A callback handed to a method of a value whose type this read does
           // not hold is handed the element of a list whose element type is in
           // a module the graph has not linked: a parameter the use does not fix
@@ -11120,6 +11133,7 @@ class TypeScriptParser {
             this.writtenElementType(target.base, target.field),
             setShapes,
             this.writtenElementShape(target.base, target.field),
+            promiseCallbacks,
           );
           const spreads = target.field === "push" || target.field === "splice" || target.field === "unshift" ? this.argumentSpreads : null;
           const receiver = target.base;
@@ -11432,6 +11446,13 @@ class TypeScriptParser {
             replace(settled);
             continue;
           }
+          // `p.then(onOk, onErr)` and `p.catch(onErr)`: the continuation a
+          // promise that is already settled implies.
+          const continued = this.promiseMethod(receiver, target.field, args);
+          if (continued !== null) {
+            replace(continued);
+            continue;
+          }
           // `a.map(f)`: a method of a typed array is a function of the file that
           // walks the array, so it is read before a method of a class is looked
           // for. A receiver that is not a sequence falls through to the classes
@@ -11615,6 +11636,15 @@ class TypeScriptParser {
           const text: Expression = value === undefined ? { k: "text", parts: [] } : { k: "text", parts: [{ k: "value", value }] };
           this.expressionTypes.set(text, TEXT_RESULT);
           replace(text);
+          continue;
+        }
+        // `Promise.reject(x)` fails a promise with the message x: a value that
+        // is not a text is written as the text it prints as, which is the
+        // message the failure carries.
+        if (target.name === "Promise.reject" && args.length === 1 && this.valueTypeOf(args[0] as Expression).kind !== "text") {
+          const text: Expression = { k: "text", parts: [{ k: "value", value: args[0] as Expression }] };
+          this.expressionTypes.set(text, TEXT_RESULT);
+          replace({ k: "call", name: "Promise.reject", args: [text] });
           continue;
         }
 
@@ -11947,6 +11977,12 @@ class TypeScriptParser {
     rest: TypeExpr | null = null,
     shapes: readonly (ResolvedType | null)[] = [],
     restShape: ResolvedType | null = null,
+    /**
+     * The parameters each argument's arrow is handed, by position, where a call
+     * has more than one callback: `p.then(onOk, onErr)` hands the carried value
+     * to the first and the failure's message to the second.
+     */
+    callbacks: readonly (readonly ArrowParameterType[] | null)[] | null = null,
   ): Expression[] {
     this.next();
     const args: Expression[] = [];
@@ -11967,7 +12003,7 @@ class TypeScriptParser {
       } else {
         spreads.push(false);
       }
-      args.push(this.readArgument(type, args.length === 0 ? callback : null, callbackWaitsForLink, shapes[args.length] ?? (args.length < expected.length ? null : restShape)));
+      args.push(this.readArgument(type, callbacks?.[args.length] ?? (args.length === 0 ? callback : null), callbackWaitsForLink, shapes[args.length] ?? (args.length < expected.length ? null : restShape)));
       // A call may end its arguments with a comma, which names no argument.
       if (!this.accept(",")) break;
     }
@@ -13100,6 +13136,196 @@ class TypeScriptParser {
       return [...left, ...right];
     }
     return null;
+  }
+
+  /**
+   * The parameters a promise continuation's callbacks are handed, by position.
+   *
+   * `p.then(onOk, onErr)` hands the value the promise carries to the first and
+   * the message a failed promise carries to the second; `p.catch(onErr)` hands
+   * it to the only one. The value is what the receiver is typed at, because a
+   * promise's declaration states what it carries and the read peels it: an
+   * `Entry` promises an entry, and `entry.isFile()` in the callback is the
+   * field the entry declares.
+   */
+  private promiseCallbackParameters(receiver: Expression, method: string): (readonly ArrowParameterType[] | null)[] | null {
+    if (method !== "then" && method !== "catch") return null;
+    // A method of a class, a collection or a text that happens to be named
+    // `then` is that method: only a receiver that is none of them is a promise,
+    // which is the order the method lookup below asks in.
+    if (this.collectionOfExpression(receiver) !== null) return null;
+    if (this.methodOwner(this.classOfExpression(receiver), method, false) !== null) return null;
+    const carried = this.valueTypeOf(receiver);
+    const carriedShape = this.shapeOf(receiver) ?? this.shapeOfTypeExpr(carried);
+    const value: ArrowParameterType = { type: this.promisePayloadType(receiver), shape: carriedShape };
+    // A failure is the message the runtime holds, which is a text.
+    const reason: ArrowParameterType = { type: TEXT_RESULT, shape: { kind: "text" } };
+    return method === "catch" ? [[reason]] : [[value], [reason]];
+  }
+
+  /**
+   * `p.then(onOk, onErr)`, `p.catch(onErr)` and `p.finally(f)`: the
+   * continuation a promise implies once it is settled.
+   *
+   * A compiled promise is settled by the time it is read — the executor runs
+   * where the promise is made — so `then` is the conditional it means: a
+   * failed promise hands the message to the rejected arm, and one that is not
+   * hands the value it carries to the fulfilled arm. A callback the source
+   * left out is the arm that does not run: a `then` without a rejected arm
+   * answers the promise itself there, so a later `await` still reports the
+   * failure, and a `catch` without a fulfilled arm answers the value.
+   */
+  private promiseMethod(receiver: Expression, method: string, args: readonly Expression[]): Expression | null {
+    if (method !== "then" && method !== "catch" && method !== "finally") return null;
+    const line = this.peek().line;
+    // A promise read by the test and again by the arm that runs is read once:
+    // a call that answers one is held in a name of the statement's own, so
+    // `stat(p).then(f)` reads the file once rather than twice.
+    const handle: Expression = this.holdValue(receiver, { kind: "ref", of: null }, line);
+    const failed: Expression = { k: "call", name: "Promise.failed", args: [handle] };
+    this.expressionTypes.set(failed, BOOLEAN_RESULT);
+    const answer = (callback: Expression | undefined, argument: Expression | null, otherwise: Expression): Expression | null => {
+      if (callback === undefined) return otherwise;
+      const signature = this.callbackSignature(callback);
+      if (signature === null) return null;
+      const written = signature.params.length === 0 || argument === null ? [] : [argument];
+      const call: Expression = { k: "invoke", callee: callback, args: written, params: signature.params, returns: signature.returns };
+      const shape = signature.shape === undefined || signature.shape === null ? null : this.shapeForRead(signature.shape);
+      if (shape !== null) this.expressionShapes.set(call, shape);
+      return call;
+    };
+    if (method === "finally") {
+      const callback = args[0];
+      if (callback === undefined) return receiver;
+      const run = answer(callback, null, { k: "null" });
+      if (run === null) return null;
+      // The callback runs for what it does, and the promise is the answer: a
+      // statement of its own, written before the value the call stands for.
+      this.pendingBefore.push({ kind: "expression", value: run, line });
+      return handle;
+    }
+    // What the promise carries is what the arm is typed at, so the await is
+    // held in a name of that type: the choice is a number where the promise
+    // carries one, and a record's fields read through the shape beside it.
+    const carriedType = this.promisePayloadType(receiver);
+    const payloadCall: Expression = { k: "call", name: "Promise.await", args: [handle] };
+    const payload: Expression = this.holdValue(payloadCall, carriedType, line);
+    const message: Expression = { k: "call", name: "Promise.message", args: [handle] };
+    this.expressionTypes.set(message, TEXT_RESULT);
+    if (method === "catch") {
+      const onErr = answer(args[0], message, handle);
+      if (onErr === null) return null;
+      // A promise that did not fail answers the value it carries: a `catch`
+      // is the value, or what the rejected arm answered.
+      return this.promiseChoice(failed, onErr, payload, line, message);
+    }
+    const onOk = answer(args[0], payload, { k: "null" });
+    const onErr = answer(args[1], message, handle);
+    if (onOk === null || onErr === null) return null;
+    return this.promiseChoice(failed, onErr, onOk, line, message);
+  }
+
+  /**
+   * A continuation read as the branch it is, in a name of the statement's own.
+   *
+   * The rejected arm reads the message a failed promise carries, and reading it
+   * is what handles the failure: the arm that does not run must not clear the
+   * error a later await has to report. A conditional value does run one arm
+   * only, but an arm is a value and a call that answers nothing is not one, so
+   * the choice is written as an `if` over a name rather than as a choice of
+   * two values. Where the statement is a loop's condition there is no
+   * statement of its own to write the branch before, and the choice is the
+   * value it was.
+   */
+  private promiseChoice(
+    condition: Expression,
+    then: Expression,
+    otherwise: Expression,
+    line: number,
+    /** A value the arm that takes the failure reads for what it does: the
+     *  message of the failure, which handling it clears from the body. */
+    rejected?: Expression,
+  ): Expression {
+    // The value the continuation answers is the one the arm that is not the
+    // failure answers: a `catch` over a list answers the list, and a `then`
+    // answers what the fulfilled callback answered.
+    const normal = this.valueTypeOf(otherwise);
+    const failure = this.valueTypeOf(then);
+    const anyLike = normal.kind === "ref" && normal.of === null && normal.name === undefined;
+    // The arm that does not run an answer of the continuation's own is the
+    // promise itself, whose handle is a reference: a `then` whose callback
+    // answers nothing still answers a reference on the arm the failure took.
+    const type = anyLike || (normal.kind === "void" && failure.kind !== "void")
+      ? commonResult(failure, normal)
+      : normal;
+    if (this.loopCondition) return this.typedChoice(condition, then, otherwise);
+    const held = `__chosen${this.fieldCount++}`;
+    // A handle's zero is the number zero, not the null pointer a shaped
+    // reference's zero is: the two are one contract type and the difference is
+    // what the C declaration says the slot holds.
+    const empty: Expression = type.kind === "ref" && type.of === null && type.name === undefined
+      ? { k: "literal", text: "0" }
+      : this.zeroFor(type);
+    this.pendingBefore.push({ kind: "declare", name: held, type, init: empty, line });
+    this.pendingBefore.push({
+      kind: "if",
+      condition,
+      then: [
+        ...(rejected === undefined ? [] : [{ kind: "expression" as const, value: rejected, line }]),
+        { kind: "assign", target: held, op: "=", value: then, line },
+      ],
+      otherwise: [{ kind: "assign", target: held, op: "=", value: otherwise, line }],
+      line,
+    });
+    this.valueTypes.set(held, type);
+    const shape = this.shapeOf(then) ?? this.shapeOf(otherwise);
+    if (shape !== null) this.valueShapes.set(held, shape);
+    return { k: "ident", name: held };
+  }
+
+  /**
+   * A value a continuation reads more than once, held in a name of its own.
+   *
+   * The name is declared with the type its use reads it at, so a value the
+   * runtime carries as a handle is held at the handle it is and the contract
+   * keeps what the source said: `Promise.await` of a `Promise<number>` is a
+   * number, and a choice between it and a number is a number.
+   */
+  private holdValue(value: Expression, type: TypeExpr | null, line: number): Expression {
+    if (this.repeatable(value) || this.loopCondition) return value;
+    const held = `__held${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: held, type, init: value, line });
+    this.valueTypes.set(held, type ?? this.valueTypeOf(value));
+    const shape = this.shapeOf(value);
+    if (shape !== null) this.valueShapes.set(held, shape);
+    return { k: "ident", name: held };
+  }
+
+  /** A choice between two values, held at the type the two have in common. */
+  private typedChoice(condition: Expression, then: Expression, otherwise: Expression): Expression {
+    const choice: Expression = { k: "conditional", condition, then, otherwise };
+    this.expressionTypes.set(choice, commonResult(this.valueTypeOf(then), this.valueTypeOf(otherwise)));
+    return choice;
+  }
+
+  /**
+   * The type of the value a promise carries.
+   *
+   * A promise's declaration states what it carries, and the read peels it: the
+   * receiver is typed at the carried value where the type reader could spell
+   * it — a `Promise<number>` is a number — and at the erased reference where it
+   * could not. The shape is the finer of the two, so a carried primitive or
+   * list is read from it; a record stays the reference its contract spells,
+   * with the shape beside it carrying the fields.
+   */
+  private promisePayloadType(receiver: Expression): TypeExpr {
+    const shape = this.shapeOf(receiver);
+    if (shape !== null && (shape.kind === "primitive" || shape.kind === "text" || shape.kind === "list")) {
+      return this.typeExprOfShape(shape);
+    }
+    const type = this.valueTypeOf(receiver);
+    if (type.kind === "primitive" || type.kind === "text" || type.kind === "slice" || type.kind === "array" || type.kind === "void") return type;
+    return ANY_TYPE;
   }
 
   /**
