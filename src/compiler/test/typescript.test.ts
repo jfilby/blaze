@@ -3606,6 +3606,23 @@ test("an intersection with a tag narrows a union to its arms", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a map value read through a fallback keeps the fields its declaration names", () => {
+  // `table.get(a) ?? table.get(b)` is one entry of the map: the fallback is the
+  // absent arm of the first read answered by the second, and the value is still
+  // the record the map holds. A field written through it is the field the
+  // declaration names.
+  const source = [
+    "interface Draft { captured: string[] }",
+    "export function count(table: Map<string, Draft>, first: string, second: string): number {",
+    "  const declared = table.get(first) ?? table.get(second);",
+    "  return declared.captured.length;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

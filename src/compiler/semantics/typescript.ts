@@ -9963,7 +9963,15 @@ class TypeScriptParser {
     const then = this.absentArmFolded(value.then, otherwise);
     const otherwiseArm = this.absentArmFolded(value.otherwise, otherwise);
     if (then === value.then && otherwiseArm === value.otherwise) return value;
-    return { k: "conditional", condition: value.condition, then, otherwise: otherwiseArm };
+    const folded: Expression = { k: "conditional", condition: value.condition, then, otherwise: otherwiseArm };
+    // The choice the fold answers is the choice it read: a `Map.get(k) ?? get(j)`
+    // is still the map's value, and the fields its shape names are the fields
+    // the folded choice reads through.
+    const type = this.expressionTypes.get(value);
+    if (type !== undefined) this.expressionTypes.set(folded, type);
+    const shape = this.expressionShapes.get(value);
+    if (shape !== undefined) this.expressionShapes.set(folded, shape);
+    return folded;
   }
 
   private readLogicalAnd(): Expression {
