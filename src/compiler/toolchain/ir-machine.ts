@@ -2241,6 +2241,8 @@ class Machine {
   readonly rodata: number[] = [];
   /** A literal already laid down, so one string is written to the object once. */
   private readonly literals = new Map<string, string>();
+  /** The descriptor of each layout, laid down once per object file. */
+  private readonly objectDescriptors = new Map<string, string>();
   /** A float already laid down, so one constant is written to the object once. */
   private readonly floatLabels = new Map<string, string>();
   /** The labels of the numbers laid down in both halves of a pair. */
@@ -9738,6 +9740,17 @@ class Machine {
     if (!isTextType(type)) this.convert(TEXT, type);
   }
 
+  /** The label of the descriptor of a layout, laid down once. */
+  private objectDescriptor(layout: ObjectLayout): string {
+    const known = this.objectDescriptors.get(layout.name);
+    if (known !== undefined) return known;
+    const names = layout.fields.map((field) => `${field.name}\0`).join("") + "\0";
+    this.literal(names);
+    const label = this.lastLiteral;
+    this.objectDescriptors.set(layout.name, label);
+    return label;
+  }
+
   private literal(text: string): void {
     // A string the program wrote out twice is the same string, so it is laid
     // down once and both places take the address of it.
@@ -10153,6 +10166,11 @@ class Machine {
     if (object !== null) this.store(object);
     if (register !== null) this.code.movRegReg(register, RAX);
     else this.code.movRegMem(RCX, frame(where));
+    const descriptor = this.objectDescriptor(layout);
+    if (register !== null) this.code.movRegReg(RDI, register);
+    else this.code.movRegMem(RDI, frame(where));
+    this.code.leaLabel(RSI, descriptor);
+    this.runtime("_object_describe");
     for (const written of value.fields) {
       const field = this.field(value.layout, written.name);
       const type = parseType(field.type);
@@ -10562,6 +10580,16 @@ class Machine {
       const right = this.hold(TEXT, "blaze_path_right");
       this.store(right);
       this.callSymbol("blaze_rt_path_join", [left, right], TEXT);
+      return;
+    }
+    if (call.callee === "blaze_rt_object_has_field" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], POINTER);
+      const object = this.hold(POINTER, "blaze_has_object");
+      this.store(object);
+      this.at(call.args[1], TEXT);
+      const field = this.hold(TEXT, "blaze_has_field");
+      this.store(field);
+      this.callSymbol("blaze_rt_object_has_field", [object, field], NUMBER);
       return;
     }
     if (call.callee === "JSON.parse" && argument !== undefined) {

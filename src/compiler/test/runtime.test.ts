@@ -289,9 +289,9 @@ test("a released block is the next block of its size, and a null release is noth
 test("the managed object representation is the same in the header and in the adapter", () => {
   const header = runtimeHeaderSource();
   const adapter = generateRuntimeAdapterSource();
-  assert.match(header, /#define BLAZE_RT_HEADER_SIZE 48u/);
-  assert.match(adapter, /BlazeHeaderSize = 48'u64/);
-  for (const field of ["magic", "base", "length", "alignment"]) {
+  assert.match(header, /#define BLAZE_RT_HEADER_SIZE 64u/);
+  assert.match(adapter, /BlazeHeaderSize = 64'u64/);
+  for (const field of ["magic", "base", "length", "alignment", "descriptor"]) {
     assert.ok(header.includes(field), `the header must describe ${field}`);
     assert.ok(adapter.includes(field), `the adapter must keep ${field}`);
   }
@@ -934,7 +934,7 @@ test("a region packs an uncleared block and keeps the slack of a cleared one", a
   assert.equal(result.code, 0, result.stderr);
   assert.equal(
     result.stdout.trim(),
-    "64 1 0",
+    "80 1 0",
     "an uncleared block is its header and its payload, and a cleared one still answers zero past its end",
   );
 });

@@ -1567,6 +1567,9 @@ class Body {
         this.callService("blaze_rt_object_new");
         const pointer = this.borrow(I32);
         this.keep(pointer);
+        this.localAt(pointer);
+        this.i32(this.poolText(layout.fields.map((field) => `${field.name}\0`).join("") + "\0"));
+        this.callService("blaze_rt_object_describe");
         for (const field of value.fields) {
           const entry = layout.fields.find((each) => each.name === field.name);
           if (entry === undefined) {
@@ -3556,6 +3559,12 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_path_join");
         return TEXT;
+      }
+      case "blaze_rt_object_has_field": {
+        this.value(argument(0), { kind: "ptr", of: { kind: "primitive", name: "u8" } });
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_object_has_field");
+        return F64_TYPE;
       }
       case "JSON.typeof": {
         // The name `typeof` answers for a value the read could not type: the

@@ -4584,6 +4584,29 @@ test("a callback declared below the arrow that uses it is read", async () => {
   }
 });
 
+test("a field presence question on an object answers the names its layout wrote", async () => {
+  // `"name" in n` where `n` is a compiled object is answered from the names
+  // the object's layout wrote, not from a dictionary the value is not. The
+  // object carries them, and the runtime asks the object itself.
+  const source = [
+    "function classify(value: unknown): string {",
+    "  const n = value as Record<string, unknown>;",
+    "  if (`name` in n) return `named`;",
+    "  if (`value` in n) return `valued`;",
+    "  return `other`;",
+    "}",
+    "function show(): string {",
+    "  return `${classify({ name: `x` })}|${classify({ value: 1 })}|${classify({ other: 2 })}`;",
+    "}",
+    "console.log(show());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "named|valued|other", `the ${backend} backend asks the object's layout`);
+  }
+});
+
 test("a module re-exports another module's function and the program calls it", async () => {
   // `export { a } from "./x.ts"` offers a name the other module writes: the
   // function is compiled once, by the module that declares it, and a caller

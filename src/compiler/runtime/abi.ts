@@ -1434,6 +1434,28 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["object"] },
   ),
   entry(
+    "blaze_rt_object_describe",
+    "void",
+    [
+      ["object", "void*"],
+      ["descriptor", "const char*"],
+    ],
+    "Names the fields a managed object was laid out with.",
+    "The descriptor is the field names, NUL separated and ending in an empty name. The object carries it for the field-presence question.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_object_has_field",
+    "double",
+    [
+      ["object", "const void*"],
+      ["field", "const char*"],
+    ],
+    "Asks whether a managed object was laid out with a field of this name.",
+    "Returns 1 or 0. An object that was never described, and a value that is not a managed pointer, answer 0.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_arguments_set",
     "void",
     [
@@ -1930,10 +1952,16 @@ typedef struct blaze_rt_header {
   uint64_t alignment;   /* payload alignment, a power of two */
   uint64_t references;  /* live references, at least one */
   uint64_t capacity;    /* payload bytes the block can hold, at least length */
+  /* The field names an object was laid out with, NUL separated and ending in
+     an empty name, or NULL for a block that is not an object. */
+  const char* descriptor;
+  /* Padding that keeps the header a multiple of the default alignment, so the
+     payload of a block out of the slab is aligned without a gap. */
+  uint64_t reserved;
 } blaze_rt_header;
 
 #define BLAZE_RT_MAGIC 0x424C415A45525400ULL
-#define BLAZE_RT_HEADER_SIZE 48u
+#define BLAZE_RT_HEADER_SIZE 64u
 #define BLAZE_RT_DEFAULT_ALIGNMENT ${DEFAULT_ALIGNMENT}u
 /* The largest a request may be, so a product of a count and an element size
    that would wrap is refused rather than answered with a smaller block. */
@@ -3700,6 +3728,8 @@ ${guarded ? "        if (slab == NULL) blaze_rt_refuse(\"out of memory\");" : ""
     header->alignment = alignment;
     header->references = 1;
     header->capacity = bytes;
+    header->descriptor = NULL;
+    header->reserved = 0;
     header->magic = BLAZE_RT_MAGIC;
     return (char*)header + BLAZE_RT_HEADER_SIZE;
   }
@@ -3714,6 +3744,8 @@ ${guarded ? "  if (base == NULL) blaze_rt_refuse(\"out of memory\");" : ""}
   header->alignment = alignment;
   header->references = 1;
   header->capacity = bytes;
+  header->descriptor = NULL;
+  header->reserved = 0;
   return (void*)aligned;
 }
 
@@ -4353,6 +4385,25 @@ void* blaze_rt_object_new(size_t bytes, size_t alignment) {
      never wrote, and a zeroed block is what answers that read the way the
      source language does. */
   return blaze_rt_block(bytes, alignment, 1);
+}
+
+/* The field names an object was laid out with. The descriptor is the names,
+   NUL separated and ending in an empty name; the header carries it. */
+void blaze_rt_object_describe(void* object, const char* descriptor) {
+  if (object == NULL) return;
+  ((blaze_rt_header*)((char*)object - BLAZE_RT_HEADER_SIZE))->descriptor = descriptor;
+}
+
+double blaze_rt_object_has_field(const void* object, const char* field) {
+  if (object == NULL || field == NULL) return 0.0;
+  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
+  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) return 0.0;
+  const char* at = header->descriptor;
+  while (*at != '\0') {
+    if (strcmp(at, field) == 0) return 1.0;
+    at += strlen(at) + 1;
+  }
+  return 0.0;
 }
 
 size_t blaze_rt_object_size(void* pointer) {

@@ -256,11 +256,13 @@ type
     alignment: uint64
     refs: uint64
     capacity: uint64 ## payload bytes the block can hold, at least length
+    descriptor: pointer ## the field names an object was laid out with, or nil
+    reserved: uint64 ## keeps the header a multiple of the default alignment
 
 const
   BlazeMagic = 0x424C415A45525400'u64
   BlazeFreed = 0'u64
-  BlazeHeaderSize = 48'u64
+  BlazeHeaderSize = 64'u64
   ## The small-block pool, the same one the C runtime keeps. A block is put in
   ## a class by the total it occupies rounded up to the granularity, and the
   ## class is what it is carved as and what it goes back onto when it is
@@ -413,7 +415,7 @@ proc blazeRegionTake(total, bytes, alignment: uint64, cleared: bool): pointer =
   let aligned = cast[pointer]((cast[uint](payload) + uint(alignment) - 1) and not (uint(alignment) - 1))
   cast[ptr BlazeHeader](cast[uint](aligned) - BlazeHeaderSize)[] = BlazeHeader(
     magic: BlazeMagic, base: cast[pointer](BlazeRegionMark), length: bytes,
-    alignment: alignment, refs: 1, capacity: bytes)
+    alignment: alignment, refs: 1, capacity: bytes, descriptor: nil, reserved: 0)
   if cleared:
     ## Cleared as a whole block rather than as a payload, which is what the C
     ## runtime does and what the comment on blazeBlock below is about: the
@@ -469,6 +471,7 @@ ${guarded ? `        if blazeSlabAt == nil:
       header = cast[ptr BlazeHeader](blazeSlabAt)
       blazeSlabAt = cast[pointer](cast[uint](blazeSlabAt) + uint(span))
     header[] = BlazeHeader(magic: BlazeMagic, base: nil, length: bytes,
+      descriptor: nil, reserved: 0,
                            alignment: align, refs: 1, capacity: bytes)
     return cast[pointer](cast[uint](header) + BlazeHeaderSize)
   let base = if cleared: alloc0(int(total)) else: alloc(int(total))
@@ -476,7 +479,7 @@ ${guarded ? `  if base == nil:
     blazeStop("allocation: out of memory")` : ""}
   let payload = alignUp(cast[uint](base) + BlazeHeaderSize, align)
   var header = BlazeHeader(magic: BlazeMagic, base: base, length: bytes,
-                           alignment: align, refs: 1, capacity: bytes)
+                           alignment: align, refs: 1, capacity: bytes, descriptor: nil, reserved: 0)
   cast[ptr BlazeHeader](payload - BlazeHeaderSize)[] = header
   cast[pointer](payload)
 
@@ -528,6 +531,28 @@ ${guarded ? `  let align = if alignment == 0: BlazeDefaultAlignment else: alignm
   ## never wrote, and a zeroed block is what answers that read the way the
   ## source language does.
   blazeBlock(bytes.uint64, align, true)` : `  blazeBlock(bytes.uint64, if alignment == 0: BlazeDefaultAlignment else: alignment.uint64, true)`}
+
+proc blaze_rt_object_describe*(target: pointer, descriptor: cstring) {.exportc, cdecl.} =
+  ## Names the fields an object was laid out with.
+  if target == nil:
+    return
+  headerOf(target)[].descriptor = cast[pointer](descriptor)
+
+proc blaze_rt_object_has_field*(target: pointer, field: cstring): float64 {.exportc, cdecl.} =
+  ## Whether the object was laid out with a field of this name.
+  if target == nil or field == nil:
+    return 0.0
+  let header = headerOf(target)
+  if header[].magic != BlazeMagic or header[].descriptor == nil:
+    return 0.0
+  var at = cast[cstring](header[].descriptor)
+  let wanted = $field
+  while at[0] != '\\0':
+    let name = $at
+    if name == wanted:
+      return 1.0
+    at = cast[cstring](cast[uint](at) + uint(name.len) + 1)
+  0.0
 
 proc blaze_rt_retain*(pointer: pointer): pointer {.exportc, cdecl.} =
 ${guarded ? "  if pointer == nil:\n    return nil" : ""}

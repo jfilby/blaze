@@ -1017,6 +1017,30 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gf. A compiled object knows the names its layout wrote
+
+    const n = node as Record<string, unknown>;
+    if ("value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) { ... }
+    if (n.k === "call" && "args" in n.call) { ... }
+
+`value as Record<string, unknown>` on an `unknown` named a dictionary the value
+never was: `"value" in n` was the dictionary's `has` on a compiled object
+pointer, and the answer was always no. The runtime header now carries the field
+names the layout wrote, NUL separated and ending in an empty name, and every
+object is described with them where it is allocated. `"key" in n` is a question
+the runtime answers from the object itself, and the assertion is read as the
+object view it is rather than as a dictionary.
+
+The header grew to sixty-four bytes, the alignment its payloads are placed at
+needs it to be a multiple of sixteen, and the C runtime, the Nim adapter and the
+WebAssembly host carry the same word. The C and machine backends and the
+WebAssembly module write the descriptor beside each object they build.
+
+`toolchain/program-emit.ts` and the `in` in `semantics/repair.ts` read. The
+resolver's other refusals in those files are the JSON indent and a shared counter.
+
+    The total went from 83 to 76.
+
 ### 4ge. A file the compiler opens is the compiler's own handle
 
     const handle = await open(path, "r");
@@ -4305,7 +4329,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-83 refusals over 95 sources, 74 of them read whole. The report reads the
+76 refusals over 95 sources, 74 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4520,6 +4544,7 @@ What was closed this session, and what each was worth:
 | a map value read through a fallback keeps its fields (§4gc) | 87 → 86 |
 | a callback annotated `any` takes the element the method hands it (§4gd) | 86 → 85 |
 | a file the compiler opens is the compiler's own handle (§4ge) | 85 → 83 |
+| a compiled object knows the names its layout wrote (§4gf) | 83 → 76 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

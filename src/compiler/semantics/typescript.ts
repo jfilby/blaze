@@ -10190,6 +10190,19 @@ class TypeScriptParser {
       this.expressionTypes.set(asked, BOOLEAN_RESULT);
       return asked;
     }
+    // A value the read cannot shape is a compiled object, and every object
+    // carries the names its layout wrote: the runtime answers whether one of
+    // them is the key.
+    if (unknownReference(this.valueTypeOf(object))) {
+      const asked: Expression = {
+        k: "binary",
+        op: "===",
+        left: { k: "call", name: "blaze_rt_object_has_field", args: [object, key] },
+        right: { k: "literal", text: "1" },
+      };
+      this.expressionTypes.set(asked, BOOLEAN_RESULT);
+      return asked;
+    }
     // The value may be one an imported function answered: its fields are the
     // declaration's, and the graph has not linked that module yet. The question
     // waits for the read that follows the link rather than being refused here.
@@ -12118,19 +12131,28 @@ class TypeScriptParser {
         const type = this.readTypeAnnotation("a type assertion", EXPRESSION_TYPE_STOPS);
         const shape = this.lastAnnotationShape();
         this.applyExpected(current(), type, shape);
+        // `value as Record<string, unknown>` where the value is `unknown` is
+        // not a dictionary the value holds: it is the view of a compiled
+        // object, whose fields the read does not know and whose layout is
+        // what says them. The assertion is left off the shape so a field is
+        // read where the object was laid out and `"k" in n` asks the object
+        // itself. A `Record` a dictionary already is keeps the dictionary.
+        const dynamicObject = assertion === "as" &&
+          shape !== null && shape.kind === "record" && shape.index !== null && shape.index.kind === "any" &&
+          unknownReference(this.valueTypeOf(current()));
         // `value as Record<string, unknown>` says the value is the dictionary
         // the assertion names. The shape is what a field or a key read off the
         // value is read at, so it is kept beside the value: `"k" in n` asks the
         // dictionary the assertion named rather than the `unknown` the
         // declaration wrote.
-        if (assertion === "as" && shape !== null && (shape.kind === "record" || shape.kind === "list" || shape.kind === "map" || shape.kind === "set")) {
+        if (!dynamicObject && assertion === "as" && shape !== null && (shape.kind === "record" || shape.kind === "list" || shape.kind === "map" || shape.kind === "set")) {
           this.expressionShapes.set(current(), shape);
         }
         // `m.get(k) as Set<string>` names a collection the value already is: a
         // map whose value is a set answers a handle, and the assertion is what
         // says what the handle holds. The value is recorded as that collection,
         // so `has`, `add` and `size` written after it are the dictionary's own.
-        const collection = this.collectionOfShape(shape);
+        const collection = dynamicObject ? null : this.collectionOfShape(shape);
         if (collection !== null) this.collectionExpressions.set(current(), collection);
         // A list is asserted at the type it says: `(o.fields as string[])`
         // names texts, so `join` written after it reads the elements the cast

@@ -49,6 +49,7 @@ export interface HostService {
 const WASM_OF_C: Record<string, string> = {
   "void": "",
   "void*": "i32",
+  "const void*": "i32",
   "char*": "i32",
   "const char*": "i32",
   "unsigned char*": "i32",
@@ -87,6 +88,8 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_array_resize",
   "blaze_rt_object_new",
   "blaze_rt_object_size",
+  "blaze_rt_object_describe",
+  "blaze_rt_object_has_field",
   "blaze_rt_print_text",
   "blaze_rt_print_error_text",
   "blaze_rt_print_text_n",
@@ -270,7 +273,7 @@ const RUNTIME_HELPERS = `
    one before. The module reads the length of a buffer from there, and the host
    writes it there for a buffer it hands over and for one the module makes. */
 const PAGE = 65536;
-const HEADER = 48;
+const HEADER = 64;
 const COUNT = 8;
 const OVERHEAD = HEADER + COUNT;
 const MAGIC = 0x424c415a45525400n;
@@ -390,6 +393,7 @@ function readHeader(pointer) {
     alignment: Number(data.getBigUint64(at + 24, true)),
     references: Number(data.getBigUint64(at + 32, true)),
     capacity: Number(data.getBigUint64(at + 40, true)),
+    descriptor: Number(data.getBigUint64(at + 48, true)),
   };
 }
 
@@ -402,6 +406,22 @@ function writeHeader(pointer, length, alignment, references, capacity) {
   data.setBigUint64(at + 24, BigInt(alignment), true);
   data.setBigUint64(at + 32, BigInt(references), true);
   data.setBigUint64(at + 40, BigInt(capacity), true);
+  data.setBigUint64(at + 48, 0n, true);
+  data.setBigUint64(at + 56, 0n, true);
+}
+
+/* The field names a descriptor holds, NUL separated and ending in an empty
+   name. */
+function descriptorHasField(descriptor, wanted) {
+  const bytes = new Uint8Array(memory.buffer);
+  let at = descriptor;
+  while (at < bytes.length && bytes[at] !== 0) {
+    let end = at;
+    while (end < bytes.length && bytes[end] !== 0) end += 1;
+    if (new TextDecoder().decode(bytes.slice(at, end)) === wanted) return true;
+    at = end + 1;
+  }
+  return false;
 }
 
 /* The count of the elements a buffer holds, which is the word the offset sits
@@ -770,6 +790,28 @@ export function blaze_rt_array_resize(pointer, count, elementSize) {
 export function blaze_rt_object_new(bytes, alignment) {
   const at = Number(alignment) === 0 ? ALIGNMENT : Number(alignment);
   return block(Number(bytes), at, true);
+}
+`,
+  },
+  {
+    service: "blaze_rt_object_describe",
+    source: `
+export function blaze_rt_object_describe(object, descriptor) {
+  if (Number(object) === 0) return;
+  view().setBigUint64(Number(object) - OVERHEAD + 48, BigInt(descriptor), true);
+}
+`,
+  },
+  {
+    service: "blaze_rt_object_has_field",
+    source: `
+export function blaze_rt_object_has_field(object, field) {
+  const pointer = Number(object);
+  if (pointer === 0) return 0;
+  const descriptor = Number(view().getBigUint64(pointer - OVERHEAD + 48, true));
+  if (descriptor === 0) return 0;
+  const wanted = new TextDecoder().decode(textBytes(Number(field)));
+  return descriptorHasField(descriptor, wanted) ? 1 : 0;
 }
 `,
   },

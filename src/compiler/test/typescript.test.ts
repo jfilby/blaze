@@ -4316,11 +4316,11 @@ test("a for-of walks a constant the file wrote, keeping the record its elements 
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
-test("a record a value is asserted to be answers whether it holds a key", () => {
-  // `value as Record<string, unknown>` names the dictionary the value is, and
-  // `key in value` is the dictionary's `has`. The assertion is what the read
-  // keeps: the declaration of `n` writes `unknown`, and the cast is the only
-  // thing that says the value is a dictionary.
+test("a record a value is asserted to be is the object its layout wrote", () => {
+  // `value as Record<string, unknown>` on an `unknown` is the view of the
+  // object the value is: its fields are the fields the object was laid out
+  // with, and `key in value` asks the object itself. The dictionary the cast
+  // used to name was a dictionary the value never was.
   const source = [
     "export function read(node: unknown): boolean {",
     "  const n = node as Record<string, unknown>;",
@@ -4330,7 +4330,7 @@ test("a record a value is asserted to be answers whether it holds a key", () => 
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(read({}));\n` }, "main.ts", "read");
-  assert.match(ir, /dict_has|blaze_rt_dict_has/, "the question is the dictionary's own has");
+  assert.match(ir, /object_has_field/, "the question is the object's own layout");
 });
 
 test("a key held in a name is asked of a record's fields", () => {

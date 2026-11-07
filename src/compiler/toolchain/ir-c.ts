@@ -414,6 +414,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
     case "blaze_rt_is_array":
       return `blaze_rt_is_array(${args[0]})`;
+    case "blaze_rt_object_has_field":
+      return `${RUNTIME_NAME}_object_has_field((const void*)(uintptr_t)(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_len":
       return `blaze_rt_dict_len(${args[0]})`;
     case "blaze_rt_dict_key_at":
@@ -1360,7 +1362,10 @@ class FunctionEmitter {
     const allocation = this.writesEveryField(value)
       ? `${RUNTIME_NAME}_allocate_uninitialized(${size})`
       : `${RUNTIME_NAME}_object_new(${size}, _Alignof(struct ${value.layout}))`;
-    return `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${allocation}; ${written.join(" ")} ${name}; })`;
+    const layout = this.fn.objects[value.layout];
+    const names = layout === undefined ? "" : layout.fields.map((field) => field.name).join("\\0");
+    const describe = layout === undefined ? "" : ` ${RUNTIME_NAME}_object_describe(${name}, "${names}\\0");`;
+    return `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${allocation};${describe} ${written.join(" ")} ${name}; })`;
   }
 
   /**

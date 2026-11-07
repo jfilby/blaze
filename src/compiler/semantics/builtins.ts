@@ -100,6 +100,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
   "blaze_rt_is_array": { params: [ANY], returns: F64, arity: 1 },
+  /** Whether a compiled object was laid out with a field of this name: the
+   *  object carries the names its layout wrote. */
+  "blaze_rt_object_has_field": { params: [POINTER, TEXT], returns: F64, arity: 2 },
   "blaze_rt_dict_len": { params: [F64], returns: F64, arity: 1 },
   "blaze_rt_dict_key_at": { params: [F64, F64], returns: TEXT, arity: 2 },
   "blaze_rt_dict_value_at": { params: [F64, F64], returns: F64, arity: 2 },
