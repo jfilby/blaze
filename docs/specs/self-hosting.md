@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fv. A block the file allocates at the top is typed by its constructor
+
+    const FLOAT_BYTES = new DataView(new ArrayBuffer(8));
+
+    FLOAT_BYTES.setFloat64(0, value, true);
+    for (let at = 0; at < size; at += 1) bytes.push(FLOAT_BYTES.getUint8(at));
+
+A top-level `const` whose value is constructed is state: the file holds one
+block, so the declaration is not inlined at each read. What the *name* holds was
+then not written down, and a method on it was a method of nothing — the three
+view reads and writes `toolchain/ir-wasm.ts` writes over its float bytes. The
+scan now records the element the constructor allocates (a typed array's own
+element, a byte for `ArrayBuffer` and `DataView`), and a function body is seeded
+with those names at the type of the block. The DataView methods are read; the
+file still refuses an empty array in a generic call.
+
+    The total went from 101 to 98.
+
 ### 4fu. A splice writes the field a chain of fields names
 
     target.owner.statements.splice(at, 0, ...hoisted);
@@ -4130,7 +4148,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-101 refusals over 95 sources, 68 of them read whole. The report reads the
+98 refusals over 95 sources, 68 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4335,6 +4353,7 @@ What was closed this session, and what each was worth:
 | a number written at its significant digits (§4fs) | 104 → 103 |
 | a union asks the kind of the value it holds (§4ft) | 103 → 102 |
 | a splice writes the field a chain of fields names (§4fu) | 102 → 101 |
+| a block the file allocates at the top is typed by its constructor (§4fv) | 101 → 98 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

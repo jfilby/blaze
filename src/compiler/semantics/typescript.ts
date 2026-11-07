@@ -98,7 +98,7 @@ import {
   type ClassParam,
   type ClassTable,
 } from "./typescript-classes.ts";
-import type { TypeExpr } from "../core/types.ts";
+import type { PrimitiveTypeName, TypeExpr } from "../core/types.ts";
 import type {
   AssignOperator,
   BinaryOp,
@@ -1113,6 +1113,17 @@ interface ScannedFile {
    * by the read that asks, against the table the module graph built.
    */
   collections: Map<string, { start: number; end: number }>;
+  /**
+   * The element type of a top-level allocation the program holds, by the name
+   * the declaration binds.
+   *
+   * `const FLOAT_BYTES = new DataView(new ArrayBuffer(8))` is one block of
+   * bytes the file writes through, so the name is state and cannot be inlined:
+   * two reads are one block. What the name holds is still the block the
+   * constructor makes, and a method written on it reads the element the
+   * declaration allocated.
+   */
+  allocations: Map<string, string>;
 }
 
 /**
@@ -1364,6 +1375,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const shapes = new Map<string, ConstantInfo>();
   const annotations = new Map<string, { start: number; end: number; exported: boolean }>();
   const collections = new Map<string, { start: number; end: number }>();
+  const allocations = new Map<string, string>();
   const state = new Set<string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1545,7 +1557,11 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // An instance is inlined only where the file reads it once: two reads of
       // a name are two reads of one object, and two allocations are two.
       const shared = construction && nameCount(tokens, name) > 2;
-      if (!constant || shared) state.add(name);
+      if (!constant || shared) {
+        state.add(name);
+        const element = allocationElement(tokens, start);
+        if (element !== null) allocations.set(name, element);
+      }
       else if (!locals.has(name)) found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) });
       index = end + 1;
       continue;
@@ -1556,7 +1572,27 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state, shapes, annotations, collections };
+  return { constants: found, state, shapes, annotations, collections, allocations };
+}
+
+/**
+ * The element type of a top-level allocation the running program holds, by the
+ * constructor the declaration writes.
+ *
+ * A `new DataView(...)` over a block of bytes and an `ArrayBuffer` are blocks
+ * of bytes; a typed array is a block of its own element. The name is state, so
+ * the declaration is not inlined, and what it holds is still the block the
+ * constructor makes.
+ */
+function allocationElement(tokens: readonly Token[], start: number): string | null {
+  if (tokens[start]?.text !== "new") return null;
+  const name = tokens[start + 1];
+  if (name?.kind !== "ident") return null;
+  const typed = TYPED_ARRAYS[name.text];
+  if (typed !== undefined) return typed;
+  if (name.text === "ArrayBuffer" || name.text === "SharedArrayBuffer") return "u8";
+  if (name.text === "DataView") return "u8";
+  return null;
 }
 
 /** Marks the constants an `export { ... }` list of this file offers. */
@@ -3588,6 +3624,7 @@ class TypeScriptParser {
     importedRenames: ReadonlyMap<string, string> = new Map(),
     constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map(),
     constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map(),
+    stateAllocations: ReadonlyMap<string, string> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3602,6 +3639,12 @@ class TypeScriptParser {
     this.constantCollections = constantCollections;
     this.state = state;
     this.shapes = shapes;
+    this.stateAllocations = stateAllocations;
+    // A block the program allocates at the top of the file is a sequence of the
+    // element the constructor names, whatever the declaration's values are: a
+    // method written on the name before the declaration is read is a method of
+    // that sequence.
+    this.seedStateAllocations();
     this.typeTable = typeTable ?? scanTypeTable(tokens);
     // A name this file imports is a value another module holds. Until the graph
     // binds the declaration, a method written on the name is not a method this
@@ -3617,6 +3660,8 @@ class TypeScriptParser {
   private readonly state: ReadonlySet<string>;
   /** The field names of a computed top-level object, by the name it is held at. */
   private readonly shapes: ReadonlyMap<string, ConstantInfo>;
+  /** The element type of a top-level allocation the program holds, by name. */
+  private readonly stateAllocations: ReadonlyMap<string, string>;
   /** The constants being read, so one that names itself is not read forever. */
   private readonly expanding = new Set<string>();
 
@@ -4528,6 +4573,7 @@ class TypeScriptParser {
     this.currentClass = self ? info : null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.seedStateAllocations();
     this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
@@ -6371,6 +6417,7 @@ class TypeScriptParser {
     this.currentClass = null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.seedStateAllocations();
     this.valueShapes = new Map();
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
@@ -13859,6 +13906,23 @@ class TypeScriptParser {
     return this.expressionFunctionType(value);
   }
 
+  /**
+   * Binds the blocks the file allocates at the top of it, which a function
+   * reads by name.
+   *
+   * A function's own names are read into a table of its own, so a name the file
+   * allocated above it is seeded here: `const FLOAT_BYTES = new DataView(...)`
+   * is one block of bytes the function writes through, and a method written on
+   * the name is a method of that block. A name the body declares of its own
+   * overwrites the seed when it is declared.
+   */
+  private seedStateAllocations(): void {
+    for (const [name, element] of this.stateAllocations) {
+      if (this.valueTypes.has(name)) continue;
+      this.valueTypes.set(name, { kind: "slice", of: { kind: "primitive", name: element as PrimitiveTypeName } });
+    }
+  }
+
   private valueTypeOf(value: Expression): TypeExpr {
     const recorded = this.expressionTypes.get(value);
     if (recorded !== undefined) return recorded;
@@ -19035,6 +19099,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       this.importedValueRenames,
       this.constantAnnotations,
       this.constantCollections,
+      this.stateAllocations,
     );
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
@@ -20343,6 +20408,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     importedRenames(tokens),
     scanned.annotations,
     scanned.collections,
+    scanned.allocations,
   );
   parser.wideBigint = wideBigint;
   // The type each imported value's declaration writes, for a value whose own

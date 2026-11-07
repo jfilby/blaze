@@ -3500,6 +3500,34 @@ test("typeof of a union of shapes is asked at run time", () => {
   assert.match(body, /text\.slice/);
 });
 
+test("a block the file allocates at the top types a method of its name", () => {
+  // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
+  // not inlined at each read. What the name holds is still the block the
+  // constructor makes, and a function below the declaration writes through it:
+  // the method is the float store, not a method of nothing.
+  const files: Record<string, string> = {
+    "main.ts": 'import { read } from "./lib.ts";\nconsole.log(read(1));\n',
+    "lib.ts": [
+      "const FLOAT_BYTES = new DataView(new ArrayBuffer(8));",
+      "export function read(value: number): number {",
+      "  FLOAT_BYTES.setFloat64(0, value, true);",
+      "  return FLOAT_BYTES.getUint8(0);",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const records = readModuleGraph({
+    frontend: typeScriptFrontend,
+    entry: { path: "main.ts", source: files["main.ts"] as string },
+    roots: ["lib.ts"],
+    read: (path) => files[path] ?? null,
+    requireImports: false,
+  });
+  const lib = records.find((record) => record.path === "lib.ts");
+  assert.ok(lib !== undefined, "lib.ts is a file of the graph");
+  assert.equal(lib.refusedCount, 0, lib.refused.map((one) => one.message).join("; "));
+});
+
 test("a test of a value settles what the branch reads it as", () => {
   // Past the guard the value is a text, so the body reads a text method: the
   // narrowing is what makes the branch typeable at all.
