@@ -3623,6 +3623,22 @@ test("a map value read through a fallback keeps the fields its declaration names
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("an any callback takes the element the method hands it", () => {
+  // `layouts.some((item: any) => item.fields.every(...))`: the annotation says
+  // nothing, and the method says the element is a Layout. A record erases to
+  // the unshaped reference, so the shape the method knows is what makes
+  // `item.fields` a list and `every` a method of it.
+  const source = [
+    "interface Layout { fields: { name: string }[] }",
+    "export function find(layouts: Layout[]): boolean {",
+    "  return layouts.some((item: any) => item.fields.every((entry: any) => entry.name !== ``));",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

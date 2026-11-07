@@ -1017,6 +1017,22 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gd. A callback annotated `any` takes the element the method hands it
+
+    const candidate = Object.values(this.objects).find((item: any) =>
+      item.fields.length === expandedFields(value).length &&
+      item.fields.every((entry: any) => fieldNames.has(entry.name)),
+    );
+
+The callback writes `any` to say it does not care what the value is, and the
+read obeyed: `item` was the unshaped reference, and `item.fields` was a field of
+nothing, so `every` was a method of nothing. The method the callback is handed
+to knows the element — a list of layouts has a layout at every position — and a
+record erases to the unshaped reference, so the shape the method knows is what
+the callback's parameter is given. `semantics/ir-resolve.ts` reads whole.
+
+    The total went from 86 to 85.
+
 ### 4gc. A map value read through a fallback keeps its fields
 
     const declared = this.functions.table.get(`${value.function}__${value.args.length}`) ??
@@ -4275,7 +4291,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-86 refusals over 95 sources, 73 of them read whole. The report reads the
+85 refusals over 95 sources, 74 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4488,6 +4504,7 @@ What was closed this session, and what each was worth:
 | a callback declared below the arrow that uses it (§4ga) | 90 → 88 |
 | an intersection with a tag narrows a union to its arms (§4gb) | 88 → 87 |
 | a map value read through a fallback keeps its fields (§4gc) | 87 → 86 |
+| a callback annotated `any` takes the element the method hands it (§4gd) | 86 → 85 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

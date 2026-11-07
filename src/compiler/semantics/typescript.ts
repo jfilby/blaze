@@ -12714,6 +12714,10 @@ class TypeScriptParser {
           if (this.accept(":")) {
             type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
             shape = this.lastAnnotationShape();
+            if (hinted !== null && unknownReference(type)) {
+              if (!unknownReference(hinted.type)) type = hinted.type;
+              if (hinted.shape !== null && hinted.shape.kind !== "any") shape = hinted.shape;
+            }
           }
           const temp = `__param${this.destructureCount++}`;
           params.push({ name: temp, type, typeName: "", functionType: null, shape });
@@ -12747,6 +12751,17 @@ class TypeScriptParser {
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
           type = this.readTypeAnnotation("the type of a parameter", new Set([",", ")", "="]));
           shape = this.lastAnnotationShape();
+          // A callback's `any` is the element the method hands it, and the
+          // method knows what that is: `items.find((item: any) => item.fields)`
+          // reads `item` at the element, not at the unshaped reference the
+          // annotation wrote.
+          if (hinted !== null && unknownReference(type)) {
+            // The annotation said nothing, and the method the callback is
+            // handed to says what the element is. A record erases to the
+            // unshaped reference, so the shape is what the read needs.
+            if (!unknownReference(hinted.type)) type = hinted.type;
+            if (hinted.shape !== null && hinted.shape.kind !== "any") shape = hinted.shape;
+          }
         }
         // A default is the value a call writes when it leaves the parameter
         // out, and the call stands where the arrow was written — so a value
