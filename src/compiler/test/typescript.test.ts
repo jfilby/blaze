@@ -3481,6 +3481,25 @@ test("typeof of a value the read cannot type is asked at run time", () => {
   assert.match(body, /JSON\.typeof/);
 });
 
+test("typeof of a union of shapes is asked at run time", () => {
+  // A field declared as a text or a record has no one kind the type can name,
+  // and folding it to "object" compiled no arm that tested for a text. The
+  // union's arms are what say it is a question for the value itself.
+  const source = [
+    "interface Shape { sides: number }",
+    "interface Extra { body: string | Shape }",
+    "export function read(extra: Extra): string {",
+    "  return typeof extra.body === `string` ? extra.body.slice(0, 2) : `shape`;",
+    "}",
+    "",
+  ].join("\n");
+  const body = JSON.stringify(analyzedBody(source, "read"));
+  assert.match(body, /JSON\.typeof/);
+  // The arm the test holds in reads the field as the text it is, so the slice
+  // is the text method and not a field read of the record arm.
+  assert.match(body, /text\.slice/);
+});
+
 test("a test of a value settles what the branch reads it as", () => {
   // Past the guard the value is a text, so the body reads a text method: the
   // narrowing is what makes the branch typeable at all.

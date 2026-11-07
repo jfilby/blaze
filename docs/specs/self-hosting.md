@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ft. A union asks the kind of the value it holds
+
+    const extra = (this.program.extraFunctions ?? []).map((extraFn) =>
+      typeof extraFn.body === "string"
+        ? extraFn.body.split("\n")
+        : this.function(extraFn.body as SemanticFunction),
+    );
+
+`typeof extraFn.body` over a field typed `string | SemanticFunction` was
+answered from the type, and a union of shapes is not one kind: the read called
+it an object, so the arm that splits a text compiled nothing and the `.split`
+was refused as a method of nothing. A record of fields is one kind and still
+answers from its type; a union is the question the runtime's `JSON.typeof`
+answers, and the branch it holds in reads the field as the text it is.
+`toolchain/program-emit.ts` reads one refusal shorter.
+
+    The total went from 103 to 102.
+
 ### 4fs. A number written at its significant digits
 
     return Number.isInteger(value) ? value.toString() : value.toPrecision(17);
@@ -4091,7 +4109,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-103 refusals over 95 sources, 68 of them read whole. The report reads the
+102 refusals over 95 sources, 68 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4143,14 +4161,6 @@ The value-model slices still open, in the order they block the self-build:
   `Record<string, string[]>` and a set of lists are refused where the value is
   read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
   its own whose handle is the entry — before a key can answer one.
-- **A value's kind where the type is a union.** `typeof value === "number"` on
-  a union of a bigint, a number, a text and a record: the read answered
-  `"object"` for the whole union and the arm that the number is was never
-  compiled. Answering the question at run time is what `JSON.typeof` is for,
-  but the union's shape has to be told apart from a single interface first —
-  the shape carries `arms`, and a record of fields and a union of them are not
-  the same kind. The number arm now has `toPrecision` (§4fs), so what is left
-  is the union asking its kind at run time.
 - **A value whose type is an intersection of a union.** `DraftValue & { k:
   "buffer" | "sized" | "view" }` is a value of one of three kinds of the union,
   and a field of it — `held`, which is the array the block is — is the field of
@@ -4302,6 +4312,7 @@ What was closed this session, and what each was worth:
 | the JSON of a list a program builds, and the tuple type a pair is (§4fq) | 112 → 108 |
 | Promise.allSettled reports how each promise settled (§4fr) | 108 → 104 |
 | a number written at its significant digits (§4fs) | 104 → 103 |
+| a union asks the kind of the value it holds (§4ft) | 103 → 102 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

@@ -10118,7 +10118,11 @@ class TypeScriptParser {
     // name of the interface it was written at.
     if (type === null) {
       const shape = this.shapeOf(operand);
-      if (shape !== null && shape.kind !== "any") type = this.typeExprOfShape(shape);
+      // A union of shapes is not one kind: its arms may be a text, a number and
+      // a record, and which one a value is is the question `typeof` asks at run
+      // time. A single interface erases to the reference its fields are read
+      // through, and that one is an object and says so where it is read.
+      if (shape !== null && shape.kind !== "any" && (shape.kind !== "record" || shape.arms === undefined)) type = this.typeExprOfShape(shape);
     }
     if (type === null) {
       const asked: Expression = { k: "call", name: "JSON.typeof", args: [operand] };
