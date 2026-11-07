@@ -1009,6 +1009,11 @@ class TypeText {
     switch (lower) {
       case "Array":
       case "ReadonlyArray":
+      // `Iterable<T>` is what a program walks, and a list is the only thing
+      // this subset walks: the element the type names is what the loop or the
+      // spread written over it holds.
+      case "Iterable":
+      case "ArrayLike":
         return { kind: "list", of: first };
       case "Map":
       case "WeakMap":

@@ -956,6 +956,11 @@ export function mapTypeScriptType(text: string, _position: string, wideBigint = 
   if (source === "bigint" && wideBigint) return parseType("u256");
   if (source in PRIMITIVES) return parseType(PRIMITIVES[source]);
   if (source in TYPED_ARRAYS) return { kind: "slice", of: parseType(TYPED_ARRAYS[source]) };
+  // `Array<T>` and the names that walk the same list are a block of T: a
+  // program walks a list, and `Iterable<T>` is the list a loop or a spread
+  // over it holds.
+  const generic = /^(?:Array|ReadonlyArray|Iterable|ArrayLike)<(.+)>$/.exec(source);
+  if (generic !== null) return { kind: "slice", of: mapTypeScriptType(generic[1] as string, _position, wideBigint) };
   return ANY_TYPE;
 }
 
@@ -7078,9 +7083,14 @@ class TypeScriptParser {
    * the opaque reference, as every other unnameable type is.
    */
   private arrayTypeFrom(start: number, end: number): TypeExpr | null {
-    // `Array<T>` and `ReadonlyArray<T>` name the same array.
+    // `Array<T>`, `ReadonlyArray<T>` and the names that walk the same list name
+    // one array.
     const head = this.tokens[start];
-    if (head?.kind === "ident" && (head.text === "Array" || head.text === "ReadonlyArray") && this.tokens[start + 1]?.text === "<") {
+    if (
+      head?.kind === "ident" &&
+      (head.text === "Array" || head.text === "ReadonlyArray" || head.text === "Iterable" || head.text === "ArrayLike") &&
+      this.tokens[start + 1]?.text === "<"
+    ) {
       const close = this.matchingToken(start + 1, "<", ">");
       if (close >= 0 && close === end - 1) {
         return { kind: "slice", of: this.typeFromTokens(start + 2, close, false) };
@@ -8176,8 +8186,11 @@ class TypeScriptParser {
       // call no longer reaches.
       this.valueArrows.delete(target.text);
       this.forgetNarrowing(target.text);
-      const assigned = this.collectionExpressions.get(value);
-      if (assigned !== undefined) this.valueCollections.set(target.text, assigned);
+      // What a name holds is what it was just written with: a map or a set a
+      // call answers is the collection the call's declaration names, exactly
+      // as the declaration of the name read it.
+      const assigned = this.collectionExpressions.get(value) ?? this.collectionOfExpression(value) ?? null;
+      if (assigned !== null) this.valueCollections.set(target.text, assigned);
       else this.valueCollections.delete(target.text);
       const held = this.classOfExpression(value);
       if (held === null) this.valueClasses.delete(target.text);
@@ -8733,9 +8746,21 @@ class TypeScriptParser {
       }
     }
     // `a.push(x)` answers the array the name holds afterwards, so written on
-    // its own line it is the write that keeps it. A field is written back into
-    // the field it was read from, with the object it belongs to unchanged.
-    if (value.k === "append" && value.arms !== undefined && value.condition !== undefined) {
+    // its own line it is the write that keeps it.
+    if (value.k === "append") return this.appendWrite(value, token.line);
+    return { kind: "expression", value, line: token.line };
+  }
+
+  /**
+   * The write that keeps the list a push answers.
+   *
+   * A field is written back into the field it was read from, with the object it
+   * belongs to unchanged, and a choice of two places is the `if` over the two
+   * writes. The helper the frontend wrote does the growing; the statement is
+   * the assignment that keeps the grown list.
+   */
+  private appendWrite(value: Expression & { k: "append" }, line: number): Statement {
+    if (value.arms !== undefined && value.condition !== undefined) {
       const writeArm = (arm: { target: string; base: string | null }): Statement => {
         const array: Expression = arm.base === null
           ? { k: "ident", name: arm.target }
@@ -8748,8 +8773,8 @@ class TypeScriptParser {
               return { k: "binary", op: "+", left: inner, right: joined };
             }, array);
         return arm.base === null
-          ? { kind: "assign", target: arm.target, op: "=", value: call, line: token.line }
-          : { kind: "memberAssign", base: arm.base, field: arm.target, op: "=", value: call, line: token.line };
+          ? { kind: "assign", target: arm.target, op: "=", value: call, line }
+          : { kind: "memberAssign", base: arm.base, field: arm.target, op: "=", value: call, line };
       };
       const arms = value.arms;
       return {
@@ -8757,36 +8782,33 @@ class TypeScriptParser {
         condition: value.condition,
         then: [writeArm(arms[0] as { target: string; base: string | null })],
         otherwise: [writeArm(arms[1] as { target: string; base: string | null })],
-        line: token.line,
+        line,
       };
     }
-    if (value.k === "append") {
-      const array: Expression = appendArray(value);
-      let call: Expression;
-      if (value.spreads === undefined) {
-        call = { k: "call", name: value.helper, args: [array, ...value.values] };
-      } else {
-        // A value written out joins the list as a list of one, and a spread
-        // joins the list it already is: both are the concatenation two lists
-        // added are, in the order the source wrote them.
-        const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
-        call = array;
-        value.values.forEach((written, at) => {
-          const joined: Expression = value.spreads?.[at] === true
-            ? written
-            : { k: "buffer", element, values: [written] };
-          call = { k: "binary", op: "+", left: call, right: joined };
-        });
-      }
-      if (value.index !== undefined) {
-        return { kind: "indexAssign", buffer: value.target, index: value.index, op: "=", value: call, line: token.line };
-      }
-      if (value.base === null) {
-        return { kind: "assign", target: value.target, op: "=", value: call, line: token.line };
-      }
-      return { kind: "memberAssign", base: value.base, field: value.target, op: "=", value: call, line: token.line };
+    const array: Expression = appendArray(value);
+    let call: Expression;
+    if (value.spreads === undefined) {
+      call = { k: "call", name: value.helper, args: [array, ...value.values] };
+    } else {
+      // A value written out joins the list as a list of one, and a spread
+      // joins the list it already is: both are the concatenation two lists
+      // added are, in the order the source wrote them.
+      const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
+      call = array;
+      value.values.forEach((written, at) => {
+        const joined: Expression = value.spreads?.[at] === true
+          ? written
+          : { k: "buffer", element, values: [written] };
+        call = { k: "binary", op: "+", left: call, right: joined };
+      });
     }
-    return { kind: "expression", value, line: token.line };
+    if (value.index !== undefined) {
+      return { kind: "indexAssign", buffer: value.target, index: value.index, op: "=", value: call, line };
+    }
+    if (value.base === null) {
+      return { kind: "assign", target: value.target, op: "=", value: call, line };
+    }
+    return { kind: "memberAssign", base: value.base, field: value.target, op: "=", value: call, line };
   }
 
   /**
@@ -17526,6 +17548,65 @@ class TypeScriptParser {
             spread = { k: "call", name: helper.name, args: [spread] };
             this.expressionTypes.set(spread, helper.returns);
           }
+        }
+        // A map spread into a list is its entries, each one the pair of a key
+        // and a value. A pair of two kinds is not one element a list holds, so
+        // only a map whose key and value are the same kind is read: the pair is
+        // then a list of two of them, and the list is a list of pairs.
+        if (collection !== null && collection.kind === "map" && sameResult(collection.key, collection.value)) {
+          const pair: TypeExpr = { kind: "slice", of: collection.key };
+          const pairShape: ResolvedType = { kind: "list", of: this.shapeOfTypeExpr(collection.key) };
+          const mapName = `__entries${this.fieldCount++}`;
+          this.pendingBefore.push({ kind: "declare", name: mapName, type: null, init: spread, line: this.peek().line });
+          this.valueTypes.set(mapName, NUMBER_RESULT);
+          const map: Expression = { k: "ident", name: mapName };
+          this.collectionExpressions.set(map, collection);
+          const pairsName = `__pairs${this.fieldCount++}`;
+          const empty: Expression = { k: "buffer", element: typeToString(pair), values: [] };
+          this.pendingBefore.push({ kind: "declare", name: pairsName, type: null, init: empty, line: this.peek().line });
+          this.valueTypes.set(pairsName, { kind: "slice", of: pair });
+          this.valueShapes.set(pairsName, { kind: "list", of: pairShape });
+          const at: Expression = { k: "ident", name: `__pair${this.fieldCount++}` };
+          const keyRead: Expression = {
+            k: "call",
+            name: this.keyReadName(collection),
+            args: [map, at],
+          };
+          const valueRead: Expression = {
+            k: "call",
+            name: this.valueReadName(collection.value),
+            args: [map, at],
+          };
+          const pairValue: Expression = {
+            k: "buffer",
+            element: typeToString(collection.key),
+            values: [keyRead, valueRead],
+          };
+          this.expressionTypes.set(pairValue, pair);
+          this.expressionShapes.set(pairValue, pairShape);
+          const helper = this.appendHelper("push", pair, 1, this.peek().line);
+          const append: Expression = {
+            k: "append",
+            target: pairsName,
+            base: null,
+            helper: helper.name,
+            op: "push",
+            values: [pairValue],
+          };
+          this.pendingBefore.push({
+            kind: "loop",
+            variable: (at as { name: string }).name,
+            from: { k: "literal", text: "0" },
+            to: { k: "call", name: "blaze_rt_dict_len", args: [map] },
+            inclusive: false,
+            step: null,
+            down: false,
+            body: [this.appendWrite(append, this.peek().line)],
+            line: this.peek().line,
+          });
+          spread = { k: "ident", name: pairsName };
+          this.expressionTypes.set(spread, { kind: "slice", of: pair });
+          this.expressionShapes.set(spread, { kind: "list", of: pairShape });
         }
         // A text spread into a list is its characters, one text each, which is
         // the fields the split helper cuts at the empty separator. Without

@@ -4531,6 +4531,37 @@ test("a map is keyed by a reference, and answers the text it holds", async () =>
   assert.equal(output.trim(), "21");
 });
 
+test("a map spread into a list is its entries, and an iterable spread is its values", async () => {
+  // `[...m]` is the entries of the map, each the pair of its key and value: a
+  // map whose key and value are the same kind is a list of pairs, and the
+  // methods written after it walk the pairs. `[...bodies]` over an
+  // `Iterable<T>` is the list the type walks.
+  const source = [
+    "function source(): Map<string, string> {",
+    "  const m = new Map<string, string>();",
+    "  m.set(`a`, `b`);",
+    "  m.set(`c`, `c`);",
+    "  return m;",
+    "}",
+    "function different(): boolean {",
+    "  let m = new Map<string, string>();",
+    "  m = source();",
+    "  return [...m].some(([key, value]) => key !== value);",
+    "}",
+    "function kept(): number {",
+    "  return [...source()].filter(([key, value]) => key !== value).length;",
+    "}",
+    "function all(bodies: Iterable<string>): string[] { return [...bodies]; }",
+    "function run(): string { return all([`x`, `y`]).join(``); }",
+    "console.log(`${different()}|${kept()}|${run()}`);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "true|1|xy", `the ${backend} backend spreads the entries`);
+  }
+});
+
 test("a module re-exports another module's function and the program calls it", async () => {
   // `export { a } from "./x.ts"` offers a name the other module writes: the
   // function is compiled once, by the module that declares it, and a caller

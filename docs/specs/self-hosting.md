@@ -1017,6 +1017,27 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fy. A map spread into a list is its entries
+
+    if ([...remapped].some(([key, root]) => key !== root)) { ... }
+
+    const all = [...bodies];   // bodies: Iterable<SemanticFunction>
+
+`[...map]` was the map handle, not the entries the source wrote, so the method
+after it was a method of nothing. The spread is now a list of the map's entries
+when key and value are the same kind: the pair is a list of two of them, built
+by the append loop, and the callback destructures it. A name assigned the answer
+of a function holds the collection that function's return type names, which is
+what `remapped = uniteShapes(shapes)` needed.
+
+`[...bodies]` over `Iterable<T>` (and `ArrayLike<T>`) is the list of T: a list is
+the only thing the subset walks, and the type names what a loop or a spread over
+it holds.
+
+`semantics/objects.ts` reads whole.
+
+    The total went from 94 to 91.
+
 ### 4fx. An empty list in a call argument takes the type the call says
 
     this.scopes.push({ id: block.id, names: ..., allocated: known === undefined ? [] : null });
@@ -4190,7 +4211,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-94 refusals over 95 sources, 71 of them read whole. The report reads the
+91 refusals over 95 sources, 72 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4398,6 +4419,7 @@ What was closed this session, and what each was worth:
 | a block the file allocates at the top is typed by its constructor (§4fv) | 101 → 98 |
 | the path namespace the compiler reads its own imports through (§4fw) | 98 → 97 |
 | an empty list in a call argument takes the type the call says (§4fx) | 97 → 94 |
+| a map spread into a list is its entries (§4fy) | 94 → 91 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
