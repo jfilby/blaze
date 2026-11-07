@@ -550,6 +550,46 @@ function typeofName(type: TypeExpr): string {
   }
 }
 
+/** The arm of a union whose tag field writes the literal, or null. */
+function armWithTag(shape: ResolvedType & { kind: "record" }, field: string, literal: string): ResolvedType | null {
+  const arm = shape.arms?.find(
+    (one) => one.kind === "record" && one.fields.get(field)?.literal === literal,
+  );
+  return arm ?? null;
+}
+
+/**
+ * The union without the arm whose tag field writes the literal.
+ *
+ * A guard `if (value.k === "buffer") return;` leaves the rest of the block
+ * with the arms the test did not name. One arm left is that arm; more than one
+ * is the union of them, with the fields they share merged as the union reader
+ * merges them.
+ */
+function withoutTag(shape: ResolvedType & { kind: "record" }, field: string, literal: string): ResolvedType | null {
+  const arms = shape.arms ?? [];
+  const rest = arms.filter(
+    (one) => !(one.kind === "record" && one.fields.get(field)?.literal === literal),
+  );
+  if (rest.length === 0 || rest.length === arms.length) return null;
+  if (rest.length === 1) return rest[0] as ResolvedType;
+  const fields = new Map<string, ResolvedField>();
+  let index: ResolvedType | null = null;
+  for (const member of rest) {
+    if (member.kind !== "record") continue;
+    for (const [name, declared] of member.fields) {
+      if (fields.has(name)) continue;
+      fields.set(name, {
+        type: declared.type,
+        optional: true,
+        ...(declared.literal === undefined ? {} : { literal: declared.literal }),
+      });
+    }
+    if (member.index !== null) index = member.index;
+  }
+  return { kind: "record", fields, index, arms: rest };
+}
+
 /** Whether a type is the reference the read has no name for. */
 function unknownReference(type: TypeExpr): boolean {
   return type.kind === "ref" && type.of === null && type.name === undefined;
@@ -1085,6 +1125,12 @@ interface ConstantInfo {
  * the file's. A declaration whose value is not a constant expression is not
  * recorded, so a name that holds a call or an object is left as itself.
  */
+/** What a test settles: the type a value is read at, and the shape it holds. */
+interface Narrowing {
+  readonly types: Map<string, TypeExpr>;
+  readonly shapes: Map<string, ResolvedType>;
+}
+
 interface ScannedFile {
   constants: Map<string, ConstantInfo>;
   /** The top-level names that are values the running program holds, not constants. */
@@ -3492,6 +3538,8 @@ class TypeScriptParser {
    * it ends, and a name written to forgets what was known about it.
    */
   private narrowed = new Map<string, TypeExpr>();
+  /** The record each path a test settled is, which a union's tag settles. */
+  private narrowedShapes = new Map<string, ResolvedType>();
   /** The type of each test `typeof` wrote at run time, by the path it read. */
   private typeofPaths = new Map<Expression, string>();
   /**
@@ -4021,6 +4069,14 @@ class TypeScriptParser {
   private shapeOf(value: Expression): ResolvedType | null {
     const recorded = this.expressionShapes.get(value);
     if (recorded !== undefined) return recorded;
+    // A test on a union's tag settles the record the value is: `value.k ===
+    // "buffer"` leaves `value` the arm that writes `buffer`, and the fields of
+    // that arm are the fields the branch reads.
+    const settledPath = this.narrowedPath(value);
+    if (settledPath !== null) {
+      const settled = this.narrowedShapes.get(settledPath);
+      if (settled !== undefined) return settled;
+    }
     let shape: ResolvedType | null = null;
     switch (value.k) {
       case "ident": {
@@ -7380,7 +7436,9 @@ class TypeScriptParser {
     // A block reads the values a test settled in the block around it, and
     // everything it settles itself is forgotten where the block ends.
     const outer = this.narrowed;
+    const outerShapes = this.narrowedShapes;
     this.narrowed = new Map(outer);
+    this.narrowedShapes = new Map(outerShapes);
     const statements: Statement[] = [];
     try {
       while (!this.at("}") && this.peek().kind !== "end") {
@@ -7413,6 +7471,7 @@ class TypeScriptParser {
       this.expect("}");
     } finally {
       this.narrowed = outer;
+      this.narrowedShapes = outerShapes;
     }
     return statements;
   }
@@ -9074,6 +9133,11 @@ class TypeScriptParser {
       line: number;
     }
     const cases: SwitchCase[] = [];
+    // A case reached only by its own match is read as the arm its test names:
+    // `switch (value.k) { case "buffer": ... }` leaves `value` the buffer arm
+    // the branch writes. A case a previous one falls into is reached by that
+    // match too, so its own test does not name the arm.
+    let onlyByItsOwnMatch = true;
     while (!this.at("}") && this.peek().kind !== "end") {
       const line = this.peek().line;
       let test: Expression | null = null;
@@ -9090,24 +9154,29 @@ class TypeScriptParser {
       const body: Statement[] = [];
       let breaks = false;
       this.breakTargets.push("switch");
-      while (!this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
-        // A `break` at the level of the case leaves the switch. A labelled one
-        // is left to the statement reader, which refuses the label where it is
-        // written.
-        if (this.at("break") && this.peek(1).kind !== "ident") {
-          this.next();
-          this.accept(";");
-          breaks = true;
-          break;
+      const settled = onlyByItsOwnMatch && test !== null
+        ? this.narrowingOf({ k: "binary", op: "===", left: discriminant, right: test }, true)
+        : { types: new Map<string, TypeExpr>(), shapes: new Map<string, ResolvedType>() };
+      this.withNarrowing(settled, () => {
+        while (!this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
+          // A `break` at the level of the case leaves the switch. A labelled one
+          // is left to the statement reader, which refuses the label where it is
+          // written.
+          if (this.at("break") && this.peek(1).kind !== "ident") {
+            this.next();
+            this.accept(";");
+            breaks = true;
+            break;
+          }
+          // A case may write its statements in a block, which is the statements
+          // it holds.
+          if (this.at("{")) {
+            body.push(...this.readBlock());
+            continue;
+          }
+          body.push(...this.guardedStatement());
         }
-        // A case may write its statements in a block, which is the statements
-        // it holds.
-        if (this.at("{")) {
-          body.push(...this.readBlock());
-          continue;
-        }
-        body.push(...this.guardedStatement());
-      }
+      });
       this.breakTargets.pop();
       // The statements after a break are unreachable. They are read past so
       // the next case starts where the source wrote it.
@@ -9115,6 +9184,7 @@ class TypeScriptParser {
         this.next();
       }
       cases.push({ test, body, breaks, line });
+      onlyByItsOwnMatch = breaks || leavesEveryPath(body);
     }
     this.expect("}");
     return this.lowerSwitch(start.line, discriminant, cases);
@@ -9191,7 +9261,9 @@ class TypeScriptParser {
   private narrowAfter(statement: Statement): void {
     if (statement.kind !== "if" || statement.otherwise.length > 0) return;
     if (!leavesEveryPath(statement.then)) return;
-    for (const [path, type] of this.narrowingOf(statement.condition, false)) this.narrowed.set(path, type);
+    const settled = this.narrowingOf(statement.condition, false);
+    for (const [path, type] of settled.types) this.narrowed.set(path, type);
+    for (const [path, shape] of settled.shapes) this.narrowedShapes.set(path, shape);
   }
 
   /** A body the condition proves never runs, read without its diagnostics. */
@@ -10256,8 +10328,11 @@ class TypeScriptParser {
    * answers for, so the branch reads the value at the type its own type would
    * have named.
    */
-  private narrowingOf(condition: Expression, holds: boolean): Map<string, TypeExpr> {
-    const settled = new Map<string, TypeExpr>();
+  private narrowingOf(condition: Expression, holds: boolean): Narrowing {
+    const settled: { types: Map<string, TypeExpr>; shapes: Map<string, ResolvedType> } = {
+      types: new Map(),
+      shapes: new Map(),
+    };
     const collect = (value: Expression, truth: boolean): void => {
       if (value.k === "unary" && value.op === "!") {
         collect(value.operand, !truth);
@@ -10285,18 +10360,38 @@ class TypeScriptParser {
         if (one !== null) {
           const list = one === "1" ? positive === truth : positive !== truth;
           const path = list ? this.narrowedPath(subject) : null;
-          if (path !== null) settled.set(path, { kind: "slice", of: ANY_TYPE });
+          if (path !== null) settled.types.set(path, { kind: "slice", of: ANY_TYPE });
         }
         return;
       }
-      const tested = positive === truth ? value.right : value.left;
-      const kind = textValue(tested);
-      if (kind === null) return;
-      const other = positive === truth ? value.left : value.right;
-      const path = this.typeofPaths.get(other);
-      if (path === undefined) return;
-      const type = typeOfTypeofName(kind);
-      if (type !== null) settled.set(path, type);
+      const leftText = textValue(value.left);
+      const rightText = textValue(value.right);
+      if ((leftText === null) === (rightText === null)) return;
+      const tag = leftText === null ? value.left : value.right;
+      const literal = (leftText === null ? rightText : leftText) as string;
+      // `typeof x === "kind"`: the branch of the test holds the value at the
+      // type the name is.
+      const path = this.typeofPaths.get(tag);
+      if (path !== undefined) {
+        if (positive === truth) {
+          const type = typeOfTypeofName(literal);
+          if (type !== null) settled.types.set(path, type);
+        }
+        return;
+      }
+      // `value.k === "buffer"` is a union's tag: the branch holds the arm whose
+      // field writes the literal, and the branch the other way is the arms it
+      // does not name.
+      if (tag.k !== "member") return;
+      const base = this.narrowedPath(tag.base);
+      if (base === null) return;
+      const shape = this.shapeOf(tag.base);
+      if (shape === null || shape.kind !== "record" || shape.arms === undefined) return;
+      const matches = positive === truth;
+      const narrowed = matches ? armWithTag(shape, tag.field, literal) : withoutTag(shape, tag.field, literal);
+      if (narrowed === null) return;
+      settled.types.set(base, this.typeExprOfShape(narrowed));
+      settled.shapes.set(base, narrowed);
     };
     collect(condition, holds);
     return settled;
@@ -10306,15 +10401,19 @@ class TypeScriptParser {
    * Reads an expression with the types a test settled in place, and hands the
    * table back afterwards.
    */
-  private withNarrowing<T>(settled: Map<string, TypeExpr>, read: () => T): T {
-    if (settled.size === 0) return read();
+  private withNarrowing<T>(settled: Narrowing, read: () => T): T {
+    if (settled.types.size === 0 && settled.shapes.size === 0) return read();
     const saved = this.narrowed;
+    const savedShapes = this.narrowedShapes;
     this.narrowed = new Map(saved);
-    for (const [path, type] of settled) this.narrowed.set(path, type);
+    this.narrowedShapes = new Map(savedShapes);
+    for (const [path, type] of settled.types) this.narrowed.set(path, type);
+    for (const [path, shape] of settled.shapes) this.narrowedShapes.set(path, shape);
     try {
       return read();
     } finally {
       this.narrowed = saved;
+      this.narrowedShapes = savedShapes;
     }
   }
 
@@ -10324,9 +10423,13 @@ class TypeScriptParser {
    */
   private forgetNarrowing(path: string): void {
     this.narrowed.delete(path);
+    this.narrowedShapes.delete(path);
     const prefix = `${path}.`;
     for (const key of [...this.narrowed.keys()]) {
       if (key.startsWith(prefix)) this.narrowed.delete(key);
+    }
+    for (const key of [...this.narrowedShapes.keys()]) {
+      if (key.startsWith(prefix)) this.narrowedShapes.delete(key);
     }
   }
 
@@ -19218,6 +19321,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     // text it writes is read with the same table the block was read with.
     child.fieldCount = this.fieldCount;
     child.narrowed = this.narrowed;
+    child.narrowedShapes = this.narrowedShapes;
     child.valueShapes = this.valueShapes;
     child.pendingValues = this.pendingValues;
     child.pendingFields = this.pendingFields;

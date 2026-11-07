@@ -3558,6 +3558,30 @@ test("an identity method reads its argument at the type the call is read at", ()
   assert.equal(read.count, 0, read.refused.map((one) => one.message).join("; "));
 });
 
+test("a union narrows by its tag field", () => {
+  // `value.kind === "text"` leaves `value` the arm that writes the tag, both in
+  // the branch the test holds in and — after a branch that returns — in the
+  // statements below it. A `switch` on the same tag narrows each case.
+  const source = [
+    "interface Written { kind: `text`; parts: string[] }",
+    "interface Block { kind: `block`; values: number[] }",
+    "export function byIf(value: Written | Block): number {",
+    "  if (value.kind === `text`) return value.parts.length;",
+    "  return value.values.length;",
+    "}",
+    "export function bySwitch(value: Written | Block): number {",
+    "  switch (value.kind) {",
+    "    case `text`: return value.parts.length;",
+    "    case `block`: return value.values.length;",
+    "  }",
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a block the file allocates at the top types a method of its name", () => {
   // `const FLOAT_BYTES = new DataView(...)` is state the file holds, so it is
   // not inlined at each read. What the name holds is still the block the

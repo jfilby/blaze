@@ -115,6 +115,14 @@ export interface ResolvedField {
   type: ResolvedType;
   optional: boolean;
   /**
+   * The literal a field is declared as, where its annotation is one.
+   *
+   * A union of records is discriminated by a field such as `k: "buffer"`, and
+   * the resolved type keeps only that the field is a text. The literal is what
+   * a test `value.k === "buffer"` narrows the union by, so it is kept here.
+   */
+  literal?: string;
+  /**
    * The names the field's annotation wrote that no declaration of the module
    * that wrote it holds.
    *
@@ -1112,9 +1120,24 @@ class TypeText {
       if (optional) rest = rest.slice(1).trim();
       if (!rest.startsWith(":")) continue;
       const type = rest.slice(1).trim();
-      fields.set(name[0], { type: resolveTypeText(this.table, type, this.params, this.seen), optional });
+      const literal = this.fieldLiteral(type);
+      fields.set(name[0], {
+        type: resolveTypeText(this.table, type, this.params, this.seen),
+        optional,
+        ...(literal === null ? {} : { literal }),
+      });
     }
     return { kind: "record", fields, index };
+  }
+
+  /** The text a field annotation writes, where it writes one literal. */
+  private fieldLiteral(text: string): string | null {
+    const written = text.trim();
+    if (written.length >= 2 && /^['"`]/.test(written) && /['"`]$/.test(written)) {
+      return written.slice(1, -1);
+    }
+    if (/^-?\d+(?:\.\d+)?$/.test(written)) return written;
+    return null;
   }
 
   /** The `;`-separated members of an object type, at brace depth zero. */

@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4fz. A union narrows by its tag field
+
+    const inner = part.value;
+    if (inner.k === "text" && inner.parts.every((one) => one.k === "text")) { ... }
+
+A union of records is one record with the fields of every arm and the arms beside
+them, and a field only one arm writes is read through the union as the first
+arm's type. `inner.k === "text"` was a comparison and nothing more: `inner`
+stayed the union, so `inner.parts` was a field of the merged record and `every`
+was a method of nothing. The literal a field is declared as is now kept with the
+field, and a test on it settles the value at the arm that writes that literal —
+and, where the test fails, at the arms it does not name. A `switch` over a tag
+settles each case the same way when the case is reached only by its own match.
+
+`semantics/optimize-ir.ts` reads whole.
+
+    The total went from 91 to 90.
+
 ### 4fy. A map spread into a list is its entries
 
     if ([...remapped].some(([key, root]) => key !== root)) { ... }
@@ -4211,7 +4229,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-91 refusals over 95 sources, 72 of them read whole. The report reads the
+90 refusals over 95 sources, 73 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4420,6 +4438,7 @@ What was closed this session, and what each was worth:
 | the path namespace the compiler reads its own imports through (§4fw) | 98 → 97 |
 | an empty list in a call argument takes the type the call says (§4fx) | 97 → 94 |
 | a map spread into a list is its entries (§4fy) | 94 → 91 |
+| a union narrows by its tag field (§4fz) | 91 → 90 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
