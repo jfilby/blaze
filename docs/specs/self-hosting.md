@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ga. A callback declared below the arrow that uses it
+
+    const walk = (items: string[]): void => { items.forEach(value); };
+    const value = (one: string): void => { console.log(one); };
+    walk(list);
+
+A block's declarations are read before its statements, but an arrow a
+declaration is initialised with was not: `walk` was read first and `value` had
+no signature, so `items.forEach(value)` was refused. The arrow's parameter and
+result annotations are now read in the prescan, and an arrow a body written
+above it takes as a value is declared as the closure that body is handed.
+`walk(list)` passes it, and both backends print what the source prints.
+
+    The total went from 90 to 88.
+
 ### 4fz. A union narrows by its tag field
 
     const inner = part.value;
@@ -4229,7 +4244,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-90 refusals over 95 sources, 73 of them read whole. The report reads the
+88 refusals over 95 sources, 73 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4439,6 +4454,7 @@ What was closed this session, and what each was worth:
 | an empty list in a call argument takes the type the call says (§4fx) | 97 → 94 |
 | a map spread into a list is its entries (§4fy) | 94 → 91 |
 | a union narrows by its tag field (§4fz) | 91 → 90 |
+| a callback declared below the arrow that uses it (§4ga) | 90 → 88 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

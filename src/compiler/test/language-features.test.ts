@@ -4562,6 +4562,28 @@ test("a map spread into a list is its entries, and an iterable spread is its val
   }
 });
 
+test("a callback declared below the arrow that uses it is read", async () => {
+  // A block's declarations are read before its statements, but an arrow a
+  // declaration is initialised with is read where it is written: `walk` is
+  // above `value`, and it hands `value` to forEach. The signature is read in
+  // the prescan, and the arrow is declared as the closure the walk is handed.
+  const source = [
+    "function run(): string {",
+    "  const list: string[] = [`a`, `b`];",
+    "  const walk = (items: string[]): void => { items.forEach(value); };",
+    "  const value = (one: string): void => { console.log(one); };",
+    "  walk(list);",
+    "  return `done`;",
+    "}",
+    "console.log(run());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "a\nb\ndone", `the ${backend} backend hands the later callback to the walk`);
+  }
+});
+
 test("a module re-exports another module's function and the program calls it", async () => {
   // `export { a } from "./x.ts"` offers a name the other module writes: the
   // function is compiled once, by the module that declares it, and a caller

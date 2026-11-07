@@ -7528,6 +7528,11 @@ class TypeScriptParser {
         this.prescanDeclaration(name.text, cursor + 1, end);
         continue;
       }
+      // `const value = (one: ProgramValue): void => { ... }` names a function
+      // a statement written above it may call: the declaration is below the
+      // call in the source, so the signature is read here before the body that
+      // calls it. A `new ...` allocation is not an arrow and falls through.
+      if (tokens[cursor]?.text === "=" && this.prescanArrow(name.text, cursor + 1)) continue;
       // `const seen = new Set<Block>()` names the collection the name holds in
       // the allocation itself.
       if (tokens[cursor]?.text !== "=" || tokens[cursor + 1]?.text !== "new") continue;
@@ -7537,6 +7542,120 @@ class TypeScriptParser {
       const collection = this.prescanCollection(cursor + 2);
       if (collection !== null) this.valueCollections.set(name.text, collection);
     }
+  }
+
+  /**
+   * The signature an arrow a declaration is initialised with writes, or false
+   * where the initialiser is not an arrow.
+   *
+   * A block's declarations are read before its statements, and an arrow a
+   * statement above calls is declared below it: `const walk = (v) => { value(v);
+   * }; const value = (one: ProgramValue): void => { ... };` was a call of a name
+   * that held no function when `walk` was read. The parameters and the result
+   * annotation are what a call of the name needs, so they are read here.
+   */
+  private prescanArrow(name: string, start: number): boolean {
+    const tokens = this.tokens;
+    let at = start;
+    if (tokens[at]?.text === "async" && tokens[at + 1]?.text === "(") at += 1;
+    let params: TypeExpr[] = [];
+    let after = at;
+    if (tokens[at]?.text === "(") {
+      const close = this.matchingToken(at, "(", ")");
+      if (close < 0) return false;
+      params = this.prescanArrowParameters(at + 1, close);
+      after = close + 1;
+    } else if (tokens[at]?.kind === "ident" && tokens[at + 1]?.text === "=>") {
+      params = [ANY_TYPE];
+      after = at + 1;
+    } else {
+      return false;
+    }
+    let returns: TypeExpr = ANY_TYPE;
+    if (tokens[after]?.text === ":") {
+      let end = after + 1;
+      let depth = 0;
+      while (end < tokens.length) {
+        const text = tokens[end]?.kind === "punct" ? (tokens[end] as Token).text : "";
+        if (text === "<" || text === "(" || text === "[" || text === "{") depth += 1;
+        else if (text === ">" || text === ")" || text === "]" || text === "}") depth -= 1;
+        else if (text === ">>") depth -= 2;
+        else if (text === ">>>") depth -= 3;
+        else if (depth === 0 && text === "=>") break;
+        end += 1;
+      }
+      if (tokens[end]?.text !== "=>") return false;
+      const saved = this.diagnostics;
+      this.diagnostics = new Diagnostics();
+      try {
+        returns = this.typeFromTokens(after + 1, end, false);
+      } catch {
+        returns = ANY_TYPE;
+      } finally {
+        this.diagnostics = saved;
+      }
+      after = end;
+    }
+    if (tokens[after]?.text !== "=>") return false;
+    this.valueFunctions.set(name, { params, returns });
+    return true;
+  }
+
+  /** The types an arrow's parameter list writes, one for each parameter. */
+  private prescanArrowParameters(from: number, to: number): TypeExpr[] {
+    const params: TypeExpr[] = [];
+    for (const member of this.typeMembers(from, to)) {
+      let start = member.start;
+      if (this.tokens[start]?.text === "...") start += 1;
+      // The type is what follows the `:` of a written parameter, down to a
+      // default or the end of the parameter.
+      let at = start;
+      let depth = 0;
+      let colon = -1;
+      let end = member.end;
+      while (at < member.end) {
+        const token = this.tokens[at];
+        const text = token?.kind === "punct" ? token.text : "";
+        if (text === "<" || text === "(" || text === "[" || text === "{") depth += 1;
+        else if (text === ">" || text === ")" || text === "]" || text === "}") depth -= 1;
+        else if (text === ">>") depth -= 2;
+        else if (text === ">>>") depth -= 3;
+        else if (depth === 0 && text === ":") {
+          colon = at;
+          break;
+        }
+        at += 1;
+      }
+      if (colon < 0) {
+        params.push(ANY_TYPE);
+        continue;
+      }
+      at = colon + 1;
+      depth = 0;
+      while (at < member.end) {
+        const token = this.tokens[at];
+        const text = token?.kind === "punct" ? token.text : "";
+        if (text === "<" || text === "(" || text === "[" || text === "{") depth += 1;
+        else if (text === ">" || text === ")" || text === "]" || text === "}") depth -= 1;
+        else if (text === ">>") depth -= 2;
+        else if (text === ">>>") depth -= 3;
+        else if (depth === 0 && text === "=") {
+          end = at;
+          break;
+        }
+        at += 1;
+      }
+      const saved = this.diagnostics;
+      this.diagnostics = new Diagnostics();
+      try {
+        params.push(this.typeFromTokens(colon + 1, end, false));
+      } catch {
+        params.push(ANY_TYPE);
+      } finally {
+        this.diagnostics = saved;
+      }
+    }
+    return params;
   }
 
   /** The type, shape, collection, class and signature a declaration writes. */
@@ -7689,7 +7808,17 @@ class TypeScriptParser {
         if (binding !== undefined) this.valueArrows.set(name.text, binding);
         this.valueTypes.set(name.text, ANY_TYPE);
         this.valueClasses.delete(name.text);
-        return { kind: "declare", name: name.text, type: ANY_TYPE, init: { k: "null" }, line: name.line };
+        // An arrow a body written above it takes as a value is that value:
+        // `const walk = (items) => items.forEach(value); const value = (one) =>
+        // ...` reads `value` before its declaration, and the lifted `walk` is
+        // handed the closure the declaration makes. An arrow only called by
+        // name is no value, and its declaration keeps writing nothing.
+        const capturedAsValue = binding !== undefined &&
+          [...this.valueArrows.values()].some((one) => one !== binding && one.captures.includes(name.text));
+        const initial: Expression = binding !== undefined && capturedAsValue
+          ? { k: "arrow", name: binding.function, captures: [...binding.captures], code: this.closureCode(binding) }
+          : { k: "null" };
+        return { kind: "declare", name: name.text, type: ANY_TYPE, init: initial, line: name.line };
       }
       this.valueArrows.delete(name.text);
       // What the name holds is what it was declared with: a name declared with
