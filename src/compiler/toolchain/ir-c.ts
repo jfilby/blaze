@@ -1387,6 +1387,10 @@ class FunctionEmitter {
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     const written = this.raw(value, depth);
     const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
+    // An absence read at a type is the zero of *that* type: a field of a text
+    // the literal left out is the null pointer, and the handle of an unshaped
+    // reference is the number zero, whichever type the null was written at.
+    if (value.k === "nothing" && as !== null) return absenceOf(as);
     // A call that answers nothing is still a call: a use that reads it at
     // another type takes the absence the call answered *after* it runs, so the
     // call is not dropped from the program by the conversion.
@@ -1478,11 +1482,11 @@ class FunctionEmitter {
       case "nothing":
         // Nothing read as a value of a scalar type is that type's zero, which
         // is what a conditional arm that wrote `null` beside a number is: the
-        // absence of a number is no number, and `NULL` is not one in C. The
-        // zero is the one `absenceOf` names, so a return, a choice and a null
-        // test of the same value agree: an unshaped reference's absence is the
-        // handle `0.0`, not the null pointer a shaped reference's is.
-        return absenceOf(value.type);
+        // absence of a number is no number, and `NULL` is not one in C. A use
+        // that states the type it reads the value at asks `absenceOf` in
+        // `expression`; what is left here is a use that states none, and the
+        // null pointer is the absence of every value but a number.
+        return isNumber(value.type) || isBoolean(value.type) ? "0.0" : "NULL";
       case "functionRef":
         return (value as { k: "functionRef"; name: string }).name;
       case "local":
