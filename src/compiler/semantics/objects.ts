@@ -414,11 +414,13 @@ class BodyTypes {
               `${this.path}: ${this.functionName} calls it with ${expression.args.length}`,
             );
           }
-          // A string is a reference the contract language does not spell, so
-          // what a use infers of it is the same as what it infers of any other
-          // reference.
+          // A call that answers a string lays the field out as the text it is:
+          // a text and a reference are both a pointer, and a field typed as
+          // the unshaped reference would read back as an `any` when the source
+          // asked for the string the call answered. A comparison of two texts
+          // is a comparison of two texts, not one of a reference and a text.
           const answer = expression.returns ?? builtin.returns;
-          return { kind: "type", type: answer.kind === "text" ? ANY_REF : answer };
+          return { kind: "type", type: answer };
         }
         // A function with default parameters is callable at a shorter arity
         // through the overload the module declares for it, which is the name

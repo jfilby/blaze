@@ -11218,6 +11218,13 @@ class TypeScriptParser {
             replace(entries);
             continue;
           }
+          // The entries as a value are the list of pairs the map's own entries
+          // are: `Object.entries(record).filter(...)`, and a call that copies
+          // them into a dictionary.
+          if (source !== undefined && collection !== null && collection.kind === "map") {
+            replace(this.entryPairs(source, collection, this.peek().line));
+            continue;
+          }
           // The record is read through a declaration another module writes, and
           // the graph has not linked it: what its entries are is the link's to
           // say. The loop names a key and a value this read cannot type, and the
@@ -12768,9 +12775,20 @@ class TypeScriptParser {
               if (hinted.shape !== null && hinted.shape.kind !== "any") shape = hinted.shape;
             }
           }
+          // A pattern read at a record — the pair an entry is — binds the
+          // names at the record's fields in the order it writes them: `[key,
+          // value]` is `first` and `second`, which is the pair the entry list
+          // holds.
+          let bindings = pattern;
+          if (shape !== null && shape.kind === "record") {
+            const fields = [...shape.fields.keys()];
+            bindings = pattern.map((binding) => binding.field === null && fields[binding.index] !== undefined
+              ? { name: binding.name, field: fields[binding.index] as string, index: -1 }
+              : binding);
+          }
           const temp = `__param${this.destructureCount++}`;
           params.push({ name: temp, type, typeName: "", functionType: null, shape });
-          prelude.push(...this.patternPrelude(pattern, temp, type, line, shape));
+          prelude.push(...this.patternPrelude(bindings, temp, type, line, shape));
           if (!this.accept(",")) break;
           continue;
         }
@@ -13359,6 +13377,13 @@ class TypeScriptParser {
       this.iteratedSequences.set(marker, elements);
       this.expressionTypes.set(marker, ANY_TYPE);
       return marker;
+    }
+    // A map's entries in an expression are a list of pairs: `[...m.entries()]`,
+    // `m.entries().filter(...)`. The pair is an object of its own, because a key
+    // and a value of two kinds are not one element type.
+    if (method === "entries" && args.length === 0) {
+      const held = this.collectionOfExpression(receiver);
+      if (held !== null && held.kind === "map") return this.entryPairs(receiver, held, line);
     }
     if (!COLLECTION_METHODS.has(method)) return null;
     if (elements === null) return null;
@@ -16591,6 +16616,73 @@ class TypeScriptParser {
    * is not: the block the runtime holds at the element type is the one the
    * source declared, and the reads are written into it one at a time.
    */
+  /**
+   * The entries of a map as a list of pairs.
+   *
+   * Each entry is a two-field record — `first` the key and `second` the value —
+   * and the list holds references to them. A pair of two kinds is not one
+   * element a typed array holds, so the pair is an object of its own; a list of
+   * references holds pointers, which is one element type whatever the pair
+   * carries. The list is built before the statement that reads it, once, so a
+   * receiver that is a call is not run again for every entry.
+   */
+  private entryPairs(receiver: Expression, collection: CollectionValue, line: number): Expression {
+    const mapName = `__entries${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: mapName, type: null, init: receiver, line });
+    this.valueTypes.set(mapName, NUMBER_RESULT);
+    const map: Expression = { k: "ident", name: mapName };
+    this.collectionExpressions.set(map, collection);
+    const pairShape: ResolvedType = {
+      kind: "record",
+      fields: new Map<string, ResolvedField>([
+        ["first", { type: this.shapeOfTypeExpr(collection.key), optional: false }],
+        ["second", { type: this.shapeOfTypeExpr(collection.value), optional: false }],
+      ]),
+      index: null,
+    };
+    const pairsName = `__pairs${this.fieldCount++}`;
+    const list: TypeExpr = { kind: "slice", of: ANY_TYPE };
+    const empty: Expression = { k: "buffer", element: typeToString(ANY_TYPE), values: [] };
+    this.pendingBefore.push({ kind: "declare", name: pairsName, type: list, init: empty, line });
+    this.valueTypes.set(pairsName, list);
+    this.valueShapes.set(pairsName, { kind: "list", of: pairShape });
+    const atName = `__pair${this.fieldCount++}`;
+    const at: Expression = { k: "ident", name: atName };
+    const pairValue: Expression = {
+      k: "object",
+      fields: [
+        { name: "first", value: { k: "call", name: this.keyReadName(collection), args: [map, at] } },
+        { name: "second", value: { k: "call", name: this.valueReadName(collection.value), args: [map, at] } },
+      ],
+    };
+    this.expressionTypes.set(pairValue, ANY_TYPE);
+    this.expressionShapes.set(pairValue, pairShape);
+    const helper = this.appendHelper("push", ANY_TYPE, 1, line);
+    const append: Expression = {
+      k: "append",
+      target: pairsName,
+      base: null,
+      helper: helper.name,
+      op: "push",
+      values: [pairValue],
+    };
+    this.pendingBefore.push({
+      kind: "loop",
+      variable: atName,
+      from: { k: "literal", text: "0" },
+      to: { k: "call", name: "blaze_rt_dict_len", args: [map] },
+      inclusive: false,
+      step: null,
+      down: false,
+      body: [this.appendWrite(append, line)],
+      line,
+    });
+    const pairs: Expression = { k: "ident", name: pairsName };
+    this.expressionTypes.set(pairs, list);
+    this.expressionShapes.set(pairs, { kind: "list", of: pairShape });
+    return pairs;
+  }
+
   private collectionListHelper(
     collection: CollectionValue,
     list: "keys" | "values",
@@ -17899,6 +17991,9 @@ class TypeScriptParser {
         // and a value. A pair of two kinds is not one element a list holds, so
         // only a map whose key and value are the same kind is read: the pair is
         // then a list of two of them, and the list is a list of pairs.
+        if (collection !== null && collection.kind === "map" && !sameResult(collection.key, collection.value)) {
+          spread = this.entryPairs(spread, collection, this.peek().line);
+        }
         if (collection !== null && collection.kind === "map" && sameResult(collection.key, collection.value)) {
           const pair: TypeExpr = { kind: "slice", of: collection.key };
           const pairShape: ResolvedType = { kind: "list", of: this.shapeOfTypeExpr(collection.key) };
@@ -18924,6 +19019,20 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       }
       return this.collectionCopyHelper(collection, copied, sourceCollection, view.line);
     }
+    // `new Map(pairs)` where the list holds the pair records a map's entries
+    // are: each entry writes its first field as the key and its second as the
+    // value, in the order the list holds them.
+    const pairs = collection.kind === "map" ? this.shapeOf(source) : null;
+    const pair = pairs !== null && pairs.kind === "list" ? pairs.of : null;
+    if (collection.kind === "map" && pair !== null && pair.kind === "record" &&
+        pair.fields.has("first") && pair.fields.has("second")) {
+      const first = pair.fields.get("first") as ResolvedField;
+      const second = pair.fields.get("second") as ResolvedField;
+      collection.key = this.typeExprOfShape(first.type);
+      collection.value = this.typeExprOfShape(second.type);
+      collection.valueShape = second.type;
+      return this.collectionFromPairs(collection, source, view.line);
+    }
     if (collection.kind !== "set") {
       this.report(
         `a ${view.text} is built from entries`,
@@ -19142,6 +19251,65 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
   }
 
   /** The function a `new Set(other)` or `new Map(other)` copies into. */
+  /**
+   * A map built from a list of pairs.
+   *
+   * The list holds one reference per entry, and the pair is the record the
+   * map's own entries are: `first` is the key and `second` the value. The
+   * helper walks the list once and writes each entry into the dictionary it
+   * answers.
+   */
+  private collectionFromPairs(collection: CollectionValue, source: Expression, line: number): Expression {
+    const key = JSON.stringify(["pairs", collection.kind, collection.key, collection.value]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return { k: "call", name: known.name, args: [source] };
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const set = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
+    const body: Statement[] = [
+      { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      { kind: "declare", name: "n", type: null, init: { k: "length", buffer: "pairs" }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: { k: "literal", text: "0" },
+        to: ident("n"),
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [{
+          kind: "declare",
+          name: "pair",
+          type: null,
+          init: { k: "index", base: ident("pairs"), index: ident("i") },
+          line,
+        }, {
+          kind: "expression",
+          value: {
+            k: "call",
+            name: set,
+            args: [
+              ident("m"),
+              { k: "member", base: ident("pair"), field: "first" },
+              { k: "member", base: ident("pair"), field: "second" },
+            ],
+          },
+          line,
+        }],
+        line,
+      },
+      { kind: "result", value: ident("m"), line },
+    ];
+    const params = [{ name: "pairs", type: { kind: "slice", of: ANY_TYPE } as TypeExpr }];
+    const returns = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { k: "call", name, args: [source] };
+  }
+
   private collectionCopyHelper(
     collection: CollectionValue,
     source: Expression,

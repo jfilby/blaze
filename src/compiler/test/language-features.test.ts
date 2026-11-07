@@ -4607,6 +4607,37 @@ test("a field presence question on an object answers the names its layout wrote"
   }
 });
 
+test("the entries of a map are a list of pairs a callback walks", async () => {
+  // `[...m.entries()]` is a list of pair records: `first` is the key and
+  // `second` the value, whichever kinds they are. A callback destructuring the
+  // pair binds those fields, and `new Map(pairs)` builds a dictionary from the
+  // same records. A module function is the path that reads a body that is not
+  // the program's, so the case is built through an import.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface F { name: string }",
+    "export function demo(): string {",
+    "  const m = new Map<string, F>();",
+    "  m.set(`a`, { name: `one` });",
+    "  m.set(`b`, { name: `two` });",
+    "  const pairs = [...m.entries()].filter(([name]) => name !== `b`);",
+    "  const copy = new Map(pairs);",
+    "  let out = ``;",
+    "  for (const [k, v] of copy) out += k + v.name;",
+    "  return `${out}|${pairs.length}|${copy.size}`;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "aone|1|1", `the ${backend} backend walks the entries as pairs`);
+  }
+});
+
 test("a module re-exports another module's function and the program calls it", async () => {
   // `export { a } from "./x.ts"` offers a name the other module writes: the
   // function is compiled once, by the module that declares it, and a caller

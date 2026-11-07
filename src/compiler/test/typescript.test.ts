@@ -3656,6 +3656,21 @@ test("a file handle's two methods are read through the host boundary", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("the entries of a map read as a value are a list of pairs", () => {
+  // `Object.entries(m)` outside a loop head is the list of entries the map
+  // holds: each entry is the pair record `first`/`second`, so a callback that
+  // destructures one binds the key and the value they are.
+  const source = [
+    "interface F { name: string }",
+    "export function names(m: Map<string, F>): string[] {",
+    "  return Object.entries(m).filter(([name]) => name !== `x`).map(([name, f]) => name + f.name);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
 test("a generic function that answers its parameter's type hands the argument back", () => {
   // `identity<T>(node: T): T` is the value it was given, and a compiled
   // function cannot spell a type parameter. The answer is read at the argument

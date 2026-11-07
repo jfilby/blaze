@@ -1017,6 +1017,31 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gj. The entries of a map are a list of pairs a callback walks
+
+    const ordered = [...counters.entries()]
+      .filter(([name]) => !shared.has(name) && ...)
+      .sort((left, right) => right[1].depth - left[1].depth);
+
+`[...map.entries()]` was only a loop head: outside one, `entries` was a method
+of nothing, and `Object.entries(record)` was read only where a loop names the
+two values. A map's entries are now a list of pair records — `first` the key and
+`second` the value — where the pair is an object because a key and a value of
+two kinds are not one element type. A destructuring callback binds the pair's
+fields in the order it writes them, a map spread of two different kinds is the
+same list, and `new Map(pairs)` writes the pair records back into a dictionary.
+`Object.entries` as a value is the list too, so a `flatMap`/`filter`/`map` chain
+over it reads.
+
+A field that holds a text is laid out as the text it is, where a call's answer
+used to lay out as the unshaped reference: the pair's key read is a text, and a
+comparison of it with a text is a comparison of two texts.
+
+`toolchain/ir-machine.ts` and `semantics/typescript.ts`'s entry reader read
+whole, and `incremental.ts` reads one refusal shorter.
+
+    The total went from 69 to 64.
+
 ### 4gi. A template interpolation reads the shapes its imports bind
 
     const services = ${JSON.stringify(HOST_SERVICES.map((service) => service.symbol))};
@@ -4377,7 +4402,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-69 refusals over 95 sources, 75 of them read whole. The report reads the
+64 refusals over 95 sources, 76 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4596,6 +4621,7 @@ What was closed this session, and what each was worth:
 | a generic function that answers its parameter's type (§4gg) | 76 → 75 |
 | a method of an object type inside a field (§4gh) | 75 → 71 |
 | a template interpolation reads the shapes its imports bind (§4gi) | 71 → 69 |
+| the entries of a map are a list of pairs a callback walks (§4gj) | 69 → 64 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
