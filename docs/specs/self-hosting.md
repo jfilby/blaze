@@ -1044,6 +1044,30 @@ has, and what the three files declare is what they build.
 
     The total went from 112 to 108.
 
+### 4fr. Promise.allSettled reports how each promise settled
+
+    const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()));
+    const failure = settled.find((entry) => entry.status === "rejected");
+
+`Promise.all` was already read as the list of the values each promise carries;
+the settle-each variant the build pools use was a method of nothing. It is the
+same walk with one extra question per promise: `Promise.allSettled` answers a
+list holding `{ status, value, reason }` for every promise, `"fulfilled"` with
+what it carried or `"rejected"` with the message it failed with. The helper
+that builds it is generated once per program and reads `Promise.failed` and
+`Promise.message`, the builtins a chained promise already asks.
+
+What it needed was the value a call answers to be the handle it is. A call of
+an `async` function was typed at the payload its declaration states, so
+`Array.from({ length: n }, () => worker())` was an empty list of nothing and its
+elements were promises that had never been made. The declaration's payload is
+what `await` reads out of the handle, so a call of an async function is now the
+reference a promise is. An await of a name a continuation held carries the
+shape that name was given, beside the type. `compiler.ts` and `codegen.ts` read
+whole.
+
+    The total went from 108 to 104.
+
 ### 4fp. A promise a body chains
 
     const present = await stat(cached).then(
@@ -4044,7 +4068,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-108 refusals over 95 sources, 67 of them read whole. The report reads the
+104 refusals over 95 sources, 67 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4240,6 +4264,7 @@ What was closed this session, and what each was worth:
 | a class built on another, and the absence a choice of texts answers (§4fo) | 124 → 123 |
 | a promise a body chains (§4fp) | 123 → 112 |
 | the JSON of a list a program builds, and the tuple type a pair is (§4fq) | 112 → 108 |
+| Promise.allSettled reports how each promise settled (§4fr) | 108 → 104 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

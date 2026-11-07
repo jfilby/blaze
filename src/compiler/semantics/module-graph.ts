@@ -151,7 +151,9 @@ function importedFunctionsOf(
         returnsShape?: ImportedFunction["shape"];
         collection?: ImportedFunction["collection"];
         params?: readonly { shape?: ResolvedType | null }[];
+        async?: boolean;
       } | undefined;
+      if (handle?.async === true) signature.async = true;
       if (handle?.returnsShape !== undefined) signature.shape = handle.returnsShape;
       if (handle?.collection !== undefined) signature.collection = handle.collection;
       const paramShapes = handle?.params?.map((param) => param.shape ?? null);

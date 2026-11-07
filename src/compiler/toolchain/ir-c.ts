@@ -1478,8 +1478,11 @@ class FunctionEmitter {
       case "nothing":
         // Nothing read as a value of a scalar type is that type's zero, which
         // is what a conditional arm that wrote `null` beside a number is: the
-        // absence of a number is no number, and `NULL` is not one in C.
-        return isNumber(value.type) || isBoolean(value.type) ? "0.0" : "NULL";
+        // absence of a number is no number, and `NULL` is not one in C. The
+        // zero is the one `absenceOf` names, so a return, a choice and a null
+        // test of the same value agree: an unshaped reference's absence is the
+        // handle `0.0`, not the null pointer a shaped reference's is.
+        return absenceOf(value.type);
       case "functionRef":
         return (value as { k: "functionRef"; name: string }).name;
       case "local":

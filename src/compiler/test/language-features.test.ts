@@ -4551,6 +4551,27 @@ test("a list built while the program runs is the JSON it is written as", async (
   assert.equal(output.trim(), String(JSON.stringify([["a", "b"], ["c", "d"]])));
 });
 
+test("Promise.allSettled reports how each promise settled", async () => {
+  // The entry the language writes is `{ status, value, reason }`: a fulfilled
+  // promise answers "fulfilled" and a failed one "rejected" with the message it
+  // failed with, so the entry a build looks for is the one a failed worker left.
+  const output = await agreesWithNode([
+    "function ok(n: number): Promise<number> { return Promise.resolve(n); }",
+    "function bad(n: number): Promise<number> { return Promise.reject(`no`); }",
+    "export async function f(): Promise<void> {",
+    "  const settled = await Promise.allSettled([ok(1), bad(2)]);",
+    '  const failure = settled.find((entry) => entry.status === "rejected");',
+    '  if (failure !== undefined && failure.status === "rejected") console.log(`${settled.length}:${failure.reason}`);',
+    "}",
+    "export function start(): void {",
+    '  f().then(() => { console.log(`done`); });',
+    "}",
+    "start();",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "2:no\ndone");
+});
+
 test("a promise a body chains runs the arm that settled it", async () => {
   // A compiled promise is settled by the time it is read, so `then` is the
   // conditional it means: the fulfilled arm reads the value the promise

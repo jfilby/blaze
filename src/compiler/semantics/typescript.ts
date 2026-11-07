@@ -2988,6 +2988,12 @@ export interface ImportedFunction {
   paramShapes?: readonly (ResolvedType | null)[];
   /** The map or set the function answers, when it answers one. */
   collection?: CollectionValue;
+  /**
+   * Whether the function is `async`: its declaration states what its promise
+   * carries, and the value a call answers is the promise handle rather than
+   * that payload.
+   */
+  async?: boolean;
 }
 
 interface CollectionValue {
@@ -3226,6 +3232,15 @@ class TypeScriptParser {
    * so the signature is kept beside the types rather than in them.
    */
   private declaredFunctionReturns = new Map<string, FunctionType>();
+  /**
+   * The functions a call answers a promise of.
+   *
+   * An `async` function's contract states the payload the promise carries, so
+   * the value a call answers is the handle and not the payload: `Array.from({
+   * length: n }, () => worker())` is a list of the promises the calls answered,
+   * and awaiting one is what reads the payload out of it.
+   */
+  private promiseFunctions = new Set<string>();
   /**
    * What each function of the file takes, by its name.
    *
@@ -5644,6 +5659,7 @@ class TypeScriptParser {
     if (signature.paramShapes !== undefined) this.declaredParamShapes.set(name, signature.paramShapes);
     if (signature.shape !== undefined) this.declaredReturnShapes.set(name, signature.shape);
     if (signature.collection !== undefined) this.declaredCollections.set(name, signature.collection);
+    if (signature.async === true) this.promiseFunctions.add(name);
   }
 
   private prescanFunctions(): void {
@@ -6385,7 +6401,10 @@ class TypeScriptParser {
         line: name.line,
       };
       if (shape !== null) fn.returnsShape = shape;
-      if (isAsync) fn.async = true;
+      if (isAsync) {
+        fn.async = true;
+        this.promiseFunctions.add(fn.name);
+      }
       if (answered !== null) fn.collection = answered;
       if (restAt !== null) fn.variadic = restAt;
       return fn;
@@ -11496,6 +11515,13 @@ class TypeScriptParser {
             replace(settled);
             continue;
           }
+          // `Promise.allSettled(items)`: one record per promise, saying how it
+          // settled.
+          const reports = this.promiseSettled(receiver, target.field, args);
+          if (reports !== null) {
+            replace(reports);
+            continue;
+          }
           // `p.then(onOk, onErr)` and `p.catch(onErr)`: the continuation a
           // promise that is already settled implies.
           const continued = this.promiseMethod(receiver, target.field, args);
@@ -12496,7 +12522,13 @@ class TypeScriptParser {
         params.map((param) => ({ name: param.name, type: param.type })),
         (value) => {
           const known = this.valueTypeOf(value);
-          return known.kind === "ref" && known.of === null && known.name === undefined ? null : known;
+          // An unshaped reference is no type the contract can name, and a body
+          // whose only return is one is left to `resultType`. A call is the
+          // exception: `() => worker()` answers the promise handle the call
+          // answered, which is exactly the reference, and reading it as nothing
+          // dropped the handle into a `void` the closure then answered.
+          if (known.kind === "ref" && known.of === null && known.name === undefined && value.k !== "call") return null;
+          return known;
         },
         (value) => this.holdsUnsettledArray(value),
       );
@@ -13309,6 +13341,21 @@ class TypeScriptParser {
       ? commonResult(failure, normal)
       : normal;
     if (this.loopCondition) return this.typedChoice(condition, then, otherwise);
+    // A continuation whose arms answer nothing answers nothing: there is no
+    // value to hold, and the arms are the calls they are.
+    if (type.kind === "void") {
+      this.pendingBefore.push({
+        kind: "if",
+        condition,
+        then: [
+          ...(rejected === undefined ? [] : [{ kind: "expression" as const, value: rejected, line }]),
+          { kind: "expression", value: then, line },
+        ],
+        otherwise: [{ kind: "expression", value: otherwise, line }],
+        line,
+      });
+      return { k: "null" };
+    }
     const held = `__chosen${this.fieldCount++}`;
     // A handle's zero is the number zero, not the null pointer a shaped
     // reference's zero is: the two are one contract type and the difference is
@@ -13376,6 +13423,141 @@ class TypeScriptParser {
     const type = this.valueTypeOf(receiver);
     if (type.kind === "primitive" || type.kind === "text" || type.kind === "slice" || type.kind === "array" || type.kind === "void") return type;
     return ANY_TYPE;
+  }
+
+  /**
+   * `Promise.allSettled(items)`: one record per promise, saying whether it
+   * settled and what a failure was.
+   *
+   * The entry the language writes is `{ status, value, reason }`: a fulfilled
+   * promise answers `"fulfilled"` and the value it carried, and a failed one
+   * answers `"rejected"` and the message it failed with. The list is of
+   * references because a record is one, and the helper that builds it walks
+   * the promises once.
+   */
+  private promiseSettled(receiver: Expression, method: string, args: readonly Expression[]): Expression | null {
+    if (!(receiver.k === "ident" && receiver.name === "Promise" && method === "allSettled")) return null;
+    if (args.length !== 1) {
+      this.report(`Promise.allSettled takes one argument`, `as in Promise.allSettled(workers.map(worker))`, this.peek());
+      return this.hole();
+    }
+    const list = args[0] as Expression;
+    const type = this.valueTypeOf(list);
+    if (type.kind !== "slice" && type.kind !== "array") {
+      if (this.importsArePending() && this.pendingHolds(list)) {
+        const answered = this.hole();
+        this.deferred.add(answered);
+        return answered;
+      }
+      this.report(
+        "Promise.allSettled settles a list",
+        "the value the call settles is a list of promises, as in Promise.allSettled(found.map(f))",
+        this.peek(),
+      );
+      return this.hole();
+    }
+    const helper = this.allSettledHelper(this.peek().line);
+    const call: Expression = { k: "call", name: helper.name, args: [list] };
+    this.expressionTypes.set(call, helper.returns);
+    this.expressionShapes.set(call, helper.shape);
+    return call;
+  }
+
+  /** The helper `Promise.allSettled` builds its records with, once per program. */
+  private allSettledHelper(line: number): { name: string; returns: TypeExpr; shape: ResolvedType } {
+    const known = this.collectHelpers.get("allSettled");
+    if (known !== undefined) {
+      const settled = this.settledShape();
+      return { name: known.name, returns: known.returns, shape: { kind: "list", of: settled } };
+    }
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const written = (value: string): Expression => ({ k: "text", parts: [{ k: "text", value }] });
+    const anyRef: TypeExpr = { kind: "ref", of: null };
+    const failed: Expression = { k: "call", name: "Promise.failed", args: [ident("p")] };
+    this.expressionTypes.set(failed, BOOLEAN_RESULT);
+    const message: Expression = { k: "call", name: "Promise.message", args: [ident("p")] };
+    this.expressionTypes.set(message, TEXT_RESULT);
+    // The value a fulfilled promise carried is the box the runtime holds: a
+    // list of handles does not say what the payload is, and a program that
+    // reads `value` reads the handle.
+    const carried: Expression = { k: "call", name: "Promise.await", args: [ident("p")] };
+    this.expressionTypes.set(carried, anyRef);
+    const record = (status: string, value: Expression, reason: Expression): Expression => ({
+      k: "object",
+      fields: [
+        { name: "status", value: written(status) },
+        { name: "value", value },
+        { name: "reason", value: reason },
+      ],
+    });
+    const body: Statement[] = [
+      {
+        kind: "declare",
+        name: "out",
+        type: null,
+        init: { k: "sized", element: typeToString(anyRef), count: { k: "length", buffer: "items" } },
+        line,
+      },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "length", buffer: "items" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "declare", name: "p", type: anyRef, init: { k: "index", base: ident("items"), index: ident("i") }, line },
+          {
+            kind: "if",
+            condition: failed,
+            then: [{
+              kind: "indexAssign",
+              buffer: "out",
+              index: ident("i"),
+              op: "=",
+              value: record("rejected", { k: "null" }, message),
+              line,
+            }],
+            otherwise: [{
+              kind: "indexAssign",
+              buffer: "out",
+              index: ident("i"),
+              op: "=",
+              value: record("fulfilled", carried, written("")),
+              line,
+            }],
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "items", type: { kind: "slice", of: anyRef } as TypeExpr }];
+    const returns: TypeExpr = { kind: "slice", of: anyRef };
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params: helper.params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set("allSettled", made);
+    return { name, returns, shape: { kind: "list", of: this.settledShape() } };
+  }
+
+  /** The record `Promise.allSettled` answers per promise. */
+  private settledShape(): ResolvedType {
+    return {
+      kind: "record",
+      fields: new Map([
+        ["status", { type: { kind: "text" } as ResolvedType, optional: false }],
+        ["value", { type: { kind: "any" } as ResolvedType, optional: false }],
+        ["reason", { type: { kind: "text" } as ResolvedType, optional: false }],
+      ]),
+      index: null,
+    };
   }
 
   /**
@@ -13696,6 +13878,10 @@ class TypeScriptParser {
       }
       const written = this.liftedArrows.get(value.name);
       if (written !== undefined) return written.returns;
+      // A call of an `async` function answers the promise handle: what the
+      // declaration states is the payload the promise carries, which is what
+      // `await` reads out of it.
+      if (this.promiseFunctions.has(value.name)) return { kind: "ref", of: null };
       const declared = this.declaredReturns.get(value.name);
       if (declared !== undefined) return declared;
       // A builtin answers the type it is declared with, so `line.trim()` is a
@@ -16050,8 +16236,19 @@ class TypeScriptParser {
         return this.hole();
       }
     }
-    const element = signature.returns;
-    const shape = this.callbackReturnsShape(callback) ?? this.shapeOfTypeExpr(element);
+    // A callback that answers nothing still answers the value a call left in
+    // the register, which an `async` call's handle is: the block holds the
+    // handle, and awaiting an element reads the payload out of it.
+    const element = signature.returns.kind === "void" ? ({ kind: "ref", of: null } as TypeExpr) : signature.returns;
+    const answered = this.callbackReturnsShape(callback) ?? this.shapeOfTypeExpr(signature.returns);
+    // A callback that answers a promise answers the handle, so there is no
+    // shape the element is read at: the list's elements are the references the
+    // handles are, and a shape of "nothing" here read the list as a list of
+    // nothing and its elements as values the await never saw.
+    const shape: ResolvedType = element.kind === "ref" && element.of === null && element.name === undefined &&
+      (answered === null || answered.kind === "absent")
+      ? { kind: "any" }
+      : answered;
     const key = JSON.stringify(["from", element, signature.params.length]);
     let helper = this.collectHelpers.get(key);
     if (helper === undefined) {
