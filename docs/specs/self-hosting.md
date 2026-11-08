@@ -1017,6 +1017,19 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4go. `Object.assign` merges the dictionaries a spread list holds
+
+    objects: Object.assign({}, ...members.map((member) => member.body.objects)),
+
+The target was an empty dictionary and the sources were a list the source did
+not write out: `...list` was a spread argument, which the call subset refused.
+An empty target at the dictionary the expected record names is now the merge
+helper over the list — every entry of every part is written into the new
+dictionary, in the order the list holds them. `semantics/recursion.ts` reads one
+refusal shorter.
+
+    The total went from 60 to 59.
+
 ### 4gn. An arrow reads a captured counter's old value before stepping it
 
     let searched = SEARCH_LIMIT;
@@ -4462,7 +4475,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-60 refusals over 95 sources, 77 of them read whole. The report reads the
+59 refusals over 95 sources, 77 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4686,6 +4699,7 @@ What was closed this session, and what each was worth:
 | `JSON.stringify` writes a record at the indent the source names (§4gl) | 63 → 62 |
 | `console.error` writes its values to the error stream (§4gm) | 62 → 61 |
 | an arrow reads a captured counter's old value before stepping it (§4gn) | 61 → 60 |
+| `Object.assign` merges the dictionaries a spread list holds (§4go) | 60 → 59 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

@@ -11204,7 +11204,7 @@ class TypeScriptParser {
           target.base.name === "Object" &&
           target.field === "assign"
         ) {
-          const args = this.readCallArguments();
+          const args = this.readCallArguments([], null, true);
           const first = args[0];
           const targetCollection = first === undefined ? null : this.collectionOfExpression(first);
           if (
@@ -11232,6 +11232,46 @@ class TypeScriptParser {
               this.expressionTypes.set(answer, NUMBER_RESULT);
               this.collectionExpressions.set(answer, targetCollection);
               replace(answer);
+              continue;
+            }
+          }
+          // `Object.assign({}, ...parts)` where the parts are a list of
+          // dictionaries the source did not write out: the target is the empty
+          // dictionary the expected record names, and the entries of every part
+          // are merged into it. An empty target writes nothing of its own, so
+          // the merge helper is the whole of the value.
+          const expectedMap = this.expectedShape === null ? null : this.collectionOfShape(this.expectedShape);
+          const spread = this.argumentSpreads ?? null;
+          const emptyTarget = first !== undefined && (
+            (first.k === "object" && first.fields.length === 0) ||
+            // An object literal written at a `Record` is the empty dictionary
+            // the literal's type names: the allocation writes no entry.
+            (first.k === "call" && first.name === "blaze_rt_dict_new" && first.args.length === 0)
+          );
+          if (
+            first !== undefined &&
+            emptyTarget &&
+            args.length === 2 &&
+            spread !== null &&
+            spread.length === 2 &&
+            spread[0] !== true &&
+            spread[1] === true &&
+            expectedMap !== null &&
+            expectedMap.kind === "map"
+          ) {
+            const list = args[1] as Expression;
+            const held = this.valueTypeOf(list);
+            if (held.kind === "slice" || held.kind === "array") {
+              const helper = this.collectionMergeHelper(expectedMap, this.peek().line);
+              const merged: Expression = { k: "call", name: helper.name, args: [list] };
+              this.collectionExpressions.set(merged, expectedMap);
+              this.expressionTypes.set(merged, NUMBER_RESULT);
+              this.expressionShapes.set(merged, {
+                kind: "record",
+                fields: new Map(),
+                index: this.shapeOfTypeExpr(expectedMap.value),
+              });
+              replace(merged);
               continue;
             }
           }

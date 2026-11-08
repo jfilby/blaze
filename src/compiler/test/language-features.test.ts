@@ -4665,6 +4665,37 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("Object.assign merges the dictionaries a spread list holds", async () => {
+  // `Object.assign({}, ...list.map(part))` writes every entry of every part
+  // into the empty dictionary the expected record names. The parts are a list
+  // the source did not write out, so the merge is a helper that walks it.
+  const source = [
+    'import { merged } from "./lib.ts";',
+    "console.log(merged());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface M { objects: Record<string, number> }",
+    "export function make(): M[] {",
+    "  const one: M = { objects: { x: 1, y: 2 } };",
+    "  const two: M = { objects: { z: 3 } };",
+    "  const list: M[] = [];",
+    "  list.push(one);",
+    "  list.push(two);",
+    "  return list;",
+    "}",
+    "export function merged(): string {",
+    "  const result: Record<string, number> = Object.assign({}, ...make().map((one) => one.objects));",
+    "  return `${result.x}|${result.y}|${result.z}`;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "1|2|3", `the ${backend} backend merges the parts`);
+  }
+});
+
 test("an arrow reads a captured counter's old value before stepping it", async () => {
   // `searched-- <= 0` reads the value the counter had and then steps it. The
   // counter lives in a box an arrow writes through, so the read and the step
