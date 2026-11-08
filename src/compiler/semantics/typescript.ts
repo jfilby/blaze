@@ -1142,6 +1142,14 @@ interface ScannedFile {
   /** The top-level names that are values the running program holds, not constants. */
   state: Set<string>;
   /**
+   * The top-level `let` names a number, by the slot the runtime holds them in.
+   *
+   * A compiled function has no environment: a module-level counter is a value
+   * the functions share, which the runtime keeps in a global cell. The slot is
+   * assigned where the declaration is read, in the order the file writes them.
+   */
+  numeric: Map<string, number>;
+  /**
    * The field names of a top-level object literal whose values are computed.
    * The names are what the source wrote even when the values are not constants,
    * so a question about the keys is one the read can answer without running
@@ -1434,6 +1442,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const collections = new Map<string, { start: number; end: number }>();
   const allocations = new Map<string, string>();
   const state = new Set<string>();
+  const numeric = new Map<string, number>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
   // The declarations are collected first so a body is never read as the file's
@@ -1616,6 +1625,12 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       const shared = construction && nameCount(tokens, name) > 2;
       if (!constant || shared) {
         state.add(name);
+        // A module-level counter is a number the runtime holds in a cell:
+        // `let temporaryWrites = 0` is the one shape this reads, because a
+        // number is the value a global cell can hold.
+        if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !locals.has(name)) {
+          numeric.set(name, numeric.size);
+        }
         const element = allocationElement(tokens, start);
         if (element !== null) allocations.set(name, element);
       }
@@ -1629,7 +1644,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state, shapes, annotations, collections, allocations };
+  return { constants: found, state, numeric, shapes, annotations, collections, allocations };
 }
 
 /**
@@ -1848,9 +1863,24 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
   // scope binds is the file's value, and the function that reads it is read
   // where the program runs.
   let found = false;
-  walkFunction(fn, (name, bound) => {
-    if (!bound && state.has(name)) found = true;
-  });
+  walkFunction(
+    fn,
+    (name, bound) => {
+      if (!bound && state.has(name)) found = true;
+    },
+    // A module-level number the function reads or writes is a cell, not a name:
+    // the call is the read or the write of the value the program holds.
+    (name) => {
+      if (
+        name === "blaze_rt_global_get" ||
+        name === "blaze_rt_global_set" ||
+        name === "blaze_rt_global_post_inc" ||
+        name === "blaze_rt_global_post_dec"
+      ) {
+        found = true;
+      }
+    },
+  );
   return found;
 }
 
@@ -3830,6 +3860,7 @@ class TypeScriptParser {
     constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map(),
     constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map(),
     stateAllocations: ReadonlyMap<string, string> = new Map(),
+    numericGlobals: ReadonlyMap<string, number> = new Map(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3843,6 +3874,7 @@ class TypeScriptParser {
     this.constantAnnotations = constantAnnotations;
     this.constantCollections = constantCollections;
     this.state = state;
+    this.numericGlobals = numericGlobals;
     this.shapes = shapes;
     this.stateAllocations = stateAllocations;
     // A block the program allocates at the top of the file is a sequence of the
@@ -3863,6 +3895,8 @@ class TypeScriptParser {
   private readonly constants: ReadonlyMap<string, ConstantInfo>;
   /** The names the running program holds, which a module function cannot read. */
   private readonly state: ReadonlySet<string>;
+  /** The module-level numbers the runtime holds in cells, by the cell's slot. */
+  private readonly numericGlobals: ReadonlyMap<string, number>;
   /** The field names of a computed top-level object, by the name it is held at. */
   private readonly shapes: ReadonlyMap<string, ConstantInfo>;
   /** The element type of a top-level allocation the program holds, by name. */
@@ -6286,7 +6320,10 @@ class TypeScriptParser {
     // not know an `export`, so it reports the export keyword first and buries
     // what the function itself wrote outside the subset. The refusal stays the
     // module's, and the declaration is held out of the body below.
-    const program = refused ? !exported : readsProgramState;
+    // An export is the module's interface: a function the file offers is read
+    // as the module's even where it reads a value the running program holds,
+    // because the name it offers is a contract the rest of the program calls.
+    const program = refused ? !exported : (readsProgramState && !exported);
     if (program) {
       functions.length = before;
       // The arrows the refused declaration wrote are read again, by the parser
@@ -8631,6 +8668,25 @@ class TypeScriptParser {
       this.position = start;
       return this.readMemberAssignment();
     }
+    const globalSlot = this.numericGlobal(target.text);
+    if (globalSlot !== null && this.peek().text === "=") {
+      this.next();
+      const value = this.readExpression();
+      this.accept(";");
+      return this.globalWrite(globalSlot, value, target.line);
+    }
+    if (globalSlot !== null && this.peek().kind === "punct" && this.peek().text in COMPOUND_OPERATORS) {
+      const op = this.next().text;
+      const value = this.readExpression();
+      this.accept(";");
+      const binary: Expression = {
+        k: "binary",
+        op: COMPOUND_OPERATORS[op] as BinaryOp,
+        left: this.globalRead(globalSlot),
+        right: value,
+      };
+      return this.globalWrite(globalSlot, binary, target.line);
+    }
     const operator = this.peek();
     // `x ??= value` writes only where x is null. It is an `if`, not a compound
     // assignment: the value is not computed where x holds one.
@@ -9201,9 +9257,21 @@ class TypeScriptParser {
       };
     }
     if (token.kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--")) {
+      const slot = this.numericGlobal(token.text);
       this.next();
       const op = this.next().text as "++" | "--";
       this.accept(";");
+      if (slot !== null) {
+        return {
+          kind: "expression",
+          value: {
+            k: "call",
+            name: op === "++" ? "blaze_rt_global_post_inc" : "blaze_rt_global_post_dec",
+            args: [{ k: "literal", text: String(slot) }],
+          },
+          line: token.line,
+        };
+      }
       return { kind: "update", name: token.text, op, prefix: false, line: token.line };
     }
     const value = this.readExpression();
@@ -10927,7 +10995,55 @@ class TypeScriptParser {
    * `a?.b.c` reads `a.b.c` only where `a` is not null. A second `?.` nests
    * another conditional inside the first.
    */
+  /**
+   * The cell a module-level number lives in, where the name is that number.
+   *
+   * A name the body declares shadows the module's: a parameter or a local of
+   * the same spelling is the local, whatever the file writes at its top.
+   */
+  private numericGlobal(name: string): number | null {
+    const slot = this.numericGlobals.get(name);
+    if (slot === undefined) return null;
+    if (this.valueTypes.has(name) || this.valueShapes.has(name) || this.valueArrows.has(name) || this.valueClasses.has(name)) return null;
+    return slot;
+  }
+
+  /** The call that reads a global cell. */
+  private globalRead(slot: number): Expression {
+    const call: Expression = { k: "call", name: "blaze_rt_global_get", args: [{ k: "literal", text: String(slot) }] };
+    this.expressionTypes.set(call, NUMBER_RESULT);
+    return call;
+  }
+
+  /** The statement that writes a global cell. */
+  private globalWrite(slot: number, value: Expression, line: number): Statement {
+    return {
+      kind: "expression",
+      value: { k: "call", name: "blaze_rt_global_set", args: [{ k: "literal", text: String(slot) }, value] },
+      line,
+    };
+  }
+
   private readPostfix(): Expression {
+    // `x++` and `x--` of a module-level number are the runtime's step: the
+    // cell is read and stepped in one call, and the value the expression has is
+    // the one before the step.
+    if (this.peek().kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--")) {
+      const slot = this.numericGlobal(this.peek().text);
+      if (slot !== null) {
+        const op = this.peek(1).text;
+        this.next();
+        this.next();
+        const call: Expression = {
+          k: "call",
+          name: op === "++" ? "blaze_rt_global_post_inc" : "blaze_rt_global_post_dec",
+          args: [{ k: "literal", text: String(slot) }],
+        };
+        this.expressionTypes.set(call, NUMBER_RESULT);
+        return call;
+      }
+    }
+
     interface OptionalLink {
       condition: Expression;
       then: Expression;
@@ -18415,6 +18531,8 @@ class TypeScriptParser {
         const declared = this.functionValue(token.text, token.line);
         if (declared !== null) return declared;
       }
+      const slot = this.numericGlobal(token.text);
+      if (slot !== null) return this.globalRead(slot);
       return { k: "ident", name: token.text };
     }
     if (token.kind === "punct" && token.text === "[") return this.arrayLiteral(token);
@@ -20768,6 +20886,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       this.constantAnnotations,
       this.constantCollections,
       this.stateAllocations,
+      this.numericGlobals,
     );
     child.currentClass = this.currentClass;
     child.pendingType = this.pendingType;
@@ -22083,6 +22202,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     scanned.annotations,
     scanned.collections,
     scanned.allocations,
+    scanned.numeric,
   );
   parser.wideBigint = wideBigint;
   // The type each imported value's declaration writes, for a value whose own

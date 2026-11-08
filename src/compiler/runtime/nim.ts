@@ -1350,6 +1350,28 @@ proc blaze_rt_now_ms*(): float64 {.exportc, cdecl.} =
   ## The wall clock in milliseconds since the Unix epoch.
   epochTime() * 1000.0
 
+var blaze_rt_globals: array[4096, float64]
+proc blaze_rt_global_slot(slot: float64): int =
+  let index = int(slot)
+  if index >= 0 and index < 4096: index else: 0
+proc blaze_rt_global_get*(slot: float64): float64 {.exportc, cdecl.} =
+  ## Reads a module-level number.
+  blaze_rt_globals[blaze_rt_global_slot(slot)]
+proc blaze_rt_global_set*(slot, value: float64): float64 {.exportc, cdecl.} =
+  ## Writes a module-level number, and answers the value written.
+  blaze_rt_globals[blaze_rt_global_slot(slot)] = value
+  value
+proc blaze_rt_global_post_inc*(slot: float64): float64 {.exportc, cdecl.} =
+  ## Steps a module-level number up, answering the value before the step.
+  let index = blaze_rt_global_slot(slot)
+  result = blaze_rt_globals[index]
+  blaze_rt_globals[index] = result + 1.0
+proc blaze_rt_global_post_dec*(slot: float64): float64 {.exportc, cdecl.} =
+  ## Steps a module-level number down, answering the value before the step.
+  let index = blaze_rt_global_slot(slot)
+  result = blaze_rt_globals[index]
+  blaze_rt_globals[index] = result - 1.0
+
 proc blaze_rt_timestamp_iso*(): cstring {.exportc, cdecl.} =
   ## The current time as an ISO 8601 timestamp in UTC, to the millisecond.
   let stamp = now().utc.format("yyyy-MM-dd'T'HH:mm:ss'.000Z'")

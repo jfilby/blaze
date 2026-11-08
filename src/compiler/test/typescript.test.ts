@@ -3673,6 +3673,19 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a module-level number is a cell the functions share", () => {
+  // A compiled function has no environment, so `let counter = 0` at the top of
+  // a file is a cell the runtime holds: a read is the cell read, a write is the
+  // cell written, and `counter++` is the one call that reads and steps it.
+  const source = [
+    "let counter = 0;",
+    "export function next(): number { return counter++; }",
+    "export function bump(): number { counter += 10; return counter; }",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("Object.values of a value the read does not type is empty", () => {
   // A value the read does not type has no fields it can name, so the values it
   // holds are the host's. The loop over them is the list the read can name,

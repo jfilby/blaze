@@ -75,6 +75,13 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_as_int_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
+  // The cells a module-level number lives in. A compiled function has no
+  // environment, so a counter the file declares at its top is a value the
+  // runtime holds and the functions share.
+  "blaze_rt_global_get": { params: [F64], returns: F64, arity: 1 },
+  "blaze_rt_global_set": { params: [F64, F64], returns: F64, arity: 2 },
+  "blaze_rt_global_post_inc": { params: [F64], returns: F64, arity: 1 },
+  "blaze_rt_global_post_dec": { params: [F64], returns: F64, arity: 1 },
   "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
   // A SHA-256 hasher is one handle the runtime keeps: the program makes it,
   // feeds it texts and reads the digest it answers.

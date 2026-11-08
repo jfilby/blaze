@@ -1017,6 +1017,23 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hd. A module-level number is a cell the functions share
+
+    let temporaryWrites = 0;
+    const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
+
+A compiled function has no environment, so a top-level `let` was a name the
+frontend could not give a slot: a write to it inside an arrow was a captured
+name the arrow could not carry, and it was refused. A `let` at the top of a file
+whose value is a number is now a cell the runtime holds, and the functions share
+it: a read is `blaze_rt_global_get(slot)`, a write is
+`blaze_rt_global_set(slot, value)`, `counter++` is the one call that reads and
+steps the cell, and a compound write is the cell read, the operation and the
+cell written. A parameter or local of the same spelling shadows the file's
+number. `core/json-store.ts` reads one refusal shorter.
+
+    The total went from 16 to 15.
+
 ### 4hc. `Object.values` of a value the read does not type is empty
 
     function freeze(value: unknown): void {
@@ -4686,7 +4703,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-16 refusals over 95 sources, 88 of them read whole. The report reads the
+15 refusals over 95 sources, 88 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4925,6 +4942,7 @@ What was closed this session, and what each was worth:
 | an object the read cannot enumerate is opaque (§4ha) | 21 → 19 |
 | a union of a text and a list is asked at run time (§4hb) | 19 → 17 |
 | `Object.values` of a value the read does not type is empty (§4hc) | 17 → 16 |
+| a module-level number is a cell the functions share (§4hd) | 16 → 15 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

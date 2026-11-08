@@ -1081,6 +1081,10 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Returns the number.",
     { tags: ["host"] },
   ),
+  entry("blaze_rt_global_get", "double", [["slot", "double"]], "Reads a module-level number.", "Returns the value the cell holds.", { tags: ["host"] }),
+  entry("blaze_rt_global_set", "double", [["slot", "double"], ["value", "double"]], "Writes a module-level number.", "Returns the value written.", { tags: ["host"] }),
+  entry("blaze_rt_global_post_inc", "double", [["slot", "double"]], "Steps a module-level number up.", "Returns the value before the step.", { tags: ["host"] }),
+  entry("blaze_rt_global_post_dec", "double", [["slot", "double"]], "Steps a module-level number down.", "Returns the value before the step.", { tags: ["host"] }),
   entry(
     "blaze_rt_timestamp_iso",
     "const char*",
@@ -4088,6 +4092,35 @@ double blaze_rt_now_ms(void) {
   struct timespec parts;
   clock_gettime(CLOCK_REALTIME, &parts);
   return (double)parts.tv_sec * 1000.0 + (double)parts.tv_nsec / 1000000.0;
+}
+
+/* The cells a module-level number lives in. A compiled function has no
+   environment, so a file's top-level counter is a slot here and
+   every function that reads or writes it goes through these. */
+#define BLAZE_RT_GLOBALS 4096
+static double blaze_rt_globals[BLAZE_RT_GLOBALS];
+static size_t blaze_rt_global_slot(double slot) {
+  const size_t index = (size_t)slot;
+  return index < BLAZE_RT_GLOBALS ? index : 0;
+}
+double blaze_rt_global_get(double slot) {
+  return blaze_rt_globals[blaze_rt_global_slot(slot)];
+}
+double blaze_rt_global_set(double slot, double value) {
+  blaze_rt_globals[blaze_rt_global_slot(slot)] = value;
+  return value;
+}
+double blaze_rt_global_post_inc(double slot) {
+  const size_t index = blaze_rt_global_slot(slot);
+  const double before = blaze_rt_globals[index];
+  blaze_rt_globals[index] = before + 1.0;
+  return before;
+}
+double blaze_rt_global_post_dec(double slot) {
+  const size_t index = blaze_rt_global_slot(slot);
+  const double before = blaze_rt_globals[index];
+  blaze_rt_globals[index] = before - 1.0;
+  return before;
 }
 
 const char* blaze_rt_timestamp_iso(void) {

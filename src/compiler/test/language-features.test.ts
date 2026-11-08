@@ -4665,6 +4665,31 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("a module-level counter is the runtime's cell", async () => {
+  // `counter++` in a function, `counter += 10` in another, and an arrow that
+  // steps it: a compiled function has no environment, so the counter is one
+  // cell the runtime holds and every function goes through it.
+  const source = [
+    'import { next, bump, tick } from "./lib.ts";',
+    "console.log(next(), next(), bump(), tick());",
+    "",
+  ].join("\n");
+  const lib = [
+    "let counter = 0;",
+    "export function next(): number { return counter++; }",
+    "export function bump(): number { counter += 10; return counter; }",
+    "export function tick(): number {",
+    "  const step = (): number => counter++;",
+    "  return step() + step();",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "0 1 12 25", `the ${backend} backend shares the cell`);
+  }
+});
+
 test("a promise made in a module settles the value its executor resolves", async () => {
   // `new Promise((resolve) => ...)` in a module function is the runtime's
   // promise: the executor is a function of the file, called with the values it
