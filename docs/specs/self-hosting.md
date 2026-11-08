@@ -1017,6 +1017,34 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gz. A decoder reads the bytes it is handed
+
+    buffered += decoder.decode(chunk, { stream: true });
+
+`decode` was read only with the one argument the runtime copies: the options an
+incremental decoder takes made the call a method the compiler did not have, and
+the chunk of a transform callback is a value the read does not type. A decoder
+reads a block of bytes, so a value handed to `decode` is read as those bytes,
+and the options are not part of the value decoded. `ai/commandcode.ts` reads one
+refusal shorter.
+
+    The total went from 22 to 21.
+
+### 4gy. A host value the read does not look inside
+
+    response: { id: undefined, timestamp: new Date() }
+    new TransformStream<Uint8Array, CommandCodeEvent>({ ... })
+
+A bare `new Date()` used as a value was refused: a date is a `Date` of the host,
+and this compiler has no value for it. A `TransformStream` was refused as an
+allocation. Both are now values the read does not look inside: the transform
+the source hands over is read as the value it is — its methods are the arrows
+their bodies are — and the stream and the date are opaque, so a field or method
+written on one waits for the host. `ai/commandcode.ts` reads two refusals
+shorter.
+
+    The total went from 24 to 22.
+
 ### 4gx. A promise made in a module settles what its executor resolves
 
     const take = <T>(isTimed: boolean, task: () => T | Promise<T>): Promise<T> =>
@@ -4614,7 +4642,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-24 refusals over 95 sources, 84 of them read whole. The report reads the
+21 refusals over 95 sources, 85 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4848,6 +4876,8 @@ What was closed this session, and what each was worth:
 | a function declared in a body is hoisted to that body (§4gv) | 28 → 26 |
 | a call of a value the read cannot type is deferred (§4gw) | 26 → 25 |
 | a promise made in a module settles what its executor resolves (§4gx) | 25 → 24 |
+| a host value the read does not look inside (§4gy) | 24 → 22 |
+| a decoder reads the bytes it is handed (§4gz) | 22 → 21 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

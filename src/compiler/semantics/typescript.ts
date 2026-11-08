@@ -12011,12 +12011,20 @@ class TypeScriptParser {
             }
           }
           // `new TextDecoder().decode(bytes)` is the text those bytes are
-          // written as: the runtime copies them into a managed string.
-          if (target.field === "decode" && args.length === 1) {
+          // written as: the runtime copies them into a managed string. The
+          // options a source may pass — `{ stream: true }` — say how a decoder
+          // that carries state across calls reads, and the one here reads the
+          // bytes it is given.
+          if (target.field === "decode" && (args.length === 1 || args.length === 2)) {
             const held = this.valueTypeOf(receiver);
             const decoder = held.kind === "ref" && held.name === "__TextDecoder";
             const bytes = this.valueTypeOf(args[0] as Expression);
-            const element = bytes.kind === "slice" || bytes.kind === "array" ? bytes.of : null;
+            // A byte buffer the read does not type is the bytes a decoder
+            // reads: `decode` is defined for a block of bytes, and a value
+            // handed to it is one the declaration of `decode` names.
+            const element = bytes.kind === "slice" || bytes.kind === "array"
+              ? bytes.of
+              : unknownReference(bytes) ? BYTE : null;
             if (decoder && element !== null && element.kind === "primitive" && element.name === "u8") {
               const heldBytes = `__bytes${this.fieldCount++}`;
               const sequence: TypeExpr = { kind: "slice", of: element };
@@ -20415,12 +20423,12 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
           this.expressionTypes.set(now, NUMBER_RESULT);
           return now;
         }
-        this.report(
-          "a date is read for its stamp or its time",
-          "as in new Date().toISOString() or new Date().getTime()",
-          view,
-        );
-        return this.hole();
+        // A date held as a value of its own is a `Date` of the host, which
+        // this compiler has no value for: it is a value the read does not look
+        // inside, so a method or a field written on it waits for the host.
+        const marker: Expression = { k: "literal", text: "0" };
+        this.expressionTypes.set(marker, { kind: "ref", of: null });
+        return marker;
       }
       const args = this.readCallArguments([NUMBER_RESULT]);
       if (args.length === 1) return args[0] as Expression;
@@ -20474,6 +20482,20 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       const marker: Expression = { k: "literal", text: "0" };
       this.expressionTypes.set(marker, { kind: "ref", of: null, name: "__TextDecoder" });
       this.expressionShapes.set(marker, { kind: "ref", name: "__TextDecoder" });
+      return marker;
+    }
+    // `new TransformStream<A, B>(transformer)`: a stream the host provides.
+    // The transformer is read as the value it is — its methods are the arrows
+    // their bodies are — and the stream is a value this read does not look
+    // inside: `readable`, `writable` and `pipeThrough` wait for the host.
+    if (view.kind === "ident" && view.text === "TransformStream") {
+      if (this.at("<")) this.skipTypeParameters();
+      if (this.accept("(")) {
+        if (!this.at(")")) this.readExpression();
+        this.expect(")");
+      }
+      const marker: Expression = { k: "literal", text: "0" };
+      this.expressionTypes.set(marker, { kind: "ref", of: null });
       return marker;
     }
     // `new RegExp(pattern, flags)`: the same pair a written-out regular

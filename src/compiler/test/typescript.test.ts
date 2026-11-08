@@ -3673,6 +3673,26 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a host value the read does not look inside is opaque", () => {
+  // `new TransformStream(transformer)` and a bare `new Date()` are values the
+  // host owns: the transformer is read as the value it is, and the stream and
+  // the date are left to the host. A decoder reads the bytes it is handed, and
+  // the options that say how a stateful decoder reads are not bytes.
+  const source = [
+    "interface Event { type: string }",
+    "export function stream(body: ReadableStream<Uint8Array>, at: Date): unknown {",
+    "  const decoder = new TextDecoder();",
+    "  return body.pipeThrough(new TransformStream<Uint8Array, Event>({",
+    "    transform(chunk, controller) {",
+    "      controller.enqueue({ type: decoder.decode(chunk, { stream: true }) });",
+    "    },",
+    "  })) ?? at;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("a call of a value the read cannot type is deferred", () => {
   // `(settings.fetch ?? fetch)(url, options)` calls whichever of the two the
   // source holds. Neither is a function this read holds, so the call is the
