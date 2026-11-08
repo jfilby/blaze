@@ -4665,6 +4665,37 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("a list of pair tuples is the entries a map reports", async () => {
+  // `readonly [string, C]` is the pair record `first`/`second`: the two values
+  // are read at their own types, a loop binds the fields, and
+  // `Object.fromEntries` writes each pair into the dictionary.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface C { a: number }",
+    "export function byName(entries: (readonly [string, C])[]): Record<string, C> {",
+    "  return Object.fromEntries(entries);",
+    "}",
+    "export function demo(): number {",
+    "  const entries: (readonly [string, C])[] = [];",
+    "  entries.push([`x`, { a: 1 }]);",
+    "  entries.push([`y`, { a: 2 }]);",
+    "  let n = 0;",
+    "  for (const [k, v] of entries) n += k.length + v.a;",
+    "  const rec = byName(entries);",
+    "  return n + rec.x.a + rec.y.a;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "8", `the ${backend} backend reads the pairs`);
+  }
+});
+
 test("a program's list of texts is a block of pointers", async () => {
   // `["a", "b"]` is a list whose elements are texts, and `[]` beside it in the
   // other arm of a choice is the same list. The length is the block's count and

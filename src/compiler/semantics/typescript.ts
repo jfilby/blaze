@@ -7049,17 +7049,27 @@ class TypeScriptParser {
     shape: ResolvedType | null = null,
   ): Statement[] {
     const base: Expression = { k: "ident", name: temp };
+    // A pattern read at a record — the pair an entry is — binds the names at
+    // the record's fields in the order it writes them: `[key, value]` is
+    // `first` and `second`. A pattern read at a list binds the elements.
+    let written = bindings;
+    if (shape !== null && shape.kind === "record") {
+      const fields = [...shape.fields.keys()];
+      written = bindings.map((binding) => binding.field === null && fields[binding.index] !== undefined
+        ? { name: binding.name, field: fields[binding.index] as string, index: -1 }
+        : binding);
+    }
     // A pattern binds names of its own, and a test that settled a name of the
     // same spelling in the scope around it says nothing about them.
-    for (const binding of bindings) this.forgetNarrowing(binding.name);
+    for (const binding of written) this.forgetNarrowing(binding.name);
     const element = type.kind === "slice" || type.kind === "array" ? type.of : null;
     if (element !== null) {
-      for (const binding of bindings) {
+      for (const binding of written) {
         if (binding.field === null) this.valueTypes.set(binding.name, element);
       }
     }
     if (shape !== null) {
-      for (const binding of bindings) {
+      for (const binding of written) {
         const bound = binding.field === null
           ? elementOfType(this.typeTable, shape)
           : (fieldOfType(this.typeTable, shape, binding.field)?.type ?? null);
@@ -7069,7 +7079,7 @@ class TypeScriptParser {
         }
       }
     }
-    return bindings.map((binding): Statement => ({
+    return written.map((binding): Statement => ({
       kind: "declare",
       name: binding.name,
       type: null,
@@ -7491,6 +7501,13 @@ class TypeScriptParser {
       const close = this.matchingToken(from, "[", "]");
       if (close > 0 && close === end - 1) {
         const members = this.typeMembers(from + 1, close);
+        // A tuple whose first value is a text is the pair record `first`/
+        // `second`: the contract holds it as the reference the record is, not
+        // as a list of the first member.
+        if (members.length === 2) {
+          const firstMember = this.typeFromTokens(members[0]?.start ?? from + 1, members[0]?.end ?? close, false);
+          if (firstMember.kind === "text") return ANY_TYPE;
+        }
         const held = members.length === 0 ? ANY_TYPE : this.typeFromTokens(members[0]?.start ?? from + 1, members[0]?.end ?? close, false);
         return { kind: "slice", of: held };
       }
@@ -11644,6 +11661,28 @@ class TypeScriptParser {
             replace(copied);
             continue;
           }
+          // A list of pair records — the entries `Object.entries` reports, or a
+          // list built from `[key, value]` writes — is the entries of the
+          // dictionary: each pair writes its `first` under its `second`.
+          if (source !== undefined) {
+            const shape = this.shapeOf(source);
+            const pair = shape !== null && shape.kind === "list" ? shape.of : null;
+            if (pair !== null && pair.kind === "record" && pair.fields.has("first") && pair.fields.has("second")) {
+              const valueShape = (pair.fields.get("second") as ResolvedField).type;
+              const collection: CollectionValue = {
+                kind: "map",
+                key: TEXT_RESULT,
+                value: this.typeExprOfShape(valueShape),
+                valueShape,
+              };
+              const copied = this.collectionFromPairs(collection, source, this.peek().line);
+              this.expressionTypes.set(copied, NUMBER_RESULT);
+              this.collectionExpressions.set(copied, collection);
+              this.expressionShapes.set(copied, { kind: "record", fields: new Map(), index: valueShape });
+              replace(copied);
+              continue;
+            }
+          }
           this.report(
             "Object.fromEntries copies a map or a record",
             "an array of pairs is a list of two values of two types, which a compiled list does not hold",
@@ -11884,7 +11923,9 @@ class TypeScriptParser {
             // type, and the JSON of it is the elements' JSON between brackets:
             // a helper walks the block, and a list of lists is the helper of
             // what the inner list holds.
-            const helper = this.jsonListHelper(type.of, this.peek().line);
+            const heldShape = this.shapeOf(written);
+            const elementShape = heldShape !== null && heldShape.kind === "list" ? heldShape.of : null;
+            const helper = this.jsonListHelper(type.of, this.peek().line, elementShape);
             if (helper.name !== "") {
               const serialized: Expression = { k: "call", name: helper.name, args: [written] };
               this.expressionTypes.set(serialized, TEXT_RESULT);
@@ -16798,11 +16839,17 @@ class TypeScriptParser {
    * object holds no field names at run time, so the JSON of one is not a text
    * this compiler can write.
    */
-  private jsonListHelper(element: TypeExpr, line: number): { name: string; returns: TypeExpr } {
-    const key = JSON.stringify(["jsonList", element]);
+  private jsonListHelper(element: TypeExpr, line: number, elementShape: ResolvedType | null = null): { name: string; returns: TypeExpr } {
+    const record = elementShape !== null && elementShape.kind === "record" && elementShape.index === null ? elementShape : null;
+    const key = JSON.stringify([
+      "jsonList",
+      element,
+      record === null ? null : [...record.fields].map(([name, field]) => [name, field.type]),
+    ]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
     const readable =
+      record !== null ||
       element.kind === "text" ||
       (element.kind === "primitive" && element.name !== "i256" && element.name !== "u256") ||
       element.kind === "slice" ||
@@ -16814,11 +16861,34 @@ class TypeScriptParser {
     const number = (text: string): Expression => ({ k: "literal", text });
     const written = (value: string): Expression => ({ k: "text", parts: [{ k: "text", value }] });
     const at = (): Expression => ({ k: "index", base: ident("items"), index: ident("i") });
-    // One element's JSON: an inner list is the helper for what it holds, and
-    // everything else is the runtime's stringify of the value it is.
-    const piece: Expression = element.kind === "slice" || element.kind === "array"
-      ? { k: "call", name: this.jsonListHelper(element.of, line).name, args: [at()] }
-      : { k: "call", name: "JSON.stringify", args: [at()] };
+    // One element's JSON: a record is its fields in the order they are, an
+    // inner list is the helper for what it holds, and everything else is the
+    // runtime's stringify of the value it is.
+    const recordPiece = (shape: ResolvedType & { kind: "record" }): Expression => {
+      const tuple = shape.tuple === true;
+      const parts: TextPart[] = [{ k: "text", value: tuple ? "[" : "{" }];
+      let first = true;
+      for (const [name, field] of shape.fields) {
+        if (!first) parts.push({ k: "text", value: "," });
+        first = false;
+        if (!tuple) parts.push({ k: "text", value: `${JSON.stringify(name)}:` });
+        const member: Expression = { k: "member", base: at(), field: name };
+        this.expressionTypes.set(member, this.typeExprOfShape(field.type));
+        this.expressionShapes.set(member, field.type);
+        const value: Expression = { k: "call", name: "JSON.stringify", args: [member] };
+        this.expressionTypes.set(value, TEXT_RESULT);
+        parts.push({ k: "value", value });
+      }
+      parts.push({ k: "text", value: tuple ? "]" : "}" });
+      const text: Expression = { k: "text", parts };
+      this.expressionTypes.set(text, TEXT_RESULT);
+      return text;
+    };
+    const piece: Expression = record !== null
+      ? recordPiece(record)
+      : element.kind === "slice" || element.kind === "array"
+        ? { k: "call", name: this.jsonListHelper(element.of, line).name, args: [at()] }
+        : { k: "call", name: "JSON.stringify", args: [at()] };
     this.expressionTypes.set(piece, TEXT_RESULT);
     const body: Statement[] = [
       { kind: "declare", name: "out", type: null, init: written("["), line },
@@ -18983,6 +19053,41 @@ class TypeScriptParser {
     const savedExpecting = this.expecting;
     const savedType = this.expectedType;
     const savedShape = this.expectedShape;
+    // `[key, value]` written where the use wants the pair record `first`/
+    // `second` is the record, not a block of two: the two values are read at
+    // the fields' own types.
+    if (
+      savedShape !== null &&
+      savedShape.kind === "record" &&
+      savedShape.fields.has("first") &&
+      savedShape.fields.has("second") &&
+      (savedType === null || savedType.kind === "ref")
+    ) {
+      const firstField = savedShape.fields.get("first") as ResolvedField;
+      const secondField = savedShape.fields.get("second") as ResolvedField;
+      const fields: { name: string; value: Expression }[] = [];
+      if (!this.at("]")) {
+        fields.push({
+          name: "first",
+          value: this.readAt(this.typeExprOfShape(firstField.type), () => this.readExpression(), firstField.type),
+        });
+        this.accept(",");
+        if (!this.at("]")) {
+          fields.push({
+            name: "second",
+            value: this.readAt(this.typeExprOfShape(secondField.type), () => this.readExpression(), secondField.type),
+          });
+        }
+        while (this.accept(",")) {
+          if (this.at("]")) break;
+          this.readExpression();
+        }
+      }
+      this.expect("]");
+      const made: Expression = { k: "object", fields };
+      this.expressionShapes.set(made, savedShape);
+      return made;
+    }
     const expected = savedExpecting;
     const expectedArray = savedType !== null && (savedType.kind === "slice" || savedType.kind === "array")
       ? savedType

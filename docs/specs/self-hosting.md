@@ -1017,6 +1017,25 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hi. A pair tuple is the record a map reports
+
+    byName<V>(entries: Iterable<readonly [string, V]>): Record<string, V> {
+      return Object.fromEntries(entries);
+    }
+    entries.push([name, contract]);
+
+`readonly [string, V]` resolved to a list of texts: the tuple's second value was
+lost, so a pair was a block of one type. A tuple of two values whose first is a
+text is now the pair record `first`/`second`, and both values are read at their
+own types. A two-element list literal written where such a record is wanted is
+the record, a `for-of` pattern `[key, value]` binds the fields, and
+`Object.fromEntries` over a list of pairs writes each into the dictionary the
+return type names. A tuple's JSON is the array the language writes, not the
+object its fields look like. `core/named-record.ts` reads whole, and its
+`byName` compiles on both backends.
+
+    The total went from 3 to 2.
+
 ### 4hh. A program reads a map from a list, a spread, and a pair callback
 
     const byName = new Map(modules.map(([path, source]) => [path, resolve(source)]));
@@ -4765,7 +4784,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-3 refusals over 95 sources, 92 of them read whole. The report reads the
+2 refusals over 95 sources, 93 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -5009,6 +5028,7 @@ What was closed this session, and what each was worth:
 | a `for-of` names the pair fields of an entry (§4hf) | 14 → 12 |
 | a loop over the entries of an untyped value is deferred (§4hg) | 12 → 10 |
 | a program reads a map from a list, a spread, and a pair callback (§4hh) | 10 → 3 |
+| a pair tuple is the record a map reports (§4hi) | 3 → 2 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

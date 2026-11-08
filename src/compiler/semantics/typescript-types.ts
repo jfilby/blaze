@@ -104,6 +104,12 @@ export type ResolvedType =
        * from a union keeps them so that a value can say which arm it is.
        */
       arms?: ResolvedType[];
+      /**
+       * The record is a pair written as a tuple, `readonly [key, value]`. The
+       * language writes a tuple as an array, so its JSON is an array rather
+       * than the object the two fields look like.
+       */
+      tuple?: true;
     }
   | { kind: "function"; params: ResolvedType[]; returns: ResolvedType }
   | { kind: "ref"; name: string | null }
@@ -988,11 +994,23 @@ class TypeText {
         this.take("]");
         type = indexedFieldOf(this.table, type, field);
       } else {
-        // A tuple is a list of the values it names.
+        // A tuple of two values whose first is a text — `readonly [string, V]`
+        // is the entry a map or `Object.entries` reports — is the pair record
+        // `first`/`second`. The key and the value are thereby read at their own
+        // types, which a list of one element type cannot do.
         const first = this.union();
-        while (this.take(",")) this.union();
+        const members = [first];
+        while (this.take(",")) members.push(this.union());
         this.take("]");
-        type = { kind: "list", of: first };
+        if (members.length === 2 && first.kind === "text") {
+          const fields = new Map<string, ResolvedField>([
+            ["first", { type: first, optional: false }],
+            ["second", { type: members[1] as ResolvedType, optional: false }],
+          ]);
+          type = { kind: "record", fields, index: null, tuple: true };
+        } else {
+          type = { kind: "list", of: first };
+        }
       }
     }
   }
@@ -1034,8 +1052,22 @@ class TypeText {
       this.at = save + 1;
       if (this.take("]")) return { kind: "list", of: ANY_TYPE };
       const first = this.union();
-      while (this.take(",")) this.union();
+      const members = [first];
+      while (this.take(",")) members.push(this.union());
       this.take("]");
+      // A tuple whose first value is a text is the pair record `first`/`second`
+      // the entry of a map or `Object.entries` is.
+      if (members.length === 2 && first.kind === "text") {
+        return {
+          kind: "record",
+          fields: new Map<string, ResolvedField>([
+            ["first", { type: first, optional: false }],
+            ["second", { type: members[1] as ResolvedType, optional: false }],
+          ]),
+          index: null,
+          tuple: true,
+        };
+      }
       return { kind: "list", of: first };
     }
     if (this.text[this.at] === "'" || this.text[this.at] === '"' || this.text[this.at] === "`") {
