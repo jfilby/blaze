@@ -12238,6 +12238,14 @@ class TypeScriptParser {
         // a function type is. The signature is the one the answer's type
         // writes, and the arguments are read at its parameters.
         if (target.k !== "ident") {
+          // `target[method](args)` where `method` was written as one of two
+          // texts: the call is the call of either field, and a field the type
+          // declares as a function is read at the one signature both answer.
+          const chosen = this.computedCall(target);
+          if (chosen !== null) {
+            replace(chosen);
+            continue;
+          }
           const held = this.expressionFunctionType(target);
           if (held !== null) {
             const args = this.readCallArguments(held.params);
@@ -14872,6 +14880,78 @@ class TypeScriptParser {
   /** The signature a member's declaration types it at, when it types one. */
   private memberFunctionType(value: Expression & { k: "member" }): FunctionType | null {
     return this.expressionFunctionType(value);
+  }
+
+  /**
+   * The call a computed field names, where the name it is computed from was
+   * written as one of two texts.
+   *
+   * `const method = add ? "wideAddMod" : "wideSubMod"; target[method](a, b)`
+   * is the call of either field. The fields are declared as functions, and a
+   * call through a computed name is read at the one signature both of them
+   * answer: the two calls stand in the arms of the choice, so the arguments are
+   * evaluated once, by the arm the condition selects. A name whose declared
+   * value is not a choice of two texts is not a field name this can pick.
+   */
+  private computedCall(target: Expression): Expression | null {
+    if (target.k !== "index") return null;
+    const choice = this.textChoiceOf(target.index, new Set());
+    if (choice === null) return null;
+    const signatures = [choice.then, choice.otherwise].map((field) =>
+      this.memberFunctionType({ k: "member", base: target.base, field }),
+    );
+    const first = signatures[0];
+    if (first === null || signatures.some((one) => one === null)) return null;
+    const signature = first as FunctionType;
+    if (signatures.some((one) => JSON.stringify(one) !== JSON.stringify(signature))) return null;
+    const args = this.readCallArguments(signature.params);
+    const invoked = (field: string): Expression => {
+      const member: Expression = { k: "member", base: target.base, field };
+      const call: Expression = {
+        k: "invoke",
+        callee: member,
+        args: structuredClone(args),
+        params: signature.params,
+        returns: signature.returns,
+      };
+      if (signature.shape !== undefined) {
+        const answered = this.shapeForRead(signature.shape);
+        if (answered !== null) this.expressionShapes.set(call, answered);
+      }
+      return call;
+    };
+    const made: Expression = {
+      k: "conditional",
+      condition: choice.condition,
+      then: invoked(choice.then),
+      otherwise: invoked(choice.otherwise),
+    };
+    this.expressionTypes.set(made, signature.returns);
+    if (signature.shape !== undefined) {
+      const answered = this.shapeForRead(signature.shape);
+      if (answered !== null) this.expressionShapes.set(made, answered);
+    }
+    return made;
+  }
+
+  /** A value written as one of two texts, and the test that picks which. */
+  private textChoiceOf(
+    value: Expression,
+    seen: Set<string>,
+  ): { condition: Expression; then: string; otherwise: string } | null {
+    const literal = (arm: Expression): string | null =>
+      arm.k === "text" && arm.parts.length === 1 && arm.parts[0]?.k === "text" ? (arm.parts[0] as { value: string }).value : null;
+    if (value.k === "ident") {
+      if (seen.has(value.name)) return null;
+      seen.add(value.name);
+      const declared = this.declaredValues.get(value.name);
+      return declared === undefined ? null : this.textChoiceOf(declared, seen);
+    }
+    if (value.k !== "conditional") return null;
+    const then = literal(value.then);
+    const otherwise = literal(value.otherwise);
+    if (then === null || otherwise === null || then === otherwise) return null;
+    return { condition: value.condition, then, otherwise };
   }
 
   /**

@@ -1017,6 +1017,22 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gs. A field named by one of two texts is called as either field
+
+    const method = value.op === "add" ? "wideAddMod" : "wideSubMod";
+    return this.target[method](left, right, modulus, value.type);
+
+A call through a computed field was "only a named function is called": the
+receiver is an index whose key this read could not name. Where the key is a
+choice of two texts written out — directly, or through a name the body declared
+with that choice — each text names a field, and when both fields are declared as
+functions with the same signature the call is the two calls in the arms of the
+choice. The arguments are read at that one signature and copied into each arm,
+so the arm the condition selects evaluates them once. `toolchain/program-emit.ts`
+reads whole.
+
+    The total went from 56 to 55.
+
 ### 4gr. A program's set is one handle on the runtime's dictionary
 
     const callable = new Set<string>();
@@ -4519,7 +4535,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-56 refusals over 95 sources, 78 of them read whole. The report reads the
+55 refusals over 95 sources, 79 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4747,6 +4763,7 @@ What was closed this session, and what each was worth:
 | a constructor field of an object type is called with new (§4gp) | 59 → 58 |
 | an arrow's parameter default is a call the call site can write (§4gq) | 58 → 57 |
 | a program's set is one handle on the runtime's dictionary (§4gr) | 57 → 56 |
+| a field named by one of two texts is called as either field (§4gs) | 56 → 55 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

@@ -3671,6 +3671,31 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a field named by one of two texts is called as either field", () => {
+  // `const method = add ? "wideAddMod" : "wideSubMod"` names a field of the
+  // target, and both fields answer the same signature. The call is the two
+  // calls in the arms of the choice, so the arguments are read once and the
+  // arm the condition selects evaluates them.
+  const source = [
+    "interface Target {",
+    "  wideAddMod(a: number, b: number): number;",
+    "  wideSubMod(a: number, b: number): number;",
+    "}",
+    "export function go(target: Target, add: boolean): number {",
+    "  const method = add ? `wideAddMod` : `wideSubMod`;",
+    "  return target[method](1, 2);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "go")?.handle;
+  assert.ok(handle !== undefined, "go is a function of the module");
+  const written = JSON.stringify(handle);
+  assert.match(written, /"k":"conditional","condition"/);
+  assert.equal((written.match(/"k":"invoke"/g) ?? []).length, 2, "one call in each arm");
+});
+
 test("a constructor field of an object type is called with new", () => {
   // `Module: { new (bytes: Uint8Array): unknown; ... }` states a construct
   // signature, and `new engine.Module(bytes)` and `new (engine.Module)(bytes)`
