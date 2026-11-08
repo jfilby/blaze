@@ -4665,6 +4665,29 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("a promise made in a module settles the value its executor resolves", async () => {
+  // `new Promise((resolve) => ...)` in a module function is the runtime's
+  // promise: the executor is a function of the file, called with the values it
+  // captured, and a call of its first parameter settles the promise. The
+  // settle parameters are not parameters of the lifted function.
+  const source = [
+    'import { f } from "./lib.ts";',
+    "console.log(await f(5));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export async function f(n: number): Promise<number> {",
+    "  const p = new Promise<number>((resolve) => { resolve(n + 1); });",
+    "  return await p;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "6", `the ${backend} backend settles the promise`);
+  }
+});
+
 test("a function declared in a body is hoisted to that body", async () => {
   // `twice` is called above its declaration, and it reads `n` from around it.
   // The declaration is lifted to the arrow its body is, and the call written

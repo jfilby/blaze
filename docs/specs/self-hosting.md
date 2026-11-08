@@ -1017,6 +1017,23 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gx. A promise made in a module settles what its executor resolves
+
+    const take = <T>(isTimed: boolean, task: () => T | Promise<T>): Promise<T> =>
+      new Promise<T>((resolve, reject) => { ... });
+
+`new Promise` was an allocation of a typed array. The executor is now read as
+the arrow its body is, and the first two parameters it writes are the settle
+functions: a call of one is the runtime's `resolve`/`reject`, and neither is a
+parameter of the lifted function, which the backend calls with the values the
+executor captured. The names are read from the tokens before the body, so a
+call inside the body is already the settle call. The module C backend and the
+validator learned the promise's settle call carries the value the executor
+handed it — a number, a text, a reference or nothing — rather than the untyped
+reference the contract has for all four. `codegen.ts` reads whole.
+
+    The total went from 25 to 24.
+
 ### 4gw. A call of a value the read cannot type is deferred
 
     const response = await (this.settings.fetch ?? fetch)(url, { ... });
@@ -4597,7 +4614,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-25 refusals over 95 sources, 83 of them read whole. The report reads the
+24 refusals over 95 sources, 84 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4830,6 +4847,7 @@ What was closed this session, and what each was worth:
 | a method of a value the read cannot type is deferred (§4gu) | 51 → 28 |
 | a function declared in a body is hoisted to that body (§4gv) | 28 → 26 |
 | a call of a value the read cannot type is deferred (§4gw) | 26 → 25 |
+| a promise made in a module settles what its executor resolves (§4gx) | 25 → 24 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

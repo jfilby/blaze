@@ -105,8 +105,10 @@ import {
   type SemanticStatement,
   type SemanticTextPart,
   type SemanticType,
+  type CaptureRef,
   type SemanticValue,
   type UnaryOp,
+  VOID,
 } from "../core/semantic-ir.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -1540,6 +1542,58 @@ class FunctionBody {
       const folded = this.bigIntCall(expression);
       if (folded !== null) return folded;
     }
+    // `new Promise((resolve, reject) => { ... })`: the executor is a function
+    // of the file, and the runtime calls it before the handle is answered. The
+    // value handed over is the function the executor lifted to, with the values
+    // it captured, which the backend calls in front of the promise's own
+    // current-promise bookkeeping. The settle parameters were dropped from the
+    // lifted function when the frontend read the allocation.
+    if (expression.name === "Promise") {
+      const promise = builtinFor("Promise") as BuiltinSignature;
+      this.builtinArity("Promise", promise, expression.args.length, line);
+      const executor = expression.args[0];
+      let handed: SemanticValue;
+      if (executor !== undefined && executor.k === "arrow") {
+        const lifted = this.context.functions[executor.name];
+        if (lifted === undefined) {
+          throw this.error(
+            `calls the executor ${executor.name}, which the program does not compile`,
+            line,
+            "a promise executor is a function of the same file",
+          );
+        }
+        const captures: CaptureRef[] = executor.captures.map((name) => {
+          const held = this.typed({ k: "ident", name }, null, line).value;
+          return { name, type: held.type };
+        });
+        handed = { k: "functionRef", type: VOID, name: lifted.function.symbol, captures };
+      } else if (executor !== undefined) {
+        handed = this.typed(executor, null, line).value;
+      } else {
+        throw this.error("a promise takes one executor", line);
+      }
+      return {
+        value: {
+          k: "call",
+          type: promise.returns,
+          call: this.semanticCall(
+            "Promise",
+            {
+              name: "Promise",
+              symbol: "Promise",
+              params: [{ name: "argument0", type: contractText(ANY_REF) }],
+              returns: contractText(promise.returns),
+            },
+            [handed],
+            promise.returns,
+            promise.effects ?? [],
+            true,
+            [ANY_REF],
+          ),
+        },
+        inferred: asType(promise.returns),
+      };
+    }
     const builtin = builtinFor(expression.name);
     if (builtin !== null) {
       this.builtinArity(expression.name, builtin, expression.args.length, line);
@@ -1563,6 +1617,13 @@ class FunctionBody {
       }
       if (expression.name === ARGV_LENGTH) return { value: { k: "argv", type: returns, index: null }, inferred: asType(returns) };
       if (expression.name === ARGV) return { value: { k: "argv", type: returns, index: args[0].value }, inferred: asType(returns) };
+      // The settle functions of a promise carry whatever the source hands
+      // them: reading the value at the builtin's untyped parameter would hand
+      // a number over as the dynamic reference it is not, and the runtime
+      // would settle the promise with the wrong kind.
+      const settles = expression.name === "resolve" || expression.name === "onFulfilled" ||
+        expression.name === "reject" || expression.name === "onRejected";
+      const handed = settles ? args.map((argument) => argument.value.type) : builtin.params;
       return {
         value: {
           k: "call",
@@ -1572,14 +1633,14 @@ class FunctionBody {
             {
               name: expression.name,
               symbol: expression.name,
-              params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+              params: handed.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
               returns: contractText(returns),
             },
             args.map((argument) => argument.value),
             returns,
             [],
             true,
-            builtin.params,
+            handed,
           ),
         },
         inferred: asType(returns),

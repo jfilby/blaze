@@ -3520,6 +3520,15 @@ class TypeScriptParser {
    * of it has been read.
    */
   private hoistRewrites: { source: string; target: string; captures: readonly string[] }[] = [];
+  /**
+   * The parameters of the promise executor being read, and the builtin each
+   * settles the promise with.
+   *
+   * The names are read from the token list before the executor's body is read,
+   * because a call of one is the runtime's settle call and not a call of a
+   * function the file declares. The map is empty outside an executor.
+   */
+  private settleNames = new Map<string, "resolve" | "reject">();
   /** How many boxes this file's arrows have needed, for naming them. */
   private boxCount = 0;
   /**
@@ -10995,6 +11004,14 @@ class TypeScriptParser {
       }
       if (this.at("(")) {
         const target = current();
+        // A call of a promise executor's settle parameter is the runtime's
+        // settle call, not a call of a function the file declares.
+        if (target.k === "ident" && this.settleNames.has(target.name)) {
+          const settle = this.settleNames.get(target.name) as "resolve" | "reject";
+          const args = this.readCallArguments();
+          replace({ k: "call", name: settle, args });
+          continue;
+        }
         // An arrow written where it is called: `((a) => a + 1)(x)`. The call is
         // a call of the function the body became, with what it captured in
         // front of the arguments.
@@ -13134,6 +13151,92 @@ class TypeScriptParser {
     // the arguments, and they are values the call site reads, so the call is
     // the same call wherever it is written.
     return this.arrowBindings.has(value.name);
+  }
+
+  /**
+   * The executor of `new Promise`.
+   *
+   * The first parameter an executor writes is the function that resolves the
+   * promise and the second the one that rejects it, whatever the source calls
+   * them. A call of either settles the promise the executor runs for, which the
+   * runtime holds as the current promise, so the parameter is dropped from the
+   * lifted function and a call of it becomes the builtin `resolve`/`reject`.
+   * The backend calls the lifted function with the values the executor captured
+   * and nothing else.
+   */
+  /**
+   * The settle parameters the executor about to be read writes.
+   *
+   * The first parameter is the function that resolves the promise and the
+   * second the one that rejects it, whatever they are called. They are read
+   * from the tokens before the body is, because a call of one inside the body
+   * is the runtime's settle call and not a call of a name the file declares.
+   */
+  private executorSettleNames(): { name: string; settle: "resolve" | "reject" }[] {
+    if (!this.at("(")) return [];
+    const names: string[] = [];
+    let depth = 1;
+    let expectName = true;
+    for (let at = this.position + 1; at < this.tokens.length; at += 1) {
+      const token = this.tokens[at];
+      if (token === undefined || token.kind === "end") break;
+      if (token.kind === "punct") {
+        if (token.text === "(" || token.text === "[" || token.text === "{" || token.text === "<") {
+          depth += 1;
+          expectName = false;
+        } else if (token.text === ")" || token.text === "]" || token.text === "}" || token.text === ">") {
+          depth -= 1;
+          if (depth === 0) break;
+        } else if (token.text === "," && depth === 1) {
+          expectName = true;
+        }
+        continue;
+      }
+      if (expectName && depth === 1 && token.kind === "ident") {
+        names.push(token.text);
+        expectName = false;
+      }
+    }
+    return names.slice(0, 2).map((name, at) => ({ name, settle: at === 0 ? "resolve" : "reject" }));
+  }
+
+  private settlingExecutor(executor: Expression, view: Token): void {
+    if (executor.k !== "arrow") {
+      this.report("a promise runs one executor", "as in new Promise((resolve, reject) => { ... })", view);
+      return;
+    }
+    const binding = this.arrowBindings.get(executor.name);
+    const lifted = this.liftedArrows.get(executor.name);
+    if (binding === undefined || lifted === undefined) return;
+    if (binding.params.length > 2) {
+      this.report("a promise executor takes resolve and reject", "as in new Promise((resolve, reject) => { ... })", view);
+      return;
+    }
+    const settle = binding.params.slice(0, 2);
+    const dropped = new Set(settle.map((param) => param.name));
+    // The closure the file holds shares the parameter list object, so the
+    // parameters are removed where they are rather than by handing the lifted
+    // function a new list the closure does not see.
+    const kept = lifted.params.filter((param) => !dropped.has(param.name));
+    lifted.params.splice(0, lifted.params.length, ...kept);
+    // The code entry the arrow was materialized with was written before the
+    // settle parameters were known, and it passes them to the lifted function:
+    // its own list and the call are corrected here so the two still agree.
+    if (binding.code !== undefined) {
+      const wrapper = this.liftedArrows.get(binding.code);
+      if (wrapper !== undefined) {
+        const wrapperKept = wrapper.params.filter((param) => param.name === "self" || !dropped.has(param.name));
+        wrapper.params.splice(0, wrapper.params.length, ...wrapperKept);
+        for (const statement of wrapper.body) {
+          if ((statement.kind === "expression" || statement.kind === "result") && statement.value !== null && statement.value.k === "call") {
+            statement.value.args = statement.value.args.filter(
+              (argument) => !(argument.k === "ident" && dropped.has(argument.name)),
+            );
+          }
+        }
+      }
+    }
+    binding.params = [];
   }
 
   private readArrow(isAsync: boolean, method = false): Expression {
@@ -20218,6 +20321,33 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
 
   private readAllocation(): Expression {
     const view = this.next();
+    // `new Promise<T>((resolve, reject) => { ... })`: the executor is a
+    // function the runtime calls when the promise is made, and the value the
+    // source holds is the promise handle. The parameters it settles the
+    // promise with are the runtime's own, so they are not parameters of the
+    // lifted function: a call of one is the call that settles it.
+    if (view.kind === "ident" && view.text === "Promise") {
+      if (this.at("<")) this.skipTypeParameters();
+      if (!this.accept("(")) {
+        this.report("a promise is made from one executor", "as in new Promise((resolve, reject) => { ... })", view);
+        return this.hole();
+      }
+      const settle = this.executorSettleNames();
+      const savedSettle = this.settleNames;
+      this.settleNames = new Map(savedSettle);
+      for (const one of settle) this.settleNames.set(one.name, one.settle);
+      let executor: Expression;
+      try {
+        executor = this.readExpression();
+      } finally {
+        this.settleNames = savedSettle;
+      }
+      this.expect(")");
+      this.settlingExecutor(executor, view);
+      const made: Expression = { k: "call", name: "Promise", args: [executor] };
+      this.expressionTypes.set(made, { kind: "ref", of: null });
+      return made;
+    }
     // `new (engine.Module)(bytes)`: the constructor is a value the source read,
     // not a name this file declares — the host's own module type says it is a
     // callable field. The field is the `new` the object type writes, and the

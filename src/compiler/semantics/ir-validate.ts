@@ -1557,6 +1557,12 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   if (!allowed.includes(call.args.length)) {
     problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${allowed.join(" or ")}`);
   }
+  // The settle functions of a promise take whatever the executor hands them:
+  // the value is the number, text, reference or nothing the promise carries,
+  // and the builtin's declared parameter is the untyped reference only because
+  // the contract language has no one type for all four.
+  const settlesAny = call.builtin && (call.callee === "resolve" || call.callee === "onFulfilled" ||
+    call.callee === "reject" || call.callee === "onRejected");
   // Variable-arity builtins may carry more types than arguments; that is expected.
   for (let index = 0; index < params.length; index += 1) {
     const parameter = contractType(params[index]);
@@ -1566,6 +1572,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     }
     const argument = call.argTypes[index];
     if (argument === undefined) continue;
+    if (settlesAny) continue;
     if (!typeEquals(parameter, argument)) {
       problems.push(`${prefix}argument ${index + 1} of ${call.callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
     }

@@ -19,7 +19,7 @@ import { inspectObject } from "./assembler.ts";
 import { run } from "../core/process.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import type { BuildMode, FunctionContract, FunctionSignature, TargetSpec } from "../core/types.ts";
-import { parseType } from "../semantics/contract.ts";
+import { contractText, parseType } from "../semantics/contract.ts";
 import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   elementTypeOf,
@@ -1109,7 +1109,11 @@ class FunctionEmitter {
     const args: string[] = [];
     call.args.forEach((argument, index) => {
       const builtin = call.builtin ? builtinFor(call.callee) : null;
-      const targetType = builtin !== null ? builtin.params[index] : (call.argTypes[index] ?? argument.type);
+      // The type the call states is the one the value is handed over as. It is
+      // the builtin's own parameter for almost every builtin, but a settle
+      // function carries the value the executor handed it, not the untyped
+      // reference the contract has for all four kinds.
+      const targetType = call.argTypes[index] ?? (builtin !== null ? builtin.params[index] : argument.type);
       // A text local is held in a cell, and a parameter declared `boxedtext` is
       // handed the cell: that is how a mutable text a nested function writes
       // travels. A parameter declared `text` is the string itself, so the value
@@ -1206,6 +1210,49 @@ class FunctionEmitter {
     }
     if (call.callee === "String.fromCodePoint") {
       return `${RUNTIME_NAME}_from_code_point(${args[0] ?? "0.0"})`;
+    }
+    // `new Promise(executor)`: the promise the runtime holds, with the executor
+    // called while it is the current promise. The executor is the function the
+    // arrow lifted to, and the captures are the values its call is handed.
+    if (call.callee === "Promise") {
+      const cb = call.args[0];
+      let invoke = `${args[0] ?? "0" }()`;
+      if (cb !== undefined && cb.k === "functionRef") {
+        const captures = Array.isArray(cb.captures) ? cb.captures : [];
+        // The executor is a function of this file, and the C of this function
+        // declares every function it calls: the declaration is the lifted
+        // function's, with the values it captured as its parameters.
+        this.declareClosureCode({
+          name: cb.name,
+          symbol: cb.name,
+          params: captures.map((capture: { name: string; type: SemanticType }, at: number) => ({
+            name: `capture${at}`,
+            type: contractText(capture.type),
+          })),
+          returns: "void",
+        });
+        invoke = `${cb.name}(${captures.map((capture: { name: string }) => capture.name).join(", ")})`;
+      }
+      return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
+    }
+    // A promise executor settles the promise the runtime holds as the current
+    // one: the value is a text, nothing, a reference or a number, and the
+    // runtime's service for the one it is.
+    if (call.callee === "resolve" || call.callee === "onFulfilled") {
+      const arg = call.args[0];
+      if (arg !== undefined && isTextType(arg.type)) return `(blaze_promise_resolve_current_text(${args[0]}), 0.0)`;
+      if (arg !== undefined && arg.k === "nothing") return `(blaze_promise_resolve_current_null(), 0.0)`;
+      if (arg !== undefined && arg.type.kind === "ref") return `(blaze_promise_resolve_current_value(${args[0]}), 0.0)`;
+      return `(blaze_promise_resolve_current(${args[0] ?? "0.0"}), 0.0)`;
+    }
+    if (call.callee === "reject" || call.callee === "onRejected") {
+      const arg = call.args[0];
+      const text = arg === undefined
+        ? `""`
+        : arg.k === "text" || arg.k === "const" || isTextType(arg.type)
+          ? args[0]
+          : `${RUNTIME_NAME}_to_text(${args[0]})`;
+      return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
     }
     return builtinExpression(call.callee, args);
   }
