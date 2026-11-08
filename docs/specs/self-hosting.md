@@ -1017,6 +1017,22 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gr. A program's set is one handle on the runtime's dictionary
+
+    const callable = new Set<string>();
+    for (const contract of Object.values(file.functions)) callable.add(symbolOf(contract));
+
+The program body had no dictionary at all. `new Set<string>()` is now the
+empty dictionary the runtime holds, and `add`, `has`, `delete` and `size` are
+the dictionary calls the handle already answers; `new Map<K, V>()` is the same
+handle, and `get`, `has`, `delete` and `size` read it. A dictionary is keyed by
+a string, which is the key spellings a program body writes; one built from an
+iterable — `new Set(map.keys())` — is still refused, because the program would
+have to walk an iterable it has no value for. `offline-build.ts` reads one
+refusal shorter.
+
+    The total went from 57 to 56.
+
 ### 4gq. An arrow's parameter default is a call the call site can write
 
     const loop = (from: string, body: Statement[], to: Expression = length()): Statement => ...
@@ -4503,7 +4519,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-57 refusals over 95 sources, 78 of them read whole. The report reads the
+56 refusals over 95 sources, 78 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4730,6 +4746,7 @@ What was closed this session, and what each was worth:
 | `Object.assign` merges the dictionaries a spread list holds (§4go) | 60 → 59 |
 | a constructor field of an object type is called with new (§4gp) | 59 → 58 |
 | an arrow's parameter default is a call the call site can write (§4gq) | 58 → 57 |
+| a program's set is one handle on the runtime's dictionary (§4gr) | 57 → 56 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

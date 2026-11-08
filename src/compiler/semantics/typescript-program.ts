@@ -282,6 +282,17 @@ class ProgramParser {
   private readonly importedNames: ReadonlySet<string>;
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
+  /**
+   * The dictionary a name holds, where it was allocated as a `Set` or a `Map`.
+   *
+   * A set and a map are one handle on the runtime's dictionary, and the
+   * program has no other way to say which methods a name answers: `add` is a
+   * set's and `get` is a map's, and both are written of a value no type in the
+   * body states.
+   */
+  private collections = new Map<string, "set" | "map">();
+  /** The dictionary an allocation names, so the declaration binds its kind. */
+  private collectionValues = new Map<ProgramValue, "set" | "map">();
   /** How many switches the reader has lowered, for naming their subjects. */
   private switchCount = 0;
   /** How many values a `for ... of` read into a name of their own. */
@@ -823,6 +834,9 @@ class ProgramParser {
     const held = annotationClass ?? this.classOfValue(value);
     if (held === null) this.valueClasses.delete(name);
     else this.valueClasses.set(name, held);
+    const collection = this.collectionValues.get(value);
+    if (collection === undefined) this.collections.delete(name);
+    else this.collections.set(name, collection);
     return { kind: "declare", name, mutable: keyword !== "const", type, value, line };
   }
 
@@ -1438,6 +1452,26 @@ class ProgramParser {
       this.next();
       const methodArgs = this.arguments();
       this.accept(";");
+      // A set's write, question and removal, and a map's, are the dictionary
+      // calls the value is one handle on.
+      const collection = this.collections.get(object);
+      if (collection === "set" && (method === "add" || method === "has" || method === "delete")) {
+        const one: ProgramValue = { k: "number", text: "1" };
+        const functionName = method === "add" ? "blaze_rt_dict_set" : method === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete";
+        const args = method === "add"
+          ? [{ k: "name", name: object } as ProgramValue, methodArgs[0] as ProgramValue, one]
+          : [{ k: "name", name: object } as ProgramValue, methodArgs[0] as ProgramValue];
+        return { kind: "invoke", function: functionName, args, line: name.line };
+      }
+      if (collection === "map" && (method === "get" || method === "has" || method === "delete")) {
+        const functionName = method === "get" ? "blaze_rt_dict_get" : method === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete";
+        return {
+          kind: "invoke",
+          function: functionName,
+          args: [{ k: "name", name: object } as ProgramValue, methodArgs[0] as ProgramValue],
+          line: name.line,
+        };
+      }
       // A method of a class is a function of the class, with the instance it
       // was written on as its first argument; a static method has none.
       if (!this.valueClasses.has(object)) {
@@ -1822,6 +1856,43 @@ class ProgramParser {
           value = { k: "argv", index: null, offset };
           continue;
         }
+        if (member === "size" && !this.at("(") && value.k === "name" && this.collections.has(value.name)) {
+          value = { k: "call", function: "blaze_rt_dict_len", args: [value] };
+          continue;
+        }
+        if (this.at("(") && value.k === "name" && this.collections.get(value.name) !== undefined) {
+          const kind = this.collections.get(value.name) as "set" | "map";
+          const one: ProgramValue = { k: "number", text: "1" };
+          if (kind === "set" && (member === "add" || member === "delete" || member === "has")) {
+            this.next();
+            const args = this.arguments();
+            if (args.length !== 1) this.fail(`a set's ${member} takes the one value`, this.peek());
+            const called: ProgramValue = member === "add"
+              ? { k: "call", function: "blaze_rt_dict_set", args: [value, args[0] as ProgramValue, one] }
+              : { k: "call", function: member === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete", args: [value, args[0] as ProgramValue] };
+            // The runtime answers one or zero, and a program's truth is the
+            // comparison that says so: `s.has(k)` prints and branches the way a
+            // truth does rather than as the number it is held as.
+            value = member === "has"
+              ? { k: "binary", op: "!==", left: called, right: { k: "number", text: "0" } }
+              : called;
+            continue;
+          }
+          if (kind === "map" && (member === "get" || member === "has" || member === "delete")) {
+            this.next();
+            const args = this.arguments();
+            if (args.length !== 1) this.fail(`a map's ${member} takes the one key`, this.peek());
+            const called: ProgramValue = {
+              k: "call",
+              function: member === "get" ? "blaze_rt_dict_get" : member === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete",
+              args: [value, args[0] as ProgramValue],
+            };
+            value = member === "has"
+              ? { k: "binary", op: "!==", left: called, right: { k: "number", text: "0" } }
+              : called;
+            continue;
+          }
+        }
         if (this.at("(")) {
           this.next();
           // `C.method(args)`: a static method is a function of the class.
@@ -2184,6 +2255,41 @@ class ProgramParser {
           this.expect("(");
           const args = this.arguments();
           return { k: "call", function: constructed.text, args };
+        }
+        // `new Set<string>()` and `new Map<K, V>()` are one handle on the
+        // runtime's dictionary. The set and the map are the same value; what
+        // the source calls it is which methods it answers, and the declaration
+        // binds that beside the name.
+        if (constructed.kind === "ident" && (constructed.text === "Set" || constructed.text === "Map")) {
+          this.next();
+          const kind = constructed.text === "Set" ? "set" : "map";
+          // A dictionary is keyed by a string: a set or a map of numbers or
+          // references is keyed by another spelling the runtime has, and the
+          // program body writes the text one.
+          let keyedByText = true;
+          if (this.at("<")) {
+            const key = this.peek(1);
+            keyedByText = key.kind === "ident" && key.text === "string";
+            this.skipAngles();
+          }
+          this.expect("(");
+          if (!keyedByText) {
+            this.fail(`${constructed.text} is keyed by a string in a program`, this.peek());
+            this.skipArguments();
+            this.expect(")");
+            return this.nothing();
+          }
+          if (!this.at(")")) {
+            // A dictionary built from an iterable is a copy of entries the
+            // program would have to walk: the empty dictionary and the writes
+            // that fill it are the form this subset holds.
+            this.fail(`a ${constructed.text} is built empty, and filled by its own writes`, this.peek());
+            this.skipArguments();
+          }
+          this.expect(")");
+          const made: ProgramValue = { k: "call", function: "blaze_rt_dict_new", args: [] };
+          this.collectionValues.set(made, kind);
+          return made;
         }
         return this.bufferLiteral();
       }

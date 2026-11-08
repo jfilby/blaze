@@ -1127,6 +1127,19 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_array_get(${argument(0)}, ${argument(1)})`;
       case "array.length":
         return `${RUNTIME_NAME}_array_length(${argument(0)})`;
+      // A set and a map are one handle on the runtime's dictionary: the value a
+      // set holds is the number one, and the key of either is the text it was
+      // written with.
+      case "blaze_rt_dict_new":
+        return `${RUNTIME_NAME}_dict_new()`;
+      case "blaze_rt_dict_set":
+        return `${RUNTIME_NAME}_dict_set(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+      case "blaze_rt_dict_has":
+        return `${RUNTIME_NAME}_dict_has(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_dict_delete":
+        return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_dict_len":
+        return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new(NULL, (uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.serveSettings":

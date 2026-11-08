@@ -605,6 +605,27 @@ test("console.error writes its values to the error stream", async () => {
   assert.equal(delivered.stderr, sourceRun.stderr);
 });
 
+test("a program's set is one handle on the runtime's dictionary", async () => {
+  // `new Set<string>()` is the empty dictionary, `add` writes one value, `has`
+  // asks whether one is there, `delete` removes it and `size` counts what is
+  // left. The runtime's handle is what the program holds, so a set passed to a
+  // function is the value the other module reads.
+  const source = [
+    "const seen = new Set<string>();",
+    "for (let i = 0; i < 5; i += 1) seen.add(`k${i % 3}`);",
+    "console.log(seen.size, seen.has(`k0`), seen.has(`gone`));",
+    "seen.delete(`k0`);",
+    "console.log(seen.size, seen.has(`k0`));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(binary !== undefined, true);
+});
+
 test("a program runs the statements a function body is written in", () => {
   const body = bodyOf(LANGUAGE);
   assert.deepEqual(
