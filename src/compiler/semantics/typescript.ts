@@ -2315,15 +2315,99 @@ function boxedWrite(box: Boxed, op: AssignOperator, value: Expression, line: num
   return { kind: "indexAssign", buffer: box.name, index: { k: "literal", text: "0" }, op, value, line };
 }
 
+/** A counter the boxed update temporaries are named by. */
+let boxedUpdates = 0;
+
+/**
+ * The prelude an update written as a value in an `if` test needs.
+ *
+ * `searched-- <= 0` is the value the counter had and then a step. The box holds
+ * the counter, and the box is a list or an object, so the read and the step are
+ * statements: `let u = box[0]; box[0] -= 1`. The test is then `u <= 0`. Only an
+ * update that is the left side of the comparison is handled: it is evaluated
+ * before the right side, which is where the prelude runs.
+ */
+function settleBoxUpdate(
+  condition: Expression,
+  name: string,
+  box: Boxed,
+  line: number,
+): { value: Expression; prelude: Statement[] } | null {
+  if (condition.k !== "binary" || condition.left.k !== "update" || condition.left.name !== name) return null;
+  const step = condition.left.op === "++" ? "+=" : "-=";
+  const temporary = `__boxupd${boxedUpdates++}`;
+  const read: Statement = { kind: "declare", name: temporary, type: null, init: boxedRead(box), line };
+  const write = boxedWrite(box, step, { k: "literal", text: "1" }, line);
+  return {
+    // The test is the comparison with the value the read kept in place of the
+    // update: `searched-- <= 0` is `u <= 0` once the step is a statement.
+    value: { ...condition, left: { k: "ident", name: temporary } },
+    prelude: condition.left.prefix ? [write, read] : [read, write],
+  };
+}
+
+/** Whether a test settles the counter the way `settleBoxUpdate` handles it. */
+function settlesBoxUpdate(condition: Expression, name: string): boolean {
+  return condition.k === "binary" && condition.left.k === "update" && condition.left.name === name;
+}
+
+/** Whether a body has an update of `name` the box cannot rewrite. */
+function unsupportedUpdateIn(statements: readonly Statement[], name: string): boolean {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "if": {
+        const settled = settlesBoxUpdate(statement.condition, name);
+        if (settled) {
+          const right = statement.condition.k === "binary" ? statement.condition.right : null;
+          if (right !== null && expressionReadsUpdate(right, name)) return true;
+        } else if (expressionReadsUpdate(statement.condition, name)) {
+          return true;
+        }
+        if (unsupportedUpdateIn(statement.then, name) || unsupportedUpdateIn(statement.otherwise, name)) return true;
+        break;
+      }
+      case "while":
+      case "doWhile":
+        if (expressionReadsUpdate(statement.condition, name) || unsupportedUpdateIn(statement.body, name)) return true;
+        break;
+      case "loop":
+        if (
+          expressionReadsUpdate(statement.from, name) ||
+          expressionReadsUpdate(statement.to, name) ||
+          (statement.step !== null && expressionReadsUpdate(statement.step, name)) ||
+          unsupportedUpdateIn(statement.body, name)
+        ) return true;
+        break;
+      case "forOf":
+        if (unsupportedUpdateIn(statement.body, name)) return true;
+        break;
+      case "try":
+        if (
+          unsupportedUpdateIn(statement.body, name) ||
+          (statement.catchBody !== null && unsupportedUpdateIn(statement.catchBody, name)) ||
+          (statement.finallyBody !== null && unsupportedUpdateIn(statement.finallyBody, name))
+        ) return true;
+        break;
+      default:
+        if (readsUpdate(statement, name)) return true;
+    }
+  }
+  return false;
+}
+
 /** Every read and write of `name` in a statement list, rewritten to its box. */
 function boxStatements(statements: Statement[], name: string, box: Boxed): void {
-  for (let at = 0; at < statements.length; at += 1) {
-    statements[at] = boxStatement(statements[at] as Statement, name, box);
+  const rewritten: Statement[] = [];
+  for (const statement of statements) {
+    const one = boxStatement(statement, name, box);
+    if (Array.isArray(one)) rewritten.push(...one);
+    else rewritten.push(one);
   }
+  statements.splice(0, statements.length, ...rewritten);
 }
 
 /** One statement, with every read and write of `name` rewritten to its box. */
-function boxStatement(statement: Statement, name: string, box: Boxed): Statement {
+function boxStatement(statement: Statement, name: string, box: Boxed): Statement | Statement[] {
   switch (statement.kind) {
     case "declare":
       // The declaration of the name itself is the box, and the caller has
@@ -2357,13 +2441,21 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
     case "print":
     case "expression":
       return { ...statement, value: boxExpression(statement.value, name, box) };
-    case "if":
-      return {
+    case "if": {
+      // `if (searched-- <= 0)` reads the value the counter had before the
+      // step and steps it. A captured counter lives in its box, so the read and
+      // the step are statements of their own in front of the `if`, and the test
+      // reads the value the read kept.
+      const settled = settleBoxUpdate(statement.condition, name, box, statement.line);
+      const condition = boxExpression(settled === null ? statement.condition : settled.value, name, box);
+      const rewritten: Statement = {
         ...statement,
-        condition: boxExpression(statement.condition, name, box),
+        condition,
         then: boxBlock(statement.then, name, box),
         otherwise: boxBlock(statement.otherwise, name, box),
       };
+      return settled === null ? rewritten : [...settled.prelude, rewritten];
+    }
     case "while":
     case "doWhile":
       return {
@@ -13262,7 +13354,7 @@ class TypeScriptParser {
   private boxArrowCaptures(body: Statement[], written: readonly string[]): boolean {
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;
-      if (readsUpdateIn(body, name)) return false;
+      if (unsupportedUpdateIn(body, name)) return false;
     }
     for (const name of written) {
       if (this.arrowBoxes.has(name)) continue;

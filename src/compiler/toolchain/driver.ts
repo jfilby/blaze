@@ -1105,6 +1105,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // hands back the text it is set to, empty where it is not set at all.
       case "process.env":
         return `${RUNTIME_NAME}_env_get(${argument(0)})`;
+      case "process.stderr.write":
+        // The error stream is the runtime's own: the text is written there and
+        // the call answers nothing, which the statement around it discards.
+        return `(${RUNTIME_NAME}_print_error_text(${argument(0)}), 0.0)`;
       case "posix.dirname":
         return `${RUNTIME_NAME}_path_dirname(${argument(0)})`;
       case "posix.normalize":

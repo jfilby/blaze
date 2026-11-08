@@ -805,6 +805,9 @@ ${anchor}
         // The message of the failure is a text, and a program holds a text as
         // the string it is.
         return `$blaze_last_error()`;
+      case "process.stderr.write":
+        // The error stream is the runtime's own, and the call answers nothing.
+        return `(${RUNTIME_NAME}_print_error_text(${argument(0)}); 0.0)`;
       default:
         throw hostError(`the driver cannot write down ${call.callee}`);
     }

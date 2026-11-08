@@ -211,18 +211,18 @@ test("Deno names the command line node names", () => {
 });
 
 test("an arrow function's body is read", () => {
-  assert.match(diagnostic(() => bodyOf("console.log((x) => { console.error(1); });\n")), /console\.error is not part of a program/);
+  assert.match(diagnostic(() => bodyOf("console.log((x) => { console.warn(1); });\n")), /console\.warn is not part of a program/);
   // A parameter that states its type and a result type written before the
   // arrow are the same arrow as the bare one, so the body is still the place
   // the refusal is reported rather than the `:` after the parameter's name.
   assert.match(
-    diagnostic(() => bodyOf("console.log(((x: number): number => { console.error(1); })(2));\n")),
-    /console\.error is not part of a program/,
+    diagnostic(() => bodyOf("console.log(((x: number): number => { console.warn(1); })(2));\n")),
+    /console\.warn is not part of a program/,
   );
 });
 
 test("a statement a program cannot run is refused", () => {
-  assert.match(diagnostic(() => bodyOf("console.error(1);\n")), /console\.error is not part of a program/);
+  assert.match(diagnostic(() => bodyOf("console.warn(1);\n")), /console\.warn is not part of a program/);
   // A switch is the chain of comparisons its cases are, so the one form it
   // cannot say is a `break` that leaves it from inside a nested statement.
   const refused = diagnostic(() => bodyOf("switch (1) { case 1: if (1 > 0) { break; } }\n"));
@@ -586,6 +586,24 @@ async function program(source: string, runtime?: "nim", mode?: BuildMode): Promi
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
   return { directory, binary: outcome.outputPath };
 }
+
+test("console.error writes its values to the error stream", async () => {
+  // The values are written the way console.log writes them — a space between
+  // and a line at the end — but on the stream the runtime reports failures on.
+  const source = [
+    "function report(): void { console.error(`careful`, 2); }",
+    "report();",
+    "console.error(`top`, 1);",
+    "console.log(`ok`);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(delivered.stderr, sourceRun.stderr);
+});
 
 test("a program runs the statements a function body is written in", () => {
   const body = bodyOf(LANGUAGE);

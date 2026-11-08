@@ -4665,6 +4665,30 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("an arrow reads a captured counter's old value before stepping it", async () => {
+  // `searched-- <= 0` reads the value the counter had and then steps it. The
+  // counter lives in a box an arrow writes through, so the read and the step
+  // are statements in front of the `if` and the test reads the value the read
+  // kept.
+  const source = [
+    'import { f } from "./lib.ts";',
+    "console.log(f(0), f(1), f(2), f(3));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function f(limit: number): number {",
+    "  let searched = limit;",
+    "  const g = (): number => { if (searched-- <= 0) return 0; return 1; };",
+    "  return g() + searched;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "-1 1 2 3", `the ${backend} backend reads the old value`);
+  }
+});
+
 test("the entries of a map are a list of pairs a callback walks", async () => {
   // `[...m.entries()]` is a list of pair records: `first` is the key and
   // `second` the value, whichever kinds they are. A callback destructuring the

@@ -1354,13 +1354,26 @@ class ProgramParser {
     this.next();
     this.expect(".");
     const method = this.next();
-    if (method.text !== "log") {
+    if (method.text !== "log" && method.text !== "error") {
       this.fail(`console.${method.text} is not part of a program; a program prints with console.log`, method);
       this.synchronize();
       return null;
     }
     this.expect("(");
-    return { kind: "print", values: this.arguments(), line };
+    const values = this.arguments();
+    if (method.text === "error") {
+      // The error stream is the runtime's own: the values are written the way
+      // `console.log` writes them, separated by a space and ended by a line,
+      // and the text goes to the stream the runtime reports its failures on.
+      const parts: ProgramText[] = [];
+      values.forEach((value, index) => {
+        if (index > 0) parts.push({ k: "text", value: " " });
+        parts.push({ k: "value", value });
+      });
+      parts.push({ k: "text", value: "\n" });
+      return { kind: "invoke", function: "process.stderr.write", args: [{ k: "text", parts }], line };
+    }
+    return { kind: "print", values, line };
   }
 
   /**

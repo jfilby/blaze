@@ -1017,6 +1017,35 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gn. An arrow reads a captured counter's old value before stepping it
+
+    let searched = SEARCH_LIMIT;
+    const walk = (path: string[]): string[] | null => {
+      for (const next of edges.get(at) ?? []) {
+        if (searched-- <= 0) return null;
+
+A name an arrow writes lives in a box, and a box is a list or an object, so an
+`x--` read as a value had no write to make: the read implied the value before
+the step, and the step is a statement. An update that is the left side of the
+comparison a test opens is now the read and the step in front of the `if`, and
+the test reads the value the read kept. An update anywhere else — inside a
+short-circuit arm, or a loop head — is still refused. `semantics/recursion.ts`
+reads one refusal shorter.
+
+    The total went from 61 to 60.
+
+### 4gm. `console.error` writes its values to the error stream
+
+    console.error(`the source prints`, 2);
+
+A program's print statement wrote `console.log` and nothing else. The values of
+`console.error` are now read the way `console.log` reads them — a space between
+and a line at the end — into one text, and the text goes to the runtime's error
+stream through `process.stderr.write`, which the driver and the Nim program
+driver both write. `offline-build.ts` reads one refusal shorter.
+
+    The total went from 62 to 61.
+
 ### 4gl. `JSON.stringify` writes a record at the indent the source names
 
     JSON.stringify({ ...contract, definition: whatItDoes }, null, 2)
@@ -4433,7 +4462,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-62 refusals over 95 sources, 77 of them read whole. The report reads the
+60 refusals over 95 sources, 77 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4655,6 +4684,8 @@ What was closed this session, and what each was worth:
 | the entries of a map are a list of pairs a callback walks (§4gj) | 69 → 64 |
 | `Object.assign` widens the object a declaration wrote (§4gk) | 64 → 63 |
 | `JSON.stringify` writes a record at the indent the source names (§4gl) | 63 → 62 |
+| `console.error` writes its values to the error stream (§4gm) | 62 → 61 |
+| an arrow reads a captured counter's old value before stepping it (§4gn) | 61 → 60 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
