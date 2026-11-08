@@ -4665,6 +4665,29 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("an arrow's parameter default is a call the call site can write", async () => {
+  // `y: number = length()` names a helper the function around the arrow
+  // declares. The default is written out at the call site, which is the same
+  // scope the helper is declared in, so the call is the value the default is.
+  const source = [
+    'import { f } from "./lib.ts";',
+    "console.log(f(5));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function f(n: number): number {",
+    "  const length = (): number => n * 2;",
+    "  const twice = (x: number, y: number = length()): number => x + y;",
+    "  return twice(1) + twice(1, 2);",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "14", `the ${backend} backend writes the default`);
+  }
+});
+
 test("Object.assign merges the dictionaries a spread list holds", async () => {
   // `Object.assign({}, ...list.map(part))` writes every entry of every part
   // into the empty dictionary the expected record names. The parts are a list

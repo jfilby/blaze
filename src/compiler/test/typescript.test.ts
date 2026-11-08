@@ -3671,6 +3671,34 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a constructor field of an object type is called with new", () => {
+  // `Module: { new (bytes: Uint8Array): unknown; ... }` states a construct
+  // signature, and `new engine.Module(bytes)` and `new (engine.Module)(bytes)`
+  // are calls of the function that field holds. The chain is read as the member
+  // expression it is, and the field is the `new` the object type writes.
+  const source = [
+    "interface Engine {",
+    "  validate(bytes: Uint8Array): boolean;",
+    "  Module: {",
+    "    new (bytes: Uint8Array): unknown;",
+    "    exports(module: unknown): { name: string }[];",
+    "  };",
+    "}",
+    "export function names(engine: Engine, bytes: Uint8Array): string[] {",
+    "  const module = new engine.Module(bytes);",
+    "  const held = new (engine.Module)(bytes);",
+    "  return engine.Module.exports(module).map((entry) => entry.name + String(engine.validate(bytes)) + String(held !== null));",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "names")?.handle;
+  assert.ok(handle !== undefined, "names is a function of the module");
+  // Both spellings are a call of the `new` field the object type declares.
+  assert.equal((JSON.stringify(handle).match(/"field":"new"/g) ?? []).length, 2);
+});
+
 test("a generic function that answers its parameter's type hands the argument back", () => {
   // `identity<T>(node: T): T` is the value it was given, and a compiled
   // function cannot spell a type parameter. The answer is read at the argument

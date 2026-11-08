@@ -12985,6 +12985,28 @@ class TypeScriptParser {
    * value that escapes that name is refused where it is written, because a
    * closure with an environment is a thing no backend of this compiler carries.
    */
+  /**
+   * A call a parameter default may be.
+   *
+   * A default is written out at the call site, so an expression the enclosing
+   * body can read is a default the call can write: `to: Expression = length()`
+   * is a call of a helper the function around the arrow declares, and `length`
+   * is still in scope where the arrow is called. The call takes no arguments,
+   * so no name of the arrow's own can reach it, which is the one thing the
+   * written-out rule guards against.
+   */
+  private callOfEnclosingName(value: Expression): boolean {
+    if (value.k !== "call") return false;
+    // A call of a name the function around the arrow binds is a value the call
+    // site can read again.
+    if (this.valueTypes.has(value.name) || this.valueArrows.has(value.name)) return true;
+    // A call of an arrow the file lifted is the lifted name by the time the
+    // default is read. The values the arrow captured are already in front of
+    // the arguments, and they are values the call site reads, so the call is
+    // the same call wherever it is written.
+    return this.arrowBindings.has(value.name);
+  }
+
   private readArrow(isAsync: boolean, method = false): Expression {
     const start = this.peek();
     if (isAsync && this.tokens[this.position]?.text === "async") this.next();
@@ -13092,7 +13114,7 @@ class TypeScriptParser {
         if (this.at("=")) {
           const equals = this.next();
           const written = this.readExpression();
-          if (isWrittenValue(written)) fallback = written;
+          if (isWrittenValue(written) || this.callOfEnclosingName(written)) fallback = written;
           else {
             this.report(
               "an arrow function's parameter takes a default",
@@ -19995,6 +20017,31 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
 
   private readAllocation(): Expression {
     const view = this.next();
+    // `new (engine.Module)(bytes)`: the constructor is a value the source read,
+    // not a name this file declares — the host's own module type says it is a
+    // callable field. The field is the `new` the object type writes, and the
+    // call is the call of the function it holds.
+    if (view.kind === "punct" && view.text === "(") {
+      const holder = this.readExpression();
+      this.expect(")");
+      const target: Expression = { k: "member", base: holder, field: "new" };
+      const heldFunction = this.memberFunctionType(target);
+      if (heldFunction === null) {
+        this.report(
+          "a constructor value is called where the type states a constructor",
+          "as in new (Host.Thing)(argument), where Host.Thing declares new (...) : T",
+          view,
+        );
+        return this.hole();
+      }
+      const args = this.readCallArguments(heldFunction.params);
+      const invoke: Expression = { k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns };
+      if (heldFunction.shape !== undefined) {
+        const held = this.shapeForRead(heldFunction.shape);
+        if (held !== null) this.expressionShapes.set(invoke, held);
+      }
+      return invoke;
+    }
     // `new Point(1, 2)`: the class's constructor is a function that returns the
     // object, and the arity selects the overload that fills any defaults.
     if (view.kind === "ident") {
@@ -20220,6 +20267,40 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     // read as the source wrote them, and the linker names the constructor.
     if (view.kind === "ident" && this.importedTypeNames.has(view.text)) {
       return { k: "call", name: view.text, args: this.readCallArguments() };
+    }
+    // `new engine.Module(bytes)`: the constructor is a field of a value, which
+    // the type of the value states as the `new` the record writes. The chain is
+    // read as the member expression it is, and the call is the call of the
+    // function that field holds.
+    if (view.kind === "ident" && this.at(".")) {
+      let holder: Expression = { k: "ident", name: view.text };
+      while (this.accept(".")) {
+        const field = this.next();
+        if (field.kind !== "ident") {
+          this.report("a member is read by its name", `near "${field.text}"`, field);
+          this.synchronize();
+          return this.hole();
+        }
+        holder = { k: "member", base: holder, field: field.text };
+      }
+      const target: Expression = { k: "member", base: holder, field: "new" };
+      const heldFunction = this.memberFunctionType(target);
+      if (heldFunction === null || !this.at("(")) {
+        this.report(
+          "a constructor value is called where the type states a constructor",
+          "as in new Host.Thing(argument), where the type of Host.Thing declares new (...) : T",
+          view,
+        );
+        this.synchronize();
+        return this.hole();
+      }
+      const args = this.readCallArguments(heldFunction.params);
+      const invoke: Expression = { k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns };
+      if (heldFunction.shape !== undefined) {
+        const held = this.shapeForRead(heldFunction.shape);
+        if (held !== null) this.expressionShapes.set(invoke, held);
+      }
+      return invoke;
     }
     if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
       this.report(
