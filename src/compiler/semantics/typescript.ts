@@ -10712,6 +10712,20 @@ class TypeScriptParser {
     if (operand.k === "literal") type = NUMBER_RESULT;
     if (operand.k === "text") type = TEXT_RESULT;
     if (operand.k === "null") return { k: "text", parts: [{ k: "text", value: "object" }] };
+    // A union of a text and a list has no one member the value is held at, and
+    // the shape says so where the declaration wrote the list. The question is
+    // then the runtime's: a list is an object and a text is a string, and the
+    // guard that asks is what names the member the value holds.
+    if (type !== null && (type.kind === "slice" || type.kind === "array")) {
+      const held = this.shapeOf(operand);
+      if (held !== null && held.kind === "any") {
+        const asked: Expression = { k: "call", name: "JSON.typeof", args: [operand] };
+        this.expressionTypes.set(asked, TEXT_RESULT);
+        const path = this.narrowedPath(operand);
+        if (path !== null) this.typeofPaths.set(asked, path);
+        return asked;
+      }
+    }
     // A member, an index or a call states its type the same way a name does:
     // the field the interface declares, the element the array holds, or what
     // the function answers. The answer is read from that type rather than

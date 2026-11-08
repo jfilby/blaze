@@ -899,9 +899,11 @@ class TypeText {
     // records with members of another kind keeps the records' fields and
     // every member as an arm, so a value the union holds can still be asked
     // for a field only one arm writes and the arm it is can still be named.
-    // A union of members of no record is the one member this compiler's
-    // values can hold. The first present member is that one, which is the
-    // rule the frontend already used.
+    // A union of members of no record is a value the read does not hold: a
+    // text and a list are both references, and which one a value is is what a
+    // `typeof` guard asks at run time. Reading it as the first member made a
+    // list method a method of a text; the value is left untyped so the method
+    // is deferred and a guard is what names the member it holds.
     if (present.some((member) => member.kind === "record")) {
       const fields = new Map<string, ResolvedField>();
       let index: ResolvedType | null = null;
@@ -914,6 +916,8 @@ class TypeText {
       }
       return { kind: "record", fields, index, arms: present };
     }
+    const mixed = present.some((member) => member.kind === "list") && present.some((member) => member.kind !== "list");
+    if (mixed) return ANY_TYPE;
     return present[0] as ResolvedType;
   }
 

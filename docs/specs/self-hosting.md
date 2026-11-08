@@ -1017,6 +1017,23 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hb. A union of a text and a list is asked at run time
+
+    args: Record<string, string | string[] | null>
+    const [head, ...rest] = entry.split(`\n`);
+    typeof body === "string" ? body.split(`\n`) : body
+
+A union whose members are no record was read as its first member, so
+`string | string[]` became a text and the list methods written after a guard
+were methods of a text. The union is now left untyped: a text and a list are
+both references, and which one a value is is exactly what `typeof` asks at run
+time. A `typeof` of a slice whose shape is `any` is the runtime's question then,
+and the guard narrows the text branch to a text, so a text method and a list
+method are each read in the branch they belong to. `toolchain/verifier.ts` reads
+whole.
+
+    The total went from 19 to 17.
+
 ### 4ha. An object the read cannot enumerate is opaque
 
     env: options.env ? { ...process.env, ...options.env } : process.env
@@ -4654,7 +4671,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-19 refusals over 95 sources, 86 of them read whole. The report reads the
+17 refusals over 95 sources, 87 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4891,6 +4908,7 @@ What was closed this session, and what each was worth:
 | a host value the read does not look inside (§4gy) | 24 → 22 |
 | a decoder reads the bytes it is handed (§4gz) | 22 → 21 |
 | an object the read cannot enumerate is opaque (§4ha) | 21 → 19 |
+| a union of a text and a list is asked at run time (§4hb) | 19 → 17 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

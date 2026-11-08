@@ -3673,6 +3673,20 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a union of a text and a list is asked at run time", () => {
+  // `string | readonly string[]` has no one member the value is held at, so the
+  // read keeps it untyped and `typeof` becomes the runtime question. The guard
+  // names the member each branch holds: a text is a string and a list is an
+  // object, so `toUpperCase` and `join` are each read where they belong.
+  const source = [
+    "export function shout(body: string | readonly string[]): string {",
+    "  return typeof body === `string` ? body.toUpperCase() : body.join(`,`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("an object the read cannot enumerate is opaque", () => {
   // `{ ...process.env, ...options.env }` is the environment the host holds: a
   // literal whose parts are only values the read does not look inside is one
