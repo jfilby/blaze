@@ -15392,6 +15392,19 @@ class TypeScriptParser {
         return listed;
       }
     }
+    // A value the read does not type has no fields it can name: it is the
+    // host's, and what it holds is the host's to say. `Object.values` of it is
+    // the list the read cannot enumerate, which is empty here; a `keys` is not
+    // deferred because a key is what a field is read by.
+    const writtenConstant = value !== undefined && value.k === "ident" ? this.constants.get(value.name) : undefined;
+    if (method === "values" && value !== undefined && writtenConstant?.fields === undefined) {
+      const heldShape = this.shapeOf(value);
+      if ((heldShape === null || heldShape.kind === "any") && unknownReference(this.valueTypeOf(value))) {
+        const empty: Expression = { k: "buffer", element: typeToString(ANY_TYPE), values: [] };
+        this.expressionTypes.set(empty, { kind: "slice", of: ANY_TYPE });
+        return empty;
+      }
+    }
     const constant = args.length === 1 && value !== undefined && value.k === "ident"
       ? this.constants.get(value.name)
       : undefined;

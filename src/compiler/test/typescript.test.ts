@@ -3673,6 +3673,22 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("Object.values of a value the read does not type is empty", () => {
+  // A value the read does not type has no fields it can name, so the values it
+  // holds are the host's. The loop over them is the list the read can name,
+  // which is empty; `Object.keys` is not deferred, because a key is how a field
+  // is read.
+  const source = [
+    "export function walk(value: unknown): number {",
+    "  let n = 0;",
+    "  for (const entry of Object.values(value)) n += 1;",
+    "  return n;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("a union of a text and a list is asked at run time", () => {
   // `string | readonly string[]` has no one member the value is held at, so the
   // read keeps it untyped and `typeof` becomes the runtime question. The guard
