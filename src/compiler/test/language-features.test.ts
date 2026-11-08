@@ -4607,6 +4607,64 @@ test("a field presence question on an object answers the names its layout wrote"
   }
 });
 
+test("JSON.stringify writes a record at the indent the source names", async () => {
+  // A record the read can name is written field by field at two spaces a
+  // level: a nested record, a list of numbers, an empty list and a truth are
+  // the text the language writes, and a dictionary is its entries.
+  const source = [
+    'import { render } from "./lib.ts";',
+    "process.stdout.write(render());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface Inner { a: number; b: string; ok: boolean }",
+    "interface Outer { name: string; inner: Inner; items: number[]; tags: string[] }",
+    "export function render(): string {",
+    "  const o: Outer = { name: `x`, inner: { a: 1, b: `y`, ok: true }, items: [1, 2], tags: [] };",
+    "  return JSON.stringify(o, null, 2);",
+    "}",
+    "",
+  ].join("\n");
+  const expected = [
+    "{",
+    '  "name": "x",',
+    '  "inner": {',
+    '    "a": 1,',
+    '    "b": "y",',
+    '    "ok": true',
+    "  },",
+    '  "items": [',
+    "    1,",
+    "    2",
+    "  ],",
+    '  "tags": []',
+    "}",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output, expected, `the ${backend} backend writes the record at the indent`);
+  }
+});
+
+test("a dictionary is written at the indent as its entries", async () => {
+  const source = [
+    'import { render } from "./lib.ts";',
+    "process.stdout.write(render());",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function render(): string {",
+    "  const rec: Record<string, number> = { a: 1, b: 2 };",
+    "  return JSON.stringify(rec, null, 2);",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output, '{\n  "a": 1,\n  "b": 2\n}', `the ${backend} backend writes the dictionary`);
+  }
+});
+
 test("the entries of a map are a list of pairs a callback walks", async () => {
   // `[...m.entries()]` is a list of pair records: `first` is the key and
   // `second` the value, whichever kinds they are. A callback destructuring the

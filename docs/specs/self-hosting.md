@@ -1017,6 +1017,22 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gl. `JSON.stringify` writes a record at the indent the source names
+
+    JSON.stringify({ ...contract, definition: whatItDoes }, null, 2)
+
+The indent a third argument names was refused: the compact text the parser built
+was the only writing it had. A value the read can name is now written at the
+indent field by field — a record by its fields in the order they are written, a
+list by a helper that walks it, a dictionary by its entries, a truth as the word
+the language writes, and a text or a number through the runtime's own writing of
+one value. A nested record is the same walk one level in. `ai/review.ts` reads
+whole; `core/json-store.ts`'s `JSON.stringify(value, null, 2)` is still refused,
+because `value` is a type parameter the read cannot name and a compiled record
+is not a dynamic handle the runtime can walk.
+
+    The total went from 63 to 62.
+
 ### 4gk. `Object.assign` widens the object a declaration wrote
 
     const withTypes = types.length === 0 ? {} : { types };
@@ -4417,7 +4433,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-63 refusals over 95 sources, 76 of them read whole. The report reads the
+62 refusals over 95 sources, 77 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4638,6 +4654,7 @@ What was closed this session, and what each was worth:
 | a template interpolation reads the shapes its imports bind (§4gi) | 71 → 69 |
 | the entries of a map are a list of pairs a callback walks (§4gj) | 69 → 64 |
 | `Object.assign` widens the object a declaration wrote (§4gk) | 64 → 63 |
+| `JSON.stringify` writes a record at the indent the source names (§4gl) | 63 → 62 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

@@ -11485,6 +11485,26 @@ class TypeScriptParser {
         ) {
           const args = this.readCallArguments();
           const written = args[0];
+          // `JSON.stringify(value, null, 2)` writes the value at two spaces a
+          // level. A value the read can name — a record, a list, a dictionary —
+          // is written field by field here, so the text is the one the language
+          // writes and not the compact text of a runtime handle.
+          if (written !== undefined && args.length === 3) {
+            const indent = this.jsonIndent(args[1], args[2]);
+            if (indent !== null) {
+              const pretty = this.jsonPretty(written, 0, this.peek().line, indent);
+              if (pretty !== null) {
+                replace(pretty);
+                continue;
+              }
+            }
+            this.report(
+              "JSON.stringify writes a value at an indent",
+              "the value is a record, a list or a dictionary this read can name, and the indent is a number written out",
+              this.peek(),
+            );
+            return this.hole();
+          }
           if (written === undefined || args.length !== 1) {
             this.report(
               "JSON.stringify writes one value",
@@ -13783,6 +13803,304 @@ class TypeScriptParser {
       return text(parts);
     }
     return null;
+  }
+
+  /** The indent `JSON.stringify(value, null, n)` names, or null. */
+  private jsonIndent(replacer: Expression | undefined, indent: Expression | undefined): number | null {
+    const none = replacer === undefined || replacer.k === "null" ||
+      (replacer.k === "ident" && replacer.name === "undefined");
+    if (!none || indent === undefined || indent.k !== "literal" || !/^\d+$/.test(indent.text)) return null;
+    const count = Number(indent.text);
+    return count >= 1 ? Math.min(10, count) : null;
+  }
+
+  /**
+   * The JSON of a value the read can name, at a number of spaces a level.
+   *
+   * A record is its fields in the order they are written, a list is its
+   * elements, and a dictionary is its entries; a text and a number are the
+   * runtime's own writing of one value, a truth is the word the language
+   * writes. A value the read cannot name is null, and the caller refuses the
+   * indent rather than writing a handle as a number.
+   */
+  private jsonPretty(value: Expression, level: number, line: number, indent: number): Expression | null {
+    // An object literal is its fields, in the order the source wrote them, and
+    // its values are read where they were written: reading the fields through a
+    // name would re-run any call written in one.
+    if (value.k === "object") {
+      const shape = this.shapeOf(value);
+      return this.jsonRecordPretty(value, shape, level, line, indent);
+    }
+    const held = this.holdValue(value, null, line);
+    const type = this.valueTypeOf(held);
+    const shape = this.shapeOf(held);
+    if (type.kind === "void" || held.k === "null") return this.jsonText("null");
+    // A dictionary is one handle, which the contract spells as a number, so the
+    // shape is asked before the type says "number" and the entries are lost.
+    const collection = shape === null ? null : this.collectionOfShape(shape);
+    if (collection !== null && collection.kind === "map") {
+      const helper = this.jsonMapPrettyHelper(collection, level, line, indent);
+      if (helper === null) return null;
+      const call: Expression = { k: "call", name: helper, args: [held] };
+      this.expressionTypes.set(call, TEXT_RESULT);
+      return call;
+    }
+    if (shape !== null && shape.kind === "record" && shape.index === null) {
+      return this.jsonRecordPretty(held, shape, level, line, indent);
+    }
+    if (shape !== null && shape.kind === "list") {
+      const elementShape = shape.of;
+      const element = this.typeExprOfShape(elementShape);
+      const helper = this.jsonListPrettyHelper(element, elementShape, level, line, indent);
+      if (helper === null) return null;
+      const call: Expression = { k: "call", name: helper, args: [held] };
+      this.expressionTypes.set(call, TEXT_RESULT);
+      return call;
+    }
+    if (type.kind === "text") return this.jsonRuntime(held);
+    if (type.kind === "primitive" && type.name === "bool") {
+      const written: Expression = {
+        k: "conditional",
+        condition: held,
+        then: this.jsonText("true"),
+        otherwise: this.jsonText("false"),
+      };
+      this.expressionTypes.set(written, TEXT_RESULT);
+      return written;
+    }
+    if (type.kind === "primitive" && type.name !== "i256" && type.name !== "u256") return this.jsonRuntime(held);
+    if (type.kind === "slice" || type.kind === "array") {
+      const element = type.of;
+      const elementShape = this.shapeOfTypeExpr(element);
+      const helper = this.jsonListPrettyHelper(element, elementShape, level, line, indent);
+      if (helper === null) return null;
+      const call: Expression = { k: "call", name: helper, args: [held] };
+      this.expressionTypes.set(call, TEXT_RESULT);
+      return call;
+    }
+    return null;
+  }
+
+  /** One value written by the runtime, as the JSON of a text or a number. */
+  private jsonRuntime(value: Expression): Expression {
+    const call: Expression = { k: "call", name: "JSON.stringify", args: [value] };
+    this.expressionTypes.set(call, TEXT_RESULT);
+    return call;
+  }
+
+  /** Text the compiler wrote, which the caller may use as a part. */
+  private jsonText(text: string): Expression {
+    const written: Expression = { k: "text", parts: [{ k: "text", value: text }] };
+    this.expressionTypes.set(written, TEXT_RESULT);
+    return written;
+  }
+
+  /** A record as the object the language writes at an indent. */
+  private jsonRecordPretty(
+    base: Expression,
+    shape: ResolvedType | null,
+    level: number,
+    line: number,
+    indent: number,
+  ): Expression | null {
+    const declared = shape !== null && shape.kind === "record" && shape.index === null ? shape : null;
+    const fields: { name: string; value: Expression }[] = base.k === "object"
+      ? base.fields.map((field) => ({ name: field.name, value: field.value }))
+      : declared === null
+        ? []
+        : [...declared.fields].map(([name]) => ({
+            name,
+            value: this.jsonMember(base, name, declared),
+          }));
+    if (declared === null && base.k !== "object") return null;
+    return this.jsonObjectParts(fields, level, indent, line);
+  }
+
+  /** A field of a record read at the type the record declares. */
+  private jsonMember(base: Expression, name: string, shape: ResolvedType & { kind: "record" }): Expression {
+    const value: Expression = { k: "member", base, field: name };
+    const field = shape.fields.get(name);
+    if (field !== undefined) {
+      this.expressionTypes.set(value, this.typeExprOfShape(field.type));
+      this.expressionShapes.set(value, field.type);
+    }
+    return value;
+  }
+
+  /** The object literal a list of recorded fields is, at an indent. */
+  private jsonObjectParts(
+    fields: readonly { name: string; value: Expression }[],
+    level: number,
+    indent: number,
+    line: number,
+  ): Expression | null {
+    const pad = (count: number): string => " ".repeat(count);
+    if (fields.length === 0) return this.jsonText("{}");
+    const parts: TextPart[] = [{ k: "text", value: "{" }];
+    for (const [index, field] of fields.entries()) {
+      const written = this.jsonPretty(field.value, level + 1, line, indent);
+      if (written === null) return null;
+      const lead = (index === 0 ? "\n" : ",\n") + pad((level + 1) * indent) + JSON.stringify(field.name) + ": ";
+      parts.push({ k: "text", value: lead });
+      parts.push({ k: "value", value: written });
+    }
+    parts.push({ k: "text", value: "\n" + pad(level * indent) + "}" });
+    const answer: Expression = { k: "text", parts };
+    this.expressionTypes.set(answer, TEXT_RESULT);
+    return answer;
+  }
+
+  /** The helper a list is written by, once per element shape and indent. */
+  private jsonListPrettyHelper(
+    element: TypeExpr,
+    elementShape: ResolvedType | null,
+    level: number,
+    line: number,
+    indent: number,
+  ): string | null {
+    const key = JSON.stringify(["jsonListPretty", element, elementShape, level, indent]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known.name;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const savedTypes = this.valueTypes;
+    const savedShapes = this.valueShapes;
+    this.valueTypes = new Map(savedTypes);
+    this.valueShapes = new Map(savedShapes);
+    this.valueTypes.set("item", element);
+    if (elementShape !== null) this.valueShapes.set("item", elementShape);
+    const savedPending = this.pendingBefore;
+    this.pendingBefore = [];
+    const encoded = this.jsonPretty({ k: "ident", name: "item" }, level + 1, line, indent);
+    const prelude = this.pendingBefore;
+    this.pendingBefore = savedPending;
+    this.valueTypes = savedTypes;
+    this.valueShapes = savedShapes;
+    if (encoded === null) return null;
+    const pad = (count: number): string => " ".repeat(count);
+    const body: Statement[] = [
+      { kind: "declare", name: "n", type: null, init: { k: "length", buffer: "items" }, line },
+      {
+        kind: "if",
+        condition: { k: "binary", op: "===", left: { k: "ident", name: "n" }, right: { k: "literal", text: "0" } },
+        then: [{ kind: "result", value: this.jsonText("[]"), line }],
+        otherwise: [],
+        line,
+      },
+      { kind: "declare", name: "out", type: TEXT_RESULT, init: this.jsonText("[\n"), line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: { k: "literal", text: "0" },
+        to: { k: "ident", name: "n" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "declare", name: "item", type: element, init: { k: "index", base: { k: "ident", name: "items" }, index: { k: "ident", name: "i" } }, line },
+          ...prelude,
+          {
+            kind: "if",
+            condition: { k: "binary", op: ">", left: { k: "ident", name: "i" }, right: { k: "literal", text: "0" } },
+            then: [{ kind: "assign", target: "out", op: "+=", value: this.jsonText(",\n"), line }],
+            otherwise: [],
+            line,
+          },
+          { kind: "assign", target: "out", op: "+=", value: this.jsonText(pad((level + 1) * indent)), line },
+          { kind: "assign", target: "out", op: "+=", value: encoded, line },
+        ],
+        line,
+      },
+      { kind: "assign", target: "out", op: "+=", value: this.jsonText("\n" + pad(level * indent) + "]"), line },
+      { kind: "result", value: { k: "ident", name: "out" }, line },
+    ];
+    const params = [{ name: "items", type: { kind: "slice", of: element } as TypeExpr }];
+    const returns = TEXT_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return name;
+  }
+
+  /** The helper a dictionary is written by, once per value shape and indent. */
+  private jsonMapPrettyHelper(
+    collection: CollectionValue,
+    level: number,
+    line: number,
+    indent: number,
+  ): string | null {
+    const key = JSON.stringify(["jsonMapPretty", collection.key, collection.value, collection.valueShape, level, indent]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known.name;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const savedTypes = this.valueTypes;
+    const savedShapes = this.valueShapes;
+    this.valueTypes = new Map(savedTypes);
+    this.valueShapes = new Map(savedShapes);
+    this.valueTypes.set("value", collection.value);
+    if (collection.valueShape !== undefined) this.valueShapes.set("value", collection.valueShape);
+    const savedPending = this.pendingBefore;
+    this.pendingBefore = [];
+    const encoded = this.jsonPretty({ k: "ident", name: "value" }, level + 1, line, indent);
+    const prelude = this.pendingBefore;
+    this.pendingBefore = savedPending;
+    this.valueTypes = savedTypes;
+    this.valueShapes = savedShapes;
+    if (encoded === null) return null;
+    const pad = (count: number): string => " ".repeat(count);
+    const keyRead: Expression = { k: "call", name: this.keyReadName(collection), args: [{ k: "ident", name: "items" }, { k: "ident", name: "i" }] };
+    this.expressionTypes.set(keyRead, TEXT_RESULT);
+    const valueRead: Expression = { k: "call", name: this.valueReadName(collection.value), args: [{ k: "ident", name: "items" }, { k: "ident", name: "i" }] };
+    this.expressionTypes.set(valueRead, collection.value);
+    if (collection.valueShape !== undefined) this.expressionShapes.set(valueRead, collection.valueShape);
+    const body: Statement[] = [
+      { kind: "declare", name: "n", type: null, init: { k: "call", name: "blaze_rt_dict_len", args: [{ k: "ident", name: "items" }] }, line },
+      {
+        kind: "if",
+        condition: { k: "binary", op: "===", left: { k: "ident", name: "n" }, right: { k: "literal", text: "0" } },
+        then: [{ kind: "result", value: this.jsonText("{}"), line }],
+        otherwise: [],
+        line,
+      },
+      { kind: "declare", name: "out", type: TEXT_RESULT, init: this.jsonText("{\n"), line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: { k: "literal", text: "0" },
+        to: { k: "ident", name: "n" },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: [
+          { kind: "declare", name: "key", type: TEXT_RESULT, init: keyRead, line },
+          { kind: "declare", name: "value", type: collection.value, init: valueRead, line },
+          ...prelude,
+          {
+            kind: "if",
+            condition: { k: "binary", op: ">", left: { k: "ident", name: "i" }, right: { k: "literal", text: "0" } },
+            then: [{ kind: "assign", target: "out", op: "+=", value: this.jsonText(",\n"), line }],
+            otherwise: [],
+            line,
+          },
+          { kind: "assign", target: "out", op: "+=", value: this.jsonText(pad((level + 1) * indent)), line },
+          { kind: "assign", target: "out", op: "+=", value: this.jsonRuntime({ k: "ident", name: "key" }), line },
+          { kind: "assign", target: "out", op: "+=", value: this.jsonText(": "), line },
+          { kind: "assign", target: "out", op: "+=", value: encoded, line },
+        ],
+        line,
+      },
+      { kind: "assign", target: "out", op: "+=", value: this.jsonText("\n" + pad(level * indent) + "}"), line },
+      { kind: "result", value: { k: "ident", name: "out" }, line },
+    ];
+    const params = [{ name: "items", type: NUMBER_RESULT }];
+    const returns = TEXT_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return name;
   }
 
   /**
