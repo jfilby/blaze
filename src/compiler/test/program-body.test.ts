@@ -263,9 +263,11 @@ test("an array written out is the array a typed array of its values would be", (
 });
 
 test("a list of values holds numbers, and a text among them is refused", () => {
+  // A list holds one kind of value: all numbers, or all texts. A list that
+  // mixes them is the one the program cannot lay out.
   assert.match(
     diagnostic(() => bodyOf('const a = [1, "two"];\n')),
-    /"two" is not a number; an array holds numbers/,
+    /an array holds one kind of value/,
   );
 });
 

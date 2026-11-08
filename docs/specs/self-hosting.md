@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4he. A program's list of texts is a block of pointers
+
+    const names: string[] = ["openmp"];
+    for (const name of names) console.log(name);
+
+A program's array held numbers: its element was a typed array's element name,
+and a text among the values was "not a number". A list of texts is now a value
+of its own (`words`), the program's array element carries a type rather than a
+primitive name, and the block it lays down is one of pointers: the length is the
+count, a `for-of` variable is the text, and an element read is the pointer the
+position holds. An empty `[]` beside a list of texts in the arms of a choice is
+the same list. `offline-build.ts` reads one refusal shorter.
+
+    The total went from 15 to 14.
+
 ### 4hd. A module-level number is a cell the functions share
 
     let temporaryWrites = 0;
@@ -4703,7 +4718,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-15 refusals over 95 sources, 88 of them read whole. The report reads the
+14 refusals over 95 sources, 88 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4943,6 +4958,7 @@ What was closed this session, and what each was worth:
 | a union of a text and a list is asked at run time (§4hb) | 19 → 17 |
 | `Object.values` of a value the read does not type is empty (§4hc) | 17 → 16 |
 | a module-level number is a cell the functions share (§4hd) | 16 → 15 |
+| a program's list of texts is a block of pointers (§4he) | 15 → 14 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

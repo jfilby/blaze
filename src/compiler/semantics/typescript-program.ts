@@ -831,6 +831,11 @@ class ProgramParser {
     }
     this.expect("=");
     const value = this.value();
+    // A list of texts states its element in the values it writes: the
+    // annotation's `string` is not a typed array's element name, and reading
+    // the list at it made the block a text. The value is what the declaration
+    // holds.
+    if (value.k === "words" || (value.k === "conditional" && value.then.k === "words" && value.otherwise.k === "words")) type = null;
     const held = annotationClass ?? this.classOfValue(value);
     if (held === null) this.valueClasses.delete(name);
     else this.valueClasses.set(name, held);
@@ -1581,7 +1586,13 @@ class ProgramParser {
     if (!this.accept("?")) return condition;
     const then = this.value();
     this.expect(":");
-    return { k: "conditional", condition, then, otherwise: this.value() };
+    const otherwise = this.value();
+    // `c ? ["openmp"] : []` is one list of texts: the empty arm is the list
+    // the other arm writes, whatever the written-out list is a list of.
+    const empty = (value: ProgramValue): boolean => value.k === "buffer" && value.values.length === 0;
+    if (then.k === "words" && empty(otherwise)) return { k: "conditional", condition, then, otherwise: { k: "words", values: [] } };
+    if (otherwise.k === "words" && empty(then)) return { k: "conditional", condition, then: { k: "words", values: [] }, otherwise };
+    return { k: "conditional", condition, then, otherwise };
   }
 
   private binary(level: number): ProgramValue {
@@ -2690,7 +2701,14 @@ class ProgramParser {
    * subset has one array of numbers rather than the several TypeScript has.
    */
   private arrayLiteral(): ProgramValue {
-    return { k: "buffer", element: "f64", values: this.elements() };
+    const values = this.elements();
+    const texts = values.filter((value) => value.k === "text" || value.k === "fixed").length;
+    if (texts === values.length && texts > 0) return { k: "words", values };
+    if (texts > 0) {
+      this.fail("an array holds one kind of value", this.peek());
+      return { k: "buffer", element: "f64", values: [] };
+    }
+    return { k: "buffer", element: "f64", values };
   }
 
   /**
@@ -2705,13 +2723,6 @@ class ProgramParser {
       return values;
     }
     for (;;) {
-      const element = this.peek();
-      if (element.kind === "string") {
-        this.fail(`"${element.text}" is not a number; an array holds numbers`, element);
-        this.synchronize("]");
-        this.accept("]");
-        return values;
-      }
       values.push(this.value());
       if (!this.accept(",")) break;
       // A trailing comma is written in the source and has no element behind it.

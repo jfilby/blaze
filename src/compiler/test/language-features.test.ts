@@ -4665,6 +4665,22 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("a program's list of texts is a block of pointers", async () => {
+  // `["a", "b"]` is a list whose elements are texts, and `[]` beside it in the
+  // other arm of a choice is the same list. The length is the block's count and
+  // a `for-of` walks the texts themselves.
+  const source = [
+    "const names: string[] = [`a`, `b`];",
+    "console.log(names.length);",
+    "for (const name of names) console.log(name);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2\na\nb", `the ${backend} backend walks the texts`);
+  }
+});
+
 test("a module-level counter is the runtime's cell", async () => {
   // `counter++` in a function, `counter += 10` in another, and an arrow that
   // steps it: a compiled function has no environment, so the counter is one

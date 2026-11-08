@@ -139,7 +139,7 @@ interface ArrayHeld {
   kind: "array";
   name: string;
   mutable: boolean;
-  element: PrimitiveTypeName | null;
+  element: TypeExpr | null;
   /** How many elements it holds, or null when the program settled on the count. */
   length: number | null;
   /** The elements as they were written, in the type the array is used at. */
@@ -266,7 +266,7 @@ type DraftValue =
   /** The length of a string, counted the way an array length is. */
   | { k: "stringLength"; of: DraftValue }
   /** One element of an array. */
-  | { k: "element"; buffer: string; bufferType: TypeExpr; index: DraftValue; type: PrimitiveTypeName }
+  | { k: "element"; buffer: string; bufferType: TypeExpr; index: DraftValue; type: TypeExpr }
   | { k: "boolean"; value: boolean }
   /** Nothing, of the type a use fixes it at. */
   | { k: "null"; type: TypeExpr | null }
@@ -376,6 +376,7 @@ const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 
 /** Nothing, as the type a reference that names nothing is read as. */
 const REF_NULL: TypeExpr = { kind: "ref", of: null };
+const F64: TypeExpr = { kind: "primitive", name: "f64" };
 
 function programError(message: string, body: ProgramBody, line: number, detail?: string): CompilerError {
   return new CompilerError({
@@ -744,9 +745,9 @@ function draftType(value: DraftValue): TypeExpr | null {
     case "sized":
     case "view":
     case "fill":
-      return { kind: "array", of: { kind: "primitive", name: value.held.element ?? "f64" }, length: value.held.length };
+      return { kind: "array", of: value.held.element ?? F64, length: value.held.length };
     case "buffer":
-      return { kind: "slice", of: { kind: "primitive", name: value.held.element ?? "f64" } };
+      return { kind: "slice", of: value.held.element ?? F64 };
     case "reference":
       return heldType(value.held);
     case "text":
@@ -764,8 +765,9 @@ function draftType(value: DraftValue): TypeExpr | null {
       return value.call.returns.kind === "text" ? null : value.call.returns;
     case "length":
     case "stringLength":
-    case "element":
       return { kind: "primitive", name: value.k === "stringLength" ? "usize" : value.type };
+    case "element":
+      return value.type;
     case "boolean":
     case "compare":
     case "isNull":
@@ -997,7 +999,7 @@ function heldType(held: Held): TypeExpr | null {
     case "text":
       return null;
     case "array":
-      return { kind: "slice", of: { kind: "primitive", name: held.element ?? "f64" } };
+      return { kind: "slice", of: held.element ?? F64 };
     case "object":
       return held.type;
     case "number":
@@ -1012,7 +1014,7 @@ function heldType(held: Held): TypeExpr | null {
 
 /** The type an array is written out as, which is the type its name is read as. */
 function arrayType(held: ArrayHeld): TypeExpr {
-  return { kind: "array", of: { kind: "primitive", name: held.element ?? "f64" }, length: held.length };
+  return { kind: "array", of: held.element ?? F64, length: held.length };
 }
 
 /**
@@ -1531,7 +1533,7 @@ function heldOf(text: string): Held {
   }
   const type = parseType(text);
   if (type.kind === "slice" || type.kind === "array") {
-    return { kind: "array", name: "", mutable: true, element: elementOf(type) ?? "f64", length: null, values: [] };
+    return { kind: "array", name: "", mutable: true, element: elementOf(type) === null ? F64 : numeric(elementOf(type) as PrimitiveTypeName), length: null, values: [] };
   }
   if (type.kind === "ptr" || type.kind === "ref") {
     return { kind: "object", name: "", mutable: true, type };
@@ -2665,7 +2667,11 @@ class ProgramResolver {
         return declare({
           kind: "array",
           mutable,
-          element: annotation === null ? value.held.element : elementOf(annotation),
+          // The element the source wrote is the one the value holds unless the
+          // annotation names a primitive the array is used at: a list of texts
+          // has no primitive element name, so its value's `text` is what the
+          // declaration keeps.
+          element: annotation === null || elementOf(annotation) === null ? value.held.element : numeric(elementOf(annotation) as PrimitiveTypeName),
           length: value.held.length,
           values: value.held.values,
         });
@@ -2726,7 +2732,9 @@ class ProgramResolver {
       case "stringLength":
         return declare({ kind: "number", mutable, type: "usize", text: "" });
       case "element":
-        return declare({ kind: "number", mutable, type: value.type, text: "" });
+        return value.type.kind === "text"
+          ? declare({ kind: "text", mutable, value: null })
+          : declare({ kind: "number", mutable, type: value.type.kind === "primitive" ? value.type.name : "f64", text: "" });
       case "field": {
         const parsed = value.type;
         if (parsed.kind === "ref" || parsed.kind === "ptr") {
@@ -2981,12 +2989,12 @@ class ProgramResolver {
         `line ${statement.line} of ${this.body.file}: only an array has elements to fill`,
       );
     }
-    const element = held.element ?? "f64";
+    const element = held.element ?? F64;
     held.element ??= element;
     return {
       kind: "fill",
       buffer: this.reference(statement.buffer, statement.line),
-      value: this.value(statement.value, numeric(element), statement.line),
+      value: this.value(statement.value, element, statement.line),
       held: { ...held, mutable: true },
       line: statement.line,
     };
@@ -2999,9 +3007,9 @@ class ProgramResolver {
     if (held.kind !== "array") {
       throw programError(`"${statement.buffer}" is not a buffer`, this.body, statement.line, `line ${statement.line} of ${this.body.file}: only an array has elements`);
     }
-    const element = held.element ?? "f64";
+    const element = held.element ?? F64;
     held.element ??= element;
-    const type = numeric(element);
+    const type = element;
     const index = this.value(statement.index, USIZE, statement.line);
     this.within(index, held, statement.line);
     return {
@@ -3098,21 +3106,23 @@ class ProgramResolver {
         `line ${statement.line} of ${this.body.file}: a program walks the arrays it allocated`,
       );
     }
-    const element = held.element ?? "f64";
+    const element = held.element ?? F64;
     held.element ??= element;
+    const elementName: PrimitiveTypeName = element.kind === "primitive" ? element.name : "f64";
     this.open();
-    const variable = this.declareName(statement.variable, statement.line, {
-      kind: "number",
-      mutable: false,
-      type: element,
-      text: "",
-    });
+    const variable = this.declareName(
+      statement.variable,
+      statement.line,
+      element.kind === "text"
+        ? { kind: "text", mutable: false, value: null }
+        : { kind: "number", mutable: false, type: elementName, text: "" },
+    );
     const body = this.looped(statement.body);
     this.close();
     return {
       kind: "forOf",
       variable: variable.name,
-      type: numeric(element),
+      type: element,
       of: held.name,
       length: { k: "length", buffer: held.name, bufferType: arrayType(held), type: "usize" },
       body,
@@ -3307,7 +3317,7 @@ class ProgramResolver {
         return {
           k: "fill",
           buffer,
-          value: this.value(value.value, numeric(held.element ?? "f64"), line),
+          value: this.value(value.value, (held.element ?? F64), line),
           held: { ...held, mutable: true },
         };
       }
@@ -3320,11 +3330,23 @@ class ProgramResolver {
           // element. Left null for a use to fix, every array became a run of
           // doubles, so an `Int32Array` was lowered as `[f64; N]` and each of
           // its elements read eight bytes out of a four byte stride.
-          element: value.element,
+          element: numeric(value.element),
           length: value.values.length,
           // The elements take the type of the array they are written into,
           // which a use of the array fixes.
           values: value.values.map((element) => this.value(element, { kind: "primitive", name: value.element }, line)),
+        };
+        if (expect !== null) this.expectArray(expect, held, line);
+        return { k: "buffer", held };
+      }
+      case "words": {
+        const held: ArrayHeld = {
+          kind: "array",
+          name: "",
+          mutable: false,
+          element: TEXT,
+          length: value.values.length,
+          values: value.values.map((one) => this.value(one, TEXT, line)),
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
@@ -3611,12 +3633,12 @@ class ProgramResolver {
             ),
           };
         }
-        const element = (held.element ?? "f64") as PrimitiveTypeName;
+        const element = held.element ?? F64;
         held.element ??= element;
         const index = this.value(value.index, USIZE, line);
         this.within(index, held, line);
         if (expect !== null) {
-          this.coerce(`an element of ${value.buffer}`, { kind: "primitive", name: element }, expect, line);
+          this.coerce(`an element of ${value.buffer}`, element, expect, line);
         }
         return { k: "element", buffer: held.name, bufferType: arrayType(held), index, type: element };
       }
@@ -3645,7 +3667,7 @@ class ProgramResolver {
 
   /** What an array of a count the program settled on holds, before it is named. */
   private arrayed(element: PrimitiveTypeName, length: number | null): ArrayHeld {
-    return { kind: "array", name: "", mutable: false, element, length, values: [] };
+    return { kind: "array", name: "", mutable: false, element: numeric(element), length, values: [] };
   }
 
   /** The call a block of bytes is laid out by. */
@@ -4666,7 +4688,7 @@ class ProgramResolver {
       // for it takes the element type, or the call would read the same bytes
       // as a type the array was never written at.
       const group = this.aliased(held);
-      const fixed = group.find((member) => member.element !== null && member.element !== wanted);
+      const fixed = group.find((member) => member.element !== null && member.element.kind === "primitive" && member.element.name !== wanted);
       if (fixed !== undefined) {
         throw programError(
           `an array of ${fixed.element} is used where ${wanted} is expected`,
@@ -4675,7 +4697,7 @@ class ProgramResolver {
           `line ${line} of ${this.body.file}: allocate the array with the element type the parameter takes`,
         );
       }
-      for (const member of group) member.element = wanted;
+      for (const member of group) member.element = numeric(wanted);
     }
     if (expect.kind === "array" && expect.length !== null && expect.length !== held.length) {
       throw programError(
@@ -5270,7 +5292,7 @@ class ProgramLowering {
         kind: "buffer",
         name: held.name,
         mutable: held.mutable,
-        element: numeric(held.element ?? "f64"),
+        element: (held.element ?? F64),
         length: held.length,
       };
     }
@@ -5394,7 +5416,7 @@ class ProgramLowering {
             detail: "fill an array a name holds",
           });
         }
-        const element = numeric(statement.held.element ?? "f64");
+        const element = (statement.held.element ?? F64);
         this.pending.push({
           k: "fill",
           buffer: array.name,
@@ -5666,7 +5688,7 @@ class ProgramLowering {
             detail: "the resolver resolved the array to a name; the lowering writes it down under that name",
           });
         }
-        const element = numeric(value.held.element ?? "f64");
+        const element = (value.held.element ?? F64);
         this.pending.push({
           k: "fill",
           buffer: array.name,
@@ -5747,7 +5769,7 @@ class ProgramLowering {
       case "element":
         return {
           k: "element",
-          type: numeric(value.type),
+          type: value.type,
           of: { k: "local", type: value.bufferType, name: value.buffer },
           index: this.value(value.index, USIZE, line),
         };
@@ -5865,7 +5887,7 @@ class ProgramLowering {
       kind: "buffer",
       name,
       mutable: false,
-      element: numeric(held.element ?? "f64"),
+      element: (held.element ?? F64),
       length: held.length,
     };
     this.pending.push({ k: "let", slot, value: this.buffer(value, line), line });
@@ -5879,7 +5901,7 @@ class ProgramLowering {
   /** A typed array, in the form the program wrote it. */
   private buffer(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
     const held = value.held;
-    const element = numeric(held.element ?? "f64");
+    const element = (held.element ?? F64);
     if (value.k === "sized") {
       // The count the program settled on is the length of the array, and the
       // block is cleared: a read past what the program filled is the zero the

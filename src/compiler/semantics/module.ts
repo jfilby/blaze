@@ -110,6 +110,14 @@ export type ProgramValue =
    * doubles.
    */
   | { k: "buffer"; element: PrimitiveTypeName; values: ProgramValue[] }
+  /**
+   * A list of texts, as `["openmp", "pthread"]` is.
+   *
+   * A text is a pointer, and a list of them is a block of pointers: the
+   * element type is `text`, which no typed array's element name states, so the
+   * literal is a value of its own.
+   */
+  | { k: "words"; values: ProgramValue[] }
   /** A block of bytes the program laid out, which the views over it read. */
   | { k: "shared"; count: ProgramValue }
   /** A typed array of a count the program settles on when it runs. */
