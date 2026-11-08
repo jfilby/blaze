@@ -1017,6 +1017,24 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hh. A program reads a map from a list, a spread, and a pair callback
+
+    const byName = new Map(modules.map(([path, source]) => [path, resolve(source)]));
+    const all = [...values, last];
+    const firsts = pairs.map(([left, right]) => left);
+
+Three constructions the compiler's scripts write were refused at the frontend:
+a `Map`/`Set` built from an iterable, a list written with a spread, and a
+callback whose parameter is a pair. All three are now read. The map's source is
+kept as the iterable it is, a spread is one part of a list whose parts are the
+list and the elements beside it, and a destructured parameter binds the entry's
+`first`/`second` fields. The lowering of the map's entries and of a spread is a
+value the program does not hold yet, and the resolver refuses those two forms
+where it lowers them rather than at the read. `offline-build.ts` and
+`dump-ir.ts` read whole.
+
+    The total went from 10 to 3.
+
 ### 4hg. A loop over the entries of an untyped value is deferred
 
     for (const [name, candidates] of Object.entries(await store.read<Record<string, Candidate[]>>(paths.candidates))) { ... }
@@ -4747,7 +4765,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-10 refusals over 95 sources, 90 of them read whole. The report reads the
+3 refusals over 95 sources, 92 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4990,6 +5008,7 @@ What was closed this session, and what each was worth:
 | a program's list of texts is a block of pointers (§4he) | 15 → 14 |
 | a `for-of` names the pair fields of an entry (§4hf) | 14 → 12 |
 | a loop over the entries of an untyped value is deferred (§4hg) | 12 → 10 |
+| a program reads a map from a list, a spread, and a pair callback (§4hh) | 10 → 3 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

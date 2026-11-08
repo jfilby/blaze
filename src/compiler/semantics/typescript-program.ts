@@ -333,23 +333,51 @@ class ProgramParser {
    * and one for a text, and the words the source writes for them say nothing it
    * can act on.
    */
-  private arrowParams(): { name: string; type: string | null }[] {
+  private arrowParams(): { params: { name: string; type: string | null }[]; prelude: ProgramStatement[] } {
     const params: { name: string; type: string | null }[] = [];
+    const prelude: ProgramStatement[] = [];
     this.expect("(");
     if (!this.at(")")) {
       for (;;) {
-        const name = this.identifier("the name of a parameter");
-        this.accept("?");
-        let type: string | null = null;
-        if (this.accept(":")) {
-          type = this.skipArrowType(new Set([",", ")"]));
+        // `([name, value]) => ...`: the parameter is one element, and the names
+        // are its `first`/`second` fields, the pair an entry is.
+        if (this.at("[")) {
+          const line = this.peek().line;
+          this.next();
+          const names: string[] = [];
+          while (!this.at("]") && this.peek().kind !== "end") {
+            names.push(this.identifier("the name of a parameter"));
+            if (!this.accept(",")) break;
+          }
+          this.expect("]");
+          this.accept("?");
+          if (this.accept(":")) this.skipArrowType(new Set([",", ")"]));
+          const held = `__arrow${this.walkCount++}`;
+          params.push({ name: held, type: null });
+          for (const [at, name] of names.entries()) {
+            prelude.push({
+              kind: "declare",
+              name,
+              mutable: false,
+              type: null,
+              value: { k: "field", object: { k: "name", name: held }, field: at === 0 ? "first" : "second" },
+              line,
+            });
+          }
+        } else {
+          const name = this.identifier("the name of a parameter");
+          this.accept("?");
+          let type: string | null = null;
+          if (this.accept(":")) {
+            type = this.skipArrowType(new Set([",", ")"]));
+          }
+          params.push({ name, type });
         }
-        params.push({ name, type });
         if (!this.accept(",")) break;
       }
     }
     this.expect(")");
-    return params;
+    return { params, prelude };
   }
 
   /** The result type an arrow states, which the program erases with it. */
@@ -2171,15 +2199,15 @@ class ProgramParser {
         }
         if (this.arrowFollows(i)) {
           const line = this.peek().line;
-          const params = this.arrowParams();
+          const { params, prelude } = this.arrowParams();
           this.arrowResultType();
           this.accept("=>");
           if (this.at("{")) {
             const body = this.braces();
-            return { k: "arrow", params, body, async: true };
+            return { k: "arrow", params, body: [...prelude, ...body], async: true };
           }
           const value = this.value();
-          return { k: "arrow", params, body: [{ kind: "result", value, line }], async: true };
+          return { k: "arrow", params, body: [...prelude, { kind: "result", value, line }], async: true };
         }
       }
       if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
@@ -2329,11 +2357,14 @@ class ProgramParser {
             return this.nothing();
           }
           if (!this.at(")")) {
-            // A dictionary built from an iterable is a copy of entries the
-            // program would have to walk: the empty dictionary and the writes
-            // that fill it are the form this subset holds.
-            this.fail(`a ${constructed.text} is built empty, and filled by its own writes`, this.peek());
-            this.skipArguments();
+            // A dictionary built from an iterable is the entries the source
+            // hands over. The construction is read; walking the entries is the
+            // backend's, and a backend that cannot refuses it there.
+            const source = this.value();
+            this.expect(")");
+            const made: ProgramValue = { k: "collection", collection: kind, source };
+            this.collectionValues.set(made, kind);
+            return made;
           }
           this.expect(")");
           const made: ProgramValue = { k: "call", function: "blaze_rt_dict_new", args: [] };
@@ -2400,15 +2431,15 @@ class ProgramParser {
       }
       if (this.arrowFollows(i)) {
         const line = this.peek().line;
-        const params = this.arrowParams();
+        const { params, prelude } = this.arrowParams();
         this.arrowResultType();
         this.accept("=>");
         if (this.at("{")) {
           const body = this.braces();
-          return { k: "arrow", params, body };
+          return { k: "arrow", params, body: [...prelude, ...body] };
         }
         const value = this.value();
-        return { k: "arrow", params, body: [{ kind: "result", value, line }] };
+        return { k: "arrow", params, body: [...prelude, { kind: "result", value, line }] };
       }
     }
     if (this.accept("(")) {
@@ -2740,6 +2771,9 @@ class ProgramParser {
    */
   private arrayLiteral(): ProgramValue {
     const values = this.elements();
+    // A list written with a spread is the parts in order: the list the spread
+    // names and the elements written beside it.
+    if (values.some((value) => value.k === "spread")) return { k: "concat", parts: values };
     const texts = values.filter((value) => value.k === "text" || value.k === "fixed").length;
     if (texts === values.length && texts > 0) return { k: "words", values };
     if (texts > 0) {
@@ -2761,7 +2795,11 @@ class ProgramParser {
       return values;
     }
     for (;;) {
-      values.push(this.value());
+      if (this.accept("...")) {
+        values.push({ k: "spread", of: this.value() });
+      } else {
+        values.push(this.value());
+      }
       if (!this.accept(",")) break;
       // A trailing comma is written in the source and has no element behind it.
       if (this.at("]")) break;

@@ -3339,6 +3339,30 @@ class ProgramResolver {
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
       }
+      case "collection": {
+        throw programError(
+          `a ${value.collection} built from a source is not lowered`,
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: the frontend reads the construction; walking the source's entries is not a value the program holds yet`,
+        );
+      }
+      case "concat": {
+        throw programError(
+          "a list written with a spread is not lowered",
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: write the elements out, or build the list where the source is a value the program holds`,
+        );
+      }
+      case "spread": {
+        throw programError(
+          "a spread is written inside a list",
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: a spread is an element of a list literal`,
+        );
+      }
       case "words": {
         const held: ArrayHeld = {
           kind: "array",

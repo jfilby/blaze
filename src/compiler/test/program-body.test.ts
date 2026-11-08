@@ -262,6 +262,18 @@ test("an array written out is the array a typed array of its values would be", (
   assert.deepEqual(dynamic, ["b"]);
 });
 
+test("a program reads a map from a list, a spread and a pair callback", () => {
+  // The constructions the compiler's own scripts write: a map built from a
+  // list, a list written with a spread, and a callback whose parameter is the
+  // pair an entry is. The read keeps them; a backend that cannot walk the
+  // entries refuses them where it lowers, not at the frontend.
+  const body = bodyOf(
+    "const pairs = [[1, 2], [3, 4]];\nconst byName = new Map(pairs);\nconst all = [...pairs, [5, 6]];\nconst firsts = pairs.map(([left, right]) => left);\n",
+  );
+  assert.equal(body.length, 4);
+  assert.deepEqual(body.map((statement) => statement.kind), ["declare", "declare", "declare", "declare"]);
+});
+
 test("a for-of names the pair fields of an entry", () => {
   // `for (const [name, entry] of pairs())` binds the two fields of the pair
   // record an entry is: `first` is the name and `second` the value.

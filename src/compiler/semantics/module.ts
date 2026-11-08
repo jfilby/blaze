@@ -118,6 +118,19 @@ export type ProgramValue =
    * literal is a value of its own.
    */
   | { k: "words"; values: ProgramValue[] }
+  /**
+   * A map or a set built from an iterable, as in `new Map(pairs)`.
+   *
+   * The entries are the value the source hands over: a list of pairs for a
+   * map, a list of values for a set. The program body reads the construction;
+   * a backend that cannot walk the source's entries refuses it where it is
+   * lowered.
+   */
+  | { k: "collection"; collection: "map" | "set"; source: ProgramValue }
+  /** A list written with a spread, as in `[...values, last]`. */
+  | { k: "concat"; parts: ProgramValue[] }
+  /** One spread element of a list written with `...`. */
+  | { k: "spread"; of: ProgramValue }
   /** A block of bytes the program laid out, which the views over it read. */
   | { k: "shared"; count: ProgramValue }
   /** A typed array of a count the program settles on when it runs. */
