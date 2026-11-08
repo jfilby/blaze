@@ -4665,6 +4665,30 @@ test("a dictionary is written at the indent as its entries", async () => {
   }
 });
 
+test("a function declared in a body is hoisted to that body", async () => {
+  // `twice` is called above its declaration, and it reads `n` from around it.
+  // The declaration is lifted to the arrow its body is, and the call written
+  // above it is renamed to the lifted function with the value it captured in
+  // front of its argument.
+  const source = [
+    'import { f } from "./lib.ts";',
+    "console.log(f(5));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function f(n: number): number {",
+    "  const r = twice(3);",
+    "  function twice(x: number): number { return x * 2 + n; }",
+    "  return r;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "11", `the ${backend} backend hoists the declaration`);
+  }
+});
+
 test("an arrow's parameter default is a call the call site can write", async () => {
   // `y: number = length()` names a helper the function around the arrow
   // declares. The default is written out at the call site, which is the same

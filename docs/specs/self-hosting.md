@@ -1017,6 +1017,54 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gv. A function declared in a body is hoisted to that body
+
+    function selfCallsIn(entry: SemanticBlock, turns: Turns): SemanticCall[] {
+      ...
+      function collect(value: SemanticValue): void { ... }
+    }
+
+A nested function declaration was refused outright, and a file with one was
+read as a program body instead. The declaration is now read as the arrow its
+body is — the same parameters, result annotation and block — and the name is
+bound to the closure it lifted to. A statement above the declaration calls it
+by the name the source wrote; when the block ends, those calls are renamed to
+the lifted function with the values it captured in front of their arguments,
+which is the hoisting the language gives a declaration. `semantics/recursion.ts`
+and `core/terminal-title.ts` read whole.
+
+    The total went from 28 to 26.
+
+### 4gu. A method of a value the read cannot type is deferred
+
+    const reader = response.body.getReader();
+    timer.unref?.();
+    process.once(`exit`, onExit);
+
+A method written on a value the read could not type was refused unless the
+file's imports were still waiting for a link. A value that is still untyped
+after the link is the dynamic value the language lets a source call, and the
+answer is a value of the same declaration the read does not hold: the method is
+deferred rather than refused, exactly as a pending import's is. A value whose
+record shape the read does hold is not one of these, so a method such a record
+does not declare is the refusal it always was. `ai/commandcode.ts`,
+`core/terminal-title.ts`, `semantics/program.ts` and `cli.ts` read much shorter.
+
+    The total went from 51 to 28.
+
+### 4gt. A call of an answer whose declaration is not held
+
+    createOpenAI(apiKey)(configuration.model)
+
+A call of the answer of a call was refused unless the answer's type was a
+function this read held. The answer of a call to an imported value is unknown
+while the graph has not linked the declaration, and the call of it is the call
+of the value it answers: the arguments are read as the source wrote them and
+the answer is untyped. This is the curried factory the provider modules are
+built from; `ai/backend.ts` reads one refusal shorter.
+
+    The total went from 55 to 51.
+
 ### 4gs. A field named by one of two texts is called as either field
 
     const method = value.op === "add" ? "wideAddMod" : "wideSubMod";
@@ -4535,7 +4583,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-55 refusals over 95 sources, 79 of them read whole. The report reads the
+26 refusals over 95 sources, 83 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4764,6 +4812,9 @@ What was closed this session, and what each was worth:
 | an arrow's parameter default is a call the call site can write (§4gq) | 58 → 57 |
 | a program's set is one handle on the runtime's dictionary (§4gr) | 57 → 56 |
 | a field named by one of two texts is called as either field (§4gs) | 56 → 55 |
+| a call of an answer whose declaration is not held (§4gt) | 55 → 51 |
+| a method of a value the read cannot type is deferred (§4gu) | 51 → 28 |
+| a function declared in a body is hoisted to that body (§4gv) | 28 → 26 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

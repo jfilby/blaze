@@ -1891,6 +1891,25 @@ function callsRewritten<T>(node: T, source: string, target: string, captures: re
   return node;
 }
 
+/**
+ * Renames every call of `source` in a statement list to `target`, handing it
+ * the captured values in front of the arguments it was written with.
+ *
+ * It is the rename `callsRewritten` makes, applied to statements that were
+ * already read: a function declared below the statement that calls it is
+ * hoisted, and the call was read before the lifted function had a name.
+ */
+function hoistCallsIn(
+  statements: Statement[],
+  source: string,
+  target: string,
+  captures: readonly string[],
+): void {
+  for (let at = 0; at < statements.length; at += 1) {
+    statements[at] = callsRewritten(statements[at] as Statement, source, target, captures);
+  }
+}
+
 function callsOf(fn: TypeScriptFunction): Set<string> {
   const called = new Set<string>();
   walkFunction(fn, () => {}, (name) => called.add(name));
@@ -3490,6 +3509,17 @@ class TypeScriptParser {
    * element, and the write is the write the source wrote.
    */
   private arrowBoxes = new Map<string, { box: string; element: TypeExpr; list: boolean }>();
+  /**
+   * Calls of a function declared in the block being read, written above it.
+   *
+   * A `function` declaration is hoisted, so a statement above it calls it. The
+   * call is read before the arrow that declaration becomes is known, so it is
+   * the name the source wrote; once the arrow is lifted, the calls are renamed
+   * to the lifted function with the values it captured in front of their
+   * arguments. The list is read at the end of the block, when every statement
+   * of it has been read.
+   */
+  private hoistRewrites: { source: string; target: string; captures: readonly string[] }[] = [];
   /** How many boxes this file's arrows have needed, for naming them. */
   private boxCount = 0;
   /**
@@ -7671,6 +7701,15 @@ class TypeScriptParser {
         if (last !== undefined) this.narrowAfter(last);
       }
       this.expect("}");
+      // A function declared in the block is hoisted: the statements read before
+      // it call it by the name the source wrote, and the lifted function is
+      // what those calls are now.
+      if (this.hoistRewrites.length > 0) {
+        for (const rewrite of this.hoistRewrites) {
+          hoistCallsIn(statements, rewrite.source, rewrite.target, rewrite.captures);
+        }
+        this.hoistRewrites = [];
+      }
     } finally {
       this.narrowed = outer;
       this.narrowedShapes = outerShapes;
@@ -7924,6 +7963,47 @@ class TypeScriptParser {
     return [...before, statement, ...rest];
   }
 
+  /**
+   * A `function` declared inside a body.
+   *
+   * The declaration is read as the arrow its body is — the same parameters,
+   * result annotation and block — and the name is bound to the closure it
+   * lifted to. The declaration itself writes nothing of its own: the closure
+   * is materialized where the name is read as a value, and a call of it is the
+   * call of the lifted function. The calls the block wrote above it are renamed
+   * by `readBlock` once the captures are known.
+   */
+  private readNestedFunction(): Statement {
+    const start = this.next();
+    let isAsync = false;
+    if (this.at("async")) {
+      this.next();
+      isAsync = true;
+    }
+    const name = this.next();
+    if (name.kind !== "ident") {
+      this.report("a function is declared by its name", `near "${name.text}"`, name);
+      this.synchronize();
+      return { kind: "expression", value: this.hole(), line: start.line };
+    }
+    if (this.at("<")) this.skipTypeParameters();
+    const savedArrowName = this.arrowName;
+    this.arrowName = name.text;
+    let arrow: Expression;
+    try {
+      arrow = this.readArrow(isAsync, true);
+    } finally {
+      this.arrowName = savedArrowName;
+    }
+    if (arrow.k !== "arrow") return { kind: "expression", value: this.hole(), line: start.line };
+    const binding = this.arrowBindings.get(arrow.name);
+    if (binding !== undefined) this.valueArrows.set(name.text, binding);
+    this.valueTypes.set(name.text, ANY_TYPE);
+    this.hoistRewrites.push({ source: name.text, target: arrow.name, captures: binding?.captures ?? [] });
+    this.accept(";");
+    return { kind: "declare", name: name.text, type: ANY_TYPE, init: { k: "null" }, line: start.line };
+  }
+
   readStatement(): Statement {
     const token = this.peek();
     if (this.accept(";")) return { kind: "expression", value: this.hole(), line: token.line };
@@ -8167,14 +8247,11 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: token.line };
     }
     if (this.at("function")) {
-      // A nested function is something a program body is allowed and the
-      // module-level declaration parser is not: a program parses its whole
-      // source again as statements if one is seen anywhere. The diagnostic
-      // lands if that reading fails too, which is the case this is for.
-      this.nestedFunction = true;
-      this.report("a function may not be declared inside a function", "declare it in the module", token);
-      this.synchronize();
-      return { kind: "expression", value: this.hole(), line: token.line };
+      // A function declared in a body is hoisted to that body, exactly as an
+      // arrow bound to a name is: the declaration is the closure the body
+      // becomes, and the statements above it that call it are renamed to the
+      // lifted function once its captures are known.
+      return this.readNestedFunction();
     }
 
     const assigned = this.readAssignment();
@@ -12214,7 +12291,16 @@ class TypeScriptParser {
             // follows the link holds the declaration, and refuses the method
             // there where there really is none. A method written on anything
             // else is refused here, whatever else the file imports.
-            if (this.importsArePending() && (this.pendingHolds(receiver) || this.opaqueValue(receiver))) {
+            // A method written on a value the read cannot type is a method of
+            // the value the source declared, and what the declaration holds is
+            // not this read's to say: the answer waits for the link the same
+            // way, and a value that is still untyped after the link is the
+            // dynamic value the language lets a source call. A record whose
+            // shape the read does hold is not one of these: a method it does
+            // not declare is the refusal it always was.
+            const known = this.shapeOf(receiver);
+            const unshaped = known === null || known.kind === "any";
+            if (this.pendingHolds(receiver) || (this.opaqueValue(receiver) && unshaped)) {
               // What the method answers is a value of the same unlinked
               // declaration, so it waits for the link too: a method written on
               // it is a method of a value this read cannot type yet.
@@ -12255,6 +12341,26 @@ class TypeScriptParser {
               if (answered !== null) this.expressionShapes.set(invoke, answered);
             }
             replace(invoke);
+            continue;
+          }
+          // `createOpenAI(key)(model)`: the answer of a call to a value the
+          // file imports is a function while the graph has not linked the
+          // declaration, so what it takes and answers is not this read's to
+          // say. The call is the call of the value it answers, and the
+          // arguments are read as the source wrote them; the read that follows
+          // the link types the call against the declaration.
+          if (
+            target.k === "call" &&
+            (this.opaqueValue(target) || this.pendingHolds(target) || this.pendingValues.has(target.name))
+          ) {
+            const args = this.readCallArguments();
+            replace({
+              k: "invoke",
+              callee: target,
+              args,
+              params: args.map(() => ANY_TYPE),
+              returns: ANY_TYPE,
+            });
             continue;
           }
         }

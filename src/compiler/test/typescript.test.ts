@@ -2487,6 +2487,11 @@ test("a branch Array.isArray holds reads the value as a list", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 
+  // Outside the branch the read cannot type the value either, and a method of
+  // a value it cannot type is deferred rather than refused: the read that
+  // follows a link, or the resolver that lowers the body, is what says whether
+  // the declaration holds one. So the branch is what makes the value a list,
+  // and the method written outside it is not one the read can place.
   const other = [
     "function walk<T>(node: T): T {",
     "  if (Array.isArray(node)) return node;",
@@ -2494,10 +2499,7 @@ test("a branch Array.isArray holds reads the value as a list", () => {
     "}",
     "",
   ].join("\n");
-  assert.match(
-    readTypeScriptModule(other, "main.ts", false).refused[0]?.message ?? "",
-    /"map" is not a method this program compiles/,
-  );
+  assert.deepEqual(readTypeScriptModule(other, "main.ts", false).refused, []);
 });
 
 test("a collection declared below a function is still what the name holds", () => {
@@ -3669,6 +3671,23 @@ test("the entries of a map read as a value are a list of pairs", () => {
   ].join("\n");
   const read = readTypeScriptModule(source, "module.ts", false);
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+});
+
+test("a method of a value the read cannot type is deferred", () => {
+  // The read is not a type checker: a method written on an `unknown` or an
+  // `any` is a method of the value the declaration the graph has not linked
+  // holds. It is deferred rather than refused, and the resolver that lowers the
+  // body is what says whether the declaration holds one.
+  const source = [
+    "export function f(body: unknown): unknown {",
+    "  return body.bytes();",
+    "}",
+    "export function g(raw: any): void {",
+    "  raw.listen(1, `x`);",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
 });
 
 test("a field named by one of two texts is called as either field", () => {
