@@ -12363,6 +12363,21 @@ class TypeScriptParser {
             });
             continue;
           }
+          // `(a ?? b)(args)`: the value the choice answers is one this read does
+          // not type, so the call is the call of that value and the arguments
+          // are read as the source wrote them. A member is not one of these: a
+          // field is a field of a layout, and a call of it is read above.
+          if (this.opaqueValue(target) && this.shapeOf(target) === null) {
+            const args = this.readCallArguments();
+            replace({
+              k: "invoke",
+              callee: target,
+              args,
+              params: args.map(() => ANY_TYPE),
+              returns: ANY_TYPE,
+            });
+            continue;
+          }
         }
         if (target.k !== "ident") return this.missing("only a named function is called", this.peek());
         // `Math.max(...xs)` and `Math.min(...xs)` are the greatest and the

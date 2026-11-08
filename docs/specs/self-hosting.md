@@ -1017,6 +1017,20 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4gw. A call of a value the read cannot type is deferred
+
+    const response = await (this.settings.fetch ?? fetch)(url, { ... });
+
+The call of a `??` whose arms the read cannot type was "only a named function
+is called". The value the choice answers is a value this read does not hold,
+and the call of it is the call of that value: the arguments are read as the
+source wrote them and the answer is untyped. A member is not one of these — a
+field is a field of a layout, and a call of it is read against the field's
+function type — so a method a known record does not declare is still refused.
+`ai/commandcode.ts` reads one refusal shorter.
+
+    The total went from 26 to 25.
+
 ### 4gv. A function declared in a body is hoisted to that body
 
     function selfCallsIn(entry: SemanticBlock, turns: Turns): SemanticCall[] {
@@ -4583,7 +4597,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-26 refusals over 95 sources, 83 of them read whole. The report reads the
+25 refusals over 95 sources, 83 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4815,6 +4829,7 @@ What was closed this session, and what each was worth:
 | a call of an answer whose declaration is not held (§4gt) | 55 → 51 |
 | a method of a value the read cannot type is deferred (§4gu) | 51 → 28 |
 | a function declared in a body is hoisted to that body (§4gv) | 28 → 26 |
+| a call of a value the read cannot type is deferred (§4gw) | 26 → 25 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

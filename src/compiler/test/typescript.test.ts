@@ -3673,6 +3673,21 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a call of a value the read cannot type is deferred", () => {
+  // `(settings.fetch ?? fetch)(url, options)` calls whichever of the two the
+  // source holds. Neither is a function this read holds, so the call is the
+  // call of the value the choice answers and the arguments are read as the
+  // source wrote them.
+  const source = [
+    "interface Settings { fetch?: unknown }",
+    "export function f(settings: Settings): unknown {",
+    "  return (settings.fetch ?? fetch)(`u`, { method: `GET` });",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("a method of a value the read cannot type is deferred", () => {
   // The read is not a type checker: a method written on an `unknown` or an
   // `any` is a method of the value the declaration the graph has not linked
