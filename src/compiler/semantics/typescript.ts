@@ -18492,6 +18492,15 @@ class TypeScriptParser {
     const parts: ({ field: { name: string; value: Expression } } | { dictionary: Expression })[] = [];
     /** The dictionary the literal is, where a spread of one says so and the use does not. */
     let dictionary: CollectionValue | null = null;
+    /**
+     * Whether a spread is a value the read does not look inside.
+     *
+     * `{ ...process.env }` is the host's environment: it has no record the read
+     * holds, and the fields it writes are the host's to say. A literal whose
+     * only parts are such spreads is a value the read does not look inside,
+     * exactly as the value it spreads is.
+     */
+    let opaqueSpread = false;
     // The shape a field is written at may be a name this module declares — a
     // recursive type writes its own name, as `Node` does inside `children` — and
     // a name is not the record it stands for, so it is resolved here.
@@ -18610,11 +18619,17 @@ class TypeScriptParser {
             // class, a call of an imported function — is not a constant this
             // read can say has no fields: the read that follows the link holds
             // the declaration and copies the fields there.
-            this.report(
-              "an object spread reads a constant object",
-              "write the fields out, or spread an object the file already wrote as a constant",
-              key,
-            );
+            const spreadShape = this.shapeOf(spread);
+            const unshaped = (spreadShape === null || spreadShape.kind === "any") && unknownReference(this.valueTypeOf(spread));
+            if (unshaped && fields.length === 0) {
+              opaqueSpread = true;
+            } else {
+              this.report(
+                "an object spread reads a constant object",
+                "write the fields out, or spread an object the file already wrote as a constant",
+                key,
+              );
+            }
           }
         }
         if (!this.accept(",")) break;
@@ -18694,6 +18709,21 @@ class TypeScriptParser {
       if (!this.accept(",")) break;
     }
     this.expect("}");
+    // A literal whose parts are only values the read does not look inside is
+    // one of those values: `{ ...process.env }` has the fields the host says,
+    // and a field written beside it would be one this read could not place.
+    if (opaqueSpread) {
+      if (fields.length > 0) {
+        this.report(
+          "an object spread reads a constant object",
+          "write the fields out, or spread an object the file already wrote as a constant",
+          this.peek(),
+        );
+      }
+      const marker: Expression = { k: "literal", text: "0" };
+      this.expressionTypes.set(marker, { kind: "ref", of: null });
+      return marker;
+    }
     // An object literal written at a `Record<string, V>` is the dictionary its
     // type names: each field is one entry of the dictionary, keyed by the name
     // the source wrote. A literal at a record of fields is laid out as fields.

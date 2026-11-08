@@ -3673,6 +3673,20 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("an object the read cannot enumerate is opaque", () => {
+  // `{ ...process.env, ...options.env }` is the environment the host holds: a
+  // literal whose parts are only values the read does not look inside is one
+  // of those values, and a host call reads it.
+  const source = [
+    "interface Options { env?: Record<string, string> }",
+    "export function f(options: Options): unknown {",
+    "  return { ...process.env, ...(options.env ?? {}) };",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("a host value the read does not look inside is opaque", () => {
   // `new TransformStream(transformer)` and a bare `new Date()` are values the
   // host owns: the transformer is read as the value it is, and the stream and

@@ -1017,6 +1017,18 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ha. An object the read cannot enumerate is opaque
+
+    env: options.env ? { ...process.env, ...options.env } : process.env
+
+`process.env` is the environment the host holds, and an object literal made of
+it has no record the read can name. A literal whose only parts are values the
+read does not look inside is now one of those values: it is a reference the
+host fills, and a field written beside such a spread is still the refusal it
+was. `core/process.ts` reads whole.
+
+    The total went from 21 to 19.
+
 ### 4gz. A decoder reads the bytes it is handed
 
     buffered += decoder.decode(chunk, { stream: true });
@@ -4642,7 +4654,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-21 refusals over 95 sources, 85 of them read whole. The report reads the
+19 refusals over 95 sources, 86 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4878,6 +4890,7 @@ What was closed this session, and what each was worth:
 | a promise made in a module settles what its executor resolves (§4gx) | 25 → 24 |
 | a host value the read does not look inside (§4gy) | 24 → 22 |
 | a decoder reads the bytes it is handed (§4gz) | 22 → 21 |
+| an object the read cannot enumerate is opaque (§4ha) | 21 → 19 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
