@@ -262,6 +262,22 @@ test("an array written out is the array a typed array of its values would be", (
   assert.deepEqual(dynamic, ["b"]);
 });
 
+test("a for-of names the pair fields of an entry", () => {
+  // `for (const [name, entry] of pairs())` binds the two fields of the pair
+  // record an entry is: `first` is the name and `second` the value.
+  const body = bodyOf("for (const [name, entry] of pairs()) { console.log(name, entry); }\n");
+  const outer = body[0] as { kind: string; body?: { kind: string; variable?: string; body?: { kind: string; name?: string; value?: { k: string; field?: string } }[] }[] };
+  assert.equal(outer?.kind, "block");
+  const loop = outer.body?.[1];
+  assert.equal(loop?.kind, "forOf");
+  const binds = (loop?.body ?? []).slice(0, 2).map((statement) => [
+    statement.kind,
+    statement.name,
+    statement.value?.k === "field" ? statement.value.field : "",
+  ]);
+  assert.deepEqual(binds, [["declare", "name", "first"], ["declare", "entry", "second"]]);
+});
+
 test("a list of values holds numbers, and a text among them is refused", () => {
   // A list holds one kind of value: all numbers, or all texts. A list that
   // mixes them is the one the program cannot lay out.

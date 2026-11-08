@@ -1021,6 +1021,44 @@ class ProgramParser {
     this.expect("for");
     this.expect("(");
     if (this.at("const") || this.at("let") || this.at("var")) {
+      const keyword = this.peek().text;
+      // `for (const [name, value] of pairs)`: an entry is the pair record a
+      // map reports, `first` the key and `second` the value.
+      if (this.peek(1).text === "[") {
+        this.next();
+        this.next();
+        const names: string[] = [];
+        while (!this.at("]") && this.peek().kind !== "end") {
+          names.push(this.identifier("the name of a loop variable"));
+          if (!this.accept(",")) break;
+        }
+        this.expect("]");
+        if (!this.accept("of")) {
+          this.fail("a loop over a list is written for (const x of list)", this.peek());
+          return this.skipLoop();
+        }
+        const of = this.value();
+        this.expect(")");
+        const body = this.statements();
+        const statements: ProgramStatement[] = [];
+        let held: string;
+        if (of.k === "name") held = of.name;
+        else {
+          held = `walk${this.walkCount++}`;
+          statements.push({ kind: "declare", name: held, mutable: false, type: null, value: of, line });
+        }
+        const element = `each${this.walkCount++}`;
+        const binds: ProgramStatement[] = names.map((name, at) => ({
+          kind: "declare",
+          name,
+          mutable: keyword !== "const",
+          type: null,
+          value: { k: "field", object: { k: "name", name: element }, field: at === 0 ? "first" : "second" },
+          line,
+        }));
+        statements.push({ kind: "forOf", variable: element, of: held, body: [...binds, ...body], line });
+        return { kind: "block", body: statements, line };
+      }
       const bound = this.peek(1);
       if (bound.kind === "ident" && this.peek(2).text === "of") {
         this.next();

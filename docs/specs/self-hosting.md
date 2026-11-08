@@ -1017,6 +1017,20 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hf. A `for-of` names the pair fields of an entry
+
+    for (const [name, contract] of Object.entries(file.functions)) { ... }
+    for (const [name] of contracts) { ... }
+
+A loop header named one variable, and a pattern was "the name of the loop
+variable" refused. A header may now write `[name, value]`: the loop is handed
+one element at a time, and the two names are the entry's `first` and `second`
+fields — the pair record a map reports and `Object.entries` builds. A name
+written alone is the element itself, as before. `dump-ir.ts` and
+`offline-build.ts` each read one refusal shorter.
+
+    The total went from 14 to 12.
+
 ### 4he. A program's list of texts is a block of pointers
 
     const names: string[] = ["openmp"];
@@ -4718,7 +4732,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-14 refusals over 95 sources, 88 of them read whole. The report reads the
+12 refusals over 95 sources, 88 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4959,6 +4973,7 @@ What was closed this session, and what each was worth:
 | `Object.values` of a value the read does not type is empty (§4hc) | 17 → 16 |
 | a module-level number is a cell the functions share (§4hd) | 16 → 15 |
 | a program's list of texts is a block of pointers (§4he) | 15 → 14 |
+| a `for-of` names the pair fields of an entry (§4hf) | 14 → 12 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
