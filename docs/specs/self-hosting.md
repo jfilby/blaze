@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hg. A loop over the entries of an untyped value is deferred
+
+    for (const [name, candidates] of Object.entries(await store.read<Record<string, Candidate[]>>(paths.candidates))) { ... }
+
+A loop over the entries of a value the read did not type was refused once the
+imports had been linked: only a pending import's value was deferred. A value
+that is still untyped after the link is one the runtime enumerates, exactly as
+a method of one is deferred: the loop names the key and the value the
+declaration holds, and the read that follows a link types them. An
+`Object.fromEntries` argument is still deferred only while its imports are
+pending, because that call reads its argument here. `compiler.ts` and
+`incremental.ts` read whole.
+
+    The total went from 12 to 10.
+
 ### 4hf. A `for-of` names the pair fields of an entry
 
     for (const [name, contract] of Object.entries(file.functions)) { ... }
@@ -4732,7 +4747,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-12 refusals over 95 sources, 88 of them read whole. The report reads the
+10 refusals over 95 sources, 90 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -4974,6 +4989,7 @@ What was closed this session, and what each was worth:
 | a module-level number is a cell the functions share (§4hd) | 16 → 15 |
 | a program's list of texts is a block of pointers (§4he) | 15 → 14 |
 | a `for-of` names the pair fields of an entry (§4hf) | 14 → 12 |
+| a loop over the entries of an untyped value is deferred (§4hg) | 12 → 10 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

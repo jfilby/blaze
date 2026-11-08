@@ -3673,6 +3673,22 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a loop over the entries of an untyped value is deferred", () => {
+  // A value the read does not type has entries the runtime enumerates: the
+  // loop names the key and the value the declaration holds, and the read that
+  // follows a link is what types them. A value the read *does* type is the
+  // record or map whose entries are read here.
+  const source = [
+    "export function walk(value: unknown): number {",
+    "  let n = 0;",
+    "  for (const [name, entry] of Object.entries(value)) n += name.length + 1;",
+    "  return n;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+});
+
 test("a module-level number is a cell the functions share", () => {
   // A compiled function has no environment, so `let counter = 0` at the top of
   // a file is a cell the runtime holds: a read is the cell read, a write is the

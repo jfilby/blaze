@@ -11689,9 +11689,13 @@ class TypeScriptParser {
           // read that follows the link types them.
           if (
             source !== undefined &&
-            (this.readingIteration || this.readingCollectionSource) &&
-            this.importsArePending() &&
-            (this.pendingHolds(source) || this.opaqueValue(source))
+            // A loop over the entries of a value the read does not type is the
+            // runtime's to enumerate: the two names are the key and the value
+            // the declaration holds, and the read that follows a link types
+            // them. A collection source is deferred only while its imports are
+            // pending, because `Object.fromEntries` reads its argument here.
+            ((this.readingIteration && !this.readingCollectionSource && (this.pendingHolds(source) || this.opaqueValue(source))) ||
+              (this.readingCollectionSource && this.importsArePending() && (this.pendingHolds(source) || this.opaqueValue(source))))
           ) {
             const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
             const unlinked: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE };
