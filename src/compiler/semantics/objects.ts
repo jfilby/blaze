@@ -406,6 +406,14 @@ class BodyTypes {
           if (inferred !== null) return { kind: "type", type: inferred };
         }
         const builtin = builtinFor(expression.name);
+        // Two forms the frontend reads and the resolver refuses: a spread of a
+        // value the read cannot name, and the JSON of one at an indent. The
+        // value is a reference, and what it holds is its own, so the layout
+        // pass needs no field of it and the answer is the reference the form
+        // states.
+        if (expression.name === "object.spread" || expression.name === "JSON.stringify.pretty") {
+          return { kind: "type", type: expression.returns ?? ANY_REF };
+        }
         if (builtin !== null) {
           const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];
           if (!allowed.includes(expression.args.length)) {

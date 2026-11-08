@@ -11896,10 +11896,24 @@ class TypeScriptParser {
                 replace(pretty);
                 continue;
               }
+              // The value is one this read cannot name — a type parameter, an
+              // `unknown`, a value the link does not hold — so the fields it
+              // writes are the value's own. The call is read as the form it
+              // is, and the resolver refuses the lowering: what the value
+              // holds is not a shape this compiler carries.
+              const deferred: Expression = {
+                k: "call",
+                name: "JSON.stringify.pretty",
+                args: [written, { k: "literal", text: String(indent) }],
+                returns: TEXT_RESULT,
+              };
+              this.expressionTypes.set(deferred, TEXT_RESULT);
+              replace(deferred);
+              continue;
             }
             this.report(
               "JSON.stringify writes a value at an indent",
-              "the value is a record, a list or a dictionary this read can name, and the indent is a number written out",
+              "the indent is a number written out, as in JSON.stringify(value, null, 2)",
               this.peek(),
             );
             return this.hole();
@@ -18720,6 +18734,12 @@ class TypeScriptParser {
      * exactly as the value it spreads is.
      */
     let opaqueSpread = false;
+    /**
+     * The spreads that made the literal opaque, in the order they were
+     * written. A field written beside one is a write into fields this read
+     * cannot name, which the resolver refuses where it lowers the literal.
+     */
+    const opaqueSpreads: Expression[] = [];
     // The shape a field is written at may be a name this module declares — a
     // recursive type writes its own name, as `Node` does inside `children` — and
     // a name is not the record it stands for, so it is resolved here.
@@ -18840,8 +18860,13 @@ class TypeScriptParser {
             // the declaration and copies the fields there.
             const spreadShape = this.shapeOf(spread);
             const unshaped = (spreadShape === null || spreadShape.kind === "any") && unknownReference(this.valueTypeOf(spread));
-            if (unshaped && fields.length === 0) {
+            if (unshaped) {
+              // `{ ...process.env }` is the fields the host holds, and a field
+              // written beside it is a write into a value whose fields this
+              // read cannot name. The literal is read as the form it is, and
+              // the resolver refuses the lowering of a write beside a spread.
               opaqueSpread = true;
+              opaqueSpreads.push(spread);
             } else {
               this.report(
                 "an object spread reads a constant object",
@@ -18932,16 +18957,28 @@ class TypeScriptParser {
     // one of those values: `{ ...process.env }` has the fields the host says,
     // and a field written beside it would be one this read could not place.
     if (opaqueSpread) {
-      if (fields.length > 0) {
-        this.report(
-          "an object spread reads a constant object",
-          "write the fields out, or spread an object the file already wrote as a constant",
-          this.peek(),
-        );
+      if (fields.length === 0) {
+        const marker: Expression = { k: "literal", text: "0" };
+        this.expressionTypes.set(marker, { kind: "ref", of: null });
+        return marker;
       }
-      const marker: Expression = { k: "literal", text: "0" };
-      this.expressionTypes.set(marker, { kind: "ref", of: null });
-      return marker;
+      // A field written beside a value the read does not look inside is a
+      // write into fields this read cannot name: the literal is the spreads
+      // and the writes beside them, and the resolver refuses the lowering.
+      const deferred: Expression = {
+        k: "call",
+        name: "object.spread",
+        args: [
+          ...opaqueSpreads,
+          ...fields.flatMap((field): Expression[] => [
+            { k: "text", parts: [{ k: "text", value: field.name }] },
+            field.value,
+          ]),
+        ],
+        returns: { kind: "ref", of: null },
+      };
+      this.expressionTypes.set(deferred, { kind: "ref", of: null });
+      return deferred;
     }
     // An object literal written at a `Record<string, V>` is the dictionary its
     // type names: each field is one entry of the dictionary, keyed by the name

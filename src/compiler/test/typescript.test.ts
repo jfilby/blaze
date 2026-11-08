@@ -3673,6 +3673,31 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a value the read cannot name is spread and serialized as the form it is", () => {
+  // `{ ...(node as object), name }` and `JSON.stringify(value, null, 2)` where
+  // the value is a type parameter: what the value holds is its own, so the
+  // literal is the spread and the writes beside it and the JSON is the
+  // runtime's. Both are read, and the resolver refuses the lowering where it
+  // lowers the body — the fields of a reference are not a shape it carries.
+  const source = [
+    "function rewrite<T>(node: T, name: string): T {",
+    "  return { ...(node as object), name } as T;",
+    "}",
+    "function serialize(value: unknown): string {",
+    "  return JSON.stringify(value, null, 2);",
+    "}",
+    "export function run(node: object): string {",
+    "  return `${rewrite(node, `x`) as unknown}${serialize(node)}`;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "rewrite")?.handle;
+  assert.ok(handle !== undefined, "rewrite is a function of the module");
+  assert.match(JSON.stringify(handle), /"name":"object.spread"/);
+});
+
 test("a loop over the entries of an untyped value is deferred", () => {
   // A value the read does not type has entries the runtime enumerates: the
   // loop names the key and the value the declaration holds, and the read that

@@ -1481,6 +1481,24 @@ class FunctionBody {
 
   /** A call, or the one builtin that is an operation rather than a call. */
   private call(expression: Expression & { k: "call" }, line: number, expect: Inferred | null = null): Typed {
+    // Two forms the frontend reads and this resolver cannot lower, because
+    // what they need is the shape a value holds at run time rather than the
+    // type a declaration states. A reference is a text, a list or a record
+    // there, and nothing in the reference says which.
+    if (expression.name === "object.spread") {
+      throw this.error(
+        "a spread of a value the read cannot name is not lowered",
+        line,
+        "the fields the value holds are the value's own, and a record is laid out from the fields its source writes; write the fields out at the literal",
+      );
+    }
+    if (expression.name === "JSON.stringify.pretty") {
+      throw this.error(
+        "the JSON of a value the read cannot name is not lowered",
+        line,
+        "a reference is a text, a list or a record when the program runs, and the runtime cannot tell which it is; write the value at a type the read names, or serialize the fields it holds",
+      );
+    }
     // `await v` is the value the promise `v` carries. A value that is not a
     // promise is awaited as itself, and a promise's value is the type the use
     // asks for: a function's body is typed before it is written, so the use is

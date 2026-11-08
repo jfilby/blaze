@@ -1017,6 +1017,44 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hj. A value the read cannot name is spread and serialized as the form it is
+
+    function serializeJson(value: unknown): string {
+      return `${JSON.stringify(value, null, 2)}\n`;
+    }
+
+    function callsRewritten<T>(node: T, ...): T {
+      return { ...(node as object), name: target } as T;
+    }
+
+Two forms write the fields a value holds: an object literal that spreads one and
+writes a field beside it, and a JSON write of one at an indent. Where the value
+is a type parameter — an `unknown`, an `any`, a declaration the link does not
+hold — the fields it writes are the value's own, and neither form was read at
+all.
+
+Both are read now. The literal is the spreads and the writes beside them
+(`object.spread`), and the JSON is the runtime's (`JSON.stringify.pretty`); what
+each answers is the reference the value is and the text the JSON is. The
+resolver refuses the two lowerings, with the reason: a reference is a text, a
+list or a record when the program runs, and nothing in the reference says which
+it is, so the fields of one are not a shape this compiler carries. That is the
+same shape of slice as §4hh — a form a program body reads, whose lowering the
+resolver refuses where it lowers the body — and it is refused rather than
+lowered to a wrong value.
+
+Everything the compiler's own sources write is now read: `core/json-store.ts`
+and `semantics/typescript.ts` are the last two, and the report is
+
+    # self-host: 95 of 95 sources read, 0 refused, 0 refusals
+
+What the two refused lowerings need is one thing: a value that says what it is.
+A tagged reference — a text, a list and a record told apart at run time — is
+what makes both forms lowerable, and it is the foundation the note below on the
+dynamic object still owes.
+
+    The total went from 2 to 0.
+
 ### 4hi. A pair tuple is the record a map reports
 
     byName<V>(entries: Iterable<readonly [string, V]>): Record<string, V> {
@@ -4784,7 +4822,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-2 refusals over 95 sources, 93 of them read whole. The report reads the
+0 refusals over 95 sources, 95 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -5029,6 +5067,7 @@ What was closed this session, and what each was worth:
 | a loop over the entries of an untyped value is deferred (§4hg) | 12 → 10 |
 | a program reads a map from a list, a spread, and a pair callback (§4hh) | 10 → 3 |
 | a pair tuple is the record a map reports (§4hi) | 3 → 2 |
+| a value the read cannot name is spread and serialized as the form it is (§4hj) | 2 → 0 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

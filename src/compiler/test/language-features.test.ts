@@ -5652,3 +5652,38 @@ test("a record keyed by the numbers a source computed holds them", async () => {
   ].join("\n"));
   assert.equal(output.trim(), "7 5");
 });
+
+test("a form the read cannot name is refused where it is lowered", async () => {
+  // A spread of a value the read cannot name, and the JSON of one at an
+  // indent, are read by the frontend — what the value holds is its own — and
+  // refused where the body is lowered: a reference is a text, a list or a
+  // record when the program runs, and nothing in it says which.
+  const cases: readonly (readonly [string, RegExp])[] = [
+    [
+      [
+        "export function rewrite<T>(node: T): T {",
+        "  return { ...(node as object), name: `x` } as T;",
+        "}",
+        "export function f(): number { return rewrite({ a: 1 }) as number; }",
+        "",
+      ].join("\n"),
+      /a spread of a value the read cannot name is not lowered/,
+    ],
+    [
+      [
+        "export function serialize(value: unknown): string {",
+        "  return JSON.stringify(value, null, 2);",
+        "}",
+        "export function f(): string { return serialize(1); }",
+        "",
+      ].join("\n"),
+      /the JSON of a value the read cannot name is not lowered/,
+    ],
+  ];
+  for (const [lib, expected] of cases) {
+    await assert.rejects(
+      () => build('import { f } from "./lib.ts";\nconsole.log(f());\n', "c", { "lib.ts": lib }),
+      expected,
+    );
+  }
+});
