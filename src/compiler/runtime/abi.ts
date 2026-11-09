@@ -6545,8 +6545,18 @@ static int blaze_rt_layout_find(const char* layout, const char* field, size_t* o
   return 0;
 }
 
+/* Whether a value is a pointer a block could be at: a handle of the dynamic
+   registry is a small index, and no allocation is at an address below a page. */
+static int blaze_rt_is_block(double value) {
+  return value > 4096.0 && value < 281474976710656.0;
+}
+
 double blaze_rt_object_copy(double base) {
   if (base == 0.0) return 0.0;
+  if (!blaze_rt_is_block(base)) {
+    blaze_rt_raise("a spread of a value that is not a record");
+    return base;
+  }
   void* object = (void*)(uintptr_t)base;
   const blaze_rt_header* header = blaze_rt_header_of(object);
   void* copy = blaze_rt_object_new(header->length, header->alignment);
@@ -6559,6 +6569,10 @@ double blaze_rt_object_copy(double base) {
    a record is a fixed shape, and a write to a field it does not hold would add
    one no read could find. */
 static unsigned char* blaze_rt_object_field(void* object, const char* field, const char** type) {
+  if (!blaze_rt_is_block((double)(uintptr_t)object)) {
+    blaze_rt_raise("a field written into a value that is not a record");
+    return NULL;
+  }
   const blaze_rt_header* header = blaze_rt_header_of(object);
   size_t offset = 0;
   if (header->descriptor == NULL || !blaze_rt_layout_find(header->descriptor, field, &offset, type)) {
