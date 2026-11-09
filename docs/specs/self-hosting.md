@@ -1017,6 +1017,37 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hv. A pair is a table entry, and the map is the writes it names
+
+    const rows = [[`a`, 1], [`b`, 2]];
+    const m = new Map<string, number>(rows);
+
+`[[key, value], ...]` was a list of two-valued lists, and a compiled list holds
+one element kind, so the literal was refused at the read ("an array holds one
+kind of value"). A bracket pair whose first token is a text is not a list: it is
+an entry of a map (`pairAhead`), and a list whose every element is an entry is
+the table a map is built from. The table is not a program value — a pair has no
+block a homogeneous list could hold — so the name a table is declared under binds
+the *entries*, and the map writes them where it is built.
+
+`new Map(rows)` and `new Map([[key, value], ...])` are therefore the same
+lowering, and both are the chain of writes `dict_set(dict_set(dict_new(), ...))`.
+
+    node:  "2 1 2 false"
+    blaze: "2 1 2 false"     (C and machine)
+
+Two limits are deliberate, and both are the one missing value:
+
+- a **pair list as a program value** — `list.map((x) => [x, 1])`, and the tuples
+  of `iterable.to_array()` — has no block, because an element of a compiled list
+  is one kind and a pair is two values of two kinds;
+- a map's entry is read back as the **number** the dictionary holds, so a text or
+  a reference value written out is refused rather than stored and read as the
+  bits of it. The runtime has `_get_text` and `_get_ref`; what is missing is the
+  map's value kind at the place `get` is written.
+
+    The total stayed at 2.
+
 ### 4hu. A map written out with its entries is the writes they name
 
     const m = new Map<string, number>([[`a`, 1], [`b`, 2]]);
@@ -5383,6 +5414,7 @@ What was closed this session, and what each was worth:
 | a spread of a list the program settles is the block copied (§4hs) | 2 → 2 (lowered) |
 | a list handed to a value the compiler cannot name is its elements (§4ht) | 2 → 2 (fixed) |
 | a map written out with its entries is the writes they name (§4hu) | 2 → 2 (lowered) |
+| a pair is a table entry, and the map is the writes it names (§4hv) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

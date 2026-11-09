@@ -334,6 +334,46 @@ class ProgramParser {
    * can act on.
    */
   /**
+   * Whether the list at the cursor is an entry of a map written out: a list of
+   * exactly two values whose first is a text.
+   */
+  private pairAhead(): boolean {
+    if (!this.at("[")) return false;
+    const tokens = this.tokens;
+    // Where the list ends: the bracket that closes the one at the cursor.
+    let close = -1;
+    let open = 0;
+    for (let at = this.position; at < tokens.length; at += 1) {
+      const token = tokens[at];
+      if (token === undefined || token.kind === "end") break;
+      if (token.kind !== "punct") continue;
+      if (token.text === "[" || token.text === "(" || token.text === "{") open += 1;
+      else if (token.text === "]" || token.text === ")" || token.text === "}") {
+        open -= 1;
+        if (open === 0) { close = at; break; }
+      }
+    }
+    if (close < 0) return false;
+    const first = tokens[this.position + 1];
+    if (first === undefined || first.kind !== "string") return false;
+    let depth = 0;
+    let commas = 0;
+    let after = false;
+    for (let at = this.position + 1; at < close; at += 1) {
+      const token = tokens[at];
+      if (token === undefined) return false;
+      if (token.kind === "punct") {
+        if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
+        else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
+        else if (token.text === "," && depth === 0) { commas += 1; after = true; }
+        continue;
+      }
+      if (after) after = false;
+    }
+    return commas === 1 && !after;
+  }
+
+  /**
    * `[[key, value], ...]`: the entries of a map written out, each pair the two
    * values between its own brackets.
    */
@@ -2831,6 +2871,17 @@ class ProgramParser {
     // A list written with a spread is the parts in order: the list the spread
     // names and the elements written beside it.
     if (values.some((value) => value.k === "spread")) return { k: "concat", parts: values };
+    // A list whose every element is an entry — `[key, value]` — is the entries
+    // of a map written out: a list of pairs, and the value a map is built from.
+    if (values.length > 0 && values.every((value) => value.k === "pair")) {
+      return {
+        k: "pairs",
+        entries: values.map((value) => {
+          const pair = value as ProgramValue & { k: "pair" };
+          return { key: pair.key, value: pair.value };
+        }),
+      };
+    }
     const texts = values.filter((value) => value.k === "text" || value.k === "fixed").length;
     if (texts === values.length && texts > 0) return { k: "words", values };
     if (texts > 0) {
@@ -2854,6 +2905,16 @@ class ProgramParser {
     for (;;) {
       if (this.accept("...")) {
         values.push({ k: "spread", of: this.value() });
+      } else if (this.at("[") && this.pairAhead()) {
+        // `[key, value]` inside a list is an entry of a map written out: the
+        // key is the text the pair starts with and the value is what follows
+        // the comma.
+        this.next();
+        const key = this.value();
+        this.expect(",");
+        const value = this.value();
+        this.expect("]");
+        values.push({ k: "pair", key, value });
       } else {
         values.push(this.value());
       }

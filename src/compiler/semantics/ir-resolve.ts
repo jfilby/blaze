@@ -146,6 +146,17 @@ interface ArrayHeld {
   values: DraftValue[];
 }
 
+/**
+ * A list of the entries a map is written from: each entry is the key and the
+ * value the source wrote between the pair's brackets.
+ */
+interface PairsHeld {
+  kind: "pairs";
+  name: string;
+  mutable: boolean;
+  entries: { key: DraftValue; value: DraftValue }[];
+}
+
 /** A reference to an object one of the compiled functions returned. */
 interface ObjectHeld {
   kind: "object";
@@ -189,7 +200,7 @@ interface ArgvHeld {
 }
 
 /** What a declared name holds. */
-type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld | ArgvHeld;
+type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld | ArgvHeld | PairsHeld;
 
 /** A name as a declaration states it, before it is declared. */
 type WithoutName<T> = T extends unknown ? Omit<T, "name"> : never;
@@ -2642,6 +2653,21 @@ class ProgramResolver {
       return { kind: "declare", name: declared.name, held: declared, value, line: statement.line };
     }
 
+    // A list of pairs is a table the map is built from, not a value the program
+    // holds: the entries are resolved where the source wrote them, and the name
+    // is bound to them so the map that names it can write them.
+    if (statement.value.k === "pairs") {
+      const entries = statement.value.entries.map((entry) => ({
+        key: this.value(entry.key, TEXT, statement.line),
+        value: this.value(entry.value, null, statement.line),
+      }));
+      const declared = this.declareName(statement.name, statement.line, {
+        kind: "pairs",
+        mutable: statement.mutable,
+        entries,
+      });
+      return { kind: "declare", name: declared.name, held: declared, value: { k: "null", type: REF_NULL }, line: statement.line };
+    }
     const value = this.value(statement.value, annotation, statement.line);
     const mutable = statement.mutable;
     // A declaration names the name the program declares, and the value is
@@ -3357,31 +3383,21 @@ class ProgramResolver {
         return { k: "buffer", held };
       }
       case "collection": {
-        // `new Map([[key, value], ...])` is the entries written out: the
-        // dictionary is the writes they name, one after another, and a value is
-        // written as the kind it is — a number, a text or a reference.
-        if (value.source.k === "pairs") {
-          const number: TypeExpr = numeric("f64");
-          let dict = this.draftCall("blaze_rt_dict_new", [], number, line);
-          for (const entry of value.source.entries) {
-            const key = this.value(entry.key, TEXT, line);
-            // A map's entry is one number: the value read back is the number the
-            // dictionary holds, so a value of any other kind would read as the
-            // bits of it. The entries are written as numbers until the read of a
-            // text or a reference says which of the two an entry is.
-            const held = this.value(entry.value, F64, line);
-            if (holdsText(held)) {
-              throw programError(
-                "a map written out holds numbers",
-                this.body,
-                line,
-                `line ${line} of ${this.body.file}: a text value needs the text entry the read does not name yet; set it where the map is declared`,
-              );
-            }
-            dict = this.draftCall("blaze_rt_dict_set", [dict, key, held], number, line);
-          }
-          return dict;
-        }
+        // The entries a map is built from: the pairs written at the map, or the
+        // name a list of pairs was declared under. The dictionary is the writes
+        // they name, one after another.
+        const pairs = value.source.k === "pairs"
+          ? value.source.entries.map((entry) => ({
+              key: this.value(entry.key, TEXT, line),
+              value: this.value(entry.value, null, line),
+            }))
+          : value.source.k === "name"
+            ? (() => {
+                const held = this.held((value.source as ProgramValue & { k: "name" }).name, line);
+                return held.kind === "pairs" ? held.entries : null;
+              })()
+            : null;
+        if (pairs !== null) return this.dictFromEntries(pairs, line);
         throw programError(
           `a ${value.collection} built from a source is not lowered`,
           this.body,
@@ -3462,6 +3478,16 @@ class ProgramResolver {
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
+      }
+      case "pair": {
+        // A pair is an entry of a map written out: the two values have no value
+        // of their own where the source wrote them.
+        throw programError(
+          "a pair is an entry of a map written out",
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: write the entries at the map they fill, as in new Map([[key, value]])`,
+        );
       }
       case "pairs": {
         // A pair is an entry of a map written out: the two values have no value
@@ -3863,6 +3889,29 @@ class ProgramResolver {
       line,
       `line ${line} of ${this.body.file}: a name holding a list, and a call answering one, are the lists a spread joins`,
     );
+  }
+
+  /**
+   * The dictionary a list of entries is: the writes the pairs name, one after
+   * another. An entry is one number — the value read back is the number the
+   * dictionary holds — so a value of another kind is refused.
+   */
+  private dictFromEntries(entries: readonly { key: DraftValue; value: DraftValue }[], line: number): DraftValue {
+    const number: TypeExpr = numeric("f64");
+    let dict = this.draftCall("blaze_rt_dict_new", [], number, line);
+    for (const entry of entries) {
+      const written = draftType(entry.value);
+      if (holdsText(entry.value) || (written !== null && (written.kind === "ref" || written.kind === "ptr"))) {
+        throw programError(
+          "a map written out holds numbers",
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: an entry is read back as the number the dictionary holds, so the entries are numbers`,
+        );
+      }
+      dict = this.draftCall("blaze_rt_dict_set", [dict, entry.key, entry.value], number, line);
+    }
+    return dict;
   }
 
   /** A list copied, as `[...values]` is. */
@@ -5508,6 +5557,9 @@ class ProgramLowering {
     }
     if (held.kind === "object") return { kind: "object", name: held.name, mutable: held.mutable, type: held.type };
     if (held.kind === "argv") return { kind: "value", name: held.name, mutable: held.mutable, type: numeric("f64") };
+    // A list of pairs is a table the map is built from: the name it was declared
+    // under holds no value, and the entries are the reads of the map.
+    if (held.kind === "pairs") return { kind: "value", name: held.name, mutable: held.mutable, type: numeric("f64") };
     return { kind: "value", name: held.name, mutable: held.mutable, type: numeric(held.type ?? "f64") };
   }
 

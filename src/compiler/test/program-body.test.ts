@@ -695,6 +695,27 @@ test("a map written out with its entries is the writes they name", async () => {
   );
 });
 
+test("a list of pairs declared by a name is the entries a map is built from", async () => {
+  // `const rows = [[`a`, 1], [`b`, 2]]; new Map(rows)` is the same map as the
+  // entries written at the constructor: the name holds the table, not a value
+  // the program reads, and the map writes each pair where it is built. A pair
+  // list is not a list of numbers, so it has no block of its own to be.
+  const source = [
+    "const rows = [[`a`, 1], [`b`, 2]];",
+    "const m = new Map<string, number>(rows);",
+    "console.log(m.size, m.get(`a`), m.get(`b`), m.has(`z`));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await program(source, undefined, undefined, {}, backend);
+    const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, sourceRun.stdout);
+    assert.equal(delivered.stdout.trim(), "2 1 2 false", `the ${backend} backend writes the table`);
+  }
+});
+
 test("a map's values are the list the program walks", async () => {
   // `m.values()` lays the dictionary's values down as a block in the order the
   // keys were first written: the runtime answers the block, and the block's

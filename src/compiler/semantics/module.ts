@@ -134,6 +134,8 @@ export type ProgramValue =
    * each pair is the two values the source wrote between its brackets.
    */
   | { k: "pairs"; entries: { key: ProgramValue; value: ProgramValue }[] }
+  /** One entry written between its own brackets, as in `[key, value]`. */
+  | { k: "pair"; key: ProgramValue; value: ProgramValue }
   /** One spread element of a list written with `...`. */
   | { k: "spread"; of: ProgramValue }
   /** A block of bytes the program laid out, which the views over it read. */
