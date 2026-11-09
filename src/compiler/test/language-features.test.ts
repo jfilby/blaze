@@ -5722,6 +5722,41 @@ test("a function called through is a callee, not a closure keyword", async () =>
   assert.equal(output.trim(), "42");
 });
 
+test("a record is an object to typeof, and its fields are the copy's", async () => {
+  // The shape the compiler's own `callsRewritten` is written in: a value the
+  // read cannot name is tested with `typeof` and read by field, and the record
+  // it is answers `object` because the block's header carries its layout. The
+  // field written beside the spread lands in the copy and leaves the base
+  // alone.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface Call { k: string; name: string; args: number[] }",
+    "export function rewriteOne<T>(node: T, source: string, target: string): T {",
+    "  if (node !== null && typeof node === `object`) {",
+    "    const written = node as { k?: unknown; name?: unknown; args?: unknown };",
+    "    if (written.k === `call` && written.name === source && Array.isArray(written.args)) {",
+    "      return { ...(node as object), name: target } as T;",
+    "    }",
+    "  }",
+    "  return node;",
+    "}",
+    "export function demo(): string {",
+    "  const call: Call = { k: `call`, name: `old`, args: [1] };",
+    "  const written = rewriteOne(call, `old`, `new`);",
+    "  return `${written.k === `call` ? written.name : `no`} ${call.name}`;",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "new old", `the ${backend} backend rewrites the copy`);
+  }
+});
+
 test("a spread of a value the read cannot name is a record with a field written", async () => {
   // `{ ...(node as object), name }` is the record `node` copied, with the one
   // written field set at the offset and kind the record's layout states. The

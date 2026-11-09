@@ -5546,7 +5546,18 @@ double blaze_rt_is_array(double value) {
 }
 const char* blaze_rt_type_of(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
-  if (!d) return value >= 4096.0 ? "string" : "number";
+  if (!d) {
+    // A record this compiler laid out is a block whose header carries its
+    // layout, and it is the object typeof names. A text is a block too, and
+    // one with no layout is a text or a list: neither is a record, so the
+    // answer stays the string a pointer is. A number is a value no block holds.
+    if (value >= 4096.0) {
+      const blaze_rt_header* header = (const blaze_rt_header*)((const char*)(uintptr_t)value - BLAZE_RT_HEADER_SIZE);
+      if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) return "object";
+      return "string";
+    }
+    return "number";
+  }
   if (d->kind == BLAZE_DYN_NUMBER) return "number";
   if (d->kind == BLAZE_DYN_BOOL) return "boolean";
   if (d->kind == BLAZE_DYN_TEXT) return "string";

@@ -1042,8 +1042,16 @@ of a `_set_list` as the pointer it is rather than boxing it. A literal that
 spreads two values the read cannot name is still refused: it is a merge of the
 fields both hold, which a copy of one record cannot express.
 
-    The total stayed at 0; a spread with a field written beside it now compiles
-    on C and on the machine backend.
+`typeof` of a value the read cannot name now answers `object` for a record: the
+block's header carries its layout, and a block that carries one is the object the
+language names — before this, `typeof <record>` answered `string`, because the
+runtime asked the registry of dynamic values and a compiled record is not in it.
+With that, the shape the compiler's own `callsRewritten` is written in compiles
+and computes: `typeof node === "object"`, the fields read through the cast the
+source wrote, `Array.isArray(args)`, and the spread that rewrites one field.
+
+    The total stayed at 0; a spread with a field written beside it, and a
+    spread behind a `typeof`, now compile on C and on the machine backend.
 
 ### 4hl. A function called `through` is a callee, not a closure keyword
 
