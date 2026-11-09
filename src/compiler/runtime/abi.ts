@@ -1102,6 +1102,11 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["object"] },
   ),
   entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry("blaze_rt_object_copy", "double", [["value", "double"]], "Copies a record.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_text", "double", [["object", "double"], ["field", "const char*"], ["value", "const char*"]], "Writes a text into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_ref", "double", [["object", "double"], ["field", "const char*"], ["value", "double"]], "Writes a reference into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_list", "double", [["object", "double"], ["field", "const char*"], ["value", "const void*"]], "Writes a list into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_number", "double", [["object", "double"], ["field", "const char*"], ["value", "double"]], "Writes a number into a field of a record, at the width the field states.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
   entry(
     "blaze_rt_json_object",
     "const char*",
@@ -6502,6 +6507,130 @@ const char* blaze_rt_json_object(double value, double indent) {
   const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
   free(build.text);
   return written;
+}
+
+/* A record copied, and a field of it written.
+
+   A spread with a field written beside it is a record with one field replaced: the fields the value
+   already holds are the block's payload, and the layout its header carries says
+   where the one written field sits and what it holds. The copy keeps the
+   layout, so the value reads through the same shape the base did. */
+
+static int blaze_rt_layout_find(const char* layout, const char* field, size_t* offset, const char** type) {
+  const char* at = layout;
+  while (at != NULL && at[0] != '\\0') {
+    const char* name = at;
+    at += strlen(at) + 1;
+    const size_t found = (size_t)strtoul(at, NULL, 10);
+    at += strlen(at) + 1;
+    const char* kind = at;
+    at += strlen(at) + 1;
+    if (strcmp(name, field) == 0) {
+      *offset = found;
+      *type = kind;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+double blaze_rt_object_copy(double base) {
+  if (base == 0.0) return 0.0;
+  void* object = (void*)(uintptr_t)base;
+  const blaze_rt_header* header = blaze_rt_header_of(object);
+  void* copy = blaze_rt_object_new(header->length, header->alignment);
+  memcpy(copy, object, header->length);
+  blaze_rt_header_of(copy)->descriptor = header->descriptor;
+  return (double)(uintptr_t)copy;
+}
+
+/* The address of a field, refused where the record was not laid out with it:
+   a record is a fixed shape, and a write to a field it does not hold would add
+   one no read could find. */
+static unsigned char* blaze_rt_object_field(void* object, const char* field, const char** type) {
+  const blaze_rt_header* header = blaze_rt_header_of(object);
+  size_t offset = 0;
+  if (header->descriptor == NULL || !blaze_rt_layout_find(header->descriptor, field, &offset, type)) {
+    blaze_rt_raise("a field the record was not laid out with");
+    return NULL;
+  }
+  return (unsigned char*)object + offset;
+}
+
+double blaze_rt_object_set_text(double target, const char* field, const char* value) {
+  if (target == 0.0) return target;
+  void* object = (void*)(uintptr_t)target;
+  const char* type = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &type);
+  if (at == NULL) return target;
+  if (strcmp(type, "text") != 0) {
+    blaze_rt_raise("a text written into a field that does not hold one");
+    return target;
+  }
+  memcpy(at, &value, sizeof value);
+  return target;
+}
+
+double blaze_rt_object_set_ref(double target, const char* field, double value) {
+  if (target == 0.0) return target;
+  void* object = (void*)(uintptr_t)target;
+  const char* type = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &type);
+  if (at == NULL) return target;
+  if (strcmp(type, "text") == 0) {
+    blaze_rt_raise("a reference written into a field that holds a text");
+    return target;
+  }
+  void* pointer = (void*)(uintptr_t)value;
+  memcpy(at, &pointer, sizeof pointer);
+  return target;
+}
+
+double blaze_rt_object_set_list(double target, const char* field, const void* value) {
+  if (target == 0.0) return target;
+  void* object = (void*)(uintptr_t)target;
+  const char* type = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &type);
+  if (at == NULL) return target;
+  if (strncmp(type, "slice<", 6) != 0) {
+    blaze_rt_raise("a list written into a field that does not hold one");
+    return target;
+  }
+  memcpy(at, &value, sizeof value);
+  return target;
+}
+
+double blaze_rt_object_set_number(double target, const char* field, double value) {
+  if (target == 0.0) return target;
+  void* object = (void*)(uintptr_t)target;
+  const char* type = NULL;
+  unsigned char* at = blaze_rt_object_field(object, field, &type);
+  if (at == NULL) return target;
+  switch (blaze_rt_layout_size(type)) {
+    case 1: {
+      if (strcmp(type, "bool") == 0) { const unsigned char written = value != 0.0 ? 1 : 0; memcpy(at, &written, 1); break; }
+      if (type[0] == 'u') { const uint8_t written = (uint8_t)value; memcpy(at, &written, 1); break; }
+      const int8_t signed_written = (int8_t)value; memcpy(at, &signed_written, 1);
+      break;
+    }
+    case 2: {
+      if (type[0] == 'u') { const uint16_t written = (uint16_t)value; memcpy(at, &written, 2); break; }
+      const int16_t signed_written = (int16_t)value; memcpy(at, &signed_written, 2);
+      break;
+    }
+    case 4: {
+      if (strcmp(type, "f32") == 0) { const float written = (float)value; memcpy(at, &written, 4); break; }
+      if (type[0] == 'u') { const uint32_t written = (uint32_t)value; memcpy(at, &written, 4); break; }
+      const int32_t signed_written = (int32_t)value; memcpy(at, &signed_written, 4);
+      break;
+    }
+    default: {
+      if (type[0] == 'u') { const uint64_t written = (uint64_t)value; memcpy(at, &written, 8); break; }
+      memcpy(at, &value, sizeof value);
+      break;
+    }
+  }
+  return target;
 }
 
 double blaze_rt_json_get(double obj, const char* field) {

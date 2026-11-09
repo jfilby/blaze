@@ -18967,22 +18967,48 @@ class TypeScriptParser {
         return marker;
       }
       // A field written beside a value the read does not look inside is a
-      // write into fields this read cannot name: the literal is the spreads
-      // and the writes beside them, and the resolver refuses the lowering.
-      const deferred: Expression = {
-        k: "call",
-        name: "object.spread",
-        args: [
-          ...opaqueSpreads,
-          ...fields.flatMap((field): Expression[] => [
+      // record with one field replaced: the block is copied, and each written
+      // field is set at the offset and kind the record's layout states. A
+      // literal that spreads two such values would be a merge of two records,
+      // which a copy of one cannot express.
+      const spread = opaqueSpreads[0] as Expression;
+      if (opaqueSpreads.length > 1) {
+        this.report(
+          "an object spread reads a constant object",
+          "write the fields out, or spread one value the file already wrote as a constant",
+          this.peek(),
+        );
+        return this.hole();
+      }
+      const result = (): Expression => {
+        const call: Expression = { k: "call", name: "object.copy", args: [spread], returns: { kind: "ref", of: null } };
+        this.expressionTypes.set(call, { kind: "ref", of: null });
+        return call;
+      };
+      let written = result();
+      for (const field of fields) {
+        const held = this.valueTypeOf(field.value);
+        const kind = held.kind === "text"
+          ? "text"
+          : held.kind === "slice" || held.kind === "array"
+            ? "list"
+            : held.kind === "primitive" || held.kind === "mask"
+              ? "number"
+              : "ref";
+        const call: Expression = {
+          k: "call",
+          name: `object.set.${kind}`,
+          args: [
+            written,
             { k: "text", parts: [{ k: "text", value: field.name }] },
             field.value,
-          ]),
-        ],
-        returns: { kind: "ref", of: null },
-      };
-      this.expressionTypes.set(deferred, { kind: "ref", of: null });
-      return deferred;
+          ],
+          returns: { kind: "ref", of: null },
+        };
+        this.expressionTypes.set(call, { kind: "ref", of: null });
+        written = call;
+      }
+      return written;
     }
     // An object literal written at a `Record<string, V>` is the dictionary its
     // type names: each field is one entry of the dictionary, keyed by the name

@@ -396,6 +396,21 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_view_load_float((const unsigned char*)(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_view_store_float":
       return `blaze_rt_view_store_float((unsigned char*)(${args[0]}), ${args[1]}, ${args[2]}, ${args[3]})`;
+    // A record copied, and a field of it written: `{ ...node, name }` is the
+    // block of `node` copied, with the one written field set at the offset and
+    // kind the record's layout states. The copy keeps the layout, so the value
+    // reads through the shape the base did, and the answer is the handle a
+    // reference is carried in.
+    case "object.copy":
+      return `((double)(uintptr_t)${RUNTIME_NAME}_object_copy(${args[0]}))`;
+    case "object.set.text":
+      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_text(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "object.set.ref":
+      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_ref(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "object.set.list":
+      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_list(${args[0]}, ${args[1]}, ${args[2]}))`;
+    case "object.set.number":
+      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_number(${args[0]}, ${args[1]}, ${args[2]}))`;
     // The JSON of a value the compiler cannot name is the walk of the record
     // the value is: the block's header carries the layout it was laid out
     // with, and the answer is a managed text.

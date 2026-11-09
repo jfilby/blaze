@@ -5722,19 +5722,41 @@ test("a function called through is a callee, not a closure keyword", async () =>
   assert.equal(output.trim(), "42");
 });
 
-test("a spread of a value the read cannot name is refused where it is lowered", async () => {
-  // `{ ...(node as object), name }` writes a field into a value whose fields
-  // are its own: a copy of a record at run time, which needs a value that says
-  // what it is. It is refused where the body is lowered, with the reason.
-  const lib = [
-    "export function rewrite<T>(node: T): T {",
-    "  return { ...(node as object), name: `x` } as T;",
-    "}",
-    "export function f(): number { return rewrite({ a: 1 }) as number; }",
+test("a spread of a value the read cannot name is a record with a field written", async () => {
+  // `{ ...(node as object), name }` is the record `node` copied, with the one
+  // written field set at the offset and kind the record's layout states. The
+  // copy keeps the layout, so the value reads through the shape the base did,
+  // and the base is untouched: a text, a number, a reference and a list are
+  // each written the way the field holds them.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
     "",
   ].join("\n");
-  await assert.rejects(
-    () => build('import { f } from "./lib.ts";\nconsole.log(f());\n', "c", { "lib.ts": lib }),
-    /a spread of a value the read cannot name is not lowered/,
-  );
+  const lib = [
+    "interface Child { n: number }",
+    "interface Node { k: string; name: string; count: number; child: Child; args: number[] }",
+    "export function renamed<T>(node: T, name: string): T {",
+    "  return { ...(node as object), name } as T;",
+    "}",
+    "export function rethought<T>(node: T, name: string, count: number, child: Child, args: number[]): T {",
+    "  return { ...(node as object), name, count, child, args } as T;",
+    "}",
+    "export function demo(): string {",
+    "  const child: Child = { n: 5 };",
+    "  const node: Node = { k: `call`, name: `old`, count: 3, child, args: [1] };",
+    "  const renamedNode = renamed(node, `new`);",
+    "  const rethoughtNode = rethought(node, `n2`, 9, { n: 6 }, [7, 8]);",
+    "  return [",
+    "    `${renamedNode.k} ${renamedNode.name} ${renamedNode.count} ${renamedNode.child.n} ${renamedNode.args.length}`,",
+    "    `${rethoughtNode.name} ${rethoughtNode.count} ${rethoughtNode.child.n} ${rethoughtNode.args[1]}`,",
+    "    `${node.name} ${node.count} ${node.child.n} ${node.args.length}`,",
+    "  ].join(`; `);",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), "call new 3 5 1; n2 9 6 8; old 3 5 1", `the ${backend} backend writes the fields`);
+  }
 });

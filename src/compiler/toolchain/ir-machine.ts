@@ -10545,6 +10545,25 @@ class Machine {
     // `JSON.stringify.pretty(value, n)` is the JSON of a record the compiler
     // cannot name: the block's layout is what the walk reads, and the answer is
     // the text it built.
+    // A record copied, and a field of it written: the runtime copies the block
+    // the handle names and sets the field the layout describes. Every argument
+    // is a number the handle is carried in but the field's name, which is text.
+    if (call.callee === "object.copy" || call.callee.startsWith("object.set.")) {
+      const held: Held[] = [];
+      for (const [at, argument] of call.args.entries()) {
+        const type = call.argTypes[at] ?? argument.type;
+        const carries = isTextType(type) || isSequence(type) ? POINTER : NUMBER;
+        // An unshaped reference is a double here, exactly as it is when a
+        // promise settles a value.
+        const target = type.kind === "ref" && type.of === null && type.name === undefined ? NUMBER : type;
+        const slot = this.hold(carries, "blaze_spread");
+        this.at(argument, target);
+        this.store(slot);
+        held.push(slot);
+      }
+      this.callSymbol(`blaze_rt_${call.callee.replace(/\./g, "_")}`, held, NUMBER);
+      return;
+    }
     if (call.callee === "JSON.stringify.pretty") {
       const held = this.hold(NUMBER, "blaze_json_value");
       // An unshaped reference is a double here, exactly as it is when a

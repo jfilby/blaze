@@ -1754,6 +1754,11 @@ proc blaze_last_error*(): cstring {.exportc, cdecl.} =
 proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
+proc blaze_rt_object_copy*(base: float64): float64 {.exportc, cdecl.} = base
+proc blaze_rt_object_set_text*(target: float64, field, value: cstring): float64 {.exportc, cdecl.} = target
+proc blaze_rt_object_set_ref*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target
+proc blaze_rt_object_set_number*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target
+proc blaze_rt_object_set_list*(target: float64, field: cstring, value: pointer): float64 {.exportc, cdecl.} = target
   ## The JSON of a record at an indent is written by the C runtime a module's
   ## functions link; a program driver passes its values to no module.
 proc blaze_rt_parse_int*(text: cstring, radix: float64): float64 {.exportc, cdecl.} = 0.0

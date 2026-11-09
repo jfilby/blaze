@@ -1017,6 +1017,34 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hm. A spread of a value the read cannot name is a record with a field written
+
+    function callsRewritten<T>(node: T, source: string, target: string): T {
+      ...
+      return { ...(node as object), name: target } as T;
+    }
+
+The last form the compiler's own sources write and the compiler could not lower.
+`{ ...(node as object), name }` is a record with one field replaced, and the
+layout the block carries (§4hk) says where the field sits and what it holds:
+
+- `blaze_rt_object_copy` copies the block, its payload and its layout, so the
+  copy reads through the same shape the base did;
+- `blaze_rt_object_set_text`, `_set_ref`, `_set_list` and `_set_number` write one
+  field of the copy at the offset and kind the layout names, refusing a field the
+  record was not laid out with and a value the field does not hold;
+- the frontend emits the copy and one write per field written beside the spread,
+  each chosen by the value's type, so a text, a reference, a list and a number
+  are each written the way the field holds them. The base is untouched.
+
+Both backends lower the four services, and the machine backend passes the list
+of a `_set_list` as the pointer it is rather than boxing it. A literal that
+spreads two values the read cannot name is still refused: it is a merge of the
+fields both hold, which a copy of one record cannot express.
+
+    The total stayed at 0; a spread with a field written beside it now compiles
+    on C and on the machine backend.
+
 ### 4hl. A function called `through` is a callee, not a closure keyword
 
     export function through(n: number): number { return n + 1; }
@@ -5125,6 +5153,7 @@ What was closed this session, and what each was worth:
 | a value the read cannot name is spread and serialized as the form it is (§4hj) | 2 → 0 |
 | the JSON of a record is the layout its block carries (§4hk) | 0 → 0 (lowered) |
 | a function called `through` is a callee (§4hl) | 0 → 0 |
+| a spread of a value the read cannot name is a record with a field written (§4hm) | 0 → 0 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

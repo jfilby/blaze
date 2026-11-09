@@ -259,6 +259,18 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  it was laid out with, and the document is written from it at the indent
    *  the source asked for. */
   "JSON.stringify.pretty": { params: [ANY, F64], returns: TEXT, arity: 2 },
+  /** A record copied: the spread of a value the compiler cannot name is the
+   *  copy of its block, and each field written beside it is set on the copy at
+   *  the offset and kind the record's layout states. The copy keeps the layout,
+   *  so the value reads through the shape the base did. */
+  "object.copy": { params: [ANY], returns: ANY, arity: 1 },
+  "object.set.text": { params: [ANY, TEXT, TEXT], returns: ANY, arity: 3 },
+  "object.set.ref": { params: [ANY, TEXT, ANY], returns: ANY, arity: 3 },
+  "object.set.number": { params: [ANY, TEXT, F64], returns: ANY, arity: 3 },
+  /** A list written into a field is the pointer to its block: an untyped
+   *  reference would box it into a dynamic value, and the block is already the
+   *  list the field holds. */
+  "object.set.list": { params: [ANY, TEXT, { kind: "slice", of: ANY }], returns: ANY, arity: 3 },
   /** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
   "Number.parseInt": { params: [ANY, F64], returns: F64, arity: 2 },
   /** `String.fromCodePoint(n)` is the text of the one code point it names. */

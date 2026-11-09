@@ -3673,6 +3673,21 @@ test("the entries of a map read as a value are a list of pairs", () => {
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
 });
 
+test("a spread of two values the read cannot name is refused", () => {
+  // A literal that spreads two records would be a merge of the fields both
+  // hold, which a copy of one record cannot express: the read refuses it
+  // rather than copying one and dropping the other.
+  const source = [
+    "export function f(a: unknown, b: unknown): unknown {",
+    "  return { ...(a as object), ...(b as object), x: 1 };",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 1);
+  assert.match(read.refused[0]?.message ?? "", /an object spread reads a constant object/);
+});
+
 test("a value the read cannot name is spread and serialized as the form it is", () => {
   // `{ ...(node as object), name }` and `JSON.stringify(value, null, 2)` where
   // the value is a type parameter: what the value holds is its own, so the
@@ -3695,7 +3710,9 @@ test("a value the read cannot name is spread and serialized as the form it is", 
   assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
   const handle = read.analysis.functions.find((entry) => entry.name === "rewrite")?.handle;
   assert.ok(handle !== undefined, "rewrite is a function of the module");
-  assert.match(JSON.stringify(handle), /"name":"object.spread"/);
+  // The literal is the block copied and the one field set on the copy.
+  assert.match(JSON.stringify(handle), /"name":"object.set.text"/);
+  assert.match(JSON.stringify(handle), /"name":"object.copy"/);
 });
 
 test("a loop over the entries of an untyped value is deferred", () => {
