@@ -641,6 +641,30 @@ test("console.error writes its values to the error stream", async () => {
   assert.equal(delivered.stderr, sourceRun.stderr);
 });
 
+test("a map's values are the list the program walks", async () => {
+  // `m.values()` lays the dictionary's values down as a block in the order the
+  // keys were first written: the runtime answers the block, and the block's
+  // header states how many values it holds, so the program holds it as a list
+  // and walks it. A map is written with `set` and read with `get`, `has` and
+  // `size`, which are the dictionary calls the handle answers.
+  const source = [
+    "const m = new Map<string, number>();",
+    "m.set(`a`, 1);",
+    "m.set(`b`, 2);",
+    "m.set(`a`, 4);",
+    "let sum = 0;",
+    "for (const v of m.values()) sum += v;",
+    "console.log(m.size, sum, m.get(`a`), m.has(`c`));",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(delivered.stdout.trim(), "2 6 4 false");
+});
+
 test("a program holds the list a call answered", async () => {
   // A list a module function hands back is a block and a length: the call
   // states the pointer, and the block's own header states how many elements

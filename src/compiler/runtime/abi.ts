@@ -1212,6 +1212,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_dict_values", "double*", [["dict", "double"]], "Lays a dictionary's values down as a block.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
   entry("blaze_rt_dict_key_at", "const char*", [["dict", "double"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
   entry("blaze_rt_dict_value_at", "double", [["dict", "double"], ["index", "double"]], "Reads the value of one entry of a dictionary by its position.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
   entry("blaze_rt_dict_value_at_ref", "double", [["dict", "double"], ["index", "double"]], "Reads the reference held by one entry of a dictionary by its position.", "Returns the reference, or zero when the position names no entry.", { tags: ["object"] }),
@@ -4518,6 +4519,19 @@ static blaze_rt_dict* blaze_rt_dict_of(double handle) {
   }
   blaze_rt_raise("a dictionary handle that the runtime did not create");
   return NULL;
+}
+
+/* The values of a dictionary, laid down as a block in the order the keys were
+   first written. A program reads the entries of a map by walking this: the
+   header of the block states how many there are, and the block is the list the
+   program holds. */
+double* blaze_rt_dict_values(double dict) {
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
+  const size_t count = d == NULL ? 0 : d->count;
+  double* values = (double*)blaze_rt_allocate(count * sizeof(double));
+  if (values == NULL) blaze_rt_raise("out of memory");
+  for (size_t at = 0; at < count; at += 1) values[at] = d->entries[at].value;
+  return values;
 }
 
 static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key) {

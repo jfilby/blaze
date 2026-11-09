@@ -815,6 +815,20 @@ ${anchor}
         // The message of the failure is a text, and a program holds a text as
         // the string it is.
         return `$blaze_last_error()`;
+      case "blaze_rt_dict_get":
+        return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_dict_set":
+        return `${RUNTIME_NAME}_dict_set(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+      case "blaze_rt_dict_has":
+        return `${RUNTIME_NAME}_dict_has(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_dict_delete":
+        return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_dict_len":
+        return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
+      case "map.values":
+        // The block the runtime lays the dictionary's values down in: a list a
+        // program holds as the pointer its header measures.
+        return `cast[float64](cast[uint](${RUNTIME_NAME}_dict_values(${argument(0)})))`;
       case "process.stderr.write":
         // The error stream is the runtime's own, and the call answers nothing.
         return `(${RUNTIME_NAME}_print_error_text(${argument(0)}); 0.0)`;

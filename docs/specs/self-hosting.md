@@ -1017,6 +1017,33 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hr. A map's values are the list the program walks
+
+    let sum = 0;
+    for (const v of m.values()) sum += v;
+
+`m.values()` is now a value a program holds. The runtime lays the dictionary's
+values down as a block, in the order the keys were first written
+(`blaze_rt_dict_values`, C and Nim), and the block's header states how many there
+are — so the resolver holds it as the sequence §4hq added, and a `for-of` walks
+it. An empty map is a block of no elements, and a key written twice keeps the
+place it first took.
+
+The program body's map methods are now the whole set: `set` and `get` were
+missing (only `add`/`has`/`delete`/`size` were left from the set slice), and both
+drivers now lower `blaze_rt_dict_set`/`_get` as well as `_has`/`_delete`/`_len`.
+
+    node:  "2 6 4 false"     (size, sum of values, get, has)
+    blaze: "2 6 4 false"     (C and machine)
+
+Still open on the same path: `new Map(<a list of pairs>)` writes each entry into
+a dictionary handle from a list of *pair records*, and a program list holds
+numbers and texts but not a record of two fields, so a pair is not a value the
+program body can build yet; and `[...m.values()]` needs the spread to join a
+block at the length its header carries (`array.join`), which is the next service.
+
+    The total stayed at 2.
+
 ### 4hq. A program holds the list a call answered
 
     const xs = numbers();
@@ -5258,6 +5285,7 @@ What was closed this session, and what each was worth:
 | a value the read cannot settle is refused, not lowered as a zero (§4hn) | 0 → 2 |
 | a list written with a spread is the list of its parts (§4hp) | 2 → 2 (lowered) |
 | a program holds the list a call answered (§4hq) | 2 → 2 (lowered) |
+| a map's values are the list the program walks (§4hr) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

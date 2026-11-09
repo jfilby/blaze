@@ -298,6 +298,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "array.get": { params: [ANY, USIZE], returns: F64, arity: 2 },
   /** `a.length` where `a` is a dynamic array: how many elements it holds. */
   "array.length": { params: [ANY], returns: USIZE, arity: 1 },
+  /** The values of a map, laid down as the list a program holds: the runtime
+   *  answers the block, and the block's header states how many there are. */
+  "map.values": { params: [ANY], returns: { kind: "slice", of: F64 }, arity: 1 },
   "fetch": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   /** `http.request(url, method, headers, body)` performs one request synchronously,
    * and `http.request(url, options, callback)` opens a buffered request whose

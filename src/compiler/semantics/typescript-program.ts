@@ -1534,6 +1534,18 @@ class ProgramParser {
           : [{ k: "name", name: object } as ProgramValue, methodArgs[0] as ProgramValue];
         return { kind: "invoke", function: functionName, args, line: name.line };
       }
+      if (collection === "map" && method === "set") {
+        return {
+          kind: "invoke",
+          function: "blaze_rt_dict_set",
+          args: [
+            { k: "name", name: object } as ProgramValue,
+            methodArgs[0] as ProgramValue,
+            methodArgs[1] as ProgramValue,
+          ],
+          line: name.line,
+        };
+      }
       if (collection === "map" && (method === "get" || method === "has" || method === "delete")) {
         const functionName = method === "get" ? "blaze_rt_dict_get" : method === "has" ? "blaze_rt_dict_has" : "blaze_rt_dict_delete";
         return {
@@ -1953,6 +1965,20 @@ class ProgramParser {
             value = member === "has"
               ? { k: "binary", op: "!==", left: called, right: { k: "number", text: "0" } }
               : called;
+            continue;
+          }
+          if (kind === "map" && member === "values" && this.at("(")) {
+            this.next();
+            const args = this.arguments();
+            if (args.length !== 0) this.fail("a map's values takes no argument", this.peek());
+            value = { k: "call", function: "map.values", args: [value] };
+            continue;
+          }
+          if (kind === "map" && member === "set" && this.at("(")) {
+            this.next();
+            const args = this.arguments();
+            if (args.length !== 2) this.fail("a map's set takes the key and the value", this.peek());
+            value = { k: "call", function: "blaze_rt_dict_set", args: [value, args[0] as ProgramValue, args[1] as ProgramValue] };
             continue;
           }
           if (kind === "map" && (member === "get" || member === "has" || member === "delete")) {

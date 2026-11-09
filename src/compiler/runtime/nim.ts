@@ -1284,6 +1284,17 @@ proc blaze_rt_dict_has*(dict: float64, key: cstring): float64 {.exportc, cdecl.}
   if at < 0 or key == nil: return 0.0
   if blazeDictFind(at, $key) >= 0: 1.0 else: 0.0
 
+proc blaze_rt_dict_values*(dict: float64): ptr float64 {.exportc, cdecl.} =
+  ## Lays a dictionary's values down as a block, in the order the keys were
+  ## first written. The block's header states how many values it holds.
+  let at = blazeDictIndex(dict)
+  let count = if at < 0: 0 else: blazeDynValues[at].entries.len
+  let values = cast[ptr UncheckedArray[float64]](blaze_rt_allocate(csize_t(count * sizeof(float64))))
+  if values != nil:
+    for position in 0 ..< count:
+      values[position] = blazeDynValues[at].entries[position][1]
+  cast[ptr float64](values)
+
 proc blaze_rt_dict_set*(dict: float64, key: cstring, value: float64): float64 {.exportc, cdecl.} =
   ## A value written under a key, and the dictionary handed back. A key the
   ## dictionary already holds is written over where it stands, so the count of

@@ -1152,6 +1152,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_len":
         return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
+      case "blaze_rt_dict_get":
+        return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
+      case "map.values":
+        return `${RUNTIME_NAME}_dict_values(${argument(0)})`;
       case "http.serve":
         return `({ void *blaze_http_srv = blaze_http_server_new(NULL, (uint16_t)${argument(0)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.serveSettings":
