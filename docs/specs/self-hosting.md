@@ -1017,6 +1017,43 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hn. A value the read cannot settle is refused, not lowered as a zero
+
+    for (const [name, candidates] of Object.entries(await store.read<...>(path))) { ... }
+
+The read was taken to zero partly by deferring a loop over the entries of a value
+it could not name (§4hg). The deferral was not lowered by anything: the
+entries of the value became the dictionary the loop walked, and the loop asked a
+record for its size as a dictionary —
+
+    double count(double x) {
+      double invariant1 = blaze_rt_dict_len(blaze_rt_to_number(x));
+      ...
+
+— which answered the count of a value that was not a dictionary. The compiler's
+own `callsRewritten` tail, `Object.fromEntries(Object.entries(node).map(...))`,
+compiled to a zero, the program read a field of it, and the binary segfaulted
+(`node` prints "outer new", the delivered program died). The refusal was raised
+where the construct is written, but it went to a diagnostic set that was not the
+declaration's, so the declaration was kept with a value that had no meaning
+behind it.
+
+Two things are fixed, and one is paid for:
+
+- **the entries of a value the read cannot name are refused** with the construct
+  that writes them: an entry is a key and a value of two types, and no value this
+  compiler holds is both. `compiler.ts` and `incremental.ts` refuse again;
+- **a value the read could not settle cannot reach a body.** It used to be the
+  literal zero, which no reader can tell from a zero the source wrote; it is now
+  a call to a name no resolver knows, carrying the line it is written on, and
+  `semantics/ir-function.ts` refuses it with that line. Every refusal that was
+  lost on the way to the declaration's diagnostics now names the construct
+  instead of leaving a zero behind — the `callsRewritten` tail reports
+  "a construct outside the subset the compiler reads reached the body" and which
+  line, and no binary is delivered.
+
+    The total went from 0 to 2, and both are the honest number.
+
 ### 4hm. A spread of a value the read cannot name is a record with a field written
 
     function callsRewritten<T>(node: T, source: string, target: string): T {
@@ -4913,7 +4950,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-0 refusals over 95 sources, 95 of them read whole. The report reads the
+2 refusals over 95 sources, 93 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -5162,6 +5199,7 @@ What was closed this session, and what each was worth:
 | the JSON of a record is the layout its block carries (§4hk) | 0 → 0 (lowered) |
 | a function called `through` is a callee (§4hl) | 0 → 0 |
 | a spread of a value the read cannot name is a record with a field written (§4hm) | 0 → 0 (lowered) |
+| a value the read cannot settle is refused, not lowered as a zero (§4hn) | 0 → 2 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

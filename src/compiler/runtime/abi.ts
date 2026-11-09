@@ -4482,8 +4482,42 @@ static blaze_rt_dict* blaze_rt_dict_alloc(void) {
   return d;
 }
 
+/* The dictionaries this runtime has handed out.
+
+   A handle is the address of a dictionary carried as the number a value is, and
+   a value that was never handed out is not one: a record read through this
+   service was read as a dictionary whose count sat where a field was, and
+   an iteration over a value the compiler had not settled answered a size out of
+   whatever the block happened to hold. A handle is checked against the ones
+   this runtime made, and anything else is refused here rather than followed. */
+static blaze_rt_dict** blaze_rt_dict_registry = NULL;
+static size_t blaze_rt_dict_count = 0;
+static size_t blaze_rt_dict_capacity = 0;
+
 double blaze_rt_dict_new(void) {
-  return (double)(uintptr_t)blaze_rt_dict_alloc();
+  blaze_rt_dict* d = blaze_rt_dict_alloc();
+  if (d == NULL) return 0.0;
+  if (blaze_rt_dict_count + 1 >= blaze_rt_dict_capacity) {
+    const size_t capacity = blaze_rt_dict_capacity ? blaze_rt_dict_capacity * 2 : 64;
+    blaze_rt_dict** grown = realloc(blaze_rt_dict_registry, capacity * sizeof(blaze_rt_dict*));
+    if (grown == NULL) return (double)(uintptr_t)d;
+    blaze_rt_dict_registry = grown;
+    blaze_rt_dict_capacity = capacity;
+  }
+  blaze_rt_dict_registry[blaze_rt_dict_count] = d;
+  blaze_rt_dict_count += 1;
+  return (double)(uintptr_t)d;
+}
+
+/** The dictionary a handle names, refused where the runtime never made one. */
+static blaze_rt_dict* blaze_rt_dict_of(double handle) {
+  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)handle;
+  if (d == NULL) return NULL;
+  for (size_t index = 0; index < blaze_rt_dict_count; index += 1) {
+    if (blaze_rt_dict_registry[index] == d) return d;
+  }
+  blaze_rt_raise("a dictionary handle that the runtime did not create");
+  return NULL;
 }
 
 static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key) {
@@ -4494,7 +4528,7 @@ static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key
 }
 
 double blaze_rt_dict_get(double dict, const char* key) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0; /* NaN */
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
   if (e == NULL) return 0.0 / 0.0; /* NaN */
@@ -4502,13 +4536,13 @@ double blaze_rt_dict_get(double dict, const char* key) {
 }
 
 double blaze_rt_dict_has(double dict, const char* key) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0;
   return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
 }
 
 double blaze_rt_dict_set(double dict, const char* key, double value) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
   if (e != NULL) { e->value = value; return (double)(uintptr_t)d; }
@@ -4528,13 +4562,13 @@ double blaze_rt_dict_set(double dict, const char* key, double value) {
 }
 
 double blaze_rt_dict_len(double dict) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL) return 0.0;
   return (double)d->count;
 }
 
 double blaze_rt_dict_delete(double dict, const char* key) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
   if (e == NULL) return (double)(uintptr_t)d;

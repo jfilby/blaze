@@ -5722,6 +5722,45 @@ test("a function called through is a callee, not a closure keyword", async () =>
   assert.equal(output.trim(), "42");
 });
 
+test("the entries of a value the read cannot name are refused, not lowered", async () => {
+  // `Object.fromEntries(Object.entries(node).map(...))` over a value the read
+  // cannot name used to compile: the entries became a zero, the program read a
+  // field of it, and it segfaulted. The construct is refused where it is
+  // written, and a value the read could not settle cannot reach the body — the
+  // build says which line, and no binary is delivered.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface Child { k: string; name: string }",
+    "interface Node { k: string; name: string; child: Child }",
+    "export function rewriteAll<T>(node: T, source: string, target: string): T {",
+    "  if (node !== null && typeof node === `object`) {",
+    "    const written = node as { k?: unknown; name?: unknown };",
+    "    if (written.k === `call` && written.name === source) {",
+    "      return { ...(node as object), name: target } as T;",
+    "    }",
+    "    return Object.fromEntries(",
+    "      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, rewriteAll(entry, source, target)]),",
+    "    ) as T;",
+    "  }",
+    "  return node;",
+    "}",
+    "export function demo(): string {",
+    "  const node: Node = { k: `record`, name: `outer`, child: { k: `call`, name: `old` } };",
+    "  const written = rewriteAll(node, `old`, `new`);",
+    "  return `${written.name} ${written.child.name}`;",
+    "}",
+    "",
+  ].join("\n");
+  await assert.rejects(
+    () => build(source, "c", { "lib.ts": lib }),
+    /a construct outside the subset the compiler reads reached the body/,
+  );
+});
+
 test("a record is an object to typeof, and its fields are the copy's", async () => {
   // The shape the compiler's own `callsRewritten` is written in: a value the
   // read cannot name is tested with `typeof` and read by field, and the record

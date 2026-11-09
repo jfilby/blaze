@@ -1481,6 +1481,18 @@ class FunctionBody {
 
   /** A call, or the one builtin that is an operation rather than a call. */
   private call(expression: Expression & { k: "call" }, line: number, expect: Inferred | null = null): Typed {
+    // A value the read could not settle. The read refuses the construct where
+    // it is written; this is where a refusal that did not survive in the
+    // declaration's trial becomes one the build reports, rather than a zero the
+    // program reads a field of.
+    if (expression.name.startsWith("__refused_")) {
+      const at = Number(expression.name.slice("__refused_".length));
+      throw this.error(
+        "a construct outside the subset the compiler reads reached the body",
+        line,
+        `the construct on line ${at} of the source was refused, and the value it writes is not one this compiler has`,
+      );
+    }
     // `await v` is the value the promise `v` carries. A value that is not a
     // promise is awaited as itself, and a promise's value is the type the use
     // asks for: a function's body is typed before it is written, so the use is

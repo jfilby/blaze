@@ -4060,8 +4060,18 @@ class TypeScriptParser {
   }
 
   /** A value standing in for one the parser could not read. */
+  /**
+   * A value the read could not settle.
+   *
+   * It is a call to a name no resolver knows, carrying the line it is written
+   * on, rather than the zero it used to be: a body that kept one — because the
+   * refusal it came from was raised while another set of diagnostics was in
+   * hand — was lowered as a zero, and the program read a field of it. The
+   * resolver refuses the name, so a value with no meaning behind it cannot
+   * reach a binary.
+   */
   private hole(): Expression {
-    return { k: "literal", text: "0" };
+    return { k: "call", name: `__refused_${this.peek().line}`, args: [], returns: ANY_TYPE };
   }
 
   private missing(message: string, token: Token = this.peek()): Expression {
@@ -11733,8 +11743,7 @@ class TypeScriptParser {
             // the declaration holds, and the read that follows a link types
             // them. A collection source is deferred only while its imports are
             // pending, because `Object.fromEntries` reads its argument here.
-            ((this.readingIteration && !this.readingCollectionSource && (this.pendingHolds(source) || this.opaqueValue(source))) ||
-              (this.readingCollectionSource && this.importsArePending() && (this.pendingHolds(source) || this.opaqueValue(source))))
+            (this.importsArePending() && (this.pendingHolds(source) || this.opaqueValue(source)))
           ) {
             const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
             const unlinked: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE };
@@ -11744,6 +11753,20 @@ class TypeScriptParser {
             this.deferred.add(entries);
             replace(entries);
             continue;
+          }
+          // A value this read cannot name has entries the runtime would have
+          // to enumerate: an entry is a key and a value of two types, and no
+          // value this compiler holds is both. It is refused here rather than
+          // lowered, because the lowering that treated it as a dictionary
+          // answered the size of a value that was not one — an answer written
+          // into a program that then read what was never there.
+          if (source !== undefined && this.opaqueValue(source) && !this.importsArePending()) {
+            this.report(
+              "the entries of a value the read cannot name are not a value this compiler holds",
+              "an entry is a key and a value of two types; write the fields out, or read the entries of a map the program builds",
+              this.peek(),
+            );
+            return this.hole();
           }
           this.report(
             "Object.entries reads a record or a map in a loop that names the two values",

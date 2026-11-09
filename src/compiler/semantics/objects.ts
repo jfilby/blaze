@@ -405,6 +405,11 @@ class BodyTypes {
           const inferred = bigIntInferred(expression.args[0]);
           if (inferred !== null) return { kind: "type", type: inferred };
         }
+        // A value the read could not settle: it is a reference here, and the
+        // resolver refuses the name with the line it is written on.
+        if (expression.name.startsWith("__refused_")) {
+          return { kind: "type", type: ANY_REF };
+        }
         const builtin = builtinFor(expression.name);
         if (builtin !== null) {
           const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];

@@ -3715,11 +3715,12 @@ test("a value the read cannot name is spread and serialized as the form it is", 
   assert.match(JSON.stringify(handle), /"name":"object.copy"/);
 });
 
-test("a loop over the entries of an untyped value is deferred", () => {
-  // A value the read does not type has entries the runtime enumerates: the
-  // loop names the key and the value the declaration holds, and the read that
-  // follows a link is what types them. A value the read *does* type is the
-  // record or map whose entries are read here.
+test("the entries of a value the read cannot name are refused", () => {
+  // An entry is a key and a value of two types, and no value this compiler
+  // holds is both: a loop over the entries of a value the read cannot name
+  // asked a value that was not a dictionary for its size, and the program ran
+  // with what it answered. It is refused where it is written instead. A value
+  // the read *does* type is the record or map whose entries are read here.
   const source = [
     "export function walk(value: unknown): number {",
     "  let n = 0;",
@@ -3728,7 +3729,9 @@ test("a loop over the entries of an untyped value is deferred", () => {
     "}",
     "",
   ].join("\n");
-  assert.deepEqual(readTypeScriptModule(source, "module.ts", false).refused, []);
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 1);
+  assert.match(read.refused[0]?.message ?? "", /the entries of a value the read cannot name are not a value this compiler holds/);
 });
 
 test("a module-level number is a cell the functions share", () => {
