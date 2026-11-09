@@ -1017,6 +1017,35 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hq. A program holds the list a call answered
+
+    const xs = numbers();
+    for (const x of xs) sum += x;
+
+A program's list was a block the program laid out and a length the emitter kept
+beside it. A list a module function answers was therefore not a value the program
+could hold: the call states one pointer, the resolver refused "a program cannot
+hold slice, and a length of one was a length nothing had. This is the foundation
+`new Map(source)`, `map.values()` and `[...list.map(cb)]` were all behind.
+
+A list a call answers is now held the way the language means it: the block the
+call handed back, and the length its own header states. The resolver binds the
+name as an array; the program emitter emits the block and the header-measured
+length (`ProgramTarget.sequence`), so the name reads its length, its elements
+and walks in a `for-of`. The call's answer is owned by the caller and released
+where the block ends — a slice a call answers is a block the callee laid out.
+
+    node:  "3 6 3 2 p"     (numbers() and words() across the module boundary)
+    blaze: "3 6 3 2 p"     (C and machine)
+
+What still does not follow is the rest of that chain: `map.values()` needs a
+runtime service that lays a dictionary's values down as a block, `list.map(cb)`
+needs a loop that calls the callback per element, and `new Map(list)` needs the
+entries written from a list of pair records. `offline-build.ts` is written in all
+three, so its program body still refuses them; its *read* is unaffected.
+
+    The total stayed at 2.
+
 ### 4hp. A list written with a spread is the list of its parts
 
     const all = [0, ...a, 3, 4];
@@ -5228,6 +5257,7 @@ What was closed this session, and what each was worth:
 | a spread of a value the read cannot name is a record with a field written (§4hm) | 0 → 0 (lowered) |
 | a value the read cannot settle is refused, not lowered as a zero (§4hn) | 0 → 2 |
 | a list written with a spread is the list of its parts (§4hp) | 2 → 2 (lowered) |
+| a program holds the list a call answered (§4hq) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

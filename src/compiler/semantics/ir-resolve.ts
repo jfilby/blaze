@@ -2792,6 +2792,23 @@ class ProgramResolver {
         if (value.call.returns.kind === "ref" || value.call.returns.kind === "ptr") {
           return declare({ kind: "object", mutable, type: value.call.returns });
         }
+        // A list a call answers is the block the call handed back: a program
+        // holds it as a name with a length, and the length is the one the
+        // block's header carries, so the elements are read at the width the
+        // return type states.
+        if (value.call.returns.kind === "slice" || value.call.returns.kind === "array") {
+          // A list a call answers is the block the call handed back: a program
+          // holds it as a name with a length, and the length is the one the
+          // block's header carries, so the elements are read at the width the
+          // return type states.
+          return declare({
+            kind: "array",
+            mutable,
+            element: value.call.returns.of,
+            length: null,
+            values: [],
+          });
+        }
         throw programError(
           `${value.call.name} returns ${contractText(value.call.returns)}`,
           this.body,
@@ -4979,6 +4996,9 @@ function draftHasCall(value: DraftValue): boolean {
 function ownership(returns: SemanticType): "none" | "borrowed" | "owned" {
   if (returns.kind === "ref") return "owned";
   if (returns.kind === "ptr") return "borrowed";
+  // A list a call answers is the block the caller is handed: the callee laid it
+  // out, and the name the program binds it to is what frees it.
+  if (returns.kind === "slice" || returns.kind === "array") return "owned";
   return "none";
 }
 
@@ -5409,6 +5429,10 @@ class ProgramLowering {
         // middle of a block, which is not a block at all.
         if (allocated && written !== null && written.k !== "view") this.own(slot.name);
         if (value.k === "newObject") this.own(slot.name);
+        // A list a call answered is the caller's to free: the callee laid it
+        // out, and the name the block binds it to releases it where the block
+        // ends.
+        if (slot.kind === "buffer" && value.k === "call" && isSequence(value.type)) this.own(slot.name);
         this.statement({ k: "let", slot, value: held, line: statement.line });
         return;
       }

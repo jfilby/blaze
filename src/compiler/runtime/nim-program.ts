@@ -537,6 +537,16 @@ ${anchor}
     return [`const ${name}_length = ${length}`, `var ${name} = ${source}`];
   }
 
+  sequence(name: string, element: SemanticType, pointer: string): string[] {
+    // A list a call answered: the block the call handed back, and the length
+    // its header carries.
+    const written = elementNim(contractType(element));
+    return [
+      `var ${name} = cast[${bufferNimType(written)}](${pointer})`,
+      `const ${name}_length = csize_t(${RUNTIME_NAME}_object_size(${name})) div ${elementSize(contractType(element))}`,
+    ];
+  }
+
   element(buffer: string, index: string): string {
     return `${buffer}[${index}]`;
   }

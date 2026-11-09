@@ -686,6 +686,18 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     return [`const size_t ${name}_length = ${length};`, `${written}* ${name} = ${source};`];
   }
 
+  sequence(name: string, element: SemanticType, pointer: string): string[] {
+    // A list a call answered: the block is the one the call handed back, and
+    // the length is the one its header carries — the call states a pointer and
+    // no count, and a module function lays its answer down at the bytes its
+    // header measures.
+    const written = declaredType(element);
+    return [
+      `${written}* ${name} = (${written}*)(${pointer});`,
+      `const size_t ${name}_length = (size_t)(${RUNTIME_NAME}_object_size(${name}) / sizeof(${written}));`,
+    ];
+  }
+
   element(buffer: string, index: string): string {
     return `${buffer}[${index}]`;
   }

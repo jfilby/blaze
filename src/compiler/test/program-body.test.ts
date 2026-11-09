@@ -597,8 +597,14 @@ const LANGUAGE = [
 ].join("\n");
 
 /** Builds a program of one entry module, and returns the binary it delivers. */
-async function program(source: string, runtime?: "nim", mode?: BuildMode): Promise<{ directory: string; binary: string }> {
+async function program(
+  source: string,
+  runtime?: "nim",
+  mode?: BuildMode,
+  files: Record<string, string> = {},
+): Promise<{ directory: string; binary: string }> {
   const directory = await scratch("blaze-program-");
+  for (const [name, text] of Object.entries(files)) await writeFile(join(directory, name), text, "utf8");
   await writeFile(join(directory, "main.ts"), source, "utf8");
   await writeProject(join(directory, "blaze.toml"), {
     language: "typescript",
@@ -633,6 +639,39 @@ test("console.error writes its values to the error stream", async () => {
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, sourceRun.stdout);
   assert.equal(delivered.stderr, sourceRun.stderr);
+});
+
+test("a program holds the list a call answered", async () => {
+  // A list a module function hands back is a block and a length: the call
+  // states the pointer, and the block's own header states how many elements
+  // it holds. The program names it, reads its length, reads its elements and
+  // walks it — the list is a value the program holds, not one it allocates.
+  const source = [
+    'import { numbers, words } from "./lib.ts";',
+    "const xs = numbers();",
+    "const ws = words();",
+    "let sum = 0;",
+    "for (const x of xs) sum += x;",
+    "console.log(xs.length, sum, xs[2], ws.length, ws[0]);",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function numbers(): number[] {",
+    "  const a: number[] = [1, 2, 3];",
+    "  return a;",
+    "}",
+    "export function words(): string[] {",
+    "  const a: string[] = [`p`, `q`];",
+    "  return a;",
+    "}",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source, undefined, undefined, { "lib.ts": lib });
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(delivered.stdout.trim(), "3 6 3 2 p");
 });
 
 test("a list written with a spread is the list of its parts", async () => {

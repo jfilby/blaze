@@ -151,6 +151,11 @@ export interface ProgramTarget {
   fill(name: string, index: string, element: SemanticType, value: string): string[];
   /** The lines that name a buffer another name already holds. */
   alias(name: string, element: SemanticType, source: string, length: string): string[];
+  /**
+   * The lines that name a list a call answered: the block the call handed back
+   * and the length its header carries.
+   */
+  sequence(name: string, element: SemanticType, pointer: string): string[];
   /** One element of a buffer. */
   element(buffer: string, index: string): string;
   /** The line that changes what a name holds. */
@@ -831,6 +836,13 @@ class ProgramEmitter {
       return;
     }
     if (slot.kind === "buffer") {
+      // A list a call answered: the block the call handed back, with the length
+      // its header carries. A call states one pointer and no count, and a
+      // module function lays its answer down at the bytes its header measures.
+      if (value.k === "call" && isSequence(value.type)) {
+        for (const line of this.target.sequence(name, slot.element, this.expression(value))) this.write(line);
+        return;
+      }
       // `const b = a` names the same array again, as the language means it.
       if (value.k === "local" && isSequence(value.type)) {
         for (const line of this.target.alias(
