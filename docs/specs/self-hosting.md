@@ -1017,6 +1017,33 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hp. A list written with a spread is the list of its parts
+
+    const all = [0, ...a, 3, 4];
+    const more = [...words, `z`];
+
+The program body refused every list written with a spread (§4hh read it, and the
+resolver refused the lowering). A spread is now folded where the parts' elements
+are written down: a list literal, and a name declared from one — which is where
+the block a program lays out comes from — are joined into the one block the
+source asked for, at the length the parts are, and a list of texts joins to a
+list of texts. A list whose length the program settles when it runs is refused
+with that reason, because a block is laid out at a length the source states and
+nothing states this one.
+
+A text element read out of a program's list is also printable now: `console.log`
+allowed a primitive and a literal, and a text element's type is neither, so
+`console.log(more[2])` was refused as a buffer.
+
+What a spread *cannot* join yet is the list a call answers: `.map(...)`,
+`map.values()` and a spread of either are values the program model does not hold
+— a list reaches a program as a block and a length, and a call answers neither.
+That is the same gap `new Map(source)` is behind, and `offline-build.ts` is
+written in it: `new Map(contracts.map(([name, contract]) => [name, ...]))`,
+`[...resolvedByName.values()]`.
+
+    The total stayed at 2.
+
 ### 4hn. A value the read cannot settle is refused, not lowered as a zero
 
     for (const [name, candidates] of Object.entries(await store.read<...>(path))) { ... }
@@ -5200,6 +5227,7 @@ What was closed this session, and what each was worth:
 | a function called `through` is a callee (§4hl) | 0 → 0 |
 | a spread of a value the read cannot name is a record with a field written (§4hm) | 0 → 0 (lowered) |
 | a value the read cannot settle is refused, not lowered as a zero (§4hn) | 0 → 2 |
+| a list written with a spread is the list of its parts (§4hp) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

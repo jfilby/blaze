@@ -635,6 +635,52 @@ test("console.error writes its values to the error stream", async () => {
   assert.equal(delivered.stderr, sourceRun.stderr);
 });
 
+test("a list written with a spread is the list of its parts", async () => {
+  // `[0, ...a, 3]` is one list: the elements of every part, in the order they
+  // are written. Where each part's elements are written down — a list literal,
+  // and a name declared from one — the list is written down at the length the
+  // parts are, so the block the program lays out is the block the source asked
+  // for. A list whose length the program settles when it runs is refused, not
+  // guessed at.
+  const source = [
+    "const a = [1, 2];",
+    "const b = [0, ...a, 3, 4];",
+    "const words = [`x`, `y`];",
+    "const more = [...words, `z`];",
+    "const written = [...[7, 8], 9];",
+    "console.log(b.length, b[3], more.length, more[2], written[1]);",
+    "",
+  ].join("\n");
+  const { directory, binary } = await program(source);
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(delivered.stdout.trim(), "5 3 3 z 8");
+});
+
+test("a spread of a list whose length the program settles is refused", () => {
+  // The length of a list the program fills when it runs is not a length the
+  // read can write down, and a block is laid out at the length the source
+  // states. The construct is refused where it is written rather than joined at
+  // a length nothing settled.
+  assert.match(
+    diagnostic(() =>
+      resolved({
+        "main.ts": [
+          "const n = 3;",
+          "const a = new Array(n);",
+          "a[0] = 1;",
+          "const b = [...a, 2];",
+          "console.log(b.length);",
+          "",
+        ].join("\n"),
+      }),
+    ),
+    /a spread joins a list whose length the program settles when it runs/,
+  );
+});
+
 test("a program's set is one handle on the runtime's dictionary", async () => {
   // `new Set<string>()` is the empty dictionary, `add` writes one value, `has`
   // asks whether one is there, `delete` removes it and `size` counts what is

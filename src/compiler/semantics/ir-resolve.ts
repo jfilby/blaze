@@ -3348,12 +3348,46 @@ class ProgramResolver {
         );
       }
       case "concat": {
-        throw programError(
-          "a list written with a spread is not lowered",
-          this.body,
-          line,
-          `line ${line} of ${this.body.file}: write the elements out, or build the list where the source is a value the program holds`,
-        );
+        // `[...a, x, ...b]` is one list: the elements of every part, in the
+        // order they are written. Where each part's elements are written down —
+        // a list literal, and a name whose list was written out — the list is
+        // written down here, at the length the parts are, and the block is the
+        // block the source asked for.
+        const values: DraftValue[] = [];
+        let element: TypeExpr | null = null;
+        for (const part of value.parts) {
+          if (part.k !== "spread") {
+            values.push(this.value(part, element, line));
+            if (element === null) element = draftType(values[values.length - 1] as DraftValue) ?? numeric("f64");
+            continue;
+          }
+          const spread = this.value(part.of, null, line);
+          const held = spread.k === "buffer"
+            ? spread.held
+            : spread.k === "reference" && spread.held.kind === "array"
+              ? spread.held
+              : null;
+          if (held === null || held.length === null || held.values.length !== held.length) {
+            throw programError(
+              "a spread joins a list whose length the program settles when it runs",
+              this.body,
+              line,
+              `line ${line} of ${this.body.file}: a list written out, and a name declared from one, are the lists a spread can join`,
+            );
+          }
+          if (element === null) element = held.element;
+          values.push(...held.values);
+        }
+        const held: ArrayHeld = {
+          kind: "array",
+          name: "",
+          mutable: false,
+          element: element ?? numeric("f64"),
+          length: values.length,
+          values,
+        };
+        if (expect !== null) this.expectArray(expect, held, line);
+        return { k: "buffer", held };
       }
       case "spread": {
         throw programError(
@@ -4809,7 +4843,8 @@ class ProgramResolver {
     // A number and a truth are what a console.log prints, however they were
     // computed: a value of a primitive type is one of them, and a literal is a
     // number no use has fixed the type of yet.
-    if (value.k === "literal" || draftType(value)?.kind === "primitive") return;
+    const printed = value.k === "literal" ? null : draftType(value);
+    if (value.k === "literal" || printed?.kind === "primitive" || printed?.kind === "text") return;
     // A field read is printed as whatever the field holds, and a reference is
     // one the driver prints as `null` or as the object behind it. The field's
     // own type is the layout's, so this is the same question the printed
