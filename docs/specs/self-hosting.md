@@ -1017,6 +1017,21 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hl. A function called `through` is a callee, not a closure keyword
+
+    export function through(n: number): number { return n + 1; }
+
+The IR text writes a call through a closure as `through <value> [arg[...] ...]`,
+and the reader takes a leading `through` as that keyword. A function the source
+calls `through` writes `through [arg[...] ...]`, which the reader then refused
+with "expected a value" — a function of the program could not survive the round
+trip the review makes. An argument list opens with `arg`, and a value never
+does, so the reader now looks past the word: `[arg` is a callee named `through`
+and anything else is the closure keyword.
+
+    The total stayed at 0, and a build that names a function `through` now
+    reaches its binary.
+
 ### 4hk. The JSON of a record is the layout its block carries
 
     export function serializeJson(value: unknown): string {
@@ -5109,6 +5124,7 @@ What was closed this session, and what each was worth:
 | a pair tuple is the record a map reports (§4hi) | 3 → 2 |
 | a value the read cannot name is spread and serialized as the form it is (§4hj) | 2 → 0 |
 | the JSON of a record is the layout its block carries (§4hk) | 0 → 0 (lowered) |
+| a function called `through` is a callee (§4hl) | 0 → 0 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

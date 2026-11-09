@@ -1443,7 +1443,11 @@ class IrScanner {
   call(returns: SemanticType): SemanticCall {
     // A call through a closure names no callee: the value is what is called,
     // and the signature is built from the arguments the call is written with.
-    if (this.peekWord() === "through") {
+    // A function of the program may itself be called `through`, and its call is
+    // written `through [arg[...] ...]`: an argument list opens with `arg` where
+    // the value a closure call is made through never does, so the two are told
+    // apart rather than by renaming the function.
+    if (this.peekWord() === "through" && !this.namesCalleeThrough()) {
       this.keyword("through");
       const through = this.value();
       const argTypes: SemanticType[] = [];
@@ -1531,6 +1535,16 @@ class IrScanner {
   }
 
   /** Whether a bracketed list still holds a value, which is how a list ends. */
+  /** Whether the `through` at the cursor names a callee rather than a close. */
+  private namesCalleeThrough(): boolean {
+    const start = this.at;
+    this.keyword("through");
+    this.skip();
+    const named = this.peek() === "[" && this.text.slice(this.at + 1, this.at + 4) === "arg";
+    this.at = start;
+    return named;
+  }
+
   private more(): boolean {
     this.skip();
     return this.peek() !== "" && this.peek() !== "]";

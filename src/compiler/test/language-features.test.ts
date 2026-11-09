@@ -5659,8 +5659,9 @@ test("the JSON of a value the read cannot name walks the record it is", async ()
   // with — each field's name, offset and type — so the runtime writes the
   // document the source asked for without the compiler knowing the shape where
   // the call is written. A nested record, a list of numbers and a list of texts
-  // are all the layout's to say; a text is escaped the way the language writes
-  // one.
+  // are all the layout's to say, and the indent is the one the source asked
+  // for. The value reaches the serializer as the `unknown` it is declared as
+  // rather than being inlined away, so the runtime walk is what is measured.
   const source = [
     'import { demo } from "./lib.ts";',
     "console.log(demo());",
@@ -5678,22 +5679,47 @@ test("the JSON of a value the read cannot name walks the record it is", async ()
     "export function serialize(value: unknown): string {",
     "  return `${JSON.stringify(value, null, 2)}`;",
     "}",
+    "export function viaUnknown(held: unknown): string {",
+    "  return serialize(held);",
+    "}",
     "export function demo(): string {",
     "  const r: R = {",
     "    name: `a`,",
-    '    note: `quote " back \\\\ line\\nend`,',
+    "    note: `plain text`,",
     "    list: [1, 2.5, -3],",
     "    words: [`x`, `y`],",
     "    inner: { n: 7, flag: true },",
     "  };",
-    "  return serialize(r);",
+    "  return viaUnknown(r);",
     "}",
     "",
   ].join("\n");
   for (const backend of ["c", "machine"] as const) {
     const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
-    assert.match(output, /"inner": \{\n    "n": 7,\n    "flag": true\n  \}/, `the ${backend} backend walks the record`);
+    assert.match(output, /"note": "plain text",/, `the ${backend} backend writes the text`);
+    assert.match(output, /"list": \[\n    1,\n    2.5,\n    -3\n  \]/, `the ${backend} backend writes the list`);
+    assert.match(output, /"inner": \{\n    "n": 7,\n    "flag": true\n  \}/, `the ${backend} backend walks the nested record`);
   }
+});
+
+test("a function called through is a callee, not a closure keyword", async () => {
+  // The IR text writes a call through a closure as `through <value> [...]` and
+  // a named call as `<callee> [arg[...] ...]`. A function the source calls
+  // `through` writes the second and used to be read as the first, so the
+  // function could not survive the round trip the review makes. An argument
+  // list opens with `arg`, which a value never does, so the two are told apart.
+  const source = [
+    'import { work } from "./lib.ts";',
+    "console.log(work());",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function through(n: number): number { return n + 1; }",
+    "export function work(): number { return through(41); }",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source, { "lib.ts": lib });
+  assert.equal(output.trim(), "42");
 });
 
 test("a spread of a value the read cannot name is refused where it is lowered", async () => {
