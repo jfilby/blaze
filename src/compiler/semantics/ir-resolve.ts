@@ -3357,11 +3357,36 @@ class ProgramResolver {
         return { k: "buffer", held };
       }
       case "collection": {
+        // `new Map([[key, value], ...])` is the entries written out: the
+        // dictionary is the writes they name, one after another, and a value is
+        // written as the kind it is — a number, a text or a reference.
+        if (value.source.k === "pairs") {
+          const number: TypeExpr = numeric("f64");
+          let dict = this.draftCall("blaze_rt_dict_new", [], number, line);
+          for (const entry of value.source.entries) {
+            const key = this.value(entry.key, TEXT, line);
+            // A map's entry is one number: the value read back is the number the
+            // dictionary holds, so a value of any other kind would read as the
+            // bits of it. The entries are written as numbers until the read of a
+            // text or a reference says which of the two an entry is.
+            const held = this.value(entry.value, F64, line);
+            if (holdsText(held)) {
+              throw programError(
+                "a map written out holds numbers",
+                this.body,
+                line,
+                `line ${line} of ${this.body.file}: a text value needs the text entry the read does not name yet; set it where the map is declared`,
+              );
+            }
+            dict = this.draftCall("blaze_rt_dict_set", [dict, key, held], number, line);
+          }
+          return dict;
+        }
         throw programError(
           `a ${value.collection} built from a source is not lowered`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: the frontend reads the construction; walking the source's entries is not a value the program holds yet`,
+          `line ${line} of ${this.body.file}: a map built from a list the program settles when it runs needs the entries written out, as in new Map([[key, value]])`,
         );
       }
       case "concat": {
@@ -3437,6 +3462,16 @@ class ProgramResolver {
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
+      }
+      case "pairs": {
+        // A pair is an entry of a map written out: the two values have no value
+        // of their own where the source wrote them.
+        throw programError(
+          "a pair is an entry of a map written out",
+          this.body,
+          line,
+          `line ${line} of ${this.body.file}: write the entries at the map they fill, as in new Map([[key, value]])`,
+        );
       }
       case "spread": {
         throw programError(
@@ -3832,19 +3867,18 @@ class ProgramResolver {
 
   /** A list copied, as `[...values]` is. */
   private listCopy(value: DraftValue, element: TypeExpr, line: number): DraftValue {
-    return this.listCall("array.copy", [value], element, line);
+    return this.draftCall("array.copy", [value], { kind: "slice", of: element }, line);
   }
 
   /** Two lists joined, as `[...a, ...b]` is. */
   private listJoin(left: DraftValue, right: DraftValue, element: TypeExpr, line: number): DraftValue {
-    return this.listCall("array.join", [left, right], element, line);
+    return this.draftCall("array.join", [left, right], { kind: "slice", of: element }, line);
   }
 
-  /** A call that answers the block a list operation makes. */
-  private listCall(name: string, args: DraftValue[], element: TypeExpr, line: number): DraftValue {
+  /** A call that answers what its builtin says it answers. */
+  private draftCall(name: string, args: DraftValue[], returns: TypeExpr, line: number): DraftValue {
     const builtin = builtinFor(name);
     if (builtin === null) throw programError(`${name} is not a call this compiler makes`, this.body, line);
-    const returns: TypeExpr = { kind: "slice", of: element };
     return {
       k: "call",
       call: {

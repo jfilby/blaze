@@ -129,6 +129,11 @@ export type ProgramValue =
   | { k: "collection"; collection: "map" | "set"; source: ProgramValue }
   /** A list written with a spread, as in `[...values, last]`. */
   | { k: "concat"; parts: ProgramValue[] }
+  /**
+   * The entries of a map written out, as in `new Map([[`a`, 1], [`b`, 2]])`:
+   * each pair is the two values the source wrote between its brackets.
+   */
+  | { k: "pairs"; entries: { key: ProgramValue; value: ProgramValue }[] }
   /** One spread element of a list written with `...`. */
   | { k: "spread"; of: ProgramValue }
   /** A block of bytes the program laid out, which the views over it read. */

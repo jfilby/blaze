@@ -1152,6 +1152,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_len":
         return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
+      case "blaze_rt_dict_set_text":
+        return `${RUNTIME_NAME}_dict_set_text(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+      case "blaze_rt_dict_set_ref":
+        return `${RUNTIME_NAME}_dict_set_ref(${argument(0)}, ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_dict_get":
         return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
       case "map.values":

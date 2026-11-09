@@ -1102,7 +1102,16 @@ class ProgramEmitter {
       if (call.signature.params[index]?.type === "boxedtext" && argument.k === "local") {
         argumentsText.push(this.names.read(argument.name));
       } else {
-        argumentsText.push(this.target.argument(type, this.expression(argument, type)));
+        // A reference handed to a service the compiler provides is the double
+        // the C ABI carries it in, whatever the lowering: the program driver is
+        // C in both builds, and only a *function* the machine backend lowered
+        // holds a reference in a register as the pointer it is.
+        const text = this.expression(argument, type);
+        const dynamic = type !== null && type.kind === "ref" && type.of === null && type.name === undefined;
+        const boxed = call.builtin && dynamic && isReferenced(argument.type)
+          ? `((double)(uintptr_t)(${text}))`
+          : this.target.argument(type, text);
+        argumentsText.push(boxed);
       }
       // A callee's array parameter carries its length beside it, so pass the
       // length of this argument as the hidden parameter that follows it.

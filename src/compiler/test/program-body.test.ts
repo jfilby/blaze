@@ -670,6 +670,31 @@ test("a list written with a spread of a map's values is the values", async () =>
   }
 });
 
+test("a map written out with its entries is the writes they name", async () => {
+  // `new Map([[key, value], ...])` is the entries written out: the dictionary is
+  // the writes the pairs name, one after another, so the map holds what the
+  // source wrote without a list of pairs having to exist first. A value of any
+  // other kind than a number is refused, because an entry is read back as the
+  // number the dictionary holds.
+  const source = [
+    "const m = new Map<string, number>([[`a`, 1], [`b`, 2]]);",
+    "console.log(m.size, m.get(`a`), m.get(`b`), m.has(`z`));",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await program(source, undefined, undefined, {}, backend);
+    const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, sourceRun.stdout);
+    assert.equal(delivered.stdout.trim(), "2 1 2 false", `the ${backend} backend writes the entries`);
+  }
+  assert.match(
+    diagnostic(() => resolved({ "main.ts": "const m = new Map<string, string>([[`a`, `one`]]);\nconsole.log(m.size);\n" })),
+    /a map written out holds numbers/,
+  );
+});
+
 test("a map's values are the list the program walks", async () => {
   // `m.values()` lays the dictionary's values down as a block in the order the
   // keys were first written: the runtime answers the block, and the block's

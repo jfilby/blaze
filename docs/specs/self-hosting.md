@@ -1017,6 +1017,33 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hu. A map written out with its entries is the writes they name
+
+    const m = new Map<string, number>([[`a`, 1], [`b`, 2]]);
+
+`new Map(<a source>)` threw in the resolver: a list of pairs was a list of two
+values of two types, which a compiled list does not hold. The entries written out
+are now read as the pairs the source wrote (`[[key, value], ...]`), and the map is
+the writes they name — `dict_set(dict_set(dict_new(), "a", 1), "b", 2)` — so no
+list of pairs has to exist for the map to be built. A name's `set` and `get` were
+also missing from the program body's maps (§4hr), and both are closed now.
+
+A **number** is the value an entry of a map written out can hold: the entry is read
+back as the number the dictionary holds, so a text or a reference value would read
+as the bits of it. Those are refused with that reason until the read knows which
+of the two an entry is — `blaze_rt_dict_get_text` and `_get_ref` exist, and what is
+missing is the map's value kind at the place `get` is written.
+
+    node:  "2 1 2 false"     (size, get, get, has)
+    blaze: "2 1 2 false"     (C and machine)
+
+A map built from a list the program settles when it runs — `new Map(rows.map(cb))`
+— is still refused: the list a call answers is a block of numbers and texts, and a
+pair record has no block a pair list can hold. That is `list.map(cb)` and the pair
+value, the next slice; `offline-build.ts` is written in it.
+
+    The total stayed at 2.
+
 ### 4ht. A list handed to a value the compiler cannot name is its elements
 
     export function report(value: unknown): string {
@@ -5355,6 +5382,7 @@ What was closed this session, and what each was worth:
 | a map's values are the list the program walks (§4hr) | 2 → 2 (lowered) |
 | a spread of a list the program settles is the block copied (§4hs) | 2 → 2 (lowered) |
 | a list handed to a value the compiler cannot name is its elements (§4ht) | 2 → 2 (fixed) |
+| a map written out with its entries is the writes they name (§4hu) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

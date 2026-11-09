@@ -815,6 +815,10 @@ ${anchor}
         // The message of the failure is a text, and a program holds a text as
         // the string it is.
         return `$blaze_last_error()`;
+      case "blaze_rt_dict_set_text":
+        return `${RUNTIME_NAME}_dict_set_text(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+      case "blaze_rt_dict_set_ref":
+        return `${RUNTIME_NAME}_dict_set_ref(${argument(0)}, ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_dict_get":
         return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_set":

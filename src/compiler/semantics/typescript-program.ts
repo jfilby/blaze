@@ -333,6 +333,26 @@ class ProgramParser {
    * and one for a text, and the words the source writes for them say nothing it
    * can act on.
    */
+  /**
+   * `[[key, value], ...]`: the entries of a map written out, each pair the two
+   * values between its own brackets.
+   */
+  private pairEntries(): { key: ProgramValue; value: ProgramValue }[] {
+    this.expect("[");
+    const entries: { key: ProgramValue; value: ProgramValue }[] = [];
+    while (!this.at("]") && this.peek().kind !== "end") {
+      this.expect("[");
+      const key = this.value();
+      this.expect(",");
+      const value = this.value();
+      this.expect("]");
+      entries.push({ key, value });
+      if (!this.accept(",")) break;
+    }
+    this.expect("]");
+    return entries;
+  }
+
   private arrowParams(): { params: { name: string; type: string | null }[]; prelude: ProgramStatement[] } {
     const params: { name: string; type: string | null }[] = [];
     const prelude: ProgramStatement[] = [];
@@ -2383,6 +2403,17 @@ class ProgramParser {
             return this.nothing();
           }
           if (!this.at(")")) {
+            // `new Map([[key, value], ...])` is the entries written out: each
+            // pair is the two values between its brackets, and the map is the
+            // writes they name.
+            if (kind === "map" && this.at("[") && this.peek(1).text === "[") {
+              const entries = this.pairEntries();
+              this.expect(")");
+              const source: ProgramValue = { k: "pairs", entries };
+              const made: ProgramValue = { k: "collection", collection: "map", source };
+              this.collectionValues.set(made, kind);
+              return made;
+            }
             // A dictionary built from an iterable is the entries the source
             // hands over. The construction is read; walking the entries is the
             // backend's, and a backend that cannot refuses it there.
