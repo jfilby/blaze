@@ -301,6 +301,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** The values of a map, laid down as the list a program holds: the runtime
    *  answers the block, and the block's header states how many there are. */
   "map.values": { params: [ANY], returns: { kind: "slice", of: F64 }, arity: 1 },
+  /** A list copied, and two lists joined: a program holds a list as the block
+   *  its header measures, so a spread of one is those bytes again. The element
+   *  type of the answer is the source's, which the read fixes at the call. */
+  "array.copy": { params: [{ kind: "slice", of: ANY }], returns: ANY, arity: 1 },
+  "array.join": { params: [{ kind: "slice", of: ANY }, { kind: "slice", of: ANY }], returns: ANY, arity: 2 },
   "fetch": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
   /** `http.request(url, method, headers, body)` performs one request synchronously,
    * and `http.request(url, options, callback)` opens a buffered request whose

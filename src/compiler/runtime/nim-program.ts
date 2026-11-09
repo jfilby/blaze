@@ -825,6 +825,10 @@ ${anchor}
         return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_len":
         return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
+      case "array.copy":
+        return `${RUNTIME_NAME}_array_copy(${argument(0)})`;
+      case "array.join":
+        return `${RUNTIME_NAME}_array_join(${argument(0)}, ${argument(1)})`;
       case "map.values":
         // The block the runtime lays the dictionary's values down in: a list a
         // program holds as the pointer its header measures.

@@ -1284,6 +1284,29 @@ proc blaze_rt_dict_has*(dict: float64, key: cstring): float64 {.exportc, cdecl.}
   if at < 0 or key == nil: return 0.0
   if blazeDictFind(at, $key) >= 0: 1.0 else: 0.0
 
+proc blaze_rt_array_copy*(source: pointer): pointer {.exportc, cdecl.} =
+  ## A block of elements copied: a list a program holds is the block and the
+  ## length its header measures, so a spread of one is these bytes again.
+  if source == nil:
+    return blaze_rt_allocate(0)
+  let bytes = blaze_rt_object_size(source)
+  let copy = blaze_rt_allocate(bytes)
+  if copy != nil and bytes > 0'u64:
+    copyMem(copy, source, bytes)
+  copy
+
+proc blaze_rt_array_join*(left, right: pointer): pointer {.exportc, cdecl.} =
+  ## Two blocks of elements joined: the left's bytes followed by the right's.
+  let leftBytes = if left == nil: 0'u64 else: uint64(blaze_rt_object_size(left))
+  let rightBytes = if right == nil: 0'u64 else: uint64(blaze_rt_object_size(right))
+  let joined = blaze_rt_allocate(csize_t(leftBytes + rightBytes))
+  if joined != nil:
+    if leftBytes > 0'u64:
+      copyMem(joined, left, csize_t(leftBytes))
+    if rightBytes > 0'u64:
+      copyMem(cast[pointer](cast[uint](joined) + uint(leftBytes)), right, csize_t(rightBytes))
+  joined
+
 proc blaze_rt_dict_values*(dict: float64): ptr float64 {.exportc, cdecl.} =
   ## Lays a dictionary's values down as a block, in the order the keys were
   ## first written. The block's header states how many values it holds.

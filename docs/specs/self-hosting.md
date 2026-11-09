@@ -1017,6 +1017,43 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hs. A spread of a list the program settles is the block copied
+
+    const values = [...resolvedByName.values()];
+    const all = [...m.values(), ...n.values()];
+
+A spread of a list whose elements are written out is the list itself (§4hp). A
+list the program settles when it runs is the block its header measures, so a
+spread of one is that block copied (`blaze_rt_array_copy`) and two are the blocks
+joined (`blaze_rt_array_join`): the runtime moves the bytes, and the answer is the
+list the program holds, at the length the joined header states. An empty map
+spreads to a block of no elements, and a list the program fills with `new
+Array(n)` copies at the length its header was laid out with.
+
+Two things had to be right for the join to be a block operation:
+
+- a service the compiler provides takes the block alone. The emitter used to
+  append a *hidden length* argument after every sequence parameter, which is what
+  a module function's array parameter carries; `array.join` was handed
+  `(left, 0, right, 0)` and joined a block with nothing. A builtin now takes the
+  pointer it was written for.
+- the element type of the answer is the read's: the ABI moves bytes and the
+  builtins say `slice<any>`, so the validator does not read a `slice<f64>` handed
+  to a list service as a `slice<ref<any>>`.
+
+A spread written *beside an element* of a list the program settles is refused: the
+element would have to be written at an index the spread's run-time length fixes.
+Write the elements out in a list of their own, or spread lists only.
+
+    node:  "3 1 3 0"     (two maps joined, and an empty one)
+    blaze: "3 1 3 0"     (C and machine)
+
+Still refused, and the next slice: `new Map(<a list of pairs>)`. A program list
+holds numbers and texts, so a pair record `{first, second}` has no block a pair
+list can hold; `list.map(cb)` writing pairs is the same missing value.
+
+    The total stayed at 2.
+
 ### 4hr. A map's values are the list the program walks
 
     let sum = 0;
@@ -5286,6 +5323,7 @@ What was closed this session, and what each was worth:
 | a list written with a spread is the list of its parts (§4hp) | 2 → 2 (lowered) |
 | a program holds the list a call answered (§4hq) | 2 → 2 (lowered) |
 | a map's values are the list the program walks (§4hr) | 2 → 2 (lowered) |
+| a spread of a list the program settles is the block copied (§4hs) | 2 → 2 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

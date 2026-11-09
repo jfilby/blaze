@@ -602,6 +602,7 @@ async function program(
   runtime?: "nim",
   mode?: BuildMode,
   files: Record<string, string> = {},
+  backend?: "c" | "machine",
 ): Promise<{ directory: string; binary: string }> {
   const directory = await scratch("blaze-program-");
   for (const [name, text] of Object.entries(files)) await writeFile(join(directory, name), text, "utf8");
@@ -612,6 +613,7 @@ async function program(
     model: { provider: "replay", file: REPLAY },
     output: "machine",
     ...(runtime === undefined ? {} : { runtime }),
+    ...(backend === undefined ? {} : { backend }),
   });
   const outcome = await runBuild(
     "blaze.toml",
@@ -639,6 +641,33 @@ test("console.error writes its values to the error stream", async () => {
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, sourceRun.stdout);
   assert.equal(delivered.stderr, sourceRun.stderr);
+});
+
+test("a list written with a spread of a map's values is the values", async () => {
+  // `[...m.values()]` is the block the runtime laid the values down in, copied;
+  // `[...a, ...b]` is the two blocks' bytes one after the other, and an empty
+  // map spreads to a list of no elements. A spread of a list the program holds
+  // is a block, so the spread is a block operation rather than a loop.
+  const source = [
+    "const m = new Map<string, number>();",
+    "m.set(`a`, 1);",
+    "m.set(`b`, 2);",
+    "const n = new Map<string, number>();",
+    "n.set(`c`, 3);",
+    "const all = [...m.values(), ...n.values()];",
+    "const none = new Map<string, number>();",
+    "const empty = [...none.values()];",
+    "console.log(all.length, all[0], all[2], empty.length);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await program(source, undefined, undefined, {}, backend);
+    const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, sourceRun.stdout);
+    assert.equal(delivered.stdout.trim(), "3 1 3 0", `the ${backend} backend joins the blocks`);
+  }
 });
 
 test("a map's values are the list the program walks", async () => {
@@ -722,11 +751,12 @@ test("a list written with a spread is the list of its parts", async () => {
   assert.equal(delivered.stdout.trim(), "5 3 3 z 8");
 });
 
-test("a spread of a list whose length the program settles is refused", () => {
-  // The length of a list the program fills when it runs is not a length the
-  // read can write down, and a block is laid out at the length the source
-  // states. The construct is refused where it is written rather than joined at
-  // a length nothing settled.
+test("a spread of a list the program settles is a copy, and one beside an element is refused", () => {
+  // `[...a]` where `a` is a list the program fills when it runs is a copy of
+  // the block `a` is: the block's header states how many elements it holds, so
+  // the copy is a block operation. A spread written *beside* an element would
+  // have to know the spread's length where the element is written, which is a
+  // length the source does not state, so that form is refused.
   assert.match(
     diagnostic(() =>
       resolved({
@@ -740,8 +770,27 @@ test("a spread of a list whose length the program settles is refused", () => {
         ].join("\n"),
       }),
     ),
-    /a spread joins a list whose length the program settles when it runs/,
+    /a list written with a spread joins lists only/,
   );
+});
+
+test("a spread of a list the program settles is the block copied", async () => {
+  const source = [
+    "const n = 3;",
+    "const a = new Array(n);",
+    "a[0] = 7;",
+    "const b = [...a];",
+    "console.log(b.length, b[0], a.length);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary } = await program(source, undefined, undefined, {}, backend);
+    const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, sourceRun.stdout);
+    assert.equal(delivered.stdout.trim(), "3 7 3", `the ${backend} backend copies the block`);
+  }
 });
 
 test("a program's set is one handle on the runtime's dictionary", async () => {

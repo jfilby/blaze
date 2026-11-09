@@ -3368,28 +3368,60 @@ class ProgramResolver {
         // `[...a, x, ...b]` is one list: the elements of every part, in the
         // order they are written. Where each part's elements are written down —
         // a list literal, and a name whose list was written out — the list is
-        // written down here, at the length the parts are, and the block is the
-        // block the source asked for.
+        // written down here, at the length the parts are. A list the program
+        // settles when it runs is the block its header measures, so a spread of
+        // one is that block copied, and two are the blocks joined.
+        const spreads = value.parts.map((part) => (part.k === "spread" ? this.value(part.of, null, line) : null));
+        const written = spreads.every((spread) => spread === null || this.writtenList(spread));
+        if (!written) {
+          if (value.parts.some((part) => part.k !== "spread")) {
+            throw programError(
+              "a list written with a spread joins lists only",
+              this.body,
+              line,
+              `line ${line} of ${this.body.file}: spread the lists into a list of their own, and write the elements out in one of the lists`,
+            );
+          }
+          const blocks = spreads.map((spread) => this.spreadBlock(spread as DraftValue, line));
+          const element = (blocks[0] as { element: TypeExpr }).element;
+          let joined = blocks.length === 1
+            ? this.listCopy((blocks[0] as { block: DraftValue }).block, element, line)
+            : (blocks[0] as { block: DraftValue }).block;
+          for (const next of blocks.slice(1)) joined = this.listJoin(joined, (next as { block: DraftValue }).block, element, line);
+          if (expect !== null) {
+            const wanted = elementOf(expect);
+            if (wanted !== null && !(element.kind === "primitive" && element.name === wanted)) {
+              throw programError(
+                `a typed array cannot be used as ${typeToString(expect)}`,
+                this.body,
+                line,
+                `line ${line} of ${this.body.file}: a list of texts is the list a program holds for texts`,
+              );
+            }
+          }
+          return joined;
+        }
         const values: DraftValue[] = [];
         let element: TypeExpr | null = null;
-        for (const part of value.parts) {
-          if (part.k !== "spread") {
-            values.push(this.value(part, element, line));
-            if (element === null) element = draftType(values[values.length - 1] as DraftValue) ?? numeric("f64");
+        for (const [at, part] of value.parts.entries()) {
+          const spread = spreads[at] ?? null;
+          if (spread === null) {
+            const one = this.value(part, element, line);
+            values.push(one);
+            if (element === null) element = draftType(one) ?? numeric("f64");
             continue;
           }
-          const spread = this.value(part.of, null, line);
           const held = spread.k === "buffer"
             ? spread.held
             : spread.k === "reference" && spread.held.kind === "array"
               ? spread.held
               : null;
-          if (held === null || held.length === null || held.values.length !== held.length) {
+          if (held === null) {
             throw programError(
-              "a spread joins a list whose length the program settles when it runs",
+              "a spread joins a list the program holds",
               this.body,
               line,
-              `line ${line} of ${this.body.file}: a list written out, and a name declared from one, are the lists a spread can join`,
+              `line ${line} of ${this.body.file}: a list literal, a name holding one, and a call answering one are the lists a spread joins`,
             );
           }
           if (element === null) element = held.element;
@@ -3765,6 +3797,71 @@ class ProgramResolver {
       // A block of bytes is laid out by the compiler itself and hands back a
       // reference, so no wide number is involved.
       wide: null,
+    };
+  }
+
+  /** Whether a spread's elements are written out where the source wrote it. */
+  private writtenList(value: DraftValue): boolean {
+    if (value.k === "buffer") return true;
+    return value.k === "reference"
+      && value.held.kind === "array"
+      && value.held.length !== null
+      && value.held.values.length === value.held.length;
+  }
+
+  /**
+   * The block a spread names, and the type of the elements it holds.
+   *
+   * A list a program holds is the block its header measures: a name of an array
+   * and a call answering one are the lists a spread joins.
+   */
+  private spreadBlock(value: DraftValue, line: number): { block: DraftValue; element: TypeExpr } {
+    if (value.k === "reference" && value.held.kind === "array") {
+      return { block: value, element: value.held.element ?? F64 };
+    }
+    if (value.k === "call" && (value.call.returns.kind === "slice" || value.call.returns.kind === "array")) {
+      return { block: value, element: value.call.returns.of };
+    }
+    throw programError(
+      "a spread joins a list the program holds",
+      this.body,
+      line,
+      `line ${line} of ${this.body.file}: a name holding a list, and a call answering one, are the lists a spread joins`,
+    );
+  }
+
+  /** A list copied, as `[...values]` is. */
+  private listCopy(value: DraftValue, element: TypeExpr, line: number): DraftValue {
+    return this.listCall("array.copy", [value], element, line);
+  }
+
+  /** Two lists joined, as `[...a, ...b]` is. */
+  private listJoin(left: DraftValue, right: DraftValue, element: TypeExpr, line: number): DraftValue {
+    return this.listCall("array.join", [left, right], element, line);
+  }
+
+  /** A call that answers the block a list operation makes. */
+  private listCall(name: string, args: DraftValue[], element: TypeExpr, line: number): DraftValue {
+    const builtin = builtinFor(name);
+    if (builtin === null) throw programError(`${name} is not a call this compiler makes`, this.body, line);
+    const returns: TypeExpr = { kind: "slice", of: element };
+    return {
+      k: "call",
+      call: {
+        name,
+        signature: {
+          name,
+          symbol: name,
+          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(returns),
+        },
+        args,
+        returns,
+        effects: [],
+        builtin: true,
+        bigint: false,
+        wide: null,
+      },
     };
   }
 

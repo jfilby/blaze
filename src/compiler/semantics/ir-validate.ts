@@ -1563,6 +1563,10 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   // the contract language has no one type for all four.
   const settlesAny = call.builtin && (call.callee === "resolve" || call.callee === "onFulfilled" ||
     call.callee === "reject" || call.callee === "onRejected");
+  // A list service takes a block as the pointer it is whatever the elements the
+  // block holds: the two sides of `[...a, ...b]` are lists of the one element
+  // type the read fixed, and the service moves bytes.
+  const listService = call.builtin && (call.callee === "array.copy" || call.callee === "array.join");
   // Variable-arity builtins may carry more types than arguments; that is expected.
   for (let index = 0; index < params.length; index += 1) {
     const parameter = contractType(params[index]);
@@ -1572,7 +1576,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     }
     const argument = call.argTypes[index];
     if (argument === undefined) continue;
-    if (settlesAny) continue;
+    if (settlesAny || listService) continue;
     if (!typeEquals(parameter, argument)) {
       problems.push(`${prefix}argument ${index + 1} of ${call.callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
     }
@@ -1582,7 +1586,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     // wide number beside a machine word is the one there is no answer for.
     const value = call.args[index];
     if (value === undefined) continue;
-    if (!convertibleTo(value.type, argument)) {
+    if (!listService && !convertibleTo(value.type, argument)) {
       problems.push(`${prefix}argument ${index + 1} of ${call.callee} is a ${typeText(value.type)} and is read as a ${typeText(argument)}`);
     }
     const reason = wideningReason(value, argument);

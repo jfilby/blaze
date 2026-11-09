@@ -1212,6 +1212,8 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_array_copy", "void*", [["block", "void*"]], "Copies a block of elements.", "Returns a block of its own holding the same bytes; the header states how many elements it holds.", { tags: ["object"] }),
+  entry("blaze_rt_array_join", "void*", [["left", "void*"], ["right", "void*"]], "Joins two blocks of elements.", "Returns a block holding the left's bytes followed by the right's; the header states how many elements it holds.", { tags: ["object"] }),
   entry("blaze_rt_dict_values", "double*", [["dict", "double"]], "Lays a dictionary's values down as a block.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
   entry("blaze_rt_dict_key_at", "const char*", [["dict", "double"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
   entry("blaze_rt_dict_value_at", "double", [["dict", "double"], ["index", "double"]], "Reads the value of one entry of a dictionary by its position.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
@@ -4519,6 +4521,31 @@ static blaze_rt_dict* blaze_rt_dict_of(double handle) {
   }
   blaze_rt_raise("a dictionary handle that the runtime did not create");
   return NULL;
+}
+
+/* A block of elements copied, and two blocks joined.
+
+   A list a program holds is the block and the length its header measures, so a
+   spread of one is a copy of those bytes: a spread alone is a block of its own,
+   and a spread of two is the two blocks' bytes one after the other. */
+
+void* blaze_rt_array_copy(void* block) {
+  if (block == NULL) return blaze_rt_allocate(0);
+  const size_t bytes = blaze_rt_header_of(block)->length;
+  void* copy = blaze_rt_allocate(bytes);
+  if (copy == NULL) blaze_rt_raise("out of memory");
+  if (bytes > 0) memcpy(copy, block, bytes);
+  return copy;
+}
+
+void* blaze_rt_array_join(void* left, void* right) {
+  const size_t leftBytes = left == NULL ? 0 : blaze_rt_header_of(left)->length;
+  const size_t rightBytes = right == NULL ? 0 : blaze_rt_header_of(right)->length;
+  void* joined = blaze_rt_allocate(leftBytes + rightBytes);
+  if (joined == NULL) blaze_rt_raise("out of memory");
+  if (leftBytes > 0) memcpy(joined, left, leftBytes);
+  if (rightBytes > 0) memcpy((char*)joined + leftBytes, right, rightBytes);
+  return joined;
 }
 
 /* The values of a dictionary, laid down as a block in the order the keys were

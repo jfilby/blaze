@@ -1108,9 +1108,12 @@ class ProgramEmitter {
       // length of this argument as the hidden parameter that follows it.
       // A text and the cell a captured text travels in are not sequences:
       // neither carries a length beside it, so neither is parsed as one.
+      // A callee's array parameter carries its length beside it, and a module
+      // function's does. A service the compiler itself provides takes the block
+      // alone — a list the runtime moves is the bytes its header measures.
       const written = call.signature.params[index]?.type;
       const paramType = written !== undefined && written !== "text" && written !== "boxedtext" ? parseType(written) : null;
-      if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
+      if (!call.builtin && paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
         if (argument.k === "local") {
           argumentsText.push(`${this.names.read(argument.name)}_length`);
         } else if (argument.k === "buffer") {
