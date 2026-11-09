@@ -11480,6 +11480,24 @@ class Machine {
         this.code.movRegMem(RAX, frame(boxed.offset));
         return;
       }
+      // A list handed to a dynamic value is the dynamic array of its elements:
+      // the block, the width of one element and what an element is, boxed one at
+      // a time. Handing the pointer over as it stood left the callee reading a
+      // pointer as the number a handle is.
+      if (isSequence(from)) {
+        const element = elementTypeOf(from);
+        const kind = element !== null && isTextType(element) ? 1n : element !== null && isBoolean(element) ? 2n : 0n;
+        const size = BigInt(element !== null && element.kind === "primitive" ? widthOf(element) : 8);
+        this.code.movRegReg(RDI, RAX);
+        this.code.movRegImm(RSI, size);
+        this.code.movRegImm(RDX, kind);
+        this.external("blaze_rt_box_sequence");
+        this.callForeign("blaze_rt_box_sequence");
+        const boxed = this.holdSlot(NUMBER, "blaze_boxed");
+        this.store(boxed);
+        this.code.movRegMem(RAX, frame(boxed.offset));
+        return;
+      }
       if (isNumber(from)) {
         this.convert(from, NUMBER);
         this.external("blaze_rt_box_number");

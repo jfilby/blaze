@@ -1256,6 +1256,18 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_box_number", "double", [["value", "double"]], "Boxes a number as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_null", "double", [], "Boxes null as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_box_sequence",
+    "double",
+    [
+      ["block", "const void*"],
+      ["elementSize", "size_t"],
+      ["kind", "int64_t"],
+    ],
+    "Boxes a block of elements as a dynamic array.",
+    "The elements are boxed one at a time: kind 0 is a number, kind 1 a text, and the block's header states how many there are. Returns a managed handle.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_json_get", "double", [["obj", "double"], ["field", "const char*"]], "Reads a field from a dynamic object.", "Returns the value.", { tags: ["object"] }),
   entry("blaze_rt_random", "double", [], "Returns a pseudo-random double in [0, 1).", "Returns the value.", { tags: ["host"] }),
   entry(
@@ -5696,6 +5708,52 @@ const char* blaze_rt_to_text(double value) {
     return sd && sd->text ? sd->text : "{}";
   }
   return "null";
+}
+
+/* A block of elements as the dynamic array they are.
+
+   A list a program holds is a block and the length its header measures, and a
+   value the compiler could not name is one handle: handing the list to such a
+   use used to answer an empty dynamic array, so asking one whether it was an
+   array was true and every element the list held was gone. The elements are
+   boxed one at a time here instead, so the dynamic value is the list. */
+double blaze_rt_box_sequence(const void* block, size_t elementSize, int64_t kind) {
+  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_ARRAY);
+  d->items = NULL;
+  d->count = 0;
+  d->capacity = 0;
+  const size_t size = elementSize;
+  const size_t count = block == NULL || size == 0 ? 0 : (size_t)(blaze_rt_header_of((void*)block)->length / size);
+  if (count > 0) {
+    d->items = (double*)blaze_rt_allocate_uninitialized(count * sizeof(double));
+    if (d->items == NULL) blaze_rt_raise("out of memory");
+    d->capacity = count;
+    for (size_t at = 0; at < count; at += 1) {
+      const unsigned char* element = (const unsigned char*)block + at * size;
+      double boxed;
+      if (kind == 1) {
+        const char* text = NULL;
+        memcpy(&text, element, sizeof text);
+        boxed = blaze_rt_box_string(text);
+      } else {
+        double number = 0.0;
+        if (size == 8) memcpy(&number, element, sizeof number);
+        else if (size == 4) { float small = 0; memcpy(&small, element, sizeof small); number = (double)small; }
+        else if (size == 2) { uint16_t small = 0; memcpy(&small, element, sizeof small); number = (double)small; }
+        else { number = element[0] != 0 ? 1.0 : 0.0; }
+        if (kind == 2) {
+          blaze_dyn* flag = blaze_dyn_new(BLAZE_DYN_BOOL);
+          flag->number = number != 0.0 ? 1.0 : 0.0;
+          boxed = blaze_dyn_register(flag);
+        } else {
+          boxed = blaze_rt_box_number(number);
+        }
+      }
+      ((double*)d->items)[at] = boxed;
+      d->count = at + 1;
+    }
+  }
+  return blaze_dyn_register(d);
 }
 
 double blaze_rt_dyn_array_new(void) {

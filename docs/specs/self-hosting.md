@@ -1017,6 +1017,36 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4ht. A list handed to a value the compiler cannot name is its elements
+
+    export function report(value: unknown): string {
+      return JSON.stringify(value);
+    }
+    report(xs);
+
+A list handed to an untyped parameter was an *empty* dynamic array: the conversion
+was a placeholder (`blaze_rt_dyn_array_new()`), so `Array.isArray(list)` said yes
+and every element the list held was gone — `JSON.stringify(list)` printed `[]`,
+and the compiler's own `callsRewritten` asked `Array.isArray(written.args)` about
+a value that had never held the arguments.
+
+The block and the length its header measures are boxed one element at a time now
+(`blaze_rt_box_sequence`): a number is a dynamic number, a text a dynamic text,
+and a truth a dynamic truth, so the dynamic value *is* the list. Both the C and
+the machine backends box it, and a list of references — which has no dynamic
+form — is refused with that reason rather than passed as a pointer.
+
+    node:  '[1,2,3] ["a","b"] [true,false]'
+    blaze: '[1,2,3] ["a","b"] [true,false]'     (C and machine)
+
+Still open on the same wall: `new Map(<a list of pairs>)` needs a pair record as a
+program value (a program list holds numbers and texts, so a pair has no block to
+sit in), and `Object.entries`/`Object.fromEntries` over a value the read cannot
+name needs a value that says what an entry is. Both are the dynamic object the
+note below still owes.
+
+    The total stayed at 2.
+
 ### 4hs. A spread of a list the program settles is the block copied
 
     const values = [...resolvedByName.values()];
@@ -5324,6 +5354,7 @@ What was closed this session, and what each was worth:
 | a program holds the list a call answered (§4hq) | 2 → 2 (lowered) |
 | a map's values are the list the program walks (§4hr) | 2 → 2 (lowered) |
 | a spread of a list the program settles is the block copied (§4hs) | 2 → 2 (lowered) |
+| a list handed to a value the compiler cannot name is its elements (§4ht) | 2 → 2 (fixed) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

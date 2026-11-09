@@ -1508,7 +1508,30 @@ class FunctionEmitter {
         return `${RUNTIME_NAME}_box_string(${written})`;
       }
       if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
-      if (isSequence(value.type)) return `${RUNTIME_NAME}_dyn_array_new()`;
+      if (isSequence(value.type)) {
+        // A list handed to a use that reads a value the compiler cannot name is
+        // the dynamic array of its elements: the block and the length its header
+        // measures are boxed one element at a time, so the value is the list and
+        // not an empty array. Only a number and a text are elements a dynamic
+        // value can hold.
+        const element = elementTypeOf(value.type);
+        const kind = element !== null && isTextType(element)
+          ? 1
+          : element !== null && isBoolean(element)
+            ? 2
+            : element !== null && isNumber(element)
+              ? 0
+              : -1;
+        if (kind < 0) {
+          throw new CompilerError({
+            category: "SemanticIrError",
+            stage: "semantic-ir",
+            message: `a ${typeText(value.type)} is handed to a use that reads a value the compiler cannot name`,
+            detail: "a dynamic value holds numbers and texts; a list of references has no dynamic form yet",
+          });
+        }
+        return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), sizeof(${declaredType(element)}), (int64_t)${kind})`;
+      }
       if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return written;
       if (isReference(value.type)) return `((double)(uintptr_t)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;

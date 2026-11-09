@@ -1239,6 +1239,46 @@ proc blaze_rt_json_get*(obj: float64, field: cstring): float64 {.exportc, cdecl.
     position += 2
   0.0
 
+proc blaze_rt_box_sequence*(source: pointer, elementSize: csize_t, kind: int64): float64 {.exportc, cdecl.} =
+  ## A block of elements as the dynamic array they are: the elements are boxed
+  ## one at a time, so the dynamic value is the list and not an empty array.
+  let handle = blaze_rt_dyn_array_new()
+  let size = elementSize
+  if source == nil or size == 0'u64:
+    return handle
+  let count = int(blaze_rt_object_size(source)) div int(size)
+  for at in 0 ..< count:
+    let element = cast[pointer](cast[uint](source) + uint(at * int(size)))
+    if kind == 2:
+      var number: float64 = 0.0
+      if size == 8'u64:
+        copyMem(addr number, element, 8)
+      elif size == 4'u64:
+        var small: float32 = 0
+        copyMem(addr small, element, 4)
+        number = float64(small)
+      else:
+        number = if cast[ptr UncheckedArray[uint8]](element)[0] != 0'u8: 1.0 else: 0.0
+      var flag = BlazeDyn(kind: dynBool)
+      flag.number = if number != 0.0: 1.0 else: 0.0
+      let boxed = blazeDynRegister(flag)
+      discard blaze_rt_array_push(handle, boxed)
+    elif kind == 1:
+      let text = cast[ptr cstring](element)[]
+      let boxed = blaze_rt_box_string(text)
+      discard blaze_rt_array_push(handle, boxed)
+    else:
+      var number: float64 = 0.0
+      if size == 8'u64:
+        copyMem(addr number, element, 8)
+      elif size == 4'u64:
+        var small: float32 = 0
+        copyMem(addr small, element, 4)
+        number = float64(small)
+      let boxed = blaze_rt_box_number(number)
+      discard blaze_rt_array_push(handle, boxed)
+  handle
+
 ## ---------------------------------------------------------------------- ##
 ## Dictionaries                                                            ##
 ## ---------------------------------------------------------------------- ##

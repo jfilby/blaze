@@ -5653,6 +5653,41 @@ test("a record keyed by the numbers a source computed holds them", async () => {
   assert.equal(output.trim(), "7 5");
 });
 
+test("a list handed to a value the compiler cannot name is its elements", async () => {
+  // A list handed to an untyped parameter used to be an *empty* dynamic array:
+  // asking whether it was an array said yes, and every element the list held
+  // was gone. The block and the length its header measures are boxed one
+  // element at a time now, so the dynamic value is the list — numbers, texts
+  // and truths alike.
+  const source = [
+    'import { numbers, words, flags } from "./lib.ts";',
+    "console.log(numbers(), words(), flags());",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function report(value: unknown): string {",
+    "  return JSON.stringify(value);",
+    "}",
+    "export function numbers(): string {",
+    "  const xs: number[] = [1, 2, 3];",
+    "  return report(xs);",
+    "}",
+    "export function words(): string {",
+    "  const ws: string[] = [`a`, `b`];",
+    "  return report(ws);",
+    "}",
+    "export function flags(): string {",
+    "  const bits: boolean[] = [true, false];",
+    "  return report(bits);",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.equal(output.trim(), '[1,2,3] ["a","b"] [true,false]', `the ${backend} backend boxes the elements`);
+  }
+});
+
 test("the JSON of a value the read cannot name walks the record it is", async () => {
   // `JSON.stringify(value, null, 2)` of a type parameter is a walk of the
   // record the value is: the block's header carries the layout it was laid out
