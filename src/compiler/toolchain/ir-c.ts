@@ -396,6 +396,11 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_view_load_float((const unsigned char*)(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_view_store_float":
       return `blaze_rt_view_store_float((unsigned char*)(${args[0]}), ${args[1]}, ${args[2]}, ${args[3]})`;
+    // The JSON of a value the compiler cannot name is the walk of the record
+    // the value is: the block's header carries the layout it was laid out
+    // with, and the answer is a managed text.
+    case "JSON.stringify.pretty":
+      return `${RUNTIME_NAME}_json_object(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_new":
       return `blaze_rt_dict_new()`;
     case "blaze_rt_dict_get":
@@ -1091,6 +1096,16 @@ class FunctionEmitter {
       if (call.callee === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf(call.args[0])})`;
       return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
     }
+    // `JSON.stringify.pretty(value, n)` is the same document written at an
+    // indent: a value the compiler cannot name is a record, and the runtime
+    // walks the layout its block carries.
+    if (call.callee === "JSON.stringify.pretty" && call.args.length === 2) {
+      // The value is handed over as the call states it: an unshaped reference
+      // is the double a pointer is carried in, and a record literal written in
+      // the argument is boxed the same way here as at any other call.
+      const value = this.expression(call.args[0] as SemanticValue, call.argTypes[0] ?? null, depth);
+      return `${RUNTIME_NAME}_json_object(${value}, ${this.expression(call.args[1] as SemanticValue, NUMBER, depth)})`;
+    }
     // `JSON.stringify(value)` writes a value as the JSON text that holds it.
     // The runtime renders it as the dynamic string it holds, and the text it
     // says is the answer: a text the program wrote is boxed so the runtime can
@@ -1417,9 +1432,19 @@ class FunctionEmitter {
     const allocation = this.writesEveryField(value)
       ? `${RUNTIME_NAME}_allocate_uninitialized(${size})`
       : `${RUNTIME_NAME}_object_new(${size}, _Alignof(struct ${value.layout}))`;
+    // The descriptor names the layout the object was laid out with: each
+    // field's name, the offset it sits at and the type it holds, which is what
+    // the JSON of a value a function cannot name is written from. Each piece is
+    // a literal of its own so the NUL that ends it cannot take the first digit
+    // of the offset into an octal escape: "list\016" is "list" and one
+    // character, where "list\0" "16\0" is the two fields it looks like.
     const layout = this.fn.objects[value.layout];
-    const names = layout === undefined ? "" : layout.fields.map((field) => field.name).join("\\0");
-    const describe = layout === undefined ? "" : ` ${RUNTIME_NAME}_object_describe(${name}, "${names}\\0");`;
+    const fields = layout === undefined
+      ? ""
+      : `${layout.fields
+          .map((field) => `"${field.name}\\0" "${field.offset}\\0" "${field.type}\\0"`)
+          .join(" ")} "\\0"`;
+    const describe = layout === undefined ? "" : ` ${RUNTIME_NAME}_object_describe(${name}, ${fields});`;
     return `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${allocation};${describe} ${written.join(" ")} ${name}; })`;
   }
 

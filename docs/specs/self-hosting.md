@@ -1017,6 +1017,52 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hk. The JSON of a record is the layout its block carries
+
+    export function serializeJson(value: unknown): string {
+      return `${JSON.stringify(value, null, 2)}\n`;
+    }
+
+`JSON.stringify(value, null, 2)` of a type parameter is read (§4hj), and it is
+now lowered: a record this compiler lays out carries the layout it was laid out
+with in the header of its block — each field's name, the offset it sits at and
+the type it holds — and the runtime walks it. A number is written by its width, a
+`bool` as `true` or `false`, a text as the escaped string it is, a list as the
+elements its block holds at the size of one, and a reference as the record it
+points at. The indent the source asked for is the indentation of every level, and
+a record with no fields is `{}` where a list with no elements is `[]`.
+
+The layout rides in the descriptor the allocation already wrote, so an object
+costs the same one call it cost before; `blaze_rt_object_has_field` walks three
+entries per field rather than one. Both backends emit the same layout, and the
+answer is a managed string, so a module function that serializes a value it
+cannot name compiles on C and on the machine backend and prints what node
+prints:
+
+    {
+      "name": "a",
+      "note": "quote \" back \\ line\nend",
+      "list": [
+        1,
+        2.5,
+        -3
+      ],
+      "words": [
+        "x",
+        "y"
+      ],
+      "inner": {
+        "n": 7,
+        "flag": true
+      }
+    }
+
+A value that is not a record laid out here — a dynamic value the runtime already
+holds, a number — is written as the value it already is. What is still refused is
+the *spread* of such a value, which needs a copy of the fields a block holds and
+a write into one of them by name: the same layout answers where a field is, and
+what it does not say is what a written value has to be stored as.
+
 ### 4hj. A value the read cannot name is spread and serialized as the form it is
 
     function serializeJson(value: unknown): string {
@@ -1034,24 +1080,18 @@ hold — the fields it writes are the value's own, and neither form was read at
 all.
 
 Both are read now. The literal is the spreads and the writes beside them
-(`object.spread`), and the JSON is the runtime's (`JSON.stringify.pretty`); what
-each answers is the reference the value is and the text the JSON is. The
-resolver refuses the two lowerings, with the reason: a reference is a text, a
-list or a record when the program runs, and nothing in the reference says which
-it is, so the fields of one are not a shape this compiler carries. That is the
-same shape of slice as §4hh — a form a program body reads, whose lowering the
-resolver refuses where it lowers the body — and it is refused rather than
-lowered to a wrong value.
+(`object.spread`), and the JSON is the walk the runtime makes of the record the
+value is (`JSON.stringify.pretty`, §4hk); what each answers is the reference the
+value is and the text the JSON is. The spread's lowering is still refused, with
+the reason: a copy of a record at run time is the fields the value holds, and
+those are not a shape the compiler carries. That is the same shape of slice as
+§4hh — a form a program body reads, whose lowering the resolver refuses where it
+lowers the body — and it is refused rather than lowered to a wrong value.
 
 Everything the compiler's own sources write is now read: `core/json-store.ts`
 and `semantics/typescript.ts` are the last two, and the report is
 
     # self-host: 95 of 95 sources read, 0 refused, 0 refusals
-
-What the two refused lowerings need is one thing: a value that says what it is.
-A tagged reference — a text, a list and a record told apart at run time — is
-what makes both forms lowerable, and it is the foundation the note below on the
-dynamic object still owes.
 
     The total went from 2 to 0.
 
@@ -5068,6 +5108,7 @@ What was closed this session, and what each was worth:
 | a program reads a map from a list, a spread, and a pair callback (§4hh) | 10 → 3 |
 | a pair tuple is the record a map reports (§4hi) | 3 → 2 |
 | a value the read cannot name is spread and serialized as the form it is (§4hj) | 2 → 0 |
+| the JSON of a record is the layout its block carries (§4hk) | 0 → 0 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

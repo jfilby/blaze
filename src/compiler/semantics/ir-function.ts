@@ -1492,13 +1492,6 @@ class FunctionBody {
         "the fields the value holds are the value's own, and a record is laid out from the fields its source writes; write the fields out at the literal",
       );
     }
-    if (expression.name === "JSON.stringify.pretty") {
-      throw this.error(
-        "the JSON of a value the read cannot name is not lowered",
-        line,
-        "a reference is a text, a list or a record when the program runs, and the runtime cannot tell which it is; write the value at a type the read names, or serialize the fields it holds",
-      );
-    }
     // `await v` is the value the promise `v` carries. A value that is not a
     // promise is awaited as itself, and a promise's value is the type the use
     // asks for: a function's body is typed before it is written, so the use is

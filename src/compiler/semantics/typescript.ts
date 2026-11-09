@@ -11896,20 +11896,24 @@ class TypeScriptParser {
                 replace(pretty);
                 continue;
               }
-              // The value is one this read cannot name — a type parameter, an
-              // `unknown`, a value the link does not hold — so the fields it
-              // writes are the value's own. The call is read as the form it
-              // is, and the resolver refuses the lowering: what the value
-              // holds is not a shape this compiler carries.
-              const deferred: Expression = {
-                k: "call",
-                name: "JSON.stringify.pretty",
-                args: [written, { k: "literal", text: String(indent) }],
-                returns: TEXT_RESULT,
-              };
-              this.expressionTypes.set(deferred, TEXT_RESULT);
-              replace(deferred);
-              continue;
+              // A value whose type the read does not hold is a reference to a
+              // record the program laid out, and the record carries its layout:
+              // the JSON of it is the walk the runtime makes. A *list* whose
+              // element the read cannot name is not that — a block of an
+              // element kind the compiler would have to know — so it is still
+              // refused below.
+              const held = this.valueTypeOf(written);
+              if (held.kind === "ref" && held.of === null && held.name === undefined) {
+                const deferred: Expression = {
+                  k: "call",
+                  name: "JSON.stringify.pretty",
+                  args: [written, { k: "literal", text: String(indent) }],
+                  returns: TEXT_RESULT,
+                };
+                this.expressionTypes.set(deferred, TEXT_RESULT);
+                replace(deferred);
+                continue;
+              }
             }
             this.report(
               "JSON.stringify writes a value at an indent",

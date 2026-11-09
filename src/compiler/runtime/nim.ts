@@ -533,7 +533,8 @@ ${guarded ? `  let align = if alignment == 0: BlazeDefaultAlignment else: alignm
   blazeBlock(bytes.uint64, align, true)` : `  blazeBlock(bytes.uint64, if alignment == 0: BlazeDefaultAlignment else: alignment.uint64, true)`}
 
 proc blaze_rt_object_describe*(target: pointer, descriptor: cstring) {.exportc, cdecl.} =
-  ## Names the fields an object was laid out with.
+  ## Names the layout an object was laid out with: each field's name, the offset
+  ## it sits at and the type it holds.
   if target == nil:
     return
   headerOf(target)[].descriptor = cast[pointer](descriptor)
@@ -551,7 +552,13 @@ proc blaze_rt_object_has_field*(target: pointer, field: cstring): float64 {.expo
     let name = $at
     if name == wanted:
       return 1.0
+    # A field is its name, the offset it sits at and the type it holds: the next
+    # field starts after all three.
     at = cast[cstring](cast[uint](at) + uint(name.len) + 1)
+    let offset = $at
+    at = cast[cstring](cast[uint](at) + uint(offset.len) + 1)
+    let kind = $at
+    at = cast[cstring](cast[uint](at) + uint(kind.len) + 1)
   0.0
 
 proc blaze_rt_retain*(pointer: pointer): pointer {.exportc, cdecl.} =
@@ -1746,6 +1753,9 @@ proc blaze_last_error*(): cstring {.exportc, cdecl.} =
 
 proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
+  ## The JSON of a record at an indent is written by the C runtime a module's
+  ## functions link; a program driver passes its values to no module.
 proc blaze_rt_parse_int*(text: cstring, radix: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_from_code_point*(value: float64): cstring {.exportc, cdecl.} = nil
 proc blaze_rt_text_code_point_at*(text: cstring, at: float64): float64 {.exportc, cdecl.} = 0.0

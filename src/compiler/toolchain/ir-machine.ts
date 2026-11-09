@@ -9740,11 +9740,12 @@ class Machine {
     if (!isTextType(type)) this.convert(TEXT, type);
   }
 
-  /** The label of the descriptor of a layout, laid down once. */
+  /** The label of the descriptor of a layout, laid down once: each field's
+   *  name, the offset it sits at and the type it holds, NUL separated. */
   private objectDescriptor(layout: ObjectLayout): string {
     const known = this.objectDescriptors.get(layout.name);
     if (known !== undefined) return known;
-    const names = layout.fields.map((field) => `${field.name}\0`).join("") + "\0";
+    const names = layout.fields.map((field) => `${field.name}\0${field.offset}\0${field.type}\0`).join("") + "\0";
     this.literal(names);
     const label = this.lastLiteral;
     this.objectDescriptors.set(layout.name, label);
@@ -10541,6 +10542,23 @@ class Machine {
     // answers and a text is a pointer to the bytes it says, so the wall between
     // them is crossed here: a text is boxed into the handle the runtime reads,
     // and the handle a stringify answers is the text it says.
+    // `JSON.stringify.pretty(value, n)` is the JSON of a record the compiler
+    // cannot name: the block's layout is what the walk reads, and the answer is
+    // the text it built.
+    if (call.callee === "JSON.stringify.pretty") {
+      const held = this.hold(NUMBER, "blaze_json_value");
+      // An unshaped reference is a double here, exactly as it is when a
+      // promise settles a value.
+      const valueType = call.argTypes[0] ?? NUMBER;
+      const carries = valueType.kind === "ref" && valueType.of === null && valueType.name === undefined ? NUMBER : valueType;
+      this.at(call.args[0] as never, carries);
+      this.store(held);
+      const spaces = this.hold(NUMBER, "blaze_json_indent");
+      this.at(call.args[1] as never, call.argTypes[1] ?? NUMBER);
+      this.store(spaces);
+      this.callSymbol("blaze_rt_json_object", [held, spaces], TEXT);
+      return;
+    }
     if (call.callee === "JSON.stringify" && argument !== undefined) {
       const held = this.dynamicArgument(argument);
       this.callSymbol("blaze_rt_json_stringify", [held], NUMBER);

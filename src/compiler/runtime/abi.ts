@@ -1102,6 +1102,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["object"] },
   ),
   entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_json_object",
+    "const char*",
+    [
+      ["value", "double"],
+      ["indent", "double"],
+    ],
+    "Writes the JSON of a value at an indent.",
+    "A value with a layout is written field by field, at the indent the source asked for; any other value is the dynamic value it already is.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_md5_create", "double", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
@@ -1444,8 +1455,8 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
       ["object", "void*"],
       ["descriptor", "const char*"],
     ],
-    "Names the fields a managed object was laid out with.",
-    "The descriptor is the field names, NUL separated and ending in an empty name. The object carries it for the field-presence question.",
+    "Names the layout a managed object was laid out with.",
+    "The descriptor is each field's name, the offset it sits at and the type it holds, each NUL separated, ending in an empty name. The object carries it for the field-presence question and for the JSON of a value a function cannot name.",
     { tags: ["object"] },
   ),
   entry(
@@ -1956,8 +1967,11 @@ typedef struct blaze_rt_header {
   uint64_t alignment;   /* payload alignment, a power of two */
   uint64_t references;  /* live references, at least one */
   uint64_t capacity;    /* payload bytes the block can hold, at least length */
-  /* The field names an object was laid out with, NUL separated and ending in
-     an empty name, or NULL for a block that is not an object. */
+  /* The layout an object was laid out with: for each field its name, the
+     offset it sits at and the type it holds, each NUL separated, ending in an
+     empty name. The names say a field is there; the offset and the type say
+     where it is and what it holds, which is what the JSON of a value a function
+     cannot name is written from. NULL for a block that is not an object. */
   const char* descriptor;
   /* Padding that keeps the header a multiple of the default alignment, so the
      payload of a block out of the slab is aligned without a gap. */
@@ -4420,8 +4434,9 @@ void* blaze_rt_object_new(size_t bytes, size_t alignment) {
   return blaze_rt_block(bytes, alignment, 1);
 }
 
-/* The field names an object was laid out with. The descriptor is the names,
-   NUL separated and ending in an empty name; the header carries it. */
+/* The layout an object was laid out with. The descriptor is each field's name,
+   the offset it sits at and the type it holds, each NUL separated and ending in
+   an empty name; the header carries it. */
 void blaze_rt_object_describe(void* object, const char* descriptor) {
   if (object == NULL) return;
   ((blaze_rt_header*)((char*)object - BLAZE_RT_HEADER_SIZE))->descriptor = descriptor;
@@ -4434,6 +4449,10 @@ double blaze_rt_object_has_field(const void* object, const char* field) {
   const char* at = header->descriptor;
   while (*at != '\0') {
     if (strcmp(at, field) == 0) return 1.0;
+    /* A field is its name, the offset it sits at and the type it holds: the
+       next field starts after all three. */
+    at += strlen(at) + 1;
+    at += strlen(at) + 1;
     at += strlen(at) + 1;
   }
   return 0.0;
@@ -4443,6 +4462,7 @@ size_t blaze_rt_object_size(void* pointer) {
 ${guarded ? "  if (pointer == NULL) return 0;" : ""}
   return blaze_rt_header_of(pointer)->length;
 }
+
 
 /* A small string-keyed dictionary. Keys are owned copies; values are doubles. */
 typedef struct { char* key; double value; } blaze_rt_dict_entry;
@@ -6301,6 +6321,189 @@ double blaze_rt_json_stringify(double value) {
   if (build.text == NULL) return blaze_rt_box_string("");
   return blaze_dyn_text_handle(build.text, build.length);
 }
+
+/* The JSON of a value a function cannot name.
+
+   A record this compiler lays out is a block whose header carries the layout it
+   was laid out with: each field's name, the offset it sits at and the type it
+   holds. That is the whole of what writing the document needs, so
+   "JSON.stringify(value, null, 2)" of a type parameter is a walk of the record
+   rather than a shape the compiler has to know where the call is written. A
+   value that carries no layout is not a record laid out here, and it is written
+   as the dynamic value it already is. */
+
+typedef struct blaze_rt_layout_field {
+  const char* name;
+  size_t offset;
+  const char* type;
+} blaze_rt_layout_field;
+
+/* The next field of a layout, or 0 at the end of it. */
+static int blaze_rt_layout_next(const char** cursor, blaze_rt_layout_field* field) {
+  const char* at = *cursor;
+  if (at == NULL || at[0] == '\\0') return 0;
+  field->name = at;
+  at += strlen(at) + 1;
+  field->offset = (size_t)strtoul(at, NULL, 10);
+  at += strlen(at) + 1;
+  field->type = at;
+  at += strlen(at) + 1;
+  *cursor = at;
+  return 1;
+}
+
+/* How many bytes a field of this type takes. Text, a reference and a list are
+   one pointer; the numbers are the width their name states. */
+static size_t blaze_rt_layout_size(const char* type) {
+  if (strcmp(type, "f32") == 0 || strcmp(type, "i32") == 0 || strcmp(type, "u32") == 0) return 4;
+  if (strcmp(type, "i16") == 0 || strcmp(type, "u16") == 0) return 2;
+  if (strcmp(type, "i8") == 0 || strcmp(type, "u8") == 0 || strcmp(type, "bool") == 0) return 1;
+  return sizeof(void*);
+}
+
+/* The number a field holds, read at the width its type states. */
+static double blaze_rt_layout_number(const unsigned char* at, const char* type) {
+  if (strcmp(type, "f64") == 0) { double value = 0; memcpy(&value, at, sizeof value); return value; }
+  if (strcmp(type, "f32") == 0) { float value = 0; memcpy(&value, at, sizeof value); return (double)value; }
+  if (strcmp(type, "bool") == 0) return at[0] != 0 ? 1.0 : 0.0;
+  switch (blaze_rt_layout_size(type)) {
+    case 1: {
+      if (type[0] == 'u') { uint8_t value = 0; memcpy(&value, at, 1); return (double)value; }
+      int8_t value = 0; memcpy(&value, at, 1); return (double)value;
+    }
+    case 2: {
+      if (type[0] == 'u') { uint16_t value = 0; memcpy(&value, at, 2); return (double)value; }
+      int16_t value = 0; memcpy(&value, at, 2); return (double)value;
+    }
+    case 4: {
+      if (type[0] == 'u') { uint32_t value = 0; memcpy(&value, at, 4); return (double)value; }
+      int32_t value = 0; memcpy(&value, at, 4); return (double)value;
+    }
+    default: {
+      if (type[0] == 'u') { uint64_t value = 0; memcpy(&value, at, 8); return (double)value; }
+      int64_t value = 0; memcpy(&value, at, 8); return (double)value;
+    }
+  }
+}
+
+static void blaze_rt_json_value_at(blaze_build* build, const unsigned char* at, const char* type, double indent, int depth);
+
+/* The indentation of a level, and the line it starts. A document written with
+   no indent is the compact one the grammar allows. */
+static void blaze_rt_json_break(blaze_build* build, double indent, int depth) {
+  if (indent <= 0.0) return;
+  blaze_build_char(build, '\\n');
+  for (int count = (int)(indent * (double)depth); count > 0; count -= 1) blaze_build_char(build, ' ');
+}
+
+/* A reference as an object: the block's layout says its fields, and a block
+   with no layout is not one this compiler wrote, so it is nothing. */
+static void blaze_rt_json_reference(blaze_build* build, const void* object, double indent, int depth) {
+  if (object == NULL) { blaze_build_bytes(build, "null", 4); return; }
+  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
+  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) { blaze_build_bytes(build, "null", 4); return; }
+  const char* cursor = header->descriptor;
+  blaze_rt_layout_field field;
+  if (!blaze_rt_layout_next(&cursor, &field)) { blaze_build_bytes(build, "{}", 2); return; }
+  blaze_build_char(build, '{');
+  int first = 1;
+  do {
+    if (!first) blaze_build_char(build, ',');
+    first = 0;
+    blaze_rt_json_break(build, indent, depth + 1);
+    blaze_build_char(build, '"');
+    blaze_build_json_text(build, field.name, strlen(field.name));
+    blaze_build_bytes(build, "\\": ", 3);
+    blaze_rt_json_value_at(build, (const unsigned char*)object + field.offset, field.type, indent, depth + 1);
+  } while (blaze_rt_layout_next(&cursor, &field));
+  blaze_rt_json_break(build, indent, depth);
+  blaze_build_char(build, '}');
+}
+
+/* The element type a slice<T> names, copied out of the type text. */
+static void blaze_rt_layout_element(const char* type, char* out, size_t room) {
+  const size_t length = strlen(type);
+  size_t inner = length > 7 && type[length - 1] == '>' ? length - 7 : 0;
+  if (inner >= room) inner = room - 1;
+  memcpy(out, type + 6, inner);
+  out[inner] = '\\0';
+}
+
+static void blaze_rt_json_value_at(blaze_build* build, const unsigned char* at, const char* type, double indent, int depth) {
+  if (strcmp(type, "text") == 0) {
+    const char* text = NULL;
+    memcpy(&text, at, sizeof text);
+    if (text == NULL) { blaze_build_bytes(build, "null", 4); return; }
+    blaze_build_char(build, '"');
+    blaze_build_json_text(build, text, blaze_rt_text_length(text));
+    blaze_build_char(build, '"');
+    return;
+  }
+  if (strncmp(type, "slice<", 6) == 0) {
+    const unsigned char* block = NULL;
+    memcpy(&block, at, sizeof block);
+    char element[64];
+    blaze_rt_layout_element(type, element, sizeof element);
+    if (block == NULL) { blaze_build_bytes(build, "null", 4); return; }
+    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)block - BLAZE_RT_HEADER_SIZE);
+    const size_t size = blaze_rt_layout_size(element);
+    const size_t count = header->magic == BLAZE_RT_MAGIC && size > 0 ? (size_t)(header->length / size) : 0;
+    if (count == 0) { blaze_build_bytes(build, "[]", 2); return; }
+    blaze_build_char(build, '[');
+    for (size_t index = 0; index < count; index += 1) {
+      if (index > 0) blaze_build_char(build, ',');
+      blaze_rt_json_break(build, indent, depth + 1);
+      blaze_rt_json_value_at(build, block + index * size, element, indent, depth + 1);
+    }
+    blaze_rt_json_break(build, indent, depth);
+    blaze_build_char(build, ']');
+    return;
+  }
+  if (strncmp(type, "ref<", 4) == 0) {
+    char inner[64];
+    blaze_rt_layout_element(type, inner, sizeof inner);
+    if (strcmp(inner, "any") == 0) {
+      double held = 0;
+      memcpy(&held, at, sizeof held);
+      blaze_build_value(build, held);
+      return;
+    }
+    const void* reference = NULL;
+    memcpy(&reference, at, sizeof reference);
+    blaze_rt_json_reference(build, reference, indent, depth);
+    return;
+  }
+  if (strcmp(type, "bool") == 0) {
+    if (at[0] != 0) blaze_build_bytes(build, "true", 4);
+    else blaze_build_bytes(build, "false", 5);
+    return;
+  }
+  {
+    char number[64];
+    const size_t written = blaze_rt_format_number(blaze_rt_layout_number(at, type), (unsigned char*)number, sizeof number);
+    blaze_build_bytes(build, number, written);
+  }
+}
+
+const char* blaze_rt_json_object(double value, double indent) {
+  blaze_build build = { NULL, 0, 0 };
+  const size_t address = (size_t)value;
+  if (address > 4096 && address < ((size_t)1 << 48)) {
+    const void* object = (const void*)(uintptr_t)value;
+    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
+    if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) {
+      blaze_rt_json_reference(&build, object, indent, 0);
+      const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
+      free(build.text);
+      return written;
+    }
+  }
+  blaze_build_value(&build, value);
+  const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
+  free(build.text);
+  return written;
+}
+
 double blaze_rt_json_get(double obj, const char* field) {
   blaze_dyn* d = blaze_dyn_lookup(obj);
   if (!d || d->kind != BLAZE_DYN_OBJECT || !d->items) return 0.0;

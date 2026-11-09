@@ -5653,37 +5653,62 @@ test("a record keyed by the numbers a source computed holds them", async () => {
   assert.equal(output.trim(), "7 5");
 });
 
-test("a form the read cannot name is refused where it is lowered", async () => {
-  // A spread of a value the read cannot name, and the JSON of one at an
-  // indent, are read by the frontend — what the value holds is its own — and
-  // refused where the body is lowered: a reference is a text, a list or a
-  // record when the program runs, and nothing in it says which.
-  const cases: readonly (readonly [string, RegExp])[] = [
-    [
-      [
-        "export function rewrite<T>(node: T): T {",
-        "  return { ...(node as object), name: `x` } as T;",
-        "}",
-        "export function f(): number { return rewrite({ a: 1 }) as number; }",
-        "",
-      ].join("\n"),
-      /a spread of a value the read cannot name is not lowered/,
-    ],
-    [
-      [
-        "export function serialize(value: unknown): string {",
-        "  return JSON.stringify(value, null, 2);",
-        "}",
-        "export function f(): string { return serialize(1); }",
-        "",
-      ].join("\n"),
-      /the JSON of a value the read cannot name is not lowered/,
-    ],
-  ];
-  for (const [lib, expected] of cases) {
-    await assert.rejects(
-      () => build('import { f } from "./lib.ts";\nconsole.log(f());\n', "c", { "lib.ts": lib }),
-      expected,
-    );
+test("the JSON of a value the read cannot name walks the record it is", async () => {
+  // `JSON.stringify(value, null, 2)` of a type parameter is a walk of the
+  // record the value is: the block's header carries the layout it was laid out
+  // with — each field's name, offset and type — so the runtime writes the
+  // document the source asked for without the compiler knowing the shape where
+  // the call is written. A nested record, a list of numbers and a list of texts
+  // are all the layout's to say; a text is escaped the way the language writes
+  // one.
+  const source = [
+    'import { demo } from "./lib.ts";',
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const lib = [
+    "interface Inner { n: number; flag: boolean }",
+    "interface R {",
+    "  name: string;",
+    "  note: string;",
+    "  list: number[];",
+    "  words: string[];",
+    "  inner: Inner;",
+    "}",
+    "export function serialize(value: unknown): string {",
+    "  return `${JSON.stringify(value, null, 2)}`;",
+    "}",
+    "export function demo(): string {",
+    "  const r: R = {",
+    "    name: `a`,",
+    '    note: `quote " back \\\\ line\\nend`,',
+    "    list: [1, 2.5, -3],",
+    "    words: [`x`, `y`],",
+    "    inner: { n: 7, flag: true },",
+    "  };",
+    "  return serialize(r);",
+    "}",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, { "lib.ts": lib }, backend);
+    assert.match(output, /"inner": \{\n    "n": 7,\n    "flag": true\n  \}/, `the ${backend} backend walks the record`);
   }
+});
+
+test("a spread of a value the read cannot name is refused where it is lowered", async () => {
+  // `{ ...(node as object), name }` writes a field into a value whose fields
+  // are its own: a copy of a record at run time, which needs a value that says
+  // what it is. It is refused where the body is lowered, with the reason.
+  const lib = [
+    "export function rewrite<T>(node: T): T {",
+    "  return { ...(node as object), name: `x` } as T;",
+    "}",
+    "export function f(): number { return rewrite({ a: 1 }) as number; }",
+    "",
+  ].join("\n");
+  await assert.rejects(
+    () => build('import { f } from "./lib.ts";\nconsole.log(f());\n', "c", { "lib.ts": lib }),
+    /a spread of a value the read cannot name is not lowered/,
+  );
 });

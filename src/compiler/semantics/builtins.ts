@@ -254,6 +254,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `JSON.stringify(value)` writes a value as the JSON text that holds it: the
    *  answer is a text, which is what a map key, a template and a hash are. */
   "JSON.stringify": { params: [ANY], returns: TEXT, arity: 1 },
+  /** `JSON.stringify(value, null, n)` of a value the compiler cannot name is a
+   *  walk of the record the value is: the header of a block carries the layout
+   *  it was laid out with, and the document is written from it at the indent
+   *  the source asked for. */
+  "JSON.stringify.pretty": { params: [ANY, F64], returns: TEXT, arity: 2 },
   /** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
   "Number.parseInt": { params: [ANY, F64], returns: F64, arity: 2 },
   /** `String.fromCodePoint(n)` is the text of the one code point it names. */
