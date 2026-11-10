@@ -41,8 +41,15 @@ const VOID: SemanticType = { kind: "void" };
 
 const TARGET: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
 
-/** How many elements the driver checks, which is enough for a team to be split. */
-const ELEMENTS = 1_000_000;
+/**
+ * How many elements the driver checks. A team is cut into parts by the
+ * processor count, so a few dozen elements are enough to give every part of a
+ * team something to do and to make a turn run over the wrong range, twice, or
+ * through another thread's pointer show up as a wrong element. The array is
+ * the driver's own and is read and checked whole, so a larger count only costs
+ * memory rather than proving more.
+ */
+const ELEMENTS = 64;
 
 const local = (name: string, type: SemanticType = F64): SemanticValue => ({ k: "local", type, name });
 const number = (text: string, type: SemanticType = F64): SemanticValue => ({ k: "const", type, text });
@@ -180,8 +187,8 @@ function unmark(block: SemanticBlock): SemanticBlock {
 }
 
 /**
- * Lowers a body, runs it over an array of a million doubles and answers what
- * the program wrote.
+ * Lowers a body, runs it over an array of doubles and answers what the
+ * program wrote.
  *
  * The driver fills the array with the counter at each element, so the value the
  * loop has to leave at every one of them is a number this file can state rather

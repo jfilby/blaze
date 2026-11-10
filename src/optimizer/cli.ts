@@ -37,7 +37,6 @@ import { addProcessed, isProcessed, loadCache, markUseful, saveCache } from "./c
 import {
   benchmarkCompiler,
   benchmarkProject,
-  SKIP_HEAP_PROOF_ENV,
   type BenchmarkResult,
 } from "./benchmark.ts";
 import { gatherBuildFeedback } from "./build-feedback.ts";
@@ -733,7 +732,6 @@ export function runTestSuite(live: boolean, compilerDir = COMPILER_DIR): SuiteRe
   // set, so the forcing variable is taken out.
   const env: Record<string, string | undefined> = {
     ...process.env,
-    [SKIP_HEAP_PROOF_ENV]: "1",
     NO_COLOR: "1",
   };
   delete env["FORCE_COLOR"];

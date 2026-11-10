@@ -376,16 +376,18 @@ test("a program that grows more heap than it is given is refused, not killed", a
     t.skip(`${PYTHON} is needed to grow a heap`);
     return;
   }
-  const unbounded = run(PYTHON, ["-c", grower(64)], { timeoutMs: 30_000 });
+  const unbounded = run(PYTHON, ["-c", grower(32)], { timeoutMs: 30_000 });
   assert.equal(unbounded.code, 0, unbounded.stderr);
 
   // Under a limit the same program is refused by the allocator, which it
   // reports as the error it is. A build that runs generated code without one
   // gets a process killed from outside instead, which says nothing about what
-  // the program was doing when it died.
-  const bounded = run(PYTHON, ["-c", grower(64)], {
+  // the program was doing when it died. The limit is one the interpreter
+  // starts and reports an error under, so the proof costs the suite a few
+  // megabytes rather than the heap a generated program is given.
+  const bounded = run(PYTHON, ["-c", grower(32)], {
     timeoutMs: 30_000,
-    heapBytes: 32 * 1024 * 1024,
+    heapBytes: 16 * 1024 * 1024,
   });
   assert.notEqual(bounded.code, 0);
   assert.match(bounded.stderr, /MemoryError|Cannot allocate memory/);

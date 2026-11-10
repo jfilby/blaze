@@ -329,6 +329,13 @@ export interface ProgramVerificationRequest {
   runner: Runner;
   /** The arguments the program is given, as they are given on the command line. */
   arguments?: readonly string[];
+  /**
+   * The heap, in bytes, the delivered program may grow. It is the heap a
+   * generated program is given unless a caller states one, which is what a
+   * check of a program that outgrows its heap sets when it knows the program
+   * it is checking does not need the whole of it.
+   */
+  heapBytes?: number;
 }
 
 /**
@@ -448,7 +455,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   const binary = run(request.runner.command, [...request.runner.args, ...arguments_], {
     cwd: request.directory,
     timeoutMs: binaryTimeout,
-    heapBytes: GENERATED_HEAP_BYTES,
+    heapBytes: request.heapBytes ?? GENERATED_HEAP_BYTES,
   });
   const printed = binary.stdout.trim();
   const stopped = stopFailure(binary);
