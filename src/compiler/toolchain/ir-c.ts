@@ -444,6 +444,12 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_is_array(${args[0]})`;
     case "blaze_rt_object_has_field":
       return `${RUNTIME_NAME}_object_has_field((const void*)(uintptr_t)(${args[0]}), ${args[1]})`;
+    case "blaze_rt_array_length":
+      return `blaze_rt_array_length(${args[0]})`;
+    case "blaze_rt_json_field_key":
+      return `blaze_rt_json_field_key(${args[0]}, ${args[1]})`;
+    case "blaze_rt_json_field_value":
+      return `blaze_rt_json_field_value(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_len":
       return `blaze_rt_dict_len(${args[0]})`;
     case "blaze_rt_dict_key_at":

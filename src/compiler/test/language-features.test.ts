@@ -5653,6 +5653,40 @@ test("a record keyed by the numbers a source computed holds them", async () => {
   assert.equal(output.trim(), "7 5");
 });
 
+test("the entries of a value the compiler cannot name are the fields it holds", async () => {
+  // `Object.entries(json)` is the fields the runtime parsed: the loop reads one
+  // field's key and one field's value by position, so a record whose fields no
+  // declaration writes is walked like a map. The value a field holds is the
+  // handle it is, which is what `typeof`, `JSON.stringify` and a recursive call
+  // read. The machine backend has no lowering for the dictionary accessors yet,
+  // so this is the C backend's answer; the read and the runtime are the same.
+  const source = [
+    'import { find, keys } from "./lib.ts";',
+    "const doc = JSON.parse(`{\"a\":{\"b\":1,\"c\":{\"token\":2}},\"e\":3}`);",
+    "console.log(find(doc, `token`), find(doc, `nope`), keys(doc));",
+    "",
+  ].join("\n");
+  const lib = [
+    "export function find(fields: Record<string, unknown>, name: string): boolean {",
+    "  for (const [key, value] of Object.entries(fields)) {",
+    "    if (key === name) return true;",
+    "    if (typeof value === `object` && value !== null) {",
+    "      if (find(value as Record<string, unknown>, name)) return true;",
+    "    }",
+    "  }",
+    "  return false;",
+    "}",
+    "export function keys(fields: Record<string, unknown>): string {",
+    "  let out = ``;",
+    "  for (const [key, value] of Object.entries(fields)) out += `${key}:${JSON.stringify(value)};`;",
+    "  return out;",
+    "}",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source, { "lib.ts": lib }, "c");
+  assert.equal(output.trim(), 'true false a:{"b":1,"c":{"token":2}};e:3;');
+});
+
 test("a list handed to a value the compiler cannot name is its elements", async () => {
   // A list handed to an untyped parameter used to be an *empty* dynamic array:
   // asking whether it was an array said yes, and every element the list held

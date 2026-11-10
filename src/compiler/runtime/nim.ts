@@ -1225,6 +1225,27 @@ proc blaze_rt_array_set*(array, index, value: float64) {.exportc, cdecl.} =
   if position < 0 or position >= blazeDynValues[at].items.len: return
   blazeDynValues[at].items[position] = value
 
+proc blaze_rt_json_field_key*(obj: float64, index: float64): cstring {.exportc, cdecl.} =
+  ## The key of one field of a dynamic object by its position.
+  let at = blazeDynIndex(obj)
+  if at < 0 or blazeDynValues[at].kind != dynObject: return ""
+  let item = blazeDynValues[at]
+  let position = int(index) * 2
+  if position < 0 or position + 1 >= item.items.len: return ""
+  let keyIndex = blazeDynIndex(item.items[position])
+  if keyIndex < 0 or blazeDynValues[keyIndex].kind != dynText: return ""
+  let key = blazeDynValues[keyIndex].text
+  if key == nil: "" else: key
+
+proc blaze_rt_json_field_value*(obj: float64, index: float64): float64 {.exportc, cdecl.} =
+  ## The value of one field of a dynamic object by its position.
+  let at = blazeDynIndex(obj)
+  if at < 0 or blazeDynValues[at].kind != dynObject: return 0.0
+  let item = blazeDynValues[at]
+  let position = int(index) * 2
+  if position < 0 or position + 1 >= item.items.len: return 0.0
+  item.items[position + 1]
+
 proc blaze_rt_json_get*(obj: float64, field: cstring): float64 {.exportc, cdecl.} =
   ## The field of an object, or nothing where the object holds no such field.
   let at = blazeDynIndex(obj)

@@ -1257,6 +1257,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_box_string", "double", [["value", "const char*"]], "Boxes a string as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_box_null", "double", [], "Boxes null as a dynamic value.", "Returns a managed handle.", { tags: ["object"] }),
   entry(
+    "blaze_rt_json_field_key",
+    "const char*",
+    [["object", "double"], ["index", "double"]],
+    "Reads the key of one field of a dynamic object by its position.",
+    "Returns the key, or the empty text when the position names no field. The fields are in the order they were parsed.",
+    { tags: ["object"] },
+  ),
+  entry(
+    "blaze_rt_json_field_value",
+    "double",
+    [["object", "double"], ["index", "double"]],
+    "Reads the value of one field of a dynamic object by its position.",
+    "Returns the value as the handle the runtime holds it as, or zero when the position names no field.",
+    { tags: ["object"] },
+  ),
+  entry(
     "blaze_rt_box_sequence",
     "double",
     [
@@ -4484,6 +4500,21 @@ ${guarded ? "  if (pointer == NULL) return 0;" : ""}
 }
 
 
+/* Dynamic value representation. */
+typedef enum { BLAZE_DYN_NULL, BLAZE_DYN_NUMBER, BLAZE_DYN_BOOL, BLAZE_DYN_TEXT, BLAZE_DYN_ARRAY, BLAZE_DYN_OBJECT, BLAZE_DYN_HASHER } blaze_dyn_kind;
+typedef struct blaze_dyn {
+  blaze_dyn_kind kind;
+  double number;
+  char* text;
+  void* items;
+  size_t count;
+  size_t capacity;
+} blaze_dyn;
+
+/* The dynamic value a handle names, or NULL where the handle names nothing.
+   Declared here because the dictionary services read a parsed object. */
+static blaze_dyn* blaze_dyn_lookup(double h);
+
 /* A small string-keyed dictionary. Keys are owned copies; values are doubles. */
 typedef struct { char* key; double value; } blaze_rt_dict_entry;
 typedef struct { blaze_rt_dict_entry* entries; size_t count; size_t capacity; } blaze_rt_dict;
@@ -4525,14 +4556,120 @@ double blaze_rt_dict_new(void) {
 }
 
 /** The dictionary a handle names, refused where the runtime never made one. */
-static blaze_rt_dict* blaze_rt_dict_of(double handle) {
+static blaze_rt_dict* blaze_rt_dict_known(double handle) {
   blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)handle;
   if (d == NULL) return NULL;
   for (size_t index = 0; index < blaze_rt_dict_count; index += 1) {
     if (blaze_rt_dict_registry[index] == d) return d;
   }
+  return NULL;
+}
+
+static blaze_rt_dict* blaze_rt_dict_of(double handle) {
+  blaze_rt_dict* d = blaze_rt_dict_known(handle);
+  if (d != NULL || handle == 0.0) return d;
   blaze_rt_raise("a dictionary handle that the runtime did not create");
   return NULL;
+}
+
+/* A dynamic object is a dictionary too.
+
+   JSON gives a record and a map the one shape at run time: an object the parser
+   laid down holds its fields as (key handle, value handle) pairs, in the order
+   the document wrote them. A program that reads the entries of a value it cannot
+   name walks those fields, and a record passed to a parameter typed as a record
+   of unknowns is one, so the dictionary services read them. A
+   handle of another kind is not an object and holds no fields, which is what the
+   language answers for the entries of a number.
+*/
+static int blaze_rt_dict_dynamic(double handle, blaze_dyn** out) {
+  blaze_dyn* d = blaze_dyn_lookup(handle);
+  if (d != NULL && d->kind == BLAZE_DYN_OBJECT) {
+    if (out != NULL) *out = d;
+    return 1;
+  }
+  return 0;
+}
+
+double blaze_rt_box_number(double value);
+double blaze_rt_box_string(const char* value);
+
+/* The layout a compiled record carries, or NULL where the handle is not one.
+
+   A record this compiler lays out is a block whose header names its fields: each
+   field's name, the offset it sits at and the type it holds. A value the read
+   cannot name may be such a record, and its entries are the fields the layout
+   names. */
+static const char* blaze_rt_record_layout(double handle) {
+  if (handle < 4096.0 || handle >= 281474976710656.0) return NULL;
+  const void* block = (const void*)(uintptr_t)handle;
+  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)block - BLAZE_RT_HEADER_SIZE);
+  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) return NULL;
+  return header->descriptor;
+}
+
+/* How many fields the layout of a record names. */
+static int blaze_rt_record_count(const char* layout) {
+  int count = 0;
+  const char* at = layout;
+  while (layout != NULL && at[0] != '\0') {
+    at += strlen(at) + 1;
+    at += strlen(at) + 1;
+    at += strlen(at) + 1;
+    count += 1;
+  }
+  return count;
+}
+
+/* One field of a record's layout: its name, where it sits and what it holds. */
+static const char* blaze_rt_record_field(const char* layout, int index, size_t* offset, const char** type) {
+  const char* at = layout;
+  int at_index = 0;
+  while (layout != NULL && at[0] != '\0') {
+    const char* name = at;
+    at += strlen(at) + 1;
+    const size_t where = (size_t)strtoul(at, NULL, 10);
+    at += strlen(at) + 1;
+    const char* kind = at;
+    at += strlen(at) + 1;
+    if (at_index == index) {
+      if (offset != NULL) *offset = where;
+      if (type != NULL) *type = kind;
+      return name;
+    }
+    at_index += 1;
+  }
+  return NULL;
+}
+
+/* A field of a record as the dynamic value the entries of a value are: a number
+   is boxed, a text is boxed as the text it says, and a reference is the handle
+   its address is. */
+static double blaze_rt_record_value(const unsigned char* at, const char* type) {
+  if (strcmp(type, "text") == 0) {
+    const char* text = NULL;
+    memcpy(&text, at, sizeof text);
+    return text == NULL ? 0.0 : blaze_rt_box_string(text);
+  }
+  if (strncmp(type, "ref<", 4) == 0 || strncmp(type, "slice<", 6) == 0 || strncmp(type, "ptr<", 4) == 0) {
+    const void* pointer = NULL;
+    memcpy(&pointer, at, sizeof pointer);
+    return (double)(uintptr_t)pointer;
+  }
+  if (strcmp(type, "f32") == 0) { float small = 0; memcpy(&small, at, sizeof small); return blaze_rt_box_number((double)small); }
+  if (strcmp(type, "f64") == 0) { double number = 0; memcpy(&number, at, sizeof number); return blaze_rt_box_number(number); }
+  if (strcmp(type, "bool") == 0) return blaze_rt_box_number(at[0] != 0 ? 1.0 : 0.0);
+  return blaze_rt_box_number(0.0);
+}
+
+/* The position of a field of a dynamic object, or -1 where it holds none. */
+static int blaze_rt_dynamic_field(blaze_dyn* d, const char* key) {
+  if (d == NULL || d->items == NULL || key == NULL) return -1;
+  for (size_t at = 0; at < d->count; at += 1) {
+    blaze_dyn* kd = blaze_dyn_lookup(((double*)d->items)[at * 2]);
+    if (kd != NULL && kd->kind == BLAZE_DYN_TEXT && kd->text != NULL && strcmp(kd->text, key) == 0) return (int)at;
+  }
+  return -1;
 }
 
 /* A block of elements copied, and two blocks joined.
@@ -4581,6 +4718,11 @@ static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key
 }
 
 double blaze_rt_dict_get(double dict, const char* key) {
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) {
+    const int at = blaze_rt_dynamic_field(object, key);
+    return at < 0 ? 0.0 / 0.0 : ((double*)object->items)[at * 2 + 1];
+  }
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0; /* NaN */
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
@@ -4589,6 +4731,8 @@ double blaze_rt_dict_get(double dict, const char* key) {
 }
 
 double blaze_rt_dict_has(double dict, const char* key) {
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0;
   return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
@@ -4615,12 +4759,30 @@ double blaze_rt_dict_set(double dict, const char* key, double value) {
 }
 
 double blaze_rt_dict_len(double dict) {
-  blaze_rt_dict* d = blaze_rt_dict_of(dict);
-  if (d == NULL) return 0.0;
-  return (double)d->count;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) return (double)object->count;
+  // The dictionary is asked before the record, because the record test reads
+  // the header in front of a pointer and a dictionary handle is one the
+  // allocator laid out rather than a managed block.
+  const blaze_rt_dict* d = blaze_rt_dict_known(dict);
+  if (d != NULL) return (double)d->count;
+  if (dict == 0.0) return 0.0;
+  {
+    const char* layout = blaze_rt_record_layout(dict);
+    if (layout != NULL) return (double)blaze_rt_record_count(layout);
+  }
+  return 0.0;
 }
 
 double blaze_rt_dict_delete(double dict, const char* key) {
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) {
+    /* A parsed object is read, not edited here: removing a field of one is a
+       shape the program would then read differently from the document it came
+       from. Refused rather than quietly answered as a dictionary it is not. */
+    blaze_rt_raise("a dynamic object is not edited");
+    return dict;
+  }
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
@@ -4672,7 +4834,14 @@ double blaze_rt_dict_set_ref(double dict, const char* key, double value) {
 /* A text is a pointer held in the same double an entry carries, and the two
    directions are the casts the ABI spells once here rather than at every use. */
 const char* blaze_rt_dict_get_text(double dict, const char* key) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) {
+    const int at = blaze_rt_dynamic_field(object, key);
+    if (at < 0) return "";
+    blaze_dyn* held = blaze_dyn_lookup(((double*)object->items)[at * 2 + 1]);
+    return held != NULL && held->kind == BLAZE_DYN_TEXT && held->text != NULL ? held->text : "";
+  }
+  blaze_rt_dict* d = blaze_rt_dict_known(dict);
   if (d == NULL || key == NULL) return "";
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
   if (e == NULL) return "";
@@ -4684,28 +4853,87 @@ double blaze_rt_dict_set_text(double dict, const char* key, const char* value) {
 }
 
 const char* blaze_rt_dict_key_at(double dict, double index) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
-  size_t at = (size_t)index;
-  if (d == NULL || at >= d->count) return "";
-  return d->entries[at].key;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_json_field_key(dict, index);
+  const blaze_rt_dict* d = blaze_rt_dict_known(dict);
+  if (d != NULL) {
+    const size_t at = (size_t)index;
+    return at >= d->count ? "" : d->entries[at].key;
+  }
+  if (dict != 0.0) {
+    const char* layout = blaze_rt_record_layout(dict);
+    if (layout != NULL) {
+      const char* name = blaze_rt_record_field(layout, (int)index, NULL, NULL);
+      return name == NULL ? "" : name;
+    }
+  }
+  return "";
 }
 
 double blaze_rt_dict_value_at(double dict, double index) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
-  size_t at = (size_t)index;
-  if (d == NULL || at >= d->count) return 0.0;
-  return d->entries[at].value;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_json_field_value(dict, index);
+  const blaze_rt_dict* d = blaze_rt_dict_known(dict);
+  if (d != NULL) {
+    const size_t at = (size_t)index;
+    return at >= d->count ? 0.0 : d->entries[at].value;
+  }
+  if (dict != 0.0) {
+    const char* layout = blaze_rt_record_layout(dict);
+    if (layout != NULL) {
+      size_t where = 0;
+      const char* kind = NULL;
+      if (blaze_rt_record_field(layout, (int)index, &where, &kind) == NULL) return 0.0;
+      const unsigned char* at = (const unsigned char*)(uintptr_t)dict + where;
+      if (strcmp(kind, "f64") == 0) { double number = 0; memcpy(&number, at, sizeof number); return number; }
+      if (strcmp(kind, "f32") == 0) { float small = 0; memcpy(&small, at, sizeof small); return (double)small; }
+      if (strcmp(kind, "text") == 0) { const char* text = NULL; memcpy(&text, at, sizeof text); return (double)(uintptr_t)text; }
+      const void* pointer = NULL; memcpy(&pointer, at, sizeof pointer); return (double)(uintptr_t)pointer;
+    }
+  }
+  return 0.0;
 }
 
 double blaze_rt_dict_value_at_ref(double dict, double index) {
+  // A compiled record's field is boxed as the dynamic value it is, so the loop
+  // that reads the key and the value holds a value a typeof and a stringify
+  // read. A dictionary is read before the record test, for the reason the length
+  // is.
+  if (dict == 0.0 || blaze_rt_dict_known(dict) != NULL) return blaze_rt_dict_value_at(dict, index);
+  const char* layout = blaze_rt_record_layout(dict);
+  if (layout != NULL) {
+    size_t where = 0;
+    const char* kind = NULL;
+    if (blaze_rt_record_field(layout, (int)index, &where, &kind) == NULL) return 0.0;
+    return blaze_rt_record_value((const unsigned char*)(uintptr_t)dict + where, kind);
+  }
   return blaze_rt_dict_value_at(dict, index);
 }
 
 const char* blaze_rt_dict_value_at_text(double dict, double index) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
-  size_t at = (size_t)index;
-  if (d == NULL || at >= d->count) return "";
-  return (const char*)(uintptr_t)d->entries[at].value;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(dict, &object)) {
+    blaze_dyn* held = blaze_dyn_lookup(blaze_rt_json_field_value(dict, index));
+    return held != NULL && held->kind == BLAZE_DYN_TEXT && held->text != NULL ? held->text : "";
+  }
+  const blaze_rt_dict* d = blaze_rt_dict_known(dict);
+  if (d != NULL) {
+    const size_t at = (size_t)index;
+    return at >= d->count ? "" : (const char*)(uintptr_t)d->entries[at].value;
+  }
+  if (dict != 0.0) {
+    const char* layout = blaze_rt_record_layout(dict);
+    if (layout != NULL) {
+      size_t where = 0;
+      const char* kind = NULL;
+      if (blaze_rt_record_field(layout, (int)index, &where, &kind) == NULL) return "";
+      if (strcmp(kind, "text") != 0) return "";
+      const char* text = NULL;
+      memcpy(&text, (const unsigned char*)(uintptr_t)dict + where, sizeof text);
+      return text == NULL ? "" : text;
+    }
+  }
+  return "";
 }
 
 /* A reference key is the address the handle carries, written in base sixteen:
@@ -5445,17 +5673,6 @@ void blaze_rt_raise(const char* message) {
 const char* blaze_rt_last_error(void) {
   return blaze_rt_last_message;
 }
-
-/* Dynamic value representation. */
-typedef enum { BLAZE_DYN_NULL, BLAZE_DYN_NUMBER, BLAZE_DYN_BOOL, BLAZE_DYN_TEXT, BLAZE_DYN_ARRAY, BLAZE_DYN_OBJECT, BLAZE_DYN_HASHER } blaze_dyn_kind;
-typedef struct blaze_dyn {
-  blaze_dyn_kind kind;
-  double number;
-  char* text;
-  void* items;
-  size_t count;
-  size_t capacity;
-} blaze_dyn;
 
 static void** blaze_dyn_reg = NULL;
 static size_t blaze_dyn_reg_n = 0;
@@ -6789,6 +7006,29 @@ double blaze_rt_object_set_number(double target, const char* field, double value
     }
   }
   return target;
+}
+
+/* The fields of a dynamic object, read by position.
+
+   The entries of a dynamic object are the fields it holds: the items are (key
+   handle, value handle) pairs, so the key is the text one of them names and the
+   value is the handle beside it. A value that is not an object has no fields,
+   which is the empty list. */
+const char* blaze_rt_json_field_key(double object, double index) {
+  blaze_dyn* d = blaze_dyn_lookup(object);
+  if (!d || d->kind != BLAZE_DYN_OBJECT || !d->items) return "";
+  const size_t at = (size_t)index;
+  if (at >= d->count) return "";
+  blaze_dyn* key = blaze_dyn_lookup(((double*)d->items)[at * 2]);
+  return key && key->kind == BLAZE_DYN_TEXT && key->text != NULL ? key->text : "";
+}
+
+double blaze_rt_json_field_value(double object, double index) {
+  blaze_dyn* d = blaze_dyn_lookup(object);
+  if (!d || d->kind != BLAZE_DYN_OBJECT || !d->items) return 0.0;
+  const size_t at = (size_t)index;
+  if (at >= d->count) return 0.0;
+  return ((double*)d->items)[at * 2 + 1];
 }
 
 double blaze_rt_json_get(double obj, const char* field) {

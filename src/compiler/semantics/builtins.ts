@@ -107,6 +107,13 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
   "blaze_rt_is_array": { params: [ANY], returns: F64, arity: 1 },
+  /** The fields of a value the read cannot name, read by position: the key is
+   *  the text one field holds and the value is the handle beside it. */
+  /** How many entries a dynamic array or object holds: an object's count is
+   *  the number of fields it carries. */
+  "blaze_rt_array_length": { params: [ANY], returns: F64, arity: 1 },
+  "blaze_rt_json_field_key": { params: [F64, F64], returns: TEXT, arity: 2 },
+  "blaze_rt_json_field_value": { params: [F64, F64], returns: ANY, arity: 2 },
   /** Whether a compiled object was laid out with a field of this name: the
    *  object carries the names its layout wrote. */
   "blaze_rt_object_has_field": { params: [POINTER, TEXT], returns: F64, arity: 2 },

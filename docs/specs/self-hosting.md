@@ -1017,6 +1017,56 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hw. The entries of a value are the fields it holds
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (key === name) return true;
+      if (typeof value === `object` && value !== null) find(value, name);
+    }
+
+The last read refusal of the compiler's own sources. `Object.entries` of a value
+the read cannot name is now a loop over the fields the value holds, and the
+fields are the runtime's:
+
+- a **dynamic object** — what a JSON parse lays down — keeps its fields as (key
+  handle, value handle) pairs, in the order the document wrote them, and
+  `blaze_rt_json_field_key` / `_json_field_value` read one by position
+  (`blaze_rt_array_length` already counts an object's fields);
+- a **record this compiler laid out** carries its layout in the block's header —
+  each field's name, offset and type (§4hk) — and the dictionary entry readers
+  read it the same way: the length is the fields the layout names, the key is a
+  field's name, and the value is the field boxed as the dynamic value it is.
+  Reading one is a build the validator still refuses — a record handed to a
+  reader whose parameter is the dictionary handle — so a compiled record's
+  entries lower only when the value is a dynamic one; the runtime is ready for
+  both;
+- the dictionary services now read a dynamic object as the dictionary it is, so
+  a value handed to a parameter typed as a record of unknowns is the dictionary
+  its fields are.
+
+What is refused, precisely: `Object.fromEntries` over the entries of such a
+value. A dictionary built from a value's entries would be a list of pairs first,
+and an entry is a key and a value of two types, which no list this compiler holds
+is both. The loop is what reads them; a copy is refused with that reason, and a
+value that was never built cannot reach the body (the hole is a name the resolver
+refuses, §4hn).
+
+The measurement is back to
+
+    # self-host: 95 of 95 sources read, 0 refused, 0 refusals
+
+and this time nothing was relocated: the two constructs the last measurement
+reached have one read and one refusal at the *lowering* (`Object.fromEntries`),
+which the resolver reports with the line.
+
+Two things are still missing, and they are the same foundation: a **pair as a
+program value** (so `Object.fromEntries` and `list.map(cb)` can build the list of
+pairs a map is copied from), and the **machine backend's dictionary accessors**
+(a module function that walks a map is still lowered by the C backend, because
+the machine backend has no case for `blaze_rt_dict_len` and its neighbours).
+
+    The total went from 2 to 0.
+
 ### 4hv. A pair is a table entry, and the map is the writes it names
 
     const rows = [[`a`, 1], [`b`, 2]];
@@ -5158,7 +5208,7 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-2 refusals over 95 sources, 93 of them read whole. The report reads the
+0 refusals over 95 sources, 95 of them read whole. The report reads the
 module graph a build reads — every source is a root, every project import is
 resolved, and a file whose imports bind a type, a value, a signature or a class
 is read again with them — so the number is what survives the link rather than
@@ -5415,6 +5465,7 @@ What was closed this session, and what each was worth:
 | a list handed to a value the compiler cannot name is its elements (§4ht) | 2 → 2 (fixed) |
 | a map written out with its entries is the writes they name (§4hu) | 2 → 2 (lowered) |
 | a pair is a table entry, and the map is the writes it names (§4hv) | 2 → 2 (lowered) |
+| the entries of a value are the fields it holds (§4hw) | 2 → 0 |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

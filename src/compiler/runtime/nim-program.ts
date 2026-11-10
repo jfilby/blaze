@@ -819,6 +819,10 @@ ${anchor}
         return `${RUNTIME_NAME}_dict_set_text(${argument(0)}, ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_dict_set_ref":
         return `${RUNTIME_NAME}_dict_set_ref(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+      case "blaze_rt_json_field_key":
+        return `${RUNTIME_NAME}_json_field_key(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_json_field_value":
+        return `${RUNTIME_NAME}_json_field_value(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_get":
         return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_set":

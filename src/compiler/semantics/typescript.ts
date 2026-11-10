@@ -3244,6 +3244,13 @@ interface CollectionValue {
    * what a field of one holds asks the shape.
    */
   valueShape?: ResolvedType;
+  /**
+   * The entries are the fields of a value the read cannot name, enumerated by
+   * the runtime: a dynamic object parsed from JSON, whose fields are a key text
+   * and a value handle. The services that read it are the JSON field ones, not
+   * the dictionary's.
+   */
+  dynamic?: boolean;
 }
 
 export interface TypeScriptFunction {
@@ -9923,6 +9930,9 @@ class TypeScriptParser {
     this.valueTypes.set(held, NUMBER_RESULT);
     const count = (): Expression => ({
       k: "call",
+      // The dictionary readers read every shape an entry loop walks: a
+      // dictionary, the object a document was parsed into, and the record this
+      // compiler laid out all answer their fields here.
       name: "blaze_rt_dict_len",
       args: [{ k: "ident", name: held }],
     });
@@ -11760,13 +11770,31 @@ class TypeScriptParser {
           // lowered, because the lowering that treated it as a dictionary
           // answered the size of a value that was not one — an answer written
           // into a program that then read what was never there.
-          if (source !== undefined && this.opaqueValue(source) && !this.importsArePending()) {
+          // The entries of a value the read cannot name are the fields the
+          // runtime holds: a dynamic object is a list of (key, value) pairs, and
+          // the loop reads one field's key and one field's value by position.
+          // The key is a text and the value is the handle it is held as, which
+          // is what a dynamic value is everywhere else.
+          if (source !== undefined && this.opaqueValue(source) && !this.importsArePending() && this.readingCollectionSource) {
+            // The entries a *collection* is built from would be a list of pairs
+            // first: an entry is a key and a value of two types, and no list
+            // this compiler holds is both. A loop over them is read; a map or a
+            // copy built from them is refused with the loop to write instead.
             this.report(
-              "the entries of a value the read cannot name are not a value this compiler holds",
-              "an entry is a key and a value of two types; write the fields out, or read the entries of a map the program builds",
+              "Object.fromEntries copies the entries of a value the read cannot name",
+              "walk the entries in a loop and write each key and value where they are read",
               this.peek(),
             );
             return this.hole();
+          }
+          if (source !== undefined && this.opaqueValue(source) && !this.importsArePending()) {
+            const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
+            const dynamic: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE, dynamic: true };
+            this.collectionExpressions.set(entries, dynamic);
+            this.iteratedCollections.set(entries, dynamic);
+            this.expressionTypes.set(entries, ANY_TYPE);
+            replace(entries);
+            continue;
           }
           this.report(
             "Object.entries reads a record or a map in a loop that names the two values",

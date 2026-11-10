@@ -3715,12 +3715,11 @@ test("a value the read cannot name is spread and serialized as the form it is", 
   assert.match(JSON.stringify(handle), /"name":"object.copy"/);
 });
 
-test("the entries of a value the read cannot name are refused", () => {
-  // An entry is a key and a value of two types, and no value this compiler
-  // holds is both: a loop over the entries of a value the read cannot name
-  // asked a value that was not a dictionary for its size, and the program ran
-  // with what it answered. It is refused where it is written instead. A value
-  // the read *does* type is the record or map whose entries are read here.
+test("a loop over the entries of a value the read cannot name is the fields it holds", () => {
+  // The fields of a value the read cannot name are the runtime's: an object it
+  // parsed holds them as key and value pairs, and a record this compiler laid
+  // out carries the layout that names them. The loop names the two values, and
+  // the field services read them by position.
   const source = [
     "export function walk(value: unknown): number {",
     "  let n = 0;",
@@ -3730,8 +3729,13 @@ test("the entries of a value the read cannot name are refused", () => {
     "",
   ].join("\n");
   const read = readTypeScriptModule(source, "module.ts", false);
-  assert.equal(read.count, 1);
-  assert.match(read.refused[0]?.message ?? "", /the entries of a value the read cannot name are not a value this compiler holds/);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const handle = read.analysis.functions.find((entry) => entry.name === "walk")?.handle;
+  assert.ok(handle !== undefined, "walk is a function of the module");
+  const written = JSON.stringify(handle);
+  assert.match(written, /blaze_rt_dict_len/, "the loop counts the fields");
+  assert.match(written, /blaze_rt_dict_key_at/, "reads a field's key");
+  assert.match(written, /blaze_rt_dict_value_at_ref/, "and the value beside it");
 });
 
 test("a module-level number is a cell the functions share", () => {
