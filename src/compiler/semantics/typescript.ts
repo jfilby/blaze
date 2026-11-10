@@ -3244,13 +3244,6 @@ interface CollectionValue {
    * what a field of one holds asks the shape.
    */
   valueShape?: ResolvedType;
-  /**
-   * The entries are the fields of a value the read cannot name, enumerated by
-   * the runtime: a dynamic object parsed from JSON, whose fields are a key text
-   * and a value handle. The services that read it are the JSON field ones, not
-   * the dictionary's.
-   */
-  dynamic?: boolean;
 }
 
 export interface TypeScriptFunction {
@@ -11789,7 +11782,7 @@ class TypeScriptParser {
           }
           if (source !== undefined && this.opaqueValue(source) && !this.importsArePending()) {
             const entries: Expression = { k: "call", name: "__collection_entries", args: [source] };
-            const dynamic: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE, dynamic: true };
+            const dynamic: CollectionValue = { kind: "map", key: { kind: "text" }, value: ANY_TYPE };
             this.collectionExpressions.set(entries, dynamic);
             this.iteratedCollections.set(entries, dynamic);
             this.expressionTypes.set(entries, ANY_TYPE);
