@@ -156,6 +156,12 @@ export interface ProgramTarget {
    * and the length its header carries.
    */
   sequence(name: string, element: SemanticType, pointer: string): string[];
+  /**
+   * The count of elements in the block a value names, read from the header the
+   * runtime laid in front of it. A list held in a field or answered by a call
+   * has no sidecar count beside a name, so this is what its length is.
+   */
+  sequenceLength(pointer: string, element: SemanticType): string;
   /** One element of a buffer. */
   element(buffer: string, index: string): string;
   /** The line that changes what a name holds. */
@@ -1296,10 +1302,14 @@ class ProgramEmitter {
    */
   private length(value: SemanticValue & { k: "length" }): string {
     if (isTextType(value.of.type)) return this.target.stringLength(this.expression(value.of));
-    if (value.of.k !== "local") {
-      throw emitError("the emitter cannot write down the length of an array", `${value.of.k} names no allocation`);
+    if (value.of.k === "local") return `${this.names.read(value.of.name)}_length`;
+    // A list held in a field or answered by a call has no sidecar count beside
+    // a name: the header the runtime laid in front of the block is the count.
+    const element = elementTypeOf(value.of.type);
+    if (element !== null && isSequence(value.of.type)) {
+      return this.target.sequenceLength(this.expression(value.of), element);
     }
-    return `${this.names.read(value.of.name)}_length`;
+    throw emitError("the emitter cannot write down the length of an array", `${value.of.k} names no allocation`);
   }
 
   private compare(value: SemanticValue & { k: "compare" }): string {

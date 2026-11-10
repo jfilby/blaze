@@ -261,7 +261,16 @@ class Graph {
           const headerEvents: Event[] = [];
           if (loop.kind === "while" || loop.kind === "doWhile") this.value(headerEvents, loop.condition);
           else if (loop.kind === "counted") headerEvents.push({ k: "read", name: loop.variable }, { k: "def", name: loop.variable });
-          else headerEvents.push({ k: "read", name: loop.index }, { k: "def", name: loop.index }, { k: "def", name: loop.element });
+          else headerEvents.push(
+            // The sequence a walk steps through is read on every turn to reach
+            // the element at the index, so it is live across every call the
+            // body makes — and across the call a length read off it makes
+            // before the first turn.
+            { k: "read", name: loop.of },
+            { k: "read", name: loop.index },
+            { k: "def", name: loop.index },
+            { k: "def", name: loop.element },
+          );
           const headerNode = this.make(headerEvents);
           const exitNode = this.make([]);
           this.open.push({ header: loop.header, exit: loop.exit, headerNode, exitNode });

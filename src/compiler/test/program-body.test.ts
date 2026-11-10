@@ -21,7 +21,7 @@ import { semanticFunctionProblems, semanticIrProblems } from "../semantics/ir-va
 import { typeText, type SemanticFunction, type SemanticValue } from "../core/semantic-ir.ts";
 import { verifyProgram } from "../toolchain/verify-program.ts";
 import { diagnostic, phaseOf } from "./phase.ts";
-import type { BuildMode, FunctionContract } from "../core/types.ts";
+import type { BuildMode, BuildStatus, FunctionContract } from "../core/types.ts";
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
@@ -596,14 +596,17 @@ const LANGUAGE = [
   "",
 ].join("\n");
 
-/** Builds a program of one entry module, and returns the binary it delivers. */
+/**
+ * Builds a program of one entry module, and returns the binary it delivers with
+ * the build record, whose fallback says a backend refused a body.
+ */
 async function program(
   source: string,
   runtime?: "nim",
   mode?: BuildMode,
   files: Record<string, string> = {},
   backend?: "c" | "machine",
-): Promise<{ directory: string; binary: string }> {
+): Promise<{ directory: string; binary: string; build: BuildStatus }> {
   const directory = await scratch("blaze-program-");
   for (const [name, text] of Object.entries(files)) await writeFile(join(directory, name), text, "utf8");
   await writeFile(join(directory, "main.ts"), source, "utf8");
@@ -622,7 +625,7 @@ async function program(
     "build",
   );
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");
-  return { directory, binary: outcome.outputPath };
+  return { directory, binary: outcome.outputPath, build: outcome.build };
 }
 
 test("console.error writes its values to the error stream", async () => {
@@ -738,6 +741,67 @@ test("a map's values are the list the program walks", async () => {
   assert.equal(delivered.code, 0, delivered.stderr);
   assert.equal(delivered.stdout, sourceRun.stdout);
   assert.equal(delivered.stdout.trim(), "2 6 4 false");
+});
+
+test("a module function walks the map it builds, and the machine backend lowers it", async () => {
+  // A dictionary is the double handle the runtime answers, and every service a
+  // module function reads one with is a call this backend now makes: the map is
+  // built, written, asked about, spread into a block and walked without the C
+  // backend being asked to lower the function instead. The walk reads the length
+  // the block's header states. The build record states the fallback, so a body
+  // the machine refused fails the test rather than passing on the C backend's
+  // answer.
+  const source = ['import { total } from "./lib.ts";', "console.log(total());", ""].join("\n");
+  const library = [
+    "export function total(): number {",
+    "  const m = new Map<string, number>();",
+    "  m.set(`a`, 1);",
+    "  m.set(`b`, 2);",
+    "  m.set(`a`, 4);",
+    "  const n = new Map<string, number>();",
+    "  n.set(`c`, 5);",
+    "  n.set(`d`, 7);",
+    "  let sum = 0;",
+    "  for (const v of m.values()) sum += v;",
+    "  for (const v of n.values()) sum += v;",
+    "  let tail = 0;",
+    "  for (const v of [...m.values(), ...n.values()]) tail += v;",
+    "  return sum * 1000 + tail + m.size * 10 + n.size + (m.get(`a`) === 4 ? 1 : 0) + (m.has(`c`) ? 2 : 0);",
+    "}",
+    "",
+  ].join("\n");
+  const { directory, binary, build } = await program(source, undefined, undefined, { "lib.ts": library }, "machine");
+  assert.equal(build.backendFallback, undefined, build.backendFallback?.reason);
+  const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+  const delivered = run(binary, [], { timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, delivered.stderr);
+  assert.equal(delivered.stdout, sourceRun.stdout);
+  assert.equal(delivered.stdout.trim(), "18041");
+});
+
+test("a list held in a field is as long as its block, empty or filled", async () => {
+  // A list field is the block pointer the layout stores, and the length is the
+  // header in front of it: an empty list allocates no element's worth of
+  // payload, so its header measures zero rather than the one element a C
+  // allocation of nothing needs. A module function reads the same length, and
+  // a program reads it off the field it wrote.
+  const source = [
+    "interface Box { items: number[]; }",
+    "function count(box: Box): number { return box.items.length; }",
+    "const empty: Box = { items: [] };",
+    "const filled: Box = { items: [1, 2, 3] };",
+    "console.log(count(empty), count(filled), empty.items.length, filled.items.length);",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { directory, binary, build } = await program(source, undefined, undefined, {}, backend);
+    if (backend === "machine") assert.equal(build.backendFallback, undefined, build.backendFallback?.reason);
+    const sourceRun = run("node", ["--experimental-strip-types", "main.ts"], { cwd: directory, timeoutMs: 60_000 });
+    const delivered = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(delivered.code, 0, delivered.stderr);
+    assert.equal(delivered.stdout, sourceRun.stdout, `the ${backend} backend counts the elements`);
+    assert.equal(delivered.stdout.trim(), "0 3 0 3");
+  }
 });
 
 test("a program holds the list a call answered", async () => {
@@ -1475,15 +1539,6 @@ test("a delivered program that runs out of memory is a verdict, not a dead build
     t.skip("python3 is needed to grow more heap than a program is given");
     return;
   }
-  // The proof grows a real heap past the delivered program's own, which on a
-  // machine with little room to spare is the thing the system kills. A run of
-  // the optimizer sets the variable, because a session that is benchmarking
-  // the suite cannot afford the two gigabytes the proof touches; a person
-  // running the suite by hand gets the proof.
-  if (process.env.BLAZE_SKIP_HEAP_PROOF !== undefined) {
-    t.skip("BLAZE_SKIP_HEAP_PROOF is set, so the heap proof is left out");
-    return;
-  }
   const directory = await scratch("blaze-oom-");
   await writeFile(join(directory, "main.ts"), 'console.log("expected");\n', "utf8");
 
@@ -1492,6 +1547,11 @@ test("a delivered program that runs out of memory is a verdict, not a dead build
   // exhausting memory, which takes the build with it and reports nothing about
   // the program; bounded, the program is refused and says so, and the run comes
   // back to be judged.
+  //
+  // The heap here is the smallest one the proof needs rather than the one a
+  // generated program is given: what is under test is the refusal, and a
+  // program refused at sixteen megabytes proves it as well as one refused at
+  // two gigabytes while using a thousandth of the memory to do it.
   const hog = [
     "import sys",
     'sys.stdout.write("expected\\n"); sys.stdout.flush()',
@@ -1510,6 +1570,7 @@ test("a delivered program that runs out of memory is a verdict, not a dead build
     sourcePath: join(directory, "main.ts"),
     directory,
     runner: { command: "python3", args: ["-c", hog] },
+    heapBytes: 16 * 1024 * 1024,
   });
 
   // The line it did print is kept: what it managed to print before it stopped

@@ -1887,8 +1887,11 @@ class ProgramParser {
         if (member === "toPrecision" && this.at("(")) return this.precision(value);
         if (member === "toString" && this.at("(")) return this.hexString(value);
         if (member === "fill" && this.at("(")) return this.filled(value);
-        if (member === "length" && value.k === "name" && !this.at("(")) {
-          value = { k: "length", of: value.name };
+        if (member === "length" && !this.at("(")) {
+          // A name is the length the program lays the block down with; a value
+          // it reads — `leaf.children.length`, `xs[0].length` — is measured
+          // where it is written, because no name holds the list the field is.
+          value = value.k === "name" ? { k: "length", of: value.name } : { k: "lengthOf", of: value };
           continue;
         }
         if (member === "env" && value.k === "name" && value.name === "process" && this.at(".")) {

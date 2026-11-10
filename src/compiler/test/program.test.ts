@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { CompilerError } from "../core/errors.ts";
 import { frontendFor } from "../semantics/frontend.ts";
 import { entryContract, INLINE_MODULE, runContractPhase } from "../semantics/program.ts";
 import type { ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
@@ -48,6 +49,62 @@ test("an import reaches through a file that imports another", () => {
 
   assert.deepEqual(program.files.map((file) => file.path), ["a.ts", "b.ts", "c.ts"]);
   assert.deepEqual(program.edges.map((edge) => `${edge.from} -> ${edge.to}`), ["a.ts -> b.ts", "b.ts -> c.ts"]);
+});
+
+test("a first read that waited for an import does not stop the build", () => {
+  // `Object.values(TABLE)` names a value another module exports. The first read
+  // of the file happens before that export is bound and refuses the call; the
+  // linked read settles it, and the build reads on. The verdict is the linked
+  // read's, not the provisional one's.
+  const program = contract(
+    {
+      "lib.ts": "export const TABLE = { a: 1, b: 2 };\n",
+      "cli.ts": [
+        'import { TABLE } from "./lib.ts";',
+        "export function sum(): number {",
+        "  let total = 0;",
+        "  for (const value of Object.values(TABLE)) total += value;",
+        "  return total;",
+        "}",
+        "console.log(sum());",
+        "",
+      ].join("\n"),
+    },
+    "cli.ts",
+  );
+
+  assert.deepEqual(program.files.map((file) => file.path), ["cli.ts", "lib.ts"]);
+  assert.deepEqual(Object.keys(program.files[0].functions), ["sum"]);
+});
+
+test("a construct the linked read still refuses stops the build with its reason", () => {
+  // The first read is deferred, not forgiven: what the link does not settle is
+  // refused in the file that wrote it, and the build names the construct.
+  let refused: unknown;
+  try {
+    contract(
+      {
+        "lib.ts": "export const TABLE = { a: 1, b: 2 };\n",
+        "cli.ts": [
+          'import { TABLE } from "./lib.ts";',
+          "export function sum(target: object): number {",
+          "  const held = new WeakRef(target) === undefined ? 0 : 1;",
+          "  let total = 0;",
+          "  for (const value of Object.values(TABLE)) total += value;",
+          "  return total + held;",
+          "}",
+          "console.log(sum({}));",
+          "",
+        ].join("\n"),
+      },
+      "cli.ts",
+    );
+  } catch (error) {
+    refused = error;
+  }
+  assert.ok(refused instanceof CompilerError, "the linked read refuses the construct");
+  assert.match(refused.message, /constructs of cli\.ts are outside the subset/);
+  assert.match(refused.detail ?? "", /WeakRef/);
 });
 
 test("modules that import each other are contracted once, as one program", () => {

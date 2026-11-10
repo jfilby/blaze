@@ -274,6 +274,8 @@ type DraftValue =
   | { k: "call"; call: DraftCall }
   /** The length of an array. */
   | { k: "length"; buffer: string; bufferType: TypeExpr; type: PrimitiveTypeName }
+  /** The length of a list written where no name holds it. */
+  | { k: "lengthOf"; of: DraftValue }
   /** The length of a string, counted the way an array length is. */
   | { k: "stringLength"; of: DraftValue }
   /** One element of an array. */
@@ -734,6 +736,7 @@ function holdsText(value: DraftValue): boolean {
     case "view":
     case "fill":
     case "length":
+    case "lengthOf":
     case "stringLength":
     case "element":
     case "boolean":
@@ -775,8 +778,9 @@ function draftType(value: DraftValue): TypeExpr | null {
       // the type of a draft does not spell.
       return value.call.returns.kind === "text" ? null : value.call.returns;
     case "length":
+    case "lengthOf":
     case "stringLength":
-      return { kind: "primitive", name: value.k === "stringLength" ? "usize" : value.type };
+      return { kind: "primitive", name: value.k === "length" ? value.type : "usize" };
     case "element":
       return value.type;
     case "boolean":
@@ -1252,6 +1256,9 @@ function callsInValue(value: ProgramValue, called: string[]): void {
     case "element":
       callsInValue(value.index, called);
       return;
+    case "lengthOf":
+      callsInValue(value.of, called);
+      return;
     case "name":
     case "length":
     case "number":
@@ -1461,6 +1468,9 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         return;
       case "length":
         note(one.of);
+        return;
+      case "lengthOf":
+        value(one.of);
         return;
       case "element":
         note(one.buffer);
@@ -2755,6 +2765,8 @@ class ProgramResolver {
         return declare({ kind: "number", mutable, type: "bool", text: value.value ? "true" : "false" });
       case "length":
         return declare({ kind: "number", mutable, type: value.type, text: "" });
+      case "lengthOf":
+        return declare({ kind: "number", mutable, type: "usize", text: "" });
       case "stringLength":
         return declare({ kind: "number", mutable, type: "usize", text: "" });
       case "element":
@@ -3593,6 +3605,11 @@ class ProgramResolver {
           ),
         };
       }
+      case "lengthOf":
+        // A list the program reads out of a field or an element has no name to
+        // count. The value is read where it is written, and the length is taken
+        // of the value rather than of a name holding it.
+        return { k: "lengthOf", of: this.value(value.of, null, line) };
       case "length": {
         const held = this.held(value.of, line);
         if (held.kind === "text") {
@@ -4893,6 +4910,7 @@ class ProgramResolver {
       case "conditional":
         return this.kindOf(value.then, line);
       case "length":
+      case "lengthOf":
       case "element":
         return "number";
       default:
@@ -5135,6 +5153,10 @@ function draftHasCall(value: DraftValue): boolean {
       return false;
     case "element":
       return draftHasCall(value.index);
+    case "lengthOf":
+      // The value the length is of is written once, so a call inside it is a
+      // call the length's statement makes.
+      return draftHasCall(value.of);
     case "text":
       // A string written out in the source is laid down in the object beside
       // the code; one with anything computed in it is built at run time.
@@ -6030,6 +6052,8 @@ class ProgramLowering {
       }
       case "length":
         return { k: "length", type: numeric(value.type), of: { k: "local", type: value.bufferType, name: value.buffer } };
+      case "lengthOf":
+        return { k: "length", type: numeric("usize"), of: this.value(value.of, null, line) };
       case "stringLength":
         return { k: "length", type: numeric("usize"), of: this.value(value.of, null, line) };
       case "element":

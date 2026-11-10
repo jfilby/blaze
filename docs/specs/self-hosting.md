@@ -1017,6 +1017,112 @@ answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
 
+### 4hx. The machine backend reads a dictionary, and a block states its length
+
+    const m = new Map<string, number>();
+    m.set(`a`, 1);
+    let sum = 0;
+    for (const v of m.values()) sum += v;
+
+A module function that builds a map was lowered by the C backend. The machine
+backend had no case for the dictionary's services, so the build fell back with
+`total calls blaze_rt_dict_new, which this backend does not lower`: the C backend
+answered the program and the note was the only sign. The services are calls this
+backend makes now — the dictionary is the double handle the runtime answers, its
+key the text the program wrote, and an entry's value the number it was written
+at, while `_text` and `_ref` name a value of another kind. What a service answers
+is the kind its name says: a number, a text, a block, or a handle the runtime
+hands back as the double a handle is, whose bits this backend holds in the
+accumulator. Each argument is written down before the next is read, because
+reading one may be a call that takes the registers the others wait in.
+
+Walking `m.values()` needed the second half: the length of the block. A list a
+function holds is the block the runtime laid out, and its header records the
+bytes it holds, so the count is those bytes over the width of one element — a
+shift, because every element the IR names is a power of two wide. Without it a
+`for-of` over the block was refused with "reads the length of an array, which no
+machine this compiler writes can answer".
+
+Two blocks beside each other are the join the runtime already provides
+(`blaze_rt_array_join`), so `[...m.values(), ...n.values()]` is a block of the
+elements of both rather than "concatenates two lists, which this backend has not
+written". The two ends of a spread are separate calls in the IR, and both are
+lowered here: `array.copy` and `array.join`.
+
+    node:  "18041"
+    blaze: "18041"     (machine, no fallback)
+
+    The total stayed at 0: the read already carried these, and the slice is a
+    lowering. What is left of the foundation in §4hw is the pair as a program
+    value, which is what `Object.fromEntries` and a map built from a callback's
+    pairs still wait for.
+
+### 4hy. A first read that waits for an import is not the verdict
+
+    Object.fromEntries(Object.entries(node).map(([name, value]) => [name, f(value)]))
+    Object.values(TABLE)          // TABLE is another module's export
+
+The gap report already read every source of the compiler, but a build could not:
+`runContractPhase` threw on the first read of `compiler.ts`, which refused seven
+constructs whose types the imports had not been bound yet. The report was clean
+because its reader answers refusals and the graph reads the file again after the
+link; the build's reader threw before that second read existed.
+
+A frontend may now answer a read instead of throwing (`Frontend.read`), and the
+module graph reads through that answer. The first read's analysis is what the
+link is built from, the linked read replaces the refusals, and the verdict is
+written once, after it: what the linked read still refuses is refused in the
+file that wrote it, and a file no link reaches keeps the refusals its only read
+earned. The graph's comment said a build reads strictly; it now reads strictly
+at the end, which is the same rule the compiler already applies to every file
+of a program.
+
+The same pass over the backend found two lowerings that never ran. The float a
+window of bytes holds (`blaze_rt_view_load_float`/`_store_float`) was written
+inside the guard for the text services, where the callee is one of nine names, so
+the comparison was unreachable and the block argument was read at an undefined
+name. It now stands beside the other services and passes the block as the
+pointer it is. The four comparisons against `fixed` in the frontend compared a
+value type against a program value that is not a type; they are gone, and
+`tsc --noEmit` is clean.
+
+    # self-host: 95 of 95 sources read, 0 refused, 0 refusals
+
+    The total stayed at 0: this changes which read a build trusts, not what the
+    frontend carries. What the contract phase still stops on is the packages
+    (§5), not a construct.
+
+### 4hz. The length of a list a field holds
+
+    interface Box { items: number[]; }
+    const empty: Box = { items: [] };
+    console.log(empty.items.length);
+
+A list field is a block pointer, and its length is the header the runtime laid
+in front of that block. The program body could not ask for it: `.length` was
+read only of a bare name, so `empty.items.length` stayed a member read of the
+field and the object pass refused it as a field named `length`. The parser now
+reads the length of any value as `lengthOf` — the IR kind already said what
+`a[0].length` and `f().length` are — and the resolver lowers it to a `length`
+of the value rather than of a name holding it. The emitter answers a value that
+is not a name with the target's `sequenceLength`, which divides the header's
+byte count by the width of one element.
+
+The empty list needed a second fix. The C driver allocated one element for a
+list of no elements because a C allocation of nothing fails, and the block's
+header recorded that element's bytes: a field read counted one element. It now
+asks for no payload, and the runtime still lays down its header, so the header
+records no element's worth and the count is zero while the sidecar count a name
+reads (`a_length`) is unchanged. The Nim driver makes the same request.
+
+    node:  "0 3 0 3"     (an empty field, a filled one, read both ways)
+    blaze: "0 3 0 3"     (C and machine, no fallback)
+
+    The total stayed at 0: the read already carried the literal, and what was
+    missing was the length of the block it became. §4dm's different-length
+    layouts are unchanged: this is the count of one field, not the shape two
+    literals of one interface share.
+
 ### 4hw. The entries of a value are the fields it holds
 
     for (const [key, value] of Object.entries(fields)) {
@@ -5251,10 +5357,10 @@ The value-model slices still open, in the order they block the self-build:
   backend stores one in a field. Every call through a function-typed field that
   the compiler now reads is written in a function body, so this is a residual
   of §4bx rather than a block.
-- **An empty list in a field.** `{ children: [] }` needs the element type the
-  field's interface states, and the linked read still refuses the literal where
-  the interface, or the field's use, does not name it. It is the largest
-  single-construct bucket left.
+- **An empty list in a field** is carried now (§4hz): the literal is a block of
+  no elements, and its length is the header the runtime wrote. What remains is
+  the shape §4dm records — two literals of one interface whose list fields hold
+  a different number of elements are still two layouts at the object pass.
 - **A list stored in a dictionary.** A dictionary's entry is one double, and a
   list is a pointer and a length: `Map<string, number[]>`,
   `Record<string, string[]>` and a set of lists are refused where the value is
@@ -5466,6 +5572,9 @@ What was closed this session, and what each was worth:
 | a map written out with its entries is the writes they name (§4hu) | 2 → 2 (lowered) |
 | a pair is a table entry, and the map is the writes it names (§4hv) | 2 → 2 (lowered) |
 | the entries of a value are the fields it holds (§4hw) | 2 → 0 |
+| a machine function builds and walks a map, and a block states its length (§4hx) | 0 → 0 (lowered) |
+| a first read that waits for an import is not the verdict (§4hy) | 0 → 0 (the build reads the linked read) |
+| the length of a list a field holds (§4hz) | 0 → 0 (lowered) |
 
 **Wrong answers found on the way.** A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's

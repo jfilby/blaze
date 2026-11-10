@@ -13,6 +13,7 @@
  */
 
 import type { FunctionContract, PrimitiveTypeName, SourceInput, TypeExpr } from "../core/types.ts";
+import type { Diagnostic } from "./diagnostics.ts";
 import type { ClassTable } from "./typescript-classes.ts";
 import type { TypeTable } from "./typescript-types.ts";
 
@@ -154,6 +155,8 @@ export type ProgramValue =
   | { k: "argv"; index: ProgramValue | null; offset: number }
   /** `name.length`, of a buffer or of a string. */
   | { k: "length"; of: string }
+  /** The length of a list written where no name holds it, as `a[0].length`. */
+  | { k: "lengthOf"; of: ProgramValue }
   | { k: "element"; buffer: string; index: ProgramValue }
   /** One field of one object a value holds, read out of it. */
   | { k: "field"; object: ProgramValue; field: string }
@@ -417,6 +420,16 @@ export interface ModuleAnalysis {
   entryGuard?: boolean;
 }
 
+/** What one read answers when the frontend reports its refusals instead of throwing. */
+export interface ModuleReadAnswer {
+  /** What the file declares, imports and runs, read as far as the source allowed. */
+  analysis: ModuleAnalysis;
+  /** The constructs the read could not carry, each where it was written. */
+  refused: readonly Diagnostic[];
+  /** The whole number of refusals, including the ones the list cut. */
+  count: number;
+}
+
 export interface Frontend {
   /**
    * Parses a module. It never contracts anything: a file is parsed once, and
@@ -434,6 +447,21 @@ export interface Frontend {
    * that wrote it. A frontend with no such notion ignores it.
    */
   analyze(source: string, path: string, entry?: boolean, context?: unknown): ModuleAnalysis;
+
+  /**
+   * Reads a module and answers the constructs it refused, rather than throwing.
+   *
+   * A file is read before its imports are linked, and a construct that only
+   * waits for a declaration another module writes is refused by that first
+   * read. The module graph reads the file again once the imports are bound, so
+   * the first read's refusals are provisional: they are the ones the linked
+   * read may settle. A frontend that can answer its refusals lets the graph
+   * defer the verdict until the read that a build reports — the analysis of a
+   * file with a provisional refusal is still what the link is built from. A
+   * frontend without this method throws on the first read, which keeps the
+   * refusal at the file that earned it.
+   */
+  read?(source: string, path: string, entry?: boolean, context?: unknown): ModuleReadAnswer;
 
   /**
    * Contracts one declared function. The contract describes the semantics the

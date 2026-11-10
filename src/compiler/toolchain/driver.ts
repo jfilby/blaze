@@ -633,7 +633,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
 
   allocate(name: string, element: SemanticType, length: number, values: string[]): string[] {
     const written = declaredType(element);
-    const bytes = length === 0 ? 1 : length;
+    // A block of no elements asks for no payload. The runtime still lays down
+    // its header, so the pointer is live and the header records no element's
+    // worth of bytes: a length read from it is the zero the source wrote.
+    // Asking for one element instead made an empty list measure one element
+    // through the header a field read counts.
+    const bytes = length === 0 ? "0" : `${length} * sizeof(${written})`;
     // The block is cleared, and the program may read past what it filled: a
     // `while (a[i])` loop over a typed array runs until the read comes back
     // false, and a cleared block is what makes that read false rather than
@@ -643,7 +648,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // that without a bounds check the IR holds no length to write.
     return [
       `const size_t ${name}_length = ${length};`,
-      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate(${bytes} * sizeof(${written}));`,
+      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate(${bytes});`,
       `if (${name} == NULL) program_fail("out of memory");`,
       ...values.map((text, index) => `${name}[${index}] = ${text};`),
     ];
@@ -652,13 +657,13 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
   sized(name: string, element: SemanticType, count: string): string[] {
     // A block of a count the program settled on when it ran. The count is read
     // as a length and the block is cleared, so a read of an element the program
-    // never wrote is the zero the language answers it with; a block of no
-    // elements is one byte, because a C allocation of nothing is a failure and
-    // the language answers an empty array with an array.
+    // never wrote is the zero the language answers it with. A block of no
+    // elements asks for no payload, so the header records no element's worth
+    // and a length read from it is zero.
     const written = declaredType(element);
     return [
       `const size_t ${name}_length = (size_t)(${count});`,
-      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate((${name}_length == 0 ? 1 : ${name}_length) * sizeof(${written}));`,
+      `${written}* ${name} = (${written}*)${RUNTIME_NAME}_allocate(${name}_length == 0 ? 0 : ${name}_length * sizeof(${written}));`,
       `if (${name} == NULL) program_fail("out of memory");`,
     ];
   }
@@ -696,6 +701,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       `${written}* ${name} = (${written}*)(${pointer});`,
       `const size_t ${name}_length = (size_t)(${RUNTIME_NAME}_object_size(${name}) / sizeof(${written}));`,
     ];
+  }
+
+  sequenceLength(pointer: string, element: SemanticType): string {
+    const written = declaredType(element);
+    return `(size_t)(${RUNTIME_NAME}_object_size(${pointer}) / sizeof(${written}))`;
   }
 
   element(buffer: string, index: string): string {

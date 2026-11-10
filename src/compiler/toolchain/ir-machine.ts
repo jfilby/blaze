@@ -149,6 +149,60 @@ const TRIANGULAR_REACH = 65_534;
 /** A reference the source left unshaped: a pointer to whatever it points at. */
 const ANY_TYPE: SemanticType = { kind: "ref", of: null };
 
+/** What a dictionary service answers, as the kind of value this backend holds. */
+type DictionaryAnswer = "number" | "text" | "pointer" | "dynamic";
+
+/**
+ * The dictionary services a module function may call: a map and a set are one
+ * handle on the runtime's dictionary, and the entries a loop walks are that
+ * dictionary's own. `dynamic` is an answer the runtime hands back as the double
+ * a handle is, which this backend holds as the bits of that double.
+ */
+const DICTIONARY_SERVICES: Readonly<Record<string, DictionaryAnswer>> = {
+  "blaze_rt_dict_new": "number",
+  "blaze_rt_dict_get": "number",
+  "blaze_rt_dict_set": "number",
+  "blaze_rt_dict_get_ref": "dynamic",
+  "blaze_rt_dict_set_ref": "number",
+  "blaze_rt_dict_get_text": "text",
+  "blaze_rt_dict_set_text": "number",
+  "blaze_rt_dict_has": "number",
+  "blaze_rt_dict_len": "number",
+  "blaze_rt_dict_delete": "number",
+  "blaze_rt_dict_set_seq": "number",
+  "blaze_rt_dict_get_seq": "pointer",
+  "blaze_rt_dict_set_seq_numkey": "number",
+  "blaze_rt_dict_get_seq_numkey": "pointer",
+  "blaze_rt_dict_key_at": "text",
+  "blaze_rt_dict_value_at": "number",
+  "blaze_rt_dict_value_at_ref": "dynamic",
+  "blaze_rt_dict_value_at_text": "text",
+  "blaze_rt_dict_set_refkey": "number",
+  "blaze_rt_dict_get_refkey": "number",
+  "blaze_rt_dict_get_refkey_text": "text",
+  "blaze_rt_dict_get_refkey_ref": "dynamic",
+  "blaze_rt_dict_set_refkey_text": "number",
+  "blaze_rt_dict_set_refkey_ref": "number",
+  "blaze_rt_dict_has_refkey": "number",
+  "blaze_rt_dict_delete_refkey": "number",
+  "blaze_rt_dict_key_ref_at": "dynamic",
+  "blaze_rt_dict_set_numkey": "number",
+  "blaze_rt_dict_get_numkey": "number",
+  "blaze_rt_dict_get_numkey_text": "text",
+  "blaze_rt_dict_get_numkey_ref": "dynamic",
+  "blaze_rt_dict_set_numkey_text": "number",
+  "blaze_rt_dict_set_numkey_ref": "number",
+  "blaze_rt_dict_has_numkey": "number",
+  "blaze_rt_dict_delete_numkey": "number",
+  "blaze_rt_dict_key_num_at": "number",
+  "blaze_rt_dict_values": "pointer",
+  "map.values": "pointer",
+  "blaze_rt_json_field_key": "text",
+  "blaze_rt_json_field_value": "dynamic",
+  "array.copy": "pointer",
+  "array.join": "pointer",
+};
+
 /**
  * The type a walk's index is held at. The IR does not name one: counting over
  * an array is a whole number whatever the elements are, and what the pinning
@@ -2282,6 +2336,13 @@ class Machine {
    * over a number nobody read.
    */
   private readonly arrayCounts = new Map<string, bigint | Held>();
+  /**
+   * The names that hold a window of another block, whose pointer is the block
+   * moved to where the window starts. The header in front of such a pointer is
+   * not the header of the block the window is of, so its length is no count this
+   * backend may read: the C backend carries it beside the name instead.
+   */
+  private readonly views = new Set<string>();
   private readonly loops: { header: string; exit: string; names: { header: string; exit: string } }[] = [];
   /**
    * The region loop the code being written is inside the body of, if any.
@@ -2912,6 +2973,20 @@ class Machine {
     else this.arrayCounts.set(emitted, count);
   }
 
+  /** Whether a value is a window of another block, and not a block of its own. */
+  private isView(value: SemanticValue): boolean {
+    if (value.k === "buffer") return value.view !== null;
+    if (value.k === "local" && isSequence(value.type)) return this.views.has(this.names.read(value.name));
+    return false;
+  }
+
+  /** Whether a name holds a window, which is what its length cannot be read from. */
+  private rememberView(name: string, value: SemanticValue): void {
+    const emitted = this.names.read(name);
+    if (this.isView(value)) this.views.add(emitted);
+    else this.views.delete(emitted);
+  }
+
   /**
    * The length a sequence argument is handed over with, which is the hidden
    * parameter that follows the pointer in the callee's convention.
@@ -3507,9 +3582,26 @@ class Machine {
     // spilled to a slot of the frame instead, so its slot is reserved here and
     // the pushes are counted as before.
     this.used = this.pinnedRegisters.length * 8;
+    // The registers this function keeps values in are saved twice: once by the
+    // prologue, which gives the caller's value back, and once beside every
+    // foreign call, which writes down what this function holds now.
+    const pinned = new Set(this.pinnedVectors.map((saved) => saved.register));
     for (const saved of this.pinnedVectors) {
       saved.offset = this.reserve(8, 8);
       this.callSaves.push({ register: saved.register, offset: this.reserve(8, 8), single: saved.single });
+    }
+    // A call this backend did not build may write every vector register, not
+    // only the ones this body uses. The registers it does not use are not
+    // touched by anything else here, so a caller may keep a value in one across
+    // this call — and the foreign call would overwrite it with no save behind
+    // it. A function that can make such a call therefore gives back all ten, as
+    // the caller was promised. A function that only calls code this backend
+    // built needs none of them: that code saves the ones it uses.
+    if (this.makesForeignCall()) {
+      for (const register of VECTOR_CALLEE_SAVED) {
+        if (pinned.has(register)) continue;
+        this.pinnedVectors.push({ register, offset: this.reserve(8, 8), single: false });
+      }
     }
     // A loop written as a team of threads is a call into the runtime, so a
     // function holding one has a frame to keep aligned whether or not the IR
@@ -3529,6 +3621,25 @@ class Machine {
     for (const block of everyBlock(this.fn.entry)) {
       for (const value of everyValue(block)) {
         if (hasCall(value)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether this body calls code this backend did not build, which may write
+   * every vector register. Allocation, printing and the argument list are the
+   * runtime's own calls, and a builtin or an indirect callee the backend does
+   * not hold is a call it cannot see inside; a call to one of the program's own
+   * functions is one it can, and that function gives back the registers it uses.
+   */
+  private makesForeignCall(): boolean {
+    if (this.fn.allocates || this.fn.prints || this.fn.readsArgv) return true;
+    for (const block of everyBlock(this.fn.entry)) {
+      for (const value of everyValue(block)) {
+        if (value.k !== "call") continue;
+        const call = value.call;
+        if (call.builtin || !this.callable.has(call.callee)) return true;
       }
     }
     return false;
@@ -4273,6 +4384,7 @@ class Machine {
           const bound = this.bind(statement.slot.name, type);
           this.store(bound);
           this.rememberElements(statement.slot.name, count);
+          this.rememberView(statement.slot.name, statement.value);
           return;
         }
         // A wide number is not in the accumulator, so it is written down from
@@ -4299,6 +4411,7 @@ class Machine {
           return;
         }
         this.store(held);
+        if (isSequence(type)) this.rememberView(statement.slot.name, statement.value);
         return;
       }
       case "set":
@@ -4311,6 +4424,8 @@ class Machine {
             statement.name,
             statement.op === "=" ? this.boundElementsOf(statement.value) : null,
           );
+          if (statement.op === "=") this.rememberView(statement.name, statement.value);
+          else this.views.delete(this.names.read(statement.name));
         }
         if (isWideType(held.type)) {
           this.wideBind(statement.name, held, statement.value);
@@ -7911,10 +8026,17 @@ class Machine {
       return;
     }
     if (value.op === "arrayConcat") {
-      throw machineError(
-        `${this.fn.symbol} concatenates two lists, which this backend has not written`,
-        "a list reaches a function as a pointer to its first element and no length arrives with it; write the list out, as in [1, 2, 3, 4]",
-      );
+      // A list this backend holds is the block the runtime laid out, so two
+      // lists are the two blocks joined: the runtime moves the bytes and the
+      // answer's header states how many elements it holds.
+      this.value(value.left);
+      const left = this.hold(POINTER, "blaze_array_left");
+      this.store(left);
+      this.value(value.right);
+      const right = this.hold(POINTER, "blaze_array_right");
+      this.store(right);
+      this.callSymbol("blaze_rt_array_join", [left, right], POINTER);
+      return;
     }
     if (value.op === "pow") {
       this.at(value.right, NUMBER);
@@ -9714,12 +9836,48 @@ class Machine {
       this.library("strlen");
       return;
     }
+    if (this.isView(of)) {
+      // A view's pointer is the block moved to where the window starts, so the
+      // header in front of it is not the header of the block it is a window of.
+      // The C backend carries the count the window is beside the name, and this
+      // one refuses rather than read a header that is not there.
+      throw machineError(
+        `${this.fn.symbol} reads the length of a view, which this backend cannot settle`,
+        "a view's pointer is the block moved to where the window starts, and no count arrives with it; write the elements out, or build with --backend c",
+      );
+    }
     if (of.k === "local") {
       const lengthName = this.arrayParamLengths.get(of.name);
       if (lengthName !== undefined) {
         this.value({ k: "local", type: USIZE, name: lengthName });
         return;
       }
+      // A name a list was bound to carries the count it was bound with, which is
+      // the elements a list was written with or the count a block was joined at.
+      const count = this.arrayCounts.get(this.names.read(of.name));
+      if (count !== undefined) {
+        if (typeof count === "bigint") {
+          this.code.movRegImm(RAX, count);
+        } else {
+          this.load(count);
+        }
+        return;
+      }
+    }
+    if (isSequence(of.type)) {
+      // A list a function holds is the block the runtime laid out: the header
+      // records the bytes it holds, so the count of elements is that many bytes
+      // divided by the width of one. Every element the IR names is a power of
+      // two wide, so the division is a shift, and the answer is the whole
+      // number the length is.
+      const element = elementTypeOf(of.type);
+      const bytes = element === null ? 8 : widthOf(element);
+      this.value(of);
+      this.code.movRegReg(RDI, RAX);
+      this.external("blaze_rt_object_size");
+      this.callForeign("blaze_rt_object_size");
+      this.code.shiftImm("shr", RAX, Math.log2(bytes));
+      return;
     }
     throw machineError(
       `${this.fn.symbol} reads the length of an array, which no machine this compiler writes can answer`,
@@ -10073,9 +10231,20 @@ class Machine {
     this.runtime("_array_new");
     const held = this.objectRegister;
     if (held !== null) {
+      // The register an object is filled in is the one an element that builds a
+      // literal or a list of its own takes, so the array is kept in the frame as
+      // well and read back into the register where an element built something.
+      // Without it the base the first allocation answered was the base a later
+      // element wrote itself into, and the array the call was handed was the
+      // last object of it.
+      const array = this.hold(POINTER, "blaze_array");
+      this.store(array);
       this.code.movRegReg(held, RAX);
       value.values.forEach((element, at) => {
         this.at(element, value.element);
+        if (allocates(element) || hasCall(element) || this.boxesDynamic(element, value.element)) {
+          this.code.movRegMem(held, frame(array.offset));
+        }
         this.storeInto(value.element, held, at * widthOf(value.element));
       });
       this.code.movRegReg(RAX, held);
@@ -10538,6 +10707,7 @@ class Machine {
       this.runtime("_array_new");
       return;
     }
+    if (this.dictionaryBuiltin(call)) return;
     // The dynamic values the runtime holds. A handle is a number the runtime
     // answers and a text is a pointer to the bytes it says, so the wall between
     // them is crossed here: a text is boxed into the handle the runtime reads,
@@ -10874,6 +11044,24 @@ class Machine {
       this.code.bind(end);
       return;
     }
+    if (call.callee === "blaze_rt_view_load_float" || call.callee === "blaze_rt_view_store_float") {
+      // The float a window of bytes holds, and the bytes a float is written
+      // into: the block goes down as the address it is, and the offset, the
+      // value and the width as the numbers they are.
+      const block = this.hold(POINTER, "blaze_view_block");
+      this.at(call.args[0], POINTER);
+      this.store(block);
+      const held: Held[] = [block];
+      const numbers = call.callee === "blaze_rt_view_load_float" ? [1, 2] : [1, 2, 3];
+      for (const at of numbers) {
+        this.at(call.args[at], NUMBER);
+        const one = this.hold(POINTER, "blaze_view_number");
+        this.store(one);
+        held.push(one);
+      }
+      this.callSymbol(call.callee, held, call.callee === "blaze_rt_view_load_float" ? NUMBER : VOID_TYPE);
+      return;
+    }
     // The text the program reads apart. The arguments are written down one
     // at a time, because evaluating one takes the accumulator the other is
     // read into, and the runtime is called with the two of them where the
@@ -10916,24 +11104,6 @@ class Machine {
         this.store(held);
         return held;
       };
-      if (call.callee === "blaze_rt_view_load_float" || call.callee === "blaze_rt_view_store_float") {
-        // The float a window of bytes holds, and the bytes a float is written
-        // into: the block goes down as the address it is, and the offset, the
-        // value and the width as the numbers they are.
-        const block = this.hold(POINTER, "blaze_view_block");
-        this.at(call.args[0], BLOCK);
-        this.store(block);
-        const held: Held[] = [block];
-        const numbers = call.callee === "blaze_rt_view_load_float" ? [1, 2] : [1, 2, 3];
-        for (const at of numbers) {
-          this.at(call.args[at], NUMBER);
-          const one = this.hold(POINTER, "blaze_view_number");
-          this.store(one);
-          held.push(one);
-        }
-        this.callSymbol(call.callee, held, call.callee === "blaze_rt_view_load_float" ? NUMBER : { kind: "void" });
-        return;
-      }
       if (call.callee === "TextEncoder.encode") {
         // The bytes a text is written as: the block the service lays the bytes
         // out in, which is the address a byte array is read at.
@@ -10962,8 +11132,17 @@ class Machine {
       if (call.callee === "text.slice") {
         const sliced = text(0);
         const start = index(1);
-        const stop = call.args.length > 2 ? index(2) : null;
-        this.callSymbol("blaze_rt_text_slice", [sliced, start, ...(stop === null ? [] : [stop])], TEXT);
+        // The runtime's entry takes the stop always: a slice written with one
+        // index runs to the end, which is a stop no text reaches.
+        let stop: Held;
+        if (call.args.length > 2) {
+          stop = index(2);
+        } else {
+          this.code.movRegImm(RAX, 0x7fff_ffff_ffff_ffffn);
+          stop = this.hold(POINTER, "blaze_text_stop");
+          this.store(stop);
+        }
+        this.callSymbol("blaze_rt_text_slice", [sliced, start, stop], TEXT);
         return;
       }
       const folded = text(0);
@@ -11065,6 +11244,74 @@ class Machine {
     }
     this.at(argument, NUMBER);
     this.library(library);
+  }
+
+  /**
+   * A dictionary service, or the block operation a list is built by.
+   *
+   * A dictionary is the double handle the runtime answers, its key is the text
+   * the program wrote, and the value an entry holds is the number the entry
+   * was written at: `_text` and `_ref` name a value of another kind, and the
+   * service answers the kind its name says. Every argument is written down
+   * before the call is made, because reading one may be a call of its own and
+   * that call takes the registers the others are waiting in.
+   */
+  private dictionaryBuiltin(call: SemanticCall): boolean {
+    const answer = DICTIONARY_SERVICES[call.callee];
+    if (answer === undefined) return false;
+    const held: Held[] = [];
+    for (const [at, argument] of call.args.entries()) {
+      const type = call.argTypes[at] ?? argument.type;
+      // A block is handed over as the pointer it is, a text as the bytes it
+      // says, and everything else — the handle, a key, a value — as the number
+      // the convention carries a double in. A value read at a reference the
+      // compiler cannot name is boxed the way the C backend boxes it, and the
+      // handle is those bits in the vector register the double goes in.
+      let carries = NUMBER;
+      if (isTextType(type)) {
+        this.at(argument, TEXT);
+        carries = TEXT;
+      } else if (isSequence(type)) {
+        this.at(argument, POINTER);
+        carries = POINTER;
+      } else if (isDynamicType(type)) {
+        this.at(argument, ANY_TYPE);
+        // A key of a reference is the address as a number: the runtime writes
+        // it in base sixteen and reads it back with an integer conversion, so
+        // the bits of the pointer are not the value it is asked for. Every
+        // other reference is the handle the value was written as, and its bits
+        // are what the runtime keeps.
+        if (call.callee.includes("_refkey") && at === 1) {
+          this.code.zeroFloat(XMM0);
+          this.code.cvtIntToFloat(XMM0, RAX, false);
+        } else {
+          this.code.movdXmm(XMM0, RAX);
+        }
+      } else {
+        this.at(argument, NUMBER);
+      }
+      const slot = this.hold(carries, "blaze_dictionary");
+      this.store(slot);
+      held.push(slot);
+    }
+    const returns = answer === "text" ? TEXT : answer === "pointer" ? POINTER : NUMBER;
+    // `map.values` is the name the IR gives the service, and the runtime's own
+    // entry is the one it calls.
+    const symbol = call.callee === "map.values" ? "blaze_rt_dict_values" : call.callee;
+    this.callSymbol(symbol, held, returns);
+    if (answer === "dynamic") {
+      if (call.callee === "blaze_rt_dict_key_ref_at") {
+        // The key is the address as a number again, so it is the integer the
+        // double says rather than the bits of the double.
+        this.code.cvtFloatToInt(RAX, XMM0, false, true);
+      } else {
+        // A handle arrives in the vector register a double is returned in, and
+        // this backend keeps a value of that kind as the bits of the double in
+        // the accumulator.
+        this.dynamicResult();
+      }
+    }
+    return true;
   }
 
   /**

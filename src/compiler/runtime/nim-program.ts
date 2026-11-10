@@ -494,10 +494,12 @@ ${anchor}
 
   allocate(name: string, element: SemanticType, length: number, values: string[]): string[] {
     const written = elementNim(contractType(element));
-    const bytes = length === 0 ? 1 : length;
+    // A block of no elements asks for no payload, so its header records no
+    // element's worth and a length read from it is zero.
+    const bytes = length === 0 ? "0" : `${length} * ${elementSize(contractType(element))}`;
     return [
       `const ${name}_length = ${length}.csize_t`,
-      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate(${bytes} * ${elementSize(contractType(element))}))`,
+      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate(csize_t(${bytes})))`,
       ...values.map((text, index) => `${name}[${index}] = ${text}`),
     ];
   }
@@ -506,12 +508,11 @@ ${anchor}
     // A block of a count the program settled on when it ran. The count is read
     // as a length and the block is cleared, so a read of an element the program
     // never wrote is the zero the language answers it with; a block of no
-    // elements is one byte, because an allocation of nothing fails and the
-    // language answers an empty array with an array.
+    // elements asks for no payload, so its header records no element's worth.
     const written = elementNim(contractType(element));
     return [
       `const ${name}_length = (${count}).csize_t`,
-      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate((if ${name}_length == 0'u64: 1'u64 else: ${name}_length).csize_t * ${elementSize(contractType(element))}))`,
+      `var ${name} = cast[${bufferNimType(written)}](${RUNTIME_NAME}_allocate((if ${name}_length == 0'u64: csize_t(0) else: csize_t(${name}_length * ${elementSize(contractType(element))}))))`,
     ];
   }
 
@@ -545,6 +546,10 @@ ${anchor}
       `var ${name} = cast[${bufferNimType(written)}](${pointer})`,
       `const ${name}_length = csize_t(${RUNTIME_NAME}_object_size(${name})) div ${elementSize(contractType(element))}`,
     ];
+  }
+
+  sequenceLength(pointer: string, element: SemanticType): string {
+    return `csize_t(${RUNTIME_NAME}_object_size(${pointer})) div ${elementSize(contractType(element))}`;
   }
 
   element(buffer: string, index: string): string {

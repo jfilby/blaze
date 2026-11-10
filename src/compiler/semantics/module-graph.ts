@@ -9,16 +9,17 @@
  * its queue counts the constructs that survive a link rather than the ones that
  * are only waiting for one.
  *
- * A build reads strictly: the frontend throws on the first file it refuses, and
- * the error is what the build names. A measurement supplies its own `reader`,
- * which answers the refusals instead, so one refused file does not hide every
- * file that imports it.
+ * A build reads strictly, but the verdict is the linked read's: a frontend that
+ * answers its refusals lets the graph keep the first analysis, and the file is
+ * refused after the second read when the link did not settle it. A measurement
+ * supplies its own `reader` and counts the refusals itself, so one refused file
+ * does not hide every file that imports it and no error is thrown here.
  */
 
 import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { SourceModule } from "../core/types.ts";
-import type { Diagnostic } from "./diagnostics.ts";
+import { refusalError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
@@ -409,13 +410,22 @@ function modulePath(candidate: string, from: string): string {
  */
 export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   const read = cachingReader(request.read);
-  const reader: ModuleReader =
-    request.reader ??
-    ((source, path, entry, context) => ({
+  // A frontend that answers its refusals is read through that answer, so the
+  // first analysis survives a construct that only waits for the link. The
+  // verdict is written after the second read, where a build reports it.
+  const reporting = request.frontend.read;
+  let reader: ModuleReader;
+  if (request.reader !== undefined) {
+    reader = request.reader;
+  } else if (reporting !== undefined) {
+    reader = (source, path, entry, context) => reporting(source, path, entry, context);
+  } else {
+    reader = (source, path, entry, context) => ({
       analysis: request.frontend.analyze(source, path, entry, context),
       refused: [],
       count: 0,
-    }));
+    });
+  }
   const records = new Map<string, ModuleRecord>();
   const pending = [request.entry.path, ...(request.roots ?? [])];
 
@@ -581,6 +591,17 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     record.analysis = second.analysis;
     record.refused = second.refused;
     record.refusedCount = second.count;
+  }
+  // A file is read to the end whatever it holds, and the linked read is the
+  // one whose refusals are the file's: a construct that waited for an import is
+  // settled by now, and what is left is what the build names. A measurement
+  // supplies its own reader and counts the refusals itself, so it is not
+  // stopped here.
+  if (request.reader === undefined) {
+    for (const record of records.values()) {
+      if (record.refused.length === 0 && record.refusedCount === 0) continue;
+      throw refusalError(record.path, record.refused, record.refusedCount);
+    }
   }
 
   return [...records.values()];

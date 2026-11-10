@@ -11413,7 +11413,7 @@ class TypeScriptParser {
           const encoding = args[1];
           const held = source === undefined ? null : this.valueTypeOf(source);
           const utf8 = encoding === undefined || (encoding.k === "text" && textValue(encoding) === "utf8");
-          if (source !== undefined && held !== null && utf8 && (held.kind === "text" || held.kind === "fixed")) {
+          if (source !== undefined && held !== null && utf8 && held.kind === "text") {
             const encoded: Expression = { k: "call", name: "TextEncoder.encode", args: [source] };
             this.expressionTypes.set(encoded, { kind: "slice", of: BYTE });
             replace(encoded);
@@ -12240,7 +12240,7 @@ class TypeScriptParser {
             const held = this.valueTypeOf(receiver);
             const encoder = held.kind === "ref" && held.name === "__TextEncoder";
             const written = this.valueTypeOf(args[0] as Expression);
-            if (encoder && (written.kind === "text" || written.kind === "fixed")) {
+            if (encoder && written.kind === "text") {
               const encoded: Expression = { k: "call", name: "TextEncoder.encode", args: [args[0] as Expression] };
               this.expressionTypes.set(encoded, { kind: "slice", of: BYTE });
               replace(encoded);
@@ -17929,7 +17929,7 @@ class TypeScriptParser {
         const copied = this.sequenceMethod("slice", held.of, source, [{ k: "literal", text: "0" }], line);
         if (copied !== null) return copied;
       }
-      if (source === undefined || args.length !== 1 || held === null || (held.kind !== "text" && held.kind !== "fixed")) {
+      if (source === undefined || args.length !== 1 || held === null || held.kind !== "text") {
         this.report(
           "Array.from reads a length description, a text or a list",
           "write Array.from({ length: n }, (_, i) => value), Array.from(text) or Array.from(list)",
@@ -19338,7 +19338,7 @@ class TypeScriptParser {
         // this, the spread was the text itself, and the methods written after
         // it — `[...text].slice(0, n).join("")` — were methods of no list.
         const spreadHeld = this.valueTypeOf(spread);
-        if (spreadHeld.kind === "text" || spreadHeld.kind === "fixed") {
+        if (spreadHeld.kind === "text") {
           const cut = this.splitHelper(this.peek().line, false);
           const empty: Expression = { k: "text", parts: [{ k: "text", value: "" }] };
           const characters: Expression = { k: "call", name: cut.name, args: [spread, empty] };
@@ -22484,6 +22484,15 @@ export const typeScriptFrontend: Frontend = {
     const read = readTypeScriptModule(source, path, entry, context);
     if (read.refused.length > 0) throw refusalError(path, read.refused, read.count);
     return read.analysis;
+  },
+
+  // The first read of a file happens before its imports are linked, so a
+  // refusal there may only be waiting for a declaration another module writes.
+  // The graph reads the file again after the link; answering the refusals here
+  // lets it keep the analysis that link is built from instead of stopping at
+  // the file that is not settled yet.
+  read(source, path, entry = true, context?: unknown) {
+    return readTypeScriptModule(source, path, entry, context);
   },
 
   contractFor(analysis, declared, input) {
