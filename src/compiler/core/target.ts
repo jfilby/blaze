@@ -341,11 +341,15 @@ export function cTargetOptions(target: TargetSpec): string[] {
   // x86 toolchains make it signed, so the choice is named rather than inherited
   // from whichever compiler happens to be running.
   const signedChar = "-fsigned-char";
-  if (target.cpu !== "") return [signedChar, `-march=${target.cpu}`];
+  // QNX keeps the POSIX surface behind `_POSIX_C_SOURCE` and its own
+  // extensions behind `_QNX_SOURCE`; the runtime reads a processor count from
+  // the latter.
+  const qnx = target.os === "qnx" ? ["-D_QNX_SOURCE"] : [];
+  if (target.cpu !== "") return [...qnx, signedChar, `-march=${target.cpu}`];
   // `-mtune=native` describes the machine the compiler is running on. A
   // cross compiler is running on the host, not on the machine whose code it
   // writes, so asking it to tune for "native" would tune for the wrong one.
-  return target.os === hostPlatform() ? [signedChar, "-mtune=native"] : [signedChar];
+  return target.os === hostPlatform() ? [...qnx, signedChar, "-mtune=native"] : [...qnx, signedChar];
 }
 
 /**

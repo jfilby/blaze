@@ -30,9 +30,10 @@ export interface Toolchain {
   readonly assembler: "as" | "driver";
   /** Whether a relocatable link is a separate linker or the driver's `-r`. */
   readonly relocatableLinker: "ld" | "driver";
-  /** The object inspector, and the size reader. */
+  /** The object inspector, the size reader, and the relocatable linker. */
   readonly nm: string;
   readonly size: string;
+  readonly ld: string;
   readonly supportsLto: boolean;
   readonly supportsFatLto: boolean;
   readonly supportsOpenMp: boolean;
@@ -49,6 +50,7 @@ const GCC: Toolchain = {
   relocatableLinker: "ld",
   nm: "nm",
   size: "size",
+  ld: "ld",
   supportsLto: true,
   supportsFatLto: true,
   supportsOpenMp: true,
@@ -64,6 +66,7 @@ const QNX_CLANG: Toolchain = {
   relocatableLinker: "driver",
   nm: "nm",
   size: "size",
+  ld: "ld",
   supportsLto: true,
   // Fat LTO is not assumed on the QNX desktop. A candidate is measured without
   // it rather than carrying an object whose `.text` is empty.
@@ -90,15 +93,18 @@ function qcc(target: TargetSpec): Toolchain {
       message: `QNX has no cross compiler selected for ${target.arch}`,
     });
   }
-  const prefix = target.arch === "x86_64" ? "ntox86_64" : "ntoaarch64le";
+  const triple = target.arch === "x86_64" ? "x86_64-pc-nto-qnx8.0.0" : "aarch64-unknown-nto-qnx8.0.0";
   return {
     id: `qcc-${target.arch}`,
     cc: "qcc",
     ccArgs: [`-V${selector}`],
     assembler: "driver",
-    relocatableLinker: "driver",
-    nm: `${prefix}-nm`,
-    size: `${prefix}-size`,
+    // qcc's `-r` adds `-lgcc_s`, which the cross SDP does not provide for a
+    // relocatable link; the target's own ld does the same job without it.
+    relocatableLinker: "ld",
+    nm: `${triple}-nm`,
+    size: `${triple}-size`,
+    ld: `${triple}-ld`,
     supportsLto: true,
     supportsFatLto: true,
     supportsOpenMp: true,
@@ -250,7 +256,7 @@ export function relocatableLinkCommand(
   inputs: readonly string[],
 ): { command: string; args: string[] } {
   if (toolchain.relocatableLinker === "ld") {
-    return { command: "ld", args: ["-r", "-o", outputPath, ...inputs] };
+    return { command: toolchain.ld, args: ["-r", "-o", outputPath, ...inputs] };
   }
   return {
     command: toolchain.cc,

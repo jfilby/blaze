@@ -4487,7 +4487,7 @@ double blaze_rt_object_has_field(const void* object, const char* field) {
   const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
   if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) return 0.0;
   const char* at = header->descriptor;
-  while (*at != '\0') {
+  while (*at != '\\0') {
     if (strcmp(at, field) == 0) return 1.0;
     /* A field is its name, the offset it sits at and the type it holds: the
        next field starts after all three. */
@@ -4616,7 +4616,7 @@ static const char* blaze_rt_record_layout(double handle) {
 static int blaze_rt_record_count(const char* layout) {
   int count = 0;
   const char* at = layout;
-  while (layout != NULL && at[0] != '\0') {
+  while (layout != NULL && at[0] != '\\0') {
     at += strlen(at) + 1;
     at += strlen(at) + 1;
     at += strlen(at) + 1;
@@ -4629,7 +4629,7 @@ static int blaze_rt_record_count(const char* layout) {
 static const char* blaze_rt_record_field(const char* layout, int index, size_t* offset, const char** type) {
   const char* at = layout;
   int at_index = 0;
-  while (layout != NULL && at[0] != '\0') {
+  while (layout != NULL && at[0] != '\\0') {
     const char* name = at;
     at += strlen(at) + 1;
     const size_t where = (size_t)strtoul(at, NULL, 10);
@@ -6050,9 +6050,9 @@ static size_t blaze_path_normalize_into(const char* path, char* out) {
   const char* at = path;
   while (*at) {
     while (*at == '/') at += 1;
-    if (*at == '\0') break;
+    if (*at == '\\0') break;
     const char* end = at;
-    while (*end != '\0' && *end != '/') end += 1;
+    while (*end != '\\0' && *end != '/') end += 1;
     const size_t part = (size_t)(end - at);
     if (part == 1 && at[0] == '.') {
       at = end;
@@ -6102,7 +6102,7 @@ static size_t blaze_path_normalize_into(const char* path, char* out) {
   } else if (trailing) {
     out[used++] = '/';
   }
-  out[used] = '\0';
+  out[used] = '\\0';
   free(starts);
   free(sizes);
   return used;
@@ -6119,7 +6119,7 @@ const char* blaze_rt_path_normalize(const char* path) {
 }
 
 const char* blaze_rt_path_dirname(const char* path) {
-  if (path == NULL || path[0] == '\0') return blaze_rt_string_new((const unsigned char*)".", 1);
+  if (path == NULL || path[0] == '\\0') return blaze_rt_string_new((const unsigned char*)".", 1);
   const int hasRoot = path[0] == '/';
   const int length = (int)strlen(path);
   /* The last separator that is followed by a part, as the language finds it:
@@ -6164,7 +6164,7 @@ const char* blaze_rt_path_join(const char* left, const char* right) {
     memcpy(combined + used, right, rightLength);
     used += rightLength;
   }
-  combined[used] = '\0';
+  combined[used] = '\\0';
   char* out = (char*)malloc(used + 2);
   const size_t written = blaze_path_normalize_into(combined, out);
   const char* answer = blaze_rt_string_new((const unsigned char*)out, written);

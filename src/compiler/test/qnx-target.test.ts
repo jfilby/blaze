@@ -67,14 +67,15 @@ test("a cross build does not ask the host compiler to tune for itself", () => {
   // A named cpu is a target decision and reaches the compiler. Without one,
   // `-mtune=native` would describe the build host, which is not the machine
   // the QNX binary runs on.
-  assert.deepEqual(cTargetOptions({ ...QNX_X86, cpu: "znver1" }), ["-fsigned-char", "-march=znver1"]);
+  assert.deepEqual(cTargetOptions({ ...QNX_X86, cpu: "znver1" }), ["-D_QNX_SOURCE", "-fsigned-char", "-march=znver1"]);
   if ((process.platform as string) === "qnx") {
-    assert.deepEqual(cTargetOptions(QNX_X86), ["-fsigned-char", "-mtune=native"]);
+    assert.deepEqual(cTargetOptions(QNX_X86), ["-D_QNX_SOURCE", "-fsigned-char", "-mtune=native"]);
   } else {
-    assert.deepEqual(cTargetOptions(QNX_X86), ["-fsigned-char"]);
+    assert.deepEqual(cTargetOptions(QNX_X86), ["-D_QNX_SOURCE", "-fsigned-char"]);
   }
   assert.equal(targetSummary(QNX_ARM), "aarch64/qnx/aapcs cpu=toolchain-default");
   assert.ok(cTargetOptions(QNX_ARM).includes("-fsigned-char"));
+  assert.ok(cTargetOptions(QNX_ARM).includes("-D_QNX_SOURCE"));
 });
 
 test("a Linux host selects qcc for both QNX architectures", () => {
@@ -156,9 +157,15 @@ test("assembly and relocatable links follow the profile", () => {
     args: ["-Vgcc_ntox86_64", "-c", "-o", "a.o", "a.s"],
   });
   assert.deepEqual(relocatableLinkCommand(qcc, "all.o", ["a.o"]), {
-    command: "qcc",
-    args: ["-Vgcc_ntox86_64", "-r", "-o", "all.o", "a.o"],
+    command: "x86_64-pc-nto-qnx8.0.0-ld",
+    args: ["-r", "-o", "all.o", "a.o"],
   });
+  assert.equal(qcc.nm, "x86_64-pc-nto-qnx8.0.0-nm");
+  assert.equal(qcc.size, "x86_64-pc-nto-qnx8.0.0-size");
+  const arm = toolchainFor(QNX_ARM, "linux");
+  assert.equal(arm.nm, "aarch64-unknown-nto-qnx8.0.0-nm");
+  assert.equal(arm.size, "aarch64-unknown-nto-qnx8.0.0-size");
+  assert.equal(arm.ld, "aarch64-unknown-nto-qnx8.0.0-ld");
 
   // The assembler probe names no program of its own: it is the profile's
   // assembler for a GNU host, and the profile's compiler driver for QNX.

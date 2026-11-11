@@ -736,7 +736,7 @@ static intptr_t blaze_http_server_do_listen(blaze_http_server_t *server) {
      bind that fails because the other listener already holds the port is the
      bind that had nothing left to add. */
   intptr_t uuid = -1;
-  if (server->host[0] != '\0') {
+  if (server->host[0] != '\\0') {
     uuid = blaze_http_server_listen_on(server, port_str, server->host);
   } else {
     intptr_t ipv6 = blaze_http_server_listen_on(server, port_str, "::");
@@ -1206,7 +1206,7 @@ static int blaze_http_client_connect(const char *host, int port, int timeout_ms)
        socket level, the same number is a different option, and asking for it
        there does nothing at all. */
     int one = 1;
-    setsockopt(attempt, SOL_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(attempt, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     if (connect(attempt, candidate->ai_addr, candidate->ai_addrlen) == 0) {
       sock = attempt;
@@ -2003,6 +2003,10 @@ export async function buildFacilRuntime(
     `-DFIO_POLL_TICK=${FACIL_IO_POLL_TICK_MS}`,
     ...objectOptions(toolchain, mode),
     ...cTargetOptions(target),
+    /* QNX has no `SA_RESTART`; the signal setup treats its absence as zero.
+       The poll engine is the one QNX uses, and naming it avoids the file's
+       own redefinition of the default. */
+    ...(target.os === "qnx" ? ["-DSA_RESTART=0", "-DFIO_ENGINE_POLL=1", "-D__LITTLE_ENDIAN__=1"] : []),
     "-ffunction-sections",
     "-fdata-sections",
     "-pthread",

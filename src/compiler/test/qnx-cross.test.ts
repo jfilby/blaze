@@ -13,6 +13,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
+import { cTargetOptions } from "../core/target.ts";
 import type { TargetSpec } from "../core/types.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
 import { buildFacilRuntime } from "../runtime/facil.ts";
@@ -84,7 +85,9 @@ test("qcc compiles the generated runtime for both QNX architectures", async (t) 
   const source = join(directory, "blaze_rt.c");
   await writeFile(source, runtimeSourceSource("debug"), "utf8");
 
-  for (const [architecture, selector] of QCC_ARCHITECTURES) {
+  for (const target of QNX_TARGETS) {
+    const architecture = target.arch;
+    const selector = architecture === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
     const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
     if (available.spawnError !== undefined || available.code !== 0) {
       t.diagnostic(`qcc has no ${architecture} compiler: ${available.stderr.trim()}`);
@@ -94,7 +97,7 @@ test("qcc compiles the generated runtime for both QNX architectures", async (t) 
     const object = join(directory, `${architecture}-runtime.o`);
     const compiled = run(
       "qcc",
-      [`-V${selector}`, "-std=c11", "-O0", "-pthread", "-c", "-o", object, source],
+      [`-V${selector}`, "-std=c11", "-O0", ...cTargetOptions(target), "-c", "-o", object, source],
       { timeoutMs: 300_000 },
     );
     assert.equal(compiled.spawnError, undefined, `${architecture}: ${compiled.spawnError ?? ""}`);
@@ -150,6 +153,8 @@ test("qcc builds the SQLite library for both QNX architectures", async (t) => {
     }
 
     const directory = await scratch(`blaze-qnx-sqlite-${target.arch}-`);
+    // The adapter includes the runtime header a build writes before it.
+    await writeRuntimeHeader(directory);
     const library = await buildSqliteLibrary(directory, "debug", target);
     const info = await stat(library.objectPath);
     assert.ok(info.size > 0, `${target.arch}: qcc built the SQLite library`);
