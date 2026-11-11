@@ -18,13 +18,17 @@ export interface HostStream {
   write(text: string): unknown;
 }
 
+/** A signal the command handles so a title does not outlive it. */
+export type HostSignal = "SIGINT" | "SIGTERM";
+
 /**
  * The process the command runs in, as the command line needs it.
  *
  * The arguments are the command's own, after the program and script names;
  * the streams are where a command writes what it says; and the exit code is
- * the answer the process leaves behind. Asking a question is an operation of
- * the host because a native command has no `readline` module to reach for.
+ * the answer the process leaves behind. Asking a question and handling a
+ * signal are operations of the host because a native command has no
+ * `readline` module and no Node signal emitter to reach for.
  */
 export interface Host {
   readonly arguments: readonly string[];
@@ -35,6 +39,12 @@ export interface Host {
   setExitCode(code: number): void;
   /** The answer to one question, or undefined when there is nobody to ask. */
   ask(question: string): Promise<string | undefined>;
+  /** Calls the handler when the process exits; the answer detaches it. */
+  onExit(handler: () => void): () => void;
+  /** Calls the handler once for a signal; the answer detaches it. */
+  onSignal(signal: HostSignal, handler: () => void): () => void;
+  /** Raises a signal again once its handler has settled what it was doing. */
+  raiseSignal(signal: HostSignal): void;
 }
 
 /**

@@ -192,10 +192,14 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     sink(title);
   };
 
+  let detachExit: () => void = () => {};
+  let detachInterrupt: () => void = () => {};
+  let detachTerminate: () => void = () => {};
+
   const detach = (): void => {
-    process.off("exit", onExit);
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onTerminate);
+    detachExit();
+    detachInterrupt();
+    detachTerminate();
   };
 
   const settle = (outcome: BuildOutcome): void => {
@@ -212,14 +216,12 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
 
   function onInterrupt(): void {
     settle("fail");
-    process.off("SIGINT", onInterrupt);
-    process.kill(process.pid, "SIGINT");
+    host.raiseSignal("SIGINT");
   }
 
   function onTerminate(): void {
     settle("fail");
-    process.off("SIGTERM", onTerminate);
-    process.kill(process.pid, "SIGTERM");
+    host.raiseSignal("SIGTERM");
   }
 
   emit(workingTitle(name, frame, resolvedBrand));
@@ -227,9 +229,9 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     frame += 1;
     emit(workingTitle(name, frame, resolvedBrand));
   }, SPINNER_FRAME_MS);
-  process.once("exit", onExit);
-  process.once("SIGINT", onInterrupt);
-  process.once("SIGTERM", onTerminate);
+  detachExit = host.onExit(onExit);
+  detachInterrupt = host.onSignal("SIGINT", onInterrupt);
+  detachTerminate = host.onSignal("SIGTERM", onTerminate);
 
   return { stop: settle };
 }

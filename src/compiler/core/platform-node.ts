@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { DirectoryEntry, FileInfo, Host } from "./platform.ts";
+import type { DirectoryEntry, FileInfo, Host, HostSignal } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename,
@@ -204,6 +204,21 @@ export const host: Host = {
     } finally {
       prompt.close();
     }
+  },
+  onExit: (handler: () => void): (() => void) => {
+    process.once("exit", handler);
+    return () => {
+      process.off("exit", handler);
+    };
+  },
+  onSignal: (signal: HostSignal, handler: () => void): (() => void) => {
+    process.once(signal, handler);
+    return () => {
+      process.off(signal, handler);
+    };
+  },
+  raiseSignal: (signal: HostSignal): void => {
+    process.kill(process.pid, signal);
   },
 };
 
