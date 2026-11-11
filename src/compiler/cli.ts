@@ -14,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, resolve, parseArgs, host } from "./core/platform.ts";
+import { existsSync, writeFileSync, readFile, resolve, parseArgs, host } from "./core/platform.ts";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -30,6 +30,7 @@ import {
   type SemanticIrOptions,
 } from "./compiler.ts";
 import { targetSummary } from "./core/target.ts";
+import { compareBuildRecords } from "./core/compare.ts";
 import {
   BACKENDS,
   BUILD_MODES,
@@ -71,6 +72,7 @@ Usage:
   blaze test <project>                     re-verify the selected candidate
   blaze benchmark <project>                re-benchmark the selected candidate
   blaze inspect <project>                  print the build record
+  blaze compare <build-a.json> <build-b.json> compare two build decisions
   blaze projects                           list ${STATE_DIRECTORY}/projects
 
 build, generate and ir take ./${PROJECT_FILE} when no path is given, and a directory
@@ -427,6 +429,26 @@ async function main(argv: readonly string[]): Promise<number> {
       const build = await inspectProject(argument, host.cwd());
       host.stdout.write(`${JSON.stringify(build, null, 2)}\n`);
       return 0;
+    }
+    case "compare": {
+      if (argument === undefined || rest[0] === undefined) {
+        host.stderr.write(`blaze compare needs two build records\n\n${USAGE}`);
+        return 1;
+      }
+      const [leftText, rightText] = await Promise.all([
+        readFile(argument, "utf8"),
+        readFile(rest[0], "utf8"),
+      ]);
+      const differences = compareBuildRecords(
+        JSON.parse(leftText) as BuildStatus,
+        JSON.parse(rightText) as BuildStatus,
+      );
+      if (differences.length === 0) {
+        host.stdout.write("The build records agree\n");
+        return 0;
+      }
+      host.stdout.write(`The build records differ:\n${differences.map((line) => `  ${line}`).join("\n")}\n`);
+      return 1;
     }
     case "projects": {
       const projects = await listProjects(host.cwd());

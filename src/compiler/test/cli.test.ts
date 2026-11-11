@@ -97,6 +97,39 @@ test("--verify=none builds a program without running it and records that", async
   assert.match(invalid.stderr, /--verify must be one of source, none/);
 });
 
+/** A built program and the project state its record lives in. */
+async function builtForCompare(name: string): Promise<{ directory: string; record: string }> {
+  const directory = await scratch(`blaze-compare-${name}-`);
+  await writeFile(join(directory, "main.ts"), "console.log(1 + 2);\n", "utf8");
+  await writeFile(
+    join(directory, "blaze.toml"),
+    'language = "typescript"\nsourceFile = "main.ts"\noutput = "machine"\nbackend = "machine"\nmode = "debug"\n',
+    "utf8",
+  );
+  const built = blaze(directory, "build");
+  assert.equal(built.code, 0, built.stderr);
+  const state = await storeDirectory(directory, basename(directory));
+  return { directory, record: join(state, "build.json") };
+}
+
+test("compare reports the decisions two build records share and the ones they do not", async () => {
+  const first = await builtForCompare("first");
+  const second = await builtForCompare("second");
+
+  const same = blaze(first.directory, "compare", first.record, second.record);
+  assert.equal(same.code, 0, same.stderr);
+  assert.match(same.stdout, /The build records agree/);
+
+  const changed = JSON.parse(await readFile(second.record, "utf8")) as { backend: string };
+  changed.backend = changed.backend === "machine" ? "c" : "machine";
+  await writeFile(second.record, JSON.stringify(changed, null, 2), "utf8");
+
+  const different = blaze(first.directory, "compare", first.record, second.record);
+  assert.equal(different.code, 1);
+  assert.match(different.stdout, /The build records differ/);
+  assert.match(different.stdout, /backend:/);
+});
+
 test("init refuses to write over a project file, and leaves it as it was", async () => {
   const directory = await scratch("blaze-init-twice-");
   assert.equal((await run(process.execPath, [CLI, "init"], { cwd: directory })).code, 0);
