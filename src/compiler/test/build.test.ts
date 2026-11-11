@@ -96,6 +96,7 @@ test("a build names the backend it used, and one that names none gets the output
   const build = await inspectProject("input", named);
   assert.equal(build.outputKind, "machine");
   assert.equal(build.backend, "c");
+  assert.equal(build.toolchain, "gcc");
   assert.equal(outcome.outputKind, "machine");
 
   const implied = await workspace("backend-implied");

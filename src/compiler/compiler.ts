@@ -106,6 +106,7 @@ import {
   optimizationOptions,
 } from "./core/target.ts";
 import { run } from "./core/process.ts";
+import { toolchainFor } from "./core/toolchain.ts";
 
 import { COMPILER_VERSION, engineStamp, toolchainFingerprints } from "./core/version.ts";
 import {
@@ -786,24 +787,43 @@ async function recordRejected(
   paths: ProjectPaths,
   id: string,
   previous: BuildStatus | undefined,
+  target: TargetSpec | undefined,
   cause: unknown,
 ): Promise<CompilerError> {
   const failure = toCompilerError(cause, { category: "InputError", stage: "input" });
   const error = new CompilerError({ ...failure.toJSON(), project: id });
   const stamp = new Date().toISOString();
+  // The target the project named is known before most refusals, and a record
+  // that named the default target instead would tell a later reader the
+  // project was a Linux build that failed rather than a QNX build that was
+  // refused. Only a refusal before the target was read falls back to the last
+  // build's target, and only a project that never had one falls back to the
+  // default.
+  const recordTarget = target ?? previous?.target ?? normalizeTarget(undefined);
   // The engine is this one, not the last build's: the record says which
   // compiler rejected the project, and a record written before this compiler
   // existed has nothing to compare a later build against.
   const engine = engineStamp(await toolchainFingerprints());
+  // A rejected build still selected the profile it would have used. Selection
+  // can fail for a target this host cannot build, and that refusal is the
+  // record's subject, so the field is left out rather than replacing the
+  // diagnostic.
+  let toolchain: string | undefined;
+  try {
+    toolchain = toolchainFor(recordTarget).id;
+  } catch {
+    toolchain = previous?.toolchain;
+  }
   await writeBuildRecord(store, paths, {
     id,
     input: paths.input,
     contract: paths.contract,
-    target: previous?.target ?? normalizeTarget(undefined),
+    target: recordTarget,
     status: "failed",
     outputKind: previous?.outputKind ?? "machine",
     backend: previous?.backend ?? "c",
     mode: previous?.mode ?? "debug",
+    ...(toolchain === undefined ? {} : { toolchain }),
     runtime: previous?.runtime ?? "none",
     createdAt: previous?.createdAt ?? stamp,
     updatedAt: stamp,
@@ -1331,6 +1351,8 @@ export async function runBuild(
   const previousBuild = await store.readIfValid<BuildStatus>(paths.build);
   let project: ProjectInput;
   let target: TargetSpec;
+  let targetForRecord: TargetSpec | undefined;
+  let toolchainId: string | undefined;
   let outputKind: OutputKind;
   let runtimeKind: RuntimeKind;
   let backendKind: BackendKind;
@@ -1342,6 +1364,8 @@ export async function runBuild(
     const input = project.input;
     assertGenerationInput(absoluteInput, input);
     target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
+    targetForRecord = target;
+    toolchainId = toolchainFor(target).id;
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
     assertRuntimeSupported(target, runtimeKind);
@@ -1373,7 +1397,7 @@ export async function runBuild(
     backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
     buildMode = resolveBuildMode(options.mode ?? input.mode);
   } catch (cause) {
-    throw await recordRejected(store, paths, id, previousBuild, cause);
+    throw await recordRejected(store, paths, id, previousBuild, targetForRecord, cause);
   }
 
   // The mode is the first thing a build says, before it names the model or
@@ -1398,6 +1422,7 @@ export async function runBuild(
       paths,
       id,
       previousBuild,
+      targetForRecord,
       new CompilerError({
         category: "InputError",
         stage: "input",
@@ -1478,6 +1503,7 @@ export async function runBuild(
     outputKind,
     backend: backendKind,
     mode: buildMode,
+    ...(toolchainId === undefined ? {} : { toolchain: toolchainId }),
     runtime: runtimeKind,
     createdAt,
     updatedAt: createdAt,

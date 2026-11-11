@@ -11,8 +11,9 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runBuild } from "../compiler.ts";
+import { inspectProject, runBuild } from "../compiler.ts";
 import { assertLibrarySupported, assertRuntimeSupported } from "../core/target.ts";
+import { toolchainFor } from "../core/toolchain.ts";
 import type { SourceInput, TargetSpec } from "../core/types.ts";
 import { walkFacilIoTree } from "../runtime/facil.ts";
 import { writeProject } from "./project.ts";
@@ -54,6 +55,13 @@ test("a QNX build refuses Nim before it is lowered", async () => {
     () => runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build"),
     /the "nim" runtime is not available on QNX/,
   );
+
+  // The refusal happens before a compiler runs, but the project named a target
+  // and that target selected a compiler: a record that said Linux or named no
+  // compiler would hide both facts from the reader of a failed QNX build.
+  const build = await inspectProject("input", directory);
+  assert.equal(build.target.os, "qnx");
+  assert.equal(build.toolchain, toolchainFor(QNX_X86).id);
 });
 
 test("a QNX build refuses Triton before the source is contracted", async () => {

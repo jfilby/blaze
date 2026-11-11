@@ -657,6 +657,13 @@ export interface BuildStatus {
   backendFallback?: { function: string; reason: string };
   /** How the toolchain built this. */
   mode: BuildMode;
+  /**
+   * The compiler profile this build selected, as `toolchainFor` names it: a
+   * stable id such as `gcc`, `qcc-x86_64` or `qnx-clang`. A record written
+   * before this field existed has none; a record written now names the
+   * profile even when the build was rejected before the compiler ran.
+   */
+  toolchain?: string;
   /** The runtime this build links against. */
   runtime: RuntimeKind;
   /** The candidate selected for each compiled function, by function name. */
