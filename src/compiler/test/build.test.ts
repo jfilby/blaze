@@ -1119,6 +1119,7 @@ test("a program entry is accepted under the symbol its contract names, not under
   );
 
   assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.programVerification, "source");
   assert.equal(outcome.contracts.main.function.symbol, "blaze_main");
   // The entry of a program is compiled under the symbol the contract gives it,
   // so a candidate that defines that symbol is the one that was asked for.
@@ -1365,6 +1366,7 @@ test("a project that asks for no check of its program's output builds a program 
 
   assert.equal(outcome.build.status, "success");
   assert.notEqual(outcome.outputPath, null);
+  assert.equal(outcome.build.programVerification, "none");
   // The build says the check was left out rather than staying silent where a
   // verdict would be, and the program is delivered all the same.
   assert.ok(

@@ -12,6 +12,7 @@ import {
   assertBuildableTarget,
   cTargetOptions,
   normalizeTarget,
+  programVerificationFor,
   targetSummary,
 } from "../core/target.ts";
 import {
@@ -179,5 +180,17 @@ test("the machine backend admits QNX x86-64 and refuses QNX AArch64", () => {
   assert.throws(
     () => assertMachineTarget(QNX_ARM),
     /the machine backend cannot build for aarch64-qnx-aapcs/,
+  );
+});
+
+test("a program is checked against its source only where the host can run it", () => {
+  assert.equal(programVerificationFor(QNX_X86, undefined), "none");
+  assert.equal(
+    programVerificationFor({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }, undefined),
+    "source",
+  );
+  assert.equal(
+    programVerificationFor({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }, false),
+    "none",
   );
 });

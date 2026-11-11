@@ -9,7 +9,7 @@
 
 import { CompilerError } from "./errors.ts";
 import { hostPlatform } from "./platform.ts";
-import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, RuntimeKind, TargetSpec } from "./types.ts";
+import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, ProgramVerification, RuntimeKind, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux", "qnx"];
@@ -154,6 +154,23 @@ export function assertLibrarySupported(target: TargetSpec, library: LibraryKind)
     message: `the "${library}" library is not available on QNX`,
     detail,
   });
+}
+
+/**
+ * Whether a delivered program can be checked against its source on this host.
+ *
+ * Source verification runs the source and the delivered program and compares
+ * what they print. A cross build produces a program this host cannot run, so
+ * there is no comparison to make; the build records `none` rather than trying
+ * to run the wrong architecture or claiming a check it did not perform. A
+ * project that asks for no comparison is `none` on any host.
+ */
+export function programVerificationFor(
+  target: TargetSpec,
+  verifyProgram: boolean | undefined,
+): ProgramVerification {
+  if (verifyProgram === false) return "none";
+  return target.os === hostPlatform() ? "source" : "none";
 }
 
 /**

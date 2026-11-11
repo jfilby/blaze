@@ -637,6 +637,9 @@ export interface BenchmarkResult {
   throughput?: number;
 }
 
+/** How a build checked the program it delivered, when it delivered one. */
+export type ProgramVerification = "source" | "none";
+
 export interface BuildStatus {
   id: string;
   input: string;
@@ -666,6 +669,14 @@ export interface BuildStatus {
   toolchain?: string;
   /** The runtime this build links against. */
   runtime: RuntimeKind;
+  /**
+   * How the delivered program's output was checked. `source` means the source
+   * ran beside the program on this host; `none` means there was no comparison,
+   * either because the project asked for none or because the program was built
+   * for a host this one cannot run. A function-only build has no program and
+   * no value here.
+   */
+  programVerification?: ProgramVerification;
   /** The candidate selected for each compiled function, by function name. */
   selectedCandidates?: Record<string, string>;
   /**

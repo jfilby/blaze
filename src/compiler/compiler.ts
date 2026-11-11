@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -104,6 +104,7 @@ import {
   EXECUTABLE_SUFFIX,
   normalizeTarget,
   optimizationOptions,
+  programVerificationFor,
 } from "./core/target.ts";
 import { run } from "./core/process.ts";
 import { toolchainFor } from "./core/toolchain.ts";
@@ -1406,6 +1407,10 @@ export async function runBuild(
   // selected before anything built can be looked at.
   reporter.stage("mode", "info", `Mode: ${buildMode} (${optimizationOptions(buildMode).join(" ")})`);
   const input = project.input;
+  // A source comparison runs the delivered program on this host. A program
+  // built for another host cannot be run here, so the build records that it
+  // made no comparison rather than trying to run the wrong machine's code.
+  const programVerification = programVerificationFor(target, input.verifyProgram);
 
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);
@@ -2160,11 +2165,11 @@ export async function runBuild(
                 objectPaths,
                 outputPath: programPath,
               });
-      // The project may ask that the delivered program not be run at all: a
-      // program that serves rather than prints, or one that cannot run where
-      // it is built, has no output the build can compare, so it is delivered
-      // as it was linked and what it prints later is not the build's to say.
-      if (input.verifyProgram === false) break;
+      // The project may ask that the delivered program not be run at all, and
+      // a program built for another host cannot be run here: either way there
+      // is no output the build can compare, so it is delivered as it was
+      // linked and what it prints later is not the build's to say.
+      if (programVerification === "none") break;
       checked = await verifyProgram({
         language: input.language,
         sourcePath: programFile.path,
@@ -2198,16 +2203,25 @@ export async function runBuild(
         "ok",
         `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
       );
-    } else if (driver !== undefined && mode === "build" && input.verifyProgram === false) {
-      // A program whose output the project does not ask to check is delivered
-      // without the comparison, and the build says so, rather than leaving the
-      // absence of a verdict where a verdict would be.
-      reporter.stage("verify", "ok", "Program output is not checked (verifyProgram = false)");
+    } else if (driver !== undefined && mode === "build" && programVerification === "none") {
+      // A program whose output is not checked is delivered without the
+      // comparison, and the build says why rather than leaving the absence of
+      // a verdict where a verdict would be.
+      reporter.stage(
+        "verify",
+        "ok",
+        input.verifyProgram === false
+          ? "Program output is not checked (verifyProgram = false)"
+          : `Program output is not checked: the program is built for ${target.os}, and this host is ${hostPlatform()}`,
+      );
     }
     // The program has agreed with its source, so the functions it is the only
     // oracle for are proved now, and the record of what this build proved is
     // written whole.
     if (checked !== undefined) await prove();
+    // A build that delivered a program says whether it checked that program's
+    // output. A function-only build has no program and leaves the field out.
+    if (driver !== undefined && mode === "build") build.programVerification = programVerification;
 
     const generated = unitsGenerated();
     // Keyed by whatever the source named the function, so these are built from
