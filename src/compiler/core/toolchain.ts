@@ -207,6 +207,41 @@ export function assembleCommand(
   };
 }
 
+/**
+ * The command that asks the assembler whether it knows the target's cpu.
+ *
+ * The probe reads assembly from standard input and writes no object, so it is
+ * the assembler's own input rather than a file. A profile with a separate
+ * assembler names the program here; a profile that assembles through its
+ * compiler driver asks the driver.
+ */
+export function assemblerProbeCommand(
+  toolchain: Toolchain,
+  target: TargetSpec,
+): { command: string; args: string[] } {
+  if (toolchain.assembler === "as") {
+    return {
+      command: "as",
+      args: [
+        ...(target.arch === "x86_64" ? ["--64"] : []),
+        ...archOptions(target),
+        "-o",
+        "/dev/null",
+        "-",
+      ],
+    };
+  }
+  return compileCommand(toolchain, [
+    "-x",
+    "assembler",
+    "-c",
+    ...archOptions(target),
+    "-o",
+    "/dev/null",
+    "-",
+  ]);
+}
+
 /** The command that bundles objects into one relocatable object. */
 export function relocatableLinkCommand(
   toolchain: Toolchain,

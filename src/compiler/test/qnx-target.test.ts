@@ -16,6 +16,7 @@ import {
 } from "../core/target.ts";
 import {
   assembleCommand,
+  assemblerProbeCommand,
   candidateOptions,
   linkOptionsFor,
   relocatableLinkCommand,
@@ -155,6 +156,17 @@ test("assembly and relocatable links follow the profile", () => {
   assert.deepEqual(relocatableLinkCommand(qcc, "all.o", ["a.o"]), {
     command: "qcc",
     args: ["-Vgcc_ntox86_64", "-r", "-o", "all.o", "a.o"],
+  });
+
+  // The assembler probe names no program of its own: it is the profile's
+  // assembler for a GNU host, and the profile's compiler driver for QNX.
+  assert.deepEqual(assemblerProbeCommand(gcc, QNX_X86), {
+    command: "as",
+    args: ["--64", "-o", "/dev/null", "-"],
+  });
+  assert.deepEqual(assemblerProbeCommand(qcc, QNX_X86), {
+    command: "qcc",
+    args: ["-Vgcc_ntox86_64", "-x", "assembler", "-c", "-o", "/dev/null", "-"],
   });
 });
 

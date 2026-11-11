@@ -15,7 +15,7 @@
 
 import { stat, writeFile } from "../core/platform.ts";
 import { archOptions, DEFAULT_TARGET } from "../core/target.ts";
-import { assembleCommand, compileCommand, toolchainFor, type Toolchain } from "../core/toolchain.ts";
+import { assembleCommand, assemblerProbeCommand, toolchainFor, type Toolchain } from "../core/toolchain.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
@@ -287,10 +287,7 @@ export function assertAssemblerSupportsArch(
 ): void {
   const options = archOptions(target);
   if (options.length === 0) return;
-  const probe =
-    toolchain.assembler === "as"
-      ? { command: "as", args: [...(target.arch === "x86_64" ? ["--64"] : []), ...options, "-o", "/dev/null", "-"] }
-      : compileCommand(toolchain, ["-x", "assembler", "-c", ...options, "-o", "/dev/null", "-"]);
+  const probe = assemblerProbeCommand(toolchain, target);
   const result = run(probe.command, probe.args, {
     input: ".text\n.globl probe\nprobe:\n\tret\n",
     timeoutMs: 30_000,
