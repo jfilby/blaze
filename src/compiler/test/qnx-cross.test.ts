@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions } from "../core/target.ts";
 import type { TargetSpec } from "../core/types.ts";
@@ -19,6 +20,7 @@ import { runtimeSourceSource } from "../runtime/abi.ts";
 import { buildFacilRuntime } from "../runtime/facil.ts";
 import { buildSqliteLibrary } from "../runtime/sqlite-build.ts";
 import { buildStandaloneRuntime, writeRuntimeHeader } from "../runtime/standalone.ts";
+import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
 const QCC_ARCHITECTURES = [
@@ -205,4 +207,77 @@ test("qcc links the generated runtime into a QNX executable", async (t) => {
     const info = await stat(executable);
     assert.ok(info.size > 0, `${target.arch}: qcc linked a QNX executable`);
   }
+});
+
+const quiet = { stage: () => {} };
+
+test("a QNX C program builds and links for both targets", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-program-${target.arch}-`);
+    await writeProject(join(directory, "input.toml"), {
+      language: "typescript",
+      source: "console.log(1 + 2);\n",
+      target,
+      output: "machine",
+      backend: "c",
+      runtime: "none",
+    });
+    const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+    assert.equal(outcome.build.status, "success");
+    assert.equal(outcome.build.toolchain, target.arch === "x86_64" ? "qcc-x86_64" : "qcc-aarch64");
+    assert.equal(outcome.build.programVerification, "none");
+    const output = outcome.outputPath;
+    assert.ok(output !== null);
+    const inspection = run("file", [output], { timeoutMs: 30_000 });
+    assert.match(inspection.stdout, target.arch === "x86_64" ? /x86-64/ : /aarch64/);
+    assert.match(inspection.stdout, /ldqnx/);
+  }
+});
+
+test("a QNX x86-64 machine program builds and links", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  const directory = await scratch("blaze-qnx-machine-program-");
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    source: "console.log(1 + 2);\n",
+    target: QNX_TARGETS[0] as TargetSpec,
+    output: "machine",
+    backend: "machine",
+    runtime: "none",
+  });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.backend, "machine");
+  assert.equal(outcome.build.toolchain, "qcc-x86_64");
+  const output = outcome.outputPath;
+  assert.ok(output !== null);
+  const inspection = run("file", [output], { timeoutMs: 30_000 });
+  assert.match(inspection.stdout, /x86-64/);
+  assert.match(inspection.stdout, /ldqnx/);
 });
