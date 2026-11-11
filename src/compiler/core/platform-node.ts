@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { DirectoryEntry, FileInfo, Host, HostSignal } from "./platform.ts";
+import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostSignal } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename,
@@ -186,6 +186,9 @@ export function hostEnvironment(): Readonly<Record<string, string | undefined>> 
   return process.env;
 }
 
+/** The line a bounded run writes when the program itself is not there. */
+const MISSING_PROGRAM = "blaze: no such program: ";
+
 /** The Node process, as the command line sees it. */
 export const host: Host = {
   arguments: process.argv.slice(2),
@@ -219,6 +222,23 @@ export const host: Host = {
   },
   raiseSignal: (signal: HostSignal): void => {
     process.kill(process.pid, signal);
+  },
+  boundHeap: (command: string, args: readonly string[], bytes: number): BoundedCommand => {
+    const kilobytes = Math.max(1, Math.floor(bytes / 1024));
+    return {
+      command: "/bin/sh",
+      args: [
+        "-c",
+        [
+          `ulimit -d ${kilobytes} 2>/dev/null || { echo "blaze: this shell cannot bound the memory of a program" >&2; exit 125; }`,
+          `command -v "$0" >/dev/null 2>&1 || { echo "${MISSING_PROGRAM}$0" >&2; exit 127; }`,
+          `exec "$0" "$@"`,
+        ].join("\n"),
+        command,
+        ...args,
+      ],
+      missing: MISSING_PROGRAM,
+    };
   },
 };
 

@@ -22,6 +22,21 @@ export interface HostStream {
 export type HostSignal = "SIGINT" | "SIGTERM";
 
 /**
+ * The command a host runs to give a program a heap bound.
+ *
+ * A host that applies the bound before the program starts returns the program
+ * and its arguments unchanged. A host that has to go through a wrapper returns
+ * the wrapper and says what it writes when the program is missing, because
+ * that wrapper's exit status is not the program's and the caller must not
+ * read it as one.
+ */
+export interface BoundedCommand {
+  readonly command: string;
+  readonly args: string[];
+  readonly missing?: string;
+}
+
+/**
  * The process the command runs in, as the command line needs it.
  *
  * The arguments are the command's own, after the program and script names;
@@ -45,6 +60,8 @@ export interface Host {
   onSignal(signal: HostSignal, handler: () => void): () => void;
   /** Raises a signal again once its handler has settled what it was doing. */
   raiseSignal(signal: HostSignal): void;
+  /** The command that runs a program with a bounded heap. */
+  boundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand;
 }
 
 /**

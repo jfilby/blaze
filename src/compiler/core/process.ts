@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { hostEnvironment, monotonicTimeNs, spawn, spawnSync } from "./platform.ts";
+import { host, hostEnvironment, monotonicTimeNs, spawn, spawnSync, type BoundedCommand } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;
@@ -72,51 +72,18 @@ const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
  */
 export const GENERATED_HEAP_BYTES = 2 * 1024 * 1024 * 1024;
 
-/**
- * The line a bounded run writes when the program itself is not there. A shell
- * reports a command it cannot find as an exit status, which a program is free
- * to choose, so the wrapper says so in words instead: a program that was never
- * found and a program that chose that status must not read alike.
- */
-const MISSING = "blaze: no such program: ";
-
-/**
- * The command as the shell runs it under a heap limit: a shell that sets the
- * limit and then `exec`s the program, so the program keeps its own process id,
- * its own exit status and its own signal. Nothing is read back through the
- * shell, so a program that stops is still told apart from one that was never
- * started.
- *
- * A shell that cannot set the limit says so and exits 125 rather than running
- * the program unbounded, because an unbounded run is the thing being fixed.
- */
-function bounded(command: string, args: readonly string[], bytes: number): { command: string; args: string[] } {
-  const kilobytes = Math.max(1, Math.floor(bytes / 1024));
-  return {
-    command: "/bin/sh",
-    args: [
-      "-c",
-      [
-        `ulimit -d ${kilobytes} 2>/dev/null || { echo "blaze: this shell cannot bound the memory of a program" >&2; exit 125; }`,
-        `command -v "$0" >/dev/null 2>&1 || { echo "${MISSING}$0" >&2; exit 127; }`,
-        `exec "$0" "$@"`,
-      ].join("\n"),
-      command,
-      ...args,
-    ],
-  };
-}
-
 export function formatCommand(command: string, args: readonly string[]): string {
   return [command, ...args].join(" ");
 }
 
 export function run(command: string, args: readonly string[], options: RunOptions = {}): RunResult {
   const started = monotonicTimeNs();
-  // The limit is applied by the shell the program is exec'd from, so what the
-  // result reports is the program: the command named here is the one asked
-  // for, not the shell that bounded it.
-  const spawned = options.heapBytes === undefined ? { command, args } : bounded(command, args, options.heapBytes);
+  // The host decides how a bounded run is launched. What the result reports is
+  // the command that was asked for, not the wrapper the host may have used to
+  // start it.
+  const spawned: BoundedCommand = options.heapBytes === undefined
+    ? { command, args: [...args] }
+    : host.boundHeap(command, args, options.heapBytes);
   const result = spawnSync(spawned.command, spawned.args, {
     cwd: options.cwd,
     env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
@@ -129,10 +96,14 @@ export function run(command: string, args: readonly string[], options: RunOption
   const durationNs = monotonicTimeNs() - started;
   const spawnFailure = result.error as NodeJS.ErrnoException | undefined;
   const stderr = result.stderr ?? "";
-  // A bounded run reaches the program through a shell, so a program that is
-  // not there is the shell's exit status rather than a failure to spawn. It
-  // is still a program that never ran, and it is reported as one.
-  const missing = stderr.startsWith(MISSING) ? stderr.slice(MISSING.length).trim() : undefined;
+  // A host may reach the program through a wrapper, so a program that is not
+  // there is the wrapper's exit status rather than a failure to spawn. It is
+  // still a program that never ran, and it is reported as one.
+  const missingPrefix = spawned.missing;
+  const missing =
+    missingPrefix !== undefined && stderr.startsWith(missingPrefix)
+      ? stderr.slice(missingPrefix.length).trim()
+      : undefined;
   // An expired deadline surfaces as an ETIMEDOUT error and the child is then
   // killed, so that error is the clock rather than a failure to launch: the
   // process ran, and only the deadline says otherwise.
@@ -183,7 +154,9 @@ export function run(command: string, args: readonly string[], options: RunOption
  */
 export function runAsync(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
   const started = monotonicTimeNs();
-  const spawned = options.heapBytes === undefined ? { command, args } : bounded(command, args, options.heapBytes);
+  const spawned: BoundedCommand = options.heapBytes === undefined
+    ? { command, args: [...args] }
+    : host.boundHeap(command, args, options.heapBytes);
   const maxBuffer = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER;
   const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -206,7 +179,11 @@ export function runAsync(command: string, args: readonly string[], options: RunO
       settled = true;
       clearTimeout(deadline);
       const durationNs = monotonicTimeNs() - started;
-      const missing = stderr.startsWith(MISSING) ? stderr.slice(MISSING.length).trim() : undefined;
+      const missingPrefix = spawned.missing;
+      const missing =
+        missingPrefix !== undefined && stderr.startsWith(missingPrefix)
+          ? stderr.slice(missingPrefix.length).trim()
+          : undefined;
       const spawnFailure =
         launchError ??
         (overflowed
