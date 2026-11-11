@@ -20,7 +20,13 @@ import { httpHeaderSource, HTTP_NAME } from "./http.ts";
 import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./http-needs.ts";
 import { RUNTIME_NAME, runtimeSourceSource } from "./abi.ts";
 import { compileRuntimeSource, writeRuntimeHeader } from "./standalone.ts";
-import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import { cTargetOptions } from "../core/target.ts";
+import {
+  compileCommand,
+  objectOptions,
+  relocatableLinkCommand,
+  toolchainFor,
+} from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 
 export interface FacilRuntime {
@@ -1949,6 +1955,7 @@ export async function buildFacilRuntime(
   };
   includeDirs.push(sourceDir);
   await collect(sourceDir);
+  const toolchain = toolchainFor(target);
   const cFlags = [
     "-std=gnu11",
     "-D_GNU_SOURCE",
@@ -1977,7 +1984,7 @@ export async function buildFacilRuntime(
        waits for its server to end, and it is paid on every run of a program
        that starts a server and closes it again. */
     `-DFIO_POLL_TICK=${FACIL_IO_POLL_TICK_MS}`,
-    ...optimizationOptions(mode),
+    ...objectOptions(toolchain, mode),
     ...cTargetOptions(target),
     "-ffunction-sections",
     "-fdata-sections",
@@ -1995,16 +2002,21 @@ export async function buildFacilRuntime(
     name: RUNTIME_NAME,
     source: runtimeSourceSource(mode),
     flags: cFlags,
+    target,
   });
   const adapter = (async () => {
     /* The adapter is told whether the runtime it is built for speaks TLS, so
        that the entry point that starts a TLS server is not compiled into a
        runtime that has no TLS behind it. */
-    const compiled = await runAsync(
-      "gcc",
-      [...cFlags, ...(needs.tls ? ["-DBLAZE_HTTP_TLS=1"] : []), "-c", "-o", adapterObject, adapterSource],
-      { timeoutMs: 300_000 },
-    );
+    const command = compileCommand(toolchain, [
+      ...cFlags,
+      ...(needs.tls ? ["-DBLAZE_HTTP_TLS=1"] : []),
+      "-c",
+      "-o",
+      adapterObject,
+      adapterSource,
+    ]);
+    const compiled = await runAsync(command.command, command.args, { timeoutMs: 300_000 });
     if (compiled.spawnError !== undefined || compiled.code !== 0) {
       throw new CompilerError({
         category: "LinkError",
@@ -2027,7 +2039,8 @@ export async function buildFacilRuntime(
      with as many in flight as the machine can run. */
   const facilObjects = await mapConcurrent(facilSources, compileJobs(), async (source, index) => {
     const objectPath = `${workDirectory}/facil_${index}.o`;
-    const compiled = await runAsync("gcc", [...cFlags, "-c", "-o", objectPath, source], {
+    const command = compileCommand(toolchain, [...cFlags, "-c", "-o", objectPath, source]);
+    const compiled = await runAsync(command.command, command.args, {
       timeoutMs: 300_000,
     });
     if (compiled.spawnError !== undefined || compiled.code !== 0) {
@@ -2045,11 +2058,8 @@ export async function buildFacilRuntime(
 
   /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links.
      OpenSSL symbols stay undefined here and are resolved when the final program is linked with -lssl -lcrypto. */
-  const linked = run(
-    "ld",
-    ["-r", "-o", bundledObject, adapterObject, rtObject, ...facilObjects],
-    { timeoutMs: 120_000 },
-  );
+  const bundle = relocatableLinkCommand(toolchain, bundledObject, [adapterObject, rtObject, ...facilObjects]);
+  const linked = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (linked.spawnError !== undefined || linked.code !== 0) {
     throw new CompilerError({
       category: "LinkError",

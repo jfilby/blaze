@@ -37,7 +37,8 @@ import {
   type ValueKind,
 } from "../core/semantic-ir.ts";
 import type { BackendKind, BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
-import { cTargetOptions, linkOptions, threadingOptions, type Threading } from "../core/target.ts";
+import { cTargetOptions, type Threading } from "../core/target.ts";
+import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainFor } from "../core/toolchain.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
@@ -2145,8 +2146,20 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // program that serves plain HTTP carries no TLS library, so it neither
   // loads one before it runs nor carries one in its binary.
   const tlsLibraries = request.tls === true ? ["-lssl", "-lcrypto"] : [];
-
-  const result = run("gcc", ["-std=c11", ...linkOptions(request.mode, request.objective), ...cTargetOptions(request.target), ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries] : [])], { timeoutMs: 120_000 });
+  const toolchain = toolchainFor(request.target);
+  const command = compileCommand(toolchain, [
+    "-std=c11",
+    ...linkOptionsFor(toolchain, request.mode, request.objective),
+    ...cTargetOptions(request.target),
+    ...threadingOptionsFor(toolchain, request.threads ?? []),
+    "-Wl,--gc-sections",
+    "-o",
+    request.outputPath,
+    ...inputs,
+    "-lm",
+    ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries] : []),
+  ]);
+  const result = run(command.command, command.args, { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw driverError("the C compiler is not available", result.spawnError);
   }

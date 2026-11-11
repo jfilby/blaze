@@ -48,7 +48,14 @@ import { cDeclarationType, cObjectDeclarations } from "./linker.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMacroNames, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { NameScope } from "./names.ts";
 import { DEFAULT_ALIGNMENT, RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
-import { archOptions, assemblyOptions, cTargetOptions, loweringOptions, threadingOptions } from "../core/target.ts";
+import { assemblyOptions, cTargetOptions } from "../core/target.ts";
+import {
+  assembleCommand,
+  compileCommand,
+  loweringOptionsFor,
+  threadingOptionsFor,
+  toolchainFor,
+} from "../core/toolchain.ts";
 import { entryIsParallel } from "../semantics/parallel.ts";
 
 /**
@@ -2664,12 +2671,13 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   const source = generateFunctionC(request.fn);
   await writeFile(request.sourcePath, source, "utf8");
 
+  const toolchain = toolchainFor(request.target);
   const archFlag = cTargetOptions(request.target);
   const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
   // `-fopenmp` is asked for only when the function has a loop the compiler
   // proved its turns independent, because it is the flag that makes the pragma
   // a team of threads rather than a line the C compiler ignores.
-  const threads = threadingOptions(entryIsParallel(request.fn.entry) ? ["openmp"] : []);
+  const threads = threadingOptionsFor(toolchain, entryIsParallel(request.fn.entry) ? ["openmp"] : []);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
   // instruction is a model's to choose, on any target. An assembly build
@@ -2684,21 +2692,18 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   // delivered was a dump of what was about to be handed to the linker, and the
   // size it reported was the size of that dump.
   if (request.assemblyPath !== undefined) {
-    const stopped = run(
-      "gcc",
-      [
-        "-std=c11",
-        ...assemblyOptions(request.mode, request.contract.optimize.primary),
-        "-S",
-        ...threads,
-        ...archFlag,
-        ...includes,
-        "-o",
-        request.assemblyPath,
-        request.sourcePath,
-      ],
-      { timeoutMs: 120_000 },
-    );
+    const stop = compileCommand(toolchain, [
+      "-std=c11",
+      ...assemblyOptions(request.mode, request.contract.optimize.primary),
+      "-S",
+      ...threads,
+      ...archFlag,
+      ...includes,
+      "-o",
+      request.assemblyPath,
+      request.sourcePath,
+    ]);
+    const stopped = run(stop.command, stop.args, { timeoutMs: 120_000 });
     if (stopped.spawnError !== undefined) {
       throw new CompilerError({
         category: "TargetError",
@@ -2717,14 +2722,13 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
     }
     // The object is the assembly assembled, so the object and the delivered
     // assembly are one compilation rather than two that happen to agree.
-    const assembled = run("as", ["--64", ...archOptions(request.target), "-o", request.objectPath, request.assemblyPath], {
-      timeoutMs: 120_000,
-    });
+    const assembly = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
+    const assembled = run(assembly.command, assembly.args, { timeoutMs: 120_000 });
     if (assembled.spawnError !== undefined) {
       throw new CompilerError({
         category: "TargetError",
         stage: "compile",
-        message: "the GNU assembler is not available",
+        message: "the assembler is not available",
         detail: assembled.spawnError,
       });
     }
@@ -2737,21 +2741,18 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
       });
     }
   } else {
-    const compiled = run(
-      "gcc",
-      [
-        "-std=c11",
-        ...loweringOptions(request.mode, request.contract.optimize.primary),
-        "-c",
-        ...threads,
-        ...archFlag,
-        ...includes,
-        "-o",
-        request.objectPath,
-        request.sourcePath,
-      ],
-      { timeoutMs: 120_000 },
-    );
+    const command = compileCommand(toolchain, [
+      "-std=c11",
+      ...loweringOptionsFor(toolchain, request.mode, request.contract.optimize.primary),
+      "-c",
+      ...threads,
+      ...archFlag,
+      ...includes,
+      "-o",
+      request.objectPath,
+      request.sourcePath,
+    ]);
+    const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
     if (compiled.spawnError !== undefined) {
       throw new CompilerError({
         category: "TargetError",
@@ -2770,7 +2771,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
     }
   }
 
-  const info = inspectObject(request.objectPath, functionName);
+  const info = inspectObject(request.objectPath, functionName, undefined, toolchain);
   if (info.defined.length !== 1 || info.defined[0] !== functionName) {
     throw backendError(
       `the C of ${functionName} defines [${info.defined.join(", ")}] instead of only "${functionName}"`,

@@ -78,8 +78,8 @@ export type TypeExpr =
 /* -------------------------------------------------------------------------- */
 
 export type Arch = "x86_64" | "aarch64" | "riscv64";
-export type OsName = "linux";
-export type Abi = "sysv";
+export type OsName = "linux" | "qnx";
+export type Abi = "sysv" | "aapcs";
 
 export interface TargetSpec {
   arch: Arch;

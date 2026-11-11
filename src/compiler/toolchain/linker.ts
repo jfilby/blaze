@@ -30,7 +30,8 @@ import { rulesFor } from "../semantics/language.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
-import { cTargetOptions, linkOptions, threadingOptions, type Threading } from "../core/target.ts";
+import { cTargetOptions, DEFAULT_TARGET, type Threading } from "../core/target.ts";
+import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainFor } from "../core/toolchain.ts";
 
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
@@ -736,9 +737,23 @@ export function link(request: LinkRequest): void {
   // because of `-flto` below: gcc rebuilds every object in front of it with the
   // options of this command, so the program that comes out is built the way
   // this line asks and not the way the objects were compiled.
-  const target = request.target === undefined ? [] : cTargetOptions(request.target);
+  const builtFor = request.target ?? DEFAULT_TARGET;
+  const toolchain = toolchainFor(builtFor);
+  const target = cTargetOptions(builtFor);
   const libraries = request.libraries ?? [];
-  const result = run("gcc", [...linkOptions(request.mode, request.objective), ...target, ...includes, ...threadingOptions(request.threads ?? []), "-Wl,--gc-sections", "-o", request.outputPath, ...inputs, "-lm", ...libraries], { timeoutMs: 120_000 });
+  const command = compileCommand(toolchain, [
+    ...linkOptionsFor(toolchain, request.mode, request.objective),
+    ...target,
+    ...includes,
+    ...threadingOptionsFor(toolchain, request.threads ?? []),
+    "-Wl,--gc-sections",
+    "-o",
+    request.outputPath,
+    ...inputs,
+    "-lm",
+    ...libraries,
+  ]);
+  const result = run(command.command, command.args, { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {
     throw linkError("the C compiler is not available", result.spawnError, request.functionName);
   }

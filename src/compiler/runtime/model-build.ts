@@ -74,7 +74,13 @@ int blaze_model_launch(const char* kernel_name,
 import { writeFile, dirname, fileURLToPath } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import { cTargetOptions } from "../core/target.ts";
+import {
+  compileCommand,
+  objectOptions,
+  relocatableLinkCommand,
+  toolchainFor,
+} from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 import { MODEL_NAME, modelHeaderSource } from "./model.ts";
 
@@ -92,18 +98,23 @@ export async function buildModelLibrary(
   await writeFile(adapterPath, modelAdapterSource(), "utf8");
   const adapterObject = `${workDirectory}/${MODEL_NAME}_adapter.o`;
   const objectPath = `${workDirectory}/${MODEL_NAME}.o`;
+  const toolchain = toolchainFor(target);
   const flags = [
     "-std=gnu11",
-    ...optimizationOptions(mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
+    ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
     ...cTargetOptions(target),
     "-ffunction-sections",
     "-fdata-sections",
   ];
-  const adapter = run(
-    "gcc",
-    [...flags, `-I${workDirectory}`, "-c", "-o", adapterObject, adapterPath],
-    { timeoutMs: 300_000 },
-  );
+  const adapterCommand = compileCommand(toolchain, [
+    ...flags,
+    `-I${workDirectory}`,
+    "-c",
+    "-o",
+    adapterObject,
+    adapterPath,
+  ]);
+  const adapter = run(adapterCommand.command, adapterCommand.args, { timeoutMs: 300_000 });
   if (adapter.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",
@@ -120,7 +131,8 @@ export async function buildModelLibrary(
       detail: `${adapterPath}\n${adapter.stderr.trim()}`,
     });
   }
-  const bundled = run("ld", ["-r", "-o", objectPath, adapterObject], { timeoutMs: 120_000 });
+  const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject]);
+  const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
     throw new CompilerError({
       category: "LinkError",

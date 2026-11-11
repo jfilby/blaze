@@ -14,7 +14,8 @@
  */
 
 import { stat, writeFile } from "../core/platform.ts";
-import { archOptions } from "../core/target.ts";
+import { archOptions, DEFAULT_TARGET } from "../core/target.ts";
+import { assembleCommand, compileCommand, toolchainFor, type Toolchain } from "../core/toolchain.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
@@ -280,34 +281,46 @@ export interface ObjectInfo {
 }
 
 /** Confirms the assembler understands the requested architecture. */
-export function assertAssemblerSupportsArch(target: TargetSpec): void {
+export function assertAssemblerSupportsArch(
+  target: TargetSpec,
+  toolchain: Toolchain = toolchainFor(target),
+): void {
   const options = archOptions(target);
   if (options.length === 0) return;
-  const probe = run("as", ["--64", ...options, "-o", "/dev/null", "-"], {
+  const probe =
+    toolchain.assembler === "as"
+      ? { command: "as", args: [...(target.arch === "x86_64" ? ["--64"] : []), ...options, "-o", "/dev/null", "-"] }
+      : compileCommand(toolchain, ["-x", "assembler", "-c", ...options, "-o", "/dev/null", "-"]);
+  const result = run(probe.command, probe.args, {
     input: ".text\n.globl probe\nprobe:\n\tret\n",
     timeoutMs: 30_000,
   });
-  if (probe.spawnError !== undefined) {
+  if (result.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",
       stage: "assemble",
-      message: "the GNU assembler is not available",
-      detail: probe.spawnError,
+      message: "the assembler is not available",
+      detail: result.spawnError,
     });
   }
-  if (probe.code !== 0) {
+  if (result.code !== 0) {
     throw new CompilerError({
       category: "TargetError",
       stage: "assemble",
       message: `the assembler does not support target.cpu "${target.cpu}"`,
-      detail: probe.stderr.trim(),
+      detail: result.stderr.trim(),
     });
   }
 }
 
-export function inspectObject(objectPath: string, functionName: string, candidate?: string): ObjectInfo {
-  const definedResult = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
-  const undefinedResult = run("nm", ["--undefined-only", objectPath], { timeoutMs: 30_000 });
+export function inspectObject(
+  objectPath: string,
+  functionName: string,
+  candidate?: string,
+  toolchain: Toolchain = toolchainFor(DEFAULT_TARGET),
+): ObjectInfo {
+  const definedResult = run(toolchain.nm, ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
+  const undefinedResult = run(toolchain.nm, ["--undefined-only", objectPath], { timeoutMs: 30_000 });
   if (definedResult.code !== 0 || undefinedResult.code !== 0) {
     throw assemblyError(
       `cannot inspect the object file for ${functionName}`,
@@ -334,7 +347,7 @@ export function inspectObject(objectPath: string, functionName: string, candidat
   // data line, and its absence reads as a text size of zero, which is the
   // smallest size there is: a size-optimised build would then pick whichever
   // candidate it happened to evaluate first, and report it as the smallest.
-  const sizeResult = run("size", ["--format=berkeley", objectPath], { timeoutMs: 30_000 });
+  const sizeResult = run(toolchain.size, ["--format=berkeley", objectPath], { timeoutMs: 30_000 });
   if (sizeResult.code !== 0) {
     throw assemblyError(
       `cannot measure the object file for ${functionName}`,
@@ -377,14 +390,14 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
 
   await writeFile(request.assemblyPath, `.text\n${request.assembly}`, "utf8");
 
-  const result = run("as", ["--64", ...archOptions(request.target), "-o", request.objectPath, request.assemblyPath], {
-    timeoutMs: 60_000,
-  });
+  const toolchain = toolchainFor(request.target);
+  const command = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
+  const result = run(command.command, command.args, { timeoutMs: 60_000 });
   if (result.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",
       stage: "assemble",
-      message: "the GNU assembler is not available",
+      message: "the assembler is not available",
       detail: result.spawnError,
     });
   }
@@ -397,7 +410,7 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
     );
   }
 
-  const info = inspectObject(request.objectPath, functionName, request.candidate);
+  const info = inspectObject(request.objectPath, functionName, request.candidate, toolchain);
   if (info.defined.length !== 1 || info.defined[0] !== functionName) {
     throw assemblyError(
       `the object defines [${info.defined.join(", ")}] instead of only "${functionName}"`,

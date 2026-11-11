@@ -24,7 +24,8 @@ import { createHash, copyFile, mkdir, rename, rm, stat, writeFile, cpus } from "
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";
-import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import { cTargetOptions } from "../core/target.ts";
+import { compileCommand, objectOptions, toolchainFor, type Toolchain } from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 
 export interface StandaloneRuntime {
@@ -63,11 +64,14 @@ let temporary = 0;
  * It is asked once and kept, because asking costs a process and it cannot
  * change under a running build.
  */
-let compilerIdentity: Promise<string> | undefined;
+const compilerIdentities = new Map<string, Promise<string>>();
 
-function identifyCompiler(): Promise<string> {
-  compilerIdentity ??= (async (): Promise<string> => {
-    const version = run("gcc", ["--version"], { timeoutMs: 30_000 });
+function identifyCompiler(toolchain: Toolchain): Promise<string> {
+  const known = compilerIdentities.get(toolchain.id);
+  if (known !== undefined) return known;
+  const identity = (async (): Promise<string> => {
+    const command = compileCommand(toolchain, ["--version"]);
+    const version = run(command.command, command.args, { timeoutMs: 30_000 });
     if (version.spawnError !== undefined) {
       throw new CompilerError({
         category: "TargetError",
@@ -86,7 +90,8 @@ function identifyCompiler(): Promise<string> {
     }
     return version.stdout.split("\n")[0]?.trim() ?? "";
   })();
-  return compilerIdentity;
+  compilerIdentities.set(toolchain.id, identity);
+  return identity;
 }
 
 /**
@@ -98,10 +103,17 @@ function identifyCompiler(): Promise<string> {
  * cpu model, because `-mtune=native` reads it and nothing in the flags says
  * which cpu that was.
  */
-function cacheKey(request: { name: string; source: string; flags: readonly string[] }, compiler: string): string {
+function cacheKey(
+  request: { name: string; source: string; flags: readonly string[] },
+  toolchain: Toolchain,
+  compiler: string,
+): string {
   const machine = `${process.arch}/${cpus()[0]?.model ?? "unknown"}`;
   return createHash("sha256")
-    .update([CACHE_SCHEMA, compiler, machine, request.name, ...request.flags, request.source].join("\u0000"), "utf8")
+    .update(
+      [CACHE_SCHEMA, toolchain.id, compiler, machine, request.name, ...request.flags, request.source].join("\u0000"),
+      "utf8",
+    )
     .digest("hex")
     .slice(0, 32);
 }
@@ -134,13 +146,16 @@ export async function compileRuntimeSource(request: {
   source: string;
   /** The flags the object is compiled with, which are part of what decides it. */
   flags: readonly string[];
+  /** The machine the runtime is built for, which selects the compiler. */
+  target: TargetSpec;
 }): Promise<{ sourcePath: string; objectPath: string }> {
   const sourcePath = `${request.workDirectory}/${request.name}.c`;
   const objectPath = `${request.workDirectory}/${request.name}.o`;
   await writeFile(sourcePath, request.source, "utf8");
 
-  const compiler = await identifyCompiler();
-  const key = cacheKey(request, compiler);
+  const toolchain = toolchainFor(request.target);
+  const compiler = await identifyCompiler(toolchain);
+  const key = cacheKey(request, toolchain, compiler);
   const directory = `${request.workDirectory}/${RUNTIME_CACHE_DIRECTORY}`;
   const cached = `${directory}/${key}.o`;
 
@@ -156,9 +171,8 @@ export async function compileRuntimeSource(request: {
   await mkdir(directory, { recursive: true });
   temporary += 1;
   const building = `${directory}/${key}.${process.pid}-${temporary}.tmp`;
-  const compiled = run("gcc", ["-std=c11", ...request.flags, "-c", "-o", building, sourcePath], {
-    timeoutMs: 120_000,
-  });
+  const command = compileCommand(toolchain, ["-std=c11", ...request.flags, "-c", "-o", building, sourcePath]);
+  const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
   if (compiled.spawnError !== undefined) {
     await discard(building);
     throw new CompilerError({
@@ -217,11 +231,18 @@ export async function buildStandaloneRuntime(
   // machinery. `-ffunction-sections` gives each entry point a section of its
   // own, and the `-Wl,--gc-sections` at the link then drops the ones this
   // program never reached. A section is only collectable if it is one.
+  const toolchain = toolchainFor(target);
   const compiled = await compileRuntimeSource({
     workDirectory,
     name: RUNTIME_NAME,
     source: runtimeSourceSource(mode),
-    flags: [...optimizationOptions(mode), ...cTargetOptions(target), "-ffunction-sections", "-fdata-sections"],
+    flags: [
+      ...objectOptions(toolchain, mode),
+      ...cTargetOptions(target),
+      "-ffunction-sections",
+      "-fdata-sections",
+    ],
+    target,
   });
   return { headerPath, ...compiled };
 }

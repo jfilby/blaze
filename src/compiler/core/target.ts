@@ -4,15 +4,15 @@
  * Target information is deliberately separate from the semantic contract: the
  * same contract compiles to different native code per target.
  *
- * Version 0.1 supports x86-64 / Linux / System V AMD64 only.
+ * Version 0.1 supports x86-64 on Linux and QNX, and AArch64 on QNX.
  */
 
 import { CompilerError } from "./errors.ts";
 import type { Arch, Abi, BuildMode, Objective, OsName, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
-const OPERATING_SYSTEMS: readonly OsName[] = ["linux"];
-const ABIS: readonly Abi[] = ["sysv"];
+const OPERATING_SYSTEMS: readonly OsName[] = ["linux", "qnx"];
+const ABIS: readonly Abi[] = ["sysv", "aapcs"];
 
 export const DEFAULT_TARGET: TargetSpec = {
   arch: "x86_64",
@@ -94,21 +94,23 @@ export function normalizeTarget(partial: Partial<TargetSpec> | undefined): Targe
  * Rejects targets this compiler version cannot build for. The failure is
  * explicit instead of producing assembly for the wrong machine.
  */
-export function assertBuildableTarget(target: TargetSpec, functionName?: string): TargetSpec {
-  const unsupported: string[] = [];
-  if (target.arch !== "x86_64") unsupported.push(`arch ${target.arch}`);
-  if (target.os !== "linux") unsupported.push(`os ${target.os}`);
-  if (target.abi !== "sysv") unsupported.push(`abi ${target.abi}`);
-
-  if (unsupported.length > 0) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `version 0.1 builds x86_64/linux/sysv only (got ${unsupported.join(", ")})`,
-      function: functionName,
-    });
+function supportedTarget(target: TargetSpec): boolean {
+  if (target.arch === "x86_64" && target.abi === "sysv" && (target.os === "linux" || target.os === "qnx")) {
+    return true;
   }
-  return target;
+  return target.arch === "aarch64" && target.os === "qnx" && target.abi === "aapcs";
+}
+
+export function assertBuildableTarget(target: TargetSpec, functionName?: string): TargetSpec {
+  if (supportedTarget(target)) return target;
+  throw new CompilerError({
+    category: "TargetError",
+    stage: "target",
+    message:
+      `version 0.1 builds x86_64/linux/sysv, x86_64/qnx/sysv and ` +
+      `aarch64/qnx/aapcs only (got ${target.arch}/${target.os}/${target.abi})`,
+    function: functionName,
+  });
 }
 
 /**
@@ -262,7 +264,10 @@ export function linkOptions(mode: BuildMode, objective?: Objective): string[] {
  */
 export function cTargetOptions(target: TargetSpec): string[] {
   if (target.cpu !== "") return [`-march=${target.cpu}`];
-  return ["-mtune=native"];
+  // `-mtune=native` describes the machine the compiler is running on. A
+  // cross compiler is running on the host, not on the machine whose code it
+  // writes, so asking it to tune for "native" would tune for the wrong one.
+  return target.os === process.platform ? ["-mtune=native"] : [];
 }
 
 /**

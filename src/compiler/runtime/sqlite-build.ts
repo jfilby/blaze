@@ -15,7 +15,13 @@
 import { createHash, existsSync, readFileSync, writeFile, dirname, resolve, fileURLToPath } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { cTargetOptions, optimizationOptions } from "../core/target.ts";
+import { cTargetOptions } from "../core/target.ts";
+import {
+  compileCommand,
+  objectOptions,
+  relocatableLinkCommand,
+  toolchainFor,
+} from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 import { SQLITE_ABI, SQLITE_NAME, sqliteHeaderSource } from "./sqlite.ts";
 
@@ -464,9 +470,10 @@ export async function buildSqliteLibrary(
   // linked with it, and an object that carries the compiler's intermediate form
   // is rebuilt at that link — which for the amalgamation is a build of the whole
   // of SQLite again, at the end of every build.
+  const toolchain = toolchainFor(target);
   const flags = [
     "-std=gnu11",
-    ...optimizationOptions(mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
+    ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
     ...cTargetOptions(target),
     ...SQLITE_COMPILE_FLAGS,
     "-ffunction-sections",
@@ -480,7 +487,8 @@ export async function buildSqliteLibrary(
   // for it again.
   const sqliteObject = `${workDirectory}/sqlite3-${sqliteObjectKey(flags, amalgamation)}.o`;
   if (!existsSync(sqliteObject)) {
-    const compiled = run("gcc", [...flags, "-c", "-o", sqliteObject, amalgamation], { timeoutMs: 600_000 });
+    const command = compileCommand(toolchain, [...flags, "-c", "-o", sqliteObject, amalgamation]);
+    const compiled = run(command.command, command.args, { timeoutMs: 600_000 });
     if (compiled.spawnError !== undefined) {
       throw new CompilerError({
         category: "TargetError",
@@ -502,11 +510,16 @@ export async function buildSqliteLibrary(
   // The adapter includes the runtime's header, which the runtime wrote into the
   // work directory before this was built, and the amalgamation's header, which
   // is vendored beside it.
-  const adapter = run(
-    "gcc",
-    [...flags, `-I${workDirectory}`, `-I${sqliteDir}`, "-c", "-o", adapterObject, adapterPath],
-    { timeoutMs: 300_000 },
-  );
+  const adapterCommand = compileCommand(toolchain, [
+    ...flags,
+    `-I${workDirectory}`,
+    `-I${sqliteDir}`,
+    "-c",
+    "-o",
+    adapterObject,
+    adapterPath,
+  ]);
+  const adapter = run(adapterCommand.command, adapterCommand.args, { timeoutMs: 300_000 });
   if (adapter.spawnError !== undefined) {
     throw new CompilerError({
       category: "TargetError",
@@ -527,7 +540,8 @@ export async function buildSqliteLibrary(
   // The two are bundled into one relocatable object, exactly as the facil
   // runtime bundles itself. The runtime's own entry points stay undefined
   // here and are resolved when the program is linked beside the runtime.
-  const bundled = run("ld", ["-r", "-o", objectPath, adapterObject, sqliteObject], { timeoutMs: 120_000 });
+  const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject, sqliteObject]);
+  const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
     throw new CompilerError({
       category: "LinkError",
