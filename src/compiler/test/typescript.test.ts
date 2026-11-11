@@ -6040,3 +6040,177 @@ test("a record whose keys the source computed as numbers is keyed by numbers", (
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
+
+test("a source written as JavaScript states no parameter type and no initial value", () => {
+  // A package is JavaScript, not TypeScript: a parameter has no annotation and
+  // a declaration may state a name and no value. The parameter is the value the
+  // caller hands over — the opaque reference the read gives a value it cannot
+  // type — and the name starts at the absent value the assignment replaces.
+  const read = readTypeScriptModule(
+    [
+      "export function walk(ctx, key) {",
+      "  let k;",
+      "  let c, underscore = 1;",
+      "  k = key;",
+      "  return underscore;",
+      "}",
+      "",
+    ].join("\n"),
+    "walk.js",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const walk = read.analysis.functions.find((entry) => entry.name === "walk")?.handle as {
+    params: { type: { kind: string } }[];
+    body: { kind: string; name?: string }[];
+  };
+  assert.deepEqual(walk.params.map((param) => param.type.kind), ["ref", "ref"], "an unstated type is a value");
+  assert.deepEqual(
+    walk.body.filter((statement) => statement.kind === "declare").map((statement) => statement.name),
+    ["k", "c", "underscore"],
+    "the one statement declares the three names it writes",
+  );
+});
+
+test("an assignment, a step and a comma are values where the language reads one", () => {
+  // `a.p-- || q` is a logical expression whose left side steps a field, and
+  // `return i++, t` answers the last value of the sequence. Both are values the
+  // statement reader used to take for statements of their own and leave the
+  // operator that follows them to be read as the start of the next statement.
+  const source = [
+    "export function next(ctx) {",
+    "  ctx.p-- || ctx.q;",
+    "  const t = ctx.t;",
+    "  t[ctx.k] = ctx.v;",
+    "  return ctx.i++, t;",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "next.js", false).refused, []);
+});
+
+test("a labelled block is a loop that leaves with break", () => {
+  // `int: { ... break int; }` leaves the block early. The label names nothing at
+  // run time: the block is a loop that runs once, and the labelled break is the
+  // break that leaves it.
+  const read = readTypeScriptModule(
+    [
+      "export function parse(n: number): number {",
+      "  int: {",
+      "    if (n > 1) break int;",
+      "    return 1;",
+      "  }",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const body = (read.analysis.functions.find((entry) => entry.name === "parse")?.handle as {
+    body: { kind: string; body?: { kind: string }[] }[];
+  }).body;
+  const block = body[0] as { kind: string; body: { kind: string }[] };
+  assert.equal(block.kind, "while", "the labelled block runs once as a loop");
+  assert.equal(block.body[block.body.length - 1]?.kind, "break", "the loop leaves after the block");
+});
+
+test("a condition that writes runs before each test", () => {
+  // `while ((c = next()))` writes on every turn, so the write is the first
+  // statement of the body and the test leaves the loop when it fails.
+  const read = readTypeScriptModule(
+    [
+      "export function drain(value: number): number {",
+      "  while ((value = value - 1)) {",
+      "    value += 0;",
+      "  }",
+      "  return value;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const loop = (read.analysis.functions.find((entry) => entry.name === "drain")?.handle as {
+    body: { kind: string; condition?: { text?: string }; body: { kind: string }[] }[];
+  }).body[0] as { kind: string; condition?: { text?: string }; body: { kind: string }[] };
+  assert.equal(loop.kind, "while");
+  assert.equal(loop.condition?.text, "1", "the loop is the infinite one");
+  assert.equal(loop.body[0]?.kind, "assign", "the condition's write runs first");
+  assert.equal(loop.body[1]?.kind, "if", "and the test leaves the loop when it fails");
+});
+
+test("a for loop's step may write more than one place", () => {
+  // `for (...; ...; i++, ctx.p++)` steps two places, which is a step sequence
+  // and not the counted step of one index: the loop becomes the while it is.
+  const source = [
+    "export function step(ctx, n: number) {",
+    "  for (let i = 0; i < n; i++, ctx.p++) {",
+    "    ctx.q = i;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("a dictionary entry written is the value it wrote", () => {
+  // `t[k] = v` on a dictionary is one entry written, and as a value it answers
+  // `v`: the entry is written through the runtime's dictionary and the value is
+  // held in a name of the statement's own.
+  const read = readTypeScriptModule(
+    [
+      "export function set(d: Record<string, number>, k: string): number {",
+      "  const v = (d[k] = 1);",
+      "  return v;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "set")?.handle as { body: unknown[] }).body);
+  assert.match(body, /blaze_rt_dict_set/, "the entry is the dictionary's write");
+  assert.match(body, /"kind":"declare","name":"__assigned0"/, "the value written is held for the expression");
+});
+
+test("void reads a value and answers the absent value", () => {
+  // `x === void 0` is the comparison against the absent value the language
+  // writes, and the same absent value is the one `undefined` reads as.
+  const read = readTypeScriptModule(
+    [
+      "export function absent(value: number): number {",
+      "  if (value === void 0) return 0;",
+      "  return value;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "absent")?.handle as { body: unknown[] }).body);
+  assert.match(body, /"right":\{"k":"null"\}/, "the absent value is what void answers");
+});
+
+test("a text written as a dot is not an optional access", () => {
+  // `c ? "." : u` is a conditional whose first arm is the one-character text a
+  // path is built from. The arm was read as the dot of `?.` and the colon after
+  // it was left to be read as an expression.
+  const read = readTypeScriptModule(
+    [
+      "export function f(subpath: string): string {",
+      '  return subpath === "" ? "." : subpath;',
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+    false,
+  );
+  assert.deepEqual(read.refused, []);
+  const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "f")?.handle as { body: unknown[] }).body);
+  assert.match(body, /"value":"\."/, "the arm is the text it wrote");
+});

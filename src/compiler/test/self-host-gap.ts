@@ -166,6 +166,10 @@ export async function selfHostGap(directory = COMPILER_ROOT): Promise<SelfHostGa
     // packages the tree depends on: an import the tree does not hold is left
     // unbound and the file is still measured.
     requireImports: false,
+    // A package is not a source of the compiler: the report asks what the
+    // frontend reads of the tree a binary is built from, and a package the
+    // tree installs is measured by the test that reads the package.
+    resolvePackages: false,
     // A measurement reads every file: answering a refusal keeps the imports the
     // rest of the tree links against, where throwing would stop the walk.
     reader: readModuleOrRefuse,

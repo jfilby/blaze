@@ -91,6 +91,16 @@ export interface ModuleGraphRequest {
    * so the rest of the tree is still read.
    */
   reader?: ModuleReader;
+  /**
+   * Whether a bare specifier names an installed package.
+   *
+   * A build reads one: the compiler's own tree imports `smol-toml`, and a
+   * binary that cannot read the package cannot be built from the tree that
+   * names it. A measurement of the compiler's sources asks what the frontend
+   * reads of those sources, and a package the tree installs would be counted
+   * as part of the tree's own gaps.
+   */
+  resolvePackages?: boolean;
 }
 
 /** The values every module of the program offers, in discovery order. */
@@ -342,12 +352,166 @@ function importedValuesOf(
   return { values, shapes };
 }
 
+/**
+ * Whether a specifier names an installed package.
+ *
+ * A relative path names a file of the project, and a specifier with a colon —
+ * `node:fs`, `http:` — names a host module rather than a package. Everything
+ * else is a package name, optionally followed by a path inside it.
+ */
+function isPackageSpecifier(request: ModuleGraphRequest, specifier: string): boolean {
+  return (
+    request.frontend.packages === true &&
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("#") &&
+    !specifier.includes(":")
+  );
+}
+
+/** The package a specifier names, or null when it names a host module. */
+function packageNameOf(request: ModuleGraphRequest, specifier: string): string | null {
+  if (!isPackageSpecifier(request, specifier)) return null;
+  const parts = specifier.split("/");
+  const first = parts[0] as string;
+  if (first === "") return null;
+  if (first.startsWith("@")) {
+    const second = parts[1];
+    return second === undefined || second === "" ? null : `${first}/${second}`;
+  }
+  return first;
+}
+
+/** The directories `node_modules` may hold a package in, nearest first. */
+function packageDirectories(from: string, name: string): string[] {
+  const directories: string[] = [];
+  let directory = posix.dirname(from);
+  while (true) {
+    directories.push(posix.join(directory, "node_modules", name));
+    if (directory === ".") return directories;
+    const parent = posix.dirname(directory);
+    if (parent === directory) return directories;
+    directory = parent;
+  }
+}
+
+/**
+ * The file a package's `exports` entry names.
+ *
+ * The entry is a text, a list of fallbacks, or the conditions it is offered
+ * under. The compiler asks as an import of an ES module, so `import` is the
+ * condition that answers, then the `node` and `default` conditions a package
+ * writes for the same file.
+ */
+function exportedTarget(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const one of value) {
+      const found = exportedTarget(one);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (value === null || typeof value !== "object") return null;
+  const conditions = value as Record<string, unknown>;
+  // The file is imported as an ES module, so `import` answers before the
+  // `node` and `default` conditions a package writes for the same entry.
+  for (const name of ["import", "node", "default", "module"]) {
+    const found = exportedTarget(conditions[name]);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/** The file a package's `exports` field names for `key`. */
+function exportTarget(exports: unknown, key: string): string | null {
+  if (typeof exports === "string" || Array.isArray(exports)) {
+    return key === "." ? exportedTarget(exports) : null;
+  }
+  if (exports === null || typeof exports !== "object") return null;
+  const table = exports as Record<string, unknown>;
+  // A field whose key names a subpath is the file it maps to.
+  const direct = table[key];
+  if (direct !== undefined) return exportedTarget(direct);
+  // A field with no key that names a subpath is the conditions the package's
+  // own entry is offered under. A package that maps subpaths names them with a
+  // leading dot, and one it does not name is not offered at all.
+  if (key === "." && (table["import"] !== undefined || table["default"] !== undefined)) {
+    return exportedTarget(table);
+  }
+  return null;
+}
+
+/** The path inside a package a specifier names, or null when it holds none. */
+function packageEntry(manifest: string, subpath: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifest);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const fields = parsed as Record<string, unknown>;
+  if (fields.exports !== undefined) return exportTarget(fields.exports, subpath === "" ? "." : `./${subpath}`);
+  if (subpath !== "") return `./${subpath}`;
+  // Without `exports`, a package is the entry its own manifest names, and
+  // `index.js` when it names none.
+  if (typeof fields.module === "string") return fields.module;
+  if (typeof fields.main === "string") return fields.main;
+  return "./index.js";
+}
+
+/** The file an entry names: the entry itself, or the extension it left out. */
+function packageFile(read: (path: string) => string | null, path: string): string | null {
+  const normalized = posix.normalize(path);
+  const candidates =
+    posix.extname(normalized) === "" ? [`${normalized}.js`, `${normalized}.mjs`, `${normalized}.ts`] : [normalized];
+  for (const candidate of [...candidates, `${normalized}/index.js`]) {
+    if (read(candidate) !== null) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The file an installed package offers under a specifier, or null.
+ *
+ * The walk is Node's: the `node_modules` of the importing file's directory,
+ * then the `node_modules` of every directory above it. A package is the entry
+ * its `exports` names — or its `module`, `main` or `index.js` — and the path
+ * after the package name is a file inside the package.
+ */
+function resolvePackage(
+  request: ModuleGraphRequest,
+  read: (path: string) => string | null,
+  from: string,
+  specifier: string,
+): string | null {
+  const name = packageNameOf(request, specifier);
+  if (name === null) return null;
+  const subpath = specifier.length > name.length ? specifier.slice(name.length + 1) : "";
+  for (const directory of packageDirectories(from, name)) {
+    const manifest = read(`${directory}/package.json`);
+    if (manifest === null) continue;
+    const entry = packageEntry(manifest, subpath);
+    if (entry === null) continue;
+    const found = packageFile(read, `${directory}/${entry}`);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 /** The candidate files an import specifier may name, joined onto the importer. */
 function candidatePaths(
   request: ModuleGraphRequest,
+  read: (path: string) => string | null,
   from: string,
   entry: { specifier: string },
 ): string[] {
+  if (isPackageSpecifier(request, entry.specifier)) {
+    if (request.resolvePackages === false) return [];
+    const found = resolvePackage(request, read, from, entry.specifier);
+    return found === null ? [] : [found];
+  }
   return request.frontend.resolveImport(entry.specifier).map((candidate) => modulePath(candidate, from));
 }
 
@@ -360,12 +524,15 @@ function resolveImport(
 ): string | null {
   // A project that pastes its source has no directory to resolve against.
   if (from === INLINE_MODULE) return null;
+  if (isPackageSpecifier(request, entry.specifier)) {
+    return request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
+  }
   let candidates: string[];
   try {
-    candidates = candidatePaths(request, from, entry);
+    candidates = candidatePaths(request, read, from, entry);
   } catch {
-    // A specifier the frontend does not resolve to a project module — a
-    // package, a host module — is a module the tree does not hold.
+    // A specifier the frontend does not resolve to a project module — a host
+    // module — is a module the tree does not hold.
     return null;
   }
   return candidates.find((path) => read(path) !== null) ?? null;
@@ -384,7 +551,16 @@ function requireImport(
       'set "sourceFile" to a file beside the project file so its imports can be resolved',
     );
   }
-  const candidates = candidatePaths(request, from, entry);
+  if (isPackageSpecifier(request, entry.specifier)) {
+    const resolved = request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
+    if (resolved !== null) return resolved;
+    const name = packageNameOf(request, entry.specifier) ?? entry.specifier;
+    throw contractPhaseError(
+      `${from} imports "${entry.specifier}" (line ${entry.line}), which is not an installed package`,
+      `looked for ${packageDirectories(from, name).join(", ")}; a package is read from the entry its package.json names`,
+    );
+  }
+  const candidates = candidatePaths(request, read, from, entry);
   const resolved = candidates.find((path) => read(path) !== null);
   if (resolved !== undefined) return resolved;
   throw contractPhaseError(

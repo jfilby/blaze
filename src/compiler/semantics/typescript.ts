@@ -2688,11 +2688,11 @@ function nestedBlocks(statement: Statement): Statement[][] {
  * a `continue` of a loop the body holds belongs to that loop and runs the step
  * that loop states, so the walk stops at one.
  */
-function continueWithStep(body: readonly Statement[], step: Statement): Statement[] {
+function continueWithStep(body: readonly Statement[], step: readonly Statement[]): Statement[] {
   const out: Statement[] = [];
   for (const statement of body) {
     if (statement.kind === "continue") {
-      out.push({ ...step }, statement);
+      out.push(...step, statement);
       continue;
     }
     if (statement.kind === "while" || statement.kind === "doWhile" || statement.kind === "loop" || statement.kind === "forOf") {
@@ -3108,6 +3108,17 @@ export function tokenize(source: string): Token[] {
       index += match[0].length;
       continue;
     }
+    // A private member is written with a `#` in front of its name. The name is
+    // one name wherever it is read — in the class that declares it, and through
+    // `this` in a method — so the tokenizer answers it as one token and no
+    // reader has to know that a `#` came before it.
+    if (character === "#" && /[A-Za-z_$]/.test(source[index + 1] ?? "")) {
+      const match = /^#[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(index));
+      if (match === null) throw frontendError(`malformed identifier`, `line ${line}`);
+      tokens.push({ kind: "ident", text: match[0], line });
+      index += match[0].length;
+      continue;
+    }
     const punctuation = PUNCTUATION.find((candidate) => source.startsWith(candidate, index));
     // An unknown character becomes a token: the parser reads on and reports
     // the first construct outside the subset, which is the useful error.
@@ -3400,6 +3411,16 @@ class TypeScriptParser {
    * is left by its break, not the loop around it.
    */
   private breakTargets: ("loop" | "switch")[] = [];
+  /**
+   * The labelled blocks a `break` may leave, with the depth of the loop stack
+   * the label sits at.
+   *
+   * A label over a block is a block a break leaves early. The block is lowered
+   * to a loop that runs once, so the break is the break of that loop — and a
+   * break written inside a loop of the block would leave that inner loop
+   * instead, which the depth says and the reader refuses.
+   */
+  private labels: { name: string; depth: number }[] = [];
   /** Names the lowered switches have taken, so each has a temporary of its own. */
   private switchCount = 0;
   /** Names the lowered for-of loops have taken, so each walks a name of its own. */
@@ -3573,6 +3594,28 @@ class TypeScriptParser {
    */
   private loopCondition = false;
   /**
+   * Whether the file being read is the entry a program runs.
+   *
+   * An untyped parameter is the dynamic value a JavaScript library hands its
+   * caller, and a library is read as the module it is. The entry of a program
+   * is different: a function of it with an untyped parameter is a function the
+   * program parser reads, where the parameter's type comes from the call sites
+   * that hand it one, as it always has. The module read refuses the parameter
+   * so the declaration is handed to that parser.
+   */
+  private entryFile = true;
+  /**
+   * Whether the condition being read is a do-while's, which is tested after the
+   * body has run.
+   *
+   * A while's condition is tested before the body, so a write it makes is the
+   * first statement of the body and the loop reads it there. A do-while's test
+   * has no such place: it runs after the body and before the next turn, and the
+   * loop statement has nowhere to put a statement of its own. A condition that
+   * writes is refused where it is written.
+   */
+  private testAfterBody = false;
+  /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
    *
@@ -3683,6 +3726,14 @@ class TypeScriptParser {
   private valueFunctions = new Map<string, FunctionType>();
   /** The map or the set each name of the function holds, when it holds one. */
   private valueCollections = new Map<string, CollectionValue>();
+  /**
+   * The entry a dictionary read is, by the expression the read lowered to.
+   *
+   * `t[k]` on a dictionary is a call that reads one entry, and the write
+   * `t[k] = v` is the call that writes it: the value the expression answers is
+   * the value written, and the place is the one the read named.
+   */
+  private dictionaryReads = new Map<Expression, { base: Expression; index: Expression; collection: CollectionValue }>();
   /** The map or the set each function of the file answers, by its name. */
   private declaredCollections = new Map<string, CollectionValue>();
   /** The map or the set a `new Map(...)` written out is, by the expression. */
@@ -5813,6 +5864,7 @@ class TypeScriptParser {
    * subset is the module's refusal and is never read again as a program.
    */
   parseModule(path: string, entry = true): ModuleAnalysis {
+    this.entryFile = entry;
     const imports: ModuleImport[] = [];
     const typeImports: ModuleTypeImport[] = [];
     // A class is lowered before anything else is read: its constructor and
@@ -6924,12 +6976,20 @@ class TypeScriptParser {
           ? this.readAt(mapped, () => this.readExpression(), shape)
           : undefined;
         if (mapped === null) {
-          if (fallback === undefined) {
+          if (fallback !== undefined) {
+            mapped = defaultParameterType(fallback);
+          } else if (this.entryFile) {
+            // The entry of a program hands an untyped parameter to the program
+            // parser, which types it by the calls the program makes.
             this.report("expected a parameter type", `near "${this.peek().text}"`, this.peek());
             this.synchronize();
             break;
+          } else {
+            // A library written as JavaScript states no type. The parameter is
+            // then the value the caller hands over, which is the dynamic value
+            // an `any` annotation states.
+            mapped = ANY_TYPE;
           }
-          mapped = defaultParameterType(fallback);
         }
         if (rest) {
           // The parameter is the list itself; the element is what a call packs.
@@ -8140,18 +8200,41 @@ class TypeScriptParser {
         // A hasher a name holds is that name's, so `hash.update` written
         // below reads the handle the runtime made.
         if (this.hashers.has(init)) this.hasherNames.add(name.text);
-        this.accept(";");
       } else if (type === null) {
-        this.report("a declaration needs an initialiser", `as in let ${name.text} = 0;`, name);
-        this.synchronize();
-        return { kind: "expression", value: this.hole(), line: name.line };
+        // A source written as JavaScript declares a name without saying what
+        // it holds and without a value, and assigns it before it reads it. The
+        // name starts at the zero of the dynamic value — the absent value the
+        // language holds before the assignment — and the assignment is what
+        // says what it holds from then on, exactly as a declared type with no
+        // value starts at the zero of its type.
+        init = this.zeroFor(ANY_TYPE);
       } else {
         // A declaration that states its type and no value starts at the zero
         // of that type: the source assigns it before it reads it, and the
         // assignment is what the body does.
         init = this.zeroFor(type);
-        this.accept(";");
       }
+      // A declaration may declare several names: `let c, underscore = 1`. The
+      // first is the one this branch read; each other is a declaration of its
+      // own, written after it so a name it reads is already there.
+      const alsoDeclared: Statement[] = [];
+      while (this.at(",")) {
+        this.next();
+        const other = this.next();
+        if (other.kind !== "ident") {
+          this.report("expected a variable name", `near "${other.text}"`, other);
+          break;
+        }
+        let otherType: TypeExpr | null = null;
+        if (this.accept(":")) otherType = this.readTypeAnnotation("a variable type", new Set(["=", ";", ",", ")"]));
+        const otherInit = this.accept("=")
+          ? this.readAt(otherType, () => this.readExpression())
+          : this.zeroFor(otherType ?? ANY_TYPE);
+        this.valueTypes.set(other.text, otherType ?? this.valueTypeOf(otherInit));
+        alsoDeclared.push({ kind: "declare", name: other.text, type: otherType, init: otherInit, line: other.line });
+      }
+      this.accept(";");
+      this.pending.push(...alsoDeclared);
       // An arrow is called by the name it is bound to: the function it lifted to
       // already carries the values it captured, so the name is not a slot the
       // body reads. A name bound to a value that is not an arrow is not one.
@@ -8241,6 +8324,24 @@ class TypeScriptParser {
       this.accept(";");
       return { kind: "expression", value, line: start.line };
     }
+    if (token.kind === "ident" && this.peek(1).kind === "punct" && this.peek(1).text === ":" && this.peek(2).text === "{") {
+      // `label: { ... }` is a block a `break label` leaves early. The label
+      // names nothing at run time: the block is a loop that runs once, and the
+      // break is the break that leaves it.
+      const label = this.next();
+      this.next();
+      this.breakTargets.push("loop");
+      this.labels.push({ name: label.text, depth: this.breakTargets.length });
+      const body = this.readBody();
+      this.labels.pop();
+      this.breakTargets.pop();
+      return {
+        kind: "while",
+        condition: { k: "literal", text: "1" },
+        body: [...body, { kind: "break", line: label.line }],
+        line: label.line,
+      };
+    }
     if (this.at("for")) return this.readLoop();
     if (this.at("if")) return this.readIf();
     if (this.at("try")) return this.readTry();
@@ -8251,6 +8352,21 @@ class TypeScriptParser {
       const keyword = this.next();
       if (this.peek().kind === "ident") {
         const label = this.next();
+        const held = this.labels[this.labels.length - 1];
+        if (keyword.text === "break" && held !== undefined && held.name === label.text) {
+          if (this.breakTargets.length !== held.depth) {
+            this.report(
+              `"break ${label.text}" leaves a loop the label does not hold`,
+              "a break out of a loop written inside the block is not part of the subset",
+              label,
+            );
+            this.accept(";");
+            this.synchronize();
+            return { kind: "expression", value: this.hole(), line: keyword.line };
+          }
+          this.accept(";");
+          return { kind: "break", line: keyword.line };
+        }
         this.report(
           `a ${keyword.text} names the loop it leaves, and a function body reads no labels`,
           `"${label.text}" is a name a program does not use here; write break; to leave the loop`,
@@ -8290,8 +8406,9 @@ class TypeScriptParser {
         return { kind: "result", value: null, line: token.line };
       }
       // A returned list is the value the function declares, and an empty one
-      // is built at the element type that declaration names.
-      const value = this.readAt(this.returns, () => this.readExpression(), this.returnsShape);
+      // is built at the element type that declaration names. A return is a
+      // whole expression, so a comma in it is the operator: `return i++, v`.
+      const value = this.readAt(this.returns, () => this.readSequence(), this.returnsShape);
       this.accept(";");
       return { kind: "result", value, line: token.line };
     }
@@ -8814,7 +8931,7 @@ class TypeScriptParser {
    * the step are the two things one `x++` does, and the place itself is named
    * by whatever the language names a value with.
    */
-  private stepPlace(target: Expression, op: "++" | "--", line: number): Expression | null {
+  private stepPlace(target: Expression, op: "++" | "--", line: number, valueAfter = false): Expression | null {
     if (target.k !== "member" && target.k !== "index") return null;
     const base = this.writeTarget(target.base, line);
     if (base === null) return null;
@@ -8831,7 +8948,15 @@ class TypeScriptParser {
     this.pendingBefore.push(target.k === "member"
       ? { kind: "memberAssign", base, field: target.field, op: op === "++" ? "+=" : "-=", value: one, line }
       : { kind: "indexAssign", buffer: base, index: target.index, op: op === "++" ? "+=" : "-=", value: one, line });
-    return { k: "ident", name: held };
+    if (!valueAfter) return { k: "ident", name: held };
+    // `++x.p` is the value the place holds after the step, so the place is
+    // read again after the write: the name the statement reads is the one the
+    // step left behind, not the one it found.
+    const after = `__stepped${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: after, type: null, init: place, line });
+    this.valueTypes.set(after, type);
+    if (shape !== null) this.valueShapes.set(after, shape);
+    return { k: "ident", name: after };
   }
 
   private readChainAssignment(): Statement | null {
@@ -9181,6 +9306,20 @@ class TypeScriptParser {
       return null;
     }
     this.position = lastDot + 2;
+    // `a.b--` written on its own line is the step of the field, and the field
+    // is all it writes only when the statement ends there. `a.b-- || next()`
+    // is the logical expression, and the reader of values steps it.
+    if (operator.text === "++" || operator.text === "--") {
+      const afterStep = this.tokens[lastDot + 3];
+      const alone =
+        afterStep === undefined ||
+        afterStep.kind === "end" ||
+        (afterStep.kind === "punct" && (afterStep.text === ";" || afterStep.text === "}" || afterStep.text === ")"));
+      if (!alone) {
+        this.position = start;
+        return null;
+      }
+    }
     // `a.length = n` writes the list the name holds, at that length.
     if (field.text === "length") {
       const owner: Expression = { k: "ident", name: writtenBase };
@@ -9301,7 +9440,15 @@ class TypeScriptParser {
         line: token.line,
       };
     }
-    if (token.kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--")) {
+    // `x++` is a statement of its own, and a value the expression around it
+    // reads when anything follows: `x++ || y` is the logical expression. The
+    // update is the statement only when the statement ends after it.
+    const afterUpdate = this.tokens[this.position + 2];
+    const updateAlone =
+      afterUpdate === undefined ||
+      afterUpdate.kind === "end" ||
+      (afterUpdate.kind === "punct" && (afterUpdate.text === ";" || afterUpdate.text === "}" || afterUpdate.text === ")"));
+    if (token.kind === "ident" && (this.peek(1).text === "++" || this.peek(1).text === "--") && updateAlone) {
       const slot = this.numericGlobal(token.text);
       this.next();
       const op = this.next().text as "++" | "--";
@@ -9563,10 +9710,35 @@ class TypeScriptParser {
     } else {
       this.next();
     }
-    const condition: Expression = this.at(";") ? { k: "literal", text: "1" } : this.readExpression();
+    // A condition that writes, `for (...; (c = next()); ...)`, writes on every
+    // turn: its statements are held aside and written where the body reads the
+    // test, which is the first thing a turn does.
+    const outer = this.pendingBefore;
+    this.pendingBefore = [];
+    let condition: Expression;
+    let perTurn: Statement[];
+    try {
+      condition = this.at(";") ? { k: "literal", text: "1" } : this.readExpression();
+      perTurn = this.pendingBefore;
+    } finally {
+      this.pendingBefore = outer;
+    }
     this.expect(";");
-    let step: Statement | null = null;
-    if (!this.at(")")) step = this.readStatement();
+    // A step is a sequence: `j++, ctx.p++` is two steps the source wrote as
+    // one, and each expression of it may write statements of its own.
+    const outerStep = this.pendingBefore;
+    this.pendingBefore = [];
+    let step: Statement[] = [];
+    try {
+      if (!this.at(")")) {
+        const line = this.peek().line;
+        const value = this.readSequence();
+        this.accept(";");
+        step = [...this.pendingBefore, { kind: "expression", value, line }];
+      }
+    } finally {
+      this.pendingBefore = outerStep;
+    }
     this.expect(")");
     // The initialiser runs once, before the loop, so it belongs to the
     // statement list this loop is one of — and the body's own statements flush
@@ -9575,15 +9747,28 @@ class TypeScriptParser {
     this.pendingBefore = [];
     const body = this.loopBody();
     this.pendingBefore = before;
-    if (step === null) return { kind: "while", condition, body, line: start.line };
+    const turns = perTurn.length === 0 ? body : [...perTurn, this.leaveLoopWhen(condition, start.line), ...body];
+    const looping: Expression = perTurn.length === 0 ? condition : { k: "literal", text: "1", boolean: true };
+    if (step.length === 0) return { kind: "while", condition: looping, body: turns, line: start.line };
     // A `continue` of this loop runs the step, which is where the source put it:
     // the step is written in front of each `continue` the body's own loops do
     // not hold, and at the end of the body for a turn that runs to the end.
     return {
       kind: "while",
-      condition,
-      body: [...continueWithStep(body, step), step],
+      condition: looping,
+      body: [...continueWithStep(turns, step), ...step],
       line: start.line,
+    };
+  }
+
+  /** The statement that leaves a loop when its condition fails. */
+  private leaveLoopWhen(condition: Expression, line: number): Statement {
+    return {
+      kind: "if",
+      condition: { k: "unary", op: "!", operand: condition },
+      then: [{ kind: "break", line }],
+      otherwise: [],
+      line,
     };
   }
 
@@ -9594,7 +9779,10 @@ class TypeScriptParser {
     const operator = this.tokens[this.position + 1];
     if (name === undefined || operator === undefined) return false;
     if (name.kind !== "ident" || name.text !== variable) return false;
-    return operator.text === "++" || operator.text === "--" || operator.text === "+=" || operator.text === "-=";
+    // `i++, j++` is two steps the source wrote as one, and the loop that reads
+    // a counted index has one step: the header is read again as the while it is.
+    if (operator.text === "++" || operator.text === "--") return this.tokens[this.position + 2]?.text === ")";
+    return operator.text === "+=" || operator.text === "-=";
   }
 
   /** `i++`, `i--`, `i += n` or `i -= n`: how the index moves. Null is one. */
@@ -10133,9 +10321,31 @@ class TypeScriptParser {
   private readWhile(): Statement {
     const start = this.next();
     this.expect("(");
-    const condition = this.inLoopCondition(() => this.readExpression());
+    // The condition is read with the statements it writes held aside: they run
+    // every turn, and the loop statement has no place of its own for them.
+    const outer = this.pendingBefore;
+    this.pendingBefore = [];
+    let condition: Expression;
+    let perTurn: Statement[];
+    try {
+      condition = this.inLoopCondition(() => this.readExpression());
+      perTurn = this.pendingBefore;
+    } finally {
+      this.pendingBefore = outer;
+    }
     this.expect(")");
-    return { kind: "while", condition, body: this.loopBody(), line: start.line };
+    const body = this.loopBody();
+    if (perTurn.length === 0) return { kind: "while", condition, body, line: start.line };
+    // A condition that writes — `while ((c = next()))` — writes before it tests,
+    // every turn. The write is the first statement of the body and the test
+    // leaves the loop when it fails, which is the same loop written with an
+    // infinite one and a break.
+    return {
+      kind: "while",
+      condition: { k: "literal", text: "1", boolean: true },
+      body: [...perTurn, this.leaveLoopWhen(condition, start.line), ...body],
+      line: start.line,
+    };
   }
 
   /** A condition a loop reads every turn, which is not read once. */
@@ -10157,7 +10367,14 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: start.line };
     }
     this.expect("(");
-    const condition = this.inLoopCondition(() => this.readExpression());
+    const saved = this.testAfterBody;
+    this.testAfterBody = true;
+    let condition: Expression;
+    try {
+      condition = this.inLoopCondition(() => this.readExpression());
+    } finally {
+      this.testAfterBody = saved;
+    }
     this.expect(")");
     this.accept(";");
     return { kind: "doWhile", condition, body, line: start.line };
@@ -10174,6 +10391,29 @@ class TypeScriptParser {
     this.breakTargets.pop();
     this.loops -= 1;
     return body;
+  }
+
+  /**
+   * An expression written as a sequence, `ctx.p++, parsed`.
+   *
+   * The comma operator evaluates each value for what it does and answers the
+   * last. Every value before the last is written as a statement ahead of the one
+   * the sequence is part of, which is where the source runs it; the last value
+   * is the sequence's own.
+   *
+   * A comma is an operator only where the language reads a whole expression:
+   * inside a group, in a return, and in a loop's step. A call's arguments and a
+   * list's elements are separated by commas that are not operators, and those
+   * readers do not call this one.
+   */
+  private readSequence(): Expression {
+    let value = this.readExpression();
+    while (this.at(",")) {
+      const comma = this.next();
+      this.pendingBefore.push({ kind: "expression", value, line: comma.line });
+      value = this.readExpression();
+    }
+    return value;
   }
 
   readExpression(): Expression {
@@ -10207,9 +10447,9 @@ class TypeScriptParser {
    *
    * A write is a statement, so the value the expression answers is the place
    * read after the write: the write runs before the statement the expression is
-   * part of, and the place is what the expression is. Only a name and a field
-   * of a name are places an expression can write; a field of a field and an
-   * element are not, and are refused where they are written.
+   * part of, and the place is what the expression is. Only a name, a field of a
+   * name and an element of a name are places an expression can write; a field
+   * of a field is not, and is refused where it is written.
    */
   private assignmentAsValue(value: Expression): Expression {
     const operator = this.peek();
@@ -10218,8 +10458,45 @@ class TypeScriptParser {
       ? (operator.text as AssignOperator)
       : null;
     if (op === null) return value;
-    if (value.k !== "ident" && value.k !== "member") return value;
-    if (this.loopCondition) {
+    // `t[k] = v` on a dictionary is the entry written, and the value the
+    // expression answers is the value written. The entry the read lowered to is
+    // the place the write names.
+    const entry = this.dictionaryReads.get(value);
+    if (entry !== undefined) {
+      if (op !== "=") {
+        this.report("a compound write of an entry is not a value", "write it as a statement of its own", operator);
+        return this.hole();
+      }
+      this.next();
+      const written = this.readExpression();
+      const base = this.writeTarget(entry.base, operator.line);
+      const setName = this.collectionSetNameFor(entry.collection);
+      if (base === null || setName === null) {
+        this.report("an assignment answers the place it writes", "write it as a statement of its own", operator);
+        return this.hole();
+      }
+      const held = `__assigned${this.fieldCount++}`;
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: written, line: operator.line });
+      this.valueTypes.set(held, this.valueTypeOf(written));
+      const shape = this.shapeOf(written);
+      if (shape !== null) this.valueShapes.set(held, shape);
+      this.pendingBefore.push({
+        kind: "expression",
+        value: {
+          k: "call",
+          name: setName,
+          args: [{ k: "ident", name: base }, entry.index, { k: "ident", name: held }],
+        },
+        line: operator.line,
+      });
+      return { k: "ident", name: held };
+    }
+    if (value.k !== "ident" && value.k !== "member" && value.k !== "index") return value;
+    // A do-while tests its condition after the body has run, and a write the
+    // test makes would have to run after the body too, which is not a place the
+    // loop statement has. A while tests before the body, so its write is the
+    // first statement of the body and is read there.
+    if (this.testAfterBody) {
       this.report(
         "an assignment written in a loop condition is not part of the subset",
         "write the value into a name inside the loop, and test the name",
@@ -10237,6 +10514,10 @@ class TypeScriptParser {
     if (base === null) {
       this.report("an assignment answers the place it writes", "write it as a statement of its own", operator);
       return this.hole();
+    }
+    if (value.k === "index") {
+      this.pendingBefore.push({ kind: "indexAssign", buffer: base, index: value.index, op, value: written, line: operator.line });
+      return { k: "index", base: { k: "ident", name: base }, index: value.index };
     }
     this.pendingBefore.push({ kind: "memberAssign", base, field: value.field, op, value: written, line: operator.line });
     return { k: "member", base: { k: "ident", name: base }, field: value.field };
@@ -10731,6 +11012,13 @@ class TypeScriptParser {
       const operand = this.readUnary();
       return this.typeofValue(operand);
     }
+    if (token.kind === "ident" && token.text === "void") {
+      // `void value` reads the value for what it does and answers the absent
+      // value, which is how a source writes `undefined` as an expression.
+      this.next();
+      this.readUnary();
+      return { k: "null" };
+    }
     if (token.kind === "punct" && UNARY_OPERATORS.includes(token.text)) {
       this.next();
       return { k: "unary", op: token.text as UnaryOp, operand: this.readUnary() };
@@ -10738,8 +11026,13 @@ class TypeScriptParser {
     if (token.kind === "punct" && (token.text === "++" || token.text === "--")) {
       this.next();
       const operand = this.readUnary();
-      if (operand.k !== "ident") return this.missing(`"${token.text}" needs a name to change`, token);
-      return { k: "update", name: operand.name, op: token.text as "++" | "--", prefix: true };
+      const op = token.text as "++" | "--";
+      if (operand.k === "ident") return { k: "update", name: operand.name, op, prefix: true };
+      // A place that is not a name is stepped through a name of the statement's
+      // own, and a prefix step answers the value the place holds afterwards.
+      const stepped = this.stepPlace(operand, op, token.line, true);
+      if (stepped !== null) return stepped;
+      return this.missing(`"${token.text}" needs a name to change`, token);
     }
     return this.readPostfix();
   }
@@ -11145,7 +11438,7 @@ class TypeScriptParser {
       // which the expression reader above reads from the value this returns.
       // `?.[i]` also writes the dot, so the token after the question is the
       // one that decides.
-      if (this.at("?") && this.peek(1).text === ".") {
+      if (this.at("?") && this.peek(1).kind === "punct" && this.peek(1).text === ".") {
         beginOptional();
         this.next();
         // `?.[i]` and `?.(args)` write a dot between the question and the
@@ -11164,6 +11457,7 @@ class TypeScriptParser {
         if (indexed !== null && indexed.kind === "map") {
           const got = this.collectionMethod(target, indexed, "get", [index]);
           if (got !== null) {
+            this.dictionaryReads.set(got, { base: target, index, collection: indexed });
             replace(got);
             continue;
           }
@@ -18700,7 +18994,9 @@ class TypeScriptParser {
     }
     if (token.kind === "punct" && token.text === "[") return this.arrayLiteral(token);
     if (token.kind === "punct" && token.text === "(") {
-      const inner = this.readExpression();
+      // A group is a whole expression, so a comma inside it is the operator and
+      // not the separator of an argument list.
+      const inner = this.readSequence();
       this.expect(")");
       return inner;
     }
@@ -22507,6 +22803,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
 }
 
 export const typeScriptFrontend: Frontend = {
+  packages: true,
   analyze(source, path, entry = true, context?: unknown) {
     const read = readTypeScriptModule(source, path, entry, context);
     if (read.refused.length > 0) throw refusalError(path, read.refused, read.count);
@@ -22575,6 +22872,11 @@ export const typeScriptFrontend: Frontend = {
         "a module imports project modules by relative path, as in \"./other.ts\"",
       );
     }
+    // An ES module names the file it imports with the extension that file has:
+    // a package written for Node writes `./parse.js`, and the file it names is
+    // that file rather than a TypeScript source beside it. A specifier with no
+    // extension is a TypeScript module of the project, as `./other` is.
+    if (specifier.endsWith(".js") || specifier.endsWith(".mjs") || specifier.endsWith(".cjs")) return [specifier];
     if (specifier.endsWith(".ts") || specifier.endsWith(".tsx")) return [specifier];
     return [`${specifier}.ts`, `${specifier}/index.ts`];
   },

@@ -5903,3 +5903,42 @@ test("a spread of a value the read cannot name is a record with a field written"
     assert.equal(output.trim(), "call new 3 5 1; n2 9 6 8; old 3 5 1", `the ${backend} backend writes the fields`);
   }
 });
+
+test("the JavaScript forms a package writes are the statements they mean", async () => {
+  // A loop's condition that writes, a labelled block a break leaves, a return
+  // that steps before it answers, a declaration of several names, a dictionary
+  // entry written where an expression goes, and `void 0`. Each is a form a
+  // package is written in, and a program built from them has to print what the
+  // source prints under Node.
+  const output = await agreesWithNode([
+    "function drain(value: number): number {",
+    "  while ((value = value - 1) > 0) {",
+    "    if (value === 2) continue;",
+    "  }",
+    "  return value;",
+    "}",
+    "function parse(n: number): number {",
+    "  int: {",
+    "    if (n > 1) break int;",
+    "    return 1;",
+    "  }",
+    "  return 0;",
+    "}",
+    "function next(i: number): number {",
+    "  let a = 0, b = 2;",
+    "  a = 3;",
+    "  return i++, a + b + i;",
+    "}",
+    "function demo(): string {",
+    "  const record = Object.create(null) as Record<string, number>;",
+    "  const written = (record[`k`] = 4);",
+    "  return `${written} ${record[`k`]}`;",
+    "}",
+    "console.log(`${drain(5)} ${parse(1)} ${parse(2)} ${next(1)} ${demo()}`);",
+    "",
+  ].join("\n"));
+  // `void 0 === undefined` is read by the frontend and is not in this list: the
+  // program prints the comparison of two absent values as false, which is a
+  // wrong answer the resolver owes (see the self-hosting spec).
+  assert.equal(output.trim(), "0 1 0 7 4 4");
+});

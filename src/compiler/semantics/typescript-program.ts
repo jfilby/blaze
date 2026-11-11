@@ -291,6 +291,23 @@ class ProgramParser {
    * body states.
    */
   private collections = new Map<string, "set" | "map">();
+  /**
+   * The entry a dictionary read names, by the expression the read lowered to.
+   *
+   * `record[key]` on a dictionary is the runtime's get, and `record[key] = v` is
+   * the write of the same entry: the value the expression answers is the entry,
+   * read after the write the statement queued.
+   */
+  private dictionaryReads = new Map<ProgramValue, { buffer: string; index: ProgramValue }>();
+  /**
+   * Whether the expression being read is a loop's condition.
+   *
+   * A condition is read again every turn, and a write it makes is a statement
+   * that has to run every turn too. The program's loop statement has no place
+   * of its own for such a statement, so the write is refused where it is
+   * written rather than run once before the loop.
+   */
+  private loopCondition = false;
   /** The dictionary an allocation names, so the declaration binds its kind. */
   private collectionValues = new Map<ProgramValue, "set" | "map">();
   /** How many switches the reader has lowered, for naming their subjects. */
@@ -1081,7 +1098,7 @@ class ProgramParser {
     const line = this.peek().line;
     this.expect("while");
     this.expect("(");
-    const condition = this.value();
+    const condition = this.condition();
     this.expect(")");
     return { kind: "while", condition, body: this.statements(), line };
   }
@@ -1093,7 +1110,7 @@ class ProgramParser {
     const body = this.statements();
     this.expect("while");
     this.expect("(");
-    const condition = this.value();
+    const condition = this.condition();
     this.expect(")");
     this.accept(";");
     return { kind: "doWhile", condition, body, line };
@@ -1198,7 +1215,7 @@ class ProgramParser {
     }
     this.next();
     const down = comparison.text === ">" || comparison.text === ">=";
-    const to = this.value();
+    const to = this.condition();
     if (!this.accept(";")) {
       this.fail("a loop is written for (let i = from; i < to; i++)", this.peek());
       return this.skipLoop();
@@ -1554,6 +1571,16 @@ class ProgramParser {
         this.synchronize();
         return null;
       }
+      // `record[key] = value` on a dictionary is the entry written, the same
+      // write `record.set(key, value)` makes.
+      if (this.collections.get(name.text) === "map" && op === "=") {
+        return {
+          kind: "invoke",
+          function: "blaze_rt_dict_set",
+          args: [{ k: "name", name: name.text }, index, this.value()],
+          line: name.line,
+        };
+      }
       return { kind: "elementAssign", buffer: name.text, index, op, value: this.value(), line: name.line };
     }
     // `a.fill(x)` written for what it does rather than for the array it hands
@@ -1715,7 +1742,108 @@ class ProgramParser {
   /* ---------------------------------------------------------------------- */
 
   private value(): ProgramValue {
-    return this.conditionalValue();
+    return this.assignmentValue(this.conditionalValue());
+  }
+
+  /** A loop's condition: a value read every turn, which may not write. */
+  private condition(): ProgramValue {
+    const saved = this.loopCondition;
+    this.loopCondition = true;
+    try {
+      return this.value();
+    } finally {
+      this.loopCondition = saved;
+    }
+  }
+
+  /**
+   * The body of a concise arrow: the values its body wrote, then the value.
+   *
+   * A write inside the body is a statement of the body, not of the statement
+   * that declares the arrow, so the queue is read here and the statements stay
+   * inside the function the arrow is.
+   */
+  private arrowBody(read: () => ProgramValue, line: number): ProgramStatement[] {
+    const outer = this.pending;
+    this.pending = [];
+    const value = read();
+    const queued = this.drainPending();
+    this.pending = outer;
+    return [...queued, { kind: "result", value, line }];
+  }
+
+  /**
+   * A write written where a value goes, as `(record[k] = 4)` is.
+   *
+   * The write is a statement of its own, queued before the one the expression is
+   * part of, and the value the expression answers is the place read after it. A
+   * program has places for a name, an element of a name and a field of a name.
+   */
+  private assignmentValue(value: ProgramValue): ProgramValue {
+    const operator = this.peek();
+    if (operator.kind !== "punct" || !ASSIGN_OPS.includes(operator.text as ProgramAssignOp)) return value;
+    if (this.loopCondition) {
+      this.fail(
+        "an assignment written in a loop condition is not part of the subset",
+        operator,
+        "write the value into a name inside the loop, and test the name",
+      );
+      this.next();
+      this.value();
+      return value;
+    }
+    const entry = this.dictionaryReads.get(value);
+    if (entry !== undefined) {
+      if (operator.text !== "=") {
+        this.fail("a compound write of an entry is not a value a program reads", operator);
+        this.synchronize();
+        return value;
+      }
+      const line = operator.line;
+      this.next();
+      const written = this.value();
+      this.pending.push({
+        kind: "invoke",
+        function: "blaze_rt_dict_set",
+        args: [{ k: "name", name: entry.buffer }, entry.index, written],
+        line,
+      });
+      return value;
+    }
+    if (value.k !== "name" && value.k !== "element" && value.k !== "field") return value;
+    const line = operator.line;
+    if (value.k === "field" && value.object.k !== "name") {
+      this.fail("an assignment answers a place a program names", operator);
+      this.synchronize();
+      return value;
+    }
+    this.next();
+    const written = this.value();
+    if (value.k === "name") {
+      this.pending.push({ kind: "assign", name: value.name, op: operator.text as ProgramAssignOp, value: written, line });
+      return value;
+    }
+    if (value.k === "element") {
+      this.pending.push({
+        kind: "elementAssign",
+        buffer: value.buffer,
+        index: value.index,
+        op: operator.text as ProgramAssignOp,
+        value: written,
+        line,
+      });
+      return value;
+    }
+    const object = (value.object as { k: "name"; name: string }).name;
+    this.pending.push({
+      kind: "fieldAssign",
+      object: object === "this" ? "self" : object,
+      field: value.field,
+      op: operator.text as ProgramAssignOp,
+      value: written,
+      line,
+    });
+    return value;
   }
 
   /** `c ? a : b`, loosest of the operators. */
@@ -1785,6 +1913,13 @@ class ProgramParser {
       const written = this.writtenKind(operand);
       if (written !== null) return { k: "text", parts: [{ k: "text", value: written }] };
       return { k: "call", function: "JSON.typeof", args: [operand] };
+    }
+    if (token.text === "void") {
+      // `void value` reads the value for what it does and answers the absent
+      // value, as the module frontend reads it.
+      this.next();
+      this.unary();
+      return { k: "null" };
     }
     if (token.kind === "punct" && (UNARY_OPS as readonly string[]).includes(token.text)) {
       this.next();
@@ -1856,6 +1991,13 @@ class ProgramParser {
         const index = this.value();
         this.expect("]");
         if (value.k === "argv") value = { k: "argv", index, offset: value.offset };
+        else if (value.k === "name" && this.collections.get(value.name) === "map") {
+          // `record[key]` on a dictionary is the entry it holds, read the way
+          // `record.get(key)` reads it.
+          const got: ProgramValue = { k: "call", function: "blaze_rt_dict_get", args: [value, index] };
+          this.dictionaryReads.set(got, { buffer: value.name, index });
+          value = got;
+        }
         else if (value.k === "name") value = { k: "element", buffer: value.name, index };
         else {
           this.fail("a program cannot read an element of a value; it reads a[i] of a name");
@@ -2092,6 +2234,20 @@ class ProgramParser {
             value = { k: "call", function: "parseInt", args: this.baseTenRadix(written, this.peek()) };
             continue;
           }
+          // `Object.create(null)` is the empty record the runtime's dictionary
+          // is, which a program fills by key, exactly as the module frontend
+          // reads it.
+          if (value.k === "name" && value.name === "Object" && member === "create") {
+            const written = this.arguments();
+            if (written.length === 1 && written[0]?.k === "null") {
+              const made: ProgramValue = { k: "call", function: "blaze_rt_dict_new", args: [] };
+              this.collectionValues.set(made, "map");
+              value = made;
+              continue;
+            }
+            this.fail("Object.create copies a prototype", dot);
+            return this.nothing();
+          }
           const namespaces = new Set(["JSON", "crypto", "fs", "Math", "console", "process", "Deno", "Bun", "http", "performance", "sqlite", "Promise", "posix"]);
           const prepend = !(value.k === "name" && namespaces.has(value.name));
           let args: ProgramValue[];
@@ -2295,8 +2451,7 @@ class ProgramParser {
             const body = this.braces();
             return { k: "arrow", params, body: [...prelude, ...body], async: true };
           }
-          const value = this.value();
-          return { k: "arrow", params, body: [...prelude, { kind: "result", value, line }], async: true };
+          return { k: "arrow", params, body: [...prelude, ...this.arrowBody(() => this.value(), line)], async: true };
         }
       }
       if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
@@ -2307,8 +2462,7 @@ class ProgramParser {
           const body = this.braces();
           return { k: "arrow", params: [{ name, type: null }], body, async: true };
         }
-        const value = this.value();
-        return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }], async: true };
+        return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(() => this.value(), line), async: true };
       }
       // `async function () { ... }`: a function expression written the long
       // way, which is the same arrow with a promise behind it.
@@ -2382,8 +2536,7 @@ class ProgramParser {
         const body = this.braces();
         return { k: "arrow", params: [{ name, type: null }], body };
       }
-      const value = this.value();
-      return { k: "arrow", params: [{ name, type: null }], body: [{ kind: "result", value, line }] };
+      return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(() => this.value(), line) };
     }
     if (token.kind === "ident") {
       if (token.text === "new") {
@@ -2538,8 +2691,7 @@ class ProgramParser {
           const body = this.braces();
           return { k: "arrow", params, body: [...prelude, ...body] };
         }
-        const value = this.value();
-        return { k: "arrow", params, body: [...prelude, { kind: "result", value, line }] };
+        return { k: "arrow", params, body: [...prelude, ...this.arrowBody(() => this.value(), line)] };
       }
     }
     if (this.accept("(")) {
@@ -2955,7 +3107,12 @@ class ProgramParser {
 
   /** One expression, on its own: what a template string interpolates. */
   private interpolated(source: string): ProgramValue {
-    const parser = new ProgramParser(tokenize(source), this.path, this.diagnostics);
+    const parser = new ProgramParser(tokenize(source), this.path, this.diagnostics, this.classTable, this.importedNames);
+    // An interpolation is part of the program it is written in: the names and
+    // the dictionaries the body declared are the ones the value reads.
+    parser.collections = new Map(this.collections);
+    parser.collectionValues = new Map(this.collectionValues);
+    parser.valueClasses = new Map(this.valueClasses);
     const value = parser.value();
     if (parser.peek().kind !== "end") {
       parser.fail(`"${parser.peek().text}" follows a complete value`, parser.peek());

@@ -475,4 +475,13 @@ export interface Frontend {
    * phase picks the candidate that exists.
    */
   resolveImport(specifier: string): string[];
+  /**
+   * Whether a bare specifier names an installed package.
+   *
+   * Node's `node_modules` is the module system a TypeScript source imports
+   * through, and a build reads the package from it. A language whose imports
+   * are its own — Nim's `std/math`, Python's `os` — has no such directory, and
+   * a bare specifier there is the language's import rather than a package.
+   */
+  readonly packages?: boolean;
 }

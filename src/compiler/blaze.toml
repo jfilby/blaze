@@ -1,5 +1,5 @@
 language = "typescript"
-sourceFile = "main.ts"
+sourceFile = "cli.ts"
 output = "machine"
 backend = "machine"
 mode = "debug"

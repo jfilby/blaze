@@ -186,8 +186,11 @@ The refusals fall into six frontiers:
   (`core/version.ts`), so a native build needs the sources or the fingerprint at
   run time.
 - **Packages.** `smol-toml` for project files, the Vercel AI SDK for model
-  providers, and `zod` in one adapter. A native binary cannot import them from
-  `node_modules`.
+  providers, and `zod` in one adapter. The graph reads a package out of
+  `node_modules` as it reads a module of the project (§4i0), so `smol-toml` is
+  not replaced: its closure is 28 refusals from 127, and what is left is the
+  host's own classes and a few reads of a value whose fields the read cannot
+  see. The AI SDK and `zod` are the same walk over a much larger closure.
 
 The frontend is a parser for a small program language, not a general JavaScript
 parser. That is the right shape to keep: the goal is to grow the subset by
@@ -1016,6 +1019,66 @@ record concatenates those entries, in element order, into the record the call
 answers: each element's dictionary is read and its entries copied in turn.
 
     The total went from 203 to 200.
+
+### 4i0. A package is a module the graph reads
+
+    import { parse } from "smol-toml";
+
+A native compiler cannot defer to Node's loader: the file a package names is a
+module of the program, read by the same frontend as the compiler's own sources.
+The graph resolved relative paths only, so `smol-toml` was the frontend's
+"cannot import" and a build stopped on the first package import `compiler.ts`
+writes.
+
+The walk is Node's: the `node_modules` of the importing file's directory, then
+the `node_modules` of every directory above it. A package is the entry its
+`exports` names — the `import` condition before `node` and `default`, a string,
+a fallback list, or the file a subpath key names — and, without `exports`, its
+`module`, `main` or `index.js`. A path after the package name is a subpath the
+field maps, and an entry that leaves out its extension is the `.js`, `.mjs` or
+`.ts` beside it. The files are project-relative paths like any other, so the
+graph links the package's own relative imports without being told they belong to
+a package, and a specifier the tree does not hold is refused at the import that
+names it (`is not an installed package`).
+
+The resolution is asked for by a build and turned off by the measurement: the
+compiler's own report counts the tree's refusals and not its dependencies', so
+`test/package-imports.test.ts` reads the package closure itself and holds it at
+28 refusals from 127.
+
+Three of the constructs that closed most of the 127 are the JavaScript a package
+is written in:
+
+- **A parameter without a type, and a declaration without a value.** TypeScript
+  is a superset of JavaScript: a package writes `function skip(ctx)` and
+  `let k;`, and both read as the dynamic value — the opaque reference an unstated
+  type is — with the assignment replacing the absent value it starts at.
+- **A value where a statement was.** An assignment, a step (`x.p--`, `++x.p`)
+  and a comma (`return i++, v`, `(c = next(), c < 4)`) are values. Each write is
+  a statement of its own ahead of the one the expression is part of; a while's
+  condition that writes becomes an infinite loop whose body writes and then
+  tests, because the write runs every turn; a for loop's step that writes more
+  than one place is the while the same rule makes it; a dictionary entry
+  (`t[k] = v`) is the runtime's set and the value it wrote.
+- **The forms around them.** A private member (`#hasDate`) is one name wherever
+  it is read, a labelled block is a loop that runs once (`break int` leaves it),
+  `void x` is the absent value, and a declaration may declare several names. A
+  step written on its own line is the statement it is, and the same step where a
+  value is read — `x.p-- || next()` — is the value. A `.js` specifier names the
+  file it says rather than a TypeScript source beside it, and a text whose value
+  is `"."` is not the dot of `?.`: the optional access asks the token to be
+  punctuation.
+
+    # self-host: 95 of 95 sources read, 0 refused, 0 refusals
+    # package:   the smol-toml closure, 127 → 28 refusals
+
+    What is left of the package is the host and the read that cannot see a
+    type: `TomlDate extends Date`, `super(...)`, `instanceof Date` and
+    `Temporal.*`, `globalThis`, `Object.keys`/`Object.hasOwn` of a value whose
+    fields the read does not hold, a default export that is an object, a
+    destructured field default, `replaceAll`, `toString(radix)` of a dynamic
+    value, `parseInt` with a dynamic radix, the element type of a list the
+    source fills by pushing, and a do-while whose test writes.
 
 ### 4hx. The machine backend reads a dictionary, and a block states its length
 
@@ -5575,8 +5638,18 @@ What was closed this session, and what each was worth:
 | a machine function builds and walks a map, and a block states its length (§4hx) | 0 → 0 (lowered) |
 | a first read that waits for an import is not the verdict (§4hy) | 0 → 0 (the build reads the linked read) |
 | the length of a list a field holds (§4hz) | 0 → 0 (lowered) |
+| a package is a module the graph reads (§4i0) | 0 → 0 (package: 127 → 28) |
 
-**Wrong answers found on the way.** A map of references read the double an entry
+**Wrong answers found on the way.** `null === null` compiles to a comparison
+that a program prints as false, so `void 0 === undefined` — the spelling the
+TOML package compares with — is read by the frontend but answered wrongly at run
+time. It is the resolver's comparison of two absent values (§4i0), and is open.
+A function of a program that reads a program-level dictionary printed `NaN` for
+an entry that had been written; the write is correct in a function of a module
+(the test that covers it), so what is open is the program function that reads
+the entry's dictionary.
+
+A map of references read the double an entry
 holds, so the IR typed the value a number and a field of it read the runtime's
 table as an object; both backends segfaulted on `Map<Box, Box>`. Two identical
 calls in one expression were inlined once (§4an). A store through an object
@@ -5627,8 +5700,11 @@ A source is still a root of its own, so a file no import reaches is measured:
 the graph is the whole tree, not one binary's closure. A build reads strictly —
 it stops at the first file it refuses — and the report reads tolerantly, so one
 refused file does not hide every file that imports it. An import the tree does
-not hold, such as a package or a host module, is left unbound: the report asks
-what the frontend reads of a file, not which packages the tree depends on.
+not hold is left unbound: the report asks what the frontend reads of the
+compiler's own sources, not of its dependencies. A package is measured by
+`test/package-imports.test.ts`, which reads the closure the package names and
+holds its refusals as a budget of its own (§4i0); a host module such as
+`node:fs` is still not a module of a project.
 
 It covers `src/compiler` only. The tests, benchmarks and scratch programs are not
 part of the compiler binary and are not compiled into it.
@@ -5806,10 +5882,12 @@ adapter, and the adapter is the only file that names a Node module.
 
 Three dependencies are in the way of a native binary:
 
-- **`smol-toml`** reads `blaze.toml`. Either write the TOML reader the project
-  files need in the subset (they are small: strings, numbers, booleans, arrays
-  and tables) or keep project parsing in the Node bootstrap until the native
-  compiler can read its own project. The first fixed point needs the former.
+- **`smol-toml`** reads `blaze.toml`. The source reads the installed package
+  rather than replacing it (§4i0): the graph resolves `node_modules` and the
+  package's own modules are compiled with the program. Its closure is held at
+  28 refusals, and the last of them are the host classes `Date` and `Temporal`,
+  a default export that is an object, and two questions asked of a value whose
+  fields the static read cannot see.
 - **The AI SDK** is the model transport. Put it behind one adapter and give the
   native compiler an HTTP + JSON transport for the providers it must speak. The
   first fixed point may use `--model replay` and avoid the network entirely;
@@ -5823,8 +5901,10 @@ The compiler is a project, not a single file. Before rung 4 it needs:
 
 - a `blaze.toml` for `src/compiler` that names the real entry module, the module
   graph and the output binary;
-- module resolution over the compiler's own directory layout, including
-  `index.ts`, relative paths and the package boundary;
+- module resolution over the compiler's own directory layout. Relative paths,
+  the `index.ts` a directory names and the `node_modules` a bare specifier names
+  are read (§4i0); a `node:`-prefixed host module is the boundary the native
+  adapter (§4) has to answer, and is not resolved as a file;
 - the toolchain services a build uses: spawning `cc`, `as`, `ld` (and `nim` when
   asked), reading their stderr, and turning a non-zero exit into the compiler's
   own diagnostic;
