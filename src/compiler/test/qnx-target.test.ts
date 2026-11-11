@@ -23,6 +23,7 @@ import {
   toolchainFor,
 } from "../core/toolchain.ts";
 import type { TargetSpec } from "../core/types.ts";
+import { assertMachineTarget } from "../toolchain/ir-machine.ts";
 
 const QNX_X86: TargetSpec = { arch: "x86_64", os: "qnx", abi: "sysv", cpu: "", features: [] };
 const QNX_ARM: TargetSpec = { arch: "aarch64", os: "qnx", abi: "aapcs", cpu: "", features: [] };
@@ -149,4 +150,16 @@ test("assembly and relocatable links follow the profile", () => {
     command: "qcc",
     args: ["-Vgcc_ntox86_64", "-r", "-o", "all.o", "a.o"],
   });
+});
+
+test("the machine backend admits QNX x86-64 and refuses QNX AArch64", () => {
+  // QNX x86-64 is System V AMD64, which is the one convention the machine
+  // backend writes. AArch64 has a different convention and no encoder here,
+  // so the refusal names it rather than writing code the linker would accept
+  // and the machine would run wrongly.
+  assert.doesNotThrow(() => assertMachineTarget(QNX_X86));
+  assert.throws(
+    () => assertMachineTarget(QNX_ARM),
+    /the machine backend cannot build for aarch64-qnx-aapcs/,
+  );
 });
