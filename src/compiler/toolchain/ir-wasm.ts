@@ -3620,6 +3620,13 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "runCommand":
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.value(argument(2), F64_TYPE);
+        this.textArgument(argument(3));
+        this.callService("blaze_rt_process_run");
+        return TEXT;
       case "streamIsTTY":
         this.value(argument(0), F64_TYPE);
         this.callService("blaze_rt_stream_is_tty");

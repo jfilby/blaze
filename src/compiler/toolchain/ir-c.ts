@@ -277,6 +277,8 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "runCommand":
+      return `${RUNTIME_NAME}_process_run(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]})`;
     case "streamIsTTY":
       return `${RUNTIME_NAME}_stream_is_tty(${args[0]})`;
     case "setExitCode":

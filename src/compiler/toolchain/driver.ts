@@ -1126,6 +1126,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "runCommand":
+        return `${RUNTIME_NAME}_process_run(${argument(0)}, ${argument(1)}, ${argument(2)}, ${argument(3)})`;
       case "streamIsTTY":
         return `${RUNTIME_NAME}_stream_is_tty(${argument(0)})`;
       case "setExitCode":

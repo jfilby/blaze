@@ -11199,6 +11199,28 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (
+      call.callee === "runCommand" &&
+      call.args[0] !== undefined &&
+      call.args[1] !== undefined &&
+      call.args[2] !== undefined &&
+      call.args[3] !== undefined
+    ) {
+      this.at(call.args[0], TEXT);
+      const command = this.hold(TEXT, "blaze_run_command");
+      this.store(command);
+      this.at(call.args[1], TEXT);
+      const input = this.hold(TEXT, "blaze_run_input");
+      this.store(input);
+      this.at(call.args[2], NUMBER);
+      const timeout = this.hold(NUMBER, "blaze_run_timeout");
+      this.store(timeout);
+      this.at(call.args[3], TEXT);
+      const cwd = this.hold(TEXT, "blaze_run_cwd");
+      this.store(cwd);
+      this.callSymbol("blaze_rt_process_run", [command, input, timeout, cwd], TEXT);
+      return;
+    }
     if (call.callee === "streamIsTTY" && call.args[0] !== undefined) {
       this.at(call.args[0], NUMBER);
       const stream = this.hold(NUMBER, "blaze_tty_stream");

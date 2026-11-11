@@ -115,6 +115,54 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code runs a command and reads its streams", async () => {
+  const invoked = (command: string, input: string, timeout: number, cwd: string): SemanticFunction =>
+    subject(
+      TEXT,
+      handsBack({
+        k: "call",
+        type: TEXT,
+        call: {
+          callee: "runCommand",
+          builtin: true,
+          signature: {
+            name: "runCommand",
+            symbol: "runCommand",
+            params: [
+              { name: "command", type: "ptr<u8>" },
+              { name: "input", type: "ptr<u8>" },
+              { name: "timeout", type: "f64" },
+              { name: "cwd", type: "ptr<u8>" },
+            ],
+            returns: "ptr<u8>",
+          },
+          args: [literal(command), literal(input), { k: "const", type: F64, text: String(timeout) }, literal(cwd)],
+          argTypes: [TEXT, TEXT, F64, TEXT],
+          returns: TEXT,
+          effects: [],
+          ownership: "none",
+          retain: false,
+        },
+      }),
+    );
+  const echo = await lowered(invoked("printf hello", "", 0, ""), (name) => `printf("%s", ${name}());`);
+  assert.match(echo, /"code":0/);
+  assert.match(echo, /"stdout":"hello"/);
+
+  const failed = await lowered(invoked("echo bad >&2; exit 3", "", 0, ""), (name) => `printf("%s", ${name}());`);
+  assert.match(failed, /"code":3/);
+  assert.match(failed, /"stderr":"bad\\u000a"/);
+
+  const stopped = await lowered(invoked("sleep 5", "", 100, ""), (name) => `printf("%s", ${name}());`);
+  assert.match(stopped, /"timedOut":1/);
+
+  const lines = await lowered(invoked("cat", "hi", 0, ""), (name) => `printf("%s", ${name}());`);
+  assert.match(lines, /"stdout":"hi"/);
+
+  const elsewhere = await lowered(invoked("pwd", "", 0, "/tmp"), (name) => `printf("%s", ${name}());`);
+  assert.match(elsewhere, /"stdout":"\/tmp\\u000a"/);
+});
+
 test("the C code sets the status the process leaves with and reads its input", async () => {
   const call = (callee: string, args: SemanticValue[], returns: SemanticType): SemanticCall => ({
       callee,

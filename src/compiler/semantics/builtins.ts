@@ -343,6 +343,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** One line read from the input of the process, without its newline; the
    *  empty text where there is no line to read. */
   "readLine": { params: [], returns: TEXT, arity: 0 },
+  /** Runs a command line through the host's shell and answers the JSON of the
+   *  run: its status, its signal, whether it was stopped at its deadline, and
+   *  what it wrote to the two streams. The input is written to its stdin. */
+  "runCommand": { params: [TEXT, TEXT, F64, TEXT], returns: TEXT, arity: 4 },
   /** The directory the process runs in, as the path it is. */
   "cwdPath": { params: [], returns: TEXT, arity: 0 },
   /** The process's own id, which a temporary name may carry. */

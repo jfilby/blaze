@@ -135,6 +135,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_path_remove",
   "blaze_rt_file_copy",
   "blaze_rt_file_append",
+  "blaze_rt_process_run",
   "blaze_rt_stream_is_tty",
   "blaze_rt_set_exit_code",
   "blaze_rt_exit_code",
@@ -1237,6 +1238,40 @@ export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
+}
+`,
+  },
+  {
+    service: "blaze_rt_process_run",
+    source: `
+export function blaze_rt_process_run(command, input, timeoutMs, cwd) {
+  const line = new TextDecoder().decode(textBytes(command));
+  const text = new TextDecoder().decode(textBytes(input));
+  const directory = new TextDecoder().decode(textBytes(cwd));
+  const limit = Number(timeoutMs) > 0 ? Number(timeoutMs) : undefined;
+  try {
+    const result = spawnSync("/bin/sh", ["-c", line], {
+      input: text,
+      timeout: limit,
+      cwd: directory === "" ? undefined : directory,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return makeText(
+      JSON.stringify({
+        code: typeof result.status === "number" ? result.status : -1,
+        signal: result.signal === null ? 0 : 1,
+        timedOut: result.error !== undefined && result.error.code === "ETIMEDOUT",
+        overflow: result.error !== undefined && result.error.code === "ENOBUFS",
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+      }),
+    );
+  } catch (error) {
+    return makeText(
+      JSON.stringify({ code: -1, signal: 0, timedOut: false, overflow: false, stdout: "", stderr: String(error) }),
+    );
+  }
 }
 `,
   },

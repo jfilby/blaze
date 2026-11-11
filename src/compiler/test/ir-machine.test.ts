@@ -393,6 +393,40 @@ test("the machine code asks the host to list a directory", async () => {
   assert.equal(printed, `[{"name":"a.txt","kind":1},{"name":"sub","kind":2}]`);
 });
 
+test("the machine code runs a command and reads its streams", async () => {
+  const fn = subject(
+    TEXT,
+    handsBack({
+      k: "call",
+      type: TEXT,
+      call: {
+        callee: "runCommand",
+        builtin: true,
+        signature: {
+          name: "runCommand",
+          symbol: "runCommand",
+          params: [
+            { name: "command", type: "ptr<u8>" },
+            { name: "input", type: "ptr<u8>" },
+            { name: "timeout", type: "f64" },
+            { name: "cwd", type: "ptr<u8>" },
+          ],
+          returns: "ptr<u8>",
+        },
+        args: [literal("printf hello"), literal(""), { k: "const", type: F64, text: "0" }, literal("")],
+        argTypes: [TEXT, TEXT, F64, TEXT],
+        returns: TEXT,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  const printed = await lowered(fn, (name) => `printf("%s", ${name}());`);
+  assert.match(printed, /"code":0/);
+  assert.match(printed, /"stdout":"hello"/);
+});
+
 test("a value the IR calls is run once, whichever form writes it down", async () => {
   // Each of these hands an answer back from a call, and a lowering that reads
   // the value once as the side that decides and once as the answer runs the

@@ -1145,6 +1145,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_process_run",
+    "const char*",
+    [["command", "const char*"], ["input", "const char*"], ["timeout_ms", "double"], ["cwd", "const char*"]],
+    "Runs a command line through the host's shell.",
+    "Returns a managed string: the JSON of the run, with its exit status, signal, whether it was stopped at its deadline, and the text it wrote to the output and error streams.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_stream_is_tty",
     "double",
     [["stream", "double"]],
@@ -3678,9 +3686,12 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #ifdef __QNXNTO__
@@ -3689,6 +3700,7 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #endif
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -6413,6 +6425,189 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+typedef struct {
+  char* data;
+  size_t length;
+  size_t capacity;
+} blaze_run_buffer;
+
+static int blaze_run_buffer_init(blaze_run_buffer* buffer) {
+  buffer->capacity = 4096;
+  buffer->length = 0;
+  buffer->data = (char*)malloc(buffer->capacity);
+  if (buffer->data == NULL) return 0;
+  buffer->data[0] = 0;
+  return 1;
+}
+
+static int blaze_run_buffer_add(blaze_run_buffer* buffer, const char* data, size_t length) {
+  if (buffer->data == NULL) return 0;
+  if (buffer->length + length + 1 > buffer->capacity) {
+    size_t capacity = buffer->capacity;
+    while (capacity < buffer->length + length + 1) capacity *= 2;
+    char* grown = (char*)realloc(buffer->data, capacity);
+    if (grown == NULL) return 0;
+    buffer->data = grown;
+    buffer->capacity = capacity;
+  }
+  memcpy(buffer->data + buffer->length, data, length);
+  buffer->length += length;
+  buffer->data[buffer->length] = 0;
+  return 1;
+}
+
+static size_t blaze_json_escape(char* out, const char* data, size_t length) {
+  size_t at = 0;
+  for (size_t index = 0; index < length; index += 1) {
+    const unsigned char byte = (unsigned char)data[index];
+    if (byte == '"' || byte == '\\\\') {
+      out[at++] = '\\\\';
+      out[at++] = (char)byte;
+    } else if (byte < 0x20) {
+      at += (size_t)sprintf(out + at, "\\\\u%04x", (unsigned int)byte);
+    } else {
+      out[at++] = (char)byte;
+    }
+  }
+  return at;
+}
+
+static double blaze_monotonic_ms(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1000000.0;
+}
+
+const char* blaze_rt_process_run(const char* command, const char* input, double timeout_ms, const char* cwd) {
+  static const char* empty = "{\\"code\\":-1,\\"signal\\":0,\\"timedOut\\":0,\\"overflow\\":0,\\"stdout\\":\\"\\",\\"stderr\\":\\"\\"}";
+  // A child that exits before it reads all of its input closes the pipe, and
+  // the write that follows would end this process too unless the signal is
+  // ignored.
+  signal(SIGPIPE, SIG_IGN);
+  blaze_run_buffer out, err;
+  if (!blaze_run_buffer_init(&out) || !blaze_run_buffer_init(&err)) {
+    if (out.data != NULL) free(out.data);
+    if (err.data != NULL) free(err.data);
+    return blaze_rt_string_new((const unsigned char*)empty, strlen(empty));
+  }
+  int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1};
+  int spawn_failed = command == NULL || pipe(out_pipe) != 0 || pipe(err_pipe) != 0 || pipe(in_pipe) != 0;
+  pid_t pid = -1;
+  if (!spawn_failed) {
+    pid = fork();
+    if (pid == 0) {
+      dup2(in_pipe[0], STDIN_FILENO);
+      dup2(out_pipe[1], STDOUT_FILENO);
+      dup2(err_pipe[1], STDERR_FILENO);
+      close(in_pipe[0]); close(in_pipe[1]);
+      close(out_pipe[0]); close(out_pipe[1]);
+      close(err_pipe[0]); close(err_pipe[1]);
+      if (cwd != NULL && cwd[0] != 0) chdir(cwd);
+      execl("/bin/sh", "sh", "-c", command, (char*)NULL);
+      _exit(127);
+    }
+    if (pid < 0) spawn_failed = 1;
+  }
+  if (spawn_failed) {
+    if (out_pipe[0] >= 0) close(out_pipe[0]);
+    if (out_pipe[1] >= 0) close(out_pipe[1]);
+    if (err_pipe[0] >= 0) close(err_pipe[0]);
+    if (err_pipe[1] >= 0) close(err_pipe[1]);
+    if (in_pipe[0] >= 0) close(in_pipe[0]);
+    if (in_pipe[1] >= 0) close(in_pipe[1]);
+  } else {
+    close(in_pipe[0]); in_pipe[0] = -1;
+    close(out_pipe[1]); out_pipe[1] = -1;
+    close(err_pipe[1]); err_pipe[1] = -1;
+    fcntl(out_pipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(err_pipe[0], F_SETFL, O_NONBLOCK);
+    const char* text = input != NULL ? input : "";
+    const size_t text_length = strlen(text);
+    size_t written = 0;
+    int out_open = 1, err_open = 1, in_open = text_length > 0;
+    if (!in_open) { close(in_pipe[1]); in_pipe[1] = -1; }
+    const double deadline = timeout_ms > 0.0 ? blaze_monotonic_ms() + timeout_ms : 0.0;
+    int timed_out = 0, overflow = 0;
+    while (out_open || err_open || in_open) {
+      struct pollfd fds[3];
+      int count = 0, out_at = -1, err_at = -1, in_at = -1;
+      if (out_open) { fds[count].fd = out_pipe[0]; fds[count].events = POLLIN; fds[count].revents = 0; out_at = count; count += 1; }
+      if (err_open) { fds[count].fd = err_pipe[0]; fds[count].events = POLLIN; fds[count].revents = 0; err_at = count; count += 1; }
+      if (in_open) { fds[count].fd = in_pipe[1]; fds[count].events = POLLOUT; fds[count].revents = 0; in_at = count; count += 1; }
+      int wait = -1;
+      if (timeout_ms > 0.0) {
+        const double remaining = deadline - blaze_monotonic_ms();
+        if (remaining <= 0.0) { timed_out = 1; break; }
+        wait = (int)remaining;
+        if (wait < 1) wait = 1;
+      }
+      const int ready = poll(fds, (nfds_t)count, wait);
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (ready == 0 && timeout_ms > 0.0) { timed_out = 1; break; }
+      if (out_at >= 0 && (fds[out_at].revents & (POLLIN | POLLHUP | POLLERR))) {
+        char chunk[65536];
+        const ssize_t got = read(out_pipe[0], chunk, sizeof chunk);
+        if (got > 0) {
+          if (!blaze_run_buffer_add(&out, chunk, (size_t)got)) overflow = 1;
+        } else if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+          close(out_pipe[0]); out_pipe[0] = -1; out_open = 0;
+        }
+      }
+      if (err_at >= 0 && (fds[err_at].revents & (POLLIN | POLLHUP | POLLERR))) {
+        char chunk[65536];
+        const ssize_t got = read(err_pipe[0], chunk, sizeof chunk);
+        if (got > 0) {
+          if (!blaze_run_buffer_add(&err, chunk, (size_t)got)) overflow = 1;
+        } else if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+          close(err_pipe[0]); err_pipe[0] = -1; err_open = 0;
+        }
+      }
+      if (in_at >= 0 && (fds[in_at].revents & (POLLOUT | POLLERR | POLLHUP))) {
+        const ssize_t put = write(in_pipe[1], text + written, text_length - written);
+        if (put > 0) written += (size_t)put;
+        if (written >= text_length || put < 0) {
+          close(in_pipe[1]); in_pipe[1] = -1; in_open = 0;
+        }
+      }
+      if (overflow) break;
+    }
+    if (out_pipe[0] >= 0) close(out_pipe[0]);
+    if (err_pipe[0] >= 0) close(err_pipe[0]);
+    if (in_pipe[1] >= 0) close(in_pipe[1]);
+    if (timed_out) kill(pid, SIGKILL);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    const int signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+    const size_t capacity = 6 * (out.length + err.length) + 512;
+    char* json = (char*)malloc(capacity);
+    if (json == NULL) {
+      free(out.data); free(err.data);
+      return blaze_rt_string_new((const unsigned char*)empty, strlen(empty));
+    }
+    size_t at = 0;
+    at += (size_t)sprintf(
+      json + at,
+      "{\\"code\\":%d,\\"signal\\":%d,\\"timedOut\\":%d,\\"overflow\\":%d,\\"stdout\\":\\"",
+      code, signal, timed_out, overflow);
+    at += blaze_json_escape(json + at, out.data != NULL ? out.data : "", out.length);
+    memcpy(json + at, "\\",\\"stderr\\":\\"", 12);
+    at += 12;
+    at += blaze_json_escape(json + at, err.data != NULL ? err.data : "", err.length);
+    memcpy(json + at, "\\"}", 2);
+    at += 2;
+    const char* answer = blaze_rt_string_new((const unsigned char*)json, at);
+    free(json); free(out.data); free(err.data);
+    return answer;
+  }
+  free(out.data);
+  free(err.data);
+  return blaze_rt_string_new((const unsigned char*)empty, strlen(empty));
 }
 
 static int blaze_exit_status = 0;

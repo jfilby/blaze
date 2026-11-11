@@ -169,6 +169,22 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("a program runs a command through the host", async () => {
+  const files = {
+    "main.ts": [
+      `console.log(runCommand("printf hello", "", 0, ""));`,
+      `console.log(runCommand("echo bad >&2; exit 3", "", 0, ""));`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /"code":0/);
+  assert.match(result.stdout, /"stdout":"hello"/);
+  assert.match(result.stdout, /"code":3/);
+  assert.match(result.stdout, /"stderr":"bad(\\u000a|\\n)"/);
+});
+
 test("a program sets its exit status and reads its input", async () => {
   const files = {
     "main.ts": [

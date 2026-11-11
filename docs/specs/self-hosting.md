@@ -5627,8 +5627,9 @@ The frontend is no longer the queue for the compiler's own sources. What
    write and append, stat and existence, the directory listing and creation,
    a path moved, removal and copy, the working directory, the process id, the
    processor count, sleep, the terminal question, the exit status and a line
-   of input; it lacks the command spawn and the signal handlers a command's
-   `host` value also carries. Each is a service the C, Nim
+   of input, and the command run (the Nim runtime merges the child's error
+   stream into its output); it lacks the signal handlers a command's `host`
+   value also carries. Each is a service the C, Nim
    and wasm hosts answer, and a builtin the subset may name. The adapter is
    written when those are in, not as a stub over names that resolve to
    nothing.
