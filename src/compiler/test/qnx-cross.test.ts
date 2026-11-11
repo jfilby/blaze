@@ -251,6 +251,73 @@ test("a QNX C program builds and links for both targets", async (t) => {
   }
 });
 
+test("a QNX HTTP program builds and links for both targets", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-http-${target.arch}-`);
+    await writeProject(join(directory, "input.toml"), {
+      language: "typescript",
+      source: "const port = 18080;\nhttp.serve(port);\n",
+      target,
+      output: "machine",
+      backend: "c",
+    });
+    const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+    assert.equal(outcome.build.status, "success");
+    assert.equal(outcome.build.runtime, "facil");
+    assert.equal(outcome.build.toolchain, target.arch === "x86_64" ? "qcc-x86_64" : "qcc-aarch64");
+    const output = outcome.outputPath;
+    assert.ok(output !== null);
+    const inspection = run("file", [output], { timeoutMs: 30_000 });
+    assert.match(inspection.stdout, /ldqnx/);
+  }
+});
+
+test("a QNX TLS HTTP program builds and links", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  const directory = await scratch("blaze-qnx-http-tls-");
+  await writeProject(join(directory, "input.toml"), {
+    language: "typescript",
+    source: 'const port = 18080;\nhttp.serveTls(port, "cert.pem", "key.pem");\n',
+    target: QNX_TARGETS[0] as TargetSpec,
+    output: "machine",
+    backend: "c",
+  });
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build");
+  assert.equal(outcome.build.status, "success");
+  assert.equal(outcome.build.runtime, "facil");
+  assert.equal(outcome.build.toolchain, "qcc-x86_64");
+  const output = outcome.outputPath;
+  assert.ok(output !== null);
+  const inspection = run("file", [output], { timeoutMs: 30_000 });
+  assert.match(inspection.stdout, /ldqnx/);
+});
+
 test("a QNX x86-64 machine program builds and links", async (t) => {
   const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
   if (qcc.spawnError !== undefined || qcc.code !== 0) {
@@ -280,4 +347,59 @@ test("a QNX x86-64 machine program builds and links", async (t) => {
   const inspection = run("file", [output], { timeoutMs: 30_000 });
   assert.match(inspection.stdout, /x86-64/);
   assert.match(inspection.stdout, /ldqnx/);
+});
+
+test("qcc builds and links the TLS HTTP runtime for both QNX targets", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-tls-${target.arch}-`);
+    const runtime = await buildFacilRuntime(directory, "debug", target, {
+      maxConnections: 64,
+      tls: true,
+    });
+    const main = join(directory, "main.c");
+    await writeFile(
+      main,
+      'extern void *blaze_http_server_new_tls(const char *, unsigned short, const char *, const char *);\nint main(void) { return blaze_http_server_new_tls("127.0.0.1", 0, "cert", "key") == 0; }\n',
+      "utf8",
+    );
+    const executable = join(directory, "tls-probe");
+    const linked = run(
+      "qcc",
+      [
+        `-V${selector}`,
+        "-std=c11",
+        "-Wl,--gc-sections",
+        "-o",
+        executable,
+        main,
+        runtime.objectPath,
+        "-lm",
+        "-pthread",
+        "-lssl",
+        "-lcrypto",
+        "-lsocket",
+      ],
+      { timeoutMs: 120_000 },
+    );
+    assert.equal(linked.spawnError, undefined, `${target.arch}: ${linked.spawnError ?? ""}`);
+    assert.equal(linked.code, 0, `${target.arch}: ${linked.stderr.trim()}`);
+    assert.ok((await stat(executable)).size > 0, `${target.arch}: qcc linked the TLS runtime`);
+  }
 });

@@ -534,7 +534,7 @@ export function runtimePreparer(request: {
         prepared = await buildStandaloneRuntime(workDirectory, request.mode, request.target);
       } else if (request.runtime === "facil") {
         const runtime = await buildFacilRuntime(workDirectory, request.mode, request.target, http);
-        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: facilIoLibraries(http.tls) };
+        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: facilIoLibraries(http.tls, request.target) };
       } else {
         prepared = { headerPath: await writeRuntimeHeader(workDirectory) };
       }

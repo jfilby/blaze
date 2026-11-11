@@ -2146,6 +2146,9 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // program that serves plain HTTP carries no TLS library, so it neither
   // loads one before it runs nor carries one in its binary.
   const tlsLibraries = request.tls === true ? ["-lssl", "-lcrypto"] : [];
+  // QNX keeps its socket calls in libsocket. Only the HTTP runtime asks for
+  // them; a program without a server links no socket library.
+  const socketLibraries = request.includeHttpHeader === true && request.target.os === "qnx" ? ["-lsocket"] : [];
   const toolchain = toolchainFor(request.target);
   const command = compileCommand(toolchain, [
     "-std=c11",
@@ -2156,7 +2159,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
     request.outputPath,
     ...inputs,
     "-lm",
-    ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries] : []),
+    ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries, ...socketLibraries] : []),
   ]);
   const result = run(command.command, command.args, { timeoutMs: 120_000 });
   if (result.spawnError !== undefined) {

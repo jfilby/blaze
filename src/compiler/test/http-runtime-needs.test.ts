@@ -156,6 +156,9 @@ test("a limit the compiler cannot read is given the room facil.io would have giv
 test("a program that speaks no TLS links no TLS library", () => {
   assert.deepEqual(facilIoLibraries(false), [], "a program that speaks no TLS links no TLS library");
   assert.deepEqual(facilIoLibraries(true), ["-lssl", "-lcrypto"], "a program that speaks TLS links OpenSSL");
+  const qnx = { arch: "x86_64" as const, os: "qnx" as const, abi: "sysv" as const, cpu: "", features: [] };
+  assert.deepEqual(facilIoLibraries(false, qnx), ["-lsocket"], "QNX sockets live in libsocket");
+  assert.deepEqual(facilIoLibraries(true, qnx), ["-lssl", "-lcrypto", "-lsocket"]);
 });
 
 test("the adapter of a runtime without TLS says so rather than serving plain HTTP", () => {

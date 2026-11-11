@@ -45,8 +45,12 @@ export const FACIL_IO_VERSION = "facil.io@git-master";
  * neither: the library is loaded before the program runs and carried in its
  * binary, and a program that never speaks TLS pays for both.
  */
-export function facilIoLibraries(tls: boolean): readonly string[] {
-  return tls ? ["-lssl", "-lcrypto"] : [];
+export function facilIoLibraries(tls: boolean, target?: TargetSpec): readonly string[] {
+  const libraries: string[] = [];
+  if (tls) libraries.push("-lssl", "-lcrypto");
+  // QNX keeps its socket calls in libsocket rather than in libc.
+  if (target?.os === "qnx") libraries.push("-lsocket");
+  return libraries;
 }
 
 /**
