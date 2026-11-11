@@ -5561,6 +5561,18 @@ unless the caller can recover it from the runtime's allocation header as
 length a list was built at is carried by the IR now, and the form is read in
 §4cw.)
 
+### 4i9. A name a program declares is the name a call reaches
+
+`resolve` is a builtin of the promise a callback settles, and the compiler
+imports a function of that name from its platform boundary. The object pass,
+the program resolver and the IR reader each asked the builtin table before the
+program's own functions, so `resolve(host.cwd(), PROJECT_FILE)` was refused as
+a one-argument builtin called with two. The order is the language's now: a
+function the program compiles is the binding the source named, and a builtin is
+what a name the program does not declare reaches. A program that calls an
+imported two-argument `resolve` resolves and prints the imported function's
+signature.
+
 ## The next slices
 
 ### What the measurement says now
@@ -5598,10 +5610,26 @@ The frontend is no longer the queue for the compiler's own sources. What
    The next refusal is a host value: `toolchain/wasm.ts` reads
    `globalThis` to ask whether the process has a WebAssembly engine, and an
    imported value — `host` from `core/platform.ts` — is a name no body
-   declares. The platform selection of §4i6 is the slice: the compiler asks the
-   host for the engine through the platform boundary, the Node adapter answers
-   `globalThis.WebAssembly`, and the native adapter answers the engine it has
-   or none, which is already the fallback the check falls back to.
+   declares. The platform selection of §5a is the slice, and it has three
+   parts. First, `core/platform.ts` becomes the boundary: it re-exports
+   `#platform`, the package manifest maps `#platform` to
+   `core/platform-node.ts` for Node, and `blaze.toml` maps it to a native
+   adapter for the self-build. Second, the native adapter answers the same
+   names in the subset over the runtime ABI, so the imports of the compiler's
+   modules are functions with bodies and the contract phase sees no external
+   call. Third, the measured set of the self-host report follows the project's
+   map, so the Node adapter is a host implementation and the native adapter is
+   the source the report keeps clean (§5a).
+
+   The runtime ABI the native adapter needs is not all there yet. It has the
+   file read, the environment, the POSIX path work, printing, the clock, the
+   random source and the hashes; it lacks file write and append, file stat,
+   directory listing and creation, removal, rename and copy, the working
+   directory and process id, the command spawn, sleep, and the stream and
+   signal services a command's `host` value is. Each is a service the C, Nim
+   and wasm hosts answer, and a builtin the subset may name. The adapter is
+   written when those are in, not as a stub over names that resolve to
+   nothing.
 2. **The contract phase's host calls.** `core/platform-node.ts` calls the names
    it imports from `node:*`, and a call to a name the program does not compile
    is refused. A native build does not carry that adapter; it needs the platform

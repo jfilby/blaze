@@ -4,7 +4,8 @@ import { CompilerError } from "../core/errors.ts";
 import { frontendFor } from "../semantics/frontend.ts";
 import { entryContract, INLINE_MODULE, runContractPhase } from "../semantics/program.ts";
 import type { ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
-import { diagnostic, programOf } from "./phase.ts";
+import { diagnostic, phaseOf, programOf } from "./phase.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
 
 const SCALE = "export function scale(x: number): number {\n  return x * 2;\n}\n";
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
@@ -68,6 +69,49 @@ test("a private helper two files name is linked under a symbol its file makes un
   assert.ok(bCalls.includes(`"name":"${bHelper.function.symbol}"`), "b's body calls its own helper");
 });
 
+test("an imported function shadows a builtin of the same name", () => {
+  // `resolve` is a builtin of the promise a callback settles, and a module may
+  // export a function of that name. The source bound the imported one, so the
+  // call is that function: its two parameters are the contract it is typed by,
+  // not the builtin's one.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": 'import { resolve } from "./path.ts";\nconst total = resolve(1, 2);\n',
+      "path.ts": "export function resolve(a: number, b: number): number {\n  return a + b;\n}\n",
+    },
+    "main.ts",
+  );
+  assert.ok(phase.body !== undefined);
+  const driver = resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys);
+  const call = findCall(driver.entry);
+  assert.ok(call !== null, "the body calls the imported function");
+  if (call === null) return;
+  assert.equal(call.callee, "resolve");
+  assert.equal(call.args.length, 2);
+});
+
+/** The first call a resolved program holds, wherever the block nests it. */
+function findCall(node: unknown): { callee: string; args: unknown[] } | null {
+  if (Array.isArray(node)) {
+    for (const value of node) {
+      const found = findCall(value);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof node !== "object" || node === null) return null;
+  const record = node as Record<string, unknown>;
+  if (record.k === "call" && typeof record.call === "object" && record.call !== null) {
+    const call = record.call as { callee?: unknown; args?: unknown };
+    if (typeof call.callee === "string" && Array.isArray(call.args)) return { callee: call.callee, args: call.args };
+  }
+  for (const value of Object.values(record)) {
+    const found = findCall(value);
+    if (found !== null) return found;
+  }
+  return null;
+}
 test("an import reaches through a file that imports another", () => {
   const program = contract(
     {

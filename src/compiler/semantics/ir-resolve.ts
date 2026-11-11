@@ -4608,7 +4608,11 @@ class ProgramResolver {
   }
 
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
-    const builtin = builtinFor(value.function);
+    // A function the program compiles is the name the source bound; a builtin
+    // of the same name is what a name the program does not declare reaches.
+    const shadows =
+      this.contracts.has(value.function) || this.contracts.has(`${value.function}__${value.args.length}`);
+    const builtin = shadows ? null : builtinFor(value.function);
     if (builtin !== null) {
       if (builtin.moduleOnly === true) {
         throw programError(

@@ -824,16 +824,20 @@ class ContractBinder {
    * no table declares is not a name the program calls.
    */
   private lookup(name: string): BoundCall | null {
+    // A function the program compiles is the name the source bound; a builtin
+    // of the same name is what a name the program does not declare reaches.
+    const own = this.declared.get(name);
+    if (own !== undefined) return own;
+    const declared = this.functions.get(name);
+    if (declared !== undefined) {
+      return { signature: declared.function, effects: declared.effects, builtin: false };
+    }
     const builtin = builtinFor(name);
     if (builtin !== null) {
       const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) }));
       return { signature: { name, symbol: name, params, returns: contractText(builtin.returns) }, effects: [], builtin: true };
     }
-    const own = this.declared.get(name);
-    if (own !== undefined) return own;
-    const declared = this.functions.get(name);
-    if (declared === undefined) return null;
-    return { signature: declared.function, effects: declared.effects, builtin: false };
+    return null;
   }
 
   /**

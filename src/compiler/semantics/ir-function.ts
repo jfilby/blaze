@@ -1639,6 +1639,26 @@ class FunctionBody {
         inferred: asType(promise.returns),
       };
     }
+    // A function the program compiles is the name the source bound: a local or
+    // an import shadows a builtin of the same name, as it does in the language.
+    // The builtin is the fallback for a name the program does not declare.
+    const directOverload = `${expression.name}__${expression.args.length}`;
+    const direct = this.context.functions[directOverload] ?? this.context.functions[expression.name];
+    if (direct !== undefined) {
+      const called = this.context.functions[directOverload] !== undefined ? directOverload : expression.name;
+      const signature = direct.function;
+      this.arity(called, signature.params.length, expression.args.length, line);
+      const args = expression.args.map((argument, at) => this.typed(argument, asType(parseType(signature.params[at].type)), line));
+      const returns = parseType(signature.returns);
+      return {
+        value: {
+          k: "call",
+          type: returns,
+          call: this.semanticCall(signature.symbol, signature, args.map((argument) => argument.value), returns, direct.effects, false),
+        },
+        inferred: asType(returns),
+      };
+    }
     const builtin = builtinFor(expression.name);
     if (builtin !== null) {
       this.builtinArity(expression.name, builtin, expression.args.length, line);

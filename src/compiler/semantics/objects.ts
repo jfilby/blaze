@@ -410,6 +410,14 @@ class BodyTypes {
         if (expression.name.startsWith("__refused_")) {
           return { kind: "type", type: ANY_REF };
         }
+        // A function the program compiles is the name the source bound; a
+        // builtin of the same name is the fallback for a name it did not.
+        const directOverload = `${expression.name}__${expression.args.length}`;
+        const direct = this.callees.get(directOverload) ?? this.callees.get(expression.name);
+        if (direct !== undefined) {
+          this.call(this.callees.get(directOverload) !== undefined ? directOverload : expression.name);
+          return { kind: "type", type: direct };
+        }
         const builtin = builtinFor(expression.name);
         if (builtin !== null) {
           const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];
