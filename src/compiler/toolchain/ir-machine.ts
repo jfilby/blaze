@@ -11199,6 +11199,18 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "fs.writeFileSync" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      // The path and the text go down as the texts they are, and the answer is
+      // the bytes written, which a statement drops.
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_file_path");
+      this.store(path);
+      this.at(call.args[1], TEXT);
+      const text = this.hold(TEXT, "blaze_file_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_file_write", [path, text], NUMBER);
+      return;
+    }
     if (call.callee === "process.env") {
       // The environment variable is read by its name, and the answer is the
       // text it is set to: a pointer to the bytes, which is what a text is.

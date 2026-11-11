@@ -1129,6 +1129,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
+    "blaze_rt_file_write",
+    "double",
+    [["path", "const char*"], ["text", "const char*"]],
+    "Writes text to a file, replacing what the file held.",
+    "Returns the bytes written, or zero where the file could not be opened.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_env_get",
     "const char*",
     [["name", "const char*"]],
@@ -6266,6 +6274,16 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+double blaze_rt_file_write(const char* path, const char* text) {
+  if (path == NULL) { blaze_rt_raise("file path is absent"); return 0.0; }
+  FILE* f = fopen(path, "w");
+  if (!f) { blaze_rt_raise("file cannot be written"); return 0.0; }
+  const size_t length = text == NULL ? 0 : strlen(text);
+  const size_t written = length == 0 ? 0 : fwrite(text, 1, length, f);
+  fclose(f);
+  return (double)written;
 }
 
 /* The four characters a document may be spaced with, as a table: a document is

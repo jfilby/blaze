@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
@@ -65,6 +65,32 @@ async function agreesWithNode(
   assert.equal(delivered.stdout, original.stdout);
   return delivered.stdout;
 }
+
+test("fs.writeFileSync writes the text a program names", async () => {
+  // The write is a host service: the path and the text are the texts they are,
+  // and the file the program names holds what it wrote when it ends. Both a
+  // machine object and a C object write it.
+  for (const backend of ["machine", "c"] as const) {
+    const directory = await scratch(`blaze-file-write-${backend}-`);
+    const path = join(directory, "written.txt");
+    const { binary } = await build(
+      [
+        'const fs = require("fs");',
+        "function save(target: string): void {",
+        '  fs.writeFileSync(target, "hello");',
+        "}",
+        `save(${JSON.stringify(path)});`,
+        'console.log("written");',
+        "",
+      ].join("\n"),
+      backend,
+    );
+    const ran = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(ran.stdout, "written\n");
+    assert.equal(await readFile(path, "utf8"), "hello");
+  }
+});
 
 test("a default parameter makes a function callable at the shorter arity", () => {
   // The full function takes every parameter, and each shorter arity is a

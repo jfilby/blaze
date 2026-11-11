@@ -5622,8 +5622,8 @@ The frontend is no longer the queue for the compiler's own sources. What
    the source the report keeps clean (§5a).
 
    The runtime ABI the native adapter needs is not all there yet. It has the
-   file read, the environment, the POSIX path work, printing, the clock, the
-   random source and the hashes; it lacks file write and append, file stat,
+   file read and write, the environment, the POSIX path work, printing, the
+   clock, the random source and the hashes; it lacks file append, file stat,
    directory listing and creation, removal, rename and copy, the working
    directory and process id, the command spawn, sleep, and the stream and
    signal services a command's `host` value is. Each is a service the C, Nim

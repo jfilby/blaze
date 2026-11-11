@@ -1124,6 +1124,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "fs.writeFileSync":
+        // The write answers the bytes written, which a statement drops: the
+        // runtime writes the file and the expression is zero.
+        return `(${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}), 0.0)`;
       // `process.env.NAME`: the runtime reads the variable by its name and
       // hands back the text it is set to, empty where it is not set at all.
       case "process.env":

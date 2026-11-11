@@ -277,6 +277,10 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "fs.writeFileSync":
+      // The file is written and the answer is the bytes written, which a
+      // statement drops: the comma expression keeps the call and answers zero.
+      return `(${RUNTIME_NAME}_file_write(${args[0]}, ${args[1]}), 0.0)`;
     case "process.env":
       // The environment variable a module function reads is the runtime's to
       // ask for: the name is the text it is spelled with, and the answer is

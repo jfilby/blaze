@@ -1900,6 +1900,24 @@ proc blaze_rt_sha256_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_date_parse*(text: cstring): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} = 0.0
 
+proc c_fopen(path, mode: cstring): pointer {.importc: "fopen", header: "<stdio.h>".}
+proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.importc: "fwrite", header: "<stdio.h>".}
+proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
+proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
+
+proc blaze_rt_file_write*(path, text: cstring): float64 {.exportc, cdecl.} =
+  ## Writes text to a file, replacing what the file held. The answer is the
+  ## bytes written, and zero where the file could not be opened.
+  if path == nil: return 0.0
+  let stream = c_fopen(path, "w")
+  if stream == nil: return 0.0
+  var written: csize_t = 0
+  if text != nil:
+    let length = c_strlen(text)
+    if length > 0: written = c_fwrite(cast[pointer](text), 1, length, stream)
+  discard c_fclose(stream)
+  float64(written)
+
 proc getenv(name: cstring): cstring {.importc: "getenv", header: "<stdlib.h>".}
 
 proc blaze_rt_env_get*(name: cstring): cstring {.exportc, cdecl.} =

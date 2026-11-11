@@ -303,6 +303,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "JSON.typeof": { params: [ANY], returns: TEXT, arity: 1 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
   "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** `fs.writeFileSync(path, text)` writes the text to the file, replacing
+   *  what it held: the answer is the bytes written, which a statement drops. */
+  "fs.writeFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

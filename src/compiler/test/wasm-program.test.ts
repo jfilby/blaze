@@ -117,6 +117,18 @@ test("a program of three functions is one module and prints what its source prin
   assert.equal(result.stdout, "42\n9\n");
 });
 
+test("a program writes a file through the host", async () => {
+  const directory = await scratch("blaze-wasm-file-");
+  const path = join(directory, "written.txt");
+  const files = {
+    "main.ts": [`fs.writeFileSync(${JSON.stringify(path)}, "hello");`, 'console.log("written");', ""].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "written\n");
+  assert.equal(await readFile(path, "utf8"), "hello");
+});
+
 test("the module of a program holds every function of it and the body it runs", async () => {
   const result = await runProgram(PROGRAM, "main.ts");
   // Every function of the program is exported by the module, and the body of

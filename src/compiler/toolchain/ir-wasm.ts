@@ -3620,6 +3620,13 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "fs.writeFileSync":
+        // The path and the text are texts at their offsets, and the answer is
+        // the bytes written, which a statement drops.
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_file_write");
+        return F64_TYPE;
       case "Number":
       case "parseInt": {
         // The number a value is written at: a text is the number its text
