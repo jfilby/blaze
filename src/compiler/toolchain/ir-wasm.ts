@@ -3620,6 +3620,15 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "makeDir":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_dir_make");
+        return F64_TYPE;
+      case "renamePath":
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_path_rename");
+        return F64_TYPE;
       case "dirList":
         this.textArgument(argument(0));
         this.callService("blaze_rt_dir_list");

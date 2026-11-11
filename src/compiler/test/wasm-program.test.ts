@@ -150,6 +150,25 @@ test("a program asks the host what a path is", async () => {
   assert.equal(result.stdout, "5\n1\n");
 });
 
+test("a program makes a directory and moves a file through the host", async () => {
+  const directory = await scratch("blaze-wasm-make-");
+  const nested = join(directory, "a/b");
+  const from = join(directory, "from.txt");
+  const to = join(directory, "to.txt");
+  await writeFile(from, "x");
+  const files = {
+    "main.ts": [
+      `console.log(makeDir(${JSON.stringify(nested)}));`,
+      `console.log(renamePath(${JSON.stringify(from)}, ${JSON.stringify(to)}));`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "1\n1\n");
+  assert.equal(await readFile(to, "utf8"), "x");
+});
+
 test("a program asks the host to list a directory", async () => {
   const directory = await scratch("blaze-wasm-dir-");
   await writeFile(join(directory, "a.txt"), "x");

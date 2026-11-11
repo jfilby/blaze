@@ -1124,6 +1124,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "makeDir":
+        return `${RUNTIME_NAME}_dir_make(${argument(0)})`;
+      case "renamePath":
+        return `${RUNTIME_NAME}_path_rename(${argument(0)}, ${argument(1)})`;
       case "dirList":
         return `${RUNTIME_NAME}_dir_list(${argument(0)})`;
       case "pathKind":

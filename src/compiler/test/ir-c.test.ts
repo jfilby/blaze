@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { validateCSource } from "../toolchain/csource.ts";
@@ -60,6 +60,60 @@ function runs(statements: SemanticBlock["statements"]): SemanticBlock {
 }
 
 const local = (name: string, type: SemanticType = F64): SemanticValue => ({ k: "local", type, name });
+
+test("the C code makes a directory and moves a file", async () => {
+  const directory = await scratch("blaze-c-make-");
+  const nested = join(directory, "a/b/c");
+  const make = subject(
+    F64,
+    handsBack({
+      k: "call",
+      type: F64,
+      call: {
+        callee: "makeDir",
+        builtin: true,
+        signature: { name: "makeDir", symbol: "makeDir", params: [{ name: "path", type: "ptr<u8>" }], returns: "f64" },
+        args: [literal(nested)],
+        argTypes: [TEXT],
+        returns: F64,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  assert.equal(await lowered(make, (name) => `printf("%.17g", ${name}());`), "1");
+  assert.ok(await stat(nested).then((info) => info.isDirectory()).catch(() => false), "the nested directory exists");
+
+  const from = join(directory, "from.txt");
+  const to = join(directory, "to.txt");
+  await writeFile(from, "x");
+  const move = subject(
+    F64,
+    handsBack({
+      k: "call",
+      type: F64,
+      call: {
+        callee: "renamePath",
+        builtin: true,
+        signature: {
+          name: "renamePath",
+          symbol: "renamePath",
+          params: [{ name: "from", type: "ptr<u8>" }, { name: "to", type: "ptr<u8>" }],
+          returns: "f64",
+        },
+        args: [literal(from), literal(to)],
+        argTypes: [TEXT, TEXT],
+        returns: F64,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  assert.equal(await lowered(move, (name) => `printf("%.17g", ${name}());`), "1");
+  assert.equal(await readFile(to, "utf8"), "x");
+});
 
 test("the C code asks the host to list a directory", async () => {
   const directory = await scratch("blaze-c-dir-");

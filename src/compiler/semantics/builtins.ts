@@ -319,6 +319,12 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  and three for anything else. The names are sorted so a build reads the
    *  same directory the same way twice. */
   "dirList": { params: [TEXT], returns: TEXT, arity: 1 },
+  /** Makes the directory the path names, and the directories above it. The
+   *  answer is one where it is there after the call and zero where it is not. */
+  "makeDir": { params: [TEXT], returns: F64, arity: 1 },
+  /** Moves the file or directory a path names to another path in the same
+   *  file system. The answer is one where it moved and zero where it did not. */
+  "renamePath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

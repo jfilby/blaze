@@ -1145,6 +1145,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_dir_make",
+    "double",
+    [["path", "const char*"]],
+    "Makes a directory and the directories above it.",
+    "Returns one where the directory is there after the call and zero where it could not be made.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_path_rename",
+    "double",
+    [["from", "const char*"], ["to", "const char*"]],
+    "Moves a file or directory to another path.",
+    "Returns one where it moved and zero where it did not.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_dir_list",
     "const char*",
     [["path", "const char*"]],
@@ -3574,6 +3590,7 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -6308,6 +6325,28 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+double blaze_rt_dir_make(const char* path) {
+  if (path == NULL || *path == 0) return 0.0;
+  char buffer[4096];
+  const size_t length = strlen(path);
+  if (length >= sizeof buffer) return 0.0;
+  memcpy(buffer, path, length + 1);
+  for (char* at = buffer + 1; *at != 0; at += 1) {
+    if (*at != '/') continue;
+    *at = 0;
+    if (mkdir(buffer, 0777) != 0 && errno != EEXIST) { *at = '/'; return 0.0; }
+    *at = '/';
+  }
+  if (mkdir(buffer, 0777) != 0 && errno != EEXIST) return 0.0;
+  struct stat info;
+  return stat(buffer, &info) == 0 && S_ISDIR(info.st_mode) ? 1.0 : 0.0;
+}
+
+double blaze_rt_path_rename(const char* from, const char* to) {
+  if (from == NULL || to == NULL) return 0.0;
+  return rename(from, to) == 0 ? 1.0 : 0.0;
 }
 
 static int blaze_dir_name_compare(const void* left, const void* right) {

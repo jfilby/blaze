@@ -11199,6 +11199,23 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "makeDir" && call.args[0] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_make_path");
+      this.store(path);
+      this.callSymbol("blaze_rt_dir_make", [path], NUMBER);
+      return;
+    }
+    if (call.callee === "renamePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const from = this.hold(TEXT, "blaze_rename_from");
+      this.store(from);
+      this.at(call.args[1], TEXT);
+      const to = this.hold(TEXT, "blaze_rename_to");
+      this.store(to);
+      this.callSymbol("blaze_rt_path_rename", [from, to], NUMBER);
+      return;
+    }
     if (call.callee === "dirList" && call.args[0] !== undefined) {
       // The directory's path is the text it is, and the runtime answers the
       // JSON of its entries as a text.

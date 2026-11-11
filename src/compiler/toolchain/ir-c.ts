@@ -277,6 +277,10 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "makeDir":
+      return `${RUNTIME_NAME}_dir_make(${args[0]})`;
+    case "renamePath":
+      return `${RUNTIME_NAME}_path_rename(${args[0]}, ${args[1]})`;
     case "dirList":
       return `${RUNTIME_NAME}_dir_list(${args[0]})`;
     case "pathKind":

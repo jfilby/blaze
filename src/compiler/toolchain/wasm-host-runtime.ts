@@ -130,6 +130,8 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_path_kind",
   "blaze_rt_file_size",
   "blaze_rt_dir_list",
+  "blaze_rt_dir_make",
+  "blaze_rt_path_rename",
   "blaze_rt_env_get",
   "blaze_rt_path_dirname",
   "blaze_rt_path_normalize",
@@ -1224,6 +1226,35 @@ export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
+}
+`,
+  },
+  {
+    service: "blaze_rt_dir_make",
+    source: `
+export function blaze_rt_dir_make(path) {
+  const name = new TextDecoder().decode(textBytes(path));
+  try {
+    mkdirSync(name, { recursive: true });
+    return statSync(name).isDirectory() ? 1 : 0;
+  } catch {
+    return 0;
+  }
+}
+`,
+  },
+  {
+    service: "blaze_rt_path_rename",
+    source: `
+export function blaze_rt_path_rename(from, to) {
+  const source = new TextDecoder().decode(textBytes(from));
+  const target = new TextDecoder().decode(textBytes(to));
+  try {
+    renameSync(source, target);
+    return 1;
+  } catch {
+    return 0;
+  }
 }
 `,
   },

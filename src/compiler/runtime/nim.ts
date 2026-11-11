@@ -1905,6 +1905,25 @@ proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.i
 proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
 proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
 
+proc blaze_rt_dir_make*(path: cstring): float64 {.exportc, cdecl.} =
+  ## Makes the directory and the directories above it, and answers whether it
+  ## is there after the call.
+  if path == nil or $path == "": return 0.0
+  try:
+    createDir($path)
+  except CatchableError:
+    return 0.0
+  if dirExists($path): 1.0 else: 0.0
+
+proc blaze_rt_path_rename*(fromPath, toPath: cstring): float64 {.exportc, cdecl.} =
+  ## Moves a file or directory to another path, and answers whether it moved.
+  if fromPath == nil or toPath == nil: return 0.0
+  try:
+    if dirExists($fromPath): moveDir($fromPath, $toPath) else: moveFile($fromPath, $toPath)
+  except CatchableError:
+    return 0.0
+  1.0
+
 proc blaze_rt_dir_list*(path: cstring): cstring {.exportc, cdecl.} =
   ## The entries of the directory as a JSON array sorted by name, each with
   ## the kind one for a file, two for a directory and three for anything else.
