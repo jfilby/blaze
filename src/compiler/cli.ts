@@ -14,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, resolve, createInterface, parseArgs } from "./core/platform.ts";
+import { existsSync, writeFileSync, resolve, parseArgs, host } from "./core/platform.ts";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -48,7 +48,7 @@ import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core
  * never owns the tab: it would replace the shell's own title for a blink.
  */
 function titleAnimation(label: string): TitleAnimation {
-  if (!process.stdout.isTTY) return NO_TITLE_ANIMATION;
+  if (!host.stdout.isTTY) return NO_TITLE_ANIMATION;
   return startBuildTitle(label);
 }
 
@@ -134,19 +134,19 @@ function consoleReporter(): Reporter {
       // Every message names the step it is about, so the stage is not printed
       // again beside it.
       void stage;
-      process.stdout.write(`${mark} ${message}\n`);
+      host.stdout.write(`${mark} ${message}\n`);
     },
   };
 }
 
 /** The project `blaze build` builds when no path is given. */
 function defaultProjectFile(): string {
-  const candidate = resolve(process.cwd(), PROJECT_FILE);
+  const candidate = resolve(host.cwd(), PROJECT_FILE);
   if (!existsSync(candidate)) {
     throw new CompilerError({
       category: "InputError",
       stage: "input",
-      message: `no ${PROJECT_FILE} in ${process.cwd()}`,
+      message: `no ${PROJECT_FILE} in ${host.cwd()}`,
       detail: "run from a project directory, or name the input: blaze build <input.toml>",
     });
   }
@@ -181,7 +181,7 @@ backend = "machine"
  * by the same name would read the new one and never the old.
  */
 function initProject(): void {
-  const path = resolve(process.cwd(), PROJECT_FILE);
+  const path = resolve(host.cwd(), PROJECT_FILE);
   if (existsSync(path)) {
     throw new CompilerError({
       category: "InputError",
@@ -191,7 +191,7 @@ function initProject(): void {
     });
   }
   writeFileSync(path, PROJECT_FILE_TEMPLATE, "utf8");
-  process.stdout.write(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
+  host.stdout.write(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
 }
 
 /**
@@ -202,14 +202,10 @@ function initProject(): void {
  * stdout either way, so a log says what happened.
  */
 async function terminalConfirm(question: string): Promise<boolean> {
-  if (process.stdin.isTTY !== true) return true;
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = (await prompt.question(question)).trim().toLowerCase();
-    return answer === "y" || answer === "yes";
-  } finally {
-    prompt.close();
-  }
+  const answer = await host.ask(question);
+  if (answer === undefined) return true;
+  const choice = answer.trim().toLowerCase();
+  return choice === "y" || choice === "yes";
 }
 
 function optionNumber(value: string | undefined, name: string, minimum = 1, maximum?: number): number | undefined {
@@ -256,7 +252,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     throw new Error("--recompile and --reuse ask for opposite builds: one rebuilds everything, the other rebuilds nothing");
   }
   return {
-    cwd: process.cwd(),
+    cwd: host.cwd(),
     reuse: values.reuse === true,
     ...(recompile ? { recompile: true } : {}),
     confirm: terminalConfirm,
@@ -300,24 +296,24 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
  * for an error that is not there.
  */
 function reportCancelled(error: SerializedCompilerError): void {
-  process.stdout.write(`\n· ${error.message}\n`);
+  host.stdout.write(`\n· ${error.message}\n`);
   if (error.detail !== undefined && error.detail.trim() !== "") {
-    process.stdout.write(`\n${error.detail.trim()}\n`);
+    host.stdout.write(`\n${error.detail.trim()}\n`);
   }
 }
 
 function reportError(error: SerializedCompilerError): void {
-  process.stderr.write(`\n✗ ${error.stage} failed: ${error.message}\n`);
+  host.stderr.write(`\n✗ ${error.stage} failed: ${error.message}\n`);
   const context = [
     error.function === undefined ? undefined : `  function:  ${error.function}`,
     error.candidate === undefined ? undefined : `  candidate: ${error.candidate}`,
   ].filter((line) => line !== undefined);
-  if (context.length > 0) process.stderr.write(`${context.join("\n")}\n`);
+  if (context.length > 0) host.stderr.write(`${context.join("\n")}\n`);
   if (error.detail !== undefined && error.detail.trim() !== "") {
-    process.stderr.write(`\n${error.detail.trim()}\n`);
+    host.stderr.write(`\n${error.detail.trim()}\n`);
   }
   if (error.project !== undefined) {
-    process.stderr.write(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${error.project}/build.json\n`);
+    host.stderr.write(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${error.project}/build.json\n`);
   }
 }
 
@@ -329,9 +325,9 @@ function selectedLabel(build: BuildStatus): string {
   return names.map((name) => `${name}#${selected[name]}`).join(",");
 }
 
-async function main(argv: string[]): Promise<number> {
+async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseArgs({
-    args: argv,
+    args: [...argv],
     allowPositionals: true,
     options: {
       model: { type: "string" },
@@ -359,7 +355,7 @@ async function main(argv: string[]): Promise<number> {
   const [command, argument, ...rest] = parsed.positionals;
 
   if (values.help === true || command === undefined) {
-    process.stdout.write(USAGE);
+    host.stdout.write(USAGE);
     return command === undefined && values.help !== true ? 1 : 0;
   }
 
@@ -374,7 +370,7 @@ async function main(argv: string[]): Promise<number> {
       try {
         const outcome = await runBuild(input, options, consoleReporter(), command);
         if (command === "generate") {
-          process.stdout.write(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
+          host.stdout.write(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
         }
       } catch (cause) {
         title.stop("fail");
@@ -390,7 +386,7 @@ async function main(argv: string[]): Promise<number> {
     case "test":
     case "benchmark": {
       if (argument === undefined) {
-        process.stderr.write(`blaze ${command} needs a project name\n\n${USAGE}`);
+        host.stderr.write(`blaze ${command} needs a project name\n\n${USAGE}`);
         return 1;
       }
       const title = titleAnimation(argument);
@@ -410,42 +406,42 @@ async function main(argv: string[]): Promise<number> {
         ...(values.all === true ? { all: true } : {}),
       };
       const input = argument ?? defaultProjectFile();
-      process.stdout.write(await runSemanticIr(input, irOptions));
+      host.stdout.write(await runSemanticIr(input, irOptions));
       return 0;
     }
     case "inspect": {
       if (argument === undefined) {
-        process.stderr.write(`blaze inspect needs a project name\n\n${USAGE}`);
+        host.stderr.write(`blaze inspect needs a project name\n\n${USAGE}`);
         return 1;
       }
-      const build = await inspectProject(argument, process.cwd());
-      process.stdout.write(`${JSON.stringify(build, null, 2)}\n`);
+      const build = await inspectProject(argument, host.cwd());
+      host.stdout.write(`${JSON.stringify(build, null, 2)}\n`);
       return 0;
     }
     case "projects": {
-      const projects = await listProjects(process.cwd());
+      const projects = await listProjects(host.cwd());
       if (projects.length === 0) {
-        process.stdout.write(`no projects in ${STATE_DIRECTORY}/projects\n`);
+        host.stdout.write(`no projects in ${STATE_DIRECTORY}/projects\n`);
         return 0;
       }
       for (const project of projects) {
-        const build = await inspectProject(project, process.cwd()).catch(() => undefined);
+        const build = await inspectProject(project, host.cwd()).catch(() => undefined);
         const state =
           build === undefined
             ? ""
             : `  ${build.status}  ${selectedLabel(build)}  ${build.model}  ${targetSummary(build.target)}`;
-        process.stdout.write(`${project}${state}\n`);
+        host.stdout.write(`${project}${state}\n`);
       }
       return 0;
     }
     default:
-      process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
+      host.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
       return 1;
   }
 }
 
 try {
-  process.exitCode = await main(process.argv.slice(2));
+  host.setExitCode(await main(host.arguments));
 } catch (cause) {
   const failure = isCompilerError(cause)
     ? cause.toJSON()
@@ -459,5 +455,5 @@ try {
   // built, nothing was damaged, and the last build is still the project's.
   if (failure.category === "CancelledError") reportCancelled(failure);
   else reportError(failure);
-  process.exitCode = 1;
+  host.setExitCode(1);
 }

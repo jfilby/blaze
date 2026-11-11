@@ -10,6 +10,8 @@
  * otherwise be able to drive the terminal.
  */
 
+import { host } from "./platform.ts";
+
 /** What blaze calls itself in a tab, whatever it is doing. */
 export const BRAND = "B";
 /** The brand blazeup uses in a tab: the blaze brand with "up" just after it. */
@@ -175,7 +177,7 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     resolvedBrand = dependencies.brand ?? BRAND;
   }
   const name = sanitizeTitlePart(label);
-  const sink = dependencies.sink ?? streamTitleSink(process.stdout);
+  const sink = dependencies.sink ?? streamTitleSink(host.stdout);
   const ticker = dependencies.ticker ?? intervalTicker;
   let frame = 0;
   let cancel: (() => void) | undefined;

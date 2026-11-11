@@ -12,6 +12,31 @@
  * sources that ask changing.
  */
 
+/** One of the command's own streams: a terminal or a pipe, and a write. */
+export interface HostStream {
+  readonly isTTY?: boolean;
+  write(text: string): unknown;
+}
+
+/**
+ * The process the command runs in, as the command line needs it.
+ *
+ * The arguments are the command's own, after the program and script names;
+ * the streams are where a command writes what it says; and the exit code is
+ * the answer the process leaves behind. Asking a question is an operation of
+ * the host because a native command has no `readline` module to reach for.
+ */
+export interface Host {
+  readonly arguments: readonly string[];
+  readonly stdout: HostStream;
+  readonly stderr: HostStream;
+  readonly platform: string;
+  cwd(): string;
+  setExitCode(code: number): void;
+  /** The answer to one question, or undefined when there is nobody to ask. */
+  ask(question: string): Promise<string | undefined>;
+}
+
 /**
  * One entry a directory lists: its name, and what it is.
  *
@@ -48,6 +73,7 @@ export {
   existsSync,
   extname,
   fileURLToPath,
+  host,
   hostArchitecture,
   hostEnvironment,
   hostPlatform,

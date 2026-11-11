@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { DirectoryEntry, FileInfo } from "./platform.ts";
+import type { DirectoryEntry, FileInfo, Host } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename,
@@ -185,6 +185,27 @@ export function monotonicTimeNs(): bigint {
 export function hostEnvironment(): Readonly<Record<string, string | undefined>> {
   return process.env;
 }
+
+/** The Node process, as the command line sees it. */
+export const host: Host = {
+  arguments: process.argv.slice(2),
+  stdout: process.stdout,
+  stderr: process.stderr,
+  platform: process.platform,
+  cwd: () => process.cwd(),
+  setExitCode: (code: number): void => {
+    process.exitCode = code;
+  },
+  ask: async (question: string): Promise<string | undefined> => {
+    if (process.stdin.isTTY !== true) return undefined;
+    const prompt = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return await prompt.question(question);
+    } finally {
+      prompt.close();
+    }
+  },
+};
 
 /** The directory part of a path. */
 export function dirname(path: string): string {
