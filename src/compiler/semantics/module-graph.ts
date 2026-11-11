@@ -831,5 +831,70 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     }
   }
 
+  markReachableHelpers([...records.values()], request.entry.path);
   return [...records.values()];
+}
+
+/**
+ * Every name a body calls, wherever the body is nested: a call is written as a
+ * call expression and a program's statement as an invocation, and a body may
+ * hold another body beside either.
+ */
+function callNamesIn(node: unknown, names: Set<string>, seen: Set<object> = new Set()): void {
+  if (Array.isArray(node)) {
+    for (const value of node) callNamesIn(value, names, seen);
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  if (seen.has(node)) return;
+  seen.add(node);
+  const record = node as Record<string, unknown>;
+  if (record.k === "call" && typeof record.name === "string") names.add(record.name);
+  if (record.k === "call" && typeof record.function === "string") names.add(record.function);
+  if (record.kind === "invoke" && typeof record.function === "string") names.add(record.function);
+  for (const value of Object.values(record)) callNamesIn(value, names, seen);
+}
+
+/**
+ * The private functions a compiled function calls are compiled with it.
+ *
+ * A module offers its exports, and a function it keeps to itself is still a
+ * body a build has to compile when an exported function calls it: the link
+ * reaches it by symbol, and a symbol no unit was compiled under is a link
+ * error. The frontend marks the functions a class is lowered to as internal
+ * because a source names the class and not them; this marks the helpers a
+ * source calls by their own names for the same reason. It walks from the
+ * exports and the program body, so a private function nothing calls is still
+ * not compiled — a tree is measured by what a build reads, and a build reads
+ * what its program reaches.
+ */
+function markReachableHelpers(records: readonly ModuleRecord[], entryPath: string): void {
+  for (const record of records) {
+    const declared = new Map(record.analysis.functions.map((entry) => [entry.name, entry]));
+    const reached = new Set<string>();
+    const queue = record.analysis.functions.filter((entry) => entry.exported || entry.internal === true);
+    const visit = (names: ReadonlySet<string>): void => {
+      for (const name of names) {
+        const entry = declared.get(name);
+        if (entry === undefined || reached.has(name)) continue;
+        reached.add(name);
+        queue.push(entry);
+      }
+    };
+    if (record.path === entryPath) {
+      const bodyCalls = new Set<string>();
+      callNamesIn(record.analysis.body ?? [], bodyCalls);
+      visit(bodyCalls);
+    }
+    while (queue.length > 0) {
+      const entry = queue.pop() as (typeof record.analysis.functions)[number];
+      const calls = new Set<string>();
+      callNamesIn(entry.handle, calls);
+      visit(calls);
+    }
+    for (const name of reached) {
+      const entry = declared.get(name);
+      if (entry !== undefined && !entry.exported) entry.internal = true;
+    }
+  }
 }

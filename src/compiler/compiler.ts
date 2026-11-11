@@ -891,11 +891,11 @@ interface CompilationUnit {
  * downstream reads the same description.
  */
 function functionContext(phase: { program: ProgramContract; objectNames: Record<string, string> }): FunctionContext {
-  return {
-    objectNames: phase.objectNames,
-    functions: Object.fromEntries(phase.program.files.flatMap((file) => Object.entries(file.functions))),
-    language: phase.program.language,
-  };
+  const functions: Record<string, FunctionContract> = {};
+  for (const file of phase.program.files) {
+    for (const contract of Object.values(file.functions)) functions[contract.function.symbol] = contract;
+  }
+  return { objectNames: phase.objectNames, functions, language: phase.program.language };
 }
 
 /**
@@ -927,15 +927,15 @@ function semanticFunctions(
   objectLayouts: Record<string, ObjectLayout>,
   objectKeys: LiteralKeys,
 ): Record<string, SemanticFunction> {
-  const context: FunctionContext = {
-    objectNames,
-    functions: Object.fromEntries(program.files.flatMap((file) => Object.entries(file.functions))),
-    language: program.language,
-  };
+  const functions: Record<string, FunctionContract> = {};
+  for (const file of program.files) {
+    for (const contract of Object.values(file.functions)) functions[contract.function.symbol] = contract;
+  }
+  const context: FunctionContext = { objectNames, functions, language: program.language };
   const resolved: Record<string, SemanticFunction> = {};
   for (const file of program.files) {
     for (const contract of Object.values(file.functions)) {
-      resolved[contract.function.name] = resolveFunction(contract, context);
+      resolved[contract.function.symbol] = resolveFunction(contract, context);
     }
   }
   // What a buffer of a program holds is a question about every write into it and
@@ -954,10 +954,10 @@ function semanticFunctions(
   // the functions it calls write, and that is a question about the program.
   const callees = new Map(Object.entries(resolved));
   for (const file of program.files) {
-    for (const [name, contract] of Object.entries(file.functions)) {
+    for (const contract of Object.values(file.functions)) {
       // A function is checked before it is shown to anything, so a function
       // that is not one a backend may lower never reaches a model.
-      validateSemanticFunction(resolved[name], contract, callees);
+      validateSemanticFunction(resolved[contract.function.symbol], contract, callees);
     }
   }
   return resolved;
@@ -974,6 +974,24 @@ interface UnitGeneration {
  * exports, because every one of them is something the program may call; a
  * library entry compiles the one function the project named.
  */
+/** The key a function's artifacts are held under: its symbol, which is unique. */
+function unitKey(unit: CompilationUnit): string {
+  return unit.contract.function.symbol;
+}
+
+/**
+ * The key a function's records are held under: the name the source gave it,
+ * and the file beside it when two files gave a function the same name. A record
+ * a reader opens names the function the source named; the symbols behind it are
+ * the link's, not the source's.
+ */
+function unitNameKey(unit: CompilationUnit, units: readonly CompilationUnit[]): string {
+  const name = unit.contract.function.name;
+  let count = 0;
+  for (const other of units) if (other.contract.function.name === name) count += 1;
+  return count > 1 ? `${unit.file}:${name}` : name;
+}
+
 function compilationUnits(program: ProgramContract, isProgram: boolean): CompilationUnit[] {
   const units: CompilationUnit[] = [];
   for (const file of program.files) {
@@ -1005,7 +1023,7 @@ async function programFunctions(
   for (const entry of units) {
     const selected = entry.result.selected;
     if (selected === null || selected === undefined) continue;
-    const name = entry.unit.contract.function.name;
+    const name = unitKey(entry.unit);
     const text = await readFile(join(base, name, `${selected}.ir`), "utf8");
     const fn = parseSemanticFunction(text, program);
     functions.push({ fn, contract: entry.unit.contract });
@@ -1043,7 +1061,7 @@ function machineRefusalOf(
 ): { function: string; reason: string; detail: string | undefined } | null {  const callees = new Map(Object.entries(semantics));
   for (const unit of units) {
     const name = unit.contract.function.name;
-    const fn = semantics[name];
+    const fn = semantics[unit.contract.function.symbol];
     if (fn === undefined) continue;
     const refusal = machineRefusal({
       fn: optimizeSemanticFunction(structuredClone(fn), callees),
@@ -1655,7 +1673,7 @@ export async function runBuild(
         // driver links beside itself. What the backend refused stays in the
         // driver, and so does everything whose call to it would hand over
         // what only one convention carries.
-        bodyLowering = programLoweringOf(driver, new Set(units.map((unit) => unit.contract.function.name)), target);
+        bodyLowering = programLoweringOf(driver, new Set(units.map(unitKey)), target);
         for (const note of bodyLowering.notes) reporter.stage("assemble", "info", note);
       }
     }
@@ -1783,9 +1801,9 @@ export async function runBuild(
       // this writes out is missing every entry it was going to keep.
       const proved = Object.create(null) as IncrementalRecord;
       for (const unit of units) {
-        const functionName = unit.contract.function.name;
-        const entry = awaitingProgram.get(functionName) ?? incremental[functionName];
-        if (entry !== undefined) proved[functionName] = entry;
+        const key = unitNameKey(unit, units);
+        const entry = awaitingProgram.get(key) ?? incremental[key];
+        if (entry !== undefined) proved[key] = entry;
       }
       await store.write(paths.incremental, proved);
     };
@@ -1795,15 +1813,15 @@ export async function runBuild(
     const generatedByFunction = new Map<string, UnitGeneration>();
     const unitsGenerated = (): UnitGeneration[] =>
       units.flatMap((unit) => {
-        const entry = generatedByFunction.get(unit.contract.function.name);
+        const entry = generatedByFunction.get(unitKey(unit));
         return entry === undefined ? [] : [entry];
       });
     /** How many candidates a unit has written, so a round names new ones. */
     const written = new Map<string, number>();
 
     /** The implementation a unit contributed to the program that mismatched. */
-    const implementationOf = (functionName: string): string | undefined => {
-      const entry = generatedByFunction.get(functionName);
+    const implementationOf = (key: string): string | undefined => {
+      const entry = generatedByFunction.get(key);
       const selected = entry?.result.selected;
       if (entry === undefined || selected === null || selected === undefined) return undefined;
       return entry.result.candidates.find((candidate) => candidate.id === selected)?.text;
@@ -1818,14 +1836,16 @@ export async function runBuild(
      * for again.
      */
     const generateUnit = async (unit: CompilationUnit, mismatch: ProgramMismatch | undefined): Promise<void> => {
+      const key = unitNameKey(unit, units);
+      const artifactKey = unitKey(unit);
       const functionName = unit.contract.function.name;
-      const previous = mismatch === undefined ? undefined : implementationOf(functionName);
+      const previous = mismatch === undefined ? undefined : implementationOf(key);
       if (mismatch !== undefined && (unit.contract.ensures.length > 0 || previous === undefined)) return;
-      const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+      const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
       const keys = keyOf(unit);
       const reuse = unitReuse({
-        entry: incremental[functionName],
+        entry: incremental[key],
         keys,
         workspace,
         functionName,
@@ -1837,15 +1857,15 @@ export async function runBuild(
         required: options.reuse,
         id,
       });
-      const sequenceStart = written.get(functionName) ?? 0;
+      const sequenceStart = written.get(key) ?? 0;
 
       if (mismatch === undefined && reuse.level === "object" && reuse.entry !== undefined) {
         const result = reusedResult(reuse.entry);
         // A repair round generates after the stored candidates, so it never
         // writes over the object this build is about to link.
         written.set(functionName, sequenceStart + result.candidates.length);
-        reusedByFunction.set(functionName, reuse.entry.selected);
-        generatedByFunction.set(functionName, { unit, result });
+        reusedByFunction.set(key, reuse.entry.selected);
+        generatedByFunction.set(artifactKey, { unit, result });
         return;
       }
 
@@ -1863,7 +1883,7 @@ export async function runBuild(
         unitFile: unit.file,
         parsed: unit.parsed,
         program,
-        base: semantics[functionName] as SemanticFunction,
+        base: semantics[unit.contract.function.symbol] as SemanticFunction,
         functions: semantics,
         // A program is one module, so the functions a candidate calls are in
         // the module beside it. A build that compiles one function on its own
@@ -1942,8 +1962,8 @@ export async function runBuild(
         },
       });
       written.set(functionName, sequenceStart + result.candidates.length);
-      reusedByFunction.delete(functionName);
-      generatedByFunction.set(functionName, { unit, result });
+      reusedByFunction.delete(key);
+      generatedByFunction.set(artifactKey, { unit, result });
 
       // A function is proved by its own vectors, or by the program it is
       // part of, so an entry is only written once something has said so.
@@ -1960,7 +1980,7 @@ export async function runBuild(
       };
       const verified = result.outcomes.find((outcome) => outcome.candidate === selected)?.verification !== undefined;
       if (verified) {
-        incremental[functionName] = entry;
+        incremental[key] = entry;
         // The record is a whole file that every function adds itself to, so
         // two functions finishing together would each read the record before
         // the other wrote it, and one entry would be lost. One writer at a
@@ -1968,7 +1988,7 @@ export async function runBuild(
         // functions it is waiting for are still waiting on a model.
         await records.run(() => store.write(paths.incremental, { ...incremental }));
       } else if (checksProgram) {
-        awaitingProgram.set(functionName, entry);
+        awaitingProgram.set(key, entry);
       }
     };
 
@@ -2022,15 +2042,16 @@ export async function runBuild(
       const selectedEntries: (readonly [string, string])[] = [];
       for (const entry of generated) {
         const functionName = entry.unit.contract.function.name;
-        candidateEntries.push([functionName, entry.result.candidates]);
+        const key = unitNameKey(entry.unit, units);
+        candidateEntries.push([key, entry.result.candidates]);
         verificationEntries.push([
-          functionName,
+          key,
           entry.result.outcomes
             .map((outcome) => outcome.verification)
             .filter((outcome): outcome is VerificationResult => outcome !== undefined),
         ]);
         benchmarkEntries.push([
-          functionName,
+          key,
           entry.result.outcomes
             .map((outcome) => outcome.benchmark)
             .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
@@ -2058,7 +2079,7 @@ export async function runBuild(
             detail: detail.trim(),
           });
         }
-        selectedEntries.push([functionName, entry.result.selected]);
+        selectedEntries.push([key, entry.result.selected]);
       }
       const candidates = byName(candidateEntries);
       const verification = byName(verificationEntries);
@@ -2071,7 +2092,7 @@ export async function runBuild(
         compilerVersion: COMPILER_VERSION,
         functions: Object.fromEntries(
           generated.map((entry) => [
-            entry.unit.contract.function.name,
+            unitNameKey(entry.unit, units),
             {
               file: entry.unit.file,
               selected: entry.result.selected,
@@ -2115,7 +2136,7 @@ export async function runBuild(
       if (driver === undefined || programFile === undefined || mode !== "build") break;
       const runtime = await prepareRuntime();
       const objectPaths = unitsGenerated().map((entry) =>
-        join(base, entry.unit.contract.function.name, `${entry.result.selected as string}.o`),
+        join(base, unitKey(entry.unit), `${entry.result.selected as string}.o`),
       );
       // `-fopenmp` is asked for when an object of the program carries a loop the
       // compiler proved its turns independent: the C backend writes that loop as
@@ -2266,22 +2287,23 @@ export async function runBuild(
     const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
     for (const entry of generated) {
       const functionName = entry.unit.contract.function.name;
-      candidateEntries.push([functionName, entry.result.candidates]);
-      outcomeEntries.push([functionName, entry.result.outcomes]);
+      const key = unitNameKey(entry.unit, units);
+      candidateEntries.push([key, entry.result.candidates]);
+      outcomeEntries.push([key, entry.result.outcomes]);
       verificationEntries.push([
-        functionName,
+        key,
         entry.result.outcomes
           .map((outcome) => outcome.verification)
           .filter((outcome): outcome is VerificationResult => outcome !== undefined),
       ]);
       benchmarkEntries.push([
-        functionName,
+        key,
         entry.result.outcomes
           .map((outcome) => outcome.benchmark)
           .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
       ]);
       const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
-      if (reusedByFunction.has(functionName)) {
+      if (reusedByFunction.has(key)) {
         // Nothing was assembled or run for this function: what it delivered is
         // what an earlier build built, linked and verified for these inputs.
         reporter.stage(
@@ -2359,8 +2381,10 @@ export async function runBuild(
           outputPath = store.resolve(paths.outputBinary);
         }
       } else {
+        const key = unitNameKey(units[0], units);
+        const artifactKey = unitKey(units[0]);
         const functionName = units[0].contract.function.name;
-        const winner = selected[functionName];
+        const winner = selected[key];
         // A candidate that calls another function of the program is linked only
         // into that program, so the backend never writes a binary of its own for
         // it and there is nothing to deliver beside the IR. This is the same
@@ -2368,7 +2392,7 @@ export async function runBuild(
         // off the IR that is delivered below, and a candidate whose IR cannot be
         // read is answered as one that calls out: the copy fails inside the
         // build rather than a binary that was never written being delivered.
-        const implementation = await readFile(join(base, `${functionName}/${winner}.ir`), "utf8");
+        const implementation = await readFile(join(base, `${artifactKey}/${winner}.ir`), "utf8");
         const standalone = !callsOutOfProgram(implementation, program, callableSymbols(units[0].contract, contracts));
         // What the build delivers is the target the lowering produced, beside
         // the IR it was lowered from, which is the text a model wrote and the
@@ -2433,7 +2457,7 @@ export async function runBuild(
     return {
       project: id,
       build,
-      contracts: Object.fromEntries(units.map((unit) => [unit.contract.function.name, unit.contract])),
+      contracts: Object.fromEntries(units.map((unit) => [unitNameKey(unit, units), unit.contract])),
       program,
       ...(phase.body === undefined ? {} : { body: phase.body }),
       candidates,
@@ -2489,8 +2513,10 @@ async function loadStored(
   // program does not have.
   const build = (await store.exists(paths.build)) ? await store.read<BuildStatus>(paths.build) : undefined;
   const compiled = build?.selectedCandidates === undefined ? {} : build.selectedCandidates;
-  const units = compilationUnits(program, program.entry.function === null)
-    .filter((unit) => Object.keys(compiled).length === 0 || compiled[unit.contract.function.name] !== undefined);
+  const all = compilationUnits(program, program.entry.function === null);
+  const units = all.filter(
+    (unit) => Object.keys(compiled).length === 0 || compiled[unitNameKey(unit, all)] !== undefined,
+  );
   return { paths, program, units };
 }
 
@@ -2591,9 +2617,11 @@ export async function runStored(
   const benchmarkEntries: [string, BenchmarkResult[]][] = [];
   const functionEntries: [string, StoredCommandOutcome["functions"][string]][] = [];
   for (const unit of units) {
+    const key = unitNameKey(unit, units);
+    const artifactKey = unitKey(unit);
     const functionName = unit.contract.function.name;
-    const candidates = stored[functionName] ?? [];
-    const chosen = build?.selectedCandidates?.[functionName];
+    const candidates = stored[key] ?? [];
+    const chosen = build?.selectedCandidates?.[key];
     const candidate = candidates.find((entry) => entry.id === chosen);
     if (candidate === undefined) {
       throw new CompilerError({
@@ -2602,7 +2630,7 @@ export async function runStored(
         message: `project "${project}" has no candidate to ${action} for ${functionName}`,
       });
     }
-    const workspace = { workDirectory: `${base}/${functionName}`, functionName };
+    const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
     const result = await evaluateStoredCandidate({
       mode,
       contract: unit.contract,
@@ -2626,15 +2654,15 @@ export async function runStored(
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
     });
     functionEntries.push([
-      functionName,
+      key,
       {
         candidate: candidate.id,
         ...(result.verification === undefined ? {} : { verification: result.verification }),
         ...(result.benchmark === undefined ? {} : { benchmark: result.benchmark }),
       },
     ]);
-    verificationEntries.push([functionName, result.verification === undefined ? [] : [result.verification]]);
-    benchmarkEntries.push([functionName, result.benchmark === undefined ? [] : [result.benchmark]]);
+    verificationEntries.push([key, result.verification === undefined ? [] : [result.verification]]);
+    benchmarkEntries.push([key, result.benchmark === undefined ? [] : [result.benchmark]]);
 
     // A function that states no postcondition has no vector to run, so there is
     // nothing to report for it here.
@@ -2699,7 +2727,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
         .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
         .join("\n");
     }
-    const wanted = semantics[options.function];
+    const wanted = Object.values(semantics).find((fn) => fn.name === options.function);
     if (wanted === undefined) {
       throw new CompilerError({
         category: "InputError",

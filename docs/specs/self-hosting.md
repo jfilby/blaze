@@ -5583,14 +5583,25 @@ what is missing.
 The frontend is no longer the queue for the compiler's own sources. What
 `blaze ir` on `src/compiler` reaches next is:
 
-1. **The link's symbols.** The frontend reads the compiler's sources and the
-   project-file package whole (§4i8), and the contract phase now builds the
-   contracts of every module. It stops where two modules declare a private
+1. **The link's symbols, closed.** Two modules may each declare a private
    helper of the same name — `typeText` in `core/semantic-ir.ts` and in
-   `semantics/typescript-types.ts` — because a program links by symbol. The
-   next slice gives a private function the symbol its file makes unique at the
-   contract/link layer while the source name stays the IR's, so the tests and
-   the prompts keep reading the names the source wrote.
+   `semantics/typescript-types.ts` — and a program links by symbol. The
+   contract phase now gives every function whose symbol another function
+   already owns a symbol its file makes unique (`<path>__<name>`), keeps the
+   source name as the contract's name, and writes the symbol into every call
+   of the function: the object pass, the outline and the IR all read the link
+   edge. A private helper a compiled function reaches is contracted with it,
+   because a symbol no unit was compiled under is a link error (§4x). A build
+   holds the work directory and artifacts of each function under its symbol,
+   and its records under the source name, or under `file:name` where two files
+   wrote the same name, so a reader still opens the function the source named.
+   The next refusal is a host value: `toolchain/wasm.ts` reads
+   `globalThis` to ask whether the process has a WebAssembly engine, and an
+   imported value — `host` from `core/platform.ts` — is a name no body
+   declares. The platform selection of §4i6 is the slice: the compiler asks the
+   host for the engine through the platform boundary, the Node adapter answers
+   `globalThis.WebAssembly`, and the native adapter answers the engine it has
+   or none, which is already the fallback the check falls back to.
 2. **The contract phase's host calls.** `core/platform-node.ts` calls the names
    it imports from `node:*`, and a call to a name the program does not compile
    is refused. A native build does not carry that adapter; it needs the platform

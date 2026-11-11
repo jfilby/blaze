@@ -780,9 +780,12 @@ class ContractBinder {
    * signature, conditions, flags, layouts and call edges are read against. A
    * builtin is the compiler's own and is never a declaration of its own.
    */
-  declaration(name: string, line: number): FunctionContract {
-    const declared = builtinFor(name) === null ? this.functions.get(name) : undefined;
-    if (declared !== undefined) return declared;
+  declaration(name: string, symbol: string, line: number): FunctionContract {
+    // A symbol is the link's name and is unique; a source name may belong to a
+    // function of every file that wrote it. The symbol the header states is
+    // therefore what the header is read against.
+    const declared = builtinFor(name) === null ? this.functions.get(symbol) ?? this.functions.get(name) : undefined;
+    if (declared !== undefined && declared.function.name === name) return declared;
     const compiled = this.names().join(", ") || "no functions";
     fail(line, `a function this program declares, one of: ${compiled}`, name);
   }
@@ -2367,7 +2370,7 @@ class FunctionReader extends BlockReader {
     const returns = scanner.type();
     scanner.end();
 
-    const declared = this.binder.declaration(name, line.number);
+    const declared = this.binder.declaration(name, symbol, line.number);
     const signature = declared.function;
     if (symbol !== signature.symbol) {
       fail(line.number, `the symbol the contract declares, "${signature.symbol}"`, symbol);

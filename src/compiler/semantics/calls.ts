@@ -35,7 +35,7 @@
 
 import type { CallStrategy, FileContract, FunctionContract } from "../core/types.ts";
 
-/** The functions of the program, by the name the source gave them. */
+/** The functions of the program, by the symbol the link names them by. */
 export type ContractsByName = Map<string, FunctionContract>;
 
 /**
@@ -74,8 +74,8 @@ export function vectorChecked(contracts: ContractsByName): Set<string> {
     if (!isVerified(contract)) continue;
     const calls = contract.definition.calls.some((edge) => edge.strategy === "call" && contracts.has(edge.callee));
     if (calls) continue;
-    checked.add(contract.function.name);
-    for (const body of writtenOut(contracts, contract)) checked.add(body.function.name);
+    checked.add(contract.function.symbol);
+    for (const body of writtenOut(contracts, contract)) checked.add(body.function.symbol);
   }
   return checked;
 }
@@ -91,15 +91,14 @@ function isEffectFree(contract: FunctionContract): boolean {
 }
 
 /**
- * The functions of the program, by name. A name belongs to one function: one
- * symbol belongs to one function, and a symbol is the name unless the source
- * declared `main`, which is refused as a duplicate of the entry (see
- * validateFunctionNames).
+ * The functions of the program, by symbol. A symbol belongs to one function:
+ * the contract phase gives a function the symbol its file makes unique when the
+ * name it was given is one another file already owns (see qualifySymbols).
  */
 export function contractsByName(files: readonly FileContract[]): ContractsByName {
   const contracts: ContractsByName = new Map();
   for (const file of files) {
-    for (const [name, contract] of Object.entries(file.functions)) contracts.set(name, contract);
+    for (const contract of Object.values(file.functions)) contracts.set(contract.function.symbol, contract);
   }
   return contracts;
 }
@@ -150,7 +149,7 @@ export function resolveCalls(files: readonly FileContract[]): void {
   const contracts = contractsByName(files);
   for (const contract of contracts.values()) {
     for (const edge of contract.definition.calls) {
-      edge.strategy = strategyFor(contracts, contract.function.name, edge.callee);
+      edge.strategy = strategyFor(contracts, contract.function.symbol, edge.callee);
     }
   }
 }
@@ -167,7 +166,7 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
   const stack = [contract];
   while (stack.length > 0) {
     const current = stack.pop() as FunctionContract;
-    const name = current.function.name;
+    const name = current.function.symbol;
     if (bodies.has(name)) continue;
     bodies.set(name, current);
     for (const edge of current.definition.calls) {
@@ -197,7 +196,7 @@ export function callableFrom(contracts: ContractsByName, contract: FunctionContr
   for (const body of writtenOut(contracts, contract)) {
     for (const edge of body.definition.calls) {
       const callee = contracts.get(edge.callee);
-      if (callee !== undefined) reached.set(callee.function.name, callee);
+      if (callee !== undefined) reached.set(callee.function.symbol, callee);
     }
   }
   return [...reached.values()];

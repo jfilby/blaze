@@ -1042,8 +1042,8 @@ function arrayType(held: ArrayHeld): TypeExpr {
 function contractsOf(program: ProgramContract): Map<string, CompiledFunction> {
   const contracts = new Map<string, CompiledFunction>();
   for (const file of program.files) {
-    for (const [name, contract] of Object.entries(file.functions)) {
-      contracts.set(name, {
+    for (const contract of Object.values(file.functions)) {
+      contracts.set(contract.function.symbol, {
         signature: contract.function,
         effects: contract.effects,
         body: contract.definition.statements,

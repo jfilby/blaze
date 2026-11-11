@@ -37,6 +37,37 @@ test("every file of the program is contracted, with its exports and its imports"
   assert.equal(program.entry.function, "dot");
 });
 
+test("a private helper two files name is linked under a symbol its file makes unique", () => {
+  // A program links by symbol, and `helper` in one file is not `helper` in
+  // another. The source name stays the contract's, and the symbol the link
+  // uses is made unique by the file: each file's call reaches its own helper.
+  const program = contract(
+    {
+      "main.ts": 'import { a } from "./a.ts";\nimport { b } from "./b.ts";\nconst total = a() + b();\n',
+      "a.ts": "function helper(n: number): number {\n  return n + 1;\n}\nexport function a(): number {\n  return helper(1);\n}\n",
+      "b.ts": "function helper(n: number): number {\n  return n + 2;\n}\nexport function b(): number {\n  return helper(2);\n}\n",
+    },
+    "main.ts",
+  );
+
+  const a = program.files.find((file) => file.path === "a.ts");
+  const b = program.files.find((file) => file.path === "b.ts");
+  assert.ok(a !== undefined && b !== undefined);
+  const aHelper = a.functions.helper;
+  const bHelper = b.functions.helper;
+  assert.ok(aHelper !== undefined && bHelper !== undefined, "both private helpers are compiled");
+  assert.equal(aHelper.function.name, "helper");
+  assert.notEqual(aHelper.function.symbol, bHelper.function.symbol);
+  assert.match(aHelper.function.symbol, /^a_ts__helper/);
+  assert.match(bHelper.function.symbol, /^b_ts__helper/);
+
+  const aCalls = JSON.stringify(a.functions.a.definition.statements);
+  const bCalls = JSON.stringify(b.functions.b.definition.statements);
+  assert.ok(aCalls.includes(`"name":"${aHelper.function.symbol}"`), "a's body calls its own helper");
+  assert.ok(!aCalls.includes(`"name":"${bHelper.function.symbol}"`), "a's body does not call b's helper");
+  assert.ok(bCalls.includes(`"name":"${bHelper.function.symbol}"`), "b's body calls its own helper");
+});
+
 test("an import reaches through a file that imports another", () => {
   const program = contract(
     {

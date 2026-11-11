@@ -113,11 +113,26 @@ function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isPro
 /* Cross-file validation                                                       */
 /* -------------------------------------------------------------------------- */
 
+/** One name an importing file binds to a function another file declares. */
+interface ImportBinding {
+  /** The importing file. */
+  from: string;
+  /** The file the import names. */
+  to: string;
+  /** The name the exporting file declares. */
+  imported: string;
+  /** The name the importing file writes. */
+  local: string;
+}
+
 /**
  * Resolves every import to the symbols it binds, and refuses a program whose
  * files disagree about what exists.
  */
-function validateImports(records: ModuleRecord[], contracts: Map<string, FileContract>): ContractEdge[] {
+function validateImports(
+  records: ModuleRecord[],
+  contracts: Map<string, FileContract>,
+): { edges: ContractEdge[]; bindings: ImportBinding[] } {
   const analyses: Record<string, string | null> = {};
   const internal: Record<string, Set<string>> = {};
   for (const record of records) {
@@ -125,6 +140,7 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
     internal[record.path] = new Set(record.analysis.functions.filter((entry) => entry.internal === true).map((entry) => entry.name));
   }
   const edges: ContractEdge[] = [];
+  const bindings: ImportBinding[] = [];
   const offeredValuesByPath = offeredValues(records);
   for (const record of records) {
     const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
@@ -183,6 +199,11 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
       for (const rename of entry.renames ?? []) {
         if (!localNames.includes(rename.local)) localNames.push(rename.local);
       }
+      // The name a file writes and the name it imports are the same unless a
+      // rename binds one to the other; the link needs both.
+      const localToImported = new Map<string, string>();
+      localNames.forEach((local, at) => localToImported.set(local, importedNames[at] ?? local));
+      for (const rename of entry.renames ?? []) localToImported.set(rename.local, rename.imported);
       const missing = importedNames.filter((name) => !available.includes(name));
       if (missing.length > 0) {
         throw contractPhaseError(
@@ -203,24 +224,170 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
           throw contractPhaseError(`${record.path} imports "${name}" and declares it itself`);
         }
         bound.set(name, { specifier: entry.specifier, to });
+        bindings.push({ from: record.path, to, imported: localToImported.get(name) ?? name, local: name });
       }
       if (!edges.some((edge) => edge.from === record.path && edge.to === to)) {
         edges.push({ from: record.path, to, symbols: importedNames });
       }
     }
   }
-  return edges;
+  return { edges, bindings };
 }
 
 /**
- * Every function of a program is compiled on its own and linked beside the
- * others by its symbol, and the object layouts are resolved by name as well,
- * so one symbol may belong to one function. The symbol is what is checked and
- * not the name it came from: a program entry named `main` is compiled as
- * `blaze_main`, so a program that also declares `blaze_main` has two functions
- * of one symbol, and the two collided in a work directory or a link step
- * rather than being refused. A name two files export is refused here for the
- * same reason.
+ * The symbol a function is linked under when its file has to make it unique.
+ *
+ * A program links by symbol, and two files may each write a private helper of
+ * the same name. The source name stays the contract's name and the IR's; the
+ * symbol is the link's, and a symbol a file makes unique is the file's path
+ * with its separators written as underscores, a separator of its own, and the
+ * name the source gave it. A path is unique, so the symbol is, unless the
+ * sanitized spelling of two paths is one: the counter beside it is the second
+ * one of that spelling the program reaches.
+ */
+function qualifiedSymbol(path: string, name: string, taken: ReadonlySet<string>): string {
+  const pathPart = path.replace(/[^A-Za-z0-9_]/g, "_");
+  let candidate = `${pathPart}__${name}`;
+  let suffix = 2;
+  while (taken.has(candidate)) {
+    candidate = `${pathPart}__${name}__${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+/**
+ * The function an importing file's local name reaches, following the module a
+ * file re-exports through when the function is another file's.
+ */
+function targetFunction(
+  records: readonly ModuleRecord[],
+  contracts: ReadonlyMap<string, FileContract>,
+  path: string,
+  name: string,
+  seen: Set<string> = new Set(),
+): FunctionContract | null {
+  if (seen.has(path)) return null;
+  seen.add(path);
+  const direct = contracts.get(path)?.functions[name];
+  if (direct !== undefined) return direct;
+  const record = records.find((one) => one.path === path);
+  if (record === undefined) return null;
+  for (const [index, entry] of record.analysis.imports.entries()) {
+    if (entry.names != null && !entry.names.includes(name)) continue;
+    const to = record.resolved[index];
+    if (to === "" || to === path) continue;
+    const found = targetFunction(records, contracts, to, name, seen);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * Writes the symbol of every call into the body, so the link names the
+ * function the call reaches rather than the name the source wrote. A call to
+ * a name the program does not compile — a builtin, a runtime service, a value
+ * a later pass moves — is left alone.
+ */
+function rewriteCallsIn(node: unknown, names: ReadonlyMap<string, string>): void {
+  if (Array.isArray(node)) {
+    for (const value of node) rewriteCallsIn(value, names);
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  const record = node as Record<string, unknown>;
+  // A function's body writes a call as an expression; a program's statements
+  // write one as an invocation. Both name the function by the name the source
+  // gave it, and the link needs the symbol it was given here.
+  if (record.k === "call" && typeof record.name === "string") {
+    const symbol = names.get(record.name);
+    if (symbol !== undefined) record.name = symbol;
+  }
+  // A program value writes a call of a function by name rather than by callee
+  // expression, and the link still needs the symbol.
+  if (record.k === "call" && typeof record.function === "string") {
+    const symbol = names.get(record.function);
+    if (symbol !== undefined) record.function = symbol;
+  }
+  if (record.kind === "invoke" && typeof record.function === "string") {
+    const symbol = names.get(record.function);
+    if (symbol !== undefined) record.function = symbol;
+  }
+  // A call written where a value goes is an invocation of a callee expression,
+  // and a callee the source named is an identifier.
+  if (record.k === "invoke" && typeof record.callee === "object" && record.callee !== null) {
+    const callee = record.callee as Record<string, unknown>;
+    if (callee.k === "ident" && typeof callee.name === "string") {
+      const symbol = names.get(callee.name);
+      if (symbol !== undefined) callee.name = symbol;
+    }
+  }
+  for (const value of Object.values(record)) rewriteCallsIn(value, names);
+}
+
+/**
+ * Gives every function whose symbol another function already owns a symbol
+ * its file makes unique, and writes that symbol into every call of it.
+ *
+ * A program links by symbol, so one symbol may belong to one function. Two
+ * files may each write a private helper of the same name — the compiler's own
+ * sources do — and the source name stays the contract's name; what changes is
+ * the symbol the link uses. The calls are rewritten here, once, because every
+ * later pass reads call names as the symbols they link by: the object pass, the
+ * outline that decides which calls are written out, and the IR.
+ *
+ * A program body is part of the entry file, so it is rewritten with that
+ * file's names and reaches the same functions the file's own functions do.
+ */
+function qualifySymbols(
+  records: readonly ModuleRecord[],
+  contracts: ReadonlyMap<string, FileContract>,
+  bindings: readonly ImportBinding[],
+  body: ProgramBody | undefined,
+): void {
+  const functions: { path: string; name: string; contract: FunctionContract }[] = [];
+  for (const record of records) {
+    const file = contracts.get(record.path);
+    if (file === undefined) continue;
+    for (const [name, contract] of Object.entries(file.functions)) functions.push({ path: record.path, name, contract });
+  }
+  const bySymbol = new Map<string, typeof functions>();
+  for (const one of functions) {
+    const group = bySymbol.get(one.contract.function.symbol);
+    if (group === undefined) bySymbol.set(one.contract.function.symbol, [one]);
+    else group.push(one);
+  }
+  const taken = new Set(functions.map((one) => one.contract.function.symbol));
+  for (const [symbol, group] of bySymbol) {
+    if (group.length < 2) continue;
+    taken.delete(symbol);
+    for (const one of group) {
+      const unique = qualifiedSymbol(one.path, one.name, taken);
+      taken.add(unique);
+      one.contract.function.symbol = unique;
+    }
+  }
+  for (const record of records) {
+    const file = contracts.get(record.path);
+    if (file === undefined) continue;
+    const names = new Map<string, string>();
+    for (const contract of Object.values(file.functions)) {
+      names.set(contract.function.name, contract.function.symbol);
+    }
+    for (const binding of bindings) {
+      if (binding.from !== record.path) continue;
+      const target = targetFunction(records, contracts, binding.to, binding.imported);
+      if (target !== null) names.set(binding.local, target.function.symbol);
+    }
+    for (const contract of Object.values(file.functions)) rewriteCallsIn(contract.definition.statements, names);
+    if (body !== undefined && body.file === record.path) rewriteCallsIn(body.statements, names);
+  }
+}
+
+/**
+ * A symbol a failed qualification would leave behind is a link step that fails
+ * after every source was read: the pass above makes the symbols unique, and this
+ * check is the net that says so.
  */
 function validateFunctionNames(files: readonly FileContract[]): void {
   const owner = new Map<string, string>();
@@ -339,8 +506,12 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
     }
     contracts.set(record.path, file);
   }
-  const edges = validateImports(records, contracts);
+  const { edges, bindings } = validateImports(records, contracts);
   const files = records.map((record) => contracts.get(record.path) as FileContract);
+  // The contract phase names every function and every call before the object
+  // pass walks the bodies, because a call is a link edge and a link edge is a
+  // symbol.
+  qualifySymbols(records, contracts, bindings, body);
   validateFunctionNames(files);
   // The objects a program allocates are named once for the whole program,
   // because a field is often what another function returns. A program body

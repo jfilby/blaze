@@ -932,6 +932,71 @@ const BRANCHING_PROGRAM = [
   "",
 ].join("\n");
 
+test("two files exporting one name are built under the symbols their files make unique", async (t) => {
+  // The source name stays the name a record and a prompt read; the link is by
+  // symbol, and the two `shared` functions are two different symbols. Both
+  // files' work directories, artifacts and records are keyed by what tells
+  // them apart, and the program runs as the source does.
+  const directory = await scratch("blaze-same-name-");
+  await writeFile(
+    join(directory, "main.ts"),
+    [
+      'import { helper } from "./a.ts";',
+      "export function shared(x: number): number {",
+      "  return x + 1;",
+      "}",
+      "function main(): void {",
+      "  console.log(shared(helper(1)));",
+      "}",
+      "main();",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "a.ts"),
+    [
+      "export function helper(x: number): number {",
+      "  return x;",
+      "}",
+      "export function shared(x: number): number {",
+      "  return x + 2;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeProject(join(directory, "blaze.toml"), {
+    language: "typescript",
+    sourceFile: "main.ts",
+    model: { provider: "openai-compatible", model: "stub" },
+    output: "machine",
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await chatEndpoint(t, [], { answer: () => SOUND });
+
+  const outcome = await runBuild(
+    "blaze.toml",
+    { cwd: directory, reuse: false, model: "openai-compatible/stub" },
+    quiet,
+    "build",
+  );
+
+  assert.equal(outcome.build.status, "success");
+  assert.ok(outcome.contracts["main.ts:shared"] !== undefined, "the entry file's shared is a function of the build");
+  assert.ok(outcome.contracts["a.ts:shared"] !== undefined, "the imported file's shared is a function of the build");
+  assert.notEqual(
+    outcome.contracts["main.ts:shared"].function.symbol,
+    outcome.contracts["a.ts:shared"].function.symbol,
+  );
+  assert.ok(outcome.outputPath !== null);
+  const execution = run(outcome.outputPath, [], { timeoutMs: 60_000 });
+  assert.equal(execution.code, 0, execution.stderr);
+  // The entry file's `shared` adds one: the call reaches its own file's
+  // function, not the one the other file exports under the same name.
+  assert.equal(execution.stdout, "2\n");
+});
+
 test("a review that inlines a call has the callee's body put where the call was", async (t) => {
   const inline = "verdict: repaired\nreason: the callee is a leaf\nproposal: inline-call entry callee=twice";
   const directory = await scratch("blaze-writes-out-");

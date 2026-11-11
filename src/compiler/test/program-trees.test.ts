@@ -311,20 +311,26 @@ test("one name may belong to one function across the whole program", () => {
   const source = files["main.ts"] as string;
 
   // Every function of a program is compiled on its own and linked beside the
-  // others by its name, and the object layouts are resolved by name too. Two
-  // files exporting one name used to overwrite each other on the way through:
-  // the loser kept a contract with no layouts at all, both were written to the
-  // same work directory, and the link failed with a duplicate symbol.
-  assert.throws(
-    () =>
-      runContractPhase({
-        frontend: frontendFor("typescript"),
-        input: { language: "typescript", source, entry: "" },
-        entry: { path: "main.ts", source },
-        read: (path) => files[path] ?? null,
-      }),
-    /"shared" is declared by both main\.ts and a\.ts/,
-  );
+  // others by symbol, and two files may each export a name. The source name
+  // stays the contract's; the symbol each file's function is linked under is
+  // the one the file makes unique, and each body calls its own.
+  const phase = runContractPhase({
+    frontend: frontendFor("typescript"),
+    input: { language: "typescript", source, entry: "" },
+    entry: { path: "main.ts", source },
+    read: (path) => files[path] ?? null,
+  });
+  const main = phase.program.files.find((file) => file.path === "main.ts");
+  const a = phase.program.files.find((file) => file.path === "a.ts");
+  assert.ok(main !== undefined && a !== undefined);
+  const mainShared = main.functions.shared;
+  const aShared = a.functions.shared;
+  assert.ok(mainShared !== undefined && aShared !== undefined);
+  assert.equal(mainShared.function.name, "shared");
+  assert.equal(aShared.function.name, "shared");
+  assert.match(mainShared.function.symbol, /^main_ts__shared/);
+  assert.match(aShared.function.symbol, /^a_ts__shared/);
+  assert.notEqual(mainShared.function.symbol, aShared.function.symbol);
 });
 
 test("the diagnostic for an array used at two element types names the file it is in", () => {

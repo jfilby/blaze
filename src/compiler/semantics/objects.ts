@@ -1344,9 +1344,12 @@ export function resolveObjects(
   const callees = new Map<string, TypeExpr>();
   const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
   for (const file of files) {
-    for (const [name, contract] of Object.entries(file.functions)) {
-      callees.set(name, parseType(contract.function.returns));
-      callers.set(name, { file, name, contract });
+    for (const contract of Object.values(file.functions)) {
+      // A body calls a function by the symbol the link names it by, which is
+      // the source name unless another file's function already owns it.
+      const symbol = contract.function.symbol;
+      callees.set(symbol, parseType(contract.function.returns));
+      callers.set(symbol, { file, name: symbol, contract });
     }
   }
   // A program of nothing but statements has no function body for the layouts
