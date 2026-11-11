@@ -117,6 +117,23 @@ test("a program of three functions is one module and prints what its source prin
   assert.equal(result.stdout, "42\n9\n");
 });
 
+test("a program asks the host whether a path exists", async () => {
+  const directory = await scratch("blaze-wasm-exists-");
+  const present = join(directory, "present.txt");
+  await writeFile(present, "x", "utf8");
+  const absent = join(directory, "absent.txt");
+  const files = {
+    "main.ts": [
+      `console.log(fs.existsSync(${JSON.stringify(present)}) ? "yes" : "no");`,
+      `console.log(fs.existsSync(${JSON.stringify(absent)}) ? "yes" : "no");`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "yes\nno\n");
+});
+
 test("a program writes a file through the host", async () => {
   const directory = await scratch("blaze-wasm-file-");
   const path = join(directory, "written.txt");

@@ -1124,6 +1124,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "fs.existsSync":
+        return `(${RUNTIME_NAME}_path_exists(${argument(0)}) != 0.0 ? 1.0 : 0.0)`;
       case "fs.writeFileSync":
         // The write answers the bytes written, which a statement drops: the
         // runtime writes the file and the expression is zero.

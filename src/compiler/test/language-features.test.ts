@@ -66,6 +66,29 @@ async function agreesWithNode(
   return delivered.stdout;
 }
 
+test("fs.existsSync answers whether a path names anything", async () => {
+  // The probe is the runtime's: a file the test made is found, and the name
+  // beside it is not. Both lowerings answer the same.
+  for (const backend of ["machine", "c"] as const) {
+    const directory = await scratch(`blaze-file-exists-${backend}-`);
+    const present = join(directory, "present.txt");
+    await writeFile(present, "x", "utf8");
+    const absent = join(directory, "absent.txt");
+    const { binary } = await build(
+      [
+        'const fs = require("fs");',
+        `console.log(fs.existsSync(${JSON.stringify(present)}) ? "yes" : "no");`,
+        `console.log(fs.existsSync(${JSON.stringify(absent)}) ? "yes" : "no");`,
+        "",
+      ].join("\n"),
+      backend,
+    );
+    const ran = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.equal(ran.stdout, "yes\nno\n");
+  }
+});
+
 test("fs.writeFileSync writes the text a program names", async () => {
   // The write is a host service: the path and the text are the texts they are,
   // and the file the program names holds what it wrote when it ends. Both a

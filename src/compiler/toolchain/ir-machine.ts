@@ -11199,6 +11199,15 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "fs.existsSync" && call.args[0] !== undefined) {
+      // The path is the text it is, and the runtime answers whether it names
+      // anything.
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_exists_path");
+      this.store(path);
+      this.callSymbol("blaze_rt_path_exists", [path], NUMBER);
+      return;
+    }
     if (call.callee === "fs.writeFileSync" && call.args[0] !== undefined && call.args[1] !== undefined) {
       // The path and the text go down as the texts they are, and the answer is
       // the bytes written, which a statement drops.

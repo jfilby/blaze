@@ -126,6 +126,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_md5_digest",
   "blaze_rt_file_read",
   "blaze_rt_file_write",
+  "blaze_rt_path_exists",
   "blaze_rt_env_get",
   "blaze_rt_path_dirname",
   "blaze_rt_path_normalize",
@@ -1220,6 +1221,15 @@ export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
+}
+`,
+  },
+  {
+    service: "blaze_rt_path_exists",
+    source: `
+export function blaze_rt_path_exists(path) {
+  const name = new TextDecoder().decode(textBytes(path));
+  return existsSync(name) ? 1 : 0;
 }
 `,
   },

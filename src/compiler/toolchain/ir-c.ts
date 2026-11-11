@@ -277,6 +277,8 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "fs.existsSync":
+      return `(${RUNTIME_NAME}_path_exists(${args[0]}) != 0.0 ? 1.0 : 0.0)`;
     case "fs.writeFileSync":
       // The file is written and the answer is the bytes written, which a
       // statement drops: the comma expression keeps the call and answers zero.

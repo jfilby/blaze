@@ -306,6 +306,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `fs.writeFileSync(path, text)` writes the text to the file, replacing
    *  what it held: the answer is the bytes written, which a statement drops. */
   "fs.writeFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** `fs.existsSync(path)` asks whether the path names anything. The answer
+   *  is one or zero, which a test reads as the truth a boolean is. */
+  "fs.existsSync": { params: [TEXT], returns: F64, arity: 1 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */
