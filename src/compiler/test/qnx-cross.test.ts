@@ -10,14 +10,14 @@
 
 import assert from "node:assert/strict";
 import { stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
 import type { TargetSpec } from "../core/types.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
 import { buildFacilRuntime } from "../runtime/facil.ts";
 import { buildSqliteLibrary } from "../runtime/sqlite-build.ts";
-import { writeRuntimeHeader } from "../runtime/standalone.ts";
+import { buildStandaloneRuntime, writeRuntimeHeader } from "../runtime/standalone.ts";
 import { scratch } from "./scratch.ts";
 
 const QCC_ARCHITECTURES = [
@@ -153,5 +153,51 @@ test("qcc builds the SQLite library for both QNX architectures", async (t) => {
     const library = await buildSqliteLibrary(directory, "debug", target);
     const info = await stat(library.objectPath);
     assert.ok(info.size > 0, `${target.arch}: qcc built the SQLite library`);
+  }
+});
+
+test("qcc links the generated runtime into a QNX executable", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-link-${target.arch}-`);
+    const runtime = await buildStandaloneRuntime(directory, "debug", target);
+    const main = join(directory, "main.c");
+    await writeFile(main, `#include "${basename(runtime.headerPath)}"\nint main(void) { return 0; }\n`, "utf8");
+    const executable = join(directory, "probe");
+    const linked = run(
+      "qcc",
+      [
+        `-V${selector}`,
+        "-std=c11",
+        "-Wl,--gc-sections",
+        "-o",
+        executable,
+        main,
+        runtime.objectPath,
+        "-lm",
+        "-pthread",
+      ],
+      { timeoutMs: 120_000 },
+    );
+    assert.equal(linked.spawnError, undefined, `${target.arch}: ${linked.spawnError ?? ""}`);
+    assert.equal(linked.code, 0, `${target.arch}: ${linked.stderr.trim()}`);
+    const info = await stat(executable);
+    assert.ok(info.size > 0, `${target.arch}: qcc linked a QNX executable`);
   }
 });
