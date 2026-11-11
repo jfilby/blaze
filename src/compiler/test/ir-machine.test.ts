@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assertMachineTarget, buildObject, machineRefusal } from "../toolchain/ir-machine.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
@@ -1937,6 +1937,43 @@ test("the object defines the symbol the function is called by, and nothing else"
   const defined = run("nm", ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
   assert.equal(defined.stdout.trim().split(/\s+/).pop(), "subject");
   assert.equal(defined.stdout.trim().split("\n").length, 1);
+});
+
+test("the QNX linker accepts the object the machine backend writes", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  const directory = await scratch("blaze-qnx-machine-link-");
+  const target: TargetSpec = { arch: "x86_64", os: "qnx", abi: "sysv", cpu: "", features: [] };
+  const fn = subject(F64, handsBack(number("42")));
+  const objectPath = join(directory, "subject.o");
+  await buildObject({ fn, contract: contracted(fn), target, callable: new Set(), objectPath });
+
+  // The object is the linker's input and nothing else: the main program calls
+  // the symbol it defines, so a linker that rejected the object would fail
+  // here rather than at the first delivered QNX program.
+  const main = join(directory, "main.c");
+  await writeFile(
+    main,
+    "extern double subject(void);\nint main(void) { return subject() == 42.0 ? 0 : 1; }\n",
+    "utf8",
+  );
+  const executable = join(directory, "subject");
+  const linked = run(
+    "qcc",
+    ["-Vgcc_ntox86_64", "-std=c11", "-o", executable, main, objectPath, "-lm"],
+    { timeoutMs: 120_000 },
+  );
+  assert.equal(linked.spawnError, undefined, linked.spawnError ?? "");
+  assert.equal(linked.code, 0, linked.stderr.trim());
+  assert.ok((await stat(executable)).size > 0, "qcc linked the machine object into a QNX executable");
 });
 
 test("a target this backend does not encode for is refused rather than answered with code", () => {
