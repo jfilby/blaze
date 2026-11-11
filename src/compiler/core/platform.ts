@@ -53,6 +53,7 @@ export {
   join,
   mkdir,
   mkdtemp,
+  monotonicTimeNs,
   normalize,
   open,
   parseArgs,

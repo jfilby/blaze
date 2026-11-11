@@ -155,6 +155,15 @@ export function processId(): number {
   return process.pid;
 }
 
+/**
+ * A clock that only moves forward, in nanoseconds. A duration measured with
+ * it is unaffected by a wall-clock adjustment, which is what a timeout and a
+ * benchmark both need.
+ */
+export function monotonicTimeNs(): bigint {
+  return process.hrtime.bigint();
+}
+
 /** The directory part of a path. */
 export function dirname(path: string): string {
   return nodeDirname(path);

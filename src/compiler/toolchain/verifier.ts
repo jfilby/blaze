@@ -28,6 +28,7 @@ import {
   type Value,
 } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
+import { monotonicTimeNs } from "../core/platform.ts";
 import { byName } from "../core/named-record.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import type { FunctionContract, Runner, TestConfig, TestFailure, VerificationResult } from "../core/types.ts";
@@ -515,7 +516,7 @@ export interface VerifyRequest {
 }
 
 export function verifyCandidate(request: VerifyRequest): VerificationResult {
-  const started = process.hrtime.bigint();
+  const started = monotonicTimeNs();
   const { vectors } = request;
   const expected = vectors.map((vector) => {
     const values = vectorValues(request.contract, vector);
@@ -597,7 +598,7 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
     cases: vectors.length,
     tolerance: expected.length === 0 ? null : toleranceFor(request.parsed, expected[0].values),
     failures: failures.slice(0, 20),
-    durationNs: Number(process.hrtime.bigint() - started),
+    durationNs: Number(monotonicTimeNs() - started),
   };
 }
 

@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { spawn, spawnSync } from "./platform.ts";
+import { monotonicTimeNs, spawn, spawnSync } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;
@@ -112,7 +112,7 @@ export function formatCommand(command: string, args: readonly string[]): string 
 }
 
 export function run(command: string, args: readonly string[], options: RunOptions = {}): RunResult {
-  const started = process.hrtime.bigint();
+  const started = monotonicTimeNs();
   // The limit is applied by the shell the program is exec'd from, so what the
   // result reports is the program: the command named here is the one asked
   // for, not the shell that bounded it.
@@ -126,7 +126,7 @@ export function run(command: string, args: readonly string[], options: RunOption
     killSignal: KILL_SIGNAL,
     maxBuffer: options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
   });
-  const durationNs = process.hrtime.bigint() - started;
+  const durationNs = monotonicTimeNs() - started;
   const spawnFailure = result.error as NodeJS.ErrnoException | undefined;
   const stderr = result.stderr ?? "";
   // A bounded run reaches the program through a shell, so a program that is
@@ -182,7 +182,7 @@ export function run(command: string, args: readonly string[], options: RunOption
  * fit.
  */
 export function runAsync(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const started = process.hrtime.bigint();
+  const started = monotonicTimeNs();
   const spawned = options.heapBytes === undefined ? { command, args } : bounded(command, args, options.heapBytes);
   const maxBuffer = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER;
   const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -205,7 +205,7 @@ export function runAsync(command: string, args: readonly string[], options: RunO
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      const durationNs = process.hrtime.bigint() - started;
+      const durationNs = monotonicTimeNs() - started;
       const missing = stderr.startsWith(MISSING) ? stderr.slice(MISSING.length).trim() : undefined;
       const spawnFailure =
         launchError ??
