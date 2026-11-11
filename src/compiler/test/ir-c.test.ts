@@ -115,6 +115,34 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code asks the host where it runs and who it is", async () => {
+  const named = (callee: string, returns: SemanticType): SemanticFunction =>
+    subject(
+      returns,
+      handsBack({
+        k: "call",
+        type: returns,
+        call: {
+          callee,
+          builtin: true,
+          signature: { name: callee, symbol: callee, params: [], returns: returns.kind === "text" ? "ptr<u8>" : "f64" },
+          args: [],
+          argTypes: [],
+          returns,
+          effects: [],
+          ownership: "none",
+          retain: false,
+        },
+      }),
+    );
+  const cwd = await lowered(named("cwdPath", TEXT), (name) => `printf("%s", ${name}());`);
+  assert.equal(cwd, process.cwd());
+  const pid = await lowered(named("processId", F64), (name) => `printf("%.17g", ${name}());`);
+  assert.ok(Number(pid) > 0, `the process has an id: ${pid}`);
+  const cpus = await lowered(named("cpuCount", F64), (name) => `printf("%.17g", ${name}());`);
+  assert.ok(Number(cpus) > 0, `the host has processors: ${cpus}`);
+});
+
 test("the C code removes a tree and copies a file", async () => {
   const directory = await scratch("blaze-c-remove-");
   const tree = join(directory, "tree");

@@ -277,6 +277,14 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "cwdPath":
+      return `${RUNTIME_NAME}_cwd()`;
+    case "processId":
+      return `${RUNTIME_NAME}_process_id()`;
+    case "cpuCount":
+      return `${RUNTIME_NAME}_cpu_count()`;
+    case "sleepMs":
+      return `(${RUNTIME_NAME}_sleep_ms(${args[0]}), 0.0)`;
     case "removePath":
       return `${RUNTIME_NAME}_path_remove(${args[0]}, ${args[1]})`;
     case "copyPath":

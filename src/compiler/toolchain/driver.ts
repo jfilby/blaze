@@ -1124,6 +1124,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "cwdPath":
+        return `${RUNTIME_NAME}_cwd()`;
+      case "processId":
+        return `${RUNTIME_NAME}_process_id()`;
+      case "cpuCount":
+        return `${RUNTIME_NAME}_cpu_count()`;
+      case "sleepMs":
+        return `(${RUNTIME_NAME}_sleep_ms(${argument(0)}), 0.0)`;
       case "removePath":
         return `${RUNTIME_NAME}_path_remove(${argument(0)}, ${argument(1)})`;
       case "copyPath":

@@ -169,6 +169,20 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("a program asks the host where it runs and who it is", async () => {
+  const files = {
+    "main.ts": [
+      "console.log(cwdPath());",
+      'console.log(processId() > 0 ? "yes" : "no");',
+      'console.log(cpuCount() > 0 ? "yes" : "no");',
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `${process.cwd()}\nyes\nyes\n`);
+});
+
 test("a program removes a tree and copies a file through the host", async () => {
   const directory = await scratch("blaze-wasm-remove-");
   const tree = join(directory, "tree");

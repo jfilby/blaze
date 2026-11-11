@@ -3620,6 +3620,19 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "cwdPath":
+        this.callService("blaze_rt_cwd");
+        return TEXT;
+      case "processId":
+        this.callService("blaze_rt_process_id");
+        return F64_TYPE;
+      case "cpuCount":
+        this.callService("blaze_rt_cpu_count");
+        return F64_TYPE;
+      case "sleepMs":
+        this.value(argument(0), F64_TYPE);
+        this.callService("blaze_rt_sleep_ms");
+        return F64_TYPE;
       case "removePath":
         this.textArgument(argument(0));
         this.value(argument(1), F64_TYPE);

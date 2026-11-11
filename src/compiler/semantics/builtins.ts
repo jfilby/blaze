@@ -331,6 +331,14 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "removePath": { params: [TEXT, F64], returns: F64, arity: 2 },
   /** Copies a file to another path, replacing what the other held. */
   "copyPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** The directory the process runs in, as the path it is. */
+  "cwdPath": { params: [], returns: TEXT, arity: 0 },
+  /** The process's own id, which a temporary name may carry. */
+  "processId": { params: [], returns: F64, arity: 0 },
+  /** How many processors the host makes available. */
+  "cpuCount": { params: [], returns: F64, arity: 0 },
+  /** Waits for the milliseconds the call names. */
+  "sleepMs": { params: [F64], returns: F64, arity: 1 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

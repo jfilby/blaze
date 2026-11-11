@@ -11199,6 +11199,21 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "cwdPath" || call.callee === "processId" || call.callee === "cpuCount") {
+      // The host answers each with a value and takes nothing: the path is a
+      // text and the two counts are numbers.
+      const symbol =
+        call.callee === "cwdPath" ? "blaze_rt_cwd" : call.callee === "processId" ? "blaze_rt_process_id" : "blaze_rt_cpu_count";
+      this.callSymbol(symbol, [], call.callee === "cwdPath" ? TEXT : NUMBER);
+      return;
+    }
+    if (call.callee === "sleepMs" && call.args[0] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      const milliseconds = this.hold(NUMBER, "blaze_sleep_ms");
+      this.store(milliseconds);
+      this.callSymbol("blaze_rt_sleep_ms", [milliseconds], NUMBER);
+      return;
+    }
     if (call.callee === "removePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
       this.at(call.args[0], TEXT);
       const path = this.hold(TEXT, "blaze_remove_path");

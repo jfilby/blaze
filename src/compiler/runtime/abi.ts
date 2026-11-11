@@ -1145,6 +1145,38 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_cwd",
+    "const char*",
+    [],
+    "The directory the process runs in.",
+    "Returns a managed string: the absolute path of the working directory.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_process_id",
+    "double",
+    [],
+    "The process's own id.",
+    "Returns the id the host gave it.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_cpu_count",
+    "double",
+    [],
+    "How many processors the host makes available.",
+    "Returns the count, and one where the host does not say.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_sleep_ms",
+    "double",
+    [["milliseconds", "double"]],
+    "Waits for a number of milliseconds.",
+    "Returns zero after the wait.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_path_remove",
     "double",
     [["path", "const char*"], ["recursive", "double"]],
@@ -6341,6 +6373,31 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+const char* blaze_rt_cwd(void) {
+  char buffer[4096];
+  if (getcwd(buffer, sizeof buffer) == NULL) return blaze_rt_string_new((const unsigned char*)".", 1);
+  return blaze_rt_string_new((const unsigned char*)buffer, strlen(buffer));
+}
+
+double blaze_rt_process_id(void) {
+  return (double)getpid();
+}
+
+double blaze_rt_cpu_count(void) {
+  const long count = sysconf(_SC_NPROCESSORS_ONLN);
+  return count > 0 ? (double)count : 1.0;
+}
+
+double blaze_rt_sleep_ms(double milliseconds) {
+  if (milliseconds > 0.0) {
+    struct timespec wait;
+    wait.tv_sec = (time_t)(milliseconds / 1000.0);
+    wait.tv_nsec = (long)((milliseconds - (double)wait.tv_sec * 1000.0) * 1000000.0);
+    nanosleep(&wait, NULL);
+  }
+  return 0.0;
 }
 
 static int blaze_remove_tree(const char* path) {
