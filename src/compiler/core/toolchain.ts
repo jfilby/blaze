@@ -35,6 +35,8 @@ export interface Toolchain {
   readonly supportsLto: boolean;
   readonly supportsFatLto: boolean;
   readonly supportsOpenMp: boolean;
+  /** Whether the linker collects sections no symbol reaches. */
+  readonly supportsGcSections: boolean;
 }
 
 /** The Linux host compiler. */
@@ -49,6 +51,7 @@ const GCC: Toolchain = {
   supportsLto: true,
   supportsFatLto: true,
   supportsOpenMp: true,
+  supportsGcSections: true,
 };
 
 /** The QNX self-hosted C/C++ toolchain. */
@@ -67,6 +70,8 @@ const QNX_CLANG: Toolchain = {
   // libomp is not assumed to exist on a QNX image; a C backend parallel loop
   // asks for it and fails clearly if it is not there.
   supportsOpenMp: false,
+  // lld's `--gc-sections` is the same option the Linux link uses.
+  supportsGcSections: true,
 };
 
 /** The QNX cross compiler, selected by qcc's `-V` target. */
@@ -96,6 +101,9 @@ function qcc(target: TargetSpec): Toolchain {
     supportsLto: true,
     supportsFatLto: true,
     supportsOpenMp: true,
+    // The QNX cross linker is GNU ld, which reads the same section collection
+    // option the Linux link passes.
+    supportsGcSections: true,
   };
 }
 
@@ -250,13 +258,22 @@ export function loweringOptionsFor(
   return toolchain.supportsLto ? options : options.filter((option) => option !== "-flto");
 }
 
-/** The options a delivered program is linked with. */
+/**
+ * The options a delivered program is linked with.
+ *
+ * Section collection is a link capability rather than a flag every linker is
+ * assumed to read. The C runtime is compiled one function per section, so a
+ * linker that collects the unreached ones drops the runtime a program never
+ * calls; a linker that does not support the option is asked for nothing and
+ * carries the whole runtime instead.
+ */
 export function linkOptionsFor(
   toolchain: Toolchain,
   mode: BuildMode,
   objective?: Objective,
 ): string[] {
-  return loweringOptionsFor(toolchain, mode, objective);
+  const options = loweringOptionsFor(toolchain, mode, objective);
+  return toolchain.supportsGcSections ? [...options, "-Wl,--gc-sections"] : options;
 }
 
 /**

@@ -746,7 +746,6 @@ export function link(request: LinkRequest): void {
     ...target,
     ...includes,
     ...threadingOptionsFor(toolchain, request.threads ?? []),
-    "-Wl,--gc-sections",
     "-o",
     request.outputPath,
     ...inputs,

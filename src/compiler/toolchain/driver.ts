@@ -2152,7 +2152,6 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
     ...linkOptionsFor(toolchain, request.mode, request.objective),
     ...cTargetOptions(request.target),
     ...threadingOptionsFor(toolchain, request.threads ?? []),
-    "-Wl,--gc-sections",
     "-o",
     request.outputPath,
     ...inputs,

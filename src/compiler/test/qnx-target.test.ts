@@ -100,6 +100,7 @@ test("a QNX host selects clang for its own architecture", () => {
   assert.equal(native.relocatableLinker, "driver");
   assert.equal(native.supportsFatLto, false);
   assert.equal(native.supportsOpenMp, false);
+  assert.equal(native.supportsGcSections, true);
 
   assert.throws(
     () => toolchainFor(QNX_ARM, "qnx", "x64"),
@@ -112,10 +113,15 @@ test("a toolchain without fat LTO measures machine code, not an empty object", (
   assert.ok(candidateOptions(gcc, "release").includes("-flto"));
   assert.ok(candidateOptions(gcc, "release").includes("-ffat-lto-objects"));
   assert.ok(linkOptionsFor(gcc, "release").includes("-flto"));
+  assert.ok(linkOptionsFor(gcc, "release").includes("-Wl,--gc-sections"));
 
   const clang = toolchainFor(QNX_X86, "qnx", "x64");
   assert.deepEqual(candidateOptions(clang, "release"), ["-O3", "-fno-math-errno", "-fno-trapping-math"]);
   assert.ok(linkOptionsFor(clang, "release").includes("-flto"));
+  assert.ok(linkOptionsFor(clang, "release").includes("-Wl,--gc-sections"));
+
+  const qcc = toolchainFor(QNX_X86, "linux");
+  assert.ok(linkOptionsFor(qcc, "release").includes("-Wl,--gc-sections"));
 });
 
 test("OpenMP is refused rather than quietly serialized", () => {
