@@ -30,7 +30,7 @@
  *   COMMANDCODE_API_KEY, COMMAND_CODE_API_KEY  enables the commandcode provider
  */
 
-import { randomUUID } from "../core/platform.ts";
+import { hostEnvironment, randomUUID } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { COMMANDCODE_BASE_URL } from "./commandcode.ts";
 
@@ -92,7 +92,7 @@ function generationError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
 }
 
-function firstEnvKey(env: NodeJS.ProcessEnv, keys: readonly string[]): string | undefined {
+function firstEnvKey(env: Readonly<Record<string, string | undefined>>, keys: readonly string[]): string | undefined {
   for (const key of keys) {
     const value = env[key];
     if (value !== undefined && value !== "") return value;
@@ -110,7 +110,7 @@ function firstEnvKey(env: NodeJS.ProcessEnv, keys: readonly string[]): string | 
  * `openai-compatible` has no endpoint of its own to fall back to — `AI_BASE_URL`
  * names it or the provider cannot be used at all.
  */
-function endpointFor(name: ProviderName, env: NodeJS.ProcessEnv): string | undefined {
+function endpointFor(name: ProviderName, env: Readonly<Record<string, string | undefined>>): string | undefined {
   if (name === "openrouter") return OPENROUTER_BASE_URL;
   if (name === "commandcode") return env.COMMANDCODE_BASE_URL || COMMANDCODE_BASE_URL;
   if (name === "opencode-go") return env.OPENCODE_GO_BASE_URL || OPENCODE_GO_BASE_URL;
@@ -125,7 +125,10 @@ function endpointFor(name: ProviderName, env: NodeJS.ProcessEnv): string | undef
  * A missing or malformed configuration fails loudly instead of silently
  * producing a compiler that cannot generate anything.
  */
-export function resolveModel(spec: string | undefined, env: NodeJS.ProcessEnv = process.env): ModelConfiguration {
+export function resolveModel(
+  spec: string | undefined,
+  env: Readonly<Record<string, string | undefined>> = hostEnvironment(),
+): ModelConfiguration {
   const requested = spec ?? env.AI_MODEL ?? "";
   if (requested === "") {
     throw generationError(

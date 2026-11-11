@@ -11,13 +11,13 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { monotonicTimeNs, spawn, spawnSync } from "./platform.ts";
+import { hostEnvironment, monotonicTimeNs, spawn, spawnSync } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;
   timeoutMs?: number;
   input?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: Readonly<Record<string, string | undefined>>;
   maxBufferBytes?: number;
   /**
    * The heap, in bytes, the child may grow. A program that allocates without
@@ -119,7 +119,7 @@ export function run(command: string, args: readonly string[], options: RunOption
   const spawned = options.heapBytes === undefined ? { command, args } : bounded(command, args, options.heapBytes);
   const result = spawnSync(spawned.command, spawned.args, {
     cwd: options.cwd,
-    env: options.env ? { ...process.env, ...options.env } : process.env,
+    env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
     input: options.input,
     encoding: "utf8",
     timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -190,7 +190,7 @@ export function runAsync(command: string, args: readonly string[], options: RunO
   return new Promise<RunResult>((settle) => {
     const child = spawn(spawned.command, spawned.args, {
       cwd: options.cwd,
-      env: options.env ? { ...process.env, ...options.env } : process.env,
+      env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
 

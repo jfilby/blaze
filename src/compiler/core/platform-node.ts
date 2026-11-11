@@ -164,6 +164,15 @@ export function monotonicTimeNs(): bigint {
   return process.hrtime.bigint();
 }
 
+/**
+ * The variables the host process was given. A build reads `AI_MODEL` and the
+ * provider credentials from here, and a child it starts is given the same
+ * variables unless the caller names its own.
+ */
+export function hostEnvironment(): Readonly<Record<string, string | undefined>> {
+  return process.env;
+}
+
 /** The directory part of a path. */
 export function dirname(path: string): string {
   return nodeDirname(path);

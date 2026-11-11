@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -1412,7 +1412,8 @@ export async function runBuild(
   // Whether a model is configured at all, the same reading resolveModel
   // makes. A build with none still runs: it lowers the IR the rules resolved
   // and verified, and reviews nothing.
-  const modelRequested = (requested ?? process.env.AI_MODEL ?? "") !== "";
+  const environment = hostEnvironment();
+  const modelRequested = (requested ?? environment.AI_MODEL ?? "") !== "";
   // A generate exists to show what a model made of the IR, so with none
   // configured there is nothing to show: it refuses rather than handing back
   // the IR as it stands under a generate's name.
@@ -1433,7 +1434,7 @@ export async function runBuild(
   }
   // A reused build is answered by the model that reviewed the stored candidate,
   // so that is the model to name.
-  const modelName = options.reuse ? previousBuild?.model : (requested ?? process.env.AI_MODEL);
+  const modelName = options.reuse ? previousBuild?.model : (requested ?? environment.AI_MODEL);
   // The model is part of every answer this compiler gives, so it is named
   // before anything can fail, including a model that cannot be reached.
   reporter.stage("model", "info", `Model: ${modelName ?? "(unset)"}`);
@@ -1648,7 +1649,7 @@ export async function runBuild(
     // last build used rather than invalidating everything for want of a name.
     const modelKey = options.reuse
       ? (previousBuild?.model ?? "unset")
-      : (requested ?? process.env.AI_MODEL ?? previousBuild?.model ?? "unset");
+      : (requested ?? environment.AI_MODEL ?? previousBuild?.model ?? "unset");
     // What the compiler itself is decides what an implementation is and how it
     // is proved, and it is in the key so that editing the prompt, the runtime
     // or the assembler rules rebuilds rather than reuses an object that the

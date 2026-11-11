@@ -48,6 +48,7 @@ export {
   extname,
   fileURLToPath,
   hostArchitecture,
+  hostEnvironment,
   hostPlatform,
   isAbsolute,
   join,
