@@ -3904,8 +3904,20 @@ class TypeScriptParser {
   /** The constants being read, so one that names itself is not read forever. */
   private readonly expanding = new Set<string>();
 
-  /** A nested function declaration is handled by the program parsing, not the module one. */
+  /**
+   * True when a body declares a function inside a function. A file that runs
+   * has that declaration read by the program parser, whose grammar carries the
+   * shape; a file that runs nothing keeps this read, where it is lifted to a
+   * closure the module function calls.
+   */
   nestedFunction = false;
+  /**
+   * True when a body reads a builtin the module parser does not hold. Those
+   * are the service calls the program parser reads — `sqlite.open` and the
+   * facility namespaces beside it — so a file that runs is read whole by that
+   * parser, exactly as a file with a nested declaration is.
+   */
+  programBuiltin = false;
   /**
    * The exports whose body this read could not hold, by signature.
    *
@@ -8047,6 +8059,12 @@ class TypeScriptParser {
    * by `readBlock` once the captures are known.
    */
   private readNestedFunction(): Statement {
+    // A program body may declare a function inside a function, and the program
+    // parser is the grammar that carries the shape: mark the file so the whole
+    // text is read by it when the file turns out to run something. A file that
+    // runs nothing keeps this read, where the declaration is lifted to a
+    // closure the module function calls.
+    this.nestedFunction = true;
     const start = this.next();
     let isAsync = false;
     if (this.at("async")) {
@@ -12562,6 +12580,15 @@ class TypeScriptParser {
             // not declare is the refusal it always was.
             const known = this.shapeOf(receiver);
             const unshaped = known === null || known.kind === "any";
+            // A method the module does not hold may be a builtin only the
+            // program parser reads — `sqlite.open` in a function of a running
+            // program. The value is deferred here as any untyped one, and the
+            // file is marked so the program parser reads it when it runs.
+            let root: Expression = receiver;
+            while (root.k === "member" || root.k === "index") root = root.base;
+            if (root.k === "ident" && builtinFor(`${root.name}.${target.field}`) !== null) {
+              this.programBuiltin = true;
+            }
             if (this.pendingHolds(receiver) || (this.opaqueValue(receiver) && unshaped)) {
               // What the method answers is a value of the same unlinked
               // declaration, so it waits for the link too: a method written on
@@ -22439,10 +22466,10 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
   const analysis = parser.parseModule(path, entry);
   // A file read as a program has its whole text readable as statements, so a
-  // nested function inside a function that the module parser stopped for is
-  // read by the one parser whose grammar carries that shape. The module
-  // parse's nested-function entries are still the answer if that fails too.
-  if (parser.nestedFunction) {
+  // nested function inside a function, and a builtin only the program parser
+  // holds, are read by the parser whose grammar carries them. The module
+  // parse's own answer is still the one used if that read fails.
+  if ((parser.nestedFunction || parser.programBuiltin) && analysis.body.length > 0) {
     const fromStatements = tokensAfterImports(parser["tokens"]);
     const programDiagnostics = new Diagnostics();
     try {

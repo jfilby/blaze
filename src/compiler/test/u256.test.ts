@@ -154,7 +154,9 @@ int main(int argc, char** argv) {
   unsigned char text[80];
   blaze_rt_u256_format(&left, 10, text, sizeof text); printf("decimal %s\\n", text);
   blaze_rt_u256_format(&left, 16, text, sizeof text); printf("hex %s\\n", text);
-  blaze_rt_u256_format(&left, 8, text, sizeof text); printf("octal %d\\n", (int)blaze_rt_u256_format(&left, 8, text, sizeof text));
+  printf("octal %d\\n", (int)blaze_rt_u256_format(&left, 8, text, sizeof text));
+  printf("octalText %s\\n", text);
+  printf("badBase %d\\n", (int)blaze_rt_u256_format(&left, 17, text, sizeof text));
 
   blaze_rt_u256_from_u64(&out, 0x0123456789abcdefULL);
   printf("widened %llu\\n", (unsigned long long)blaze_rt_u256_to_u64(&out));
@@ -249,10 +251,13 @@ test("the wide kernel answers the same arithmetic the language's bigints do", as
     checked += 6;
   }
 
-  // A base the kernel does not answer is refused rather than answered in another
-  // base, which would print a different number from the one that was asked for.
+  // Every base from two to sixteen is answered in the base it was asked for,
+  // and a base outside that range is refused rather than answered in another
+  // one, which would print a different number from the one that was asked for.
   const one = await ask(binary, 255n, 0n);
-  assert.equal(one.get("octal"), "0");
+  assert.equal(one.get("octal"), "3");
+  assert.equal(one.get("octalText"), "377");
+  assert.equal(one.get("badBase"), "0");
   // Widening zero-extends and narrowing keeps the low limb.
   assert.equal(one.get("widened"), "81985529216486895");
   assert.ok(checked > 20_000, `expected the boundary set to be exercised, checked ${checked}`);

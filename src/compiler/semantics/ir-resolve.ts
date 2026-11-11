@@ -4962,9 +4962,9 @@ class ProgramResolver {
       // as a type the array was never written at.
       const group = this.aliased(held);
       const fixed = group.find((member) => member.element !== null && member.element.kind === "primitive" && member.element.name !== wanted);
-      if (fixed !== undefined) {
+      if (fixed !== undefined && fixed.element !== null) {
         throw programError(
-          `an array of ${fixed.element} is used where ${wanted} is expected`,
+          `an array of ${typeToString(fixed.element)} is used where ${wanted} is expected`,
           this.body,
           line,
           `line ${line} of ${this.body.file}: allocate the array with the element type the parameter takes`,
