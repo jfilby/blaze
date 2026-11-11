@@ -1905,6 +1905,23 @@ proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.i
 proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
 proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
 
+proc blaze_rt_path_kind*(path: cstring): float64 {.exportc, cdecl.} =
+  ## Zero for nothing, one for a file, two for a directory, three for another
+  ## kind of entry.
+  if path == nil: return 0.0
+  let name = $path
+  if dirExists(name): return 2.0
+  if fileExists(name): return 1.0
+  if os.exists(name): return 3.0
+  0.0
+
+proc blaze_rt_file_size*(path: cstring): float64 {.exportc, cdecl.} =
+  ## The bytes the file holds, or -1 where the path names no file.
+  if path == nil: return -1.0
+  let name = $path
+  if not fileExists(name): return -1.0
+  float64(getFileSize(name))
+
 proc blaze_rt_path_exists*(path: cstring): float64 {.exportc, cdecl.} =
   ## One where the path names a file or a directory, and zero where it does not.
   if path == nil: return 0.0

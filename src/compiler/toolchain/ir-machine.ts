@@ -11199,6 +11199,15 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if ((call.callee === "pathKind" || call.callee === "fileSize") && call.args[0] !== undefined) {
+      // The path is the text it is; the runtime reads it and answers the kind
+      // the entry is or the bytes the file holds.
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_stat_path");
+      this.store(path);
+      this.callSymbol(call.callee === "pathKind" ? "blaze_rt_path_kind" : "blaze_rt_file_size", [path], NUMBER);
+      return;
+    }
     if (call.callee === "fs.existsSync" && call.args[0] !== undefined) {
       // The path is the text it is, and the runtime answers whether it names
       // anything.

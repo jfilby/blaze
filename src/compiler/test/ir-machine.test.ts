@@ -334,6 +334,37 @@ async function instructions(fn: SemanticFunction, target: TargetSpec = TARGET): 
   return listed.stdout;
 }
 
+test("the machine code asks the host the size of a file and the kind of a path", async () => {
+  // The two services a stat is built from: the bytes a file holds and what the
+  // path names. The path is a text the IR carries, and the runtime answers.
+  const directory = await scratch("blaze-machine-stat-");
+  const path = join(directory, "data.txt");
+  await writeFile(path, "hello");
+  const ask = (callee: string): SemanticFunction =>
+    subject(
+      F64,
+      handsBack({
+        k: "call",
+        type: F64,
+        call: {
+          callee,
+          builtin: true,
+          signature: { name: callee, symbol: callee, params: [{ name: "path", type: "ptr<u8>" }], returns: "f64" },
+          args: [literal(path)],
+          argTypes: [TEXT],
+          returns: F64,
+          effects: [],
+          ownership: "none",
+          retain: false,
+        },
+      }),
+    );
+  const size = await lowered(ask("fileSize"), (name) => `printf("%.17g", ${name}());`);
+  assert.equal(size, "5");
+  const kind = await lowered(ask("pathKind"), (name) => `printf("%.17g", ${name}());`);
+  assert.equal(kind, "1", "the path names a file");
+});
+
 test("a value the IR calls is run once, whichever form writes it down", async () => {
   // Each of these hands an answer back from a call, and a lowering that reads
   // the value once as the side that decides and once as the answer runs the

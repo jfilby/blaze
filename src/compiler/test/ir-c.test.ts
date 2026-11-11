@@ -201,6 +201,32 @@ async function lowered(fn: SemanticFunction, driver: (name: string) => string): 
   return run(binary, [], { timeoutMs: 60_000 }).stdout;
 }
 
+test("the C code asks the host the kind of a path", async () => {
+  const directory = await scratch("blaze-c-stat-");
+  const file = join(directory, "data.txt");
+  await writeFile(file, "hello");
+  const fn = subject(
+    F64,
+    handsBack({
+      k: "call",
+      type: F64,
+      call: {
+        callee: "pathKind",
+        builtin: true,
+        signature: { name: "pathKind", symbol: "pathKind", params: [{ name: "path", type: "ptr<u8>" }], returns: "f64" },
+        args: [literal(file)],
+        argTypes: [TEXT],
+        returns: F64,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  const printed = await lowered(fn, (name) => `printf("%.17g", ${name}());`);
+  assert.equal(printed, "1", "the path names a file");
+});
+
 test("a value the IR calls is run once, whichever form writes it down", async () => {
   // Each of these hands an answer back from a call, and the C used to write the
   // value down twice — as the arm that decides and as the answer, or as the

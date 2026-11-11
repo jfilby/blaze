@@ -309,6 +309,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `fs.existsSync(path)` asks whether the path names anything. The answer
    *  is one or zero, which a test reads as the truth a boolean is. */
   "fs.existsSync": { params: [TEXT], returns: F64, arity: 1 },
+  /** The kind of thing a path names: zero for nothing, one for a file, two for
+   *  a directory, three for anything else. It is what a stat is built from. */
+  "pathKind": { params: [TEXT], returns: F64, arity: 1 },
+  /** The size in bytes of the file a path names, or -1 where there is none. */
+  "fileSize": { params: [TEXT], returns: F64, arity: 1 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

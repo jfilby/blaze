@@ -1129,6 +1129,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
+    "blaze_rt_path_kind",
+    "double",
+    [["path", "const char*"]],
+    "The kind of thing a path names.",
+    "Returns zero for nothing, one for a file, two for a directory and three for anything else.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_file_size",
+    "double",
+    [["path", "const char*"]],
+    "The size of the file a path names.",
+    "Returns the bytes it holds, or -1 where the path names no file.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_path_exists",
     "double",
     [["path", "const char*"]],
@@ -3558,6 +3574,7 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #include <malloc.h>
 #endif
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -6282,6 +6299,20 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+double blaze_rt_path_kind(const char* path) {
+  struct stat info;
+  if (path == NULL || stat(path, &info) != 0) return 0.0;
+  if (S_ISDIR(info.st_mode)) return 2.0;
+  if (S_ISREG(info.st_mode)) return 1.0;
+  return 3.0;
+}
+
+double blaze_rt_file_size(const char* path) {
+  struct stat info;
+  if (path == NULL || stat(path, &info) != 0) return -1.0;
+  return (double)info.st_size;
 }
 
 double blaze_rt_path_exists(const char* path) {

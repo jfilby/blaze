@@ -1124,6 +1124,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "pathKind":
+        return `${RUNTIME_NAME}_path_kind(${argument(0)})`;
+      case "fileSize":
+        return `${RUNTIME_NAME}_file_size(${argument(0)})`;
       case "fs.existsSync":
         return `(${RUNTIME_NAME}_path_exists(${argument(0)}) != 0.0 ? 1.0 : 0.0)`;
       case "fs.writeFileSync":

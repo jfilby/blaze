@@ -3620,6 +3620,14 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "pathKind":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_path_kind");
+        return F64_TYPE;
+      case "fileSize":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_file_size");
+        return F64_TYPE;
       case "fs.existsSync":
         this.textArgument(argument(0));
         this.callService("blaze_rt_path_exists");

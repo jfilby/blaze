@@ -134,6 +134,22 @@ test("a program asks the host whether a path exists", async () => {
   assert.equal(result.stdout, "yes\nno\n");
 });
 
+test("a program asks the host what a path is", async () => {
+  const directory = await scratch("blaze-wasm-stat-");
+  const path = join(directory, "data.txt");
+  await writeFile(path, "hello");
+  const files = {
+    "main.ts": [
+      `console.log(fileSize(${JSON.stringify(path)}));`,
+      `console.log(pathKind(${JSON.stringify(path)}));`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "5\n1\n");
+});
+
 test("a program writes a file through the host", async () => {
   const directory = await scratch("blaze-wasm-file-");
   const path = join(directory, "written.txt");
