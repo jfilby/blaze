@@ -10,7 +10,8 @@
  * answer that differs is a difference the run reports.
  */
 
-import type { BuildStatus } from "./types.ts";
+import { join, readFile } from "./platform.ts";
+import type { BuildStatus, Candidate } from "./types.ts";
 
 /** The fields that name a run rather than what it decided. */
 const RUN_SPECIFIC = new Set(["id", "input", "contract", "output", "createdAt", "updatedAt"]);
@@ -71,4 +72,75 @@ export function compareBuildRecords(left: BuildStatus, right: BuildStatus): stri
   const differences: string[] = [];
   walk(comparable(left), comparable(right), "", differences);
   return differences;
+}
+
+/** The differences in any two JSON values, under the name `root`. */
+export function compareJson(left: unknown, right: unknown, root: string): string[] {
+  const differences: string[] = [];
+  walk(left as Json, right as Json, root, differences);
+  return differences;
+}
+
+/**
+ * The selected candidate text two project states compiled.
+ *
+ * A build record names the candidate it selected, but not what that candidate
+ * says. The candidate text is the IR the compiler resolved and reviewed, so a
+ * fixed point compares it too: the same source and model must produce the same
+ * program, not merely choose a candidate with the same name.
+ */
+async function compareSelectedCandidates(
+  leftRoot: string,
+  rightRoot: string,
+  leftBuild: BuildStatus,
+  rightBuild: BuildStatus,
+): Promise<string[]> {
+  const differences: string[] = [];
+  const left = JSON.parse(await readFile(join(leftRoot, "candidates.json"), "utf8")) as Record<string, Candidate[]>;
+  const right = JSON.parse(await readFile(join(rightRoot, "candidates.json"), "utf8")) as Record<string, Candidate[]>;
+  const named = new Set([
+    ...Object.keys(leftBuild.selectedCandidates ?? {}),
+    ...Object.keys(rightBuild.selectedCandidates ?? {}),
+  ]);
+  for (const functionName of [...named].sort()) {
+    const leftId = leftBuild.selectedCandidates?.[functionName];
+    const rightId = rightBuild.selectedCandidates?.[functionName];
+    if (leftId === undefined || rightId === undefined || leftId !== rightId) continue;
+    const leftCandidate = (left[functionName] ?? []).find((candidate) => candidate.id === leftId);
+    const rightCandidate = (right[functionName] ?? []).find((candidate) => candidate.id === rightId);
+    const path = `candidates.${functionName}.${leftId}`;
+    if (leftCandidate === undefined || rightCandidate === undefined) {
+      differences.push(`${path}: selected candidate is ${leftCandidate === undefined ? "missing on the left" : "missing on the right"}`);
+      continue;
+    }
+    if (leftCandidate.text !== rightCandidate.text) differences.push(`${path}.text: the selected IR differs`);
+    if (JSON.stringify(leftCandidate.proposals) !== JSON.stringify(rightCandidate.proposals)) {
+      differences.push(`${path}.proposals: the applied proposals differ`);
+    }
+    if (JSON.stringify(leftCandidate.feedback) !== JSON.stringify(rightCandidate.feedback)) {
+      differences.push(`${path}.feedback: the recorded diagnostics differ`);
+    }
+  }
+  return differences;
+}
+
+/**
+ * The decisions two project states agree on, and the ones they do not.
+ *
+ * A state directory is the `.blaze/projects/<name>` directory a build leaves:
+ * its record, its contract, and the candidates it reviewed. Comparing the
+ * record alone would miss a different IR selected under the same candidate
+ * name, and comparing the candidates alone would miss a different backend or
+ * runtime; a conformance run needs both answers.
+ */
+export async function compareProjectStates(leftRoot: string, rightRoot: string): Promise<string[]> {
+  const leftBuild = JSON.parse(await readFile(join(leftRoot, "build.json"), "utf8")) as BuildStatus;
+  const rightBuild = JSON.parse(await readFile(join(rightRoot, "build.json"), "utf8")) as BuildStatus;
+  const leftContract = JSON.parse(await readFile(join(leftRoot, "contract.json"), "utf8")) as unknown;
+  const rightContract = JSON.parse(await readFile(join(rightRoot, "contract.json"), "utf8")) as unknown;
+  return [
+    ...compareBuildRecords(leftBuild, rightBuild),
+    ...compareJson(leftContract, rightContract, "contract"),
+    ...(await compareSelectedCandidates(leftRoot, rightRoot, leftBuild, rightBuild)),
+  ];
 }

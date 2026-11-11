@@ -98,7 +98,7 @@ test("--verify=none builds a program without running it and records that", async
 });
 
 /** A built program and the project state its record lives in. */
-async function builtForCompare(name: string): Promise<{ directory: string; record: string }> {
+async function builtForCompare(name: string): Promise<{ directory: string; state: string; record: string }> {
   const directory = await scratch(`blaze-compare-${name}-`);
   await writeFile(join(directory, "main.ts"), "console.log(1 + 2);\n", "utf8");
   await writeFile(
@@ -109,7 +109,7 @@ async function builtForCompare(name: string): Promise<{ directory: string; recor
   const built = blaze(directory, "build");
   assert.equal(built.code, 0, built.stderr);
   const state = await storeDirectory(directory, basename(directory));
-  return { directory, record: join(state, "build.json") };
+  return { directory, state, record: join(state, "build.json") };
 }
 
 test("compare reports the decisions two build records share and the ones they do not", async () => {
@@ -120,6 +120,20 @@ test("compare reports the decisions two build records share and the ones they do
   assert.equal(same.code, 0, same.stderr);
   assert.match(same.stdout, /The build records agree/);
 
+  const sameStates = blaze(first.directory, "compare", first.state, second.state);
+  assert.equal(sameStates.code, 0, sameStates.stderr);
+  assert.match(sameStates.stdout, /The build records agree/);
+
+  const contractPath = join(second.state, "contract.json");
+  const contract = JSON.parse(await readFile(contractPath, "utf8")) as { version: string };
+  contract.version = "different";
+  await writeFile(contractPath, JSON.stringify(contract, null, 2), "utf8");
+  const contractDifference = blaze(first.directory, "compare", first.state, second.state);
+  assert.equal(contractDifference.code, 1);
+  assert.match(contractDifference.stdout, /contract\.version:/);
+  contract.version = "1";
+  await writeFile(contractPath, JSON.stringify(contract, null, 2), "utf8");
+
   const changed = JSON.parse(await readFile(second.record, "utf8")) as { backend: string };
   changed.backend = changed.backend === "machine" ? "c" : "machine";
   await writeFile(second.record, JSON.stringify(changed, null, 2), "utf8");
@@ -128,6 +142,35 @@ test("compare reports the decisions two build records share and the ones they do
   assert.equal(different.code, 1);
   assert.match(different.stdout, /The build records differ/);
   assert.match(different.stdout, /backend:/);
+});
+
+test("compare reports a selected candidate whose IR differs", async () => {
+  const first = await libraryProject("compare-candidate-a");
+  const second = await libraryProject("compare-candidate-b");
+  const build = (directory: string) =>
+    run(process.execPath, [CLI, "build", "input.toml", `--model=replay:${first.replay}`], {
+      cwd: directory,
+      timeoutMs: 300_000,
+    });
+  assert.equal(build(first.directory).code, 0);
+  assert.equal(build(second.directory).code, 0);
+  const firstState = await storeDirectory(first.directory, "input");
+  const secondState = await storeDirectory(second.directory, "input");
+
+  const same = blaze(first.directory, "compare", firstState, secondState);
+  assert.equal(same.code, 0, same.stderr);
+  assert.match(same.stdout, /The build records agree/);
+
+  const candidatesPath = join(secondState, "candidates.json");
+  const candidates = JSON.parse(await readFile(candidatesPath, "utf8")) as Record<string, { id: string; text: string }[]>;
+  const selected = candidates.square?.[0];
+  assert.ok(selected !== undefined);
+  selected.text += "\n";
+  await writeFile(candidatesPath, JSON.stringify(candidates, null, 2), "utf8");
+
+  const different = blaze(first.directory, "compare", firstState, secondState);
+  assert.equal(different.code, 1);
+  assert.match(different.stdout, /candidates\.square\.c1\.text/);
 });
 
 test("init refuses to write over a project file, and leaves it as it was", async () => {
