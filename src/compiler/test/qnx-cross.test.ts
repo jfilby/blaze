@@ -16,6 +16,7 @@ import { run } from "../core/process.ts";
 import type { TargetSpec } from "../core/types.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
 import { buildFacilRuntime } from "../runtime/facil.ts";
+import { buildSqliteLibrary } from "../runtime/sqlite-build.ts";
 import { writeRuntimeHeader } from "../runtime/standalone.ts";
 import { scratch } from "./scratch.ts";
 
@@ -126,5 +127,31 @@ test("qcc builds the HTTP runtime for both QNX architectures", async (t) => {
     const runtime = await buildFacilRuntime(directory, "debug", target);
     const info = await stat(runtime.objectPath);
     assert.ok(info.size > 0, `${target.arch}: qcc built the HTTP runtime`);
+  }
+});
+
+test("qcc builds the SQLite library for both QNX architectures", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-sqlite-${target.arch}-`);
+    const library = await buildSqliteLibrary(directory, "debug", target);
+    const info = await stat(library.objectPath);
+    assert.ok(info.size > 0, `${target.arch}: qcc built the SQLite library`);
   }
 });
