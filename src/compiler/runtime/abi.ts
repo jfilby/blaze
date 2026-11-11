@@ -1145,6 +1145,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_dir_list",
+    "const char*",
+    [["path", "const char*"]],
+    "Lists the entries a directory holds, as JSON.",
+    "Returns a managed string: an array of objects with the entry's name and its kind, sorted by name. An absent or unreadable directory is an empty array.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_path_exists",
     "double",
     [["path", "const char*"]],
@@ -3565,6 +3573,7 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -6299,6 +6308,78 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+static int blaze_dir_name_compare(const void* left, const void* right) {
+  return strcmp(*(const char* const*)left, *(const char* const*)right);
+}
+
+const char* blaze_rt_dir_list(const char* path) {
+  static const char* empty = "[]";
+  if (path == NULL) return blaze_rt_string_new((const unsigned char*)empty, 2);
+  DIR* dir = opendir(path);
+  if (dir == NULL) return blaze_rt_string_new((const unsigned char*)empty, 2);
+  size_t count = 0, capacity = 16;
+  char** names = (char**)malloc(capacity * sizeof(char*));
+  if (names == NULL) { closedir(dir); return blaze_rt_string_new((const unsigned char*)empty, 2); }
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    if (count == capacity) {
+      capacity *= 2;
+      char** grown = (char**)realloc(names, capacity * sizeof(char*));
+      if (grown == NULL) break;
+      names = grown;
+    }
+    const size_t length = strlen(entry->d_name);
+    names[count] = (char*)malloc(length + 1);
+    if (names[count] == NULL) break;
+    memcpy(names[count], entry->d_name, length + 1);
+    count += 1;
+  }
+  closedir(dir);
+  qsort(names, count, sizeof(char*), blaze_dir_name_compare);
+  size_t total = 3;
+  for (size_t at = 0; at < count; at += 1) total += strlen(names[at]) * 6 + 48;
+  char* out = (char*)malloc(total);
+  if (out == NULL) {
+    for (size_t at = 0; at < count; at += 1) free(names[at]);
+    free(names);
+    return blaze_rt_string_new((const unsigned char*)empty, 2);
+  }
+  size_t written = 0;
+  out[written++] = '[';
+  for (size_t at = 0; at < count; at += 1) {
+    if (at > 0) out[written++] = ',';
+    memcpy(out + written, "{\\"name\\":\\"", 9);
+    written += 9;
+    const char* name = names[at];
+    for (size_t c = 0; name[c] != 0; c += 1) {
+      const unsigned char byte = (unsigned char)name[c];
+      if (byte == '"' || byte == '\\\\') {
+        out[written++] = '\\\\';
+        out[written++] = (char)byte;
+      } else if (byte < 0x20) {
+        written += (size_t)sprintf(out + written, "\\\\u%04x", (unsigned int)byte);
+      } else {
+        out[written++] = (char)byte;
+      }
+    }
+    memcpy(out + written, "\\",\\"kind\\":", 9);
+    written += 9;
+    char full[4096];
+    snprintf(full, sizeof full, "%s/%s", path, name);
+    struct stat info;
+    int kind = 0;
+    if (stat(full, &info) == 0) kind = S_ISDIR(info.st_mode) ? 2 : (S_ISREG(info.st_mode) ? 1 : 3);
+    written += (size_t)sprintf(out + written, "%d}", kind);
+    free(names[at]);
+  }
+  free(names);
+  out[written++] = ']';
+  char* answer = blaze_rt_string_new((const unsigned char*)out, written);
+  free(out);
+  return answer;
 }
 
 double blaze_rt_path_kind(const char* path) {

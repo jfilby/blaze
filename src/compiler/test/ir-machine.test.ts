@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assertMachineTarget, buildObject, machineRefusal } from "../toolchain/ir-machine.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
@@ -363,6 +363,34 @@ test("the machine code asks the host the size of a file and the kind of a path",
   assert.equal(size, "5");
   const kind = await lowered(ask("pathKind"), (name) => `printf("%.17g", ${name}());`);
   assert.equal(kind, "1", "the path names a file");
+});
+
+test("the machine code asks the host to list a directory", async () => {
+  // The entries are the JSON the runtime writes, sorted by name, each with the
+  // kind one for a file and two for a directory.
+  const directory = await scratch("blaze-machine-dir-");
+  await writeFile(join(directory, "a.txt"), "x");
+  await mkdir(join(directory, "sub"));
+  const fn = subject(
+    TEXT,
+    handsBack({
+      k: "call",
+      type: TEXT,
+      call: {
+        callee: "dirList",
+        builtin: true,
+        signature: { name: "dirList", symbol: "dirList", params: [{ name: "path", type: "ptr<u8>" }], returns: "ptr<u8>" },
+        args: [literal(directory)],
+        argTypes: [TEXT],
+        returns: TEXT,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  const printed = await lowered(fn, (name) => `printf("%s", ${name}());`);
+  assert.equal(printed, `[{"name":"a.txt","kind":1},{"name":"sub","kind":2}]`);
 });
 
 test("a value the IR calls is run once, whichever form writes it down", async () => {

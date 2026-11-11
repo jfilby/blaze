@@ -129,6 +129,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_path_exists",
   "blaze_rt_path_kind",
   "blaze_rt_file_size",
+  "blaze_rt_dir_list",
   "blaze_rt_env_get",
   "blaze_rt_path_dirname",
   "blaze_rt_path_normalize",
@@ -1223,6 +1224,23 @@ export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
+}
+`,
+  },
+  {
+    service: "blaze_rt_dir_list",
+    source: `
+export function blaze_rt_dir_list(path) {
+  const name = new TextDecoder().decode(textBytes(path));
+  try {
+    const entries = readdirSync(name, { withFileTypes: true })
+      .filter((entry) => entry.name !== "." && entry.name !== "..")
+      .map((entry) => ({ name: entry.name, kind: entry.isDirectory() ? 2 : entry.isFile() ? 1 : 3 }))
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    return makeText(JSON.stringify(entries));
+  } catch {
+    return makeText("[]");
+  }
 }
 `,
   },

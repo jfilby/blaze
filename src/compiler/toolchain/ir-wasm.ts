@@ -3620,6 +3620,10 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "dirList":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_dir_list");
+        return TEXT;
       case "pathKind":
         this.textArgument(argument(0));
         this.callService("blaze_rt_path_kind");

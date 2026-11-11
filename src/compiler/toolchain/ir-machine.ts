@@ -11199,6 +11199,15 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "dirList" && call.args[0] !== undefined) {
+      // The directory's path is the text it is, and the runtime answers the
+      // JSON of its entries as a text.
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_dir_path");
+      this.store(path);
+      this.callSymbol("blaze_rt_dir_list", [path], TEXT);
+      return;
+    }
     if ((call.callee === "pathKind" || call.callee === "fileSize") && call.args[0] !== undefined) {
       // The path is the text it is; the runtime reads it and answers the kind
       // the entry is or the bytes the file holds.

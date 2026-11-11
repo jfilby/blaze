@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { semanticFunctionProblems } from "../semantics/ir-validate.ts";
 import { validateCSource } from "../toolchain/csource.ts";
@@ -60,6 +60,39 @@ function runs(statements: SemanticBlock["statements"]): SemanticBlock {
 }
 
 const local = (name: string, type: SemanticType = F64): SemanticValue => ({ k: "local", type, name });
+
+test("the C code asks the host to list a directory", async () => {
+  const directory = await scratch("blaze-c-dir-");
+  await writeFile(join(directory, "a.txt"), "x");
+  await writeFile(join(directory, 'a"b.txt'), "x");
+  await writeFile(join(directory, "a\\b.txt"), "x");
+  await mkdir(join(directory, "sub"));
+  const fn = subject(
+    TEXT,
+    handsBack({
+      k: "call",
+      type: TEXT,
+      call: {
+        callee: "dirList",
+        builtin: true,
+        signature: { name: "dirList", symbol: "dirList", params: [{ name: "path", type: "ptr<u8>" }], returns: "ptr<u8>" },
+        args: [literal(directory)],
+        argTypes: [TEXT],
+        returns: TEXT,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  const printed = await lowered(fn, (name) => `printf("%s", ${name}());`);
+  // A name is escaped as JSON escapes it: the quote and the backslash of the
+  // names beside the plain one are written as the strings they are.
+  assert.equal(
+    printed,
+    `[{"name":"a\\"b.txt","kind":1},{"name":"a.txt","kind":1},{"name":"a\\\\b.txt","kind":1},{"name":"sub","kind":2}]`,
+  );
+});
 
 test("a candidate reaching for inline assembly is refused however it spells it", () => {
   // The C a candidate delivers is compiled by the C compiler, which reads

@@ -314,6 +314,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "pathKind": { params: [TEXT], returns: F64, arity: 1 },
   /** The size in bytes of the file a path names, or -1 where there is none. */
   "fileSize": { params: [TEXT], returns: F64, arity: 1 },
+  /** The entries a directory holds, as JSON: an array of objects whose `name`
+   *  is the entry's and whose `kind` is one for a file, two for a directory
+   *  and three for anything else. The names are sorted so a build reads the
+   *  same directory the same way twice. */
+  "dirList": { params: [TEXT], returns: TEXT, arity: 1 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */
