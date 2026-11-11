@@ -1125,6 +1125,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_sha256_create", "double", [], "Creates a SHA-256 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
   entry("blaze_rt_sha256_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to a SHA-256 hasher.", "Returns the hasher.", { tags: ["object"] }),
   entry("blaze_rt_sha256_digest", "double", [["hasher", "double"]], "Finalizes and returns the SHA-256 hex digest.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_date_iso", "const char*", [["milliseconds", "double"]], "Writes the ISO 8601 stamp of a date in UTC, to the millisecond.", "Returns a managed text; a date that is not a number is `Invalid Date`.", { tags: ["host"] }),
   entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
@@ -1162,6 +1163,7 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
   entry("blaze_rt_array_get", "double", [["array", "double"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
   entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_length", "double", [["value", "double"]], "Reads how long a value is: the items of a dynamic array or object, the fields of a dictionary or record, or the characters of a text.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_set", "void", [["array", "double"], ["index", "double"], ["value", "double"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
   entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_is_array", "double", [["value", "double"]], "Asks whether a dynamic value is an array.", "Returns 1 or 0.", { tags: ["object"] }),
@@ -4177,6 +4179,30 @@ double blaze_rt_global_post_dec(double slot) {
   return before;
 }
 
+/* The ISO 8601 stamp of a date, in UTC. The millisecond part is the fraction
+   the date carries, which the current-time stamp below leaves at zero. */
+const char* blaze_rt_date_iso(double milliseconds) {
+  if (isnan(milliseconds)) return blaze_rt_string_new((const unsigned char*)"Invalid Date", 12);
+  /* The second and the millisecond are the integer division and its rest, so
+     the runtime carries no dependency on the maths library for a stamp. A
+     negative rest is moved into the second before it, which is the date the
+     same number names. */
+  long long whole = (long long)milliseconds;
+  long long seconds = whole / 1000;
+  long long millis = whole % 1000;
+  if (millis < 0) {
+    millis += 1000;
+    seconds -= 1;
+  }
+  time_t at = (time_t)seconds;
+  struct tm parts;
+  gmtime_r(&at, &parts);
+  char text[48];
+  size_t written = strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%S", &parts);
+  written += snprintf(text + written, sizeof text - written, ".%03lldZ", millis);
+  return blaze_rt_string_new((const unsigned char*)text, written);
+}
+
 const char* blaze_rt_timestamp_iso(void) {
   const time_t now = time(NULL);
   struct tm parts;
@@ -6020,6 +6046,28 @@ double blaze_rt_array_get(double array, double index) {
   if (i >= d->count) return 0.0;
   return ((double*)d->items)[i];
 }
+double blaze_rt_length(double value) {
+  // How long a value is, whichever of the runtime's shapes it has: a dynamic
+  // array or object counts its items, a dictionary or record counts its
+  // fields, and a text counts its code points. A value that is none of them
+  // is as long as nothing.
+  blaze_dyn* d = blaze_dyn_lookup(value);
+  if (d != NULL) {
+    if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return (double)d->count;
+    return 0.0;
+  }
+  if (value < 4096.0) return 0.0;
+  const double counted = blaze_rt_dict_len(value);
+  if (counted != 0.0) return counted;
+  {
+    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)(uintptr_t)value - BLAZE_RT_HEADER_SIZE);
+    if (header->magic == BLAZE_RT_MAGIC && header->descriptor == NULL) {
+      return (double)blaze_rt_text_length((const char*)(uintptr_t)value);
+    }
+  }
+  return counted;
+}
+
 double blaze_rt_array_length(double array) {
   blaze_dyn* d = blaze_dyn_lookup(array);
   if (!d) return 0.0;

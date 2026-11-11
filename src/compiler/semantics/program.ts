@@ -141,6 +141,13 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
       // import, and what crosses the link is the value itself.
       const named = offeredValuesByPath.find((one) => one.path === to);
       const available = Object.keys(target.functions).filter((name) => internal[to]?.has(name) !== true);
+      // A name the module exports is offered even where its value is not one
+      // the read settles in place: the import resolves to the name.
+      const targetRecord = records.find((one) => one.path === to);
+      for (const name of targetRecord?.analysis.exportedNames ?? []) {
+        if (!available.includes(name)) available.push(name);
+      }
+      available.splice(0, available.length, ...new Set(available));
       if (named !== undefined) for (const name of named.values.keys()) available.push(name);
       // A file that re-exports another module's names offers those names: the
       // function is compiled by the module that declares it, and the link
@@ -166,14 +173,24 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
         // default joins the list rather than standing in for it.
         names = [...names, offered];
       }
-      const missing = names.filter((name) => !available.includes(name));
+      // A rename imports one name and binds another: the module that offers
+      // it is asked for the imported name, and the file writes the local one.
+      const importedNames = [...names];
+      const localNames = names.map((name) => {
+        const rename = (entry.renames ?? []).find((one) => one.imported === name);
+        return rename === undefined ? name : rename.local;
+      });
+      for (const rename of entry.renames ?? []) {
+        if (!localNames.includes(rename.local)) localNames.push(rename.local);
+      }
+      const missing = importedNames.filter((name) => !available.includes(name));
       if (missing.length > 0) {
         throw contractPhaseError(
           `${record.path} imports ${missing.map((name) => `"${name}"`).join(", ")} from "${entry.specifier}", which does not export ${missing.length === 1 ? "it" : "them"}`,
           `${to} exports: ${available.join(", ")}`,
         );
       }
-      for (const name of names) {
+      for (const name of localNames) {
         const first = bound.get(name);
         // The same module reached twice binds the same name to the same thing,
         // so it is not a collision. Reporting one refused a file that names
@@ -188,7 +205,7 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
         bound.set(name, { specifier: entry.specifier, to });
       }
       if (!edges.some((edge) => edge.from === record.path && edge.to === to)) {
-        edges.push({ from: record.path, to, symbols: names });
+        edges.push({ from: record.path, to, symbols: importedNames });
       }
     }
   }

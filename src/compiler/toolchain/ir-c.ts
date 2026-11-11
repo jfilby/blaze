@@ -451,8 +451,20 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_is_array(${args[0]})`;
     case "blaze_rt_object_has_field":
       return `${RUNTIME_NAME}_object_has_field((const void*)(uintptr_t)(${args[0]}), ${args[1]})`;
+    case "blaze_rt_date_iso":
+      return `blaze_rt_date_iso(${args[0]})`;
     case "blaze_rt_array_length":
       return `blaze_rt_array_length(${args[0]})`;
+    case "blaze_rt_length":
+      return `blaze_rt_length(${args[0]})`;
+    case "blaze_rt_dyn_array_new":
+      return `blaze_rt_dyn_array_new()`;
+    case "blaze_rt_array_push":
+      return `blaze_rt_array_push(${args[0]}, ${args[1]})`;
+    case "blaze_rt_array_get":
+      return `blaze_rt_array_get(${args[0]}, ${args[1]})`;
+    case "blaze_rt_array_set":
+      return `blaze_rt_array_set(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_json_field_key":
       return `blaze_rt_json_field_key(${args[0]}, ${args[1]})`;
     case "blaze_rt_json_field_value":
@@ -1257,7 +1269,12 @@ class FunctionEmitter {
       return `${RUNTIME_NAME}_to_number(${args[0] ?? "0.0"})`;
     }
     if (call.callee === "Number.parseInt") {
-      return `${RUNTIME_NAME}_parse_int(${args[0] ?? "0.0"}, ${args[1] ?? "0.0"})`;
+      // The text is read at the parameter the runtime declares: a text the
+      // read holds is the pointer itself, and a value the read cannot name is
+      // the text it holds.
+      const first = call.args[0];
+      const text = first !== undefined && isTextType(first.type) ? this.raw(first, depth) : `${RUNTIME_NAME}_to_text(${args[0] ?? "0.0"})`;
+      return `${RUNTIME_NAME}_parse_int(${text}, ${args[1] ?? "0.0"})`;
     }
     if (call.callee === "String.fromCodePoint") {
       return `${RUNTIME_NAME}_from_code_point(${args[0] ?? "0.0"})`;

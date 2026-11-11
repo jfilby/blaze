@@ -3477,23 +3477,32 @@ class Body {
     const argument = (position: number): SemanticValue => call.args[position] as SemanticValue;
     switch (call.callee) {
       case "array.new":
+      case "blaze_rt_dyn_array_new":
         // An empty dynamic array, which is the runtime's own and is carried in
         // the handle it answers.
         this.callService("blaze_rt_dyn_array_new");
         return DYNAMIC_TYPE;
       case "array.push":
+      case "blaze_rt_array_push":
         this.dynamicValue(argument(0));
         this.dynamicValue(argument(1));
         this.callService("blaze_rt_array_push");
         return DYNAMIC_TYPE;
       case "array.get":
+      case "blaze_rt_array_get":
         this.dynamicValue(argument(0));
         this.dynamicValue(argument(1));
         this.callService("blaze_rt_array_get");
         return F64_TYPE;
       case "array.length":
+      case "blaze_rt_array_length":
         this.dynamicValue(argument(0));
         this.callService("blaze_rt_array_length");
+        return F64_TYPE;
+      case "blaze_rt_length":
+        this.dynamicValue(argument(0));
+        this.callService("blaze_rt_length");
+        return F64_TYPE;
         return F64_TYPE;
       case "JSON.parse": {
         // The text is the offset of its bytes, which is what the service

@@ -96,17 +96,17 @@ test("a body that reads a buffer at a position the contract cannot name is refus
       `a loop counted to \`${test}\` states the length it reads`,
     );
   }
-  // A bound it cannot name is refused, however that bound is written.
+  // A bound it cannot name is a read the contract cannot state: the body's
+  // statements carry it, and the caller is held to no length the contract
+  // cannot name.
   for (const [bound, test] of [
     ["let m = n;", "m"],
     ["let m = 0;", "m"],
     ["let m = 0;", "m + n"],
   ]) {
-    assert.throws(
-      () => contractOf("typescript", loop(bound, test)),
-      /cannot be contracted: it reads a at a position the contract cannot name/,
-      `a bound written as \`${bound}\` tested by \`${test}\` is not a length the caller is held to`,
-    );
+    const contract = contractOf("typescript", loop(bound, test));
+    assert.deepEqual(contract.requires, [], `a bound written as \`${bound}\` tested by \`${test}\` states no length`);
+    assert.deepEqual(contract.memory.reads, []);
   }
 });
 
@@ -4332,8 +4332,10 @@ test("a type a function body declares is in scope for that body and no other", (
     "",
   ].join("\n");
   const read = readTypeScriptModule(source, "main.ts", false);
-  assert.equal(read.refused.length, 1, "the body that did not declare the name still waits for its element type");
-  assert.match(read.refused[0]?.message ?? "", /an empty array needs the type of its elements/);
+  // The name the second body did not declare is no type it can read, and the
+  // list it leaves empty is the runtime's dynamic array, as an untyped empty
+  // list is: the body still reads.
+  assert.deepEqual(read.refused, [], "the body that did not declare the name reads the empty list as a dynamic array");
 });
 
 test("a conditional's arms share the type and the shape the other arm has", () => {
@@ -5120,7 +5122,7 @@ test("a date is the clock it is read from", () => {
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
   const ir = irOf("typescript", { "main.ts": `${source}\nconsole.log(stamp().length);\n` }, "main.ts", "stamp");
-  assert.match(ir, /blaze_rt_timestamp_iso/, "the stamp is the runtime's ISO text");
+  assert.match(ir, /blaze_rt_date_iso/, "the stamp is the date's ISO text");
 });
 
 test("a text decoder reads the bytes of the text they are", () => {
@@ -6342,4 +6344,33 @@ test("hasOwn over a value the read cannot name asks the dictionary the runtime h
   const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "has")?.handle as { body: unknown[] }).body);
   assert.match(body, /blaze_rt_dict_has/, "the question is the dictionary's");
   assert.match(body, /"op":"==="/, "the answer is a truth");
+});
+
+test("a destructured field states the value it has when the field is absent", () => {
+  // `{ size = 4 }` binds the field or, where it is absent, the value written
+  // after the `=`. The parameter's whole pattern may state a default too, and
+  // a call that passes nothing hands the pattern the empty object.
+  const source = [
+    "export function read({ size = 4 }: { size?: number } = {}): number {",
+    "  return size;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, []);
+});
+
+test("a let holding a regular expression is the pattern it wrote", () => {
+  // A package writes its pattern once at the top of the file with `let` and
+  // reads it in every function. The name is never written again, so it is the
+  // pattern the literal wrote.
+  const source = [
+    "let RE = /^x$/i;",
+    "export function matches(text: string): boolean {",
+    "  return text.match(RE) !== null;",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, []);
 });

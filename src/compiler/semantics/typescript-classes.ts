@@ -16,6 +16,17 @@
  */
 
 import type { Token } from "./typescript.ts";
+
+/**
+ * The name a class member is lowered under.
+ *
+ * A private name is written `#name`, which is no C or Nim identifier; the
+ * compiled layout spells it with a prefix the source cannot write, and every
+ * read and write of the member is spelled the same way.
+ */
+export function memberNameOf(text: string): string {
+  return text.startsWith("#") ? `__private_${text.slice(1)}` : text;
+}
 import { typeText, type ResolvedType } from "./typescript-types.ts";
 
 /** One parameter of a method or constructor, as the source declared it. */
@@ -439,7 +450,7 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       if (index < close) index += 1;
       continue;
     }
-    const memberName = memberToken.text;
+    const memberName = memberNameOf(memberToken.text);
     index += 1;
     if (isPunct(tokens[index], "?") || isPunct(tokens[index], "!")) index += 1;
     if (isPunct(tokens[index], "<")) index = skipAngles(tokens, index);

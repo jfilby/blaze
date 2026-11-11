@@ -61,7 +61,7 @@
  *     the contract carrying the statements themselves as a definition
  */
 
-import { parseType, typeToString } from "./contract.ts";
+import { isBufferType, parseType, typeToString } from "./contract.ts";
 import { ARGV, ARGV_LENGTH, builtinFor } from "./builtins.ts";
 
 export { ARGV, ARGV_LENGTH };
@@ -97,6 +97,7 @@ import {
   type ClassMethod,
   type ClassParam,
   type ClassTable,
+  memberNameOf,
 } from "./typescript-classes.ts";
 import type { PrimitiveTypeName, TypeExpr } from "../core/types.ts";
 import type {
@@ -1618,6 +1619,15 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         else if (written === ";" && depth === 0) break;
         end += 1;
       }
+      // A regular expression is a value the source wrote. A `let` that holds
+      // one and is never written again is as constant as a `const`: a package
+      // writes its pattern once at the top of the file and reads it in every
+      // function, and a pattern is two texts rather than state.
+      if (!locals.has(name) && tokens[start]?.kind === "regex" && end === start + 1 && !writtenName(tokens, name)) {
+        found.set(name, { expression: { range: { start, end } }, exported: offered });
+        index = end + 1;
+        continue;
+      }
       const construction = !mutable && constructorRange(tokens, start, end);
       const constant = !mutable && (construction || constantRange(tokens, start, end));
       // An instance is inlined only where the file reads it once: two reads of
@@ -1634,7 +1644,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         const element = allocationElement(tokens, start);
         if (element !== null) allocations.set(name, element);
       }
-      else if (!locals.has(name)) found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) });
+      else if (!locals.has(name)) { found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) }); }
       index = end + 1;
       continue;
     }
@@ -1729,6 +1739,10 @@ function localNames(tokens: readonly Token[]): Set<string> {
       // annotation is what made it look like a parameter here.
       const before = tokens[index - 1]?.text;
       if (depth === 0 && (before === "const" || before === "let" || before === "var")) continue;
+      // A conditional writes `condition ? a : b`, and a `case` writes its
+      // label before a colon: neither is a parameter's annotation, and a name
+      // the file declares is not a body's because it stands before one.
+      if (before === "?" || before === ":" || before === "case") continue;
       names.add(token.text);
     }
   }
@@ -3434,6 +3448,8 @@ class TypeScriptParser {
   private readonly allTokens: Token[];
   /** The class whose method is being read, or null outside a class. */
   private currentClass: ClassInfo | null = null;
+  /** The name a class method calls its instance by, which a parameter may take. */
+  private selfName = "self";
   /** The class each name of the function being read holds. */
   private valueClasses = new Map<string, string>();
   /** The type each name of the function being read is held at. */
@@ -3617,7 +3633,6 @@ class TypeScriptParser {
    * loop statement has nowhere to put a statement of its own. A condition that
    * writes is refused where it is written.
    */
-  private testAfterBody = false;
   /**
    * The element type an array written out is held at, when the declaration it
    * initialises says what that is.
@@ -3713,6 +3728,8 @@ class TypeScriptParser {
   private expressionReads = 0;
   /** How many reads are waiting to settle their value against the type of the use. */
   private expectedReads = 0;
+  /** How many enclosing reads are at a type the compiler does not know yet. */
+  private expectedUnresolved = 0;
   /** The lists that are a regular expression's pattern and flags. */
   private readonly regexValues = new Set<Expression>();
   /** The names bound to a regular expression, read by the methods of one. */
@@ -4702,6 +4719,8 @@ class TypeScriptParser {
     this.expectedType = type;
     this.expectedShape = shape ?? this.shapeOfNamedType(type);
     this.expectedReads += 1;
+    const unresolved = type !== null && type.kind === "ref" && !unknownReference(type) && (this.expectedShape === null || this.expectedShape.kind === "any");
+    if (unresolved) this.expectedUnresolved += 1;
     try {
       const value = read();
       if (type !== null) this.applyExpected(value, type, this.expectedShape);
@@ -4711,6 +4730,7 @@ class TypeScriptParser {
       this.expectedType = savedType;
       this.expectedShape = savedShape;
       this.expectedReads -= 1;
+      if (unresolved) this.expectedUnresolved -= 1;
       if (this.expectedReads === 0 && this.expressionReads === 0) this.reportUnsettledArrays();
     }
   }
@@ -4787,6 +4807,7 @@ class TypeScriptParser {
         if (value.values.length === 0) {
           if (this.unsettledArrays.has(value)) {
             value.element = typeToString(type.of);
+            value.dynamic = false;
             this.unsettledArrays.delete(value);
           }
           return;
@@ -4879,6 +4900,16 @@ class TypeScriptParser {
     }
     for (const [value, token] of this.unsettledArrays) {
       if (value.k !== "buffer" || value.values.length !== 0) continue;
+      // A list no use states the element type of is the runtime's dynamic
+      // array: the source may push values of any kind into it, and its length
+      // travels with it. A use that does state a type settles it before this
+      // read ends, and the empty list that reached here is the one the source
+      // let the values decide.
+      if (this.expectedType === null && this.expectedUnresolved === 0) {
+        value.dynamic = true;
+        this.expressionTypes.set(value, ANY_TYPE);
+        continue;
+      }
       this.report(
         "an empty array needs the type of its elements",
         "write the declaration with the element type, as in const names: string[] = []",
@@ -4949,10 +4980,22 @@ class TypeScriptParser {
    * `self` is the instance a method was called on; a static member has no
    * instance, so `this` there is refused where it is written.
    */
+  /**
+   * The name a class instance is carried under, made distinct from the names
+   * the method's own parameters use. `self` is a name a source may declare, so
+   * the parameter list decides which name the instance takes.
+   */
+  private instanceName(params: readonly { name: string }[]): string {
+    let name = "self";
+    while (params.some((param) => param.name === name)) name = `_${name}`;
+    return name;
+  }
+
   private withClassContext<T>(info: ClassInfo, params: readonly ClassParam[], self: boolean, run: () => T): T {
     const savedTokens = this.tokens;
     const savedPosition = this.position;
     const savedClass = this.currentClass;
+    const savedSelf = this.selfName;
     const savedTypes = this.valueClasses;
     const savedValueTypes = this.valueTypes;
     const savedDeclaredValues = this.declaredValues;
@@ -4963,6 +5006,7 @@ class TypeScriptParser {
     const savedRegexes = this.valueRegexes;
     this.tokens = this.allTokens;
     this.currentClass = self ? info : null;
+    this.selfName = self ? this.instanceName(params) : "self";
     this.valueClasses = new Map();
     this.valueTypes = new Map();
     this.declaredValues = new Map();
@@ -4972,7 +5016,7 @@ class TypeScriptParser {
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
     this.valueRegexes = new Set();
-    if (self) this.valueClasses.set("self", info.name);
+    if (self) this.valueClasses.set(this.selfName, info.name);
     for (const param of params) {
       const typeName = this.classTypeName(param.typeName);
       if (typeName !== null) this.valueClasses.set(param.name, typeName);
@@ -4984,6 +5028,7 @@ class TypeScriptParser {
       this.tokens = savedTokens;
       this.position = savedPosition;
       this.currentClass = savedClass;
+      this.selfName = savedSelf;
       this.valueClasses = savedTypes;
       this.valueTypes = savedValueTypes;
       this.declaredValues = savedDeclaredValues;
@@ -5376,7 +5421,7 @@ class TypeScriptParser {
     const out: DeclaredFunction[] = [];
     for (let arity = required; arity < params.length; arity += 1) {
       const written = params.slice(0, arity);
-      const paramsOut = self ? [{ name: "self", type: this.referenceTo(info.name) }, ...this.methodParams(written)] : this.methodParams(written);
+      const paramsOut = self ? [{ name: this.instanceName(written), type: this.referenceTo(info.name) }, ...this.methodParams(written)] : this.methodParams(written);
       // A default is read once, under a name of its own, before the call: it
       // may be a call of its own, and a call written among the arguments would
       // run while the receiver and the earlier arguments are pinned in the
@@ -5398,7 +5443,7 @@ class TypeScriptParser {
         statements.push({ kind: "declare", name, type: null, init: value, line: method.line });
         return { k: "ident", name };
       });
-      const callArgs = self ? [{ k: "ident", name: "self" } satisfies Expression, ...args] : args;
+      const callArgs = self ? [{ k: "ident", name: this.instanceName(written) } satisfies Expression, ...args] : args;
       statements.push({ kind: "result", value: { k: "call", name: baseName, args: callArgs }, line: method.line });
       out.push(this.declared(`${baseName}__${arity}`, paramsOut, returns, statements, exported, method.line));
     }
@@ -5423,13 +5468,73 @@ class TypeScriptParser {
     return this.constructorOf(base);
   }
 
+  /** Whether a class is a `Date`, or extends one through another class. */
+  private classExtendsDate(name: string): boolean {
+    const seen = new Set<string>();
+    let current: string | null = name;
+    while (current !== null && !seen.has(current)) {
+      if (current === "Date") return true;
+      seen.add(current);
+      const info = this.classNamed(current);
+      current = info === undefined ? null : info.base;
+    }
+    return false;
+  }
+
+  /** The milliseconds a value written to `Date` names. */
+  private dateMilliseconds(value: Expression): Expression {
+    const held = this.valueTypeOf(value);
+    if (held.kind === "text") {
+      return { k: "call", name: "Date.parse", args: [value] };
+    }
+    if (held.kind === "primitive") return value;
+    const cls = this.classOfExpression(value);
+    if (cls !== null && this.classExtendsDate(cls)) {
+      return { k: "member", base: value, field: "__date" };
+    }
+    // A value the read cannot name may be the text a date is parsed from or
+    // the milliseconds it already is: the runtime's kind tells them apart.
+    const kind = this.typeofValue(value);
+    return {
+      k: "conditional",
+      condition: { k: "binary", op: "===", left: kind, right: { k: "text", parts: [{ k: "text", value: "string" }] } },
+      then: { k: "call", name: "Date.parse", args: [value] },
+      otherwise: value,
+    };
+  }
+
+  /**
+   * A method a class of `Date` inherits.
+   *
+   * The date a subclass carries is the `__date` field the lowering wrote, so
+   * the time and the stamp are read out of it; the subclass's own methods are
+   * the class's, and are read before this.
+   */
+  private dateMethod(receiver: Expression, field: string, args: readonly Expression[]): Expression | null {
+    if (args.length !== 0) return null;
+    if (field === "getTime" || field === "valueOf") {
+      const time: Expression = { k: "member", base: receiver, field: "__date" };
+      this.expressionTypes.set(time, NUMBER_RESULT);
+      return time;
+    }
+    if (field === "toISOString") {
+      const time: Expression = { k: "member", base: receiver, field: "__date" };
+      this.expressionTypes.set(time, NUMBER_RESULT);
+      const stamp: Expression = { k: "call", name: "blaze_rt_date_iso", args: [time] };
+      this.expressionTypes.set(stamp, TEXT_RESULT);
+      return stamp;
+    }
+    return null;
+  }
+
   /** Every function a class becomes: a constructor, methods, and static members. */
   private emitClass(info: ClassInfo): DeclaredFunction[] {
     const out: DeclaredFunction[] = [];
     // A class built on another is built by the base's constructor, and the
     // object it makes is one layout with the fields of both. `extends Error` is
     // not a second layout: the message is a field of the error itself.
-    if (info.base !== null && info.base !== "Error") {
+    const dateBase = info.base === "Date";
+    if (info.base !== null && info.base !== "Error" && !dateBase) {
       const base = this.classNamed(info.base);
       if (base === undefined || base.start < 0) {
         this.report(
@@ -5442,7 +5547,10 @@ class TypeScriptParser {
     const own = info.constructor;
     const inherited = own === null ? this.constructorOf(info) : null;
     const params: readonly ClassParam[] = own?.params ?? inherited?.params ?? [];
+    // A class of `Date` carries the time the base holds beside its own fields:
+    // a date is a number here, and the subclass is the record that holds it.
     const fields = this.fieldsOf(info, params);
+    if (dateBase) fields.unshift({ name: "__date", typeName: "number", initStart: -1, initEnd: -1, line: info.line });
     // A field written at a type another module declares is held as `any` by a
     // read that has not linked the declaration yet. The method written on the
     // field waits for the read that follows the link, where the field's own
@@ -5459,7 +5567,8 @@ class TypeScriptParser {
         return { name: field.name, value: parameter === undefined ? this.defaultFieldValue(field) : { k: "ident", name: parameter.name } };
       }),
     };
-    const body: Statement[] = [{ kind: "declare", name: "self", type: null, init: object, line: info.line }];
+    const instance = this.instanceName(params);
+    const body: Statement[] = [{ kind: "declare", name: instance, type: null, init: object, line: info.line }];
     // A field initialiser runs after the object exists, so a class field may
     // read another field through `this`; a parameter property is already the
     // argument the constructor was given and needs no assignment.
@@ -5475,7 +5584,7 @@ class TypeScriptParser {
           this.shapeForName(field.typeName),
         ),
       );
-      body.push({ kind: "memberAssign", base: "self", field: field.name, op: "=", value, line: field.line });
+      body.push({ kind: "memberAssign", base: instance, field: field.name, op: "=", value, line: field.line });
     }
     const constructorSource = own ?? inherited?.body ?? null;
     if (constructorSource !== null) {
@@ -5490,7 +5599,7 @@ class TypeScriptParser {
         }),
       );
     }
-    body.push({ kind: "result", value: { k: "ident", name: "self" }, line: info.line });
+    body.push({ kind: "result", value: { k: "ident", name: instance }, line: info.line });
     const constructorParams = this.methodParams(params);
     out.push(this.declared(info.name, constructorParams, this.referenceTo(info.name), body, info.exported, info.line));
     out.push(...this.wrappers(info, { name: "constructor", params: [...params], returnTypeName: info.name, bodyStart: -1, bodyEnd: -1, line: info.line }, info.name, this.referenceTo(info.name), false, info.exported));
@@ -5513,7 +5622,7 @@ class TypeScriptParser {
       out.push(
         this.declared(
           name,
-          [{ name: "self", type: this.referenceTo(info.name) }, ...this.methodParams(method.params)],
+          [{ name: this.instanceName(method.params), type: this.referenceTo(info.name) }, ...this.methodParams(method.params)],
           returns,
           statements,
           info.exported,
@@ -6042,6 +6151,10 @@ class TypeScriptParser {
     for (const declaration of declarations) {
       for (const entry of declaration.entries) declared.add(entry.name);
     }
+    // A top-level value is declared here whether the read settled it or holds
+    // it as state: an `export { name }` list names it either way.
+    for (const name of this.constants.keys()) declared.add(name);
+    for (const name of this.state) declared.add(name);
     // The names the file's imports bind, so a list that offers one is the
     // re-export it is: `export { availableParallelism }` where the name was
     // imported from `node:os` offers what that module offers.
@@ -6074,12 +6187,23 @@ class TypeScriptParser {
       imports.push({ specifier: entry.specifier, names: [...entry.names], default: false, line: entry.line });
     }
     const valueShapes = this.exportedValueShapes();
+    // Every name the file offers, so an import resolves even where the value
+    // cannot be settled in place.
+    const exportedNames = new Set<string>();
+    for (const fn of functions) if (fn.exported) exportedNames.add(fn.name);
+    for (const [name, constant] of this.constants) if (constant.exported === true) exportedNames.add(name);
+    for (const entry of this.reexports) for (const name of entry.names) exportedNames.add(name);
+    for (const name of Object.keys(namesExported)) exportedNames.add(name);
+    // `export { sleep as setTimeout }` offers the alias, which is the name a
+    // module imports.
+    for (const rename of this.localExportRenames) exportedNames.add(rename.exported);
     return {
       path,
       imports,
       typeImports,
       types: this.typeTable,
       classes: this.classTable,
+      exportedNames: [...exportedNames],
       ...(valueShapes.size === 0 ? {} : { valueShapes }),
       ...(this.droppedExports.length === 0 ? {} : { signatures: this.droppedExports }),
       ...(this.reexports.length === 0 ? {} : { reexports: this.reexports }),
@@ -6323,8 +6447,12 @@ class TypeScriptParser {
     const values = new Map<string, ConstantInfo>();
     for (const [name, constant] of this.constants) {
       if (constant.exported !== true) continue;
+      // A value the file offers is offered even where the read cannot settle
+      // it in place: a module that imports the name holds a value the link
+      // names, and refusing the import would hide it. The value is inlined
+      // only when it settles.
       const read = this.settledConstant(name, constant);
-      if (read !== null) values.set(name, read);
+      values.set(name, read ?? constant);
     }
     return values;
   }
@@ -6595,6 +6723,11 @@ class TypeScriptParser {
     // build needs. A value another module imports is a different question, and
     // the import phase answers it.
     if (exported && (this.at("const") || this.at("let") || this.at("var"))) {
+      // The name is offered whether or not the read can settle its value: a
+      // module that imports it resolves the name, and the value is read where
+      // the file that wrote it can.
+      const declaration = this.peek(1);
+      if (declaration.kind === "ident") namesExported[declaration.text] = true;
       this.synchronize();
       return null;
     }
@@ -7074,10 +7207,10 @@ class TypeScriptParser {
    * a name of the pattern's own and each bound name is a declaration read out
    * of it. The fields and the positions are the ones the source wrote.
    */
-  private readParameterPattern(): { name: string; field: string | null; index: number }[] | null {
+  private readParameterPattern(): { name: string; field: string | null; index: number; default?: Expression }[] | null {
     if (this.at("{")) {
       this.next();
-      const bindings: { name: string; field: string | null; index: number }[] = [];
+      const bindings: { name: string; field: string | null; index: number; default?: Expression }[] = [];
       while (!this.at("}") && this.peek().kind !== "end") {
         const written = this.next();
         if (written.kind !== "ident") {
@@ -7091,12 +7224,9 @@ class TypeScriptParser {
           if (alias.kind !== "ident") this.report("a destructured field binds a name", `near "${alias.text}"`, alias);
           else bound = alias.text;
         }
-        if (this.at("=")) {
-          this.report("a destructured field with a default is not supported", "write the default where the value is made");
-          this.next();
-          this.readExpression();
-        }
-        bindings.push({ name: bound, field: written.text, index: -1 });
+        let fallback: Expression | undefined;
+        if (this.accept("=")) fallback = this.readExpression();
+        bindings.push({ name: bound, field: written.text, index: -1, ...(fallback === undefined ? {} : { default: fallback }) });
         if (!this.accept(",")) break;
       }
       this.expect("}");
@@ -7104,7 +7234,7 @@ class TypeScriptParser {
     }
     if (this.at("[")) {
       this.next();
-      const bindings: { name: string; field: string | null; index: number }[] = [];
+      const bindings: { name: string; field: string | null; index: number; default?: Expression }[] = [];
       let at = 0;
       while (!this.at("]") && this.peek().kind !== "end") {
         // `[a, , b]`: a gap names no element, so the positions after it move
@@ -7137,7 +7267,7 @@ class TypeScriptParser {
    * element type, because the name is one element of the value it was handed.
    */
   private patternPrelude(
-    bindings: readonly { name: string; field: string | null; index: number }[],
+    bindings: readonly { name: string; field: string | null; index: number; default?: Expression }[],
     temp: string,
     type: TypeExpr,
     line: number,
@@ -7174,15 +7304,18 @@ class TypeScriptParser {
         }
       }
     }
-    return written.map((binding): Statement => ({
-      kind: "declare",
-      name: binding.name,
-      type: null,
-      init: binding.field !== null
+    return written.map((binding): Statement => {
+      const read: Expression = binding.field !== null
         ? { k: "member", base, field: binding.field }
-        : { k: "index", base, index: { k: "literal", text: String(binding.index) } },
-      line,
-    }));
+        : { k: "index", base, index: { k: "literal", text: String(binding.index) } };
+      return {
+        kind: "declare",
+        name: binding.name,
+        type: null,
+        init: binding.default === undefined ? read : { k: "binary", op: "??", left: read, right: binding.default },
+        line,
+      };
+    });
   }
 
   /**
@@ -8313,14 +8446,18 @@ class TypeScriptParser {
       const held = annotationClass ?? this.classOfExpression(init);
       if (held === null) this.valueClasses.delete(name.text);
       else this.valueClasses.set(name.text, held);
-      this.valueTypes.set(name.text, type ?? this.valueTypeOf(init));
+      // An empty list no use states the element type of is the runtime's
+      // dynamic array, and the name holds that handle: it is not a block of
+      // references the compiler would have to box.
+      const initType = init.k === "buffer" && init.dynamic === true ? ANY_TYPE : this.valueTypeOf(init);
+      this.valueTypes.set(name.text, type ?? initType);
       this.declaredValues.set(name.text, init);
       // A name declared again is the value it was declared with, and nothing a
       // test settled about a name of the same spelling still holds.
       this.forgetNarrowing(name.text);
       if (this.pendingNote) this.pendingValues.add(name.text);
       else this.pendingValues.delete(name.text);
-      const declaredShape = annotationShape ?? this.shapeOf(init);
+      const declaredShape = annotationShape ?? (init.k === "buffer" && init.dynamic === true ? null : this.shapeOf(init));
       if (declaredShape !== null) this.valueShapes.set(name.text, declaredShape);
       else this.valueShapes.delete(name.text);
       if (this.isRegexValue(init)) this.valueRegexes.add(name.text);
@@ -8527,7 +8664,7 @@ class TypeScriptParser {
   private readDestructuredDeclaration(line: number): Statement {
     const open = this.next();
     if (open.text === "{") {
-      const fields: { name: string; field: string }[] = [];
+      const fields: { name: string; field: string; default?: Expression }[] = [];
       // `const { a, ...rest } = value` binds the fields the pattern does not
       // name: what is left of the record, as the record it is.
       let rest: string | null = null;
@@ -8551,12 +8688,9 @@ class TypeScriptParser {
           if (alias.kind !== "ident") this.report("a destructured field binds a name", `near "${alias.text}"`, alias);
           else bound = alias.text;
         }
-        if (this.at("=")) {
-          this.report("a destructured field with a default is not supported", "write the default where the value is made");
-          this.next();
-          this.readExpression();
-        }
-        fields.push({ name: bound, field: written.text });
+        let fallback: Expression | undefined;
+        if (this.accept("=")) fallback = this.readExpression();
+        fields.push({ name: bound, field: written.text, ...(fallback === undefined ? {} : { default: fallback }) });
         if (!this.accept(",")) break;
       }
       this.expect("}");
@@ -8580,7 +8714,8 @@ class TypeScriptParser {
       }
       fields.forEach((entry) => {
         const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
-        const read: Expression = expanded ?? { k: "member", base, field: entry.field };
+        const held: Expression = expanded ?? { k: "member", base, field: entry.field };
+        const read: Expression = entry.default === undefined ? held : { k: "binary", op: "??", left: held, right: entry.default };
         const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
         // The value the file wrote for a constant field is the value the name
         // reads, so its shape is the one that field holds even where the
@@ -9077,8 +9212,8 @@ class TypeScriptParser {
     // The write goes back into the place the list is held in, which is the name
     // or the field the source wrote.
     let place: { target: string; base: string | null } | null = null;
-    if (base.k === "ident") place = { target: base.name === "this" ? "self" : base.name, base: null };
-    else if (base.k === "member" && base.base.k === "ident") place = { target: base.field, base: base.base.name === "this" ? "self" : base.base.name };
+    if (base.k === "ident") place = { target: base.name === "this" ? this.selfName : base.name, base: null };
+    else if (base.k === "member" && base.base.k === "ident") place = { target: base.field, base: base.base.name === "this" ? this.selfName : base.base.name };
     else if (base.k === "member") {
       // `this.diagnostics.entries.length = n`: the list is a field of a field,
       // and the write goes back into the field it is held in. The value before
@@ -9128,7 +9263,7 @@ class TypeScriptParser {
    * name of the statement's own otherwise.
    */
   private writeTarget(base: Expression, line: number): string | null {
-    const named = base.k === "ident" ? (base.name === "this" && this.currentClass !== null ? "self" : base.name) : null;
+    const named = base.k === "ident" ? (base.name === "this" && this.currentClass !== null ? this.selfName : base.name) : null;
     if (named !== null) return named;
     const held = `__place${this.fieldCount++}`;
     this.pendingBefore.push({ kind: "declare", name: held, type: null, init: base, line });
@@ -9184,10 +9319,10 @@ class TypeScriptParser {
     // `this.counters[kind] += 1` writes an element of the object the field
     // holds. The object is a reference, so the write goes through a name of the
     // statement's own and lands in the same object.
-    let place: string = buffer.text === "this" && this.currentClass !== null ? "self" : buffer.text;
+    let place: string = buffer.text === "this" && this.currentClass !== null ? this.selfName : buffer.text;
     if (this.at(".") && this.tokens[this.position + 1]?.kind === "ident" && this.tokens[this.position + 2]?.text === "[") {
       const field = this.tokens[this.position + 1] as Token;
-      const member: Expression = { k: "member", base: { k: "ident", name: place }, field: field.text };
+      const member: Expression = { k: "member", base: { k: "ident", name: place }, field: memberNameOf(field.text) };
       this.next();
       this.next();
       const held = this.writeTarget(member, buffer.line);
@@ -9210,12 +9345,30 @@ class TypeScriptParser {
       return null;
     }
     this.next();
-    const value = this.readExpression();
+    // The write settles the value after it is read, so the read is kept open
+    // for that: an empty list is not refused before the place it is written
+    // into can say what it holds.
+    this.expressionReads += 1;
+    let value: Expression;
+    try {
+      value = this.readExpression();
+    } finally {
+      this.expressionReads -= 1;
+    }
     this.accept(";");
     // `record[name] = value` writes one entry of the dictionary the record is.
     // The write is the dictionary's own, by the value the entry holds, and a
     // compound write is the entry read and the operator applied to it.
     const heldCollection = this.collectionOfExpression({ k: "ident", name: place });
+    if (heldCollection !== null && heldCollection.kind === "map" && (heldCollection.value.kind === "slice" || heldCollection.value.kind === "array")) {
+      this.applyExpected(value, heldCollection.value, this.shapeOfTypeExpr(heldCollection.value));
+    } else if (heldCollection === null || (heldCollection.kind === "map" && unknownReference(heldCollection.value))) {
+      // The place states no element type. A package writes `t[k] = []` over a
+      // table of unknowns: the list there is the runtime's dynamic array, which
+      // grows and is measured by the services that read a value it holds.
+      value = this.dynamicEmptyList(value);
+    }
+    if (this.expressionReads === 0 && this.expectedReads === 0) this.reportUnsettledArrays();
     if (heldCollection !== null && heldCollection.kind === "map") {
       const setName = this.collectionSetNameFor(heldCollection);
       const compound = operator.text !== "=" && operator.text !== "??=" ? COMPOUND_OPERATORS[operator.text] : null;
@@ -9317,7 +9470,7 @@ class TypeScriptParser {
       }
       break;
     }
-    let writtenBase = base.text === "this" && this.currentClass !== null ? "self" : base.text;
+    let writtenBase = base.text === "this" && this.currentClass !== null ? this.selfName : base.text;
     const field = this.tokens[lastDot + 1] as Token | undefined;
     const operator = this.tokens[lastDot + 2] as Token | undefined;
     if (
@@ -9371,7 +9524,7 @@ class TypeScriptParser {
       const owner: Expression = calls
         ? this.readOwner(start, lastDot)
         : chain.slice(0, -1).reduce<Expression>(
-            (inner, one) => ({ k: "member", base: inner, field: one.text }),
+            (inner, one) => ({ k: "member", base: inner, field: memberNameOf(one.text) }),
             { k: "ident", name: writtenBase },
           );
       const ownerType = this.valueTypeOf(owner);
@@ -9405,7 +9558,7 @@ class TypeScriptParser {
       return {
         kind: "memberAssign",
         base: writtenBase,
-        field: field.text,
+        field: memberNameOf(field.text),
         op: operator.text === "++" ? "+=" : "-=",
         value: { k: "literal", text: "1" },
         line: base.line,
@@ -9418,7 +9571,7 @@ class TypeScriptParser {
     // The field says what the value written into it holds, so `this.pending =
     // []` is a list of the field's elements where the field is a list. The
     // shape is the field the class declares or the one the value's type names.
-    const written: Expression = { k: "member", base: { k: "ident", name: writtenBase }, field: field.text };
+    const written: Expression = { k: "member", base: { k: "ident", name: writtenBase }, field: memberNameOf(field.text) };
     const shape = this.shapeOf(written);
     const value = shape === null
       ? this.readExpression()
@@ -9428,12 +9581,12 @@ class TypeScriptParser {
       return {
         kind: "memberAssign",
         base: writtenBase,
-        field: field.text,
+        field: memberNameOf(field.text),
         op: "=",
         value: {
           k: "binary",
           op: "??",
-          left: { k: "member", base: { k: "ident", name: writtenBase }, field: field.text },
+          left: { k: "member", base: { k: "ident", name: writtenBase }, field: memberNameOf(field.text) },
           right: value,
         },
         line: base.line,
@@ -9442,7 +9595,7 @@ class TypeScriptParser {
     return {
       kind: "memberAssign",
       base: writtenBase,
-      field: field.text,
+      field: memberNameOf(field.text),
       op: operator.text as AssignOperator,
       value,
       line: base.line,
@@ -9452,16 +9605,30 @@ class TypeScriptParser {
   /** A call or an `i++` written for what it does. */
   private readEffect(): Statement {
     const token = this.peek();
-    // `super(message)` is the only call a class of `extends Error` makes into
-    // its base: the base holds the one field an error has, and the call writes
-    // it. A compiled class has no other inheritance to call into.
+    // `super(...)` is the base's constructor. A class of `Date` carries the
+    // time the base holds in its `__date` field; a class of `Error` carries the
+    // message it was raised with. A compiled class has no other inheritance to
+    // call into.
     if (token.kind === "ident" && token.text === "super" && this.peek(1).text === "(") {
       this.next();
-      const args = this.readCallArguments();
+      const owner = this.currentClass;
+      const dateBase = owner !== null && owner.base === "Date";
+      const args = this.readCallArguments(dateBase ? [ANY_TYPE] : undefined);
       this.accept(";");
+      if (dateBase) {
+        const value = args[0];
+        return {
+          kind: "memberAssign",
+          base: this.selfName,
+          field: "__date",
+          op: "=",
+          value: value === undefined ? { k: "call", name: "blaze_rt_now_ms", args: [] } : this.dateMilliseconds(value),
+          line: token.line,
+        };
+      }
       return {
         kind: "memberAssign",
-        base: "self",
+        base: this.selfName,
         field: "message",
         op: "=",
         value: args[0] ?? { k: "text", parts: [] },
@@ -10395,17 +10562,28 @@ class TypeScriptParser {
       return { kind: "expression", value: this.hole(), line: start.line };
     }
     this.expect("(");
-    const saved = this.testAfterBody;
-    this.testAfterBody = true;
+    // A condition that writes — `do { … } while ((c = next()))` — writes after
+    // the body ran and before the test, every turn. The writes are the body's
+    // last statements and the test leaves an infinite loop when it fails.
+    const outer = this.pendingBefore;
+    this.pendingBefore = [];
     let condition: Expression;
+    let perTurn: Statement[];
     try {
       condition = this.inLoopCondition(() => this.readExpression());
+      perTurn = this.pendingBefore;
     } finally {
-      this.testAfterBody = saved;
+      this.pendingBefore = outer;
     }
     this.expect(")");
     this.accept(";");
-    return { kind: "doWhile", condition, body, line: start.line };
+    if (perTurn.length === 0) return { kind: "doWhile", condition, body, line: start.line };
+    return {
+      kind: "while",
+      condition: { k: "literal", text: "1", boolean: true },
+      body: [...body, ...perTurn, this.leaveLoopWhen(condition, start.line)],
+      line: start.line,
+    };
   }
 
   /**
@@ -10520,18 +10698,6 @@ class TypeScriptParser {
       return { k: "ident", name: held };
     }
     if (value.k !== "ident" && value.k !== "member" && value.k !== "index") return value;
-    // A do-while tests its condition after the body has run, and a write the
-    // test makes would have to run after the body too, which is not a place the
-    // loop statement has. A while tests before the body, so its write is the
-    // first statement of the body and is read there.
-    if (this.testAfterBody) {
-      this.report(
-        "an assignment written in a loop condition is not part of the subset",
-        "write the value into a name inside the loop, and test the name",
-        operator,
-      );
-      return this.hole();
-    }
     this.next();
     const written = this.readExpression();
     if (value.k === "ident") {
@@ -10971,8 +11137,25 @@ class TypeScriptParser {
     while (this.at("instanceof")) {
       this.next();
       const name = this.next();
-      const known = name.kind === "ident" && (this.classTable.names.has(name.text) || name.text === "Error");
-      if (name.kind !== "ident" || !known) {
+      if (name.kind !== "ident") {
+        this.report("instanceof names a class of this module", `near "${name.text}"`, name);
+        continue;
+      }
+      // A host class is named through its namespace — `Temporal.PlainDate` —
+      // and the members are read as the name they are.
+      let dotted = false;
+      while (this.at(".")) {
+        this.next();
+        const member = this.next();
+        if (member.kind !== "ident") {
+          this.report("a class is named with an identifier", `near "${member.text}"`, member);
+          break;
+        }
+        dotted = true;
+      }
+      const local = this.classTable.names.has(name.text);
+      const known = local || name.text === "Error" || name.text === "Date" || dotted;
+      if (!known) {
         this.report("instanceof names a class of this module", `near "${name.text}"`, name);
         continue;
       }
@@ -10981,7 +11164,8 @@ class TypeScriptParser {
       // every class of `extends Error` is one too. A value no type names may be
       // any instance, so it is one when it is there.
       const held = this.classOfExpression(left);
-      const isOne = held !== null && (held === name.text || (name.text === "Error" && this.classNamed(held)?.base === "Error"));
+      const isDate = name.text === "Date" && held !== null && this.classExtendsDate(held);
+      const isOne = held !== null && (held === name.text || isDate || (name.text === "Error" && this.classNamed(held)?.base === "Error"));
       left =
         held === null
           ? { k: "binary", op: "!==", left, right: { k: "null" } }
@@ -11303,7 +11487,12 @@ class TypeScriptParser {
    * table back afterwards.
    */
   private withNarrowing<T>(settled: Narrowing, read: () => T): T {
-    if (settled.types.size === 0 && settled.shapes.size === 0) return read();
+    // A branch reads with its own map even where the branch itself settles
+    // nothing: a write inside it forgets a narrowing the branch around it made,
+    // and the sibling branch must still read through that narrowing.
+    if (settled.types.size === 0 && settled.shapes.size === 0 && this.narrowed.size === 0 && this.narrowedShapes.size === 0) {
+      return read();
+    }
     const saved = this.narrowed;
     const savedShapes = this.narrowedShapes;
     this.narrowed = new Map(saved);
@@ -11642,7 +11831,17 @@ class TypeScriptParser {
           const prototype = args[0];
           if (prototype !== undefined && prototype.k === "null" && args.length === 1) {
             const empty: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
-            const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: NUMBER_RESULT };
+            // The declaration states what its entries hold; a table declared
+            // `any` states nothing, and its entries are the dynamic values the
+            // runtime holds rather than numbers.
+            const expected = this.expectedShape;
+            const indexed = expected !== null && expected.kind === "record" && expected.index !== null ? expected.index : null;
+            const collection: CollectionValue = {
+              kind: "map",
+              key: TEXT_RESULT,
+              value: indexed === null ? ANY_TYPE : this.typeExprOfShape(indexed),
+              ...(indexed === null ? {} : { valueShape: indexed }),
+            };
             this.collectionExpressions.set(empty, collection);
             this.expressionTypes.set(empty, NUMBER_RESULT);
             replace(empty);
@@ -12163,12 +12362,10 @@ class TypeScriptParser {
               replace({ k: "call", name: "Number.parseInt", args });
               continue;
             }
-            this.report(
-              "Number.parseInt reads a number in base ten",
-              "the digits the source writes are base ten ones, as in Number.parseInt(text, 10)",
-              this.peek(),
-            );
-            return this.hole();
+            // A radix the source computes is the runtime's parse: the digits
+            // are read in the base the value names.
+            replace({ k: "call", name: "Number.parseInt", args });
+            continue;
           }
           const lowered = this.numberMethod(target.field, args);
           if (lowered !== null) {
@@ -12260,12 +12457,19 @@ class TypeScriptParser {
           // built: its entries are the runtime's, so the question is the
           // dictionary's. The runtime answers it for a parsed object and for a
           // compiled record's layout as well.
-          if (receiver !== undefined && key !== undefined && unknownReference(this.valueTypeOf(receiver))) {
-            const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, key] };
-            const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
-            this.expressionTypes.set(answer, BOOLEAN_RESULT);
-            replace(answer);
-            continue;
+          if (receiver !== undefined && key !== undefined) {
+            const held = this.valueTypeOf(receiver);
+            // A value the read cannot name, and the dictionary handle a value
+            // of the runtime is held as, both answer the question from the
+            // entries the runtime holds.
+            const dictionary = unknownReference(held) || (held.kind === "primitive" && held.name === "f64");
+            if (dictionary) {
+              const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, key] };
+              const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
+              this.expressionTypes.set(answer, BOOLEAN_RESULT);
+              replace(answer);
+              continue;
+            }
           }
           this.report(
             "hasOwnProperty asks a record keyed by text",
@@ -12543,6 +12747,16 @@ class TypeScriptParser {
           );
           const spreads = target.field === "push" || target.field === "splice" || target.field === "unshift" ? this.argumentSpreads : null;
           const receiver = target.base;
+          // A push on a value the read cannot name is the runtime's dynamic
+          // array append: the list is the entry or the name the source wrote,
+          // and the append answers the list it grew, which is written back.
+          if (target.field === "push" && spreads === null && unknownReference(this.valueTypeOf(receiver)) && args.length >= 1) {
+            const lowered = this.dynamicPush(receiver, args, callLine);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
           // `hash.update(text)` feeds the runtime's SHA-256 hasher and
           // `hash.digest("hex")` answers the digest it holds: the hasher is one
           // handle, and the two calls are the runtime's own.
@@ -12585,7 +12799,7 @@ class TypeScriptParser {
                 replace(receiver);
                 continue;
               }
-              const stamp: Expression = { k: "call", name: "blaze_rt_timestamp_iso", args: [] };
+              const stamp: Expression = { k: "call", name: "blaze_rt_date_iso", args: [receiver] };
               this.expressionTypes.set(stamp, TEXT_RESULT);
               replace(stamp);
               continue;
@@ -12887,7 +13101,11 @@ class TypeScriptParser {
           // helpers the runtime already carries are used directly, and the
           // three that ask where a needle is are written over `text.indexOf`
           // so a text needs no new service.
-          if (this.valueTypeOf(receiver).kind === "text") {
+          const receiverType = this.valueTypeOf(receiver);
+          // A value the read cannot name may be a text: the language lets a
+          // source call a text method on one, and the runtime reads it as a
+          // text where the method asks.
+          if (receiverType.kind === "text" || receiverType.kind === "ref") {
             const lowered = this.textMethod(receiver, target.field, args);
             if (lowered !== null) {
               replace(lowered);
@@ -12904,7 +13122,17 @@ class TypeScriptParser {
               continue;
             }
           }
-          const found = this.methodOwner(this.classOfExpression(receiver), target.field, false);
+          // A class of `Date` inherits the base's time and stamp; its own
+          // methods are the class's, and were found above where written.
+          const receiverClass = this.classOfExpression(receiver);
+          if (target.field !== "toISOString" && receiverClass !== null && this.classExtendsDate(receiverClass)) {
+            const lowered = this.dateMethod(receiver, target.field, args);
+            if (lowered !== null) {
+              replace(lowered);
+              continue;
+            }
+          }
+          const found = this.methodOwner(receiverClass, target.field, false);
           if (found === null) {
             // A receiver whose type is a name this file imports is not a value
             // this read can say has no such method: the declaration is in
@@ -13104,11 +13332,8 @@ class TypeScriptParser {
           } else if (radix !== undefined && radix.k === "literal" && (radix.text === "2" || radix.text === "8" || radix.text === "16")) {
             target.name = "Number.parseInt";
           } else {
-            this.report(
-              "parseInt reads a number in base ten",
-              "the digits the source writes are base ten ones, as in parseInt(text, 10)",
-              this.peek(),
-            );
+            // A radix the source computes is the runtime's parse.
+            target.name = "Number.parseInt";
           }
         }
         // `String(x)` is the text the value is written as, which is the value a
@@ -13290,7 +13515,15 @@ class TypeScriptParser {
           }
         }
         if (field.text === "length" && target.k === "ident" && !this.at("(")) {
-          replace({ k: "length", buffer: target.name });
+          // A value the read cannot name carries its length in the runtime's
+          // dynamic array rather than in a block header.
+          if (unknownReference(this.valueTypeOf(target))) {
+            const counted: Expression = { k: "call", name: "blaze_rt_length", args: [target] };
+            this.expressionTypes.set(counted, NUMBER_RESULT);
+            replace(counted);
+          } else {
+            replace({ k: "length", buffer: target.name });
+          }
           continue;
         }
         if (field.text === "toFixed" && this.at("(")) {
@@ -13336,6 +13569,16 @@ class TypeScriptParser {
               this.peek(),
             );
             replace(this.hole());
+            continue;
+          }
+          // A value the read cannot name has no radix: the argument is the
+          // options an object of its own reads, and the text is the value
+          // written the way a template string writes it.
+          if (unknownReference(this.valueTypeOf(target)) && this.peek(1).kind !== "number") {
+            this.readCallArguments();
+            const written: Expression = { k: "text", parts: [{ k: "value", value: target }] };
+            this.expressionTypes.set(written, TEXT_RESULT);
+            replace(written);
             continue;
           }
           replace(this.hexadecimal(target));
@@ -13391,7 +13634,7 @@ class TypeScriptParser {
             continue;
           }
         }
-        replace({ k: "member", base: target, field: field.text });
+        replace({ k: "member", base: target, field: memberNameOf(field.text) });
         continue;
       }
       return finish();
@@ -14085,7 +14328,12 @@ class TypeScriptParser {
       }
     });
     const body: Statement[] = this.readReturning(stated, () => {
-      if (this.at("{")) return [...prelude, ...this.readFunctionBlock()];
+      if (this.at("{")) {
+        const read = [...prelude, ...this.readFunctionBlock()];
+        // `() => {}` runs nothing and answers nothing: the return is the one
+        // statement its body has, so a caller of it is a call with a body.
+        return read.length === 0 ? [{ kind: "result" as const, value: null, line }] : read;
+      }
       // A concise body that is a whole assignment is the write and the value it
       // wrote: `() => (count ??= next())` runs the write and answers `count`.
       // A parenthesised form is the same value, and the parentheses are the
@@ -14428,6 +14676,9 @@ class TypeScriptParser {
       ? binding.function.replace("__closure_", "__closure_code_")
       : `__closure_code_${this.stem}_${binding.function}`;
     binding.code = code;
+    // A declaration read as a value twice is one entry: the name is the
+    // declaration's, and a function of that name is written once.
+    if (this.liftedArrows.has(code)) return code;
     const line = this.liftedArrows.get(binding.function)?.line ?? binding.line ?? 0;
     const args: Expression[] = [
       ...binding.captures.map((_, index) => ({
@@ -15996,6 +16247,14 @@ class TypeScriptParser {
         return empty;
       }
     }
+    // A value the read cannot name is the dictionary the runtime holds: its
+    // keys are the entries it has, read by position.
+    const heldConstant = value !== undefined && value.k === "ident" ? this.constants.get(value.name) : undefined;
+    if (method === "keys" && args.length === 1 && value !== undefined && heldConstant?.fields === undefined && unknownReference(this.valueTypeOf(value))) {
+      const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: ANY_TYPE };
+      const read = this.collectionMethod(value, collection, method, []);
+      if (read !== null) return read;
+    }
     const constant = args.length === 1 && value !== undefined && value.k === "ident"
       ? this.constants.get(value.name)
       : undefined;
@@ -16478,6 +16737,12 @@ class TypeScriptParser {
       if (!this.repeatable(at)) return null;
       return call("text.slice", [receiver, at, { k: "binary", op: "+", left: at, right: { k: "literal", text: "1" } }]);
     }
+    // `text.charCodeAt(i)` is the code of the character at the position. The
+    // texts this compiler holds are code points, so the code point is the code
+    // the source reads for every character it encodes as one unit.
+    if (method === "charCodeAt" && args.length === 1) {
+      return call("text.codePointAt", [receiver, args[0] as Expression]);
+    }
     if (method === "includes" && args.length === 1) {
       return {
         k: "binary",
@@ -16509,6 +16774,17 @@ class TypeScriptParser {
           right: after,
         },
       };
+    }
+    // `text.replaceAll(needle, replacement)` is every asking replaced. The
+    // needle is a text the source wrote and not the empty one: the language's
+    // empty needle inserts between characters, which is a different text than
+    // the one this helper writes.
+    if (method === "replaceAll" && args.length === 2) {
+      const needle = args[0] as Expression;
+      const replacement = args[1] as Expression;
+      if (needle.k !== "text" || needle.parts.length !== 1 || (needle.parts[0] as { value: string }).value === "") return null;
+      const helper = this.replaceAllHelper(this.peek().line);
+      return call(helper.name, [receiver, needle, replacement]);
     }
     if (method === "startsWith" && args.length === 1) {
       // The field the text holds from the beginning, which is the text the
@@ -17248,6 +17524,88 @@ class TypeScriptParser {
     const params = [
       { name: "text", type: TEXT_RESULT },
       { name: "count", type: NUMBER_RESULT },
+    ];
+    const returns: TypeExpr = TEXT_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const made = { name, returns };
+    this.collectHelpers.set(key, made);
+    this.pureTextHelpers.add(name);
+    return made;
+  }
+
+  /**
+   * The helper that replaces every asking of a needle, once per file.
+   *
+   * The needle is asked from the position after the last replacement, so a
+   * replacement that itself holds the needle is not asked again: what is
+   * replaced is the source text, exactly as the language does it.
+   */
+  private replaceAllHelper(line: number): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["replaceAll"]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const at: Expression = { k: "ident", name: "at" };
+    const size: Expression = { k: "lengthOf", of: ident("needle") };
+    const body: Statement[] = [
+      // A needle with no characters is nothing to replace: the helper is a
+      // function an input built from its contract may hand one, and a search
+      // for it would find it at every position for ever.
+      {
+        kind: "if",
+        condition: { k: "binary", op: "===", left: size, right: number("0") },
+        then: [{ kind: "result", value: ident("text"), line }],
+        otherwise: [],
+        line,
+      },
+      { kind: "declare", name: "out", type: null, init: { k: "text", parts: [{ k: "text", value: "" }] }, line },
+      { kind: "declare", name: "at", type: null, init: number("0"), line },
+      {
+        kind: "while",
+        condition: number("1"),
+        body: [
+          // The runtime searches a text from its start: the rest of the text
+          // is the slice the needle is asked in, and the position is the one
+          // the slice found plus where the slice began.
+          { kind: "declare", name: "rest", type: null, init: { k: "call", name: "text.slice", args: [ident("text"), at] }, line },
+          { kind: "declare", name: "found", type: null, init: { k: "call", name: "text.indexOf", args: [ident("rest"), ident("needle")] }, line },
+          {
+            kind: "if",
+            condition: { k: "binary", op: "<", left: ident("found"), right: number("0") },
+            then: [{ kind: "break", line }],
+            otherwise: [],
+            line,
+          },
+          { kind: "declare", name: "position", type: null, init: { k: "binary", op: "+", left: at, right: ident("found") }, line },
+          {
+            kind: "assign",
+            target: "out",
+            op: "+=",
+            value: { k: "call", name: "text.slice", args: [ident("text"), at, ident("position")] },
+            line,
+          },
+          { kind: "assign", target: "out", op: "+=", value: ident("replacement"), line },
+          {
+            kind: "assign",
+            target: "at",
+            op: "=",
+            value: { k: "binary", op: "+", left: ident("position"), right: size },
+            line,
+          },
+        ],
+        line,
+      },
+      { kind: "result", value: { k: "binary", op: "+", left: ident("out"), right: { k: "call", name: "text.slice", args: [ident("text"), at] } }, line },
+    ];
+    const params = [
+      { name: "text", type: TEXT_RESULT },
+      { name: "needle", type: TEXT_RESULT },
+      { name: "replacement", type: TEXT_RESULT },
     ];
     const returns: TypeExpr = TEXT_RESULT;
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
@@ -18997,13 +19355,31 @@ class TypeScriptParser {
       // `this` is the instance a method was called on, which is the first
       // parameter the class lowering gives every method.
       if (token.text === "this") {
-        if (this.currentClass !== null) return { k: "ident", name: "self" };
+        if (this.currentClass !== null) return { k: "ident", name: this.selfName };
         this.report(
           '"this" is not a value outside a class method',
           "a method reads the instance it was called on as this",
           token,
         );
         return { k: "ident", name: "this" };
+      }
+      if (token.text === "super" && this.at(".")) {
+        // `super.toISOString()` is the base's method on the time the subclass
+        // carries. The only base with methods a source calls is `Date`.
+        this.next();
+        const field = this.next();
+        const owner = this.currentClass;
+        if (owner !== null && owner.base === "Date" && this.at("(")) {
+          const args = this.readCallArguments();
+          const lowered = this.dateMethod({ k: "ident", name: this.selfName }, field.text, args);
+          if (lowered !== null) return lowered;
+        }
+        this.report(
+          "a call of super is not part of the class subset",
+          "a compiled class is one layout; write the fields and methods it needs",
+          field,
+        );
+        return this.hole();
       }
       if (token.text === "super") {
         this.report(
@@ -19824,6 +20200,76 @@ class TypeScriptParser {
     const empty: Expression = { k: "buffer", element: typeToString(ANY_TYPE), values: [] };
     this.unsettledArrays.set(empty, open);
     return answer(empty);
+  }
+
+  /**
+   * An empty list written into a place the read cannot shape, as the dynamic
+   * array the runtime holds.
+   *
+   * A typed place settles the list at its element type; a place that states
+   * nothing has no element to build a block at, and the language's answer is a
+   * dynamic array: its elements are the values pushed into it, and its length
+   * travels with it. Only the list itself is converted; an empty arm of a
+   * conditional keeps its own settlement.
+   */
+  private dynamicEmptyList(value: Expression): Expression {
+    if (value.k !== "buffer" || value.values.length !== 0 || !this.unsettledArrays.has(value)) return value;
+    this.unsettledArrays.delete(value);
+    const made: Expression = { k: "call", name: "blaze_rt_dyn_array_new", args: [], returns: ANY_TYPE };
+    this.expressionTypes.set(made, ANY_TYPE);
+    return made;
+  }
+
+  /**
+   * `list.push(value)` on a value the read cannot name: the runtime's dynamic
+   * array append.
+   *
+   * The list is an entry or a name, and the append answers the list it grew,
+   * which is written back to the place the source named. The value is handed
+   * as the dynamic value the runtime stores; a number is boxed and a text is
+   * boxed, so a later read at the type the use asks for recovers it.
+   */
+  private dynamicPush(receiver: Expression, args: readonly Expression[], line: number): Expression | null {
+    let list: Expression = receiver;
+    for (const argument of args) {
+      const appended: Expression = { k: "call", name: "blaze_rt_array_push", args: [list, argument], returns: ANY_TYPE };
+      this.expressionTypes.set(appended, ANY_TYPE);
+      list = appended;
+    }
+    // The append is read once: the list it answers is a name the write uses, so
+    // an expression statement does not append a second time.
+    const held = `__grown${this.fieldCount++}`;
+    this.pendingBefore.push({ kind: "declare", name: held, type: null, init: list, line });
+    this.valueTypes.set(held, ANY_TYPE);
+    const answered: Expression = { k: "ident", name: held };
+    // An entry of a dictionary the read lowered to a `get`: the grown list is
+    // written back through the dictionary's own set, exactly as a push on a
+    // map's value is.
+    const entry = this.dictionaryReads.get(receiver);
+    if (entry !== undefined) {
+      const base = this.writeTarget(entry.base, line);
+      const setName = this.collectionSetNameFor(entry.collection);
+      if (base === null || setName === null) return null;
+      this.pendingBefore.push({
+        kind: "expression",
+        value: { k: "call", name: setName, args: [{ k: "ident", name: base }, entry.index, answered] },
+        line,
+      });
+      return answered;
+    }
+    if (receiver.k === "ident") {
+      this.pendingBefore.push({ kind: "assign", target: receiver.name, op: "=", value: answered, line });
+      return answered;
+    }
+    if (receiver.k === "index" && receiver.base.k === "ident") {
+      this.pendingBefore.push({ kind: "indexAssign", buffer: receiver.base.name, index: receiver.index, op: "=", value: answered, line });
+      return answered;
+    }
+    if (receiver.k === "member" && receiver.base.k === "ident") {
+      this.pendingBefore.push({ kind: "memberAssign", base: receiver.base.name, field: receiver.field, op: "=", value: answered, line });
+      return answered;
+    }
+    return null;
   }
 
   /** An array of values written out, at the element type it is held at. */
@@ -21480,7 +21926,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
           this.synchronize();
           return this.hole();
         }
-        holder = { k: "member", base: holder, field: field.text };
+        holder = { k: "member", base: holder, field: memberNameOf(field.text) };
       }
       const target: Expression = { k: "member", base: holder, field: "new" };
       const heldFunction = this.memberFunctionType(target);
@@ -21674,15 +22120,12 @@ function usageOf(declaration: TypeScriptFunction): {
   accesses: AccessRange[];
 } {
   const parameters = new Set(declaration.params.map((param) => param.name));
-  /**
-   * Whether the ranges this body reads have to be stated.
-   *
-   * A function the frontend wrote is called only from the body that wrote it,
-   * which is what holds the bounds of everything it hands over. Stating them
-   * again would hold a helper to a caller that does not exist, and a helper that
-   * walks an array it was handed reads at a position nothing there can name.
-   */
-  const contractable = declaration.closure !== true;
+  const parameterTypes = new Map(declaration.params.map((param) => [param.name, param.type]));
+  /** Whether a name holds a buffer, which is the only value with a range. */
+  const isBuffer = (name: string): boolean => {
+    const type = parameterTypes.get(name);
+    return type !== undefined && isBufferType(type);
+  };
   const accesses: AccessRange[] = [];
   /** The range a loop index stands for, which its body reads through. */
   const loops = new Map<string, { lo: string; hi: string }>();
@@ -21763,7 +22206,7 @@ function usageOf(declaration: TypeScriptFunction): {
         // name is not left out: the read is still a read, and what the
         // contract states about it is that the buffer is there.
         const base = value.base;
-        if (base.k === "ident" && parameters.has(base.name)) {
+        if (base.k === "ident" && parameters.has(base.name) && isBuffer(base.name)) {
           const loop = value.index.k === "ident" ? loops.get(value.index.name) : undefined;
           if (loop !== undefined) access(base.name, loop.lo, loop.hi);
           else {
@@ -21776,12 +22219,10 @@ function usageOf(declaration: TypeScriptFunction): {
             // gets a real bound the moment the bound is spelled as a
             // parameter rather than as a local holding one. A contract that
             // cannot state the length the body reads is not a contract.
+            // A position the contract cannot name is a read the body makes and
+            // the contract cannot bound: the definition carries the statements,
+            // and the caller is held to no range it cannot state.
             if (at !== null) access(base.name, at, `(${at} + 1)`);
-            else if (contractable)
-              throw frontendError(
-                `${declaration.name} cannot be contracted: it reads ${base.name} at a position the contract cannot name`,
-                "hold the bound in a parameter, so the contract can state the length the body reads",
-              );
           }
         }
         expression(value.base);
@@ -21854,7 +22295,7 @@ function usageOf(declaration: TypeScriptFunction): {
         // no precondition at all, and a driver that believed the contract
         // handed the body a buffer shorter than the body walks.
         const base = one.buffer;
-        if (parameters.has(base)) {
+        if (parameters.has(base) && isBuffer(base)) {
           const loop = one.index.k === "ident" ? loops.get(one.index.name) : undefined;
           if (loop !== undefined) access(base, loop.lo, loop.hi);
           else {
@@ -21907,7 +22348,7 @@ function usageOf(declaration: TypeScriptFunction): {
         // Walking a buffer reads all of it, so the contract says so. The
         // iteration is bounded by the array's own length, so no length is
         // required of the caller: what it states is that the buffer is there.
-        if (parameters.has(one.of)) access(one.of, "0", `len(${one.of})`);
+        if (parameters.has(one.of) && isBuffer(one.of)) access(one.of, "0", `len(${one.of})`);
         one.body.forEach(statement);
         return;
       case "break":
@@ -21952,12 +22393,15 @@ const CONTRACT_BINARY = new Set(["+", "-", "*", "/", "<", "<=", ">", ">=", "==",
 
 class BodyAnalysis {
   private readonly declaration: TypeScriptFunction;
+  /** The names the file declares, which a body may read. */
+  private readonly moduleNames: ReadonlySet<string>;
   private readonly bindings = new Map<string, string>();
   private readonly accesses: AccessRange[] = [];
   private result: string | null = null;
 
-  constructor(declaration: TypeScriptFunction) {
+  constructor(declaration: TypeScriptFunction, moduleNames: ReadonlySet<string> = new Set()) {
     this.declaration = declaration;
+    this.moduleNames = moduleNames;
     for (const param of declaration.params) this.bindings.set(param.name, param.name);
   }
 
@@ -22199,6 +22643,16 @@ class BodyAnalysis {
         if (loop !== null && expression.name === loop.variable) return expression.name;
         const bound = this.bindings.get(expression.name);
         if (bound === undefined) {
+          // A value of the file is a name the contract cannot state over the
+          // parameters, so the body is contracted by what it does. A name the
+          // file does not declare is a refusal: the source reads nothing.
+          if (this.moduleNames.has(expression.name)) {
+            this.uncontractable(
+              `reads "${expression.name}", which the body did not declare`,
+              line,
+              "a contract is one expression over the parameters; a body that reads a value of the file is contracted by what it does",
+            );
+          }
           throw frontendError(`unknown identifier "${expression.name}"`, `line ${line}: declare it with an initialiser`);
         }
         return bound;
@@ -22248,6 +22702,16 @@ class BodyAnalysis {
             `reads "${base.name}", which the body built rather than received`,
             line,
             "a contract is one expression over the parameters; a body that reads a value it built is contracted by what it does",
+          );
+        }
+        // A value that is not a buffer has no range: an element of a dynamic
+        // value is read by the runtime, and the contract cannot state it. The
+        // body is contracted by the statements it runs, as a calling body is.
+        if (!isBufferType(param.type)) {
+          this.uncontractable(
+            `reads an element of "${param.name}", which is not a buffer`,
+            line,
+            "a function over a dynamic value is contracted by the statements it runs",
           );
         }
         const index = this.serialize(expression.index, loop, line);
@@ -22949,7 +23413,15 @@ export const typeScriptFrontend: Frontend = {
 
   contractFor(analysis, declared, input) {
     const declaration = declared.handle as TypeScriptFunction;
-    const body = new BodyAnalysis(declaration).run();
+    const held = analysis.constants as ReadonlyMap<string, unknown> | undefined;
+    const moduleNames = new Set<string>(held === undefined ? [] : [...held.keys()]);
+    // A value the file imports is a name it reads; a name it neither declares
+    // nor imports is the refusal.
+    for (const entry of analysis.imports) {
+      for (const name of entry.names ?? []) moduleNames.add(name);
+      for (const rename of entry.renames ?? []) moduleNames.add(rename.local);
+    }
+    const body = new BodyAnalysis(declaration, moduleNames).run();
     // A result that is one expression also states a postcondition: the
     // compiler is the oracle that decides whether an implementation meets it.
     // The body travels either way — it is what the function is, and the IR is

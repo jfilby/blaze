@@ -71,7 +71,7 @@ int blaze_triton_launch(const char* kernel_name,
 `;
 }
 
-import { writeFile, dirname, fileURLToPath } from "../core/platform.ts";
+import { writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions } from "../core/target.ts";
@@ -83,9 +83,6 @@ import {
 } from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 import { TRITON_NAME, tritonHeaderSource } from "./triton.ts";
-
-const compilerDir = dirname(fileURLToPath(import.meta.url));
-void compilerDir;
 
 export async function buildTritonLibrary(
   workDirectory: string,

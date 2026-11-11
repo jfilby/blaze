@@ -4243,6 +4243,51 @@ compiler offers one.
 
 This took the total from 689 to 680, and `runtime/nim.ts` reads whole.
 
+### 4i8. The project-file package reads, with the forms a package writes
+
+`blaze ir` on `src/compiler` now reads `smol-toml`'s whole module graph — the
+entry, `parse`, `extract`, `struct`, `primitive`, `date`, `stringify` and
+`error` — and stops in the contract phase. The forms it needed are the forms a
+JavaScript package writes and the compiler had not carried:
+
+- **An empty list states no element type when no use does.** `let seen = []`
+  and `t[k] = []` over a table of unknowns are the runtime's dynamic arrays
+  (`blaze_rt_dyn_array_new`), grown with `blaze_rt_array_push` and measured
+  with `blaze_rt_array_length`; an index read at a number key is
+  `blaze_rt_array_get`. A use that states the element type still settles the
+  list at that type, and an empty list inside a value read at a type the
+  compiler does not know yet still waits instead.
+- **A value the read cannot name is a dynamic value.** An index read or write
+  of one is the dictionary service its key names (`get`/`get_ref`/`get_text`
+  and the `set` family); a text method called on one is the text service; and
+  `Object.keys` of one is the entries the runtime holds. `Object.hasOwn` on
+  one, and on the number a dictionary is held as, is `blaze_rt_dict_has`.
+- **A `let` that holds a regular expression is the pattern it wrote**, where
+  the file never writes it again: a package writes its patterns once.
+- **`parseInt(text, radix)` reads a radix the source computes** through
+  `Number.parseInt`, and the C emitter passes the text pointer the runtime
+  declares rather than a boxed value.
+- **A `do { … } while ((i = …))` writes before it tests**, every turn.
+- **`text.replaceAll(needle, replacement)`**, for a non-empty needle the source
+  wrote, is a helper of the file that searches the rest of the text from the
+  position it reached.
+- **`text.charCodeAt(i)`**, `text.match(pattern)` with a pattern held in a
+  `let`, `toString(options)` on a value the read cannot name, and
+  `Object.keys` of one.
+- **A destructured field may state its default**, `{ size = 4 }`, in a
+  declaration and in a parameter pattern.
+- **A class may extend `Date`.** The subclass carries the time in a `__date`
+  field, `super(ms)` sets it (a text is `Date.parse`d), the base's `getTime`,
+  `valueOf` and `toISOString` read it, `super.toISOString()` is the base's
+  method on it, `instanceof Date` is true for it, and its private fields are
+  laid out under names C can spell.
+- **`blaze_rt_date_iso(ms)`** writes the ISO 8601 stamp of a date the program
+  holds, rather than the current clock; the Nim adapter answers it too.
+
+What this leaves is the contract and link. The module graph reads; the
+contract phase now walks the tree it could not reach, and the blockers there
+are the program functions of `cli.ts` and the symbols two modules share.
+
 ### 4i6. The model transport is a host boundary a project selects
 
 The AI SDK was read as project source: `blaze ir` on `src/compiler` stopped in
@@ -5538,11 +5583,14 @@ what is missing.
 The frontend is no longer the queue for the compiler's own sources. What
 `blaze ir` on `src/compiler` reaches next is:
 
-1. **`smol-toml`'s parser.** The package is read with the program (§4i0) and
-   stops at `t[k] = []` in `dist/parse.js`, where `t` is an unannotated table
-   built with `Object.create(null)`. The place states no element type, so the
-   list needs the dynamic value representation the runtime's `array_push`
-   already has; the push on that entry is the same slice.
+1. **The link's symbols.** The frontend reads the compiler's sources and the
+   project-file package whole (§4i8), and the contract phase now builds the
+   contracts of every module. It stops where two modules declare a private
+   helper of the same name — `typeText` in `core/semantic-ir.ts` and in
+   `semantics/typescript-types.ts` — because a program links by symbol. The
+   next slice gives a private function the symbol its file makes unique at the
+   contract/link layer while the source name stays the IR's, so the tests and
+   the prompts keep reading the names the source wrote.
 2. **The contract phase's host calls.** `core/platform-node.ts` calls the names
    it imports from `node:*`, and a call to a name the program does not compile
    is refused. A native build does not carry that adapter; it needs the platform

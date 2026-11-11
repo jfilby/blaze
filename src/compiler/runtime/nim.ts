@@ -1216,6 +1216,22 @@ proc blaze_rt_array_length*(array: float64): float64 {.exportc, cdecl.} =
   if item.kind != dynArray: return 0.0
   float64(item.items.len)
 
+proc blaze_rt_length*(value: float64): float64 {.exportc, cdecl.} =
+  ## How long a value is, whichever of the runtime's shapes it has: a dynamic
+  ## array or object counts its items, a dictionary or record counts its
+  ## fields, and a text counts its characters.
+  let at = blazeDynIndex(value)
+  if at >= 0:
+    let item = blazeDynValues[at]
+    if item.kind == dynArray: return float64(item.items.len)
+    if item.kind == dynObject: return float64(item.items.len div 2)
+    if item.kind == dynText: return float64(blaze_rt_text_length(item.text))
+    return 0.0
+  if value < 4096.0: return 0.0
+  let counted = blaze_rt_dict_len(value)
+  if counted != 0.0: return counted
+  float64(blaze_rt_text_length(cast[cstring](cast[uint](value))))
+
 proc blaze_rt_array_set*(array, index, value: float64) {.exportc, cdecl.} =
   ## One element written, where the array holds it. An index that names no
   ## element writes nothing, which is what the C runtime answers.
@@ -1478,6 +1494,19 @@ proc blaze_rt_timestamp_iso*(): cstring {.exportc, cdecl.} =
   ## The current time as an ISO 8601 timestamp in UTC, to the millisecond.
   let stamp = now().utc.format("yyyy-MM-dd'T'HH:mm:ss'.000Z'")
   blaze_rt_string_new(cast[pointer](cstring(stamp)), csize_t(stamp.len))
+
+proc blaze_rt_date_iso*(milliseconds: float64): cstring {.exportc, cdecl.} =
+  ## The ISO 8601 stamp of a date, in UTC, to the millisecond.
+  if milliseconds != milliseconds:
+    return blaze_rt_string_new(cast[pointer](cstring"Invalid Date"), csize_t(12))
+  var seconds = floor(milliseconds / 1000.0)
+  var millis = int64(milliseconds - seconds * 1000.0)
+  if millis < 0:
+    millis += 1000
+    seconds -= 1.0
+  let stamp = fromUnix(int64(seconds)).utc.format("yyyy-MM-dd'T'HH:mm:ss")
+  let full = stamp & "." & align($millis, 3, '0') & "Z"
+  blaze_rt_string_new(cast[pointer](cstring(full)), csize_t(full.len))
 
 proc blaze_rt_number_same*(left, right: float64): float64 {.exportc, cdecl.} =
   ## Two numbers are the same when the bits they are held as are: -0 and 0 are

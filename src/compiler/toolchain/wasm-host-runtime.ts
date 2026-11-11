@@ -120,6 +120,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_array_get",
   "blaze_rt_array_set",
   "blaze_rt_array_length",
+  "blaze_rt_length",
   "blaze_rt_md5_create",
   "blaze_rt_md5_update",
   "blaze_rt_md5_digest",
@@ -1153,6 +1154,26 @@ export function blaze_rt_array_set(array, index, value) {
   const at = Number(index);
   if (at < 0 || at >= boxed.items.length) return;
   boxed.items[at] = value;
+}
+`,
+  },
+  {
+    service: "blaze_rt_length",
+    source: `
+export function blaze_rt_length(value) {
+  const boxed = dynLookup(value);
+  if (boxed !== null) {
+    if (boxed.kind === "array") return boxed.items.length;
+    if (boxed.kind === "object") {
+      const inner = boxed.value;
+      if (inner === null || typeof inner !== "object") return 0;
+      return Object.keys(inner).length;
+    }
+    if (boxed.kind === "text") return boxed.text.length;
+    return 0;
+  }
+  if (Number(value) === 0) return 0;
+  return textBytes(value).length;
 }
 `,
   },

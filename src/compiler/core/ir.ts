@@ -106,6 +106,12 @@ export type Expression =
       element: string;
       values: Expression[];
       view?: { of: Expression; offset: Expression; count: Expression };
+      /**
+       * A list whose elements no use states: the runtime's dynamic array, not a
+       * block of a stated element type. A package writes `let seen = []` and
+       * pushes the values it reads, and the list is the values it holds.
+       */
+      dynamic?: boolean;
     }
   /** A template string: text as written, with the values it interpolates. */
   | { k: "text"; parts: TextPart[] }

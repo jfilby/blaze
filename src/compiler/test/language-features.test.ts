@@ -1645,6 +1645,86 @@ test("Object.hasOwn asks the dictionary a value holds", async () => {
   }
 });
 
+test("a class may extend Date and read the time it carries", async () => {
+  const source = [
+    "class Stamp extends Date {",
+    "  #local = 0;",
+    "  constructor(ms: number) {",
+    "    super(ms);",
+    "    this.#local = 7;",
+    "  }",
+    "  local(): number {",
+    "    return this.#local;",
+    "  }",
+    "  toISOString(): string {",
+    "    return super.toISOString();",
+    "  }",
+    "}",
+    "export function demo(): string {",
+    "  const stamp = new Stamp(86400000 + 500);",
+    "  return `${stamp.getTime()} ${stamp.toISOString()} ${stamp.local()} ${stamp instanceof Date}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "86400500 1970-01-02T00:00:00.500Z 7 true", `the ${backend} backend reads the date a class carries`);
+  }
+});
+
+test("a list the source leaves empty grows with the values pushed into it", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  let seen = [];",
+    "  seen.push(1);",
+    "  seen.push(`two`);",
+    "  const text = `a_b`.replaceAll(`_`, `-`);",
+    "  return `${seen.length} ${text}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "2 a-b", `the ${backend} backend grows the list and replaces every needle`);
+  }
+});
+
+test("a do-while condition may write the value it tests", async () => {
+  const source = [
+    "export function demo(): number {",
+    "  let i = 0;",
+    "  let n = 0;",
+    "  do {",
+    "    n += 1;",
+    "  } while ((i = i + 1) < 3);",
+    "  return n * 10 + i;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "33", `the ${backend} backend runs the write before the test`);
+  }
+});
+
+test("a number is parsed in a radix the source computes", async () => {
+  const source = [
+    "export function demo(): number {",
+    "  const base = 16;",
+    "  return parseInt(`ff`, base);",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "255", `the ${backend} backend reads the digits in the base it is given`);
+  }
+});
+
 test("a record spread into a record is the entries of both", async () => {
   const source = [
     "export function demo(): string {",

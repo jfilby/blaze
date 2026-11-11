@@ -663,6 +663,23 @@ class FunctionBody {
         return this.fieldAssignment(statement);
       case "indexAssign": {
         const buffer = this.read(statement.buffer, statement.line);
+        const bufferType = slotType(buffer.slot);
+        // A write into a dynamic value is the entry the key names: the runtime
+        // stores it, and there is no buffer to lay an element out in.
+        if (!this.isBufferValue(bufferType)) {
+          const base: Typed = { value: { k: "local", type: bufferType, name: buffer.name }, inferred: buffer.inferred };
+          const key = this.typed(statement.index, null, statement.line);
+          const value = this.typed(statement.value, null, statement.line);
+          if (statement.op !== "=") {
+            throw this.error(
+              `a compound write of an entry of "${buffer.name}" is not part of the subset`,
+              statement.line,
+              "read the entry into a name, combine it, and write the name back",
+            );
+          }
+          this.dynamicIndexWrite(base, key, value, statement.line);
+          return;
+        }
         const elementType = elementOf(buffer.inferred);
         const element = asType(elementType);
         const index = this.typed(statement.index, WHOLE, statement.line).value;
@@ -1106,11 +1123,18 @@ class FunctionBody {
         const held = this.read(expression.buffer, line);
         return { value: { k: "length", type: USIZE, of: { k: "local", type: slotType(held.slot), name: held.name } }, inferred: asType(USIZE) };
       }
-      case "lengthOf":
+      case "lengthOf": {
+        const operand = this.typed(expression.of, null, line);
+        // A dynamic value carries its length in the runtime's array, not in a
+        // block header: the length is the service that answers it.
+        if (!this.isBufferValue(operand.value.type) && operand.value.type.kind !== "text") {
+          return this.runtimeCall("blaze_rt_array_length", [operand.value], F64);
+        }
         return {
-          value: { k: "length", type: USIZE, of: this.typed(expression.of, null, line).value },
+          value: { k: "length", type: USIZE, of: operand.value },
           inferred: asType(USIZE),
         };
+      }
       case "index": {
         const base = this.typed(expression.base, null, line);
         if (base.inferred.kind === "object") {
@@ -1119,6 +1143,12 @@ class FunctionBody {
             line,
             "an object is read field by field, as in node.left",
           );
+        }
+        // A value that is not a buffer is a dynamic value: its entries are the
+        // runtime's, and the key chooses the service that reads one.
+        if (!this.isBufferValue(base.value.type)) {
+          const key = this.typed(expression.index, null, line);
+          return this.dynamicIndexRead(base, key, expect);
         }
         const element = elementOf(base.inferred);
         return {
@@ -1159,6 +1189,9 @@ class FunctionBody {
         };
       }
       case "buffer": {
+        // A list whose element type no use stated is the runtime's dynamic
+        // array, which holds the values pushed into it.
+        if (expression.dynamic === true) return this.runtimeCall("blaze_rt_dyn_array_new", [], ANY_REF);
         // `bytes.subarray(from, to)` is a window of a block another name holds:
         // the block moved by the offset, and the elements it reaches are the
         // count the source wrote. Nothing is allocated and nothing is copied.
@@ -2009,6 +2042,96 @@ class FunctionBody {
     const constant = wholeConstant(value, type);
     if (constant === null) return null;
     return { value: constant, inferred: asType(type) };
+  }
+
+  /**
+   * Whether a value is a buffer, whose elements are read at a position its
+   * type measures.
+   *
+   * A value the read could not name is a dynamic value: its elements are the
+   * runtime's entries, read through the dictionary or array services rather
+   * than as a buffer.
+   */
+  private isBufferValue(type: SemanticType): boolean {
+    return type.kind === "ptr" || type.kind === "slice" || type.kind === "array" || type.kind === "mask";
+  }
+
+  /** A runtime call of one builtin, kept for what it does or read for what it answers. */
+  private runtimeCall(name: string, args: readonly SemanticValue[], returns: SemanticType): Typed {
+    const builtin = builtinFor(name) as BuiltinSignature;
+    const call = this.semanticCall(
+      name,
+      {
+        name,
+        symbol: name,
+        params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+        returns: contractText(returns),
+      },
+      args,
+      returns,
+      [],
+      true,
+      builtin.params,
+    );
+    return { value: { k: "call", type: returns, call }, inferred: asType(returns) };
+  }
+
+  /**
+   * A value read from a dynamic value: an entry of a dictionary, or an element
+   * of a dynamic array.
+   *
+   * The key's kind chooses the service: a text key asks the dictionary, and a
+   * number key the dynamic array. A key the read could not name is asked as a
+   * text, because a JavaScript table is keyed by name. What the use expects
+   * chooses the accessor that answers it without a conversion the value cannot
+   * survive: a text read is the text the entry holds, and a value read is the
+   * handle the entry holds.
+   */
+  private dynamicIndexRead(base: Typed, key: Typed, expect: Inferred | null): Typed {
+    const expected = expect !== null && expect.kind === "type" ? expect.type : null;
+    const textKey = key.value.type.kind !== "primitive";
+    let name: string;
+    let returns: SemanticType;
+    if (!textKey) {
+      name = "blaze_rt_array_get";
+      returns = F64;
+    } else if (expected !== null && expected.kind === "text") {
+      name = "blaze_rt_dict_get_text";
+      returns = TEXT;
+    } else if (expected !== null && this.isBufferValue(expected)) {
+      name = "blaze_rt_dict_get_ref";
+      returns = expected;
+    } else if (expected !== null && expected.kind === "primitive" && expected.name !== "bool") {
+      name = "blaze_rt_dict_get";
+      returns = F64;
+    } else {
+      name = "blaze_rt_dict_get_ref";
+      returns = ANY_REF;
+    }
+    return this.runtimeCall(name, [base.value, key.value], returns);
+  }
+
+  /**
+   * A write into a dynamic value: the entry a text key names, or the element a
+   * number key names.
+   *
+   * The value chooses the accessor that stores it without a conversion that
+   * would lose what it is: a text is written as a text, a reference as the
+   * handle it is, and a number as the entry it becomes.
+   */
+  private dynamicIndexWrite(base: Typed, key: Typed, value: Typed, line: number): void {
+    const textKey = key.value.type.kind !== "primitive";
+    const kind = value.value.type.kind;
+    const text = kind === "text";
+    const reference = kind === "ref" || kind === "ptr" || kind === "slice" || kind === "array";
+    let name: string;
+    if (textKey) {
+      name = text ? "blaze_rt_dict_set_text" : reference ? "blaze_rt_dict_set_ref" : "blaze_rt_dict_set";
+    } else {
+      name = text ? "blaze_rt_dict_set_numkey_text" : reference ? "blaze_rt_dict_set_numkey_ref" : "blaze_rt_dict_set_numkey";
+    }
+    const call = this.runtimeCall(name, [base.value, key.value, value.value], F64);
+    if (call.value.k === "call") this.write({ k: "call", call: call.value.call, line });
   }
 
   /** A call of one of the wide modular kernels, as the builtin it is. */

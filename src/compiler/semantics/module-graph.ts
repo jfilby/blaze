@@ -805,6 +805,19 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     record.analysis = second.analysis;
     record.refused = second.refused;
     record.refusedCount = second.count;
+    // The linked read names the imports again, and a file that re-exports a
+    // name adds an import the first read may have written after it: the paths
+    // are resolved against the analysis the contract is built from, so every
+    // import is paired with the module it names.
+    const strict = request.requireImports !== false;
+    record.resolved = record.analysis.imports.map((entry) => {
+      const resolved = strict ? requireImport(request, read, record.path, entry) : resolveImport(request, read, record.path, entry);
+      return resolved ?? "";
+    });
+    record.typeResolved = (record.analysis.typeImports ?? []).map((entry) => {
+      const resolved = strict ? requireImport(request, read, record.path, entry) : resolveImport(request, read, record.path, entry);
+      return resolved ?? "";
+    });
   }
   // A file is read to the end whatever it holds, and the linked read is the
   // one whose refusals are the file's: a construct that waited for an import is

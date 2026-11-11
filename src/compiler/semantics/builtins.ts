@@ -83,6 +83,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_global_post_inc": { params: [F64], returns: F64, arity: 1 },
   "blaze_rt_global_post_dec": { params: [F64], returns: F64, arity: 1 },
   "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
+  "blaze_rt_date_iso": { params: [F64], returns: TEXT, arity: 1 },
   // A SHA-256 hasher is one handle the runtime keeps: the program makes it,
   // feeds it texts and reads the digest it answers.
   "blaze_rt_sha256_create": { params: [], returns: F64, arity: 0 },
@@ -112,6 +113,15 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** How many entries a dynamic array or object holds: an object's count is
    *  the number of fields it carries. */
   "blaze_rt_array_length": { params: [ANY], returns: F64, arity: 1 },
+  /** How long a value is, whichever of the runtime's shapes it has. */
+  "blaze_rt_length": { params: [ANY], returns: F64, arity: 1 },
+  /** A dynamic array: the list a value the read cannot type holds. */
+  "blaze_rt_dyn_array_new": { params: [], returns: ANY, arity: 0 },
+  /** Appends one value to a dynamic array, and answers the array. */
+  "blaze_rt_array_push": { params: [F64, ANY], returns: ANY, arity: 2 },
+  /** Reads one element of a dynamic array. */
+  "blaze_rt_array_get": { params: [F64, F64], returns: F64, arity: 2 },
+  "blaze_rt_array_set": { params: [F64, F64, ANY], returns: { kind: "void" }, arity: 3 },
   "blaze_rt_json_field_key": { params: [F64, F64], returns: TEXT, arity: 2 },
   "blaze_rt_json_field_value": { params: [F64, F64], returns: ANY, arity: 2 },
   /** Whether a compiled object was laid out with a field of this name: the

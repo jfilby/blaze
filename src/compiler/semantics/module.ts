@@ -338,6 +338,12 @@ export interface ModuleAnalysis {
    */
   classes?: ClassTable;
   functions: DeclaredFunction[];
+  /**
+   * Every name the file offers, including a value the read cannot settle in
+   * place. An import of one resolves to the name; what the name holds is read
+   * where it is used.
+   */
+  exportedNames?: readonly string[];
   /** The name the file exports as its default, or null where it exports none. */
   default: string | null;
   /**
