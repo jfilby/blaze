@@ -1,5 +1,10 @@
 # The QNX port
 
+## Local QNX install
+
+/jason/Development/qnx800
+
+
 ## What this spec is
 
 This is the roadmap for Blaze on QNX OS 8.0. It starts from the assumption that
