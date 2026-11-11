@@ -69,6 +69,34 @@ test("init writes a project file that builds machine code", async () => {
   assert.equal(executed.stdout, "3\n");
 });
 
+test("--verify=none builds a program without running it and records that", async () => {
+  const directory = await scratch("blaze-cli-verify-");
+  await writeFile(join(directory, "main.ts"), "console.log(1 + 2);\n", "utf8");
+  await writeFile(
+    join(directory, "blaze.toml"),
+    'language = "typescript"\nsourceFile = "main.ts"\noutput = "machine"\nbackend = "machine"\nmode = "debug"\n',
+    "utf8",
+  );
+
+  const built = blaze(directory, "build", "--verify=none");
+  assert.equal(built.code, 0, built.stderr);
+  const project = basename(directory);
+  const state = await storeDirectory(directory, project);
+  const record = JSON.parse(await readFile(join(state, "build.json"), "utf8")) as { programVerification?: string };
+  assert.equal(record.programVerification, "none");
+
+  // The program is delivered, and running it is what this test does after the
+  // build; the build itself did not run it to compare against the source.
+  const delivered = join(state, "output", project);
+  const executed = run(delivered, [], { timeoutMs: 60_000 });
+  assert.equal(executed.code, 0, executed.stderr);
+  assert.equal(executed.stdout, "3\n");
+
+  const invalid = blaze(directory, "build", "--verify=sometimes");
+  assert.notEqual(invalid.code, 0);
+  assert.match(invalid.stderr, /--verify must be one of source, none/);
+});
+
 test("init refuses to write over a project file, and leaves it as it was", async () => {
   const directory = await scratch("blaze-init-twice-");
   assert.equal((await run(process.execPath, [CLI, "init"], { cwd: directory })).code, 0);

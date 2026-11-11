@@ -9,7 +9,7 @@
 
 import { CompilerError } from "./errors.ts";
 import { hostPlatform } from "./platform.ts";
-import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, ProgramVerification, RuntimeKind, TargetSpec } from "./types.ts";
+import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, VerificationMode, RuntimeKind, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux", "qnx"];
@@ -168,7 +168,20 @@ export function assertLibrarySupported(target: TargetSpec, library: LibraryKind)
 export function programVerificationFor(
   target: TargetSpec,
   verifyProgram: boolean | undefined,
-): ProgramVerification {
+  requested?: VerificationMode,
+): VerificationMode {
+  if (requested === "none") return "none";
+  if (requested === "source") {
+    if (target.os !== hostPlatform()) {
+      throw new CompilerError({
+        category: "TargetError",
+        stage: "target",
+        message: "a source check needs a program this host can run",
+        detail: `the program is built for ${target.os}, and this host is ${hostPlatform()}; build for this host or pass --verify=none`,
+      });
+    }
+    return "source";
+  }
   if (verifyProgram === false) return "none";
   return target.os === hostPlatform() ? "source" : "none";
 }

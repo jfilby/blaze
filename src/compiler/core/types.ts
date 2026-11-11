@@ -638,7 +638,7 @@ export interface BenchmarkResult {
 }
 
 /** How a build checked the program it delivered, when it delivered one. */
-export type ProgramVerification = "source" | "none";
+export type VerificationMode = "source" | "none";
 
 export interface BuildStatus {
   id: string;
@@ -676,7 +676,7 @@ export interface BuildStatus {
    * for a host this one cannot run. A function-only build has no program and
    * no value here.
    */
-  programVerification?: ProgramVerification;
+  programVerification?: VerificationMode;
   /** The candidate selected for each compiled function, by function name. */
   selectedCandidates?: Record<string, string>;
   /**

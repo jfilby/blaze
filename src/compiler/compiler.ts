@@ -137,6 +137,7 @@ import {
   type SourceModule,
   type TestConfig,
   type TargetSpec,
+  type VerificationMode,
   type VerificationResult,
 } from "./core/types.ts";
 
@@ -194,6 +195,8 @@ export interface BuildOptions {
   runtime?: RuntimeKind;
   /** Print the prompt sent to the model for every attempt. */
   debug?: boolean;
+  /** How the delivered program is checked; overrides the project file. */
+  verify?: VerificationMode;
   /**
    * The arguments a program is checked with: the source and the delivered
    * binary are both run with them, so a program that reads the command line is
@@ -1410,7 +1413,7 @@ export async function runBuild(
   // A source comparison runs the delivered program on this host. A program
   // built for another host cannot be run here, so the build records that it
   // made no comparison rather than trying to run the wrong machine's code.
-  const programVerification = programVerificationFor(target, input.verifyProgram);
+  const programVerification = programVerificationFor(target, input.verifyProgram, options.verify);
 
   // --model wins over the project file, which wins over AI_MODEL.
   const requested = options.model ?? modelSpec(input.model, absoluteInput);

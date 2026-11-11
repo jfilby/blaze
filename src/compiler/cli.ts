@@ -39,6 +39,7 @@ import {
   RUNTIME_KINDS,
   type BuildStatus,
   type OutputKind,
+  type VerificationMode,
   type RuntimeKind,
 } from "./core/types.ts";
 import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core/terminal-title.ts";
@@ -95,6 +96,9 @@ Options:
   --backend <name>          c, wasm or machine; defaults to the output's
   --mode <name>             debug (-O0 -g, default), release (-O3), or danger
                             (release, with the runtime's guards left out)
+  --verify <mode>           source (run the program beside its source) or none
+                            (deliver without a comparison); a cross build
+                            defaults to none
   --runtime <name>          host runtime: none, nim or facil (default none)
   --max-candidates <n>      candidates to build per function (default 5)
   --max-attempts <n>        review rounds per candidate (default 3)
@@ -244,6 +248,10 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (mode !== undefined && !BUILD_MODES.includes(mode as BuildMode)) {
     throw new Error(`--mode must be one of ${BUILD_MODES.join(", ")}, got "${String(mode)}"`);
   }
+  const verify = values.verify;
+  if (verify !== undefined && verify !== "source" && verify !== "none") {
+    throw new Error(`--verify must be one of source, none, got "${String(verify)}"`);
+  }
   const recompile = values.recompile === true;
   // The two ask opposite things of the record: `--reuse` builds only from what
   // is stored, `--recompile` builds only what is not, so a build asking for
@@ -263,6 +271,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
     ...(mode === undefined ? {} : { mode: mode as BuildMode }),
+    ...(verify === undefined ? {} : { verify: verify as VerificationMode }),
     ...(runtime === undefined ? {} : { runtime: runtime as RuntimeKind }),
     ...(backend === undefined ? {} : { backend: backend as BackendKind }),
     ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") === undefined
@@ -336,6 +345,7 @@ async function main(argv: readonly string[]): Promise<number> {
       output: { type: "string" },
       runtime: { type: "string" },
       mode: { type: "string" },
+      verify: { type: "string" },
       backend: { type: "string" },
       debug: { type: "boolean" },
       "max-candidates": { type: "string" },

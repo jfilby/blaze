@@ -186,6 +186,11 @@ test("the machine backend admits QNX x86-64 and refuses QNX AArch64", () => {
 
 test("a program is checked against its source only where the host can run it", () => {
   assert.equal(programVerificationFor(QNX_X86, undefined), "none");
+  assert.equal(programVerificationFor(QNX_X86, undefined, "none"), "none");
+  assert.throws(
+    () => programVerificationFor(QNX_X86, undefined, "source"),
+    /a source check needs a program this host can run/,
+  );
   assert.equal(
     programVerificationFor({ arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }, undefined),
     "source",
