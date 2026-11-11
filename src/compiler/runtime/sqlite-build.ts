@@ -12,7 +12,7 @@
  * library as one translation unit, which is what makes it one file to compile.
  */
 
-import { createHash, existsSync, readFileSync, writeFile, compilerDataRoot, resolve } from "../core/platform.ts";
+import { createHash, readFileSync, rename, rm, stat, writeFile, compilerDataRoot, processId, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions, targetSummary } from "../core/target.ts";
@@ -434,6 +434,9 @@ export interface SqliteLibrary {
 /** A change to what the cache key means names a different cache. */
 const SQLITE_CACHE_SCHEMA = "sqlite-object-1";
 
+/** Distinguishes the temporary files of builds that overlap. */
+let temporary = 0;
+
 /**
  * The name the compiled amalgamation is kept under, which says what it was
  * built from: the compiler profile and its version, the target, the flags it
@@ -458,6 +461,20 @@ export function sqliteObjectKey(
     readFileSync(amalgamation),
   ].join("\u0000");
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
+}
+
+/**
+ * Whether a path holds an object a build may reuse.
+ *
+ * A compile that was killed left a partial object at the cache name, and an
+ * object of no bytes is not an answer to any link. The size is what tells the
+ * two apart; a missing file is not an object either.
+ */
+export async function sqliteObjectUsable(path: string): Promise<boolean> {
+  return stat(path).then(
+    (info) => info.isFile() && info.size > 0,
+    () => false,
+  );
 }
 
 /**
@@ -505,10 +522,17 @@ export async function buildSqliteLibrary(
     compiler,
     target: targetSummary(target),
   })}.o`;
-  if (!existsSync(sqliteObject)) {
-    const command = compileCommand(toolchain, [...flags, "-c", "-o", sqliteObject, amalgamation]);
+  if (!(await sqliteObjectUsable(sqliteObject))) {
+    // A compile that stops halfway leaves a partial object, and a later build
+    // must not read it as the library. The object is written under a name no
+    // other build shares and renamed into the cache only after the compiler
+    // exits cleanly.
+    temporary += 1;
+    const building = `${sqliteObject}.${processId()}-${temporary}.tmp`;
+    const command = compileCommand(toolchain, [...flags, "-c", "-o", building, amalgamation]);
     const compiled = run(command.command, command.args, { timeoutMs: 600_000 });
     if (compiled.spawnError !== undefined) {
+      await rm(building, { force: true }).catch(() => undefined);
       throw new CompilerError({
         category: "TargetError",
         stage: "compile",
@@ -517,12 +541,24 @@ export async function buildSqliteLibrary(
       });
     }
     if (compiled.code !== 0) {
+      await rm(building, { force: true }).catch(() => undefined);
       throw new CompilerError({
         category: "LinkError",
         stage: "compile",
         message: "the SQLite amalgamation did not build",
         detail: `${amalgamation}\n${compiled.stderr.trim()}`,
       });
+    }
+    // Two builds of one project can miss the same key at once, so the rename
+    // can find the name already there. The object is a function of the key, so
+    // an entry that is already present answers this build as well.
+    const renameFailure = await rename(building, sqliteObject).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    if (renameFailure !== undefined) {
+      await rm(building, { force: true }).catch(() => undefined);
+      if (!(await sqliteObjectUsable(sqliteObject))) throw renameFailure;
     }
   }
 

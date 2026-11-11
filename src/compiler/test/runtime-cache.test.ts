@@ -16,7 +16,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scratch } from "./scratch.ts";
 import { RUNTIME_CACHE_DIRECTORY, buildStandaloneRuntime } from "../runtime/standalone.ts";
-import { sqliteObjectKey } from "../runtime/sqlite-build.ts";
+import { sqliteObjectKey, sqliteObjectUsable } from "../runtime/sqlite-build.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
 import type { TargetSpec } from "../core/types.ts";
 
@@ -137,4 +137,15 @@ test("a SQLite object is keyed by its compiler and target, not only by its flags
     linux,
     "another target is another object",
   );
+});
+
+test("a partial SQLite object is not a cache hit", async () => {
+  const directory = await scratch("blaze-sqlite-partial-");
+  const object = join(directory, "sqlite3-partial.o");
+
+  assert.equal(await sqliteObjectUsable(object), false, "a missing object is not reusable");
+  await writeFile(object, Buffer.alloc(0));
+  assert.equal(await sqliteObjectUsable(object), false, "an empty object is not reusable");
+  await writeFile(object, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  assert.equal(await sqliteObjectUsable(object), true, "a non-empty object is reusable");
 });
