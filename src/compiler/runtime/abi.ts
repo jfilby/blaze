@@ -1145,6 +1145,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_path_remove",
+    "double",
+    [["path", "const char*"], ["recursive", "double"]],
+    "Removes a file or directory.",
+    "Returns one where the path is gone after the call, including a path that was not there, and zero where it could not be removed.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_file_copy",
+    "double",
+    [["from", "const char*"], ["to", "const char*"]],
+    "Copies a file to another path.",
+    "Returns one where the copy is written and zero where it could not be.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_dir_make",
     "double",
     [["path", "const char*"]],
@@ -6325,6 +6341,50 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+static int blaze_remove_tree(const char* path) {
+  struct stat info;
+  if (lstat(path, &info) != 0) return 1;
+  if (!S_ISDIR(info.st_mode)) return remove(path) == 0;
+  DIR* dir = opendir(path);
+  if (dir == NULL) return 0;
+  struct dirent* entry;
+  int done = 1;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    char full[4096];
+    snprintf(full, sizeof full, "%s/%s", path, entry->d_name);
+    if (!blaze_remove_tree(full)) done = 0;
+  }
+  closedir(dir);
+  if (done) done = rmdir(path) == 0;
+  return done;
+}
+
+double blaze_rt_path_remove(const char* path, double recursive) {
+  if (path == NULL) return 0.0;
+  if (recursive != 0.0) return blaze_remove_tree(path) ? 1.0 : 0.0;
+  if (lstat(path, &(struct stat){0}) != 0) return 1.0;
+  return remove(path) == 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_copy(const char* from, const char* to) {
+  if (from == NULL || to == NULL) return 0.0;
+  FILE* input = fopen(from, "rb");
+  if (input == NULL) return 0.0;
+  FILE* output = fopen(to, "wb");
+  if (output == NULL) { fclose(input); return 0.0; }
+  char buffer[8192];
+  size_t got;
+  int done = 1;
+  while ((got = fread(buffer, 1, sizeof buffer, input)) > 0) {
+    if (fwrite(buffer, 1, got, output) != got) { done = 0; break; }
+  }
+  if (ferror(input)) done = 0;
+  fclose(input);
+  if (fclose(output) != 0) done = 0;
+  return done ? 1.0 : 0.0;
 }
 
 double blaze_rt_dir_make(const char* path) {

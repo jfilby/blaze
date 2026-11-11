@@ -325,6 +325,12 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** Moves the file or directory a path names to another path in the same
    *  file system. The answer is one where it moved and zero where it did not. */
   "renamePath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** Removes the file or directory a path names. A recursive remove takes the
+   *  entries a directory holds with it; a path that is not there is removed
+   *  already, so the answer is one. */
+  "removePath": { params: [TEXT, F64], returns: F64, arity: 2 },
+  /** Copies a file to another path, replacing what the other held. */
+  "copyPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

@@ -3620,6 +3620,16 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "removePath":
+        this.textArgument(argument(0));
+        this.value(argument(1), F64_TYPE);
+        this.callService("blaze_rt_path_remove");
+        return F64_TYPE;
+      case "copyPath":
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_file_copy");
+        return F64_TYPE;
       case "makeDir":
         this.textArgument(argument(0));
         this.callService("blaze_rt_dir_make");

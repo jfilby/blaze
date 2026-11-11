@@ -115,6 +115,48 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code removes a tree and copies a file", async () => {
+  const directory = await scratch("blaze-c-remove-");
+  const tree = join(directory, "tree");
+  await mkdir(join(tree, "sub"), { recursive: true });
+  await writeFile(join(tree, "sub", "file.txt"), "x");
+  const call = (callee: string, args: SemanticValue[]): SemanticFunction =>
+    subject(
+      F64,
+      handsBack({
+        k: "call",
+        type: F64,
+        call: {
+          callee,
+          builtin: true,
+          signature: {
+            name: callee,
+            symbol: callee,
+            params: args.map((_, at) => ({ name: `argument${at}`, type: at === 1 && callee === "removePath" ? "f64" : "ptr<u8>" })),
+            returns: "f64",
+          },
+          args,
+          argTypes: args.map(() => TEXT),
+          returns: F64,
+          effects: [],
+          ownership: "none",
+          retain: false,
+        },
+      }),
+    );
+  const one: SemanticValue = { k: "const", type: F64, text: "1" };
+  const remove = call("removePath", [literal(tree), one]);
+  assert.equal(await lowered(remove, (name) => `printf("%.17g", ${name}());`), "1");
+  assert.equal(await stat(tree).then(() => "there").catch(() => "gone"), "gone");
+
+  const from = join(directory, "from.txt");
+  const to = join(directory, "to.txt");
+  await writeFile(from, "hello");
+  const copy = call("copyPath", [literal(from), literal(to)]);
+  assert.equal(await lowered(copy, (name) => `printf("%.17g", ${name}());`), "1");
+  assert.equal(await readFile(to, "utf8"), "hello");
+});
+
 test("the C code asks the host to list a directory", async () => {
   const directory = await scratch("blaze-c-dir-");
   await writeFile(join(directory, "a.txt"), "x");

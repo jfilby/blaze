@@ -1905,6 +1905,32 @@ proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.i
 proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
 proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
 
+proc blaze_rt_path_remove*(path: cstring, recursive: float64): float64 {.exportc, cdecl.} =
+  ## Removes a file or directory, and answers whether the path is gone after
+  ## the call. A path that is not there is removed already.
+  if path == nil: return 0.0
+  let name = $path
+  if not os.exists(name): return 1.0
+  try:
+    if dirExists(name):
+      if recursive == 0.0:
+        for _ in walkDir(name): return 0.0
+      removeDir(name)
+    else:
+      removeFile(name)
+  except CatchableError:
+    return 0.0
+  1.0
+
+proc blaze_rt_file_copy*(fromPath, toPath: cstring): float64 {.exportc, cdecl.} =
+  ## Copies a file to another path, and answers whether the copy is written.
+  if fromPath == nil or toPath == nil: return 0.0
+  try:
+    copyFile($fromPath, $toPath)
+  except CatchableError:
+    return 0.0
+  1.0
+
 proc blaze_rt_dir_make*(path: cstring): float64 {.exportc, cdecl.} =
   ## Makes the directory and the directories above it, and answers whether it
   ## is there after the call.

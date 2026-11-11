@@ -11199,6 +11199,26 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "removePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_remove_path");
+      this.store(path);
+      this.at(call.args[1], NUMBER);
+      const recursive = this.hold(NUMBER, "blaze_remove_recursive");
+      this.store(recursive);
+      this.callSymbol("blaze_rt_path_remove", [path, recursive], NUMBER);
+      return;
+    }
+    if (call.callee === "copyPath" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const from = this.hold(TEXT, "blaze_copy_from");
+      this.store(from);
+      this.at(call.args[1], TEXT);
+      const to = this.hold(TEXT, "blaze_copy_to");
+      this.store(to);
+      this.callSymbol("blaze_rt_file_copy", [from, to], NUMBER);
+      return;
+    }
     if (call.callee === "makeDir" && call.args[0] !== undefined) {
       this.at(call.args[0], TEXT);
       const path = this.hold(TEXT, "blaze_make_path");

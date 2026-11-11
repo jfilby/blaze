@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { join } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { buildProgramModule, describeModule, programModuleBytes } from "../toolchain/ir-wasm.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { resolveProgram } from "../semantics/ir-resolve.ts";
@@ -167,6 +167,28 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stdout, "1\n1\n");
   assert.equal(await readFile(to, "utf8"), "x");
+});
+
+test("a program removes a tree and copies a file through the host", async () => {
+  const directory = await scratch("blaze-wasm-remove-");
+  const tree = join(directory, "tree");
+  await mkdir(join(tree, "sub"), { recursive: true });
+  await writeFile(join(tree, "sub", "file.txt"), "x");
+  const from = join(directory, "from.txt");
+  const to = join(directory, "to.txt");
+  await writeFile(from, "hello");
+  const files = {
+    "main.ts": [
+      `console.log(removePath(${JSON.stringify(tree)}, 1));`,
+      `console.log(copyPath(${JSON.stringify(from)}, ${JSON.stringify(to)}));`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "1\n1\n");
+  assert.equal(await stat(tree).then(() => "there").catch(() => "gone"), "gone");
+  assert.equal(await readFile(to, "utf8"), "hello");
 });
 
 test("a program asks the host to list a directory", async () => {
