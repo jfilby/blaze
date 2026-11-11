@@ -15,7 +15,7 @@
 import { createHash, existsSync, readFileSync, writeFile, dirname, resolve, fileURLToPath } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { cTargetOptions } from "../core/target.ts";
+import { cTargetOptions, targetSummary } from "../core/target.ts";
 import {
   compileCommand,
   objectOptions,
@@ -24,6 +24,7 @@ import {
 } from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 import { SQLITE_ABI, SQLITE_NAME, sqliteHeaderSource } from "./sqlite.ts";
+import { identifyCompiler } from "./standalone.ts";
 
 /** The repository root, used to locate the vendored SQLite source. */
 const compilerDir = dirname(fileURLToPath(import.meta.url));
@@ -435,14 +436,32 @@ export interface SqliteLibrary {
   objectPath: string;
 }
 
+/** A change to what the cache key means names a different cache. */
+const SQLITE_CACHE_SCHEMA = "sqlite-object-1";
+
 /**
  * The name the compiled amalgamation is kept under, which says what it was
- * built from: the flags it was compiled with and the source it was compiled
- * from. An object built from another set of flags is another object, and one
- * built from another version of the amalgamation is another object too.
+ * built from: the compiler profile and its version, the target, the flags it
+ * was compiled with, and the source it was compiled from. An object built from
+ * another set of flags is another object, and one built from another version
+ * of the amalgamation is another object too. The compiler and target are in
+ * the key because the work directory outlives a change of either: a QNX build
+ * that reused the object a Linux gcc wrote would link code for the wrong
+ * machine.
  */
-function sqliteObjectKey(flags: readonly string[], amalgamation: string): string {
-  const material = [...flags, readFileSync(amalgamation)].join("\n");
+export function sqliteObjectKey(
+  flags: readonly string[],
+  amalgamation: string,
+  identity: { readonly toolchain: string; readonly compiler: string; readonly target: string },
+): string {
+  const material = [
+    SQLITE_CACHE_SCHEMA,
+    identity.toolchain,
+    identity.compiler,
+    identity.target,
+    ...flags,
+    readFileSync(amalgamation),
+  ].join("\u0000");
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
 
@@ -471,6 +490,7 @@ export async function buildSqliteLibrary(
   // is rebuilt at that link — which for the amalgamation is a build of the whole
   // of SQLite again, at the end of every build.
   const toolchain = toolchainFor(target);
+  const compiler = await identifyCompiler(toolchain);
   const flags = [
     "-std=gnu11",
     ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
@@ -485,7 +505,11 @@ export async function buildSqliteLibrary(
   // minute. The object is kept in the work directory under a name that says
   // what it was built from, so a build that follows another one does not pay
   // for it again.
-  const sqliteObject = `${workDirectory}/sqlite3-${sqliteObjectKey(flags, amalgamation)}.o`;
+  const sqliteObject = `${workDirectory}/sqlite3-${sqliteObjectKey(flags, amalgamation, {
+    toolchain: toolchain.id,
+    compiler,
+    target: targetSummary(target),
+  })}.o`;
   if (!existsSync(sqliteObject)) {
     const command = compileCommand(toolchain, [...flags, "-c", "-o", sqliteObject, amalgamation]);
     const compiled = run(command.command, command.args, { timeoutMs: 600_000 });

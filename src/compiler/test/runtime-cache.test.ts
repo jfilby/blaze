@@ -16,6 +16,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scratch } from "./scratch.ts";
 import { RUNTIME_CACHE_DIRECTORY, buildStandaloneRuntime } from "../runtime/standalone.ts";
+import { sqliteObjectKey } from "../runtime/sqlite-build.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
 import type { TargetSpec } from "../core/types.ts";
 
@@ -107,4 +108,33 @@ test("a work directory keeps what it built, and does not answer for another", as
   // directory it was compiled in, so two work directories hold two objects even
   // when both were compiled from the same source with the same flags.
   assert.equal((await cacheObjects(two))[0]?.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])), true);
+});
+
+test("a SQLite object is keyed by its compiler and target, not only by its flags", async () => {
+  const directory = await scratch("blaze-sqlite-cache-");
+  const amalgamation = join(directory, "sqlite3.c");
+  await writeFile(amalgamation, "int sqlite3_probe;\n", "utf8");
+  const identity = {
+    toolchain: "gcc",
+    compiler: "gcc 14.2",
+    target: "x86_64/linux/sysv cpu=toolchain-default",
+  };
+
+  const linux = sqliteObjectKey(["-O2"], amalgamation, identity);
+  assert.equal(sqliteObjectKey(["-O2"], amalgamation, { ...identity }), linux);
+  assert.notEqual(
+    sqliteObjectKey(["-O2"], amalgamation, { ...identity, toolchain: "qcc-x86_64" }),
+    linux,
+    "another compiler profile is another object",
+  );
+  assert.notEqual(
+    sqliteObjectKey(["-O2"], amalgamation, { ...identity, compiler: "gcc 15.0" }),
+    linux,
+    "another compiler version is another object",
+  );
+  assert.notEqual(
+    sqliteObjectKey(["-O2"], amalgamation, { ...identity, target: "x86_64/qnx/sysv cpu=toolchain-default" }),
+    linux,
+    "another target is another object",
+  );
 });

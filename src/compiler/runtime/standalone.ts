@@ -66,7 +66,7 @@ let temporary = 0;
  */
 const compilerIdentities = new Map<string, Promise<string>>();
 
-function identifyCompiler(toolchain: Toolchain): Promise<string> {
+export function identifyCompiler(toolchain: Toolchain): Promise<string> {
   const known = compilerIdentities.get(toolchain.id);
   if (known !== undefined) return known;
   const identity = (async (): Promise<string> => {
