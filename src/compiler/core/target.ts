@@ -8,7 +8,7 @@
  */
 
 import { CompilerError } from "./errors.ts";
-import type { Arch, Abi, BuildMode, Objective, OsName, TargetSpec } from "./types.ts";
+import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, RuntimeKind, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux", "qnx"];
@@ -110,6 +110,48 @@ export function assertBuildableTarget(target: TargetSpec, functionName?: string)
       `version 0.1 builds x86_64/linux/sysv, x86_64/qnx/sysv and ` +
       `aarch64/qnx/aapcs only (got ${target.arch}/${target.os}/${target.abi})`,
     function: functionName,
+  });
+}
+
+/**
+ * What a target cannot host, stated before a build starts.
+ *
+ * A runtime is the host a program runs on, and a library is linked beside it.
+ * A target that does not provide one says so here, at the point the project
+ * names it, rather than after the program has been lowered and the linker
+ * reports a missing symbol or a missing compiler. QNX provides the compiler's
+ * own C runtime, the facil.io HTTP runtime, and SQLite; it provides no Nim
+ * compiler and no Triton device runtime.
+ */
+const QNX_RUNTIME_REFUSALS: Partial<Record<RuntimeKind, string>> = {
+  nim: "QNX provides no Nim compiler; build with --runtime none or --runtime facil",
+};
+
+const QNX_LIBRARY_REFUSALS: Partial<Record<LibraryKind, string>> = {
+  triton: "Triton device kernels are not available on QNX; build the program without Triton calls",
+};
+
+export function assertRuntimeSupported(target: TargetSpec, runtime: RuntimeKind): void {
+  if (target.os !== "qnx") return;
+  const detail = QNX_RUNTIME_REFUSALS[runtime];
+  if (detail === undefined) return;
+  throw new CompilerError({
+    category: "TargetError",
+    stage: "target",
+    message: `the "${runtime}" runtime is not available on QNX`,
+    detail,
+  });
+}
+
+export function assertLibrarySupported(target: TargetSpec, library: LibraryKind): void {
+  if (target.os !== "qnx") return;
+  const detail = QNX_LIBRARY_REFUSALS[library];
+  if (detail === undefined) return;
+  throw new CompilerError({
+    category: "TargetError",
+    stage: "target",
+    message: `the "${library}" library is not available on QNX`,
+    detail,
   });
 }
 

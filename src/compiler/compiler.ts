@@ -97,7 +97,14 @@ import {
   type ReuseLevel,
   type UnitKeys,
 } from "./incremental.ts";
-import { assertBuildableTarget, EXECUTABLE_SUFFIX, normalizeTarget, optimizationOptions } from "./core/target.ts";
+import {
+  assertBuildableTarget,
+  assertLibrarySupported,
+  assertRuntimeSupported,
+  EXECUTABLE_SUFFIX,
+  normalizeTarget,
+  optimizationOptions,
+} from "./core/target.ts";
 import { run } from "./core/process.ts";
 
 import { COMPILER_VERSION, engineStamp, toolchainFingerprints } from "./core/version.ts";
@@ -116,6 +123,7 @@ import {
   BUILD_MODES,
   type BuildMode,
   type BuildStatus,
+  type LibraryKind,
   OUTPUT_KINDS,
   type FunctionContract,
   type ObjectLayout,
@@ -349,6 +357,25 @@ function resolveRuntimeKind(requested: RuntimeKind | undefined, output: OutputKi
     });
   }
   return requested;
+}
+
+/**
+ * The libraries a source asks to link beside its runtime.
+ *
+ * The target decides which of them exist: SQLite is available on both targets,
+ * Triton is not available on QNX, and the refusal names the target rather than
+ * letting the source lower to objects that cannot link. A source that asks for
+ * neither links neither, so a build that does not use a library does not carry
+ * one.
+ */
+function libraryKindsFor(source: string, target: TargetSpec): LibraryKind[] {
+  const libraries: LibraryKind[] = [];
+  if (usesSqliteSource(source)) libraries.push("sqlite");
+  if (usesTritonSource(source)) {
+    assertLibrarySupported(target, "triton");
+    libraries.push("triton");
+  }
+  return libraries;
 }
 
 /**
@@ -1308,6 +1335,7 @@ export async function runBuild(
   let runtimeKind: RuntimeKind;
   let backendKind: BackendKind;
   let buildMode: BuildMode;
+  let libraries: LibraryKind[] = [];
   let usesSqlite = false;
   try {
     project = readInput(absoluteInput);
@@ -1316,6 +1344,7 @@ export async function runBuild(
     target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
     outputKind = resolveOutputKind(options.output ?? input.output);
     runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
+    assertRuntimeSupported(target, runtimeKind);
     // HTTP programs need the facil runtime even when the user did not ask for
     // it: the generated code references blaze_http_* symbols.
     if (runtimeKind === "none" && mentionsHttpModule(project.entry.source)) runtimeKind = "facil";
@@ -1324,6 +1353,7 @@ export async function runBuild(
     // by Nim is lowered by the host's own emitter, which knows no library, so
     // both are refused here rather than failing later at the link.
     usesSqlite = usesSqliteSource(project.entry.source);
+    libraries = libraryKindsFor(project.entry.source, target);
     if (usesSqlite && outputKind === "wasm") {
       throw new CompilerError({
         category: "InputError",
@@ -1633,7 +1663,7 @@ export async function runBuild(
       runtime: runtimeKind,
       target,
       workspace: { workDirectory: base, functionName: program.entry.file },
-      libraries: usesSqlite || usesTritonSource(project.entry.source) ? (usesSqlite && usesTritonSource(project.entry.source) ? ["sqlite", "triton"] : usesSqlite ? ["sqlite"] : ["triton"]) : [],
+      libraries,
       http,
     });
     // The machine, one measurement at a time however many functions are being
@@ -2446,10 +2476,12 @@ export async function runStored(
   const output = build?.outputKind ?? "machine";
   const lowering = build?.backend ?? impliedBackend(output);
   const mode = build?.mode ?? "debug";
-  const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
   // The contract names no target, so the one the build ran for is what the
   // stored candidate is tested and measured against.
   const target = build?.target ?? normalizeTarget(input.target);
+  const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
+  assertRuntimeSupported(target, runtime);
+  const libraries = libraryKindsFor(input.source, target);
   const base = store.resolve(paths.work);
   const prepareRuntime = runtimePreparer({
     lowering,
@@ -2457,7 +2489,7 @@ export async function runStored(
     runtime,
     target,
     workspace: { workDirectory: base, functionName: program.entry.file },
-    libraries: usesSqliteSource(input.source) || usesTritonSource(input.source) ? (usesSqliteSource(input.source) && usesTritonSource(input.source) ? ["sqlite", "triton"] : usesSqliteSource(input.source) ? ["sqlite"] : ["triton"]) : [],
+    libraries,
     // The runtime is built for the program the stored candidates belong to, so
     // it is built for the same program the build built it for: the source of
     // the project is what says what its server holds and whether it speaks

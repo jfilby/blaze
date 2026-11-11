@@ -12,7 +12,7 @@
  * into a single relocatable object that the program driver links.
  */
 
-import { readdirEntries, stat, writeFile, availableParallelism, fileURLToPath, dirname, resolve } from "../core/platform.ts";
+import { readdirEntries, stat, writeFile, availableParallelism, fileURLToPath, dirname, join, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run, runAsync } from "../core/process.ts";
 import { mapConcurrent } from "../core/concurrency.ts";
@@ -95,6 +95,42 @@ export function vendoredFacilIoDir(): string {
 /** Where facil.io's C sources and public headers live inside the vendored copy. */
 export function facilIoSourceDir(): string {
   return resolve(vendoredFacilIoDir(), "lib/facil");
+}
+
+/** The C translation units and subdirectories of a facil.io source tree. */
+export interface FacilIoTree {
+  readonly sources: readonly string[];
+  readonly directories: readonly string[];
+}
+
+/**
+ * Walks the facil.io source tree without a shell.
+ *
+ * The build used to ask `find` for the translation units. A target with a C
+ * compiler but no shell could not build the HTTP runtime for that reason
+ * alone, and the list the shell printed was the host's order rather than the
+ * compiler's. The walker uses the platform's directory listing, so a QNX host
+ * and a Linux host enumerate the same tree, and it sorts both answers so the
+ * objects it compiles are made in the same order on either.
+ */
+export async function walkFacilIoTree(root: string): Promise<FacilIoTree> {
+  const sources: string[] = [];
+  const directories: string[] = [];
+  const walk = async (directory: string): Promise<void> => {
+    for (const entry of await readdirEntries(directory)) {
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        directories.push(full);
+        await walk(full);
+      } else if (entry.isFile() && entry.name.endsWith(".c")) {
+        sources.push(full);
+      }
+    }
+  };
+  await walk(root);
+  sources.sort();
+  directories.sort();
+  return { sources, directories };
 }
 
 /** The generated HTTP header a program that uses the HTTP runtime includes. */
@@ -1911,26 +1947,22 @@ export async function buildFacilRuntime(
      program that does not gets the missing one, which is the same API with
      nothing behind it. */
   const excluded = ["/cli/", "/legacy/", "/redis/"];
-  const listed = run(
-    "sh",
-    ["-c", `find "${sourceDir}" -name "*.c" -type f | sort`],
-    { timeoutMs: 30_000 },
-  );
-  if (listed.spawnError !== undefined || listed.code !== 0) {
+  let tree: FacilIoTree;
+  try {
+    tree = await walkFacilIoTree(sourceDir);
+  } catch (cause) {
     throw new CompilerError({
       category: "LinkError",
       stage: "compile",
       message: "could not enumerate facil.io sources",
-      detail: `${listed.stderr.trim() ?? listed.spawnError ?? ""}`,
+      detail: cause instanceof Error ? cause.message : String(cause),
     });
   }
-  const tlsBackend = needs.tls ? "/tls/fio_tls_openssl.c" : "/tls/fio_tls_missing.c";
-  const facilSources = listed.stdout
-    .trim()
-    .split("\n")
-    .filter((line) => line.length > 0 && !excluded.some((e) => line.includes(e)))
+  const tlsBackend = needs.tls ? join(sourceDir, "tls/fio_tls_openssl.c") : join(sourceDir, "tls/fio_tls_missing.c");
+  const facilSources = tree.sources
+    .filter((line) => !excluded.some((e) => line.includes(e)))
     .filter((line) => !line.includes("/tls/fio_tls_openssl.c") && !line.includes("/tls/fio_tls_missing.c"))
-    .concat(`${sourceDir}${tlsBackend}`);
+    .concat(tlsBackend);
   if (facilSources.length === 0) {
     throw new CompilerError({
       category: "LinkError",
@@ -1942,19 +1974,9 @@ export async function buildFacilRuntime(
 
   /* facil.io spreads its public headers across subdirectories, so add every
      subdirectory as an include path (fio.h itself includes <http.h>,
-     <fiobj.h>, etc., and http.c needs <http1_parser.h> one level deeper). */
-  const includeDirs: string[] = [];
-  const collect = async (dir: string): Promise<void> => {
-    for await (const entry of await readdirEntries(dir)) {
-      const full = `${dir}/${entry.name}`;
-      if (entry.isDirectory()) {
-        includeDirs.push(full);
-        await collect(full);
-      }
-    }
-  };
-  includeDirs.push(sourceDir);
-  await collect(sourceDir);
+     <fiobj.h>, etc., and http.c needs <http1_parser.h> one level deeper). The
+     walk that listed the sources already visited every directory. */
+  const includeDirs = [sourceDir, ...tree.directories];
   const toolchain = toolchainFor(target);
   const cFlags = [
     "-std=gnu11",

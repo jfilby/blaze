@@ -3535,6 +3535,10 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef __QNXNTO__
+/* QNX declares aligned_alloc in <malloc.h> rather than <stdlib.h>. */
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
