@@ -8,6 +8,7 @@
  */
 
 import { CompilerError } from "./errors.ts";
+import { hostPlatform } from "./platform.ts";
 import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, RuntimeKind, TargetSpec } from "./types.ts";
 
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
@@ -161,7 +162,7 @@ export function assertLibrarySupported(target: TargetSpec, library: LibraryKind)
  * the host is asked rather than assumed. The host is what matters here: the
  * `gcc` and `nim` that write these files are the host's.
  */
-export const EXECUTABLE_SUFFIX = process.platform === "win32" ? ".exe" : "";
+export const EXECUTABLE_SUFFIX = hostPlatform() === "win32" ? ".exe" : "";
 
 /**
  * The assembler options a target's cpu asks for, empty when the toolchain
@@ -309,7 +310,7 @@ export function cTargetOptions(target: TargetSpec): string[] {
   // `-mtune=native` describes the machine the compiler is running on. A
   // cross compiler is running on the host, not on the machine whose code it
   // writes, so asking it to tune for "native" would tune for the wrong one.
-  return target.os === process.platform ? ["-mtune=native"] : [];
+  return target.os === hostPlatform() ? ["-mtune=native"] : [];
 }
 
 /**

@@ -137,6 +137,24 @@ export function compilerDataRoot(): string {
   return resolve(nodeDirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
+/** The operating system this compiler is running on. */
+export function hostPlatform(): string {
+  return process.platform;
+}
+
+/** The architecture this compiler is running on. */
+export function hostArchitecture(): string {
+  return process.arch;
+}
+
+/**
+ * The process id, which names the temporary files of one writer so a second
+ * writer in the same directory cannot share them.
+ */
+export function processId(): number {
+  return process.pid;
+}
+
 /** The directory part of a path. */
 export function dirname(path: string): string {
   return nodeDirname(path);

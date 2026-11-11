@@ -7,7 +7,7 @@
  * has been renamed into place is still there after the power goes out.
  */
 
-import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, stat, writeFile, dirname, isAbsolute, normalize, relative, resolve, sep } from "./platform.ts";
+import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, stat, writeFile, dirname, isAbsolute, normalize, processId, relative, resolve, sep } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
 
 export interface JsonStore {
@@ -162,7 +162,7 @@ export function createJsonStore(root: string): JsonStore {
       // path would otherwise share this name: one would rename the other's
       // temporary away and the loser would fail on a file that no longer
       // exists.
-      const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
+      const temporary = `${file}.${processId()}.${temporaryWrites++}.tmp`;
       try {
         await writeFile(temporary, serializeJson(value), "utf8");
         await syncPath(temporary);
@@ -214,7 +214,7 @@ export function createJsonStore(root: string): JsonStore {
       // sees a file that is neither the old contents nor the new. It goes
       // through a temporary of its own, as `write` does, so a build record is
       // only ever observed whole.
-      const temporary = `${file}.${process.pid}.${temporaryWrites++}.tmp`;
+      const temporary = `${file}.${processId()}.${temporaryWrites++}.tmp`;
       try {
         await writeFile(temporary, contents, "utf8");
         await syncPath(temporary);

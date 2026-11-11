@@ -20,7 +20,7 @@
  * instead of asking the C compiler the same question again.
  */
 
-import { createHash, copyFile, mkdir, rename, rm, stat, writeFile, cpus } from "../core/platform.ts";
+import { createHash, copyFile, mkdir, rename, rm, stat, writeFile, cpus, hostArchitecture, processId } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";
@@ -108,7 +108,7 @@ function cacheKey(
   toolchain: Toolchain,
   compiler: string,
 ): string {
-  const machine = `${process.arch}/${cpus()[0]?.model ?? "unknown"}`;
+  const machine = `${hostArchitecture()}/${cpus()[0]?.model ?? "unknown"}`;
   return createHash("sha256")
     .update(
       [CACHE_SCHEMA, toolchain.id, compiler, machine, request.name, ...request.flags, request.source].join("\u0000"),
@@ -170,7 +170,7 @@ export async function compileRuntimeSource(request: {
 
   await mkdir(directory, { recursive: true });
   temporary += 1;
-  const building = `${directory}/${key}.${process.pid}-${temporary}.tmp`;
+  const building = `${directory}/${key}.${processId()}-${temporary}.tmp`;
   const command = compileCommand(toolchain, ["-std=c11", ...request.flags, "-c", "-o", building, sourcePath]);
   const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
   if (compiled.spawnError !== undefined) {

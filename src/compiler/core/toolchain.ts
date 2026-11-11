@@ -15,6 +15,7 @@
  */
 
 import { CompilerError } from "./errors.ts";
+import { hostArchitecture as defaultHostArchitecture, hostPlatform } from "./platform.ts";
 import { archOptions, loweringOptions, optimizationOptions, threadingOptions, type Threading } from "./target.ts";
 import type { Arch, BuildMode, Objective, TargetSpec } from "./types.ts";
 
@@ -131,8 +132,8 @@ function normalizedArch(arch: string): Arch | undefined {
  */
 export function toolchainFor(
   target: TargetSpec,
-  host: string = process.platform,
-  hostArchitecture: string = process.arch,
+  host: string = hostPlatform(),
+  hostArchitecture: string = defaultHostArchitecture(),
 ): Toolchain {
   if (target.os === "linux") return GCC;
   if (target.os !== "qnx") {
