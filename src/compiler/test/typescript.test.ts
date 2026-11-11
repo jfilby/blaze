@@ -6223,8 +6223,12 @@ test("a host module names the boundary a build is linked against", () => {
   const files: Record<string, string> = {
     "main.ts": [
       'import { join } from "node:path";',
+      'import { callModel } from "#host/model";',
       "export function pathOf(directory: string, name: string): string {",
       "  return join(directory, name);",
+      "}",
+      "export function ask(prompt: string): string {",
+      "  return callModel(prompt);",
       "}",
       "",
     ].join("\n"),
@@ -6295,4 +6299,47 @@ test("a module may offer its names again as an object default", () => {
   for (const record of records) {
     assert.equal(record.refusedCount, 0, `${record.path}: ${record.refused.map((one) => one.message).join("; ")}`);
   }
+});
+
+test("a project maps a host specifier to one of its own modules", () => {
+  // The boundary is a name, not a fixed file: a project maps "#host/model" to
+  // the adapter it builds. A mapped specifier is an ordinary module of the
+  // program, so the contract phase resolves its calls; an unmapped one is the
+  // host's, as the test above reads it.
+  const files: Record<string, string> = {
+    "main.ts": [
+      'import { callModel } from "#host/model";',
+      'console.log(callModel("x"));',
+      "",
+    ].join("\n"),
+    "lib.ts": [
+      "export function callModel(prompt: string): string {",
+      "  return prompt;",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const phase = phaseOf("typescript", files, "main.ts", { modules: { "#host/model": "lib.ts" } });
+  const lib = phase.program.files.find((file) => file.path === "lib.ts");
+  assert.ok(lib !== undefined, "the mapped module is part of the program");
+  assert.deepEqual(Object.keys(lib.functions), ["callModel"], "its function is the one the import binds");
+  assert.deepEqual(phase.program.edges, [{ from: "main.ts", to: "lib.ts", symbols: ["callModel"] }]);
+});
+
+test("hasOwn over a value the read cannot name asks the dictionary the runtime holds", () => {
+  // A package writes `Object.hasOwn(t, k)` where `t` came out of a table and
+  // has no annotation. The value is the runtime's dictionary, so the question
+  // is the dictionary's; the answer is the comparison the question is, not the
+  // number the runtime returns.
+  const source = [
+    "export function has(t: any, k: string): boolean {",
+    "  return Object.hasOwn(t, k);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, []);
+  const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "has")?.handle as { body: unknown[] }).body);
+  assert.match(body, /blaze_rt_dict_has/, "the question is the dictionary's");
+  assert.match(body, /"op":"==="/, "the answer is a truth");
 });

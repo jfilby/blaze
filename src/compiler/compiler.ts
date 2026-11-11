@@ -558,6 +558,37 @@ function readInput(path: string): ProjectInput {
       message: `${path} must define "source" or "sourceFile"`,
     });
   }
+  // A module map names the file a host specifier is built from. The key is the
+  // boundary the sources import, and the value is a path inside the project:
+  // anything else would let a project file silently rename its own sources.
+  if (input.modules !== undefined) {
+    if (input.modules === null || typeof input.modules !== "object" || Array.isArray(input.modules)) {
+      throw new CompilerError({
+        category: "InputError",
+        stage: "input",
+        message: `${path} has a "modules" that is not a table`,
+        detail: 'write "[modules]" with entries such as \"#platform\" = "core/platform-native.ts"',
+      });
+    }
+    for (const [specifier, target] of Object.entries(input.modules)) {
+      if (!specifier.startsWith("#")) {
+        throw new CompilerError({
+          category: "InputError",
+          stage: "input",
+          message: `${path} maps "${specifier}", which is not a host specifier`,
+          detail: "only a #-prefixed import is the boundary a project may map to its own file",
+        });
+      }
+      if (typeof target !== "string" || target === "" || target.startsWith("/") || target.includes("..")) {
+        throw new CompilerError({
+          category: "InputError",
+          stage: "input",
+          message: `${path} maps "${specifier}" to ${JSON.stringify(target)}`,
+          detail: "the mapped module is a path inside the project, such as \"core/platform-native.ts\"",
+        });
+      }
+    }
+  }
   return { input: input as SourceInput, entry: { path: entryPath, source: input.source }, directory };
 }
 

@@ -176,4 +176,11 @@ test("the sources that make the compiler are not the tests, the benchmarks or th
     assert.doesNotMatch(path, /(^|\/)node_modules\//, `${path} is a dependency, not a source`);
     assert.doesNotMatch(path, /(^|\/)\.blaze\//, `${path} is a build's output, not a source`);
   }
+  // The Node host's model transport names the AI SDK. A native project maps the
+  // same boundary to `ai/review-native.ts`, so the Node files are not sources a
+  // compiler binary carries.
+  for (const host of ["ai/review-node.ts", "ai/commandcode.ts"]) {
+    assert.ok(!report.files.includes(host), `${host} is the Node host's, not the compiler's`);
+  }
+  assert.ok(report.files.includes("ai/review-native.ts"), "the adapter a native build links is a source of the compiler");
 });

@@ -97,6 +97,31 @@ test("--verify=none builds a program without running it and records that", async
   assert.match(invalid.stderr, /--verify must be one of source, none/);
 });
 
+test("a project may map only a host specifier to its own file", async () => {
+  // The module map is for the boundary (`#platform`, `#model`). A project that
+  // maps an ordinary name would be renaming a source import, so the input is
+  // refused before the graph is read.
+  const directory = await scratch("blaze-cli-modules-");
+  await writeFile(join(directory, "main.ts"), "console.log(1);\n", "utf8");
+  await writeFile(
+    join(directory, "blaze.toml"),
+    [
+      'language = "typescript"',
+      'sourceFile = "main.ts"',
+      'output = "machine"',
+      'backend = "machine"',
+      "",
+      "[modules]",
+      '"model" = "main.ts"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const built = blaze(directory, "build");
+  assert.notEqual(built.code, 0, "the project is refused");
+  assert.match(built.stderr, /which is not a host specifier/);
+});
+
 /** A built program and the project state its record lives in. */
 async function builtForCompare(name: string): Promise<{ directory: string; state: string; record: string }> {
   const directory = await scratch(`blaze-compare-${name}-`);

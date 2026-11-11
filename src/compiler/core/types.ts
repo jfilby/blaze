@@ -466,6 +466,16 @@ export interface SourceInput {
   source: string;
   /** Path of a source file next to the input file, read instead of `source`. */
   sourceFile?: string;
+  /**
+   * The project file a host specifier names, by specifier.
+   *
+   * A `#`-prefixed import is the host boundary: unmapped, the host answers it,
+   * as `node:fs` is answered. A project that maps one names a source of its own
+   * for the boundary, which is then read, contracted and compiled like every
+   * other module. The native self-build maps the platform and model adapters;
+   * the Node build lets `package.json`'s `imports` answer them.
+   */
+  modules?: Record<string, string>;
   /** Provider and model for this project, overriding AI_MODEL. */
   model?: string | ModelSelection;
   /** Function of the entry module to compile. Absent when the entry is a program. */

@@ -1629,6 +1629,22 @@ test("a rest field of a dictionary copies the entries the pattern does not name"
   }
 });
 
+test("Object.hasOwn asks the dictionary a value holds", async () => {
+  const source = [
+    "export function demo(): string {",
+    "  const counts: Record<string, number> = { a: 1, b: 2 };",
+    "  const key = `a`;",
+    "  return `${Object.hasOwn(counts, key)} ${Object.hasOwn(counts, `missing`)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "true false", `the ${backend} backend answers the key question`);
+  }
+});
+
 test("a record spread into a record is the entries of both", async () => {
   const source = [
     "export function demo(): string {",

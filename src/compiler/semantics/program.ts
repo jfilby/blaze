@@ -131,6 +131,10 @@ function validateImports(records: ModuleRecord[], contracts: Map<string, FileCon
     const bound = new Map<string, { specifier: string; to: string }>();
     for (const [index, entry] of record.analysis.imports.entries()) {
       const to = record.resolved[index];
+      // A host module is the boundary the build links against, not a file of
+      // the program: it has no contract of its own, and what the name answers
+      // is the native adapter's.
+      if (to === "") continue;
       const target = contracts.get(to) as FileContract;
       // A module offers the functions it exports and the values it declares at
       // the top of the file: a name bound to a value is a name this file may
@@ -296,7 +300,7 @@ function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | 
 /* -------------------------------------------------------------------------- */
 
 export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
-  const records = readModuleGraph(request);
+  const records = readModuleGraph({ ...request, modules: request.input.modules });
   const body = resolveBody(records, request.entry.path);
   const contracts = new Map<string, FileContract>();
   for (const record of records) {

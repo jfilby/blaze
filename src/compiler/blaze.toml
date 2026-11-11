@@ -7,3 +7,9 @@ mode = "debug"
 [model]
 # provider = "nebius"
 # model = "nvidia/Nemotron-3_5-Lightning"
+
+[modules]
+# The model transport a native build links. The Node compiler resolves
+# "#host/model" through package.json to ai/review-node.ts, which carries the
+# AI SDK; this project maps the same name to the adapter a native binary has.
+"#host/model" = "ai/review-native.ts"

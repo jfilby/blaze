@@ -4737,9 +4737,25 @@ double blaze_rt_dict_get(double dict, const char* key) {
 double blaze_rt_dict_has(double dict, const char* key) {
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
-  blaze_rt_dict* d = blaze_rt_dict_of(dict);
-  if (d == NULL || key == NULL) return 0.0;
-  return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+  /* A value the program cannot name may be a dictionary or a compiled record:
+     the length below already answers both, so the question does too. A handle
+     the runtime did not create is not a dictionary, and asking one for a key
+     is not an error here, exactly as its length is zero. */
+  blaze_rt_dict* d = blaze_rt_dict_known(dict);
+  if (d != NULL) return key != NULL && blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+  if (dict != 0.0 && key != NULL) {
+    const char* layout = blaze_rt_record_layout(dict);
+    if (layout != NULL) {
+      for (size_t at = 0; ; at += 1) {
+        size_t where = 0;
+        const char* kind = NULL;
+        const char* name = blaze_rt_record_field(layout, (int)at, &where, &kind);
+        if (name == NULL) return 0.0;
+        if (strcmp(name, key) == 0) return 1.0;
+      }
+    }
+  }
+  return 0.0;
 }
 
 double blaze_rt_dict_set(double dict, const char* key, double value) {

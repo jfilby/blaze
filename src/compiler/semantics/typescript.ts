@@ -12256,6 +12256,17 @@ class TypeScriptParser {
             replace(decided);
             continue;
           }
+          // A value the read cannot name may be the dictionary the package
+          // built: its entries are the runtime's, so the question is the
+          // dictionary's. The runtime answers it for a parsed object and for a
+          // compiled record's layout as well.
+          if (receiver !== undefined && key !== undefined && unknownReference(this.valueTypeOf(receiver))) {
+            const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, key] };
+            const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
+            this.expressionTypes.set(answer, BOOLEAN_RESULT);
+            replace(answer);
+            continue;
+          }
           this.report(
             "hasOwnProperty asks a record keyed by text",
             "a record keyed by text is the runtime's dictionary; a compiled object is one layout",

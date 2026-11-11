@@ -101,6 +101,14 @@ export interface ModuleGraphRequest {
    * as part of the tree's own gaps.
    */
   resolvePackages?: boolean;
+  /**
+   * The project file each host specifier names, by specifier.
+   *
+   * A `#`-prefixed import is the host boundary unless the project maps it to a
+   * file of its own: the map is how one tree selects the Node platform adapter
+   * or the native one without a branch in the sources.
+   */
+  modules?: Readonly<Record<string, string>>;
 }
 
 /** The values every module of the program offers, in discovery order. */
@@ -524,6 +532,9 @@ function resolveImport(
 ): string | null {
   // A project that pastes its source has no directory to resolve against.
   if (from === INLINE_MODULE) return null;
+  const mapped = request.modules?.[entry.specifier];
+  if (mapped !== undefined) return read(mapped) === null ? null : mapped;
+  if (isHostSpecifier(entry.specifier)) return null;
   if (isPackageSpecifier(request, entry.specifier)) {
     return request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
   }
@@ -538,9 +549,15 @@ function resolveImport(
   return candidates.find((path) => read(path) !== null) ?? null;
 }
 
-/** Whether a specifier names a host module rather than a file of the project. */
+/**
+ * Whether a specifier names a host module rather than a file of the project.
+ *
+ * A colon is a scheme (`node:fs`); a leading `#` is the import map a package
+ * writes in its own manifest (`#host/model`), which Node resolves to the host
+ * adapter and a native build links against.
+ */
 function isHostSpecifier(specifier: string): boolean {
-  return specifier.includes(":");
+  return specifier.startsWith("#") || specifier.includes(":");
 }
 
 /**
@@ -561,6 +578,14 @@ function requireImport(
     throw contractPhaseError(
       `an inline source cannot import "${entry.specifier}"`,
       'set "sourceFile" to a file beside the project file so its imports can be resolved',
+    );
+  }
+  const mapped = request.modules?.[entry.specifier];
+  if (mapped !== undefined) {
+    if (read(mapped) !== null) return mapped;
+    throw contractPhaseError(
+      `${from} imports "${entry.specifier}" (line ${entry.line}), which the project maps to ${mapped}`,
+      `the mapped module is not a file of the project; fix the "${entry.specifier}" entry in the project file`,
     );
   }
   if (isHostSpecifier(entry.specifier)) return null;

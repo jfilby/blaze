@@ -32,12 +32,14 @@
 
 import { hostEnvironment, randomUUID } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
-import { COMMANDCODE_BASE_URL } from "./commandcode.ts";
 
 export type ProviderName = "openai" | "anthropic" | "google" | "openrouter" | "opencode-go" | "opencode-zen" | "nebius" | "openai-compatible" | "commandcode" | "replay";
 
 /** OpenRouter serves every model behind one OpenAI compatible endpoint. */
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/** The API host a CommandCode subscription is reached at. */
+export const COMMANDCODE_BASE_URL = "https://api.commandcode.ai";
 
 /**
  * Nebius Token Factory serves every model it hosts behind one OpenAI compatible

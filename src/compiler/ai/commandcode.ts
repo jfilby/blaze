@@ -35,9 +35,8 @@ import type {
 } from "@ai-sdk/provider";
 import { host, randomUUID } from "../core/platform.ts";
 import { z } from "zod";
+import { COMMANDCODE_BASE_URL } from "./model.ts";
 
-/** The API host, and the only path that a CommandCode subscription can reach. */
-export const COMMANDCODE_BASE_URL = "https://api.commandcode.ai";
 const GENERATE_PATH = "/alpha/generate";
 
 /**

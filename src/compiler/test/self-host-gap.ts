@@ -47,6 +47,18 @@ const ENTRY = "cli.ts";
  */
 const NOT_COMPILER: ReadonlySet<string> = new Set(["node_modules", ".blaze", "test", "bench", "scratch"]);
 
+/**
+ * The sources a Node host provides for the model boundaary.
+ *
+ * `ai/review-node.ts` is what `package.json` maps `#host/model` to, and it is
+ * the only file that names the AI SDK and `zod`; `ai/commandcode.ts` is the one
+ * provider it carries. A native build maps the same boundary to
+ * `ai/review-native.ts` (§5a of the spec) and never compiles either of these,
+ * so the report measures the sources a native binary is made of. The Node
+ * compiler still loads them at run time through the manifest's `imports`.
+ */
+const HOST_SOURCES: ReadonlySet<string> = new Set(["ai/review-node.ts", "ai/commandcode.ts"]);
+
 /** One source the frontend cannot read, and what it said about it. */
 export interface RefusedSource {
   /** Project-relative path, with `/` separators. */
@@ -154,7 +166,7 @@ export async function selfHostGap(directory = COMPILER_ROOT): Promise<SelfHostGa
   const sources = new Map<string, string>();
   for (const path of paths) sources.set(projectPath(directory, path), await readFile(path, "utf8"));
 
-  const files = [...sources.keys()].sort();
+  const files = [...sources.keys()].filter((path) => !HOST_SOURCES.has(path)).sort();
   if (files.length === 0) return { files: [], clean: [], refused: [], refusals: [], total: 0 };
   const entryPath = files.includes(ENTRY) ? ENTRY : (files[0] as string);
   const records = readModuleGraph({

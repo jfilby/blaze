@@ -188,9 +188,14 @@ The refusals fall into six frontiers:
 - **Packages.** `smol-toml` for project files, the Vercel AI SDK for model
   providers, and `zod` in one adapter. The graph reads a package out of
   `node_modules` as it reads a module of the project (§4i0), so `smol-toml` is
-  not replaced: its closure is 28 refusals from 127, and what is left is the
-  host's own classes and a few reads of a value whose fields the read cannot
-  see. The AI SDK and `zod` are the same walk over a much larger closure.
+  not replaced: its entry reads whole now that the objects it repeats as a
+  default export and the regex in `zod`'s compiled source are read (§4i3,
+  §4i4). The AI SDK is the next closure on the queue: `blaze ir` on
+  `src/compiler` reaches `@ai-sdk/anthropic` and reports 38 constructs there
+  (a computed class member, empty lists without a stated element, object
+  spreads of values the read cannot name). The spec replaces that transport
+  rather than growing the parser over it (§5), so the package queue is not the
+  language queue.
 
 The frontend is a parser for a small program language, not a general JavaScript
 parser. That is the right shape to keep: the goal is to grow the subset by
@@ -4238,6 +4243,51 @@ compiler offers one.
 
 This took the total from 689 to 680, and `runtime/nim.ts` reads whole.
 
+### 4i6. The model transport is a host boundary a project selects
+
+The AI SDK was read as project source: `blaze ir` on `src/compiler` stopped in
+`@ai-sdk/anthropic` with 38 refusals, and every later package would have been
+the same walk. The spec replaces that transport rather than growing the parser
+over it (§5), so the transport moved behind the boundary the graph already
+knows:
+
+- `ai/review-node.ts` is the only source that names the AI SDK, `zod` and
+  `ai/commandcode.ts`; `package.json` maps `#host/model` to it, which is what
+  the Node compiler loads at run time.
+- `ai/review-native.ts` is the adapter a native build links: replayed reviews
+  need no host, and every provider that would need the network is refused with
+  a diagnostic that names the missing transport.
+- `src/compiler/blaze.toml` maps `#host/model` to the native adapter and
+  `ai/backend.ts` asks for a backend only through the boundary.
+
+The project file is what selects the adapter: a `[modules]` table maps a
+`#`-specifier to a source of the project, which the graph then reads, contracts
+and compiles like any other module (§5a). An unmapped `#`-specifier is the
+host's, as `node:*` is. The TypeScript frontend's `SourceInput` carries the map,
+`readModuleGraph` resolves it before the host check, and `readInput` refuses a
+map whose key is not `#`-prefixed or whose target leaves the project.
+
+The self-host report measures the sources a native binary is made of, so
+`ai/review-node.ts` and the provider it carries are not measured; the native
+adapter is. `smol-toml`'s entry now reads whole, and the next refusal is a
+construct in its parser (§4i7).
+
+### 4i7. `Object.hasOwn` asks the value the program holds
+
+With the SDK out of the project's graph (§4i6), `blaze ir` read further into
+`smol-toml` and stopped at `Object.hasOwn(t, k)` in `dist/parse.js`, where `t`
+is a table the package built with `Object.create(null)` and has no annotation.
+The read had two answers: a dictionary's `has`, and a constant object's names.
+The value was neither to this read — it is an `any` — and the question was
+refused even though the runtime answers it.
+
+A value the read cannot name now asks `blaze_rt_dict_has`, and the runtime
+answers it for a parsed object and for a compiled record's layout as well as
+for a dictionary: its length already had the same three answers, and the key
+question did not. The answer is the comparison `=== 1`, because resolution types
+a runtime call by the ABI's `double` return and a printer would otherwise write
+`1` where the language writes `true` (§4i5).
+
 ### 4i5. A key question over a dictionary is a truth, not the number it asks
 
 `"drop" in rest` was read as the `blaze_rt_dict_has` call itself. The runtime
@@ -4291,7 +4341,16 @@ specifier is left unbound, exactly as a package the tree does not hold is left
 unbound in a measurement, and the project's own imports are still required.
 
 This is what let rung 1 reach the compiler's dependencies: the first read stopped
-at the host import, and the next stopped inside `zod` (§4cc).
+at the host import, the next stopped inside `zod`'s compiled source (§4i3), and
+the next inside `smol-toml`'s object default (§4i4).
+
+It also names the wall after the frontend. A host service is not a function the
+program compiles: `core/platform-node.ts` calls `nodeJoin` and its siblings, and
+the contract phase answers `a function may only call the functions of the program
+it is part of`. A native build does not carry that adapter — it links a platform
+implementation written in the subset and calling the runtime's own entries — so
+what the self-build needs is the platform selection between the Node adapter and
+the native one (§4, §6), not external calls in the contract model.
 
 ### 4i1. The platform's path values keep their type, and a dictionary's rest is a copy
 
@@ -5461,35 +5520,35 @@ length a list was built at is carried by the IR now, and the form is read in
 
 ### What the measurement says now
 
-0 refusals over 95 sources, 95 of them read whole. The report reads the
-module graph a build reads — every source is a root, every project import is
-resolved, and a file whose imports bind a type, a value, a signature or a class
-is read again with them — so the number is what survives the link rather than
-what waited for one. `core/version.ts` reads whole now that a directory entry
-and a path are the compiler's own types (§4fn), which is the one source the
-slices since the last measurement closed.
+0 refusals over 97 sources, 97 of them read whole. The report reads the module
+graph a build reads — every source is a root, every project import is resolved,
+and a file whose imports bind a type, a value, a signature or a class is read
+again with them — so the number is what survives the link rather than what
+waited for one. The last slices closed the two sources the QNX work added
+(§4i1) and the platform, package, regex and default-export constructs the first
+whole-project read found (§4i2–§4i4).
 
 The number was five times larger than the standalone read's 421 because that
 read was counting with a hand over the rest of the file: the first imported type
 it could not resolve set the deferral, and every construct after it that would
 have needed the link was skipped rather than reported. The linked read binds
 those types and reports what is left, so 421 measured how far a parse got, not
-what is missing. The largest buckets now, in order:
+what is missing.
 
-| refusals | refusal | what it needs |
-| --- | --- | --- |
-| 7 | `in` asks a value whose fields the type does not write down` | a dynamic value whose fields no layout writes: `"k" in n.value` where the field is `unknown`, which is the writable dynamic object §3 still owes |
-| 7 | `only a named function is called` | four calls of package providers (the AI SDK transport, §5) and a callee an expression answers: `this.target[method]`, `(a ?? b)(url)` |
-| 5 | `"map" is not a method` | a receiver the linked read cannot type: a promise, a host value whose declaration is a Node module, or a value an imported declaration erases |
-| 4 | `"..." is not a value a program can read` | a list spread in a program body, whose arrays are numbers |
-| 4 | `"catch"`, 4 `"then"` and 2 `"allSettled"` | a promise a body chains: the runtime has the promise and the await, not the methods of it |
-| 4 | `JSON.stringify writes a list whose values are written where the list is` | a list of one element type is not a dynamic value the runtime's stringify walks |
-| 3 | `"off"`, 3 `"once"` and the rest of `core/terminal-title.ts` | Node's streams and process events, which the host boundary has not replaced |
-| 3 | `JSON.stringify writes one value` | the indent a third argument names |
-| 5 | `a program cannot allocate Map` or `Set` | the collections a program body builds |
-| 3 | `an empty array needs the type of its elements` | an empty literal whose element type no use states, still in the IR text parsers |
-| 2 | `Object.entries reads a record or a map in a loop that names the two values` | the entries of a record whose type the link did not settle |
-| 2 | `a function may not be declared inside a function` | a nested declaration, in the terminal title and in `recursion.ts` |
+The frontend is no longer the queue for the compiler's own sources. What
+`blaze ir` on `src/compiler` reaches next is:
+
+1. **`smol-toml`'s parser.** The package is read with the program (§4i0) and
+   stops at `t[k] = []` in `dist/parse.js`, where `t` is an unannotated table
+   built with `Object.create(null)`. The place states no element type, so the
+   list needs the dynamic value representation the runtime's `array_push`
+   already has; the push on that entry is the same slice.
+2. **The contract phase's host calls.** `core/platform-node.ts` calls the names
+   it imports from `node:*`, and a call to a name the program does not compile
+   is refused. A native build does not carry that adapter; it needs the platform
+   selection between the Node adapter and the native one (§4, §5a, §6). The
+   model half of that selection is in place (§4i6).
+3. **The value-model slices** below, which are lowering gaps rather than reads.
 
 A refusal listed here is still not always a construct the frontend cannot read:
 a file is linked against the declarations of other files, and a file that is
@@ -5508,20 +5567,20 @@ The value-model slices still open, in the order they block the self-build:
   no elements, and its length is the header the runtime wrote. What remains is
   the shape §4dm records — two literals of one interface whose list fields hold
   a different number of elements are still two layouts at the object pass.
-- **A list stored in a dictionary.** A dictionary's entry is one double, and a
-  list is a pointer and a length: `Map<string, number[]>`,
-  `Record<string, string[]>` and a set of lists are refused where the value is
-  read, and `m.get(k) ?? []` with it. A list would have to be boxed — a block of
-  its own whose handle is the entry — before a key can answer one.
+- **A list stored in a dictionary** is carried now: the list is copied into a
+  runtime block whose header states its length, and the entry holds its handle
+  (see the map-of-lists test). What remains is a list of a list as a class
+  field, and a set of lists.
 - **A value whose type is an intersection of a union.** `DraftValue & { k:
   "buffer" | "sized" | "view" }` is a value of one of three kinds of the union,
   and a field of it — `held`, which is the array the block is — is the field of
   the narrowed kinds. The read keeps the whole union, so `held.values` is a
   field of nothing and its `map` is a method of nothing.
-- **The host's directory.** `process.cwd()` is the directory a build runs in.
-  The clock and the two streams a program writes are read now (§4cg, §4ch), so
-  this is what is left of the host object: one file, `ai/commandcode.ts`, asks
-  for the directory it runs in.
+- **The host's directory** is read through the boundary now: `ai/commandcode.ts`
+  asks the host for `cwd()` and its platform, and `compiler.ts`/`codegen.ts`
+  write stderr and read the clock through the same boundary. `process.execPath`
+  in `codegen.ts` remains, because running the wasm host under Node is the one
+  service a native build does not have.
 
 What was closed this session, and what each was worth:
 
@@ -5978,6 +6037,44 @@ Three dependencies are in the way of a native binary:
   model review is then the last dependency to arrive, not the first.
 - **`zod`** validates one provider's answers. Hand-written checks in the same
   adapter are enough, and they are code the compiler can compile.
+
+### 5a. The host adapter a project selects
+
+The boundary has one implementation today: `core/platform.ts` re-exports
+`core/platform-node.ts`, and `ai/backend.ts` imports the AI SDK directly. A
+native build must name its own adapter for both without a Node import, and the
+same source tree must still run under Node. The mechanism is an import map the
+project file owns:
+
+    [modules]
+    "#platform" = "core/platform-native.ts"
+    "#model" = "ai/model-native.ts"
+
+A `#`-prefixed specifier is the boundary (`§4i2`). A project that maps it
+resolves it to a file of the project, which is read, contracted and compiled
+like any other module: the calls have bodies, so the contract phase does not
+see an external function. A project that does not map it leaves it to the host,
+as `node:*` is left to the host. Node resolves the same specifiers through the
+`imports` field of `package.json`, which is what the Node compiler runs; the
+native project maps them to implementations written in the subset.
+
+The two implementations are different sources, not two branches in one file:
+
+- `#platform`: `core/platform-node.ts` for Node, a native adapter that answers
+  the same names from the runtime ABI for the self-build. The native adapter is
+  the file §4 describes; it is where the file, process, clock and network
+  services are carried.
+- `#model`: `ai/backend-node.ts` for Node (the AI SDK and `zod`), and a native
+  adapter that speaks the replay path and one HTTP transport (§5). The first
+  fixed point uses replay, so the native adapter may refuse a provider with a
+  clear diagnostic until the HTTP transport is written.
+
+Because a host adapter is not part of the binary a native project builds, the
+self-host report measures the sources the project reaches, not every file whose
+name happens to end in `.ts`: the Node adapter is a host's implementation, and
+the native adapter is the source the report must keep clean. Deriving the
+measured set from the project's map and the manifest's `imports` makes that
+explicit instead of a special case in the report.
 
 ### 6. Package and build the compiler
 

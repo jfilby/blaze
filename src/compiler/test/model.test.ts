@@ -6,7 +6,8 @@ import type { ReviewRequest } from "../ai/review.ts";
 import { phaseOf, semanticsOf } from "./phase.ts";
 import { resolveModel, OPENROUTER_BASE_URL, OPENCODE_GO_BASE_URL, OPENCODE_ZEN_BASE_URL, NEBIUS_BASE_URL } from "../ai/model.ts";
 import { CompilerError } from "../core/errors.ts";
-import { createBackend, ReplayBackend, VercelAiBackend } from "../ai/backend.ts";
+import { createBackend, ReplayBackend } from "../ai/backend.ts";
+import { VercelAiBackend } from "#host/model";
 import { chatEndpoint } from "./model-endpoint.ts";
 import { scratch } from "./scratch.ts";
 

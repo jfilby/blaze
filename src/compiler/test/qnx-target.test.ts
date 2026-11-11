@@ -83,16 +83,24 @@ test("a Linux host selects qcc for both QNX architectures", () => {
   assert.equal(x86.id, "qcc-x86_64");
   assert.equal(x86.cc, "qcc");
   assert.deepEqual(x86.ccArgs, ["-Vgcc_ntox86_64"]);
-  assert.equal(x86.nm, "ntox86_64-nm");
-  assert.equal(x86.size, "ntox86_64-size");
+  // The SDP names its binutils with the full target triple, not the short
+  // `ntox86_64` selector that `-V` takes (§"Build the QNX runtime and
+  // libraries with the SDP").
+  assert.equal(x86.nm, "x86_64-pc-nto-qnx8.0.0-nm");
+  assert.equal(x86.size, "x86_64-pc-nto-qnx8.0.0-size");
+  assert.equal(x86.ld, "x86_64-pc-nto-qnx8.0.0-ld");
   assert.equal(x86.assembler, "driver");
-  assert.equal(x86.relocatableLinker, "driver");
+  // `qcc -r` adds `-lgcc_s`, which the cross SDP does not provide, so the
+  // target's own linker does the relocatable link.
+  assert.equal(x86.relocatableLinker, "ld");
 
   const arm = toolchainFor(QNX_ARM, "linux");
   assert.equal(arm.id, "qcc-aarch64");
   assert.deepEqual(arm.ccArgs, ["-Vgcc_ntoaarch64le"]);
-  assert.equal(arm.nm, "ntoaarch64le-nm");
-  assert.equal(arm.size, "ntoaarch64le-size");
+  assert.equal(arm.nm, "aarch64-unknown-nto-qnx8.0.0-nm");
+  assert.equal(arm.size, "aarch64-unknown-nto-qnx8.0.0-size");
+  assert.equal(arm.ld, "aarch64-unknown-nto-qnx8.0.0-ld");
+  assert.equal(arm.relocatableLinker, "ld");
 });
 
 test("a QNX host selects clang for its own architecture", () => {
