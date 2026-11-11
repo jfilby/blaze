@@ -13,6 +13,8 @@ import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
+import { runtimeSourceSource } from "../runtime/abi.ts";
+import { writeRuntimeHeader } from "../runtime/standalone.ts";
 import { scratch } from "./scratch.ts";
 
 const QCC_ARCHITECTURES = [
@@ -50,5 +52,43 @@ test("qcc cross-compiles a QNX object when the QNX SDP is installed", async (t) 
     assert.equal(compiled.code, 0, `${architecture}: ${compiled.stderr.trim()}`);
     const info = await stat(object);
     assert.ok(info.size > 0, `${architecture}: qcc wrote an object`);
+  }
+});
+
+test("qcc compiles the generated runtime for both QNX architectures", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  const directory = await scratch("blaze-qnx-runtime-cross-");
+  // The runtime includes its own header by name, so the header is written
+  // beside the source exactly as a native build writes it.
+  await writeRuntimeHeader(directory);
+  const source = join(directory, "blaze_rt.c");
+  await writeFile(source, runtimeSourceSource("debug"), "utf8");
+
+  for (const [architecture, selector] of QCC_ARCHITECTURES) {
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${architecture} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const object = join(directory, `${architecture}-runtime.o`);
+    const compiled = run(
+      "qcc",
+      [`-V${selector}`, "-std=c11", "-O0", "-pthread", "-c", "-o", object, source],
+      { timeoutMs: 300_000 },
+    );
+    assert.equal(compiled.spawnError, undefined, `${architecture}: ${compiled.spawnError ?? ""}`);
+    assert.equal(compiled.code, 0, `${architecture}: ${compiled.stderr.trim()}`);
+    const info = await stat(object);
+    assert.ok(info.size > 0, `${architecture}: qcc compiled the runtime`);
   }
 });
