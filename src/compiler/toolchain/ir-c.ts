@@ -277,6 +277,14 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "streamIsTTY":
+      return `${RUNTIME_NAME}_stream_is_tty(${args[0]})`;
+    case "setExitCode":
+      return `(${RUNTIME_NAME}_set_exit_code(${args[0]}), 0.0)`;
+    case "exitCode":
+      return `${RUNTIME_NAME}_exit_code()`;
+    case "readLine":
+      return `${RUNTIME_NAME}_read_line()`;
     case "cwdPath":
       return `${RUNTIME_NAME}_cwd()`;
     case "processId":
@@ -287,6 +295,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `(${RUNTIME_NAME}_sleep_ms(${args[0]}), 0.0)`;
     case "removePath":
       return `${RUNTIME_NAME}_path_remove(${args[0]}, ${args[1]})`;
+    case "appendPath":
+      return `${RUNTIME_NAME}_file_append(${args[0]}, ${args[1]})`;
     case "copyPath":
       return `${RUNTIME_NAME}_file_copy(${args[0]}, ${args[1]})`;
     case "makeDir":

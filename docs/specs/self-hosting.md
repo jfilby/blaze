@@ -5623,11 +5623,12 @@ The frontend is no longer the queue for the compiler's own sources. What
 
    The runtime ABI the native adapter needs is not all there yet. It has the
    file read and write, the existence probe, the environment, the POSIX path
-   work, printing, the clock, the random source and the hashes; it lacks file
-   append, file stat,
-   directory listing and creation, removal, rename and copy, the working
-   directory and process id, the command spawn, sleep, and the stream and
-   signal services a command's `host` value is. Each is a service the C, Nim
+   work, printing, the clock, the random source, the hashes, the file read,
+   write and append, stat and existence, the directory listing and creation,
+   a path moved, removal and copy, the working directory, the process id, the
+   processor count, sleep, the terminal question, the exit status and a line
+   of input; it lacks the command spawn and the signal handlers a command's
+   `host` value also carries. Each is a service the C, Nim
    and wasm hosts answer, and a builtin the subset may name. The adapter is
    written when those are in, not as a stub over names that resolve to
    nothing.

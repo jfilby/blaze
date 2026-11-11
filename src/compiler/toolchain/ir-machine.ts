@@ -11199,6 +11199,28 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "streamIsTTY" && call.args[0] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      const stream = this.hold(NUMBER, "blaze_tty_stream");
+      this.store(stream);
+      this.callSymbol("blaze_rt_stream_is_tty", [stream], NUMBER);
+      return;
+    }
+    if (call.callee === "setExitCode" && call.args[0] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      const code = this.hold(NUMBER, "blaze_exit_code");
+      this.store(code);
+      this.callSymbol("blaze_rt_set_exit_code", [code], NUMBER);
+      return;
+    }
+    if (call.callee === "exitCode") {
+      this.callSymbol("blaze_rt_exit_code", [], NUMBER);
+      return;
+    }
+    if (call.callee === "readLine") {
+      this.callSymbol("blaze_rt_read_line", [], TEXT);
+      return;
+    }
     if (call.callee === "cwdPath" || call.callee === "processId" || call.callee === "cpuCount") {
       // The host answers each with a value and takes nothing: the path is a
       // text and the two counts are numbers.
@@ -11222,6 +11244,16 @@ class Machine {
       const recursive = this.hold(NUMBER, "blaze_remove_recursive");
       this.store(recursive);
       this.callSymbol("blaze_rt_path_remove", [path, recursive], NUMBER);
+      return;
+    }
+    if (call.callee === "appendPath" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_append_path");
+      this.store(path);
+      this.at(call.args[1], TEXT);
+      const text = this.hold(TEXT, "blaze_append_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_file_append", [path, text], NUMBER);
       return;
     }
     if (call.callee === "copyPath" && call.args[0] !== undefined && call.args[1] !== undefined) {

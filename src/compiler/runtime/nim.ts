@@ -1905,6 +1905,33 @@ proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.i
 proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
 proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
 
+var blazeExitStatus: int = 0
+
+proc c_isatty(fd: cint): cint {.importc: "isatty", header: "<unistd.h>".}
+
+proc blaze_rt_stream_is_tty*(stream: float64): float64 {.exportc, cdecl.} =
+  ## One where the output stream or the error stream is a terminal.
+  let descriptor: cint = if stream == 2.0: 2 else: 1
+  c_isatty(descriptor) != 0
+
+proc blaze_rt_set_exit_code*(code: float64): float64 {.exportc, cdecl.} =
+  ## Sets the status the process leaves with.
+  blazeExitStatus = int(code)
+  code
+
+proc blaze_rt_exit_code*(): float64 {.exportc, cdecl.} =
+  ## The status the process will leave with.
+  float64(blazeExitStatus)
+
+proc blaze_rt_read_line*(): cstring {.exportc, cdecl.} =
+  ## One line of the input without its newline, and the empty text at the end.
+  var line = ""
+  try:
+    if stdin.readLine(line): discard
+  except CatchableError:
+    line = ""
+  blazePathManaged(line)
+
 proc blaze_rt_cwd*(): cstring {.exportc, cdecl.} =
   ## The absolute path of the directory the process runs in.
   blazePathManaged(getCurrentDir())
@@ -1938,6 +1965,21 @@ proc blaze_rt_path_remove*(path: cstring, recursive: float64): float64 {.exportc
   except CatchableError:
     return 0.0
   1.0
+
+proc blaze_rt_file_append*(path, text: cstring): float64 {.exportc, cdecl.} =
+  ## Appends text to a file, making the file where it is not there yet, and
+  ## answers the bytes appended.
+  if path == nil: return 0.0
+  let content = if text == nil: "" else: $text
+  try:
+    let stream = open($path, fmAppend)
+    try:
+      stream.write(content)
+    finally:
+      stream.close()
+  except CatchableError:
+    return 0.0
+  float64(content.len)
 
 proc blaze_rt_file_copy*(fromPath, toPath: cstring): float64 {.exportc, cdecl.} =
   ## Copies a file to another path, and answers whether the copy is written.

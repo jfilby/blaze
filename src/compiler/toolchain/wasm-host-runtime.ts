@@ -134,6 +134,11 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_path_rename",
   "blaze_rt_path_remove",
   "blaze_rt_file_copy",
+  "blaze_rt_file_append",
+  "blaze_rt_stream_is_tty",
+  "blaze_rt_set_exit_code",
+  "blaze_rt_exit_code",
+  "blaze_rt_read_line",
   "blaze_rt_cwd",
   "blaze_rt_process_id",
   "blaze_rt_cpu_count",
@@ -1236,6 +1241,49 @@ export function blaze_rt_md5_digest(hasher) {
 `,
   },
   {
+    service: "blaze_rt_stream_is_tty",
+    source: `
+export function blaze_rt_stream_is_tty(stream) {
+  const target = Number(stream) === 2 ? process.stderr : process.stdout;
+  return target.isTTY === true ? 1 : 0;
+}
+`,
+  },
+  {
+    service: "blaze_rt_set_exit_code",
+    source: `
+export function blaze_rt_set_exit_code(code) {
+  process.exitCode = Number(code);
+  return code;
+}
+`,
+  },
+  {
+    service: "blaze_rt_exit_code",
+    source: `
+export function blaze_rt_exit_code() {
+  return Number(process.exitCode ?? 0);
+}
+`,
+  },
+  {
+    service: "blaze_rt_read_line",
+    source: `
+let blazeInputLines = null;
+export function blaze_rt_read_line() {
+  if (blazeInputLines === null) {
+    try {
+      blazeInputLines = readFileSync(0, "utf8").split("\\n");
+    } catch {
+      blazeInputLines = [];
+    }
+  }
+  const line = blazeInputLines.length > 0 ? blazeInputLines.shift() : "";
+  return makeText(line);
+}
+`,
+  },
+  {
     service: "blaze_rt_cwd",
     source: `
 export function blaze_rt_cwd() {
@@ -1278,6 +1326,21 @@ export function blaze_rt_path_remove(path, recursive) {
   try {
     rmSync(name, { recursive: Number(recursive) !== 0, force: true });
     return 1;
+  } catch {
+    return 0;
+  }
+}
+`,
+  },
+  {
+    service: "blaze_rt_file_append",
+    source: `
+export function blaze_rt_file_append(path, text) {
+  const name = new TextDecoder().decode(textBytes(path));
+  const bytes = textBytes(text);
+  try {
+    appendFileSync(name, bytes);
+    return bytes.length;
   } catch {
     return 0;
   }

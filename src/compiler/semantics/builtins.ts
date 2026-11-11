@@ -331,6 +331,18 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "removePath": { params: [TEXT, F64], returns: F64, arity: 2 },
   /** Copies a file to another path, replacing what the other held. */
   "copyPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** Appends text to a file, making the file where it is not there yet. */
+  "appendPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
+  /** Whether a stream the process writes to is a terminal: one is the output
+   *  stream, two the error stream. The answer is one or zero. */
+  "streamIsTTY": { params: [F64], returns: F64, arity: 1 },
+  /** Sets the status the process leaves with when it ends. */
+  "setExitCode": { params: [F64], returns: F64, arity: 1 },
+  /** The status the process will leave with, which starts at zero. */
+  "exitCode": { params: [], returns: F64, arity: 0 },
+  /** One line read from the input of the process, without its newline; the
+   *  empty text where there is no line to read. */
+  "readLine": { params: [], returns: TEXT, arity: 0 },
   /** The directory the process runs in, as the path it is. */
   "cwdPath": { params: [], returns: TEXT, arity: 0 },
   /** The process's own id, which a temporary name may carry. */

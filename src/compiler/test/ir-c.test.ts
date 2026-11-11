@@ -20,7 +20,7 @@ import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { cLiteral } from "../toolchain/c-names.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, ObjectLayout } from "../core/types.ts";
-import type { SemanticBlock, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
+import type { SemanticBlock, SemanticCall, SemanticFunction, SemanticSlot, SemanticType, SemanticValue } from "../core/semantic-ir.ts";
 import { scratch } from "./scratch.ts";
 
 const F64: SemanticType = { kind: "primitive", name: "f64" };
@@ -115,6 +115,50 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code sets the status the process leaves with and reads its input", async () => {
+  const call = (callee: string, args: SemanticValue[], returns: SemanticType): SemanticCall => ({
+      callee,
+      builtin: true,
+      signature: {
+        name: callee,
+        symbol: callee,
+        params: args.map((argument, at) => ({ name: `argument${at}`, type: argument.type.kind === "text" ? "ptr<u8>" : "f64" })),
+        returns: returns.kind === "text" ? "ptr<u8>" : "f64",
+      },
+      args,
+      argTypes: args.map((argument) => argument.type),
+      returns,
+      effects: [],
+      ownership: "none",
+      retain: false,
+  });
+  const set = call("setExitCode", [{ k: "const", type: F64, text: "3" }], F64);
+  const get = call("exitCode", [], F64);
+  const fn = subject(F64, {
+    id: "entry",
+    statements: [{ k: "call", call: set, line: 1 }],
+    releases: [],
+    terminator: { k: "return", value: { k: "call", type: F64, call: get } },
+  });
+  const printed = await lowered(
+    fn,
+    (name) => `extern double blaze_rt_exit_code(void); ${name}(); printf("%.17g", blaze_rt_exit_code());`,
+  );
+  assert.equal(printed, "3");
+
+  const tty = await lowered(
+    subject(F64, handsBack({ k: "call", type: F64, call: call("streamIsTTY", [{ k: "const", type: F64, text: "1" }], F64) })),
+    (name) => `printf("%.17g", ${name}());`,
+  );
+  assert.equal(tty, "0", "the test's output is a pipe, not a terminal");
+
+  const line = await lowered(
+    subject(TEXT, handsBack({ k: "call", type: TEXT, call: call("readLine", [], TEXT) })),
+    (name) => `printf("[%s]", ${name}());`,
+  );
+  assert.equal(line, "[]", "the process was given no input");
+});
+
 test("the C code asks the host where it runs and who it is", async () => {
   const named = (callee: string, returns: SemanticType): SemanticFunction =>
     subject(
@@ -183,6 +227,10 @@ test("the C code removes a tree and copies a file", async () => {
   const copy = call("copyPath", [literal(from), literal(to)]);
   assert.equal(await lowered(copy, (name) => `printf("%.17g", ${name}());`), "1");
   assert.equal(await readFile(to, "utf8"), "hello");
+
+  const appended = call("appendPath", [literal(to), literal(" again")]);
+  assert.equal(await lowered(appended, (name) => `printf("%.17g", ${name}());`), "6");
+  assert.equal(await readFile(to, "utf8"), "hello again");
 });
 
 test("the C code asks the host to list a directory", async () => {

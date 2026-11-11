@@ -169,6 +169,21 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("a program sets its exit status and reads its input", async () => {
+  const files = {
+    "main.ts": [
+      "setExitCode(3);",
+      "console.log(exitCode());",
+      'console.log(streamIsTTY(1) ? "tty" : "pipe");',
+      'console.log(`[${readLine()}]`);',
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 3, result.stderr);
+  assert.equal(result.stdout, "3\npipe\n[]\n");
+});
+
 test("a program asks the host where it runs and who it is", async () => {
   const files = {
     "main.ts": [
@@ -195,14 +210,15 @@ test("a program removes a tree and copies a file through the host", async () => 
     "main.ts": [
       `console.log(removePath(${JSON.stringify(tree)}, 1));`,
       `console.log(copyPath(${JSON.stringify(from)}, ${JSON.stringify(to)}));`,
+      `console.log(appendPath(${JSON.stringify(to)}, " again"));`,
       "",
     ].join("\n"),
   };
   const result = await runProgram(files, "main.ts");
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "1\n1\n");
+  assert.equal(result.stdout, "1\n1\n6\n");
   assert.equal(await stat(tree).then(() => "there").catch(() => "gone"), "gone");
-  assert.equal(await readFile(to, "utf8"), "hello");
+  assert.equal(await readFile(to, "utf8"), "hello again");
 });
 
 test("a program asks the host to list a directory", async () => {

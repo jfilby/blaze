@@ -599,7 +599,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
   }
 
   closeProgram(releases: readonly string[]): string[] {
-    return [...releases, `${RUNTIME_NAME}_finalize();`, "return 0;", "}"];
+    // The status is the program's own: `process.exitCode` written by the
+    // source is the status the command leaves with.
+    return [...releases, `${RUNTIME_NAME}_finalize();`, `return (int)${RUNTIME_NAME}_exit_code();`, "}"];
   }
 
   epilogue(): string[] {
@@ -1124,6 +1126,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "streamIsTTY":
+        return `${RUNTIME_NAME}_stream_is_tty(${argument(0)})`;
+      case "setExitCode":
+        return `(${RUNTIME_NAME}_set_exit_code(${argument(0)}), 0.0)`;
+      case "exitCode":
+        return `${RUNTIME_NAME}_exit_code()`;
+      case "readLine":
+        return `${RUNTIME_NAME}_read_line()`;
       case "cwdPath":
         return `${RUNTIME_NAME}_cwd()`;
       case "processId":
@@ -1134,6 +1144,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `(${RUNTIME_NAME}_sleep_ms(${argument(0)}), 0.0)`;
       case "removePath":
         return `${RUNTIME_NAME}_path_remove(${argument(0)}, ${argument(1)})`;
+      case "appendPath":
+        return `${RUNTIME_NAME}_file_append(${argument(0)}, ${argument(1)})`;
       case "copyPath":
         return `${RUNTIME_NAME}_file_copy(${argument(0)}, ${argument(1)})`;
       case "makeDir":

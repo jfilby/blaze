@@ -3620,6 +3620,20 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "streamIsTTY":
+        this.value(argument(0), F64_TYPE);
+        this.callService("blaze_rt_stream_is_tty");
+        return F64_TYPE;
+      case "setExitCode":
+        this.value(argument(0), F64_TYPE);
+        this.callService("blaze_rt_set_exit_code");
+        return F64_TYPE;
+      case "exitCode":
+        this.callService("blaze_rt_exit_code");
+        return F64_TYPE;
+      case "readLine":
+        this.callService("blaze_rt_read_line");
+        return TEXT;
       case "cwdPath":
         this.callService("blaze_rt_cwd");
         return TEXT;
@@ -3637,6 +3651,11 @@ class Body {
         this.textArgument(argument(0));
         this.value(argument(1), F64_TYPE);
         this.callService("blaze_rt_path_remove");
+        return F64_TYPE;
+      case "appendPath":
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_file_append");
         return F64_TYPE;
       case "copyPath":
         this.textArgument(argument(0));

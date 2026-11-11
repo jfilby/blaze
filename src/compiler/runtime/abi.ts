@@ -1145,6 +1145,38 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_stream_is_tty",
+    "double",
+    [["stream", "double"]],
+    "Asks whether an output stream is a terminal.",
+    "Returns one for the output stream or the error stream where it is a terminal, and zero where it is not.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_set_exit_code",
+    "double",
+    [["code", "double"]],
+    "Sets the status the process leaves with.",
+    "Returns the code it set.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_exit_code",
+    "double",
+    [],
+    "The status the process will leave with.",
+    "Returns the code set by the last call, zero where none was set.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_read_line",
+    "const char*",
+    [],
+    "Reads one line of the process's input.",
+    "Returns a managed string: the line without its newline, and the empty string at the end of the input.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_cwd",
     "const char*",
     [],
@@ -1182,6 +1214,14 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     [["path", "const char*"], ["recursive", "double"]],
     "Removes a file or directory.",
     "Returns one where the path is gone after the call, including a path that was not there, and zero where it could not be removed.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_file_append",
+    "double",
+    [["path", "const char*"], ["text", "const char*"]],
+    "Appends text to a file.",
+    "Returns the bytes appended, and zero where the file could not be opened.",
     { tags: ["host"] },
   ),
   entry(
@@ -6375,6 +6415,30 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   return blaze_rt_box_string(answer);
 }
 
+static int blaze_exit_status = 0;
+
+double blaze_rt_stream_is_tty(double stream) {
+  const int descriptor = stream == 2.0 ? STDERR_FILENO : STDOUT_FILENO;
+  return isatty(descriptor) ? 1.0 : 0.0;
+}
+
+double blaze_rt_set_exit_code(double code) {
+  blaze_exit_status = (int)code;
+  return code;
+}
+
+double blaze_rt_exit_code(void) {
+  return (double)blaze_exit_status;
+}
+
+const char* blaze_rt_read_line(void) {
+  char buffer[4096];
+  if (fgets(buffer, sizeof buffer, stdin) == NULL) return blaze_rt_string_new((const unsigned char*)"", 0);
+  size_t length = strlen(buffer);
+  while (length > 0 && (buffer[length - 1] == '\\n' || buffer[length - 1] == '\\r')) length -= 1;
+  return blaze_rt_string_new((const unsigned char*)buffer, length);
+}
+
 const char* blaze_rt_cwd(void) {
   char buffer[4096];
   if (getcwd(buffer, sizeof buffer) == NULL) return blaze_rt_string_new((const unsigned char*)".", 1);
@@ -6424,6 +6488,16 @@ double blaze_rt_path_remove(const char* path, double recursive) {
   if (recursive != 0.0) return blaze_remove_tree(path) ? 1.0 : 0.0;
   if (lstat(path, &(struct stat){0}) != 0) return 1.0;
   return remove(path) == 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_append(const char* path, const char* text) {
+  if (path == NULL) return 0.0;
+  FILE* f = fopen(path, "a");
+  if (!f) return 0.0;
+  const size_t length = text == NULL ? 0 : strlen(text);
+  const size_t written = length == 0 ? 0 : fwrite(text, 1, length, f);
+  fclose(f);
+  return (double)written;
 }
 
 double blaze_rt_file_copy(const char* from, const char* to) {
