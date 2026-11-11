@@ -1128,6 +1128,60 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
+    "blaze_rt_file_write",
+    "double",
+    [
+      ["path", "const char*"],
+      ["text", "const char*"],
+      ["append", "double"],
+    ],
+    "Writes a text to a file, replacing what it held or appending to it.",
+    "Returns 1 when the text was written and 0 when the file could not be opened.",
+    { tags: ["host"] },
+  ),
+  entry("blaze_rt_file_exists", "double", [["path", "const char*"]], "Whether a path names a file or a directory.", "Returns 1 or 0.", { tags: ["host"] }),
+  entry("blaze_rt_file_size", "double", [["path", "const char*"]], "The bytes a file holds.", "Returns the size, or -1 where the path names no file.", { tags: ["host"] }),
+  entry("blaze_rt_file_kind", "double", [["path", "const char*"]], "What a path names.", "Returns 0 where nothing is there, 1 for a file, 2 for a directory and 3 for anything else.", { tags: ["host"] }),
+  entry("blaze_rt_dir_make", "double", [["path", "const char*"], ["parents", "double"]], "Makes a directory, and its parents where the source asks for them.", "Returns 1 when a directory is there afterwards, 0 when it is not.", { tags: ["host"] }),
+  entry("blaze_rt_file_remove", "double", [["path", "const char*"], ["recursive", "double"]], "Removes a file, or a directory and everything it holds.", "Returns 1 when nothing is left at the path, 0 when something is.", { tags: ["host"] }),
+  entry("blaze_rt_file_rename", "double", [["from", "const char*"], ["to", "const char*"]], "Renames or moves a path.", "Returns 1 when the path was moved, 0 when it was not.", { tags: ["host"] }),
+  entry("blaze_rt_file_copy", "double", [["from", "const char*"], ["to", "const char*"]], "Copies a file.", "Returns 1 when the copy was written, 0 when it was not.", { tags: ["host"] }),
+  entry("blaze_rt_dir_count", "double", [["path", "const char*"]], "How many entries a directory lists.", "Returns the count, or -1 where the path names no directory.", { tags: ["host"] }),
+  entry("blaze_rt_dir_name", "const char*", [["path", "const char*"], ["index", "double"]], "The name of one entry of a directory, in the order the host lists them.", "Returns a managed text: the name, or the empty text where the index names no entry.", { tags: ["host"] }),
+  entry("blaze_rt_dir_is_dir", "double", [["path", "const char*"], ["index", "double"]], "Whether one entry of a directory is itself a directory.", "Returns 1 or 0.", { tags: ["host"] }),
+  entry("blaze_rt_current_dir", "const char*", [], "The directory the program is running in.", "Returns a managed text.", { tags: ["host"] }),
+  entry("blaze_rt_temp_dir", "const char*", [], "A directory temporary files belong in.", "Returns the directory the environment names, or /tmp.", { tags: ["host"] }),
+  entry("blaze_rt_process_id", "double", [], "The process id.", "Returns the id of the process the program runs in.", { tags: ["host"] }),
+  entry("blaze_rt_host_platform", "const char*", [], "The operating system the program runs on.", "Returns the name this compiler answers for it.", { tags: ["host"] }),
+  entry("blaze_rt_host_arch", "const char*", [], "The architecture the program runs on.", "Returns the name this compiler answers for it.", { tags: ["host"] }),
+  entry("blaze_rt_random_uuid", "const char*", [], "A universally unique identifier, version 4.", "Returns a managed text of thirty-six characters.", { tags: ["host"] }),
+  entry("blaze_rt_env_count", "double", [], "How many variables the environment holds.", "Returns the count.", { tags: ["host"] }),
+  entry("blaze_rt_env_at", "const char*", [["index", "double"]], "One variable of the environment as NAME=value.", "Returns a managed text, or the empty text where the index names no variable.", { tags: ["host"] }),
+  entry("blaze_rt_cpu_count", "double", [], "How many processors the host has.", "Returns the count.", { tags: ["host"] }),
+  entry("blaze_rt_file_sync", "double", [["path", "const char*"]], "Writes a file's bytes and its name out to the disk.", "Returns 1 when the path was synced and 0 when it could not be opened. A directory is synced the way a file is, which is what makes a rename durable.", { tags: ["host"] }),
+  entry("blaze_rt_sleep_ms", "double", [["milliseconds", "double"]], "Waits for a number of milliseconds.", "Returns 1 once the wait is over.", { tags: ["host"] }),
+  /**
+   * A program started and waited for, as the command line the compiler's host
+   * adapter builds: the arguments, the directory it runs in, the variables its
+   * environment is set to, what it reads on standard input, and what it wrote
+   * on the two streams. The handle is the runtime's, and `run` answers the exit
+   * status (`-1` for a program that never started, `-3` for one a signal
+   * ended); the signal, the errno of a failed start, whether the deadline
+   * stopped it and what it wrote are questions about the handle afterwards.
+   */
+  entry("blaze_rt_command_new", "double", [], "Creates a command to be started.", "Returns a managed handle.", { tags: ["host"] }),
+  entry("blaze_rt_command_arg", "double", [["command", "double"], ["text", "const char*"]], "Adds one argument to a command.", "Returns the command.", { tags: ["host"] }),
+  entry("blaze_rt_command_cwd", "double", [["command", "double"], ["path", "const char*"]], "Sets the directory a command runs in.", "Returns the command.", { tags: ["host"] }),
+  entry("blaze_rt_command_env", "double", [["command", "double"], ["name", "const char*"], ["value", "const char*"]], "Sets one variable of a command's environment.", "Returns the command.", { tags: ["host"] }),
+  entry("blaze_rt_command_input", "double", [["command", "double"], ["text", "const char*"]], "Sets what a command reads on standard input.", "Returns the command.", { tags: ["host"] }),
+  entry("blaze_rt_command_run", "double", [["command", "double"], ["timeout_ms", "double"]], "Starts a command and waits for it, up to a deadline.", "Returns the exit status, -1 where it never started and -3 where a signal ended it.", { tags: ["host"] }),
+  entry("blaze_rt_command_signal", "double", [["command", "double"]], "The signal that ended a command.", "Returns the number, or 0 where no signal ended it.", { tags: ["host"] }),
+  entry("blaze_rt_command_errno", "double", [["command", "double"]], "Why a command never started.", "Returns the errno of the failed start, or 0.", { tags: ["host"] }),
+  entry("blaze_rt_command_timed_out", "double", [["command", "double"]], "Whether the deadline stopped a command.", "Returns 1 or 0.", { tags: ["host"] }),
+  entry("blaze_rt_command_stdout", "const char*", [["command", "double"]], "What a command wrote on standard output.", "Returns a borrowed text valid until the command is freed.", { tags: ["host"] }),
+  entry("blaze_rt_command_stderr", "const char*", [["command", "double"]], "What a command wrote on standard error.", "Returns a borrowed text valid until the command is freed.", { tags: ["host"] }),
+  entry("blaze_rt_command_free", "void", [["command", "double"]], "Releases a command and what it wrote.", "Returns nothing.", { tags: ["host"] }),
+  entry(
     "blaze_rt_env_get",
     "const char*",
     [["name", "const char*"]],
@@ -1211,6 +1265,17 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
   entry("blaze_rt_dict_get_text", "const char*", [["dict", "double"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry(
+    "blaze_rt_own_key",
+    "double",
+    [
+      ["value", "double"],
+      ["key", "const char*"],
+    ],
+    "Asks whether a value the compiler could not shape holds a key of its own.",
+    "A dynamic object, a dictionary the runtime created and a record this compiler laid out answer the keys they hold; every other value answers 0.",
+    { tags: ["object"] },
+  ),
   entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_copy", "void*", [["block", "void*"]], "Copies a block of elements.", "Returns a block of its own holding the same bytes; the header states how many elements it holds.", { tags: ["object"] }),
   entry("blaze_rt_array_join", "void*", [["left", "void*"], ["right", "void*"]], "Joins two blocks of elements.", "Returns a block holding the left's bytes followed by the right's; the header states how many elements it holds.", { tags: ["object"] }),
@@ -3531,9 +3596,16 @@ export function runtimeSourceSource(mode: BuildMode = "debug"): string {
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #ifdef __QNXNTO__
 /* QNX declares aligned_alloc in <malloc.h> rather than <stdlib.h>. */
@@ -4740,6 +4812,30 @@ double blaze_rt_dict_has(double dict, const char* key) {
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0;
   return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+}
+
+/* Whether a value the compiler could not shape holds a key of its own.
+
+   The shapes a value takes are three: a dynamic object the JSON reader laid
+   down, a dictionary the runtime created, and a record this compiler laid out.
+   Each is asked the way its own entries are read, so the answer is one question
+   whatever the value turned out to be; a number, an empty handle and a block
+   that carries no layout answer no. */
+double blaze_rt_own_key(double value, const char* key) {
+  if (key == NULL) return 0.0;
+  blaze_dyn* object = NULL;
+  if (blaze_rt_dict_dynamic(value, &object)) return blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
+  blaze_rt_dict* d = blaze_rt_dict_known(value);
+  if (d != NULL) return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+  const char* layout = blaze_rt_record_layout(value);
+  if (layout != NULL) {
+    const int count = blaze_rt_record_count(layout);
+    for (int at = 0; at < count; at += 1) {
+      const char* name = blaze_rt_record_field(layout, at, NULL, NULL);
+      if (name != NULL && strcmp(name, key) == 0) return 1.0;
+    }
+  }
+  return 0.0;
 }
 
 double blaze_rt_dict_set(double dict, const char* key, double value) {
@@ -6202,6 +6298,658 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+/* The file services the compiler's own host adapter asks for.
+
+   Every entry answers a value and raises nothing: a path that is not there is
+   the answer a question about it has, and a write that fails is the zero the
+   caller branches on. A path is the bytes the host takes, and a name a listing
+   answers is a managed text, so it outlives the directory stream it came from.
+   */
+double blaze_rt_file_write(const char* path, const char* text, double append) {
+  if (path == NULL) return 0.0;
+  FILE* f = fopen(path, append != 0.0 ? "ab" : "wb");
+  if (f == NULL) return 0.0;
+  size_t len = text == NULL ? 0 : strlen(text);
+  size_t wrote = len == 0 ? 0 : fwrite(text, 1, len, f);
+  int closed = fclose(f);
+  return (wrote == len && closed == 0) ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_exists(const char* path) {
+  struct stat info;
+  if (path == NULL) return 0.0;
+  return stat(path, &info) == 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_size(const char* path) {
+  struct stat info;
+  if (path == NULL || stat(path, &info) != 0) return -1.0;
+  return (double)info.st_size;
+}
+
+double blaze_rt_file_kind(const char* path) {
+  struct stat info;
+  if (path == NULL || stat(path, &info) != 0) return 0.0;
+  if (S_ISREG(info.st_mode)) return 1.0;
+  if (S_ISDIR(info.st_mode)) return 2.0;
+  return 3.0;
+}
+
+/* One directory made, and the answer is whether it is one: a directory that is
+   already there is the directory the caller asked for, which is what makes a
+   recursive make idempotent. */
+static int blaze_rt_dir_make_one(const char* path) {
+  if (mkdir(path, 0777) == 0) return 1;
+  struct stat info;
+  return stat(path, &info) == 0 && S_ISDIR(info.st_mode) ? 1 : 0;
+}
+
+double blaze_rt_dir_make(const char* path, double parents) {
+  if (path == NULL || path[0] == '\\0') return 0.0;
+  if (parents == 0.0) return blaze_rt_dir_make_one(path) ? 1.0 : 0.0;
+  /* The parents are made left to right, and the path is put back after each
+     one: every separator but the first is a point a parent ends at. */
+  size_t len = strlen(path);
+  char* copy = (char*)malloc(len + 1);
+  if (copy == NULL) return 0.0;
+  memcpy(copy, path, len + 1);
+  int made = 1;
+  for (size_t at = 1; at < len; at += 1) {
+    if (copy[at] != '/') continue;
+    copy[at] = '\0';
+    made = blaze_rt_dir_make_one(copy);
+    copy[at] = '/';
+    if (!made) break;
+  }
+  if (made) made = blaze_rt_dir_make_one(copy);
+  free(copy);
+  return made ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_remove(const char* path, double recursive) {
+  if (path == NULL) return 0.0;
+  if (recursive == 0.0) return remove(path) == 0 ? 1.0 : 0.0;
+  struct stat info;
+  if (stat(path, &info) != 0) return 0.0;
+  if (S_ISDIR(info.st_mode)) {
+    DIR* dir = opendir(path);
+    if (dir == NULL) return 0.0;
+    struct dirent* entry;
+    int ok = 1;
+    while ((entry = readdir(dir)) != NULL) {
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+      size_t need = strlen(path) + strlen(entry->d_name) + 2;
+      char* child = (char*)malloc(need);
+      if (child == NULL) { ok = 0; break; }
+      snprintf(child, need, "%s/%s", path, entry->d_name);
+      if (blaze_rt_file_remove(child, 1.0) == 0.0) ok = 0;
+      free(child);
+      if (!ok) break;
+    }
+    closedir(dir);
+    if (!ok) return 0.0;
+  }
+  return remove(path) == 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_rename(const char* from, const char* to) {
+  if (from == NULL || to == NULL) return 0.0;
+  return rename(from, to) == 0 ? 1.0 : 0.0;
+}
+
+double blaze_rt_file_copy(const char* from, const char* to) {
+  if (from == NULL || to == NULL) return 0.0;
+  FILE* in = fopen(from, "rb");
+  if (in == NULL) return 0.0;
+  FILE* out = fopen(to, "wb");
+  if (out == NULL) { fclose(in); return 0.0; }
+  char buffer[16384];
+  int ok = 1;
+  size_t got;
+  while ((got = fread(buffer, 1, sizeof buffer, in)) > 0) {
+    if (fwrite(buffer, 1, got, out) != got) { ok = 0; break; }
+  }
+  if (ferror(in)) ok = 0;
+  if (fclose(out) != 0) ok = 0;
+  fclose(in);
+  return ok ? 1.0 : 0.0;
+}
+
+/* One entry of a directory, counted the way the listing counts: the two names
+   every directory answers with are not entries of it. */
+static int blaze_rt_dir_entry_at(const char* path, double index, char* name, size_t room, int* isdir) {
+  if (path == NULL || index < 0) return 0;
+  DIR* dir = opendir(path);
+  if (dir == NULL) return 0;
+  long wanted = (long)index;
+  long at = 0;
+  struct dirent* entry;
+  int found = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    if (at == wanted) {
+      if (name != NULL && room > 0) {
+        strncpy(name, entry->d_name, room - 1);
+        name[room - 1] = '\0';
+      }
+      if (isdir != NULL) {
+        size_t need = strlen(path) + strlen(entry->d_name) + 2;
+        char* child = (char*)malloc(need);
+        if (child != NULL) {
+          snprintf(child, need, "%s/%s", path, entry->d_name);
+          struct stat info;
+          *isdir = stat(child, &info) == 0 && S_ISDIR(info.st_mode) ? 1 : 0;
+          free(child);
+        } else {
+          *isdir = 0;
+        }
+      }
+      found = 1;
+      break;
+    }
+    at += 1;
+  }
+  closedir(dir);
+  return found;
+}
+
+double blaze_rt_dir_count(const char* path) {
+  if (path == NULL) return -1.0;
+  DIR* dir = opendir(path);
+  if (dir == NULL) return -1.0;
+  double count = 0;
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+    count += 1;
+  }
+  closedir(dir);
+  return count;
+}
+
+const char* blaze_rt_dir_name(const char* path, double index) {
+  char name[4096];
+  if (!blaze_rt_dir_entry_at(path, index, name, sizeof name, NULL)) {
+    return blaze_rt_string_new((const unsigned char*)"", 0);
+  }
+  return blaze_rt_string_new((const unsigned char*)name, strlen(name));
+}
+
+double blaze_rt_dir_is_dir(const char* path, double index) {
+  int isdir = 0;
+  blaze_rt_dir_entry_at(path, index, NULL, 0, &isdir);
+  return isdir ? 1.0 : 0.0;
+}
+
+const char* blaze_rt_current_dir(void) {
+  char buffer[4096];
+  if (getcwd(buffer, sizeof buffer) == NULL) return blaze_rt_string_new((const unsigned char*)".", 1);
+  return blaze_rt_string_new((const unsigned char*)buffer, strlen(buffer));
+}
+
+const char* blaze_rt_temp_dir(void) {
+  const char* name = getenv("TMPDIR");
+  if (name == NULL || name[0] == '\0') name = getenv("TEMP");
+  if (name == NULL || name[0] == '\0') name = "/tmp";
+  return blaze_rt_string_new((const unsigned char*)name, strlen(name));
+}
+
+double blaze_rt_process_id(void) {
+  return (double)getpid();
+}
+
+const char* blaze_rt_host_platform(void) {
+#if defined(__linux__)
+  return "linux";
+#elif defined(__APPLE__)
+  return "darwin";
+#elif defined(__QNXNTO__)
+  return "qnx";
+#elif defined(_WIN32)
+  return "win32";
+#else
+  return "unknown";
+#endif
+}
+
+const char* blaze_rt_host_arch(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+  return "x64";
+#elif defined(__aarch64__)
+  return "arm64";
+#elif defined(__i386__)
+  return "ia32";
+#else
+  return "unknown";
+#endif
+}
+
+const char* blaze_rt_random_uuid(void) {
+  unsigned char bytes[16];
+  for (int at = 0; at < 16; at += 1) bytes[at] = (unsigned char)(rand() & 0xff);
+  bytes[6] = (unsigned char)((bytes[6] & 0x0f) | 0x40);
+  bytes[8] = (unsigned char)((bytes[8] & 0x3f) | 0x80);
+  static const char nibbles[] = "0123456789abcdef";
+  unsigned char text[37];
+  int at = 0;
+  for (int byte = 0; byte < 16; byte += 1) {
+    if (byte == 4 || byte == 6 || byte == 8 || byte == 10) text[at++] = '-';
+    text[at++] = (unsigned char)nibbles[bytes[byte] >> 4];
+    text[at++] = (unsigned char)nibbles[bytes[byte] & 15];
+  }
+  text[36] = 0;
+  return blaze_rt_string_new(text, 36);
+}
+
+/* A path's bytes and its name written out to the disk.
+
+   A write renamed into place before its bytes are there leaves a name with
+   nothing behind it, so the store syncs the temporary file and the directory it
+   is renamed in. A directory is opened the way a file is and synced the same
+   way, which is what makes the rename durable. */
+double blaze_rt_file_sync(const char* path) {
+  if (path == NULL) return 0.0;
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return 0.0;
+  int synced = fsync(fd) == 0 ? 1 : 0;
+  close(fd);
+  return synced ? 1.0 : 0.0;
+}
+
+/* A wait of a number of milliseconds, which a program asks for when a retry or
+   a poll has to give the host time. */
+double blaze_rt_sleep_ms(double milliseconds) {
+  if (!(milliseconds > 0.0)) return 1.0;
+  struct timespec wait;
+  wait.tv_sec = (time_t)(milliseconds / 1000.0);
+  wait.tv_nsec = (long)((milliseconds - (double)wait.tv_sec * 1000.0) * 1000000.0);
+  if (wait.tv_nsec < 0) wait.tv_nsec = 0;
+  if (wait.tv_nsec > 999999999L) wait.tv_nsec = 999999999L;
+  while (nanosleep(&wait, &wait) != 0 && errno == EINTR) {
+  }
+  return 1.0;
+}
+
+/* A program started and waited for.
+
+   The command the adapter builds is the arguments, the directory, the
+   environment it overrides, the text it reads on standard input and the two
+   streams it wrote. The runtime starts it with fork and execve, reads both of
+   its streams while it runs, and enforces the deadline with a signal; the
+   answers are the ones the C library gives, so a program that never started
+   answers the errno of the failed start and one a signal ended answers the
+   signal. A command is released when the caller is done with it, and the
+   strings it wrote live until then. */
+/* The environment the process was started with, which a command copies and
+   overrides: the C library keeps it, and the ABI takes no environment of its
+   own. */
+extern char** environ;
+
+typedef struct blaze_command {
+  char** args;
+  size_t argc, argcap;
+  char* cwd;
+  char** env_names;
+  char** env_values;
+  size_t envc, envcap;
+  char* input;
+  char* out;
+  size_t out_len, out_cap;
+  char* err;
+  size_t err_len, err_cap;
+  int status, signo, errnum, timed_out;
+} blaze_command;
+
+static blaze_command** blaze_commands = NULL;
+static size_t blaze_command_count = 0;
+static size_t blaze_command_capacity = 0;
+
+static blaze_command* blaze_command_of(double handle) {
+  int at = (int)handle;
+  if (at <= 0 || (size_t)at > blaze_command_count) return NULL;
+  return blaze_commands[at - 1];
+}
+
+static void blaze_command_push(char*** list, size_t* count, size_t* cap, const char* value) {
+  if (*count + 1 >= *cap) {
+    *cap = *cap == 0 ? 8 : *cap * 2;
+    *list = (char**)realloc(*list, *cap * sizeof(char*));
+    if (*list == NULL) blaze_rt_raise("out of memory");
+  }
+  (*list)[(*count)++] = value == NULL ? NULL : strdup(value);
+  (*list)[*count] = NULL;
+}
+
+static void blaze_command_append(char** buffer, size_t* len, size_t* cap, const char* bytes, size_t count) {
+  if (*len + count + 1 > *cap) {
+    size_t want = *len + count + 1;
+    size_t grown = *cap == 0 ? 256 : *cap;
+    while (grown < want) grown *= 2;
+    *buffer = (char*)realloc(*buffer, grown);
+    if (*buffer == NULL) blaze_rt_raise("out of memory");
+    *cap = grown;
+  }
+  memcpy(*buffer + *len, bytes, count);
+  *len += count;
+  (*buffer)[*len] = '\0';
+}
+
+/* The file a command names, searched for in PATH where it is a bare name: the
+   child calls execve, which takes no search of its own. */
+static int blaze_command_resolve(const char* name, char* out, size_t room) {
+  if (name == NULL || name[0] == '\0') return 0;
+  if (strchr(name, '/') != NULL) {
+    snprintf(out, room, "%s", name);
+    return access(out, X_OK) == 0;
+  }
+  const char* path = getenv("PATH");
+  if (path == NULL) path = "/usr/local/bin:/usr/bin:/bin";
+  const char* at = path;
+  for (;;) {
+    const char* colon = strchr(at, ':');
+    size_t len = colon == NULL ? strlen(at) : (size_t)(colon - at);
+    if (len == 0) snprintf(out, room, "./%s", name);
+    else snprintf(out, room, "%.*s/%s", (int)len, at, name);
+    if (access(out, X_OK) == 0) return 1;
+    if (colon == NULL) break;
+    at = colon + 1;
+  }
+  return 0;
+}
+
+static char** blaze_command_environment(blaze_command* command, size_t* total) {
+  size_t count = 0;
+  for (char** at = environ; *at != NULL; at += 1) count += 1;
+  char** list = (char**)calloc(count + command->envc + 1, sizeof(char*));
+  if (list == NULL) blaze_rt_raise("out of memory");
+  size_t used = 0;
+  for (size_t at = 0; at < count; at += 1) {
+    const char* entry = environ[at];
+    const char* equals = strchr(entry, '=');
+    size_t name_len = equals == NULL ? strlen(entry) : (size_t)(equals - entry);
+    int overridden = 0;
+    for (size_t env = 0; env < command->envc; env += 1) {
+      if (strlen(command->env_names[env]) == name_len && strncmp(command->env_names[env], entry, name_len) == 0) {
+        overridden = 1;
+        break;
+      }
+    }
+    if (!overridden) list[used++] = strdup(entry);
+  }
+  for (size_t env = 0; env < command->envc; env += 1) {
+    size_t need = strlen(command->env_names[env]) + strlen(command->env_values[env]) + 2;
+    char* entry = (char*)malloc(need);
+    if (entry == NULL) blaze_rt_raise("out of memory");
+    snprintf(entry, need, "%s=%s", command->env_names[env], command->env_values[env]);
+    list[used++] = entry;
+  }
+  list[used] = NULL;
+  if (total != NULL) *total = used;
+  return list;
+}
+
+double blaze_rt_command_new(void) {
+  blaze_command* command = (blaze_command*)calloc(1, sizeof(blaze_command));
+  if (command == NULL) blaze_rt_raise("out of memory");
+  if (blaze_command_count == blaze_command_capacity) {
+    blaze_command_capacity = blaze_command_capacity == 0 ? 8 : blaze_command_capacity * 2;
+    blaze_commands = (blaze_command**)realloc(blaze_commands, blaze_command_capacity * sizeof(blaze_command*));
+    if (blaze_commands == NULL) blaze_rt_raise("out of memory");
+  }
+  blaze_commands[blaze_command_count] = command;
+  blaze_command_count += 1;
+  return (double)blaze_command_count;
+}
+
+double blaze_rt_command_arg(double handle, const char* text) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command != NULL) blaze_command_push(&command->args, &command->argc, &command->argcap, text);
+  return handle;
+}
+
+double blaze_rt_command_cwd(double handle, const char* text) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command != NULL) {
+    free(command->cwd);
+    command->cwd = text == NULL ? NULL : strdup(text);
+  }
+  return handle;
+}
+
+double blaze_rt_command_env(double handle, const char* name, const char* value) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command == NULL || name == NULL || value == NULL) return handle;
+  if (command->envc + 1 >= command->envcap) {
+    command->envcap = command->envcap == 0 ? 8 : command->envcap * 2;
+    command->env_names = (char**)realloc(command->env_names, command->envcap * sizeof(char*));
+    command->env_values = (char**)realloc(command->env_values, command->envcap * sizeof(char*));
+    if (command->env_names == NULL || command->env_values == NULL) blaze_rt_raise("out of memory");
+  }
+  command->env_names[command->envc] = strdup(name);
+  command->env_values[command->envc] = strdup(value);
+  command->envc += 1;
+  return handle;
+}
+
+double blaze_rt_command_input(double handle, const char* text) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command != NULL) {
+    free(command->input);
+    command->input = text == NULL ? NULL : strdup(text);
+  }
+  return handle;
+}
+
+double blaze_rt_command_run(double handle, double timeout_ms) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command == NULL) return -1.0;
+  command->out_len = 0;
+  command->err_len = 0;
+  command->timed_out = 0;
+  command->signo = 0;
+  command->errnum = 0;
+  command->status = 0;
+  if (command->argc == 0) { command->status = -1; command->errnum = EINVAL; return -1.0; }
+  char path[4096];
+  if (!blaze_command_resolve(command->args[0], path, sizeof path)) {
+    command->status = -1;
+    command->errnum = ENOENT;
+    return -1.0;
+  }
+  size_t environment_count = 0;
+  char** environment = blaze_command_environment(command, &environment_count);
+  int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1}, in_pipe[2] = {-1, -1}, exec_pipe[2] = {-1, -1};
+  if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0 || pipe(exec_pipe) != 0) {
+    command->status = -1;
+    command->errnum = errno;
+    for (size_t at = 0; at < environment_count; at += 1) free(environment[at]);
+    free(environment);
+    return -1.0;
+  }
+  int wants_input = command->input != NULL;
+  if (wants_input && pipe(in_pipe) != 0) {
+    command->status = -1;
+    command->errnum = errno;
+    for (size_t at = 0; at < environment_count; at += 1) free(environment[at]);
+    free(environment);
+    return -1.0;
+  }
+  fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
+  pid_t child = fork();
+  if (child < 0) {
+    command->status = -1;
+    command->errnum = errno;
+    for (size_t at = 0; at < environment_count; at += 1) free(environment[at]);
+    free(environment);
+    return -1.0;
+  }
+  if (child == 0) {
+    dup2(out_pipe[1], STDOUT_FILENO);
+    dup2(err_pipe[1], STDERR_FILENO);
+    if (wants_input) dup2(in_pipe[0], STDIN_FILENO);
+    else {
+      int none = open("/dev/null", O_RDONLY);
+      if (none >= 0) dup2(none, STDIN_FILENO);
+    }
+    close(out_pipe[0]); close(out_pipe[1]);
+    close(err_pipe[0]); close(err_pipe[1]);
+    if (wants_input) { close(in_pipe[0]); close(in_pipe[1]); }
+    if (command->cwd != NULL && chdir(command->cwd) != 0) {
+      int code = errno;
+      if (write(exec_pipe[1], &code, sizeof code) < 0) { }
+      _exit(127);
+    }
+    execve(path, command->args, environment);
+    int code = errno;
+    if (write(exec_pipe[1], &code, sizeof code) < 0) { }
+    _exit(127);
+  }
+  close(out_pipe[1]); close(err_pipe[1]); close(exec_pipe[1]);
+  if (wants_input) {
+    close(in_pipe[0]);
+    size_t wrote = 0;
+    size_t len = strlen(command->input);
+    while (wrote < len) {
+      ssize_t got = write(in_pipe[1], command->input + wrote, len - wrote);
+      if (got <= 0) break;
+      wrote += (size_t)got;
+    }
+    close(in_pipe[1]);
+  }
+  int exec_errno = 0;
+  ssize_t read_exec = read(exec_pipe[0], &exec_errno, sizeof exec_errno);
+  close(exec_pipe[0]);
+  struct pollfd fds[2];
+  fds[0].fd = out_pipe[0]; fds[0].events = POLLIN; fds[0].revents = 0;
+  fds[1].fd = err_pipe[0]; fds[1].events = POLLIN; fds[1].revents = 0;
+  int open_count = 2;
+  int expired = 0;
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  long long started_ns = (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
+  while (open_count > 0) {
+    int wait_ms = -1;
+    if (timeout_ms > 0.0) {
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      long long elapsed = ((long long)now.tv_sec * 1000000000LL + now.tv_nsec) - started_ns;
+      long long remaining_ms = (long long)timeout_ms - elapsed / 1000000LL;
+      if (remaining_ms <= 0) { expired = 1; break; }
+      wait_ms = (int)(remaining_ms > 1000 ? 1000 : remaining_ms);
+    }
+    int ready = poll(fds, 2, wait_ms);
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    for (int at = 0; at < 2; at += 1) {
+      if (fds[at].fd < 0) continue;
+      if ((fds[at].revents & (POLLIN | POLLHUP | POLLERR)) == 0) continue;
+      char buffer[8192];
+      ssize_t got = read(fds[at].fd, buffer, sizeof buffer);
+      if (got > 0) {
+        if (at == 0) blaze_command_append(&command->out, &command->out_len, &command->out_cap, buffer, (size_t)got);
+        else blaze_command_append(&command->err, &command->err_len, &command->err_cap, buffer, (size_t)got);
+      } else if (got == 0) {
+        close(fds[at].fd);
+        fds[at].fd = -1;
+        open_count -= 1;
+      } else if (errno != EINTR && errno != EAGAIN) {
+        close(fds[at].fd);
+        fds[at].fd = -1;
+        open_count -= 1;
+      }
+    }
+  }
+  if (fds[0].fd >= 0) close(fds[0].fd);
+  if (fds[1].fd >= 0) close(fds[1].fd);
+  if (expired) {
+    command->timed_out = 1;
+    kill(child, SIGKILL);
+  }
+  int state = 0;
+  while (waitpid(child, &state, 0) < 0 && errno == EINTR) { }
+  if (read_exec > 0) {
+    command->status = -1;
+    command->errnum = exec_errno;
+  } else if (WIFEXITED(state)) {
+    command->status = WEXITSTATUS(state);
+  } else if (WIFSIGNALED(state)) {
+    command->status = -3;
+    command->signo = WTERMSIG(state);
+  }
+  for (size_t at = 0; at < environment_count; at += 1) free(environment[at]);
+  free(environment);
+  return (double)command->status;
+}
+
+double blaze_rt_command_signal(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  return command == NULL ? 0.0 : (double)command->signo;
+}
+
+double blaze_rt_command_errno(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  return command == NULL ? 0.0 : (double)command->errnum;
+}
+
+double blaze_rt_command_timed_out(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  return command == NULL ? 0.0 : (command->timed_out ? 1.0 : 0.0);
+}
+
+const char* blaze_rt_command_stdout(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  return command == NULL || command->out == NULL ? "" : command->out;
+}
+
+const char* blaze_rt_command_stderr(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  return command == NULL || command->err == NULL ? "" : command->err;
+}
+
+void blaze_rt_command_free(double handle) {
+  blaze_command* command = blaze_command_of(handle);
+  if (command == NULL) return;
+  for (size_t at = 0; at < command->argc; at += 1) free(command->args[at]);
+  free(command->args);
+  for (size_t at = 0; at < command->envc; at += 1) {
+    free(command->env_names[at]);
+    free(command->env_values[at]);
+  }
+  free(command->env_names);
+  free(command->env_values);
+  free(command->cwd);
+  free(command->input);
+  free(command->out);
+  free(command->err);
+  free(command);
+  blaze_commands[(int)handle - 1] = NULL;
+}
+
+/* The environment the process was started with, as the variables it holds:
+   a caller that builds a child's environment copies them by position. */
+double blaze_rt_env_count(void) {
+  double count = 0;
+  for (char** at = environ; *at != NULL; at += 1) count += 1;
+  return count;
+}
+
+const char* blaze_rt_env_at(double index) {
+  int wanted = (int)index;
+  if (wanted < 0) return "";
+  int at = 0;
+  for (char** item = environ; *item != NULL; item += 1) {
+    if (at == wanted) return blaze_rt_string_new((const unsigned char*)*item, strlen(*item));
+    at += 1;
+  }
+  return "";
+}
+
+double blaze_rt_cpu_count(void) {
+  long count = sysconf(_SC_NPROCESSORS_ONLN);
+  return count > 0 ? (double)count : 1.0;
 }
 
 /* The four characters a document may be spaced with, as a table: a document is

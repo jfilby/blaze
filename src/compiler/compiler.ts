@@ -522,6 +522,25 @@ function readInput(path: string): ProjectInput {
   if (typeof input.language !== "string") {
     throw new CompilerError({ category: "InputError", stage: "input", message: `${path} must define "language"` });
   }
+  // A host table names a file for a path the project holds, and every entry is
+  // a path of its own: a table with a value that is not a path, or a key that
+  // is not one, is a project that cannot be read the way it says.
+  if (input.host !== undefined) {
+    const table = input.host as unknown;
+    if (typeof table !== "object" || table === null || Array.isArray(table)) {
+      throw new CompilerError({ category: "InputError", stage: "input", message: `${path} has a "host" that is not a table` });
+    }
+    for (const [from, to] of Object.entries(table as Record<string, unknown>)) {
+      if (typeof to !== "string" || to === "" || from === "") {
+        throw new CompilerError({
+          category: "InputError",
+          stage: "input",
+          message: `${path} has a host replacement that is not a path`,
+          detail: `"${from}" is read as ${typeof to === "string" ? JSON.stringify(to) : typeof to}`,
+        });
+      }
+    }
+  }
   rejectCredentials(path, input);
   const directory = dirname(path);
   // `sourceFile` names a source file next to the project file, so the example
@@ -1553,6 +1572,7 @@ export async function runBuild(
       input,
       entry: project.entry,
       read: moduleReader(project.directory),
+      ...(input.host === undefined ? {} : { host: input.host }),
     });
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
@@ -2658,6 +2678,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     input,
     entry,
     read: moduleReader(directory),
+    ...(input.host === undefined ? {} : { host: input.host }),
   });
   const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by

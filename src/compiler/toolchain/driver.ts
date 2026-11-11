@@ -371,6 +371,52 @@ const WIDE_KERNELS: Record<string, string> = {
 };
 
 /** The C driver of one program. */
+/**
+ * The host services the compiler's adapter asks for, as the call each one is.
+ *
+ * The driver writes a Nim host program, and the entries are the runtime's own:
+ * a name the frontend writes is the entry it lowers to, with the flag a write
+ * takes beside the two texts it is handed.
+ */
+const HOST_CALLS: Readonly<Record<string, (argument: (index: number) => string) => string>> = {
+  "fs.readFileSync": (argument) => `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`,
+  "fs.writeFileSync": (argument) => `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 0.0)`,
+  "fs.appendFileSync": (argument) => `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 1.0)`,
+  "fs.existsSync": (argument) => `${RUNTIME_NAME}_file_exists(${argument(0)})`,
+  "fs.fileSizeSync": (argument) => `${RUNTIME_NAME}_file_size(${argument(0)})`,
+  "fs.fileKindSync": (argument) => `${RUNTIME_NAME}_file_kind(${argument(0)})`,
+  "fs.mkdirSync": (argument) => `${RUNTIME_NAME}_dir_make(${argument(0)}, ${argument(1)})`,
+  "fs.rmSync": (argument) => `${RUNTIME_NAME}_file_remove(${argument(0)}, ${argument(1)})`,
+  "fs.renameSync": (argument) => `${RUNTIME_NAME}_file_rename(${argument(0)}, ${argument(1)})`,
+  "fs.copyFileSync": (argument) => `${RUNTIME_NAME}_file_copy(${argument(0)}, ${argument(1)})`,
+  "fs.dirCountSync": (argument) => `${RUNTIME_NAME}_dir_count(${argument(0)})`,
+  "fs.dirNameSync": (argument) => `${RUNTIME_NAME}_dir_name(${argument(0)}, ${argument(1)})`,
+  "fs.dirIsDirSync": (argument) => `${RUNTIME_NAME}_dir_is_dir(${argument(0)}, ${argument(1)})`,
+  "process.cwd": () => `${RUNTIME_NAME}_current_dir()`,
+  "process.pid": () => `${RUNTIME_NAME}_process_id()`,
+  "os.tmpdir": () => `${RUNTIME_NAME}_temp_dir()`,
+  "os.platform": () => `${RUNTIME_NAME}_host_platform()`,
+  "os.arch": () => `${RUNTIME_NAME}_host_arch()`,
+  "crypto.randomUUID": () => `${RUNTIME_NAME}_random_uuid()`,
+  "fs.fsyncPath": (argument) => `${RUNTIME_NAME}_file_sync(${argument(0)})`,
+  "timers.sleepMs": (argument) => `(${RUNTIME_NAME}_sleep_ms(${argument(0)}), 1.0)`,
+  "exec.new": () => `${RUNTIME_NAME}_command_new()`,
+  "exec.arg": (argument) => `${RUNTIME_NAME}_command_arg(${argument(0)}, ${argument(1)})`,
+  "exec.cwd": (argument) => `${RUNTIME_NAME}_command_cwd(${argument(0)}, ${argument(1)})`,
+  "exec.env": (argument) => `${RUNTIME_NAME}_command_env(${argument(0)}, ${argument(1)}, ${argument(2)})`,
+  "exec.input": (argument) => `${RUNTIME_NAME}_command_input(${argument(0)}, ${argument(1)})`,
+  "exec.run": (argument) => `${RUNTIME_NAME}_command_run(${argument(0)}, ${argument(1)})`,
+  "exec.signal": (argument) => `${RUNTIME_NAME}_command_signal(${argument(0)})`,
+  "exec.errno": (argument) => `${RUNTIME_NAME}_command_errno(${argument(0)})`,
+  "exec.timedOut": (argument) => `${RUNTIME_NAME}_command_timed_out(${argument(0)})`,
+  "exec.stdout": (argument) => `${RUNTIME_NAME}_command_stdout(${argument(0)})`,
+  "exec.stderr": (argument) => `${RUNTIME_NAME}_command_stderr(${argument(0)})`,
+  "exec.free": (argument) => `(${RUNTIME_NAME}_command_free(${argument(0)}), 1.0)`,
+  "env.count": () => `${RUNTIME_NAME}_env_count()`,
+  "env.at": (argument) => `${RUNTIME_NAME}_env_at(${argument(0)})`,
+  "os.cpuCount": () => `${RUNTIME_NAME}_cpu_count()`,
+};
+
 class CDriver implements ProgramTarget {
   /** The objects built so far, so each one built as a value is named apart. */
   private builds = 0;
@@ -960,6 +1006,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
 
   builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
+    // The host services the compiler's adapter asks for: the name is the
+    // builtin the frontend writes and the call is the runtime entry it names.
+    const host = HOST_CALLS[call.callee];
+    if (host !== undefined) return host(argument);
     switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
@@ -1122,6 +1172,16 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_text_upper(${argument(0)})`;
       case "crypto.createHash":
         return `${RUNTIME_NAME}_md5_create()`;
+      // The frontend names the SHA-256 hasher the compiler fingerprints with,
+      // and the digest is the text the runtime holds a handle for.
+      case "blaze_rt_sha256_create":
+        return `${RUNTIME_NAME}_sha256_create()`;
+      case "blaze_rt_sha256_update":
+        return `${RUNTIME_NAME}_sha256_update(${argument(0)}, ${argument(1)})`;
+      case "blaze_rt_sha256_digest":
+        return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_sha256_digest(${argument(0)}))`;
+      case "blaze_rt_own_key":
+        return `${RUNTIME_NAME}_own_key(${argument(0)}, ${argument(1)})`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
       // `process.env.NAME`: the runtime reads the variable by its name and

@@ -1650,7 +1650,12 @@ class FunctionBody {
             },
             args.map((argument) => argument.value),
             returns,
-            [],
+            // A builtin's effects are the world it reads: a file question, a
+            // command started, a clock read. A call the read knows is free is a
+            // value the optimizer may move; one that reads the world is not,
+            // and folding it past the statement that frees what it reads undid
+            // the order the source wrote.
+            builtin.effects ?? [],
             true,
             handed,
           ),

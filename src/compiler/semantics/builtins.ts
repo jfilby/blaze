@@ -103,6 +103,10 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_dict_get_text": { params: [F64, TEXT], returns: TEXT, arity: 2 },
   "blaze_rt_dict_set_text": { params: [F64, TEXT, TEXT], returns: F64, arity: 3 },
   "blaze_rt_dict_has": { params: [F64, TEXT], returns: F64, arity: 2 },
+  /** Whether a value the read cannot shape holds a key of its own: a dynamic
+   *  object, a dictionary and a compiled record are each asked the way their
+   *  own entries are read. */
+  "blaze_rt_own_key": { params: [F64, TEXT], returns: F64, arity: 2 },
   /** `Array.isArray(value)` over a value the read does not type: the runtime
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
@@ -279,7 +283,11 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  list the field holds. */
   "object.set.list": { params: [ANY, TEXT, { kind: "slice", of: ANY }], returns: ANY, arity: 3 },
   /** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
-  "Number.parseInt": { params: [ANY, F64], returns: F64, arity: 2 },
+  /** `Number.parseInt(text, radix)` reads the number a text states in its radix.
+   *  The digits are the text itself, so the first parameter is a text: an
+   *  untyped reference would box the pointer into a dynamic value the runtime
+   *  would hand to the parser as a number. */
+  "Number.parseInt": { params: [TEXT, F64], returns: F64, arity: 2 },
   /** `String.fromCodePoint(n)` is the text of the one code point it names. */
   "String.fromCodePoint": { params: [F64], returns: TEXT, arity: 1 },
   "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
@@ -292,7 +300,59 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  value as, or the number or the text the value itself is. */
   "JSON.typeof": { params: [ANY], returns: TEXT, arity: 1 },
   "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
-  "fs.readFileSync": { params: [ANY, ANY], returns: ANY, arity: 2 },
+  /** The path and the mode are the texts they are written as; the answer is
+   *  the text the runtime carries a handle for. */
+  "fs.readFileSync": { params: [TEXT, TEXT], returns: ANY, arity: 2, effects: ["filesystem"] },
+  /** The rest of the file services the compiler's host adapter asks for. A
+   *  question about a path answers a number: 1 or 0 for a question, the size or
+   *  the kind for a question that names one, and the empty text where a path
+   *  names nothing. A write answers 1 when the text was written. */
+  "fs.writeFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
+  "fs.appendFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
+  "fs.existsSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
+  "fs.fileSizeSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
+  "fs.fileKindSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
+  "fs.mkdirSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
+  "fs.rmSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
+  "fs.renameSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
+  "fs.copyFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
+  /** The entries of a directory, counted and read by position: a name is the
+   *  text the runtime answers with, and whether it is a directory is the
+   *  question the entry beside it answers. */
+  "fs.dirCountSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
+  "fs.dirNameSync": { params: [TEXT, F64], returns: TEXT, arity: 2, effects: ["filesystem"] },
+  "fs.dirIsDirSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
+  /** A path synced to the disk — a file or the directory a rename landed in —
+   *  and a wait of a number of milliseconds. */
+  "fs.fsyncPath": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
+  "timers.sleepMs": { params: [F64], returns: F64, arity: 1, effects: ["clock"] },
+  /** A program started and waited for: the command the adapter builds, the
+   *  exit status it answered, what it wrote, and the questions about a start
+   *  that failed or a deadline that stopped it. */
+  "exec.new": { params: [], returns: F64, arity: 0, effects: ["memory"] },
+  "exec.arg": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
+  "exec.cwd": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
+  "exec.env": { params: [F64, TEXT, TEXT], returns: F64, arity: 3, effects: ["memory"] },
+  "exec.input": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
+  "exec.run": { params: [F64, F64], returns: F64, arity: 2, effects: ["syscall", "io", "memory"] },
+  "exec.signal": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
+  "exec.errno": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
+  "exec.timedOut": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
+  "exec.stdout": { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] },
+  "exec.stderr": { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] },
+  "exec.free": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
+  /** The process and the host it runs on. */
+  "process.cwd": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
+  "process.pid": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
+  "os.tmpdir": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
+  "os.platform": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
+  "os.arch": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
+  "crypto.randomUUID": { params: [], returns: TEXT, arity: 0, effects: ["random"] },
+  /** The environment as the variables it holds, and how many processors the
+   *  host has: the adapter builds a child's environment and sizes its pool. */
+  "env.count": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
+  "env.at": { params: [F64], returns: TEXT, arity: 1, effects: ["syscall"] },
+  "os.cpuCount": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
   /** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */

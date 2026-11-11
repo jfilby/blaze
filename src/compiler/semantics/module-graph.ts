@@ -101,6 +101,15 @@ export interface ModuleGraphRequest {
    * as part of the tree's own gaps.
    */
   resolvePackages?: boolean;
+  /**
+   * The file a build reads in place of one the project holds.
+   *
+   * The module keeps the name the import gave it, so every importer reaches the
+   * same module, and the replacement's own imports resolve beside the file the
+   * replacement is in. A project says which file its host adapter is, and both
+   * compilers that build it apply the same table.
+   */
+  host?: Readonly<Record<string, string>>;
 }
 
 /** The values every module of the program offers, in discovery order. */
@@ -608,7 +617,12 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   while (pending.length > 0) {
     const path = pending.shift() as string;
     if (records.has(path)) continue;
-    const source = path === request.entry.path ? request.entry.source : read(path);
+    // A file the project names a replacement for is read from that file, and
+    // the module keeps the name the import gave it. What the replacement
+    // imports resolves beside the file it was written in, not beside the name
+    // it answers for.
+    const sourcePath = request.host?.[path] ?? path;
+    const source = path === request.entry.path ? request.entry.source : read(sourcePath);
     if (source === null) throw contractPhaseError(`cannot read module ${path}`);
     if (source.trim() === "") throw contractPhaseError(`module ${path} is empty`);
 
@@ -626,8 +640,8 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     const strict = request.requireImports !== false;
     for (const entry of record.analysis.imports) {
       const resolved = strict
-        ? requireImport(request, read, path, entry)
-        : resolveImport(request, read, path, entry);
+        ? requireImport(request, read, sourcePath, entry)
+        : resolveImport(request, read, sourcePath, entry);
       // An import left unbound keeps its place, so the resolved list still
       // answers by the index the imports are written at.
       record.resolved.push(resolved ?? "");
@@ -638,8 +652,8 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // followed beside the runtime imports but is never checked for a symbol.
     for (const entry of record.analysis.typeImports ?? []) {
       const resolved = strict
-        ? requireImport(request, read, path, entry)
-        : resolveImport(request, read, path, entry);
+        ? requireImport(request, read, sourcePath, entry)
+        : resolveImport(request, read, sourcePath, entry);
       record.typeResolved.push(resolved ?? "");
       if (resolved !== null) pending.push(resolved);
     }

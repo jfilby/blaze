@@ -117,9 +117,9 @@ test("the compiler's TOML dependency is read from the package it is installed as
   assert.ok(paths.includes("node_modules/smol-toml/dist/parse.js"), "the module the entry imports is read");
   // The budget is a ratchet: the package is 1000 lines of JavaScript written
   // for Node, and every construct the frontend learns lowers this number. What
-  // is left needs the host classes `Date` and `Temporal`, the enumeration of a
-  // dynamic record, and the values a JavaScript source reads without stating
-  // their type.
+  // is left needs the host classes `Date` and `Temporal`, the element type of
+  // an empty list, `replaceAll`, a destructured field default and the default
+  // object the entry exports.
   const total = records.reduce((count, record) => count + record.refusedCount, 0);
-  assert.ok(total <= 28, `the package is read but for 28 constructs: ${total}`);
+  assert.ok(total <= 23, `the package is read but for 23 constructs: ${total}`);
 });

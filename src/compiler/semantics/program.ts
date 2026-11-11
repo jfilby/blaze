@@ -51,6 +51,8 @@ export interface ContractPhaseRequest {
   entry: SourceModule;
   /** Reads an imported module by project-relative path; null when there is none. */
   read: (path: string) => string | null;
+  /** The file a build reads in place of one the project holds, by path. */
+  host?: Readonly<Record<string, string>>;
 }
 
 export interface ContractPhase {

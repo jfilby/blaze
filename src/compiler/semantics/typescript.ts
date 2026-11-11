@@ -8565,9 +8565,26 @@ class TypeScriptParser {
         if (baseShape !== null) this.valueShapes.set(temp, baseShape);
         base = { k: "ident", name: temp };
       }
+      // A base keyed by text is a dictionary: a named field of the pattern is
+      // the entry, read by the key the pattern wrote, not a field of a layout.
+      const dictionary = baseShape === null ? null : this.collectionOfShape(baseShape);
       fields.forEach((entry) => {
         const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
-        const read: Expression = expanded ?? { k: "member", base, field: entry.field };
+        let read: Expression;
+        if (expanded !== null) {
+          read = expanded;
+        } else if (dictionary !== null && dictionary.kind === "map") {
+          const kind = this.storedKind(dictionary.value);
+          const operation = kind === "text" ? "getText" as const : kind === "reference" ? "getRef" as const : "get" as const;
+          read = {
+            k: "call",
+            name: this.dictionaryCall(dictionary.key, operation) ?? "blaze_rt_dict_get",
+            args: [base, { k: "text", parts: [{ k: "text", value: entry.field }] }],
+          };
+          this.expressionTypes.set(read, dictionary.value);
+        } else {
+          read = { k: "member", base, field: entry.field };
+        }
         const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
         // The value the file wrote for a constant field is the value the name
         // reads, so its shape is the one that field holds even where the
@@ -8586,10 +8603,27 @@ class TypeScriptParser {
         });
       });
       if (rest !== null) {
-        if (baseShape === null || baseShape.kind !== "record" || baseShape.index !== null) {
+        const restCollection = dictionary;
+        if (baseShape === null || baseShape.kind !== "record") {
           this.report(
             `a rest field binds the fields of a record`,
             `the value ${rest} reads has no fields a rest could bind`,
+            open,
+          );
+        } else if (baseShape.index !== null && restCollection !== null && restCollection.kind === "map") {
+          // The base is a dictionary: the rest is the entries the pattern did
+          // not name, copied into a dictionary of its own.
+          const helper = this.restDictionaryHelper(restCollection, fields.map((entry) => entry.field), line);
+          const value: Expression = { k: "call", name: helper.name, args: [base] };
+          this.expressionTypes.set(value, NUMBER_RESULT);
+          this.valueCollections.set(rest, restCollection);
+          this.valueShapes.set(rest, baseShape);
+          this.valueTypes.set(rest, this.typeExprOfShape(baseShape));
+          this.pending.push({ kind: "declare", name: rest, type: null, init: value, line });
+        } else if (baseShape.index !== null) {
+          this.report(
+            `a rest field binds the fields of a record`,
+            `the value ${rest} reads is keyed by a type this rest cannot copy`,
             open,
           );
         } else {
@@ -12123,13 +12157,17 @@ class TypeScriptParser {
               replace({ k: "call", name: "parseInt", args: [args[0] as Expression] });
               continue;
             }
-            if (radix.k === "literal" && (radix.text === "2" || radix.text === "8" || radix.text === "16")) {
+            // Any other radix is the parser's own call: the runtime reads the
+            // base at run time, so a radix the source wrote out and one it
+            // computed are the same call. A radix that is a text is not a
+            // number the runtime reads, and is refused.
+            if (radix !== undefined && this.valueTypeOf(radix).kind !== "text") {
               replace({ k: "call", name: "Number.parseInt", args });
               continue;
             }
             this.report(
-              "Number.parseInt reads a number in base ten",
-              "the digits the source writes are base ten ones, as in Number.parseInt(text, 10)",
+              "Number.parseInt reads a number in its radix",
+              "the radix is a number, as in Number.parseInt(text, 10)",
               this.peek(),
             );
             return this.hole();
@@ -12218,6 +12256,30 @@ class TypeScriptParser {
             const decided: Expression = answer ?? { k: "literal", text: "0" };
             this.expressionTypes.set(decided, BOOLEAN_RESULT);
             replace(decided);
+            continue;
+          }
+          // A value the read cannot shape is not one record or one dictionary
+          // the parser could name: it is whatever the program built, and the
+          // runtime asks the shape when the question runs. A dynamic object, a
+          // dictionary and a record this compiler laid out each answer whether
+          // a key is one of their own. A handle whose entries the read lost is
+          // the number the dictionary's own is.
+          const held = receiver === undefined ? null : this.valueTypeOf(receiver);
+          const reference = held !== null && (held.kind === "ref" || (held.kind === "primitive" && held.name === "f64"));
+          if (
+            receiver !== undefined &&
+            key !== undefined &&
+            reference &&
+            (this.valueTypeOf(key).kind === "text" || unknownReference(this.valueTypeOf(key)))
+          ) {
+            const asked: Expression = {
+              k: "binary",
+              op: "===",
+              left: { k: "call", name: "blaze_rt_own_key", args: [receiver, key] },
+              right: { k: "literal", text: "1" },
+            };
+            this.expressionTypes.set(asked, BOOLEAN_RESULT);
+            replace(asked);
             continue;
           }
           this.report(
@@ -13054,12 +13116,14 @@ class TypeScriptParser {
           const radix = args[1];
           if (radix !== undefined && radix.k === "literal" && radix.text === "10") {
             args = [args[0] as Expression];
-          } else if (radix !== undefined && radix.k === "literal" && (radix.text === "2" || radix.text === "8" || radix.text === "16")) {
+          } else if (radix !== undefined && this.valueTypeOf(radix).kind !== "text") {
+            // A radix the source computes is read at run time by the parser,
+            // and the call is the same one a radix written out makes.
             target.name = "Number.parseInt";
           } else {
             this.report(
-              "parseInt reads a number in base ten",
-              "the digits the source writes are base ten ones, as in parseInt(text, 10)",
+              "parseInt reads a number in its radix",
+              "the radix is a number, as in parseInt(text, 10)",
               this.peek(),
             );
           }
@@ -14482,9 +14546,11 @@ class TypeScriptParser {
         if (held.kind !== "slice" && held.kind !== "array") {
           // `a.concat(x)` with a value that is not a list appends that value:
           // the language makes it the last element, which is a one-element list
-          // of the element the answer holds. A value of another type is not one
-          // the list could hold, and is refused as before.
-          if (typeToString(held) !== typeToString(elements)) {
+          // of the element the answer holds. A value whose type the read does
+          // not hold is read at the element's type — a function another file
+          // answers is what its declaration says — and a value of another type
+          // is not one the list could hold, and is refused as before.
+          if (typeToString(held) !== typeToString(elements) && !unknownReference(held)) {
             this.report(
               "concat joins lists",
               `a list is joined with a list of its elements, or with one element; the source wrote ${typeToString(held)}`,
@@ -15936,6 +16002,28 @@ class TypeScriptParser {
         return listed;
       }
     }
+    // A value the read does not hold at a record is the dictionary the program
+    // built, or the record another module handed over: the runtime asks the
+    // shape when the program runs, and the keys are the entries it holds. The
+    // list is the block of texts the helper lays down, one key per entry. A
+    // name the file wrote as a constant is not one of those: its keys are the
+    // names the file wrote, and the branch below answers them.
+    const namedConstant = value !== undefined && value.k === "ident" ? this.constants.get(value.name) : undefined;
+    if (
+      method === "keys" &&
+      value !== undefined &&
+      namedConstant?.fields === undefined &&
+      unknownReference(this.valueTypeOf(value))
+    ) {
+      const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: ANY_TYPE };
+      const helper = this.collectionListHelper(collection, "keys", this.peek().line);
+      if (helper !== null) {
+        const listed: Expression = { k: "call", name: helper.name, args: [value] };
+        this.expressionTypes.set(listed, helper.returns);
+        this.expressionShapes.set(listed, { kind: "list", of: helper.elementShape });
+        return listed;
+      }
+    }
     // A value the read does not type has no fields it can name: it is the
     // host's, and what it holds is the host's to say. `Object.values` of it is
     // the list the read cannot enumerate, which is empty here; a `keys` is not
@@ -17305,6 +17393,79 @@ class TypeScriptParser {
     const made = { name, returns };
     this.collectHelpers.set(key, made);
     return made;
+  }
+
+  /**
+   * The dictionary a rest field of a destructuring pattern binds.
+   *
+   * A `Record<string, V>` is the runtime's dictionary, and a rest field over it
+   * is the entries the pattern did not name: a function of the file walks the
+   * entries by position and writes the ones left into a dictionary of its own,
+   * so the value it read is untouched. The write is the one the value's kind
+   * takes, the same call a `record[key] = value` makes.
+   */
+  private restDictionaryHelper(
+    collection: CollectionValue,
+    named: readonly string[],
+    line: number,
+  ): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["rest", collection.key, collection.value, named]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const readName = this.valueReadName(collection.value);
+    const setName = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
+    const read: Expression = { k: "call", name: readName, args: [ident("items"), ident("at")] };
+    this.expressionTypes.set(read, collection.value);
+    const keyRead: Expression = { k: "call", name: "blaze_rt_dict_key_at", args: [ident("items"), ident("at")] };
+    this.expressionTypes.set(keyRead, TEXT_RESULT);
+    // The keys the pattern named, as the chain of comparisons the write skips.
+    let named_: Expression | null = null;
+    for (const field of named) {
+      const equal: Expression = {
+        k: "binary",
+        op: "===",
+        left: ident("key"),
+        right: { k: "text", parts: [{ k: "text", value: field }] },
+      };
+      this.expressionTypes.set(equal, BOOLEAN_RESULT);
+      named_ = named_ === null ? equal : { k: "binary", op: "||", left: named_, right: equal };
+    }
+    const write = (): Expression => {
+      const wrote: Expression = { k: "call", name: setName, args: [ident("out"), ident("key"), ident("value")] };
+      this.expressionTypes.set(wrote, NUMBER_RESULT);
+      return wrote;
+    };
+    const writeStatement: Statement = { kind: "expression", value: write(), line };
+    const loopBody: Statement[] = [
+      { kind: "declare", name: "key", type: null, init: keyRead, line },
+      { kind: "declare", name: "value", type: null, init: read, line },
+    ];
+    if (named_ === null) loopBody.push(writeStatement);
+    else {
+      this.expressionTypes.set(named_, BOOLEAN_RESULT);
+      loopBody.push({ kind: "if", condition: named_, then: [], otherwise: [writeStatement], line });
+    }
+    const made: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] };
+    this.expressionTypes.set(made, NUMBER_RESULT);
+    const counted: Expression = { k: "call", name: "blaze_rt_dict_len", args: [ident("items")] };
+    this.expressionTypes.set(counted, NUMBER_RESULT);
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: made, line },
+      { kind: "loop", variable: "at", from: number("0"), to: counted, inclusive: false, step: null, down: false, body: loopBody, line },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "items", type: NUMBER_RESULT }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    const answered = { name, returns };
+    this.collectHelpers.set(key, answered);
+    return answered;
   }
 
   private splitHelper(line: number, withLimit: boolean): { name: string; returns: TypeExpr } {
@@ -18937,6 +19098,62 @@ class TypeScriptParser {
         this.expect("(");
         this.expect(")");
         return { k: "call", name: "process.hrtime.bigint", args: [] };
+      }
+      // A host call: `fs.readFileSync` and the operations the runtime answers
+      // for the compiler's own adapter. The name is the builtin the backends
+      // lower, the arguments are read at the types it states, and the answer is
+      // the value the runtime holds, which the declared type reads.
+      if (
+        (token.text === "fs" || token.text === "os" || token.text === "timers" || token.text === "exec" || token.text === "env") &&
+        this.at(".") &&
+        this.peek(1).kind === "ident" &&
+        builtinFor(`${token.text}.${this.peek(1).text}`) !== null
+      ) {
+        const operation = `${token.text}.${this.peek(1).text}`;
+        const builtin = builtinFor(operation);
+        this.next();
+        this.next();
+        const args = this.readCallArguments(builtin?.params ?? []);
+        const called: Expression = { k: "call", name: operation, args };
+        this.expressionTypes.set(called, builtin?.returns ?? ANY_TYPE);
+        return called;
+      }
+      // `crypto.randomUUID()` is the runtime's own uuid: sixteen random bytes
+      // with the version and the variant bits set.
+      if (
+        token.text === "crypto" &&
+        this.at(".") &&
+        this.peek(1).text === "randomUUID" &&
+        this.peek(2).text === "("
+      ) {
+        this.next();
+        this.next();
+        this.next();
+        this.expect(")");
+        const called: Expression = { k: "call", name: "crypto.randomUUID", args: [] };
+        this.expressionTypes.set(called, TEXT_RESULT);
+        return called;
+      }
+      // `process.cwd()` is the directory the program runs in, and `process.pid`
+      // is the process it runs as: both are the host's to answer.
+      if (
+        token.text === "process" &&
+        this.at(".") &&
+        (this.peek(1).text === "cwd" || this.peek(1).text === "pid")
+      ) {
+        const field = this.peek(1).text;
+        this.next();
+        this.next();
+        if (field === "cwd") {
+          this.expect("(");
+          this.expect(")");
+        } else if (this.at("(")) {
+          this.next();
+          this.expect(")");
+        }
+        const called: Expression = { k: "call", name: `process.${field}`, args: [] };
+        this.expressionTypes.set(called, field === "cwd" ? TEXT_RESULT : NUMBER_RESULT);
+        return called;
       }
       // `Deno.args` names the same command line under a host that hands over
       // the arguments alone: node counts the program and the file it runs

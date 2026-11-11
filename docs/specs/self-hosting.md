@@ -1069,16 +1069,283 @@ is written in:
   is `"."` is not the dot of `?.`: the optional access asks the token to be
   punctuation.
 
-    # self-host: 95 of 95 sources read, 0 refused, 0 refusals
-    # package:   the smol-toml closure, 127 → 28 refusals
+    # self-host: 97 of 97 sources read, 0 refused, 0 refusals
+    # package:   the smol-toml closure, 127 → 23 refusals
 
     What is left of the package is the host and the read that cannot see a
     type: `TomlDate extends Date`, `super(...)`, `instanceof Date` and
-    `Temporal.*`, `globalThis`, `Object.keys`/`Object.hasOwn` of a value whose
-    fields the read does not hold, a default export that is an object, a
+    `Temporal.*`, `globalThis`, a default export that is an object, a
     destructured field default, `replaceAll`, `toString(radix)` of a dynamic
-    value, `parseInt` with a dynamic radix, the element type of a list the
-    source fills by pushing, and a do-while whose test writes.
+    value, the element type of a list the source fills by pushing, and a
+    do-while whose test writes.
+
+### 4i1. A radix the source computes
+
+    let str = ...;
+    parseInt(str, base);              // the TOML package, base 2, 8 or 16
+
+The parser of the package reads an integer in the base its prefix chose, and the
+base is a value the program settles on when it runs: the frontend accepted a
+radix only when it was the literal 2, 8, 10 or 16, and refused `parseInt(str,
+base)` with `parseInt reads a number in base ten`. The runtime already read a
+base it was handed (`blaze_rt_parse_int(text, radix)`), so the frontend now
+sends every radix that is not a text to that call. The one-argument form and an
+explicit ten stay the base-ten read the source wrote.
+
+Two things behind that call were wrong and are fixed with it. The builtin
+declared its first parameter as the untyped reference, and the C backend boxes a
+text handed to one: the emitted call was `blaze_rt_parse_int(box_string("ff"),
+16.0)`, a double where the parser takes a `const char*`. What a source writes is
+a text, and the builtin says so now; the wasm and Nim paths already passed the
+pointer.
+
+The machine backend had no conversion from a value the runtime holds to a
+number: it refused with "a value the runtime holds is read as a number, which
+this backend has no lowering for". An untyped radix reaches the parser as that
+value, so the call is one the machine backend does not lower and the build falls
+back to the C backend for that function — the answer the builder already gives a
+function the machine cannot write, and the test's two backends still print the
+same number. That is the representation of a reference as a dynamic value, and
+it is open; until it is settled, refusing keeps a function on the backend that
+answers it.
+
+The measurement is
+
+    # self-host: 97 of 97 sources read, 0 refused, 0 refusals
+    # package:   the smol-toml closure, 127 → 23 refusals
+
+### 4i2. The file a project reads for its host
+
+    # blaze.toml
+    [host]
+    "core/platform-node.ts" = "core/platform-native.ts"
+
+The compiler's own sources cannot name a Node module if a native compiler is to
+build them: `core/platform.ts` re-exports the adapter, and the adapter is the one
+file that imports `node:fs`. Replacing that file in the source set cannot be a
+property of the *builder*, because the Node compiler and the native compiler
+must build the same program: a substitution one of them made and the other did
+not is two programs. So the project states it, and every compiler that builds
+the project applies the same table.
+
+The table has one operation: an import that resolves to a key is read from the
+file the key names. The module keeps the name the import gave it — every
+importer links the same module, and the contract, the layouts and the symbol
+names are the ones the original path names — while the replacement's own imports
+resolve beside the file the replacement is written in rather than beside the
+name it answers for. Each entry is a non-empty project-relative path, and the
+input refuses a table that is not one.
+
+The measurement that proves it is a project whose adapter imports `node:fs` and
+whose `[host]` names an adapter in a subdirectory that imports a second file
+beside it: `blaze ir` prints the replacement's function and its constant, and
+never the name of the host import. The Node compiler reads that project the same
+way the native one will.
+
+The table is not yet written into `src/compiler/blaze.toml`: the file it names,
+`core/platform-native.ts`, does not exist yet, and the table would only move the
+build's refusal from `node:fs` to a missing module. Writing the native adapter
+is the next slice, and this is the mechanism it lands through.
+
+### 4i3. The hash and the file read on the native backends
+
+    createHash(`sha256`).update(text, `utf8`).digest(`hex`);
+    fs.readFileSync(path, `utf8`);
+
+The compiler's fingerprint is the runtime's SHA-256 hasher and its sources are
+read from files, and neither call had a lowering on either native backend. The
+frontend already rewrites `createHash("sha256")` into the runtime's three
+hasher calls, so the work is the backends': the C backend names the three
+functions and unboxes the digest, which the runtime answers as the handle a
+text is carried in; the machine backend calls them with the handle in the
+double register and reads the digest out through `blaze_rt_to_text`. The Nim
+driver maps the same three, because the frontend's names are the runtime's.
+
+`fs.readFileSync` is the call a *program* body already made, and the program
+grammar lowers it through the driver; what was missing is the C and machine
+lowerings. Both call `blaze_rt_file_read` with the path and the mode as texts
+(the builtin used to hand them through as untyped references, which boxed the
+path into a dynamic value the runtime would have read as a number), and the
+machine keeps the answer as the handle the runtime answers.
+
+The tests build a program on both backends: one prints the digests of three
+texts — the empty one, `abc`, and `a` followed by `bc` — and the other prints a
+file the test wrote before the build. Neither is compared with Node, because
+Node has neither name as a global; the digest is the algorithm's and the file is
+the test's.
+
+What is left for the native adapter is the other half of this. A **module**
+function could not call the host: `fs.readFileSync` was read in a program body
+and reached the body of a module function as a hole, and the compiler's own
+sources are module functions. The module parser now reads a `fs.` name the
+builtins table holds — the operation is the name the backends lower, the answer
+is the value the runtime holds, and a text use unboxes it — so the same program
+that read the file through a body reads it through an exported function now.
+
+### 4i4. The file services the adapter asks for
+
+    blaze_rt_file_write(path, text, append);
+    blaze_rt_file_exists(path);  blaze_rt_file_size(path);
+    blaze_rt_file_kind(path);    blaze_rt_dir_make(path, parents);
+    blaze_rt_dir_count(path);    blaze_rt_dir_name(path, at);
+    blaze_rt_dir_is_dir(path, at); blaze_rt_file_copy(from, to);
+    blaze_rt_file_rename(from, to); blaze_rt_file_remove(path, recursive);
+    blaze_rt_current_dir(); blaze_rt_temp_dir(); blaze_rt_process_id();
+    blaze_rt_host_platform(); blaze_rt_host_arch(); blaze_rt_random_uuid();
+    blaze_rt_file_sync(path); blaze_rt_sleep_ms(milliseconds);
+
+The compiler's store is a directory tree it writes, reads back, lists, moves and
+removes, and the runtime carried only the read. The nineteen entries above are
+the rest of it, answered by the C runtime with the ordinary POSIX calls and
+declared in the same ABI the native adapter will ask them through. Two of them
+are the operations around the store rather than its data: a path synced to the
+disk — the store syncs the temporary file and the directory it renames it in —
+and a wait of a number of milliseconds, which a retry or a poll asks for. Every
+one answers a value and raises nothing: a path that is not there is the answer a
+question about it has, and a write that fails is the zero the caller branches
+on. A listing is counted and read by position, and a name it answers is a
+managed text so it outlives the directory stream it came from.
+
+The Nim adapter implements the same entries over `std/os` and `std/posix`,
+because the boundary test requires both sides to declare every entry: a
+directory listing walks the host's, a file is copied and moved by the host, and
+the uuid is sixteen bytes of `urandom` with the version and variant bits set.
+The adapter compiles (`nim c`), which is what checks it.
+
+The probe is the C runtime's own: it makes a tree with its parents, writes,
+appends, reads back, copies, moves, counts, lists by name and kind, syncs,
+removes the tree, and checks the environment answers — the platform and
+architecture are not `unknown`, the uuid has the version the function names,
+and the current and temporary directories are there.
+
+This moves no refusal: the services are new names a source cannot call yet.
+
+### 4i5. The names a module function asks the host by
+
+    fs.mkdirSync(root, 1);            fs.writeFileSync(path, text);
+    fs.appendFileSync(path, text);    fs.existsSync(path);
+    fs.fileSizeSync(path);            fs.fileKindSync(path);
+    fs.rmSync(root, 1);               fs.renameSync(from, to);
+    fs.copyFileSync(from, to);        fs.dirCountSync(path);
+    fs.dirNameSync(path, at);         fs.dirIsDirSync(path, at);
+    process.cwd(); process.pid;       os.tmpdir(); os.platform(); os.arch();
+    crypto.randomUUID();              fs.fsyncPath(path);
+    timers.sleepMs(milliseconds);
+
+The runtime answered the file and environment services above and no source
+could name them. Each is a builtin now, with the signature the ABI takes: a path
+and a text for a write, two texts for a copy or a move, a text and a count for a
+directory entry, and a number or a text for the answer. The module parser reads
+any `fs.`, `os.` or `timers.` name the builtins table holds — the existing `fs.`
+case extended to the namespaces — and reads `crypto.randomUUID()`,
+`process.cwd()` and `process.pid` beside the host names it already read
+(`process.env`, `process.argv`, `process.hrtime.bigint`, `posix.*`).
+
+The backends get the names through tables rather than a case each. The C
+backend maps a builtin name to the C call, including the flag a write appends
+(`0.0` for a replacement, `1.0` for an append). The machine backend maps a name
+to the runtime entry, the kind of each argument, the constants written after
+them and the kind of the answer — the same shape the dictionary services
+already use, so a service that answers a value the runtime holds is read out
+through `dynamicResult`. The driver maps the names to the same entries for a Nim
+host program.
+
+The test is one module function on both native backends: it makes a tree with
+its parents, writes, appends, syncs, sizes, kinds, copies, moves, counts, lists
+by name and by kind, removes the tree, waits a millisecond, and prints the
+current and temporary directories, the platform, the architecture, the process
+id and a uuid — fifteen fields, each asserted against the host the test is
+running on.
+
+This moves no refusal: the names are new, and nothing in the package or the
+compiler's own sources writes them yet.
+
+What the adapter still needs is the operations with no service of their own: a
+process started and waited for, a file opened as a handle, the arguments parsed
+and the parallelism counted. Those are the next entries, and each is a name, a
+service and two lowerings like the ones above.
+
+### 4i6. A rest field over a dictionary, and the entry a pattern names
+
+    const { project: _project, ...rest } = error as Record<string, Json>;
+
+The new comparison source binds a rest field over a `Record<string, Json>`, and
+the pattern reader knew only a record's fields: a base keyed by text has no set
+of fields a rest could subtract, so the declaration was refused with "a rest
+field binds the fields of a record". The rest of a dictionary is the entries the
+pattern did not name: a function of the file copies them by position into a
+dictionary of its own — the count, the key at a position, the value beside it,
+and a write for every key that is not one of the named ones — so the value the
+pattern read is untouched and the rest has the type the base's index states.
+
+Reading it exposed the other half: a *named* field of a dictionary pattern,
+`const { a } = table`, was bound to the base itself. The field read was the
+member a layout answers, and a dictionary handle has no fields, so the name held
+the handle and every use of it read the table. A base shaped by an index now
+reads its named entries with the dictionary's own get, of the kind the index
+value is, which is the same call a `record[key]` makes.
+
+The test binds one named entry and the rest of a three-entry table on both
+native backends: the named value, the keys left in the order they were written,
+the sum of their values, and the base still holding every entry it started with.
+
+    # self-host: 97 of 97 sources read, 0 refused, 0 refusals
+    # package:   the smol-toml closure, 127 → 23 refusals
+
+The report is 97 sources because the comparison work added `core/compare.ts`;
+the rest field was the one refusal it added, and it is read now.
+
+### 4i7. A program started, waited for, and read
+
+    double command = blaze_rt_command_new();
+    blaze_rt_command_arg(command, "cc");
+    blaze_rt_command_arg(command, "-o");
+    blaze_rt_command_arg(command, output);
+    blaze_rt_command_cwd(command, workspace);
+    blaze_rt_command_env(command, "PATH", path);
+    blaze_rt_command_input(command, "");
+    double status = blaze_rt_command_run(command, 60000);
+    const char* said = blaze_rt_command_stderr(command);
+
+The compiler's toolchain runs `cc`, `as` and `ld`, hands them a directory and an
+environment, gives them a deadline, and reads what they wrote on both streams;
+the runtime carried no way to start a program. The twelve entries above are
+that way: a command is the arguments, the directory, the variables its
+environment overrides, the text it reads on standard input, and the two streams
+it wrote. `run` answers the exit status — `-1` where the program never started,
+a number where it exited, `-3` where a signal ended it — and the signal, the
+errno, whether the deadline stopped it and what it wrote are questions about the
+handle afterwards. A command is released when the caller is done with it and its
+texts live until then.
+
+The C runtime starts the program with `fork` and `execve`: the file a bare name
+names is searched for in `PATH` before the child runs, the environment is the
+process's own with the overrides written over it (built in the parent, so the
+child calls nothing that allocates), both streams are read while the program
+runs, and the deadline is a signal the runtime sends before it waits. The Nim
+adapter answers the same twelve over `std/posix`, and it compiles (`nim c`).
+
+The probe is the C runtime's own: it runs `/bin/echo` and reads its stdout, a
+shell that exits 3 and reads the status, `sleep 5` with a hundred millisecond
+deadline and reads the signal (9) and the timeout, `pwd` in `/tmp` and reads the
+directory, a variable set on the command and read back, a program that reads
+what it was given on standard input, and a name that is not a program and reads
+errno 2.
+
+This moves no refusal: the services are new names a source cannot call yet.
+The names landed with the services (`exec.new`, `exec.arg`, `exec.run` and the
+rest), and so did the two operations the adapter's environment and its pool
+need: the variables the environment holds, by position (`env.count`, `env.at`),
+and how many processors the host has (`os.cpuCount`), answered by the C runtime
+and the Nim adapter.
+
+Four operations of the host contract have no service yet, and they are the next
+entries before `core/platform-native.ts` can be written whole: a text written to
+standard output with no newline (the progress lines the command line writes as a
+build runs), the exit code a command leaves behind (`setExitCode`, which the C
+driver's `main` would return), the handlers a program runs when it exits (the
+scratch directories and the terminal title), and a line read from standard
+input for the one question the command line asks.
 
 ### 4hx. The machine backend reads a dictionary, and a block states its length
 
@@ -5639,6 +5906,13 @@ What was closed this session, and what each was worth:
 | a first read that waits for an import is not the verdict (§4hy) | 0 → 0 (the build reads the linked read) |
 | the length of a list a field holds (§4hz) | 0 → 0 (lowered) |
 | a package is a module the graph reads (§4i0) | 0 → 0 (package: 127 → 28) |
+| a radix the source computes (§4i1) | 0 → 0 (package: 24 → 23) |
+| a host table names the file a build reads (§4i2) | 0 → 0 (the graph) |
+| the hash and the file read on the native backends (§4i3) | 0 → 0 (lowered) |
+| the file services the adapter asks for (§4i4) | 0 → 0 (the ABI) |
+| the names a module function asks the host by (§4i5) | 0 → 0 (builtins) |
+| a rest field over a dictionary, and the entry a pattern names (§4i6) | 0 → 0 |
+| a program started, waited for, and read (§4i7) | 0 → 0 (the ABI) |
 
 **Wrong answers found on the way.** `null === null` compiles to a comparison
 that a program prints as false, so `void 0 === undefined` — the spelling the
@@ -5661,6 +5935,34 @@ a number was read at the unshaped reference an arm of another type falls back to
 `has`/`add` on it were methods of nothing. And an array a *callee* builds was not
 the turn's block, so a loop that appended to a list dropped what its first turn
 appended (§4ax).
+
+**A builtin that reads the world is moved past a statement.** The optimizer
+treats a call as a value it may fold into the use of its result when the call
+states no effects, and the builtin calls of the module and program lowerings
+carried an empty effect list. `const status = exec.run(command, 5000)` was
+folded into the return, and `exec.free(command)`, written between them, ran
+before the program was started: every command answered -1 as if the handle the
+runtime held had been freed. The builtins now state the effects they have
+(`filesystem`, `syscall`, `io`, `memory`, `clock`, `random`), and both the
+module resolver and the program lowering pass them into the call. The resolved
+IR keeps the order and `optimizeSemanticFunction` keeps it too — a probe of both
+prints the declarations in the order the source wrote them — while a build
+driven by the replay fixture still lowers the folded IR, so the candidate that
+build selects is where the fold comes from, and that is open. Until it is
+settled the adapter reads a command before it frees it and the language test
+that would show the order is not in the suite. The command services themselves
+are answered by the runtime's own probe (echo, status, deadline, directory,
+environment, standard input, a missing program).
+
+**A build failure found at the head of the tree.** A program body that hands an
+object literal to a parameter the read cannot type writes it into a layout whose
+field is the unshaped reference: `classify({ name: "x" })` emits a `double`
+field and assigns the text's pointer to it, and the C compiler refuses the file
+(`incompatible types when assigning to type 'double' from type 'char *'`).
+`test/language-features.test.ts`'s "a field presence question on an object" is
+the test that builds it; the same probe fails at commit `2a6a9ea`, so it is the
+program lowering's and not a regression this work introduced. What is open is
+the literal's field type when the use states only the opaque reference.
 
 **A type-layer bug, found and fixed.** `type X = | A | B` — the leading bar the
 sources write when the members are laid out one per line — was read as a member
@@ -5885,9 +6187,9 @@ Three dependencies are in the way of a native binary:
 - **`smol-toml`** reads `blaze.toml`. The source reads the installed package
   rather than replacing it (§4i0): the graph resolves `node_modules` and the
   package's own modules are compiled with the program. Its closure is held at
-  28 refusals, and the last of them are the host classes `Date` and `Temporal`,
-  a default export that is an object, and two questions asked of a value whose
-  fields the static read cannot see.
+  23 refusals, and the last of them are the host classes `Date` and `Temporal`,
+  a default export that is an object, `replaceAll`, and the element type of
+  lists the source fills by pushing.
 - **The AI SDK** is the model transport. Put it behind one adapter and give the
   native compiler an HTTP + JSON transport for the providers it must speak. The
   first fixed point may use `--model replay` and avoid the network entirely;

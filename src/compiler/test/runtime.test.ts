@@ -133,6 +133,161 @@ test("the path functions resolve a POSIX path the way the host does", async () =
   assert.deepEqual(delivered.stdout.trim().split("\n"), expected);
 });
 
+test("the file services write, list, move and remove what the host does", async () => {
+  // The compiler's own host adapter writes its store and reads it back, so the
+  // runtime answers the file services the adapter asks for: a write that
+  // replaces or appends, a size and a kind, a directory made with its parents,
+  // the entries of a directory by name and by kind, a copy and a move, and a
+  // removal that takes a tree with it. The probe runs in its own directory and
+  // builds the tree it asks about.
+  const directory = await scratch("blaze-files-");
+  const probe = [
+    "#include <stdio.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    '  if (blaze_rt_dir_make("tree/one/two", 1.0) != 1.0) return 1;',
+    '  if (blaze_rt_file_kind("tree/one/two") != 2.0) return 2;',
+    '  if (blaze_rt_file_write("tree/one/two/one.txt", "hello", 0.0) != 1.0) return 3;',
+    '  if (blaze_rt_file_size("tree/one/two/one.txt") != 5.0) return 4;',
+    '  if (blaze_rt_file_kind("tree/one/two/one.txt") != 1.0) return 5;',
+    '  if (blaze_rt_file_exists("tree/one/two/none.txt") != 0.0) return 6;',
+    '  if (blaze_rt_file_write("tree/one/two/one.txt", " world", 1.0) != 1.0) return 7;',
+    '  if (strcmp(blaze_rt_to_text(blaze_rt_file_read("tree/one/two/one.txt", "utf8")), "hello world") != 0) return 8;',
+    '  if (blaze_rt_file_copy("tree/one/two/one.txt", "tree/one/two/copy.txt") != 1.0) return 9;',
+    '  if (blaze_rt_file_size("tree/one/two/copy.txt") != 11.0) return 10;',
+    '  if (blaze_rt_file_rename("tree/one/two/copy.txt", "tree/one/moved.txt") != 1.0) return 11;',
+    '  if (blaze_rt_file_exists("tree/one/moved.txt") != 1.0) return 12;',
+    '  if (blaze_rt_file_exists("tree/one/two/copy.txt") != 0.0) return 13;',
+    '  if (blaze_rt_dir_count("tree/one") != 2.0) return 14;',
+    "  int sawTwo = 0, sawMoved = 0;",
+    "  for (int at = 0; at < 2; at++) {",
+    '    const char* name = blaze_rt_dir_name("tree/one", (double)at);',
+    '    if (strcmp(name, "two") == 0) {',
+    '      if (blaze_rt_dir_is_dir("tree/one", (double)at) != 1.0) return 15;',
+    "      sawTwo = 1;",
+    "    }",
+    '    if (strcmp(name, "moved.txt") == 0) {',
+    '      if (blaze_rt_dir_is_dir("tree/one", (double)at) != 0.0) return 16;',
+    "      sawMoved = 1;",
+    "    }",
+    "  }",
+    "  if (!sawTwo || !sawMoved) return 17;",
+    '  if (blaze_rt_file_sync("tree/one") != 1.0) return 28;',
+    "  if (blaze_rt_env_count() < 1.0) return 30;",
+    '  if (strlen(blaze_rt_env_at(0)) == 0) return 31;',
+    '  if (strchr(blaze_rt_env_at(0), 0x3d) == NULL) return 32;',
+    "  if (blaze_rt_cpu_count() < 1.0) return 33;",
+    '  if (blaze_rt_file_remove("tree", 1.0) != 1.0) return 18;',
+    '  if (blaze_rt_file_exists("tree") != 0.0) return 19;',
+    "  if (blaze_rt_current_dir()[0] == 0) return 20;",
+    "  if (blaze_rt_temp_dir()[0] == 0) return 21;",
+    "  if (blaze_rt_process_id() <= 0.0) return 22;",
+    '  if (strcmp(blaze_rt_host_platform(), "unknown") == 0) return 23;',
+    '  if (strcmp(blaze_rt_host_arch(), "unknown") == 0) return 24;',
+    "  const char* id = blaze_rt_random_uuid();",
+    '  if (strlen(id) != 36 || id[8] != 0x2d || id[13] != 0x2d || id[18] != 0x2d || id[23] != 0x2d) return 25;',
+    "  if (id[14] != '4') return 26;",
+    '  if (strchr("89ab", id[19]) == NULL) return 27;',
+    "  if (blaze_rt_sleep_ms(1) != 1.0) return 29;",
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  await mkdir(join(directory, "run"));
+  await writeFile(join(directory, "run", `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "run", "runtime.c"), runtimeSourceSource(), "utf8");
+  await writeFile(join(directory, "run", "probe.c"), probe, "utf8");
+  const built = run("gcc", ["-std=c11", "-O2", "-o", "probe", "probe.c", "runtime.c", "-lm"], {
+    cwd: join(directory, "run"),
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const delivered = run(join(directory, "run", "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, `the file services answer the host (exit ${delivered.code})`);
+});
+
+test("the command services start a program, wait for it, and answer what it said", async () => {
+  // The compiler's host adapter runs cc, as and ld, and reads what they said:
+  // the command is the arguments, the directory it runs in, the variables its
+  // environment overrides, the text on its standard input, and the two streams
+  // it wrote. The probe asks the runtime directly, so a failure names the
+  // service rather than a compiler stage.
+  const directory = await scratch("blaze-command-");
+  const probe = [
+    "#include <stdio.h>",
+    "#include <string.h>",
+    `#include "${RUNTIME_NAME}.h"`,
+    "int main(void) {",
+    `  ${RUNTIME_NAME}_initialize();`,
+    "  double echo = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(echo, "/bin/echo");',
+    '  blaze_rt_command_arg(echo, "hello");',
+    "  if (blaze_rt_command_run(echo, 5000) != 0.0) return 1;",
+    '  if (strcmp(blaze_rt_command_stdout(echo), "hello\\n") != 0) return 2;',
+    '  if (blaze_rt_command_stderr(echo)[0] != 0) return 3;',
+    "  blaze_rt_command_free(echo);",
+    "  double status = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(status, "sh");',
+    '  blaze_rt_command_arg(status, "-c");',
+    '  blaze_rt_command_arg(status, "exit 3");',
+    "  if (blaze_rt_command_run(status, 5000) != 3.0) return 4;",
+    "  blaze_rt_command_free(status);",
+    "  double slow = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(slow, "/bin/sh");',
+    '  blaze_rt_command_arg(slow, "-c");',
+    '  blaze_rt_command_arg(slow, "sleep 5");',
+    "  if (blaze_rt_command_run(slow, 100) != -3.0) return 5;",
+    "  if (blaze_rt_command_timed_out(slow) != 1.0) return 6;",
+    "  if (blaze_rt_command_signal(slow) != 9.0) return 7;",
+    "  blaze_rt_command_free(slow);",
+    "  double where = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(where, "/bin/sh");',
+    '  blaze_rt_command_arg(where, "-c");',
+    '  blaze_rt_command_arg(where, "pwd");',
+    '  blaze_rt_command_cwd(where, "/tmp");',
+    "  if (blaze_rt_command_run(where, 5000) != 0.0) return 8;",
+    '  if (strcmp(blaze_rt_command_stdout(where), "/tmp\\n") != 0) return 9;',
+    "  blaze_rt_command_free(where);",
+    "  double env = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(env, "/bin/sh");',
+    '  blaze_rt_command_arg(env, "-c");',
+    '  blaze_rt_command_arg(env, "printf %s \\"$BLAZE_TEST\\"");',
+    '  blaze_rt_command_env(env, "BLAZE_TEST", "yes");',
+    "  if (blaze_rt_command_run(env, 5000) != 0.0) return 10;",
+    '  if (strcmp(blaze_rt_command_stdout(env), "yes") != 0) return 11;',
+    "  blaze_rt_command_free(env);",
+    "  double feed = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(feed, "/bin/sh");',
+    '  blaze_rt_command_arg(feed, "-c");',
+    '  blaze_rt_command_arg(feed, "read line; echo got:$line");',
+    '  blaze_rt_command_input(feed, "abc\\n");',
+    "  if (blaze_rt_command_run(feed, 5000) != 0.0) return 12;",
+    '  if (strcmp(blaze_rt_command_stdout(feed), "got:abc\\n") != 0) return 13;',
+    "  blaze_rt_command_free(feed);",
+    "  double missing = blaze_rt_command_new();",
+    '  blaze_rt_command_arg(missing, "no-such-command-xyz");',
+    "  if (blaze_rt_command_run(missing, 5000) != -1.0) return 14;",
+    "  if (blaze_rt_command_errno(missing) != 2.0) return 15;",
+    "  blaze_rt_command_free(missing);",
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+  await mkdir(join(directory, "run"));
+  await writeFile(join(directory, "run", `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(directory, "run", "runtime.c"), runtimeSourceSource(), "utf8");
+  await writeFile(join(directory, "run", "probe.c"), probe, "utf8");
+  const built = run("gcc", ["-std=c11", "-O2", "-o", "probe", "probe.c", "runtime.c", "-lm"], {
+    cwd: join(directory, "run"),
+    timeoutMs: 120_000,
+  });
+  assert.equal(built.code, 0, built.stderr);
+  const delivered = run(join(directory, "run", "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
+  assert.equal(delivered.code, 0, `the command services answer the host (exit ${delivered.code})`);
+});
+
 test("a danger runtime still answers the ABI where its own arithmetic would not", async () => {
   // `danger` leaves out the checks a program makes of itself. Two of the
   // runtime's own answers are not such a check: `index - 2` underflows to a

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runBuild, runStored, inspectProject, type Reporter } from "../compiler.ts";
+import { runBuild, runSemanticIr, runStored, inspectProject, type Reporter } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import type { Candidate, ProgramContract, SourceInput, VerificationResult } from "../core/types.ts";
@@ -102,6 +102,59 @@ test("a build names the backend it used, and one that names none gets the output
   const implied = await workspace("backend-implied");
   await runBuild("input.toml", { cwd: implied, reuse: false, model: `replay:${REPLAY}` }, quiet, "build");
   assert.equal((await inspectProject("input", implied)).backend, "machine");
+});
+
+test("a host table reads the file a build names in place of the project's", async () => {
+  // A build of a source for a host it does not run on substitutes that host's
+  // adapter, and the project says which file answers for which path. The module
+  // keeps the name the import gave it, and the replacement's own imports
+  // resolve beside the file it is written in rather than beside that name.
+  const directory = await workspace("host-table", {
+    language: "typescript",
+    source: "",
+    sourceFile: "main.ts",
+    output: "machine",
+    host: { "adapter.ts": "native/adapter.ts" },
+    generation: { maxCandidates: 1, maxAttempts: 1 },
+  });
+  await writeFile(
+    join(directory, "main.ts"),
+    ['import { answer } from "./adapter.ts";', "console.log(`${answer()}`);", ""].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "adapter.ts"),
+    [
+      'import { readFileSync } from "node:fs";',
+      "export function answer(): number {",
+      "  return readFileSync(0).length;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await mkdir(join(directory, "native"));
+  await writeFile(
+    join(directory, "native/adapter.ts"),
+    [
+      'import { fortyTwo } from "./value.ts";',
+      "export function answer(): number {",
+      "  return fortyTwo();",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    join(directory, "native/value.ts"),
+    ["export function fortyTwo(): number {", "  return 42;", "}", ""].join("\n"),
+    "utf8",
+  );
+
+  const printed = await runSemanticIr(join(directory, "input.toml"), { all: true });
+  assert.match(printed, /fortyTwo/, "the replacement's own import is read beside it");
+  assert.match(printed, /42/, "the module is the one the host table names");
+  assert.doesNotMatch(printed, /readFileSync/, "the file the project holds is not read");
 });
 
 /**
