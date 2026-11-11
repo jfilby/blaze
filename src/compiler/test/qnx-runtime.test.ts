@@ -22,6 +22,7 @@ import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
 const QNX_X86: TargetSpec = { arch: "x86_64", os: "qnx", abi: "sysv", cpu: "", features: [] };
+const QNX_ARM: TargetSpec = { arch: "aarch64", os: "qnx", abi: "aapcs", cpu: "", features: [] };
 const LINUX_X86: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
 
 const quiet = { stage: () => {} };
@@ -116,4 +117,28 @@ test("vendored sources are found from the compiler data root", async () => {
 test("the compiler fingerprints the package its host names", async () => {
   assert.equal((await stat(join(compilerSourceRoot(), "cli.ts"))).isFile(), true);
   assert.equal((await stat(join(compilerSourceRoot(), "core", "version.ts"))).isFile(), true);
+});
+
+test("a QNX AArch64 build falls back to C when the machine backend refuses", async () => {
+  const directory = await scratch("blaze-qnx-arm-fallback-");
+  const input: SourceInput = {
+    language: "typescript",
+    source: "export function twice(n: number): number {\n  return n * 2;\n}\n",
+    entry: "twice",
+    target: QNX_ARM,
+    output: "machine",
+    backend: "machine",
+    runtime: "none",
+  };
+  await writeProject(join(directory, "input.toml"), input);
+
+  // The C compiler is not on this host, so the build stops after it has chosen
+  // the backend. What the record says is the decision the build made: the
+  // machine backend cannot write AArch64, and the C backend is what it used.
+  await runBuild("input.toml", { cwd: directory, reuse: false }, quiet, "build").catch(() => undefined);
+  const build = await inspectProject("input", directory);
+  assert.equal(build.target.arch, "aarch64");
+  assert.equal(build.target.os, "qnx");
+  assert.equal(build.backend, "c");
+  assert.match(build.backendFallback?.reason ?? "", /machine backend cannot build for aarch64-qnx-aapcs/);
 });
