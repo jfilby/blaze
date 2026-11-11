@@ -39,6 +39,7 @@ export {
   availableParallelism,
   basename,
   compilerDataRoot,
+  compilerSourceRoot,
   copyFile,
   cpus,
   createHash,

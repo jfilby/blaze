@@ -23,12 +23,12 @@
  * object that may be linked as it stands.
  */
 
-import { createHash, readFile, readdirEntries, join, relative, sep, fileURLToPath } from "./platform.ts";
+import { compilerSourceRoot, createHash, readFile, readdirEntries, join, relative, sep } from "./platform.ts";
 
 export const COMPILER_VERSION = "0.1.0";
 
 /** The package this module was loaded from, which is what gets fingerprinted. */
-const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const PACKAGE_ROOT = compilerSourceRoot();
 
 /**
  * Directories that hold no compiler. Tests are not compiled into a build, and

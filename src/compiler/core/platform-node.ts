@@ -137,6 +137,19 @@ export function compilerDataRoot(): string {
   return resolve(nodeDirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
+/**
+ * The compiler's own source package, which is what its fingerprint walks.
+ *
+ * This Node build keeps the package at `src/compiler`; a native install
+ * answers the same name with the installed source tree, or a tree embedded in
+ * the binary. It is separate from the data root because the vendored sources
+ * are read by a build, while the compiler sources are what says what that
+ * build is.
+ */
+export function compilerSourceRoot(): string {
+  return resolve(nodeDirname(fileURLToPath(import.meta.url)), "..");
+}
+
 /** The operating system this compiler is running on. */
 export function hostPlatform(): string {
   return process.platform;

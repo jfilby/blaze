@@ -12,7 +12,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { inspectProject, runBuild } from "../compiler.ts";
-import { compilerDataRoot } from "../core/platform.ts";
+import { compilerDataRoot, compilerSourceRoot } from "../core/platform.ts";
 import { assertLibrarySupported, assertRuntimeSupported } from "../core/target.ts";
 import { toolchainFor } from "../core/toolchain.ts";
 import type { SourceInput, TargetSpec } from "../core/types.ts";
@@ -111,4 +111,9 @@ test("vendored sources are found from the compiler data root", async () => {
   assert.equal(vendoredSqliteDir(), join(compilerDataRoot(), "deps", "sqlite3"));
   assert.equal((await stat(facilIoSourceDir())).isDirectory(), true);
   assert.equal((await stat(vendoredSqliteDir())).isDirectory(), true);
+});
+
+test("the compiler fingerprints the package its host names", async () => {
+  assert.equal((await stat(join(compilerSourceRoot(), "cli.ts"))).isFile(), true);
+  assert.equal((await stat(join(compilerSourceRoot(), "core", "version.ts"))).isFile(), true);
 });
