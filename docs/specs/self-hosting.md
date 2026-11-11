@@ -4238,6 +4238,90 @@ compiler offers one.
 
 This took the total from 689 to 680, and `runtime/nim.ts` reads whole.
 
+### 4i5. A key question over a dictionary is a truth, not the number it asks
+
+`"drop" in rest` was read as the `blaze_rt_dict_has` call itself. The runtime
+answers one or zero, and the frontend typed the call as the boolean the question
+is, but resolution types a runtime call by the ABI's `double` return, so the
+answer reached the printer as a number: a program that printed `${key in record}`
+printed `0` where the source prints `false`. The static-record path already
+wraps its chain in a comparison and prints the truth; the dictionary path now
+does the same, `=== 1` over the call. The one test that found it is the rest
+field of a dictionary (§4i1), whose second value is a key question.
+
+### 4i4. A package's default export may be an object
+
+With the host boundary and the regex fixed, `blaze ir` on `src/compiler` reached
+`node_modules/smol-toml/dist/index.js` and refused its last line:
+`export default { parse, stringify, TomlDate, TomlError };` was `only a function
+can be a default export`. The subset links by name, so a default export is the
+name of a function and a default import binds that name. A package that repeats
+its named exports as an object default has no such name.
+
+The object is now read and offered to nobody: the named exports it repeats are
+the module's exports and still cross the link, and a default import of the
+object is refused where the import is written, because the module offers no
+function under that name. This is the package half of §5 measured rather than
+guessed: the frontend now reads smol-toml's entry, and the next refusal in the
+dependency graph is the queue.
+
+### 4i3. A regular expression whose pattern begins with the equals sign
+
+The first read of the compiler's whole project — `blaze ir` on `src/compiler` —
+reached `node_modules/zod/v4/core/util.js` and stopped with `unterminated
+regular expression` at its `replace(/=/g, "")`. The scanner read the `/=` at the
+start of the pattern as the divide-assign operator, because it refused to open a
+pattern on that text at all, and the slash that closed the pattern then opened
+one that ran to the end of the line.
+
+Where a regular expression is allowed there is no left operand, so `/=` is the
+start of a pattern and never an operator: the operator is only one after a
+value, and the scanner already tells those two positions apart. The guard is
+gone and `/=/g` reads as the pattern it is. This is what reading a package's
+compiled source found, and it is a construct the language has always had.
+
+### 4i2. A host module names the boundary, not a file of the project
+
+`blaze ir` on `src/compiler` refused at the first import: `cannot import
+"node:fs"`. The graph's strict read required every import to resolve to a file
+of the project, and `core/platform-node.ts` names the host it runs on. The spec
+already says a `node:`-prefixed module is the boundary the native adapter
+answers and is not resolved as a file (§6); the graph now does that. A host
+specifier is left unbound, exactly as a package the tree does not hold is left
+unbound in a measurement, and the project's own imports are still required.
+
+This is what let rung 1 reach the compiler's dependencies: the first read stopped
+at the host import, and the next stopped inside `zod` (§4cc).
+
+### 4i1. The platform's path values keep their type, and a dictionary's rest is a copy
+
+Two sources were added to the compiler while the report said zero refusals, and
+the next measurement found two: `runtime/facil.ts` joins a list with the text a
+path join answers, and `core/compare.ts` spreads a diagnostic record into a rest
+field.
+
+The first was a typing gap in the platform boundary, not a new construct.
+`core/platform-node.ts` already wraps `dirname`, `extname`, `isAbsolute`,
+`normalize` and `relative` with the signatures the compiler reads, but `join`,
+`resolve`, `basename` and `sep` were raw re-exports of `node:path`: a call to one
+answered `ref<any>`, so `tree.sources.filter(...).concat(tlsBackend)` read the
+element as a reference and refused the join. They are wrapped now with the
+signatures the sources write — `join(first, second, third?)`,
+`resolve(path, second?)`, `basename(path, suffix?)`, and `sep: string` — because
+the compiler calls them with at most three parts and a spread argument is not in
+the call subset. `concat` already accepts a single element of the list's type;
+the element simply had no type before.
+
+The second was a value-model gap. A rest field over a record of fields is a new
+object built from the fields the pattern did not name (§4dl). A dictionary has
+no fields the read can list, so the same syntax was refused. It now binds a
+dictionary: a generated helper walks the source by position, reads the key,
+skips the names the pattern wrote, and writes every remaining value through the
+accessor its declared type names. The answer keeps the source's value shape, so
+a field read through the rest is the dictionary entry it names.
+
+This took the total from 2 to 0 over 97 sources.
+
 ### 4bz. A default read at the parameter's type, and a collection in an entry
 
     method(types: ModuleTypeBinding[] = [], renames: ModuleTypeBinding[] = []): …

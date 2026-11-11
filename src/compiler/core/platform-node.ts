@@ -29,16 +29,16 @@ import {
 import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostSignal } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  basename,
+  basename as nodeBasename,
   dirname as nodeDirname,
   extname as nodeExtname,
   isAbsolute as nodeIsAbsolute,
-  join,
+  join as nodeJoin,
   normalize as nodeNormalize,
   posix,
   relative as nodeRelative,
-  resolve,
-  sep,
+  resolve as nodeResolve,
+  sep as nodeSep,
 } from "node:path";
 import { availableParallelism, cpus, tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -50,13 +50,11 @@ import { fileURLToPath } from "node:url";
 export {
   availableParallelism,
   appendFile,
-  basename,
   copyFile,
   cpus,
   createHash,
   existsSync,
   fileURLToPath,
-  join,
   mkdir,
   mkdtemp,
   parseArgs,
@@ -66,9 +64,7 @@ export {
   readFileSync,
   nodeReaddir as readdir,
   rename,
-  resolve,
   rm,
-  sep,
   sleep,
   sleep as setTimeout,
   spawn,
@@ -118,9 +114,9 @@ export async function open(path: string, mode: string): Promise<FileHandle> {
 /*
  * The path operations answer the texts they are given, and the compiler asks
  * them as its own functions rather than as the host's: a source that joins or
- * shortens a path reads the answer at `text`, which is what it is. `join` and
- * `resolve` take any number of parts and stay the host's, because a rest
- * parameter is a list a call is read against and none of these needs one.
+ * shortens a path reads the answer at `text`, which is what it is. They are
+ * wrapped rather than re-exported because a raw re-export carries no signature
+ * for the compiler to read, so every call answer is a reference of no type.
  */
 
 /**
@@ -240,6 +236,34 @@ export const host: Host = {
     };
   },
 };
+
+/** The last part of a path, or the path with its extension taken off. */
+export function basename(path: string, suffix?: string): string {
+  return suffix === undefined ? nodeBasename(path) : nodeBasename(path, suffix);
+}
+
+/**
+ * The parts of a path joined with the platform's separator.
+ *
+ * Three parts are what the compiler asks of it, and the third is optional
+ * because a call that joins two is the common one.
+ */
+export function join(first: string, second: string, third?: string): string {
+  return third === undefined ? nodeJoin(first, second) : nodeJoin(first, second, third);
+}
+
+/** The separator a path is written with on this platform. */
+export const sep: string = nodeSep;
+
+/**
+ * A path made absolute against the directory the process runs in.
+ *
+ * A second part is resolved after the first, which is how the compiler names a
+ * file inside a directory.
+ */
+export function resolve(path: string, second?: string): string {
+  return second === undefined ? nodeResolve(path) : nodeResolve(path, second);
+}
 
 /** The directory part of a path. */
 export function dirname(path: string): string {

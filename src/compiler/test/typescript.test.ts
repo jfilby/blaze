@@ -6214,3 +6214,85 @@ test("a text written as a dot is not an optional access", () => {
   const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "f")?.handle as { body: unknown[] }).body);
   assert.match(body, /"value":"\."/, "the arm is the text it wrote");
 });
+
+test("a host module names the boundary a build is linked against", () => {
+  // `node:fs` is not a file the project holds: it names the services the host
+  // adapter answers, and a graph that must hold every project import must not
+  // throw when it reaches one. The compiler's own `core/platform-node.ts` is
+  // the file that names the host, and `blaze ir` on `src/compiler` reads it.
+  const files: Record<string, string> = {
+    "main.ts": [
+      'import { join } from "node:path";',
+      "export function pathOf(directory: string, name: string): string {",
+      "  return join(directory, name);",
+      "}",
+      "",
+    ].join("\n"),
+  };
+  const records = readModuleGraph({
+    frontend: typeScriptFrontend,
+    entry: { path: "main.ts", source: files["main.ts"] as string },
+    read: (path) => files[path] ?? null,
+    reader: (source, path, entry, context) => {
+      try {
+        return readTypeScriptModule(source, path, entry, context);
+      } catch (error) {
+        return {
+          analysis: { path, imports: [], functions: [], default: null, body: [] },
+          refused: [{ line: 1, message: (error as Error).message, detail: "" }],
+          count: 1,
+        };
+      }
+    },
+  });
+  assert.deepEqual(records.map((record) => record.path), ["main.ts"], "the host module is not read as a file");
+  assert.equal(records[0]?.refusedCount, 0, records[0]?.refused.map((one) => one.message).join("; "));
+});
+
+test("a regular expression may begin with the equals sign", () => {
+  // `/=/g` starts where a regex is allowed, and `/=` is also the divide-assign
+  // operator. The operator is only one after a value, so the two are told apart
+  // by the token before the slash. Reading `/=/` as `/=` left the closing slash
+  // to open a pattern that ran off the line.
+  const source = [
+    "export function percent(text: string): string {",
+    "  return text.replace(/=/g, `%`);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.deepEqual(read.refused, []);
+});
+
+test("a module may offer its names again as an object default", () => {
+  // `export default { parse, stringify }` is how a package writes its named
+  // exports a second time. The subset links by name and carries no object
+  // default, so the object is read and offered to nobody; the named exports it
+  // repeats are still the module's exports and still cross the link.
+  const files: Record<string, string> = {
+    "main.ts": [
+      'import { parse } from "./lib.ts";',
+      "export function read(text: string): number {",
+      "  return parse(text);",
+      "}",
+      "",
+    ].join("\n"),
+    "lib.ts": [
+      "export function parse(text: string): number {",
+      "  return text.length;",
+      "}",
+      "export default { parse };",
+      "",
+    ].join("\n"),
+  };
+  const records = readModuleGraph({
+    frontend: typeScriptFrontend,
+    entry: { path: "main.ts", source: files["main.ts"] as string },
+    roots: ["lib.ts"],
+    read: (path) => files[path] ?? null,
+  });
+  assert.deepEqual(records.map((record) => record.path).sort(), ["lib.ts", "main.ts"]);
+  for (const record of records) {
+    assert.equal(record.refusedCount, 0, `${record.path}: ${record.refused.map((one) => one.message).join("; ")}`);
+  }
+});

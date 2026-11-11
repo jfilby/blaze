@@ -1600,6 +1600,35 @@ test("a rest field binds what is left of the record", async () => {
   }
 });
 
+test("a rest field of a dictionary copies the entries the pattern does not name", async () => {
+  // A record of fields is one layout, so its rest is the fields the source did
+  // not name. A dictionary has no layout: its rest is a new dictionary holding
+  // every entry the pattern did not name, in the order the source holds them.
+  const source = [
+    "export function numbers(): string {",
+    "  const values: Record<string, number> = { left: 1, drop: 2, right: 3 };",
+    "  const { drop, ...rest } = values;",
+    "  return `${rest.left} ${rest.right} ${`drop` in rest} ${Object.keys(rest).length}`;",
+    "}",
+    "export function texts(): string {",
+    "  const values: Record<string, string> = { left: `a`, drop: `x`, right: `b` };",
+    "  const { drop, ...rest } = values;",
+    "  return `${rest.left} ${rest.right} ${`drop` in rest} ${Object.keys(rest).length}`;",
+    "}",
+    "console.log(numbers());",
+    "console.log(texts());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(
+      output.trim().split("\n").join("|"),
+      "1 3 false 2|a b false 2",
+      `the ${backend} backend copies the entries a rest leaves`,
+    );
+  }
+});
+
 test("a record spread into a record is the entries of both", async () => {
   const source = [
     "export function demo(): string {",

@@ -538,19 +538,32 @@ function resolveImport(
   return candidates.find((path) => read(path) !== null) ?? null;
 }
 
-/** The file an import names, or the refusal of a graph that must hold it. */
+/** Whether a specifier names a host module rather than a file of the project. */
+function isHostSpecifier(specifier: string): boolean {
+  return specifier.includes(":");
+}
+
+/**
+ * The file an import names, or null where the host is what answers it.
+ *
+ * A host module is the boundary a build is linked against, not a file the tree
+ * holds: `node:fs` names the adapter's own services, and a native adapter
+ * answers the same names without a Node module. A graph that must hold every
+ * import still holds the project's, and lets the host's name its boundary.
+ */
 function requireImport(
   request: ModuleGraphRequest,
   read: (path: string) => string | null,
   from: string,
   entry: { specifier: string; line: number },
-): string {
+): string | null {
   if (from === INLINE_MODULE) {
     throw contractPhaseError(
       `an inline source cannot import "${entry.specifier}"`,
       'set "sourceFile" to a file beside the project file so its imports can be resolved',
     );
   }
+  if (isHostSpecifier(entry.specifier)) return null;
   if (isPackageSpecifier(request, entry.specifier)) {
     const resolved = request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
     if (resolved !== null) return resolved;

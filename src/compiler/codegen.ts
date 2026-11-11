@@ -76,7 +76,7 @@ export interface PreparedLibrary {
   headerPath: string;
   objectPath: string;
 }
-import { readFile, stat, writeFile, dirname } from "./core/platform.ts";
+import { monotonicTimeNs, readFile, stat, writeFile, dirname } from "./core/platform.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import type { SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
@@ -1392,9 +1392,9 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     asked: ReviewRequest,
     sequence: number,
   ): Promise<{ review: Review; durationNs: bigint }> => {
-    const startedAt = process.hrtime.bigint();
+    const startedAt = monotonicTimeNs();
     const review = await generationBackend().review(asked, sequence);
-    return { review, durationNs: process.hrtime.bigint() - startedAt };
+    return { review, durationNs: monotonicTimeNs() - startedAt };
   };
 
   // Candidates are independent chains. Each reviews the same IR independently,

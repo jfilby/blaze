@@ -3000,7 +3000,10 @@ export function tokenize(source: string): Token[] {
     // pattern runs to the next slash outside a character class. A backslash
     // covers the character after it, so a slash written as `\/` is part of the
     // pattern and not its end; a slash inside `[...]` is part of the class.
-    if (character === "/" && !source.startsWith("/=", index) && regexAllowed(tokens)) {
+    // Where a regex is allowed there is no left operand, so `/=` is the start
+    // of a pattern that begins with `=` — `/=/g` — not the divide-assign
+    // operator, which is only an operator after a value.
+    if (character === "/" && regexAllowed(tokens)) {
       const startLine = line;
       let end = index + 1;
       let inClass = false;
@@ -6547,6 +6550,16 @@ class TypeScriptParser {
       // links by name: there is one table of functions for the whole program,
       // so one name cannot stand for two of them.
       if (!this.at("function")) {
+        // `export default { parse, stringify }` is the object a package offers
+        // its named exports again as. The subset links by name and carries no
+        // object default, so the object is read and offered to nobody: a
+        // module that writes one is read whole, and a default import of it is
+        // refused where the import is, not where the package is.
+        if (this.at("{")) {
+          this.readExpression();
+          this.accept(";");
+          return null;
+        }
         this.report(
           "only a function can be a default export",
           `as in export default function f(): number { ... }, not ${this.peek().text}`,
@@ -8586,14 +8599,29 @@ class TypeScriptParser {
         });
       });
       if (rest !== null) {
-        if (baseShape === null || baseShape.kind !== "record" || baseShape.index !== null) {
+        const named = new Set(fields.map((entry) => entry.field));
+        if (baseShape === null || baseShape.kind !== "record") {
           this.report(
             `a rest field binds the fields of a record`,
             `the value ${rest} reads has no fields a rest could bind`,
             open,
           );
+        } else if (baseShape.index !== null) {
+          // A record keyed by a name holds the entries the source wrote, not a
+          // layout the file declared: what is left is a dictionary of every
+          // entry the pattern does not name, in the order the source holds
+          // them.
+          const value = this.typeExprOfShape(baseShape.index);
+          const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value };
+          const helper = this.dictionaryRestHelper(collection, [...named], line);
+          const read: Expression = { k: "call", name: helper.name, args: [base] };
+          this.collectionExpressions.set(read, collection);
+          this.expressionTypes.set(read, NUMBER_RESULT);
+          const shape: ResolvedType = { kind: "record", fields: new Map(), index: baseShape.index };
+          this.valueShapes.set(rest, shape);
+          this.valueTypes.set(rest, this.typeExprOfShape(shape));
+          this.pending.push({ kind: "declare", name: rest, type: null, init: read, line });
         } else {
-          const named = new Set(fields.map((entry) => entry.field));
           const remaining = new Map(
             [...baseShape.fields].filter(([name]) => !named.has(name)),
           );
@@ -10865,10 +10893,18 @@ class TypeScriptParser {
     // field to compare against.
     const dictionary = shape === null ? null : this.collectionOfShape(shape);
     if (dictionary !== null && dictionary.kind === "map") {
+      // The runtime answers one or zero, which is a number: the question is
+      // the comparison, so a value that is printed as a text says true or
+      // false rather than one or zero.
       const asked: Expression = {
-        k: "call",
-        name: this.dictionaryCall(dictionary.key, "has") ?? "blaze_rt_dict_has",
-        args: [object, key],
+        k: "binary",
+        op: "===",
+        left: {
+          k: "call",
+          name: this.dictionaryCall(dictionary.key, "has") ?? "blaze_rt_dict_has",
+          args: [object, key],
+        },
+        right: { k: "literal", text: "1" },
       };
       this.expressionTypes.set(asked, BOOLEAN_RESULT);
       return asked;
@@ -20729,6 +20765,87 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       { kind: "result", value: ident("out"), line },
     ];
     const params = [{ name: "parts", type: { kind: "slice", of: NUMBER_RESULT } as TypeExpr }];
+    const returns: TypeExpr = NUMBER_RESULT;
+    const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
+    this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });
+    this.liftedArrows.set(name, helper);
+    this.collectHelpers.set(key, { name, returns });
+    return { name, returns };
+  }
+
+  /**
+   * The function a rest field of a dictionary becomes: a copy without the names
+   * the pattern wrote.
+   *
+   * A record of fields is one layout, so its rest is the fields the source did
+   * not name. A dictionary has no such layout: its keys are the entries the
+   * value holds, and what is left is a new dictionary with every entry whose
+   * key the pattern did not name, copied in the order the source holds them.
+   * Each value is read and written through the accessor its declared type
+   * names, so a text stays a text and a reference stays a reference.
+   */
+  private dictionaryRestHelper(
+    collection: CollectionValue,
+    excluded: readonly string[],
+    line: number,
+  ): { name: string; returns: TypeExpr } {
+    const key = JSON.stringify(["rest", collection.key, collection.value, excluded]);
+    const known = this.collectHelpers.get(key);
+    if (known !== undefined) return known;
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    const ident = (value: string): Expression => ({ k: "ident", name: value });
+    const number = (text: string): Expression => ({ k: "literal", text });
+    const set = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
+    const readValue = this.valueReadName(collection.value);
+    const readKey = this.keyReadName(collection);
+    let named: Expression | null = null;
+    for (const field of excluded) {
+      const equal: Expression = {
+        k: "binary",
+        op: "===",
+        left: ident("key"),
+        right: { k: "text", parts: [{ k: "text", value: field }] },
+      };
+      named = named === null ? equal : { k: "binary", op: "||", left: named, right: equal };
+    }
+    const copy: Statement = {
+      kind: "expression",
+      value: {
+        k: "call",
+        name: set,
+        args: [ident("out"), ident("key"), { k: "call", name: readValue, args: [ident("source"), ident("i")] }],
+      },
+      line,
+    };
+    const walk: Statement[] = [
+      { kind: "declare", name: "key", type: null, init: { k: "call", name: readKey, args: [ident("source"), ident("i")] }, line },
+      named === null
+        ? copy
+        : {
+            kind: "if",
+            condition: named,
+            then: [{ kind: "continue", line }],
+            otherwise: [copy],
+            line,
+          },
+    ];
+    const body: Statement[] = [
+      { kind: "declare", name: "out", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
+      {
+        kind: "loop",
+        variable: "i",
+        from: number("0"),
+        to: { k: "call", name: "blaze_rt_dict_len", args: [ident("source")] },
+        inclusive: false,
+        step: null,
+        down: false,
+        body: walk,
+        line,
+      },
+      { kind: "result", value: ident("out"), line },
+    ];
+    const params = [{ name: "source", type: NUMBER_RESULT as TypeExpr }];
     const returns: TypeExpr = NUMBER_RESULT;
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
     this.closures.push({ name, exported: false, internal: true, params, returns, handle: helper });

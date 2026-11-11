@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, host, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "smol-toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -710,7 +710,7 @@ function printPrompt(dump: PromptDump): void {
   // every candidate and then the target of the one it selected, and both are
   // asked for by the same candidate and round.
   const at = `${dump.stage} ${dump.candidate}.${dump.attempt}`;
-  process.stderr.write(
+  host.stderr.write(
     `\n-- prompt ${at}: system --\n${dump.system}\n-- prompt ${at}: user --\n${dump.user}\n`,
   );
 }
@@ -726,7 +726,7 @@ function printAnswer(dump: AnswerDump): void {
   // An answer that was nothing at all is printed as nothing: a retry line reads
   // the same whether the model wrote an essay or a single space.
   const quoted = quoteReply(dump.answer);
-  process.stderr.write(`\n-- answer ${at} --\n${quoted.length === 0 ? "(nothing)" : quoted.join("\n")}\n`);
+  host.stderr.write(`\n-- answer ${at} --\n${quoted.length === 0 ? "(nothing)" : quoted.join("\n")}\n`);
 }
 
 function testConfigFor(input: SourceInput, options: BuildOptions): TestConfig {

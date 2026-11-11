@@ -33,7 +33,7 @@ import type {
   LanguageModelV4Usage,
   SharedV4Warning,
 } from "@ai-sdk/provider";
-import { randomUUID } from "../core/platform.ts";
+import { host, randomUUID } from "../core/platform.ts";
 import { z } from "zod";
 
 /** The API host, and the only path that a CommandCode subscription can reach. */
@@ -226,9 +226,9 @@ function toWire(modelId: string, options: LanguageModelV4CallOptions, warnings: 
   const joined = system.join("\n\n");
   return {
     config: {
-      workingDir: process.cwd(),
+      workingDir: host.cwd(),
       date: new Date().toISOString().slice(0, 10),
-      environment: process.platform,
+      environment: host.platform,
       structure: [],
       isGitRepo: false,
       currentBranch: "",
