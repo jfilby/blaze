@@ -13,7 +13,9 @@ import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
+import type { TargetSpec } from "../core/types.ts";
 import { runtimeSourceSource } from "../runtime/abi.ts";
+import { buildFacilRuntime } from "../runtime/facil.ts";
 import { writeRuntimeHeader } from "../runtime/standalone.ts";
 import { scratch } from "./scratch.ts";
 
@@ -21,6 +23,14 @@ const QCC_ARCHITECTURES = [
   ["x86_64", "gcc_ntox86_64"],
   ["aarch64", "gcc_ntoaarch64le"],
 ] as const;
+
+const QNX_TARGETS: readonly TargetSpec[] = QCC_ARCHITECTURES.map(([arch]) => ({
+  arch,
+  os: "qnx",
+  abi: arch === "x86_64" ? "sysv" : "aapcs",
+  cpu: "",
+  features: [],
+}));
 
 test("qcc cross-compiles a QNX object when the QNX SDP is installed", async (t) => {
   const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
@@ -90,5 +100,31 @@ test("qcc compiles the generated runtime for both QNX architectures", async (t) 
     assert.equal(compiled.code, 0, `${architecture}: ${compiled.stderr.trim()}`);
     const info = await stat(object);
     assert.ok(info.size > 0, `${architecture}: qcc compiled the runtime`);
+  }
+});
+
+test("qcc builds the HTTP runtime for both QNX architectures", async (t) => {
+  const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });
+  if (qcc.spawnError !== undefined || qcc.code !== 0) {
+    t.skip("qcc is not on PATH; source the QNX SDP environment to run this test");
+    return;
+  }
+  if (process.env.QNX_TARGET === undefined || process.env.QNX_TARGET === "") {
+    t.skip("QNX_TARGET is not set; source the QNX SDP environment to run this test");
+    return;
+  }
+
+  for (const target of QNX_TARGETS) {
+    const selector = target.arch === "x86_64" ? "gcc_ntox86_64" : "gcc_ntoaarch64le";
+    const available = run("qcc", [`-V${selector}`, "--version"], { timeoutMs: 30_000 });
+    if (available.spawnError !== undefined || available.code !== 0) {
+      t.diagnostic(`qcc has no ${target.arch} compiler: ${available.stderr.trim()}`);
+      continue;
+    }
+
+    const directory = await scratch(`blaze-qnx-facil-${target.arch}-`);
+    const runtime = await buildFacilRuntime(directory, "debug", target);
+    const info = await stat(runtime.objectPath);
+    assert.ok(info.size > 0, `${target.arch}: qcc built the HTTP runtime`);
   }
 });
