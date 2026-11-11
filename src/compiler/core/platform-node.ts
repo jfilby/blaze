@@ -54,7 +54,6 @@ export {
   copyFile,
   cpus,
   createHash,
-  createInterface,
   existsSync,
   fileURLToPath,
   join,

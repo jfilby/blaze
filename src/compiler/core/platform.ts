@@ -95,7 +95,6 @@ export {
   copyFile,
   cpus,
   createHash,
-  createInterface,
   dirname,
   existsSync,
   extname,
