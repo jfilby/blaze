@@ -323,11 +323,16 @@ export function linkOptions(mode: BuildMode, objective?: Objective): string[] {
  * is not.
  */
 export function cTargetOptions(target: TargetSpec): string[] {
-  if (target.cpu !== "") return [`-march=${target.cpu}`];
+  // Generated C and the runtime behind it must read a byte the same way on
+  // every target. AArch64 toolchains commonly make `char` unsigned while the
+  // x86 toolchains make it signed, so the choice is named rather than inherited
+  // from whichever compiler happens to be running.
+  const signedChar = "-fsigned-char";
+  if (target.cpu !== "") return [signedChar, `-march=${target.cpu}`];
   // `-mtune=native` describes the machine the compiler is running on. A
   // cross compiler is running on the host, not on the machine whose code it
   // writes, so asking it to tune for "native" would tune for the wrong one.
-  return target.os === hostPlatform() ? ["-mtune=native"] : [];
+  return target.os === hostPlatform() ? [signedChar, "-mtune=native"] : [signedChar];
 }
 
 /**

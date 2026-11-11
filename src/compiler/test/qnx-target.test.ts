@@ -67,13 +67,14 @@ test("a cross build does not ask the host compiler to tune for itself", () => {
   // A named cpu is a target decision and reaches the compiler. Without one,
   // `-mtune=native` would describe the build host, which is not the machine
   // the QNX binary runs on.
-  assert.deepEqual(cTargetOptions({ ...QNX_X86, cpu: "znver1" }), ["-march=znver1"]);
+  assert.deepEqual(cTargetOptions({ ...QNX_X86, cpu: "znver1" }), ["-fsigned-char", "-march=znver1"]);
   if ((process.platform as string) === "qnx") {
-    assert.deepEqual(cTargetOptions(QNX_X86), ["-mtune=native"]);
+    assert.deepEqual(cTargetOptions(QNX_X86), ["-fsigned-char", "-mtune=native"]);
   } else {
-    assert.deepEqual(cTargetOptions(QNX_X86), []);
+    assert.deepEqual(cTargetOptions(QNX_X86), ["-fsigned-char"]);
   }
   assert.equal(targetSummary(QNX_ARM), "aarch64/qnx/aapcs cpu=toolchain-default");
+  assert.ok(cTargetOptions(QNX_ARM).includes("-fsigned-char"));
 });
 
 test("a Linux host selects qcc for both QNX architectures", () => {
