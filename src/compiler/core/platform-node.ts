@@ -124,6 +124,19 @@ export async function open(path: string, mode: string): Promise<FileHandle> {
  * parameter is a list a call is read against and none of these needs one.
  */
 
+/**
+ * The directory a build reads its vendored sources from, `deps/facil.io` and
+ * `deps/sqlite3`.
+ *
+ * A Node build keeps them at the repository root, three directories above this
+ * file. A native install answers the same name with the directory beside its
+ * binary, which is why the location is a host service rather than a path each
+ * runtime computes from its own module URL.
+ */
+export function compilerDataRoot(): string {
+  return resolve(nodeDirname(fileURLToPath(import.meta.url)), "../../..");
+}
+
 /** The directory part of a path. */
 export function dirname(path: string): string {
   return nodeDirname(path);

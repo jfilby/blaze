@@ -38,6 +38,7 @@ export {
   appendFile,
   availableParallelism,
   basename,
+  compilerDataRoot,
   copyFile,
   cpus,
   createHash,

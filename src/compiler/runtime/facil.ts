@@ -12,7 +12,7 @@
  * into a single relocatable object that the program driver links.
  */
 
-import { readdirEntries, stat, writeFile, availableParallelism, fileURLToPath, dirname, join, resolve } from "../core/platform.ts";
+import { readdirEntries, stat, writeFile, availableParallelism, compilerDataRoot, join, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run, runAsync } from "../core/process.ts";
 import { mapConcurrent } from "../core/concurrency.ts";
@@ -82,14 +82,9 @@ export const FACIL_IO_POLL_TICK_MS = 1;
  */
 export const FACIL_IO_MEMORY_BLOCKS = 32;
 
-/** The repository root, used to locate the vendored facil.io source. */
-const compilerDir = dirname(fileURLToPath(import.meta.url));
-/** .../src/compiler/runtime -> repository root. */
-const repoRoot = resolve(compilerDir, "../../..");
-
 /** The vendored facil.io source, pinned to `FACIL_IO_VERSION`. */
 export function vendoredFacilIoDir(): string {
-  return resolve(repoRoot, "deps/facil.io");
+  return resolve(compilerDataRoot(), "deps/facil.io");
 }
 
 /** Where facil.io's C sources and public headers live inside the vendored copy. */

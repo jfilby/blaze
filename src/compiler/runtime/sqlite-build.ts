@@ -12,7 +12,7 @@
  * library as one translation unit, which is what makes it one file to compile.
  */
 
-import { createHash, existsSync, readFileSync, writeFile, dirname, resolve, fileURLToPath } from "../core/platform.ts";
+import { createHash, existsSync, readFileSync, writeFile, compilerDataRoot, resolve } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions, targetSummary } from "../core/target.ts";
@@ -26,14 +26,9 @@ import type { BuildMode, TargetSpec } from "../core/types.ts";
 import { SQLITE_ABI, SQLITE_NAME, sqliteHeaderSource } from "./sqlite.ts";
 import { identifyCompiler } from "./standalone.ts";
 
-/** The repository root, used to locate the vendored SQLite source. */
-const compilerDir = dirname(fileURLToPath(import.meta.url));
-/** .../src/compiler/runtime -> repository root. */
-const repoRoot = resolve(compilerDir, "../../..");
-
 /** The vendored SQLite amalgamation, pinned to `SQLITE_VERSION`. */
 export function vendoredSqliteDir(): string {
-  return resolve(repoRoot, "deps/sqlite3");
+  return resolve(compilerDataRoot(), "deps/sqlite3");
 }
 
 /**
