@@ -309,6 +309,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `(*((double*)(${args[0]}) = ${args[1]}, 0.0)`;
     case "tl.arange":
       return `(0.0)`;
+    case "Math.fround":
+      return `((double)(float)(${args[0]}))`;
     case "Math.random":
       // The runtime's own random is what a program body is given, so a module
       // function and a program body answer the same call the same way.

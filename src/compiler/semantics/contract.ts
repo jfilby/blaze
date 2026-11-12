@@ -598,8 +598,6 @@ export interface NullType {
 
 export type StaticType = TypeExpr | NullType;
 
-const NULL_TYPE: NullType = { kind: "null" };
-
 function describeType(type: StaticType): string {
   return type.kind === "null" ? "null" : typeToString(type);
 }
@@ -652,7 +650,7 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
     case "bool":
       return { kind: "primitive", name: "bool" };
     case "null":
-      return NULL_TYPE;
+      return { kind: "null" };
     case "var": {
       const type = env.get(expression.name);
       if (type === undefined) {

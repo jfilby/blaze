@@ -3663,6 +3663,10 @@ class Body {
       case "cwdPath":
         this.callService("blaze_rt_cwd");
         return TEXT;
+      case "Math.fround":
+        this.value(argument(0), F64_TYPE);
+        this.callService("blaze_rt_fround");
+        return F64_TYPE;
       case "hostProcessId":
         this.callService("blaze_rt_process_id");
         return F64_TYPE;

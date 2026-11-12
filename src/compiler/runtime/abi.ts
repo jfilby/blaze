@@ -1073,7 +1073,15 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     "Returns the number the low bits read back as, zero extended.",
     { tags: ["object"] },
   ),
-  entry(
+    entry(
+    "blaze_rt_fround",
+    "double",
+    [["value", "double"]],
+    "Reads a number at the single precision a float32 field holds.",
+    "Returns the double the nearest single precision value is, as Math.fround answers it.",
+    { tags: [] },
+  ),
+entry(
     "blaze_rt_now_ms",
     "double",
     [],
@@ -4372,6 +4380,10 @@ int64_t blaze_rt_as_int_n(double bits, int64_t value) {
    milliseconds are the double a source holds a date as, and the stamp is the
    text an ISO 8601 timestamp writes: UTC, to the millisecond, with the Z the
    language writes for it. */
+double blaze_rt_fround(double value) {
+  return (double)(float)value;
+}
+
 double blaze_rt_now_ms(void) {
   struct timespec parts;
   clock_gettime(CLOCK_REALTIME, &parts);

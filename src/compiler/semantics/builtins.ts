@@ -159,6 +159,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.sqrt": { params: [F64], returns: F64, arity: 1 },
   "Math.abs": { params: [F64], returns: F64, arity: 1 },
   "Math.floor": { params: [F64], returns: F64, arity: 1 },
+  /** `Math.fround(x)` is the nearest single precision number to x, read back
+   *  as a double: the width a float32 field holds. */
+  "Math.fround": { params: [F64], returns: F64, arity: 1 },
   "Math.round": { params: [F64], returns: F64, arity: 1 },
   "Math.trunc": { params: [F64], returns: F64, arity: 1 },
   "Math.ceil": { params: [F64], returns: F64, arity: 1 },

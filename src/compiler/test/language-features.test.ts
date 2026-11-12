@@ -5825,6 +5825,31 @@ test("a destructured field of a text record is the text entry it names", async (
   assert.equal(output.trim(), "x y");
 });
 
+test("a wide whole number is computed with a choice of written numbers", async () => {
+  // A wide value beside a choice of two written numbers is one width on both
+  // sides: the choice is widened where it is added, not refused for being a
+  // signed machine word beside a wide number.
+  const source = [
+    "const WIDE = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn;",
+    "export function calc(a: bigint, b: bigint): bigint {",
+    "  const product = a * b;",
+    "  return (product + (a < b ? 1n : 0n) + (a >> 3n)) & WIDE;",
+    "}",
+    "console.log(calc(123456789n, 987654321n).toString(16));",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source);
+  assert.equal(output.trim(), ((123456789n * 987654321n + 1n + (123456789n >> 3n)) & ((1n << 256n) - 1n)).toString(16));
+});
+
+test("Math.fround reads a number at the single precision", async () => {
+  const output = await agreesWithNode([
+    "console.log(`${Math.fround(1.1)} ${Math.fround(0.1)} ${Math.fround(16777217)}`);",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "1.100000023841858 0.10000000149011612 16777216");
+});
+
 test("a text spread into a list is its characters and Array.from is the same list", async () => {
   // `[...text]` is the characters of the text, one text each, which is the
   // fields the split helper cuts at the empty separator; `Array.from(text)` is

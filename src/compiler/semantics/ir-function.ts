@@ -1861,8 +1861,8 @@ class FunctionBody {
       // text operand names; a number beside one is not the question this asks.
       const bothText = isText(left.value.type) && isText(right.value.type);
       const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
-      const leftValue = wide === null ? left.value : this.widenLiteral(left.value, wide);
-      const rightValue = wide === null ? right.value : this.widenLiteral(right.value, wide);
+      const leftValue = wide === null ? left.value : this.wideOperand(left.value, wide, line);
+      const rightValue = wide === null ? right.value : this.wideOperand(right.value, wide, line);
       return {
         value: {
           k: "compare",
@@ -1885,8 +1885,8 @@ class FunctionBody {
         );
       }
       const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
-      const leftValue = wide === null ? left.value : this.widenLiteral(left.value, wide);
-      const rightValue = wide === null ? right.value : this.widenLiteral(right.value, wide);
+      const leftValue = wide === null ? left.value : this.wideOperand(left.value, wide, line);
+      const rightValue = wide === null ? right.value : this.wideOperand(right.value, wide, line);
       return {
         value: {
           k: "compare",
@@ -1960,17 +1960,24 @@ class FunctionBody {
         );
       }
     }
-    const folded = this.foldedValue(arithmetic, left.value, right.value, type);
+    // A wide result is computed over two wide numbers. An operand of a
+    // narrower whole type is widened into a name of the wide type, which is
+    // the store the backends already widen at; a literal is the value itself.
+    const leftWide = this.wideOperand(left.value, type, line);
+    // A shift's right side is the machine word of count, not the shifted
+    // value's width: it is read as one above and is not widened with it.
+    const rightWide = counted || converting ? right.value : this.wideOperand(right.value, type, line);
+    const folded = this.foldedValue(arithmetic, leftWide, rightWide, type);
     if (folded !== null) return folded;
     // A wide remainder is the kernels' answer, not the machine's: the product
     // of two 256 bit numbers does not fit in one, and a `%` of the low half is
     // a different number from the remainder of the whole.
     if (arithmetic === "mod" && type.kind === "primitive" && type.name === "u256") {
-      const reduced = modularReduction(left.value, right.value, (name, args) => this.wideKernel(name, args));
+      const reduced = modularReduction(leftWide, rightWide, (name, args) => this.wideKernel(name, args));
       if (reduced !== null) return { value: reduced, inferred: asType(type) };
     }
     return {
-      value: { k: "arith", type, op: arithmetic, left: left.value, right: right.value },
+      value: { k: "arith", type, op: arithmetic, left: leftWide, right: rightWide },
       inferred: asType(type),
     };
   }
@@ -2509,6 +2516,28 @@ class FunctionBody {
     const number = wholeText(value.text);
     if (number === null || number < 0n) return value;
     return { k: "const", type, text: value.text };
+  }
+
+  /**
+   * A whole number read at a wide type: a literal is written at that width,
+   * and a value that computes something is stored into a name of the wide
+   * type, which is where every backend widens a machine word into the wide
+   * number's low limb.
+   */
+  private wideOperand(value: SemanticValue, type: SemanticType, line: number): SemanticValue {
+    if (!isWideType(type) || isWideType(value.type)) return value;
+    if (value.k === "const") return this.widenLiteral(value, type);
+    // A choice of two written values is widened in both arms: it is the value
+    // of either, and neither arm needs a store to become the wide number.
+    if (value.k === "select") {
+      const then = this.wideOperand(value.then, type, line);
+      const otherwise = this.wideOperand(value.otherwise, type, line);
+      // Both arms are written values that widened; a choice with an arm that
+      // did not is left as it is, and the kernel's refusal says why.
+      if (!isWideType(then.type) || !isWideType(otherwise.type)) return value;
+      return { ...value, type, then, otherwise };
+    }
+    return value;
   }
 
   /* ---------------------------------------------------------------------- */

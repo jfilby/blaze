@@ -802,6 +802,9 @@ proc blaze_rt_host_argument*(index: csize_t): cstring {.exportc, cdecl.} =
   let text = if at >= 0 and at < blazeHostArguments.len: blazeHostArguments[at] else: ""
   blaze_rt_string_new(cast[pointer](text.cstring), csize_t(text.len))
 
+proc blaze_rt_fround*(value: float64): float64 {.exportc, cdecl.} =
+  float64(float32(value))
+
 proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
   if text != nil: stdout.write($text)
 

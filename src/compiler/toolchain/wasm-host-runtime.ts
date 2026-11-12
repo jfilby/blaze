@@ -90,6 +90,7 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_object_size",
   "blaze_rt_object_describe",
   "blaze_rt_object_has_field",
+  "blaze_rt_fround",
   "blaze_rt_print_text",
   "blaze_rt_print_error_text",
   "blaze_rt_print_text_n",
@@ -847,6 +848,14 @@ export function blaze_rt_object_has_field(object, field) {
 export function blaze_rt_object_size(pointer) {
   if (pointer === 0) return 0n;
   return BigInt(readHeader(pointer).length);
+}
+`,
+  },
+  {
+    service: "blaze_rt_fround",
+    source: `
+export function blaze_rt_fround(value) {
+  return Math.fround(value);
 }
 `,
   },

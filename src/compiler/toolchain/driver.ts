@@ -1026,6 +1026,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `program_round(${argument(0)})`;
       case "Math.trunc":
         return `trunc(${argument(0)})`;
+      case "Math.fround":
+        return `((double)(float)(${argument(0)}))`;
       case "Math.random":
         return `${RUNTIME_NAME}_random()`;
       // The pending failure of a call, which a `try` block reads: the failure

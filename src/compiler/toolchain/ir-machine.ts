@@ -10728,6 +10728,11 @@ class Machine {
       this.runtime("_argv");
       return;
     }
+    if (call.callee === "Math.fround" && call.args[0] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      this.runtime("_fround");
+      return;
+    }
     if (call.callee === "Math.floor") {
       this.at(argument, NUMBER);
       this.roundDown();
