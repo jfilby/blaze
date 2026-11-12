@@ -1731,7 +1731,7 @@ function releaseProblems(prefix: string, releases: string[], declared: string[])
   const problems: string[] = [];
   const position = new Map(declared.map((name, index) => [name, index]));
   const seen = new Set<string>();
-  let previous = Number.POSITIVE_INFINITY;
+  let previous = 1 / 0;
 
   for (const release of releases) {
     const at = position.get(release);

@@ -294,8 +294,16 @@ function builtinExpression(name: string, args: string[]): string {
       return `fabs(${args[0]})`;
     case "Math.sqrt":
       return `sqrt(${args[0]})`;
+    case "Math.log10":
+      return `log10(${args[0]})`;
     case "Math.log":
       return `log(${args[0]})`;
+    case "isNaN":
+      return `({ double blaze_nan = ${args[0]}; blaze_nan != blaze_nan ? 1 : 0; })`;
+    case "parseFloat":
+      return `strtod(${args[0]}, NULL)`;
+    case "Math.imul":
+      return `((double)(int32_t)((uint32_t)(int32_t)(${args[0]}) * (uint32_t)(int32_t)(${args[1]})))`;
     case "Math.pow":
       return `pow(${args[0]}, ${args[1]})`;
     case "Math.sign":

@@ -34,7 +34,7 @@ const ENTRY_ALIGNMENT = 8;
 const ANY = 16;
 
 /** The whole register set is 32 bytes, not the one cell a push moves. */
-const WHOLE_SET = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]);
+
 
 /**
  * The mnemonics that move rsp by one cell. They are named one by one rather
@@ -42,36 +42,7 @@ const WHOLE_SET = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad
  * way and is a register operation: read as a pop it moved rsp that no
  * instruction did, and a candidate that was aligned was turned away.
  */
-const CELL_SET = new Set([
-  "push",
-  "pop",
-  // AT&T writes the operand size into the mnemonic, so `pushq %rbp` is as
-  // ordinary as `push %rbp` and both are the same instruction.
-  "pushb",
-  "pushw",
-  "pushl",
-  "pushq",
-  "pushbq",
-  "pushwq",
-  "pushlq",
-  "pushqq",
-  "popb",
-  "popw",
-  "popl",
-  "popq",
-  "popbq",
-  "popwq",
-  "poplq",
-  "popqq",
-  "pushf",
-  "pushfw",
-  "pushfd",
-  "pushfq",
-  "popf",
-  "popfw",
-  "popfd",
-  "popfq",
-]);
+
 /**
  * The registers an instruction moves rsp by writing to. A write to `esp` or
  * `sp` zero-extends into rsp, so `subl $8, %esp` moves it exactly as
@@ -129,19 +100,48 @@ function immediateValue(operand: string): number {
         ? Number.parseInt(digits.slice(1), 8)
         : /^[0-9]+$/.test(digits)
           ? Number.parseInt(digits, 10)
-          : Number.NaN;
+          : 0 / 0;
   return sign === 0 ? magnitude : sign * magnitude;
 }
 
 /** What an instruction leaves the offset at, given what it started at. */
 function transfer(mnemonic: string, operands: string[], alignment: Alignment): Alignment {
-  if (WHOLE_SET.has(mnemonic) || CELL_SET.has(mnemonic)) {
+  if (new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]).has(mnemonic) || new Set([
+  "push",
+  "pop",
+  // AT&T writes the operand size into the mnemonic, so `pushq %rbp` is as
+  // ordinary as `push %rbp` and both are the same instruction.
+  "pushb",
+  "pushw",
+  "pushl",
+  "pushq",
+  "pushbq",
+  "pushwq",
+  "pushlq",
+  "pushqq",
+  "popb",
+  "popw",
+  "popl",
+  "popq",
+  "popbq",
+  "popwq",
+  "poplq",
+  "popqq",
+  "pushf",
+  "pushfw",
+  "pushfd",
+  "pushfq",
+  "popf",
+  "popfw",
+  "popfd",
+  "popfq",
+]).has(mnemonic)) {
     // A push and a pop both move rsp by one cell, and one cell is half a
     // boundary, so either one leaves an aligned offset where it found a
     // misaligned one and the other way about. Pushing the whole register set
     // moves eight cells, which is a whole number of boundaries and so leaves
     // the offset where it was.
-    const cell = WHOLE_SET.has(mnemonic) ? 32 : 8;
+    const cell = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]).has(mnemonic) ? 32 : 8;
     return alignment === null ? null : (alignment + cell) % ANY;
   }
   // `leave` restores rsp from a frame the walk never read, and `enter` builds

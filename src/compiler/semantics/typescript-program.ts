@@ -189,9 +189,7 @@ const VIEW_BYTES: Record<string, number> = {
   f64: 8,
 };
 
-const VIEWS_LIST = Object.keys(VIEWS).join(", ");
 
-const MATH = MATH_NAMES.join(", ");
 
 /** What an assignment may be written with. */
 const ASSIGN_OPS: readonly ProgramAssignOp[] = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=", "**="];
@@ -2361,7 +2359,7 @@ class ProgramParser {
     const open = this.peek();
     this.next();
     const digits = this.peek();
-    const count = digits.kind === "number" ? Number(digits.text) : Number.NaN;
+    const count = digits.kind === "number" ? Number(digits.text) : 0 / 0;
     if (digits.kind !== "number" || !/^\d+$/.test(digits.text) || count < 1 || count > 100) {
       this.fail("the significant digits a number is written at are written out, as in x.toPrecision(17)", digits);
       this.skipArguments();
@@ -2798,7 +2796,7 @@ class ProgramParser {
     this.next();
     const builtin = this.identifier("the function of Math");
     if (!MATH_NAMES.includes(`Math.${builtin}`)) {
-      this.fail(`Math.${builtin} is not a function of a program; call one of ${MATH}`, token);
+      this.fail(`Math.${builtin} is not a function of a program; call one of ${MATH_NAMES.join(", ")}`, token);
       this.skipArguments();
       return { k: "name", name: "Math" };
     }
@@ -2983,7 +2981,7 @@ class ProgramParser {
       return this.nothing();
     }
     if (!(view in VIEWS)) {
-      this.fail(`a program cannot allocate ${view}; supported: ${VIEWS_LIST}`);
+      this.fail(`a program cannot allocate ${view}; supported: ${Object.keys(VIEWS).join(", ")}`);
       this.skipArguments();
       return this.nothing();
     }

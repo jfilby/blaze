@@ -494,7 +494,7 @@ export interface PyModule {
  * Triton source declares. Every other import is refused, because a module of
  * the standard library is a file the compiler does not read.
  */
-export const KNOWN_MODULES: ReadonlySet<string> = new Set(["math", "sys", "asyncio", "triton", "triton.language", "__future__"]);
+export const KNOWN_MODULES: readonly string[] = ["math", "sys", "asyncio", "triton", "triton.language", "__future__"];
 
 /**
  * The keywords the subset does not read, and what a source writes instead of
@@ -999,7 +999,7 @@ class PythonParser {
         return;
       }
     }
-    if (!KNOWN_MODULES.has(path)) {
+    if (!KNOWN_MODULES.includes(path)) {
       this.report(
         `"${path}" is not a module the compiler knows`,
         `line ${module.line}: the compiler reads the modules of the project, as in \`from helpers import dot\`, and the modules of the standard library it knows are ${[...KNOWN_MODULES].join(", ")}`,
@@ -2671,7 +2671,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
   for (const fn of module.functions) {
     defaults.set(fn.name, fn.params.map((param) => param.default as PyValue));
   }
-  const fillValue = (value: PyValue): PyValue => {
+  function fillValue(value: PyValue): PyValue {
     if (value.k === "call") {
       const ds = defaults.get(value.name);
       if (ds !== undefined && value.args.length < ds.length) {
@@ -2682,7 +2682,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
         }
         value.args = padded;
       }
-      value.args = value.args.map(fillValue);
+      value.args = value.args.map((inner) => fillValue(inner));
       if (value.grid !== undefined) value.grid = fillValue(value.grid);
       return value;
     }
@@ -2711,10 +2711,10 @@ function fillDefaultArguments(module: PyModule): PyModule {
         if (value.step !== null) value.step = fillValue(value.step);
         break;
       case "list":
-        value.items = value.items.map(fillValue);
+        value.items = value.items.map((inner) => fillValue(inner));
         break;
       case "set":
-        value.items = value.items.map(fillValue);
+        value.items = value.items.map((inner) => fillValue(inner));
         break;
       case "membership":
         value.value = fillValue(value.value);
@@ -2736,8 +2736,8 @@ function fillDefaultArguments(module: PyModule): PyModule {
         break;
     }
     return value;
-  };
-  const fillStatement = (stmt: PyStatement): PyStatement => {
+  }
+  function fillStatement(stmt: PyStatement): PyStatement {
     switch (stmt.k) {
       case "declare":
         stmt.value = fillValue(stmt.value);
@@ -2764,41 +2764,41 @@ function fillDefaultArguments(module: PyModule): PyModule {
         break;
       case "if":
         stmt.condition = fillValue(stmt.condition);
-        stmt.then = stmt.then.map(fillStatement);
-        stmt.otherwise = stmt.otherwise.map(fillStatement);
+        stmt.then = stmt.then.map((inner) => fillStatement(inner));
+        stmt.otherwise = stmt.otherwise.map((inner) => fillStatement(inner));
         break;
       case "while":
         stmt.condition = fillValue(stmt.condition);
-        stmt.body = stmt.body.map(fillStatement);
+        stmt.body = stmt.body.map((inner) => fillStatement(inner));
         break;
       case "for":
         stmt.from = fillValue(stmt.from);
         stmt.to = fillValue(stmt.to);
         if (stmt.step !== null) stmt.step = fillValue(stmt.step);
-        stmt.body = stmt.body.map(fillStatement);
+        stmt.body = stmt.body.map((inner) => fillStatement(inner));
         break;
       case "print":
-        stmt.values = stmt.values.map(fillValue);
+        stmt.values = stmt.values.map((inner) => fillValue(inner));
         break;
       case "call":
         stmt.value = fillValue(stmt.value);
         break;
       case "function":
-        stmt.body = stmt.body.map(fillStatement);
+        stmt.body = stmt.body.map((inner) => fillStatement(inner));
         break;
       case "try":
-        stmt.body = stmt.body.map(fillStatement);
-        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map(fillStatement);
-        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map(fillStatement);
+        stmt.body = stmt.body.map((inner) => fillStatement(inner));
+        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map((inner) => fillStatement(inner));
+        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map((inner) => fillStatement(inner));
         break;
     }
     return stmt;
-  };
+  }
   const filledFunctions = module.functions.map((fn) => ({
     ...fn,
-    body: fn.body.map(fillStatement),
+    body: fn.body.map((inner) => fillStatement(inner)),
   }));
-  const filledBody = module.body.map(fillStatement);
+  const filledBody = module.body.map((inner) => fillStatement(inner));
   return { ...module, functions: filledFunctions, body: filledBody };
 }
 
@@ -2854,22 +2854,24 @@ function expandWalrus(module: PyModule): PyModule {
         return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
       }
       case "list": {
-        const pres: PyStatement[] = [];
-        const items = value.items.map((item) => {
-          const r = expandExpr(item, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
-        return { value: { ...value, items }, pre: pres };
+        const pres9Parts = value.items.map((item) => expandExpr(item, scope));
+        const items = pres9Parts.map((part) => part.value);
+        const pres9: PyStatement[] = [];
+        for (let at = 0; at < pres9Parts.length; at += 1) {
+          const part = pres9Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres9.push(part.pre[k] as PyStatement);
+        }
+        return { value: { ...value, items }, pre: pres9 };
       }
       case "set": {
-        const pres: PyStatement[] = [];
-        const items = value.items.map((item) => {
-          const r = expandExpr(item, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
-        return { value: { ...value, items }, pre: pres };
+        const pres8Parts = value.items.map((item) => expandExpr(item, scope));
+        const items = pres8Parts.map((part) => part.value);
+        const pres8: PyStatement[] = [];
+        for (let at = 0; at < pres8Parts.length; at += 1) {
+          const part = pres8Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres8.push(part.pre[k] as PyStatement);
+        }
+        return { value: { ...value, items }, pre: pres8 };
       }
       case "membership": {
         const V = expandExpr(value.value, scope);
@@ -2883,27 +2885,29 @@ function expandWalrus(module: PyModule): PyModule {
         return { value: { ...value, element: E.value, iterable: I.value, condition: C.value }, pre: [...E.pre, ...I.pre, ...C.pre] };
       }
       case "dict": {
-        const pres: PyStatement[] = [];
-        const entries = value.entries.map((entry) => {
-          const r = expandExpr(entry.value, scope);
-          pres.push(...r.pre);
-          return { ...entry, value: r.value };
-        });
-        return { value: { ...value, entries }, pre: pres };
+        const pres7Parts = value.entries.map((entry) => expandExpr(entry.value, scope));
+        const entries = value.entries.map((entry, at) => ({ ...entry, value: (pres7Parts[at] as Expanded).value }));
+        const pres7: PyStatement[] = [];
+        for (let at = 0; at < pres7Parts.length; at += 1) {
+          const part = pres7Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres7.push(part.pre[k] as PyStatement);
+        }
+        return { value: { ...value, entries }, pre: pres7 };
       }
       case "field": {
         const B = expandExpr(value.base, scope);
         return { value: { ...value, base: B.value }, pre: B.pre };
       }
       case "call": {
-        const pres: PyStatement[] = [];
-        const args = value.args.map((arg) => {
-          const r = expandExpr(arg, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
+        const pres6Parts = value.args.map((arg) => expandExpr(arg, scope));
+        const args = pres6Parts.map((part) => part.value);
+        const pres6: PyStatement[] = [];
+        for (let at = 0; at < pres6Parts.length; at += 1) {
+          const part = pres6Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres6.push(part.pre[k] as PyStatement);
+        }
         const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
-        return { value: { ...value, args, grid }, pre: pres };
+        return { value: { ...value, args, grid }, pre: pres6 };
       }
       case "lambda":
         // Walrus inside a lambda is not lifted (a lambda has no statement
@@ -2991,13 +2995,14 @@ function expandWalrus(module: PyModule): PyModule {
         return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
       }
       case "print": {
-        const pres: PyStatement[] = [];
-        const values = stmt.values.map((v) => {
-          const r = expandExpr(v, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
-        return [...pres, { ...stmt, values }];
+        const pres5Parts = stmt.values.map((v) => expandExpr(v, scope));
+        const values = pres5Parts.map((part) => part.value);
+        const pres5: PyStatement[] = [];
+        for (let at = 0; at < pres5Parts.length; at += 1) {
+          const part = pres5Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres5.push(part.pre[k] as PyStatement);
+        }
+        return [...pres5, { ...stmt, values }];
       }
       case "call": {
         const r = expandExpr(stmt.value, scope);
@@ -3130,13 +3135,14 @@ function expandComprehensions(module: PyModule): PyModule {
         return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
       }
       case "list": {
-        const pres: PyStatement[] = [];
-        const items = value.items.map((item) => {
-          const r = expandExpr(item, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
-        return { value: { ...value, items }, pre: pres };
+        const pres4Parts = value.items.map((item) => expandExpr(item, scope));
+        const items = pres4Parts.map((part) => part.value);
+        const pres4: PyStatement[] = [];
+        for (let at = 0; at < pres4Parts.length; at += 1) {
+          const part = pres4Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres4.push(part.pre[k] as PyStatement);
+        }
+        return { value: { ...value, items }, pre: pres4 };
       }
       case "membership": {
         const V = expandExpr(value.value, scope);
@@ -3144,27 +3150,29 @@ function expandComprehensions(module: PyModule): PyModule {
         return { value: { ...value, value: V.value, container: C.value }, pre: [...V.pre, ...C.pre] };
       }
       case "dict": {
-        const pres: PyStatement[] = [];
-        const entries = value.entries.map((entry) => {
-          const r = expandExpr(entry.value, scope);
-          pres.push(...r.pre);
-          return { ...entry, value: r.value };
-        });
-        return { value: { ...value, entries }, pre: pres };
+        const pres3Parts = value.entries.map((entry) => expandExpr(entry.value, scope));
+        const entries = value.entries.map((entry, at) => ({ ...entry, value: (pres3Parts[at] as Expanded).value }));
+        const pres3: PyStatement[] = [];
+        for (let at = 0; at < pres3Parts.length; at += 1) {
+          const part = pres3Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres3.push(part.pre[k] as PyStatement);
+        }
+        return { value: { ...value, entries }, pre: pres3 };
       }
       case "field": {
         const B = expandExpr(value.base, scope);
         return { value: { ...value, base: B.value }, pre: B.pre };
       }
       case "call": {
-        const pres: PyStatement[] = [];
-        const args = value.args.map((arg) => {
-          const r = expandExpr(arg, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
+        const pres2Parts = value.args.map((arg) => expandExpr(arg, scope));
+        const args = pres2Parts.map((part) => part.value);
+        const pres2: PyStatement[] = [];
+        for (let at = 0; at < pres2Parts.length; at += 1) {
+          const part = pres2Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres2.push(part.pre[k] as PyStatement);
+        }
         const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
-        return { value: { ...value, args, grid }, pre: pres };
+        return { value: { ...value, args, grid }, pre: pres2 };
       }
       case "walrus": {
         const inner = expandExpr(value.value, scope);
@@ -3252,13 +3260,14 @@ function expandComprehensions(module: PyModule): PyModule {
         return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
       }
       case "print": {
-        const pres: PyStatement[] = [];
-        const values = stmt.values.map((v) => {
-          const r = expandExpr(v, scope);
-          pres.push(...r.pre);
-          return r.value;
-        });
-        return [...pres, { ...stmt, values }];
+        const pres1Parts = stmt.values.map((v) => expandExpr(v, scope));
+        const values = pres1Parts.map((part) => part.value);
+        const pres1: PyStatement[] = [];
+        for (let at = 0; at < pres1Parts.length; at += 1) {
+          const part = pres1Parts[at] as Expanded;
+          for (let k = 0; k < part.pre.length; k += 1) pres1.push(part.pre[k] as PyStatement);
+        }
+        return [...pres1, { ...stmt, values }];
       }
       case "call": {
         const r = expandExpr(stmt.value, scope);
@@ -3303,7 +3312,7 @@ function packRestArguments(module: PyModule): PyModule {
     const idx = fn.params.findIndex((p) => p.rest === true);
     if (idx >= 0) restIndex.set(fn.name, idx);
   }
-  const packValue = (value: PyValue): PyValue => {
+  function packValue(value: PyValue): PyValue {
     if (value.k === "call") {
       const idx = restIndex.get(value.name);
       if (idx !== undefined) {
@@ -3316,7 +3325,7 @@ function packRestArguments(module: PyModule): PyModule {
           value.args = [...value.args, { k: "list", items: [] }];
         }
       }
-      value.args = value.args.map(packValue);
+      value.args = value.args.map((inner) => packValue(inner));
       if (value.grid !== undefined) value.grid = packValue(value.grid);
       return value;
     }
@@ -3344,10 +3353,10 @@ function packRestArguments(module: PyModule): PyModule {
         if (value.step !== null) value.step = packValue(value.step);
         break;
       case "list":
-        value.items = value.items.map(packValue);
+        value.items = value.items.map((inner) => packValue(inner));
         break;
       case "set":
-        value.items = value.items.map(packValue);
+        value.items = value.items.map((inner) => packValue(inner));
         break;
       case "membership":
         value.value = packValue(value.value);
@@ -3372,8 +3381,8 @@ function packRestArguments(module: PyModule): PyModule {
         break;
     }
     return value;
-  };
-  const packStmt = (stmt: PyStatement): PyStatement => {
+  }
+  function packStmt(stmt: PyStatement): PyStatement {
     switch (stmt.k) {
       case "declare":
         stmt.value = packValue(stmt.value);
@@ -3400,41 +3409,41 @@ function packRestArguments(module: PyModule): PyModule {
         break;
       case "if":
         stmt.condition = packValue(stmt.condition);
-        stmt.then = stmt.then.map(packStmt);
-        stmt.otherwise = stmt.otherwise.map(packStmt);
+        stmt.then = stmt.then.map((inner) => packStmt(inner));
+        stmt.otherwise = stmt.otherwise.map((inner) => packStmt(inner));
         break;
       case "while":
         stmt.condition = packValue(stmt.condition);
-        stmt.body = stmt.body.map(packStmt);
+        stmt.body = stmt.body.map((inner) => packStmt(inner));
         break;
       case "for":
         stmt.from = packValue(stmt.from);
         stmt.to = packValue(stmt.to);
         if (stmt.step !== null) stmt.step = packValue(stmt.step);
-        stmt.body = stmt.body.map(packStmt);
+        stmt.body = stmt.body.map((inner) => packStmt(inner));
         break;
       case "print":
-        stmt.values = stmt.values.map(packValue);
+        stmt.values = stmt.values.map((inner) => packValue(inner));
         break;
       case "call":
         stmt.value = packValue(stmt.value);
         break;
       case "function":
-        stmt.body = stmt.body.map(packStmt);
+        stmt.body = stmt.body.map((inner) => packStmt(inner));
         break;
       case "try":
-        stmt.body = stmt.body.map(packStmt);
-        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map(packStmt);
-        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map(packStmt);
+        stmt.body = stmt.body.map((inner) => packStmt(inner));
+        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map((inner) => packStmt(inner));
+        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map((inner) => packStmt(inner));
         break;
     }
     return stmt;
-  };
+  }
   const packedFunctions = module.functions.map((fn) => ({
     ...fn,
-    body: fn.body.map(packStmt),
+    body: fn.body.map((inner) => packStmt(inner)),
   }));
-  const packedBody = module.body.map(packStmt);
+  const packedBody = module.body.map((inner) => packStmt(inner));
   return { ...module, functions: packedFunctions, body: packedBody };
 }
 
@@ -3594,7 +3603,7 @@ function dottedName(value: PyValue): string {
  * may be a method call, which is the other reading of `name(args)`.
  */
 function isModulePath(value: PyValue): boolean {
-  if (value.k === "name") return value.name === "tl" || KNOWN_MODULES.has(value.name);
+  if (value.k === "name") return value.name === "tl" || KNOWN_MODULES.includes(value.name);
   if (value.k === "field") return isModulePath(value.base);
   return false;
 }
@@ -4590,12 +4599,12 @@ function usageOf(declaration: PyFunction): {
         return;
       case "if":
         expression(one.condition);
-        one.then.forEach(statement);
-        one.otherwise.forEach(statement);
+        one.then.forEach((inner) => statement(inner));
+        one.otherwise.forEach((inner) => statement(inner));
         return;
       case "while":
         expression(one.condition);
-        one.body.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
         return;
       case "for": {
         expression(one.from);
@@ -4607,15 +4616,15 @@ function usageOf(declaration: PyFunction): {
         const to = contractTextOf(one.to);
         const outer = loops.get(one.variable);
         if (from !== null && to !== null) loops.set(one.variable, { lo: from, hi: to });
-        one.body.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
         if (outer === undefined) loops.delete(one.variable);
         else loops.set(one.variable, outer);
         return;
       }
       case "try":
-        one.body.forEach(statement);
-        if (one.catchBody !== null) one.catchBody.forEach(statement);
-        if (one.finallyBody !== null) one.finallyBody.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
+        if (one.catchBody !== null) one.catchBody.forEach((inner) => statement(inner));
+        if (one.finallyBody !== null) one.finallyBody.forEach((inner) => statement(inner));
         return;
       case "call":
         expression(one.value);
@@ -4628,7 +4637,7 @@ function usageOf(declaration: PyFunction): {
     }
   };
 
-  declaration.body.forEach(statement);
+  declaration.body.forEach((inner) => statement(inner));
   return { allocates, prints, readsArgv, accesses };
 }
 
@@ -4807,7 +4816,7 @@ function promiseSettleName(payload: TypeExpr): string {
  */
 function settledPythonBody(statements: readonly Statement[], payload: TypeExpr): Statement[] {
   const name = promiseSettleName(payload);
-  const settle = (statement: Statement): Statement => {
+  function settle(statement: Statement): Statement {
     switch (statement.kind) {
       case "result": {
         // `return None` settles the promise with nothing, which is the call
@@ -4818,25 +4827,25 @@ function settledPythonBody(statements: readonly Statement[], payload: TypeExpr):
         return { ...statement, value: { k: "call", name, args: [statement.value] } };
       }
       case "if":
-        return { ...statement, then: statement.then.map(settle), otherwise: statement.otherwise.map(settle) };
+        return { ...statement, then: statement.then.map((inner) => settle(inner)), otherwise: statement.otherwise.map((inner) => settle(inner)) };
       case "while":
       case "doWhile":
       case "loop":
       case "forOf":
-        return { ...statement, body: statement.body.map(settle) };
+        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
       case "try":
         return {
           ...statement,
-          body: statement.body.map(settle),
-          catchBody: statement.catchBody === null ? null : statement.catchBody.map(settle),
-          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(settle),
+          body: statement.body.map((inner) => settle(inner)),
+          catchBody: statement.catchBody === null ? null : statement.catchBody.map((inner) => settle(inner)),
+          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map((inner) => settle(inner)),
         };
       default:
         return statement;
     }
-  };
+  }
   return [
-    ...statements.map(settle),
+    ...statements.map((inner) => settle(inner)),
     { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: statements[0]?.line ?? 1 },
   ];
 }

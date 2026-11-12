@@ -78,9 +78,9 @@ function parseScalar(type: ScalarType, text: string): Value {
 /** Reads the textual floats the harness produces, including inf and nan. */
 function parseFloatingText(text: string): number {
   const lowered = text.toLowerCase();
-  if (lowered === "inf" || lowered === "+inf" || lowered === "infinity") return Number.POSITIVE_INFINITY;
-  if (lowered === "-inf" || lowered === "-infinity") return Number.NEGATIVE_INFINITY;
-  if (lowered === "nan" || lowered === "-nan") return Number.NaN;
+  if (lowered === "inf" || lowered === "+inf" || lowered === "infinity") return 1 / 0;
+  if (lowered === "-inf" || lowered === "-infinity") return -1 / 0;
+  if (lowered === "nan" || lowered === "-nan") return 0 / 0;
   const parsed = Number(text);
   if (Number.isNaN(parsed)) {
     throw new CompilerError({

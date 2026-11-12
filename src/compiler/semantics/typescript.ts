@@ -20146,6 +20146,23 @@ class TypeScriptParser {
         if (shape !== undefined) this.expressionShapes.set(call, shape);
         return call;
       }
+      // The three numbers the language names without a declaration. They are
+      // written as the divisions that produce them, so no backend needs a
+      // global for them.
+      if (token.text === "NaN" || token.text === "Infinity") {
+        const zero: Expression = { k: "literal", text: "0" };
+        const one: Expression = { k: "literal", text: "1" };
+        this.expressionTypes.set(zero, NUMBER_RESULT);
+        this.expressionTypes.set(one, NUMBER_RESULT);
+        const value: Expression = {
+          k: "binary",
+          op: "/",
+          left: token.text === "NaN" ? zero : one,
+          right: zero,
+        };
+        this.expressionTypes.set(value, NUMBER_RESULT);
+        return value;
+      }
       // A name an import binds is not a value this read can answer yet: the
       // link is where the getter it is read through arrives.
       if (!this.linked && this.pendingValues.has(token.text)) this.waitForFunction = true;
@@ -23116,8 +23133,8 @@ function usageOf(declaration: TypeScriptFunction): {
       }
       case "if":
         expression(one.condition);
-        one.then.forEach(statement);
-        one.otherwise.forEach(statement);
+        one.then.forEach((inner) => statement(inner));
+        one.otherwise.forEach((inner) => statement(inner));
         return;
       case "loop":
         expression(one.from);
@@ -23141,21 +23158,21 @@ function usageOf(declaration: TypeScriptFunction): {
             ? { lo: one.inclusive ? to : `(${to} + 1)`, hi: `(${from} + 1)` }
             : { lo: from, hi: one.inclusive ? `(${to} + 1)` : to });
         }
-        one.body.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
         if (outer === undefined) loops.delete(one.variable);
         else loops.set(one.variable, outer);
         return;
       case "while":
       case "doWhile":
         expression(one.condition);
-        one.body.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
         return;
       case "forOf":
         // Walking a buffer reads all of it, so the contract says so. The
         // iteration is bounded by the array's own length, so no length is
         // required of the caller: what it states is that the buffer is there.
         if (parameters.has(one.of) && isBuffer(one.of)) access(one.of, "0", `len(${one.of})`);
-        one.body.forEach(statement);
+        one.body.forEach((inner) => statement(inner));
         return;
       case "break":
       case "continue":
@@ -23164,7 +23181,7 @@ function usageOf(declaration: TypeScriptFunction): {
         return;
     }
   };
-  declaration.body.forEach(statement);
+  declaration.body.forEach((inner) => statement(inner));
   return { allocates, prints, readsArgv, accesses };
 }
 
@@ -23753,7 +23770,7 @@ function destructuredBindingsOf(body: readonly Statement[]): Map<string, number>
  * position.
  */
 function inlineDestructured(value: Expression, bindings: ReadonlyMap<string, number>, temp: string): Expression {
-  const walk = (one: Expression): Expression => {
+  function walk(one: Expression): Expression {
     switch (one.k) {
       case "ident":
         if (bindings.has(one.name)) {
@@ -23765,7 +23782,7 @@ function inlineDestructured(value: Expression, bindings: ReadonlyMap<string, num
       case "index":
         return { ...one, base: walk(one.base), index: walk(one.index) };
       case "call":
-        return { ...one, args: one.args.map(walk) };
+        return { ...one, args: one.args.map((inner) => walk(inner)) };
       case "binary":
         return { ...one, left: walk(one.left), right: walk(one.right) };
       case "unary":
@@ -23781,13 +23798,13 @@ function inlineDestructured(value: Expression, bindings: ReadonlyMap<string, num
       case "object":
         return { ...one, fields: one.fields.map((field) => ({ ...field, value: walk(field.value) })) };
       case "buffer":
-        return { ...one, values: one.values.map(walk) };
+        return { ...one, values: one.values.map((inner) => walk(inner)) };
       case "arrow":
         return one;
       default:
         return one;
     }
-  };
+  }
   return walk(value);
 }
 
@@ -23802,7 +23819,7 @@ function substituteEntryPair(
   keyRead: () => Expression,
   valueRead: () => Expression,
 ): Expression | null {
-  const walk = (one: Expression): Expression | null => {
+  function walk(one: Expression): Expression | null {
     switch (one.k) {
       case "index": {
         if (one.base.k === "ident" && one.base.name === temp && one.index.k === "literal") {
@@ -23889,7 +23906,7 @@ function substituteEntryPair(
       default:
         return one;
     }
-  };
+  }
   return walk(value);
 }
 
@@ -23928,7 +23945,7 @@ function writtenListValues(value: Expression): Expression[] | null {
  * the loop is on: the pair a callback writes, read for each entry.
  */
 function substituteParams(value: Expression, params: ReadonlySet<string>, element: () => Expression): Expression {
-  const walk = (one: Expression): Expression => {
+  function walk(one: Expression): Expression {
     switch (one.k) {
       case "ident":
         return params.has(one.name) ? element() : one;
@@ -23937,7 +23954,7 @@ function substituteParams(value: Expression, params: ReadonlySet<string>, elemen
       case "index":
         return { ...one, base: walk(one.base), index: walk(one.index) };
       case "call":
-        return { ...one, args: one.args.map(walk) };
+        return { ...one, args: one.args.map((inner) => walk(inner)) };
       case "binary":
         return { ...one, left: walk(one.left), right: walk(one.right) };
       case "unary":
@@ -23957,13 +23974,13 @@ function substituteParams(value: Expression, params: ReadonlySet<string>, elemen
       case "object":
         return { ...one, fields: one.fields.map((field) => ({ ...field, value: walk(field.value) })) };
       case "buffer":
-        return { ...one, values: one.values.map(walk) };
+        return { ...one, values: one.values.map((inner) => walk(inner)) };
       case "arrow":
         return one;
       default:
         return one;
     }
-  };
+  }
   return walk(value);
 }
 
@@ -24028,7 +24045,7 @@ function promiseResolveName(payload: TypeExpr): string {
  */
 function settledBody(statements: readonly Statement[], payload: TypeExpr): Statement[] {
   const name = promiseResolveName(payload);
-  const settle = (statement: Statement): Statement => {
+  function settle(statement: Statement): Statement {
     switch (statement.kind) {
       case "result":
         // A function that returns nothing settles the promise with nothing,
@@ -24040,29 +24057,29 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
       case "if":
         return {
           ...statement,
-          then: statement.then.map(settle),
-          otherwise: statement.otherwise.map(settle),
+          then: statement.then.map((inner) => settle(inner)),
+          otherwise: statement.otherwise.map((inner) => settle(inner)),
         };
       case "while":
       case "doWhile":
-        return { ...statement, body: statement.body.map(settle) };
+        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
       case "loop":
-        return { ...statement, body: statement.body.map(settle) };
+        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
       case "forOf":
-        return { ...statement, body: statement.body.map(settle) };
+        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
       case "try":
         return {
           ...statement,
-          body: statement.body.map(settle),
-          catchBody: statement.catchBody === null ? null : statement.catchBody.map(settle),
-          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(settle),
+          body: statement.body.map((inner) => settle(inner)),
+          catchBody: statement.catchBody === null ? null : statement.catchBody.map((inner) => settle(inner)),
+          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map((inner) => settle(inner)),
         };
       default:
         return statement;
     }
-  };
+  }
   return [
-    ...statements.map(settle),
+    ...statements.map((inner) => settle(inner)),
     { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: statements[0]?.line ?? 1 },
   ];
 }
