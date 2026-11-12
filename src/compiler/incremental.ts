@@ -245,10 +245,16 @@ export function reusable(
   keys: UnitKeys,
   objectBuilt: boolean,
 ): ReuseLevel | null {
-  if (entry === undefined || entry.reviewKey !== keys.review || entry.selected === "") return null;
-  const outcome = entry.outcomes.find((candidate) => candidate.candidate === entry.selected);
-  if (outcome === undefined || !outcome.valid) return null;
-  return objectBuilt && entry.objectKey === keys.object ? "object" : "assembly";
+  if (entry === undefined) return null;
+  const fields = entry as unknown as Record<string, unknown>;
+  const keyFields = keys as unknown as Record<string, unknown>;
+  const review = String(fields["reviewKey"]);
+  const selected = String(fields["selected"]);
+  if (review !== String(keyFields["review"]) || selected === "") return null;
+  const outcomes = fields["outcomes"] as Record<string, unknown>[];
+  const outcome = outcomes.find((candidate) => String(candidate["candidate"]) === selected);
+  if (outcome === undefined || !(outcome["valid"] as boolean)) return null;
+  return objectBuilt && String(fields["objectKey"]) === String(keyFields["object"]) ? "object" : "assembly";
 }
 
 /**

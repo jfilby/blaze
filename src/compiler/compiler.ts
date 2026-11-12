@@ -47,6 +47,7 @@ import type {
   SemanticBlock,
   SemanticFunction,
   SemanticProgram,
+  SemanticSlot,
   SemanticType,
 } from "./core/semantic-ir.ts";
 import { slotType, statementBlocksOf, statementValues, walkValues } from "./core/semantic-ir.ts";
@@ -130,7 +131,9 @@ import {
   type FunctionContract,
   type ObjectLayout,
   type ProgramContract,
+  type FileContract,
   type GenerationConfig,
+  type OptimizeSpec,
   type OutputKind,
   type SourceInput,
   type SourceModule,
@@ -863,7 +866,13 @@ function resolvedDriver(
   objectKeys: LiteralKeys,
 ): SemanticProgram {
   const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
-  wholeElementArithmetic(driver.bodies, driver.entry, vectorChecked(contractsByName(program.files)));
+  const fields = driver as unknown as Record<string, unknown>;
+  const files = (program as unknown as Record<string, unknown>)["files"] as FileContract[];
+  wholeElementArithmetic(
+    fields["bodies"] as SemanticFunction[],
+    fields["entry"] as SemanticBlock | null,
+    vectorChecked(contractsByName(files)),
+  );
   return driver;
 }
 
@@ -897,10 +906,13 @@ function semanticFunctions(
   // loop over whole numbers is settled here rather than by a per-function pass:
   // it is asked of these bodies, which are the ones every backend is handed.
   if (body !== undefined) {
+    const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
+    const fields = driver as unknown as Record<string, unknown>;
+    const files = (program as unknown as Record<string, unknown>)["files"] as FileContract[];
     wholeElementArithmetic(
       Object.values(resolved),
-      resolveProgram(body, program, objectNames, objectLayouts, objectKeys).entry,
-      vectorChecked(contractsByName(program.files)),
+      fields["entry"] as SemanticBlock | null,
+      vectorChecked(contractsByName(files)),
     );
   }
   // Every body is resolved before any of them is checked, because a function is
@@ -908,10 +920,12 @@ function semanticFunctions(
   // the functions it calls write, and that is a question about the program.
   const callees = new Map(Object.entries(resolved));
   for (const file of program.files) {
-    for (const contract of Object.values(file.functions)) {
+    const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
+    for (const contract of Object.values(declared)) {
       // A function is checked before it is shown to anything, so a function
       // that is not one a backend may lower never reaches a model.
-      validateSemanticFunction(resolved[contract.function.symbol], contract, callees);
+      const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
+      validateSemanticFunction(resolved[String(fn["symbol"])], contract, callees);
     }
   }
   return resolved;
@@ -928,9 +942,19 @@ interface UnitGeneration {
  * exports, because every one of them is something the program may call; a
  * library entry compiles the one function the project named.
  */
+/** The contract a compilation unit holds, as the record its layout stores. */
+function unitContract(unit: CompilationUnit): Record<string, unknown> {
+  return (unit as unknown as Record<string, unknown>)["contract"] as Record<string, unknown>;
+}
+
+/** The function a contract describes, read by key. */
+function contractFunction(contract: Record<string, unknown>): Record<string, unknown> {
+  return contract["function"] as Record<string, unknown>;
+}
+
 /** The key a function's artifacts are held under: its symbol, which is unique. */
 function unitKey(unit: CompilationUnit): string {
-  return unit.contract.function.symbol;
+  return String(contractFunction(unitContract(unit))["symbol"]);
 }
 
 /**
@@ -940,18 +964,25 @@ function unitKey(unit: CompilationUnit): string {
  * the link's, not the source's.
  */
 function unitNameKey(unit: CompilationUnit, units: readonly CompilationUnit[]): string {
-  const name = unit.contract.function.name;
+  const name = String(contractFunction(unitContract(unit))["name"]);
   let count = 0;
-  for (const other of units) if (other.contract.function.name === name) count += 1;
-  return count > 1 ? `${unit.file}:${name}` : name;
+  for (const other of units) {
+    if (String(contractFunction(unitContract(other))["name"]) === name) count += 1;
+  }
+  const file = (unit as unknown as Record<string, unknown>)["file"] as string;
+  return count > 1 ? `${file}:${name}` : name;
 }
 
 function compilationUnits(program: ProgramContract, isProgram: boolean): CompilationUnit[] {
   const units: CompilationUnit[] = [];
   for (const file of program.files) {
-    for (const [name, contract] of Object.entries(file.functions)) {
-      if (!isProgram && !(program.entry.file === file.path && program.entry.function === name)) continue;
-      units.push({ file: file.path, contract, parsed: parseContract(contract) });
+    const fields = file as unknown as Record<string, unknown>;
+    const declared = fields["functions"] as Record<string, FunctionContract>;
+    const filePath = fields["path"] as string;
+    const entry = (program as unknown as Record<string, unknown>)["entry"] as Record<string, unknown>;
+    for (const [name, contract] of Object.entries(declared)) {
+      if (!isProgram && !(String(entry["file"]) === String(filePath) && String(entry["function"]) === name)) continue;
+      units.push({ file: String(filePath), contract, parsed: parseContract(contract) });
     }
   }
   return units;
@@ -975,18 +1006,24 @@ async function programFunctions(
   const functions: ModuleFunction[] = [];
   const known = new Set<string>();
   for (const entry of units) {
-    const selected = entry.result.selected;
+    const fields = entry as unknown as Record<string, unknown>;
+    const result = fields["result"] as Record<string, unknown>;
+    const selected = result["selected"];
     if (selected === null || selected === undefined) continue;
-    const name = unitKey(entry.unit);
-    const text = await readFile(join(join(base, name), `${selected}.ir`), "utf8");
+    const unit = fields["unit"] as CompilationUnit;
+    const name = unitKey(unit);
+    const text = await readFile(join(join(base, name), `${String(selected)}.ir`), "utf8");
     const fn = parseSemanticFunction(text, program);
-    functions.push({ fn, contract: entry.unit.contract });
-    known.add(fn.symbol);
+    const contract = (unit as unknown as Record<string, unknown>)["contract"] as FunctionContract;
+    functions.push({ fn, contract });
+    known.add(String((fn as unknown as Record<string, unknown>)["symbol"]));
   }
-  for (const body of driver.bodies) {
-    if (known.has(body.symbol)) continue;
+  const bodies = (driver as unknown as Record<string, unknown>)["bodies"] as SemanticFunction[];
+  for (const body of bodies) {
+    const symbol = String((body as unknown as Record<string, unknown>)["symbol"]);
+    if (known.has(symbol)) continue;
     functions.push({ fn: body });
-    known.add(body.symbol);
+    known.add(symbol);
   }
   return functions;
 }
@@ -1014,16 +1051,21 @@ function machineRefusalOf(
   target: TargetSpec,
 ): { function: string; reason: string; detail: string | undefined } | null {  const callees = new Map(Object.entries(semantics));
   for (const unit of units) {
-    const name = unit.contract.function.name;
-    const fn = semantics[unit.contract.function.symbol];
+    const contract = unitContract(unit) as unknown as FunctionContract;
+    const fnInfo = contractFunction(unitContract(unit));
+    const name = String(fnInfo["name"]);
+    const fn = semantics[String(fnInfo["symbol"])];
     if (fn === undefined) continue;
     const refusal = machineRefusal({
       fn: optimizeSemanticFunction(structuredClone(fn), callees),
-      contract: unit.contract,
-      callable: callableSymbols(unit.contract, contracts),
+      contract,
+      callable: callableSymbols(contract, contracts),
       target,
     });
-    if (refusal !== null) return { function: name, reason: refusal.reason, detail: refusal.detail };
+    if (refusal !== null) {
+      const fields = refusal as unknown as Record<string, unknown>;
+      return { function: name, reason: String(fields["reason"]), detail: fields["detail"] as string | undefined };
+    }
   }
   return null;
 }
@@ -1071,12 +1113,13 @@ interface ProgramLowering {
  * sides of the boundary, so neither crosses.
  */
 function crossesBackends(type: SemanticType): boolean {
+  const kind = String((type as unknown as Record<string, unknown>)["kind"]);
   return (
-    type.kind === "primitive" ||
-    type.kind === "ptr" ||
-    type.kind === "slice" ||
-    type.kind === "array" ||
-    type.kind === "void"
+    kind === "primitive" ||
+    kind === "ptr" ||
+    kind === "slice" ||
+    kind === "array" ||
+    kind === "void"
   );
 }
 
@@ -1093,42 +1136,58 @@ export function programLoweringOf(
   covered: ReadonlySet<string>,
   target: TargetSpec,
 ): ProgramLowering {
+  const fields = driver as unknown as Record<string, unknown>;
+  const bodies = fields["bodies"] as SemanticFunction[];
+  const signatures = fields["functions"] as SemanticFunction[];
   const callable = new Set<string>([
-    ...driver.bodies.map((body) => body.symbol),
-    ...driver.functions.map((signature) => signature.symbol),
+    ...bodies.map((body) => String((body as unknown as Record<string, unknown>)["symbol"])),
+    ...signatures.map((signature) => String((signature as unknown as Record<string, unknown>)["symbol"])),
   ]);
   // A body a contracted function covers is compiled as that function's own
   // object, so the backend was asked about it already.
   const lowered = new Set<string>(
-    driver.bodies.filter((body) => !covered.has(body.name)).map((body) => body.symbol),
+    bodies
+      .filter((body) => !covered.has(String((body as unknown as Record<string, unknown>)["name"])))
+      .map((body) => String((body as unknown as Record<string, unknown>)["symbol"])),
   );
   const notes: string[] = [];
-  for (const body of driver.bodies) {
-    if (!lowered.has(body.symbol)) continue;
+  for (const body of bodies) {
+    const symbol = String((body as unknown as Record<string, unknown>)["symbol"]);
+    if (!lowered.has(symbol)) continue;
     const refusal = machineRefusal({ fn: body, callable, target });
     if (refusal !== null) {
-      lowered.delete(body.symbol);
+      const refusalFields = refusal as unknown as Record<string, unknown>;
+      const reason = String(refusalFields["reason"]);
+      const detail = refusalFields["detail"] as string | undefined;
+      lowered.delete(symbol);
       notes.push(
-        `the machine backend refused to lower ${body.name} (${refusal.reason}); the driver keeps its C`,
+        `the machine backend refused to lower ${String((body as unknown as Record<string, unknown>)["name"])} (${reason}); the driver keeps its C`,
       );
-      if (refusal.detail !== undefined && refusal.detail.trim() !== "") notes.push(refusal.detail.trim());
+      if (detail !== undefined && detail.trim() !== "") notes.push(detail.trim());
     }
-  }  // A call between one side and the other is the boundary, and it decides both
+  }
+  // A call between one side and the other is the boundary, and it decides both
   // sides together: every body that calls across an incompatible edge is
   // lowered by the same backend as the callee is.
   let moved = true;
   while (moved) {
     moved = false;
     for (const edge of callsWithin(driver)) {
-      if (lowered.has(edge.caller) === lowered.has(edge.callee)) continue;
-      const callee = driver.bodies.find((body) => body.symbol === edge.callee);
-      if (callee === undefined) continue;
-      const incompatible = !crossesBackends(callee.returns) || callee.params.some((param) => !crossesBackends(slotType(param)));
+      const edgeFields = edge as unknown as Record<string, unknown>;
+      const caller = String(edgeFields["caller"]);
+      const callee = String(edgeFields["callee"]);
+      if (lowered.has(caller) === lowered.has(callee)) continue;
+      const found = bodies.find((body) => String((body as unknown as Record<string, unknown>)["symbol"]) === callee);
+      if (found === undefined) continue;
+      const foundFields = found as unknown as Record<string, unknown>;
+      const returns = foundFields["returns"] as SemanticType;
+      const params = foundFields["params"] as SemanticSlot[];
+      const incompatible = !crossesBackends(returns) || params.some((param) => !crossesBackends(slotType(param)));
       if (!incompatible) continue;
-      const dropped = lowered.has(edge.caller) ? edge.caller : edge.callee;
+      const dropped = lowered.has(caller) ? caller : callee;
       if (lowered.delete(dropped)) {
         moved = true;
-        const partner = dropped === edge.caller ? edge.callee : edge.caller;
+        const partner = dropped === caller ? callee : caller;
         notes.push(
           `the machine backend left ${dropped} in the driver: a call it shares with ${partner} hands over what only one convention carries`,
         );
@@ -1141,8 +1200,11 @@ export function programLoweringOf(
   // compiled as objects of their own and may hand the driver a callback.
   const visible = new Set<string>(
     callsWithin(driver)
-      .filter((edge) => lowered.has(edge.caller) && !lowered.has(edge.callee))
-      .map((edge) => edge.callee),
+      .filter((edge) => {
+        const edgeFields = edge as unknown as Record<string, unknown>;
+        return lowered.has(String(edgeFields["caller"])) && !lowered.has(String(edgeFields["callee"]));
+      })
+      .map((edge) => String((edge as unknown as Record<string, unknown>)["callee"])),
   );
   return { lowered, visible, notes, callable };
 }
@@ -1153,10 +1215,16 @@ export function programLoweringOf(
  */
 function callsWithin(program: SemanticProgram): { caller: string; callee: string }[] {
   const edges: { caller: string; callee: string }[] = [];
-  for (const body of program.bodies) {
-    for (const callee of directCalleesOf(body.entry)) edges.push({ caller: body.symbol, callee });
+  const fields = program as unknown as Record<string, unknown>;
+  const bodies = fields["bodies"] as SemanticFunction[];
+  for (const body of bodies) {
+    const bodyFields = body as unknown as Record<string, unknown>;
+    const entry = bodyFields["entry"] as SemanticBlock;
+    const symbol = String(bodyFields["symbol"]);
+    for (const callee of directCalleesOf(entry)) edges.push({ caller: symbol, callee });
   }
-  for (const callee of directCalleesOf(program.entry)) edges.push({ caller: "", callee });
+  const entry = fields["entry"] as SemanticBlock;
+  for (const callee of directCalleesOf(entry)) edges.push({ caller: "", callee });
   return edges;
 }
 
@@ -1247,7 +1315,9 @@ function callsOutOfProgram(
   callable: ReadonlySet<string>,
 ): boolean {
   try {
-    return parseSemanticFunction(text, program).calls.some((edge) => callable.has(edge.callee));
+    const fn = parseSemanticFunction(text, program);
+    const calls = (fn as unknown as Record<string, unknown>)["calls"] as { callee: string }[];
+    return calls.some((edge) => callable.has(String((edge as unknown as Record<string, unknown>)["callee"])));
   } catch {
     return true;
   }
@@ -1260,13 +1330,18 @@ function callsOutOfProgram(
  * rather than ask a model for anything.
  */
 function unitReuse(request: UnitReuseRequest): UnitReuse {
-  const { entry, keys, required } = request;
-  if (entry === undefined || entry.reviewKey !== keys.review) {
+  const requestFields = request as unknown as Record<string, unknown>;
+  const entry = requestFields["entry"] as Record<string, unknown> | undefined;
+  const keys = requestFields["keys"] as Record<string, unknown>;
+  const required = requestFields["required"] as boolean;
+  const functionName = String(requestFields["functionName"]);
+  const id = String(requestFields["id"]);
+  if (entry === undefined || String(entry["reviewKey"]) !== String(keys["review"])) {
     if (!required) return { level: null, entry: undefined, missing: [] };
     throw new CompilerError("StorageError", "reuse", entry === undefined
-          ? `no stored implementation to reuse for ${request.functionName}`
-          : `the stored implementation of ${request.functionName} was reviewed from different inputs`, entry === undefined
-          ? `nothing is stored for ${request.id}; run blaze build without --reuse to build it`
+          ? `no stored implementation to reuse for ${functionName}`
+          : `the stored implementation of ${functionName} was reviewed from different inputs`, entry === undefined
+          ? `nothing is stored for ${id}; run blaze build without --reuse to build it`
           : "its contract, the functions it is linked against, the target, the options, the model or the compiler's own review of a function changed; run blaze build without --reuse to build it again", "", "", "");
   }
   // The stored candidate's own IR decides which files it produced: one that
@@ -1275,16 +1350,23 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
   // every such function a cache miss for the life of the project. An entry a
   // build cannot read is treated as one that links on its own, so a corrupt
   // record costs the files that are genuinely there and is rebuilt otherwise.
-  const stored = entry.candidates.find((candidate) => candidate.id === entry.selected);
+  const selected = String(entry["selected"]);
+  const candidates = entry["candidates"] as Record<string, unknown>[];
+  const stored = candidates.find((candidate) => String(candidate["id"]) === selected);
+  const callable = requestFields["callable"] as ReadonlySet<string>;
   const missing = reusableFiles(
-    request.workspace,
-    entry.selected,
-    request.output,
-    request.lowering,
-    request.linksObjects,
-    stored === undefined || !callsOutOfProgram(stored.text, request.program, request.callable),
+    requestFields["workspace"] as CodegenWorkspace,
+    selected,
+    requestFields["output"] as OutputKind,
+    requestFields["lowering"] as BackendKind,
+    requestFields["linksObjects"] as boolean,
+    stored === undefined || !callsOutOfProgram(String(stored["text"]), requestFields["program"] as ProgramContract, callable),
   ).filter((file) => !existsSync(file));
-  return { level: reusable(entry, keys, missing.length === 0), entry, missing };
+  return {
+    level: reusable(entry as unknown as IncrementalEntry | undefined, keys as unknown as UnitKeys, missing.length === 0),
+    entry: entry as unknown as IncrementalEntry | undefined,
+    missing,
+  };
 }
 
 
@@ -1299,13 +1381,19 @@ async function programSource(
   body: ProgramBody,
   language: string,
 ): Promise<{ path: string }> {
-  if (body.file !== INLINE_MODULE) return { path: resolve(project.directory, body.file) };
+  const bodyFields = body as unknown as Record<string, unknown>;
+  const projectFields = project as unknown as Record<string, unknown>;
+  const file = String(bodyFields["file"]);
+  if (file !== INLINE_MODULE) {
+    return { path: resolve(String(projectFields["directory"]), file) };
+  }
   // The source is written under the name its own toolchain runs it by: a
   // Python source is run by python3, which reads a file of any name, and the
   // name is what says what the source is.
   const extension = language.toLowerCase() === "python" ? "py" : "ts";
   const path = `${base}/${id}.program.${extension}`;
-  await writeFile(path, project.entry.source, "utf8");
+  const entry = projectFields["entry"] as Record<string, unknown>;
+  await writeFile(path, String(entry["source"]), "utf8");
   return { path };
 }
 
@@ -1314,12 +1402,18 @@ async function programSource(
  * line the two outputs part on, or how the program stopped before they could.
  */
 function describeProgramFailure(mismatch: ProgramMismatch | undefined): string {
-  if (mismatch?.failure !== undefined) {
+  const fields = mismatch as unknown as Record<string, unknown> | undefined;
+  const failure = fields === undefined ? undefined : fields["failure"];
+  if (fields !== undefined && failure !== undefined) {
+    const actual = String(fields["actualOutput"]);
     const printed =
-      mismatch.actualOutput === "" ? "printed nothing" : `printed ${mismatch.actualOutput.split("\n").length} line(s) and then stopped`;
-    return `${mismatch.failure}: it ${printed}, where the source prints ${JSON.stringify(mismatch.expected)} on line ${mismatch.line}`;
+      actual === "" ? "printed nothing" : `printed ${actual.split("\n").length} line(s) and then stopped`;
+    return `${String(failure)}: it ${printed}, where the source prints ${JSON.stringify(fields["expected"])} on line ${String(fields["line"])}`;
   }
-  return `the program does not print what the source prints: line ${mismatch?.line}, the source prints ${JSON.stringify(mismatch?.expected)}, the program prints ${JSON.stringify(mismatch?.actual)}`;
+  const line = fields === undefined ? "" : String(fields["line"]);
+  const expected = fields === undefined ? undefined : fields["expected"];
+  const actual = fields === undefined ? undefined : fields["actual"];
+  return `the program does not print what the source prints: line ${line}, the source prints ${JSON.stringify(expected)}, the program prints ${JSON.stringify(actual)}`;
 }
 
 export async function runBuild(
@@ -1328,8 +1422,9 @@ export async function runBuild(
   reporter: Reporter,
   mode: "build" | "generate",
 ): Promise<BuildOutcome> {
-  const store = createJsonStore(join(options.cwd, STATE_DIRECTORY));
-  const absoluteInput = resolve(options.cwd, inputPath);
+  const fields = options as unknown as Record<string, unknown>;
+  const store = createJsonStore(join(String(fields["cwd"]), STATE_DIRECTORY));
+  const absoluteInput = resolve(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id, projectStoreId(absoluteInput));
 
@@ -1353,19 +1448,22 @@ export async function runBuild(
   let buildMode: BuildMode;
   let libraries: LibraryKind[] = [];
   let usesSqlite = false;
+  let inputFields: Record<string, unknown> = {};
   try {
     project = readInput(absoluteInput);
-    const input = project.input;
+    const projectFields = project as unknown as Record<string, unknown>;
+    inputFields = projectFields["input"] as Record<string, unknown>;
+    const input = inputFields as unknown as SourceInput;
     assertGenerationInput(absoluteInput, input);
-    target = assertBuildableTarget(normalizeTarget(input.target), input.entry);
+    target = assertBuildableTarget(normalizeTarget(inputFields["target"] as Partial<TargetSpec> | undefined), inputFields["entry"] as string | undefined);
     targetForRecord = target;
     toolchainId = toolchainFor(target).id;
-    outputKind = resolveOutputKind(options.output ?? input.output);
-    runtimeKind = resolveRuntimeKind(options.runtime ?? input.runtime, outputKind);
+    outputKind = resolveOutputKind((fields["output"] as OutputKind | undefined) ?? (inputFields["output"] as OutputKind | undefined));
+    runtimeKind = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? (inputFields["runtime"] as RuntimeKind | undefined), outputKind);
     assertRuntimeSupported(target, runtimeKind);
     // HTTP programs need the facil runtime even when the user did not ask for
     // it: the generated code references blaze_http_* symbols.
-    if (runtimeKind === "none" && mentionsHttpModule(project.entry.source)) runtimeKind = "facil";
+    if (runtimeKind === "none" && mentionsHttpModule(String((projectFields["entry"] as Record<string, unknown>)["source"]))) runtimeKind = "facil";
     // A program that uses SQLite links the SQLite library beside the runtime
     // it runs on. A wasm module links no library at all, and a program hosted
     // by Nim is lowered by the host's own emitter, which knows no library, so
@@ -1378,8 +1476,8 @@ export async function runBuild(
     if (usesSqlite && runtimeKind === "nim") {
       throw new CompilerError("InputError", "input", "a program hosted by Nim cannot use SQLite", "the Nim host links the runtime and no library; build it with --runtime none, or drop the SQLite calls", "", "", "");
     }
-    backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
-    buildMode = resolveBuildMode(options.mode ?? input.mode);
+    backendKind = resolveBackend((fields["backend"] as BackendKind | undefined) ?? (inputFields["backend"] as BackendKind | undefined), outputKind);
+    buildMode = resolveBuildMode((fields["mode"] as BuildMode | undefined) ?? (inputFields["mode"] as BuildMode | undefined));
   } catch (cause) {
     throw await recordRejected(store, paths, id, previousBuild, targetForRecord, cause);
   }
@@ -1393,10 +1491,10 @@ export async function runBuild(
   // A source comparison runs the delivered program on this host. A program
   // built for another host cannot be run here, so the build records that it
   // made no comparison rather than trying to run the wrong machine's code.
-  const programVerification = programVerificationFor(target, input.verifyProgram, options.verify);
+  const programVerification = programVerificationFor(target, inputFields["verifyProgram"] as boolean | undefined, fields["verify"] as VerificationMode | undefined);
 
   // --model wins over the project file, which wins over AI_MODEL.
-  const requested = options.model ?? modelSpec(input.model, absoluteInput);
+  const requested = (fields["model"] as string | undefined) ?? modelSpec(inputFields["model"] as SourceInput["model"], absoluteInput);
   // Whether a model is configured at all, the same reading resolveModel
   // makes. A build with none still runs: it lowers the IR the rules resolved
   // and verified, and reviews nothing.
@@ -1417,7 +1515,7 @@ export async function runBuild(
   }
   // A reused build is answered by the model that reviewed the stored candidate,
   // so that is the model to name.
-  const modelName = options.reuse ? previousBuild?.model : (requested ?? environment.AI_MODEL);
+  const modelName = (fields["reuse"] as boolean) ? previousBuild?.model : (requested ?? environment.AI_MODEL);
   // The model is part of every answer this compiler gives, so it is named
   // before anything can fail, including a model that cannot be reached.
   reporter.stage("model", "info", `Model: ${modelName ?? "(unset)"}`);
@@ -1434,7 +1532,7 @@ export async function runBuild(
   // itself. `--recompile` is the same answer given in advance.
   const previousEngine = previousBuild?.engine;
   const engineChanged = previousEngine !== undefined && previousEngine !== engine;
-  if (engineChanged && options.reuse !== true) {
+  if (engineChanged && (fields["reuse"] as boolean) !== true) {
     reporter.stage(
       "engine",
       "info",
@@ -1445,8 +1543,8 @@ export async function runBuild(
       "info",
       "The stored objects were built by different rules, so every function is reviewed again from the semantic IR",
     );
-    if (options.recompile !== true && options.confirm !== undefined) {
-      const recompile = await options.confirm("Recompile every function from scratch? [y/N] ");
+    if ((fields["recompile"] as boolean | undefined) !== true && fields["confirm"] !== undefined) {
+      const recompile = await (fields["confirm"] as (question: string) => Promise<boolean>)("Recompile every function from scratch? [y/N] ");
       if (!recompile) {
         throw new CompilerError("CancelledError", "engine", `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`, "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it", "", "", "");
       }
@@ -1459,11 +1557,11 @@ export async function runBuild(
   // would have let them through. A `--reuse` build discards nothing — it asks
   // no model for anything, so there is nothing to rebuild, and it reports the
   // mismatch against what it was promised instead.
-  const discardStored = options.recompile === true || (engineChanged && options.reuse !== true);
+  const discardStored = (fields["recompile"] as boolean | undefined) === true || (engineChanged && (fields["reuse"] as boolean) !== true);
 
   await storeMkdirp(store, paths.root);
   await storeMkdirp(store, paths.work);
-  if (options.recompile === true) {
+  if ((fields["recompile"] as boolean | undefined) === true) {
     try { await storeRemove(store, join(paths.work, "program.c")); } catch {}
   }
   await storeMkdirp(store, paths.output);
@@ -1494,7 +1592,7 @@ export async function runBuild(
     engine,
     // The flag is the record of a build that was told to recompile. An engine
     // change that forced one is already visible as the stamp, which moved.
-    ...(options.recompile === true ? { recompiled: true } : {}),
+    ...((fields["recompile"] as boolean | undefined) === true ? { recompiled: true } : {}),
   };
   await writeBuildRecord(store, paths, build);
 
@@ -1519,11 +1617,11 @@ export async function runBuild(
     // The contract phase comes first and asks no model: every file of the
     // program is read, contracted and validated before any target code exists.
     const phase = runContractPhase({
-      frontend: frontendFor(input.language),
+      frontend: frontendFor(String(inputFields["language"])),
       input,
       entry: project.entry,
       read: moduleReader(project.directory),
-      ...(input.host === undefined ? {} : { host: input.host }),
+      ...(inputFields["host"] === undefined ? {} : { host: inputFields["host"] as Readonly<Record<string, string>> }),
     });
     const program = phase.program;
     const units = compilationUnits(program, phase.body !== undefined);
@@ -1617,7 +1715,7 @@ export async function runBuild(
     // What every function of this build was compiled against, so nothing is
     // reused across a change of contract, target, options or model.
     const test = testConfigFor(input, options);
-    const benchmarkConfig = { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations };
+    const benchmarkConfig = { iterations: (inputFields["benchmark"] as Record<string, unknown> | undefined)?.["iterations"] as number | undefined ?? DEFAULT_BENCHMARK.iterations };
     // A program links the object of every function it calls, and running it is
     // what proves the functions it is the only oracle for. A build that stops
     // at candidate selection has no program to link or to run, and so has no
@@ -1626,7 +1724,7 @@ export async function runBuild(
     // Which model an implementation came from is part of what it is, so asking
     // for a different one rebuilds. A build that names no model reuses what the
     // last build used rather than invalidating everything for want of a name.
-    const modelKey = options.reuse
+    const modelKey = (fields["reuse"] as boolean)
       ? (previousBuild?.model ?? "unset")
       : (requested ?? environment.AI_MODEL ?? previousBuild?.model ?? "unset");
     // What the compiler itself is decides what an implementation is and how it
@@ -1776,7 +1874,7 @@ export async function runBuild(
         linksObjects: checksProgram,
         program,
         callable: callableSymbols(unit.contract, contracts),
-        required: options.reuse,
+        required: fields["reuse"] as boolean,
         id,
       });
       const sequenceStart = written.get(key) ?? 0;
@@ -1820,7 +1918,7 @@ export async function runBuild(
         ...(modelRequested
           ? {
               backend: () => {
-                if (options.reuse) {
+                if (fields["reuse"] as boolean) {
                   throw new CompilerError("StorageError", "reuse", `the stored implementation of ${functionName} no longer satisfies its contract`, "run blaze build without --reuse to review it again", "", "", "");
                 }
                 return createBackend(requireModel(), {
@@ -1842,11 +1940,11 @@ export async function runBuild(
                     // names a line of it, so it is the only way to see the answer the
                     // refusal is about. It is printed beside the prompt, under the
                     // same `--debug`.
-                    if (options.debug === true && answer !== undefined) {
+                    if ((fields["debug"] as boolean | undefined) === true && answer !== undefined) {
                       printAnswer({ stage, candidate, attempt, retry, answer });
                     }
                   },
-                  ...(options.debug === true ? { onPrompt: printPrompt } : {}),
+                  ...((fields["debug"] as boolean | undefined) === true ? { onPrompt: printPrompt } : {}),
                 });
               },
             }
@@ -2026,11 +2124,11 @@ export async function runBuild(
     // that program. So a build generates, links and runs, and generates again
     // with what the program printed until the two agree or the rounds run out.
     const programRounds =
-      phase.body === undefined || mode !== "build" || options.reuse ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
+      phase.body === undefined || mode !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
     let checked: ProgramVerification | undefined;
     let mismatch: ProgramMismatch | undefined;
     let selected: Record<string, string> = {};
-    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body, input.language);
+    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body, String(inputFields["language"]));
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
     const programBinary = `program${EXECUTABLE_SUFFIX}`;
@@ -2100,11 +2198,11 @@ export async function runBuild(
               entry: driver.entry,
               modulePath: programModule,
               hostPath: programHost,
-              language: input.language,
+              language: String(inputFields["language"]),
             })).runner
           : isHttp || runtimeKind === "none"
             ? await buildProgramDriver({
-                objective: normalizeOptimize(input.optimize).primary,
+                objective: normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary,
                 mode: buildMode,
                 target,
                 program: driver,
@@ -2137,11 +2235,11 @@ export async function runBuild(
       // linked and what it prints later is not the build's to say.
       if (programVerification === "none") break;
       checked = await verifyProgram({
-        language: input.language,
+        language: String(inputFields["language"]),
         sourcePath: programFile.path,
         directory: project.directory,
         runner,
-        arguments: options.arguments,
+        arguments: fields["arguments"] as string[],
       });
       // A program that stopped is as repairable as one that printed the wrong
       // thing, so the rounds are spent on it rather than on ending the build.
@@ -2171,7 +2269,7 @@ export async function runBuild(
       reporter.stage(
         "verify",
         "ok",
-        input.verifyProgram === false
+        (inputFields["verifyProgram"] as boolean | undefined) === false
           ? "Program output is not checked (verifyProgram = false)"
           : `Program output is not checked: the program is built for ${target.os}, and this host is ${hostPlatform()}`,
       );
@@ -2428,7 +2526,8 @@ export async function runStored(
   reporter: Reporter,
   action: "test" | "benchmark",
 ): Promise<StoredCommandOutcome> {
-  const root = join(options.cwd, STATE_DIRECTORY);
+  const fields = options as unknown as Record<string, unknown>;
+  const root = join(String(fields["cwd"]), STATE_DIRECTORY);
   const store = createJsonStore(root);
   const { paths, program, units } = await loadStored(store, root, project);
   if (units.length === 0) {
@@ -2470,7 +2569,7 @@ export async function runStored(
   // The contract names no target, so the one the build ran for is what the
   // stored candidate is tested and measured against.
   const target = build?.target ?? normalizeTarget(input.target);
-  const runtime = resolveRuntimeKind(options.runtime ?? build?.runtime ?? input.runtime, output);
+  const runtime = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? build?.runtime ?? input.runtime, output);
   assertRuntimeSupported(target, runtime);
   const libraries = libraryKindsFor(input.source, target);
   const base = storeResolve(store, paths.work);
@@ -2597,6 +2696,7 @@ export interface SemanticIrOptions {
  * checked against the contract it claims to implement.
  */
 export async function runSemanticIr(inputPath: string, options: SemanticIrOptions): Promise<string> {
+  const fields = options as unknown as Record<string, unknown>;
   const { input, entry, directory } = readInput(inputPath);
   const phase = runContractPhase({
     frontend: frontendFor(input.language),
@@ -2608,15 +2708,15 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
-  if (options.function !== undefined || options.all === true) {
-    if (options.function === undefined) {
+  if (fields["function"] !== undefined || (fields["all"] as boolean | undefined) === true) {
+    if (fields["function"] === undefined) {
       return phase.program.files
         .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
         .join("\n");
     }
-    const wanted = Object.values(semantics).find((fn) => fn.name === options.function);
+    const wanted = Object.values(semantics).find((fn) => String((fn as unknown as Record<string, unknown>)["name"]) === String(fields["function"]));
     if (wanted === undefined) {
-      throw new CompilerError("InputError", "ir", `${projectIdFor(inputPath)} has no function called ${options.function}`, `it declares ${Object.keys(semantics).join(", ") || "nothing"}`, "", "", "");
+      throw new CompilerError("InputError", "ir", `${projectIdFor(inputPath)} has no function called ${String(fields["function"])}`, `it declares ${Object.keys(semantics).join(", ") || "nothing"}`, "", "", "");
     }
     // What the backends are handed is folded, so what is printed here is what
     // was lowered rather than what the frontend resolved.
@@ -2627,9 +2727,9 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   }
   const callees = new Map(Object.entries(semantics));
   const program =
-    options.from === undefined
+    fields["from"] === undefined
       ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys)
-      : parseSemanticProgram(readFileSync(options.from, "utf8"), phase.program);
+      : parseSemanticProgram(readFileSync(String(fields["from"]), "utf8"), phase.program);
   validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])));
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
