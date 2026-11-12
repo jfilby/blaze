@@ -40,9 +40,9 @@ import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntri
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
-import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
+import { INLINE_MODULE, runContractPhase, type ContractPhase } from "./semantics/program.ts";
 import { contractsByName, vectorChecked, type ContractsByName } from "./semantics/calls.ts";
-import type { ProgramBody } from "./semantics/module.ts";
+import type { Frontend, ProgramBody } from "./semantics/module.ts";
 import type {
   SemanticBlock,
   SemanticFunction,
@@ -55,7 +55,7 @@ import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts";
-import { buildObject as buildMachineObject, machineRefusal } from "./toolchain/ir-machine.ts";
+import { buildObject as buildMachineObject, machineRefusal, type MachineResult } from "./toolchain/ir-machine.ts";
 import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { usesTritonSource } from "./runtime/triton.ts";
@@ -83,6 +83,7 @@ import {
   runtimePreparer,
   type CodegenResult,
   type CodegenWorkspace,
+  type PreparedRuntime,
 } from "./codegen.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
@@ -119,6 +120,7 @@ import {
   type Candidate,
   type BenchmarkResult,
   type CandidateOutcome,
+  type Runner,
   type RuntimeKind,
   RUNTIME_KINDS,
   BACKENDS,
@@ -133,6 +135,7 @@ import {
   type ProgramContract,
   type FileContract,
   type GenerationConfig,
+  type Objective,
   type OptimizeSpec,
   type OutputKind,
   type SourceInput,
@@ -1419,6 +1422,116 @@ function describeProgramFailure(mismatch: ProgramMismatch | undefined): string {
   return `the program does not print what the source prints: line ${line}, the source prints ${JSON.stringify(expected)}, the program prints ${JSON.stringify(actual)}`;
 }
 
+/** The machine fallback a build records, with the fields it holds. */
+function backendFallbackOf(fn: string, reason: string): { function: string; reason: string } {
+  return { function: fn, reason };
+}
+
+/** The machine object a build writes, called with the values it holds. */
+function buildMachineObjectFor(
+  fn: SemanticFunction,
+  target: TargetSpec,
+  callable: ReadonlySet<string>,
+  objectPath: string,
+): Promise<MachineResult> {
+  return buildMachineObject({ fn, target, callable, objectPath });
+}
+
+/** The runner of a program module, built from the values the build holds. */
+async function buildProgramModuleRunner(
+  functions: ModuleFunction[],
+  entry: SemanticBlock,
+  modulePath: string,
+  hostPath: string,
+  language: string,
+): Promise<Runner> {
+  const result = await buildProgramModule({ functions, entry, modulePath, hostPath, language });
+  return (result as unknown as Record<string, unknown>)["runner"] as Runner;
+}
+
+/** A runner value at the type the caller holds it as. */
+function runnerOf(value: Runner): Runner {
+  return value;
+}
+
+/** The driver of a program, built from the values the build holds. */
+async function buildProgramDriverFor(
+  objective: Objective,
+  mode: BuildMode,
+  target: TargetSpec,
+  program: SemanticProgram,
+  workDirectory: string,
+  objectPaths: string[],
+  loweredBodies: string[],
+  sharedBodies: string[],
+  runtimeObjectPath: string | undefined,
+  includeHttpHeader: boolean,
+  lowering: BackendKind,
+  includeSqliteHeader: boolean,
+  tls: boolean,
+  libraryObjectPaths: string[],
+  threads: Threading[],
+  outputPath: string,
+): Promise<Runner> {
+  return await buildProgramDriver({
+    objective,
+    mode,
+    target,
+    program,
+    workDirectory,
+    objectPaths,
+    loweredBodies,
+    sharedBodies,
+    runtimeObjectPath,
+    includeHttpHeader,
+    lowering,
+    includeSqliteHeader,
+    tls,
+    libraryObjectPaths,
+    threads,
+    outputPath,
+  });
+}
+
+/** The Nim host of a program, built from the values the build holds. */
+async function buildProgramHostFor(
+  mode: BuildMode,
+  program: SemanticProgram,
+  workDirectory: string,
+  objectPaths: string[],
+  outputPath: string,
+): Promise<Runner> {
+  return await buildProgramHost({ mode, program, workDirectory, objectPaths, outputPath });
+}
+
+/** The verification of a program, called with the values the build holds. */
+function verifyProgramFor(
+  language: string,
+  sourcePath: string,
+  directory: string,
+  runner: Runner,
+  args: string[],
+): Promise<ProgramVerification> {
+  return verifyProgram({ language, sourcePath, directory, runner, arguments: args });
+}
+
+/** The contract phase a request object names, called with values it already holds. */
+function contractPhaseFor(
+  frontend: Frontend,
+  input: SourceInput,
+  entry: SourceModule,
+  read: (path: string) => string | null,
+  host: Readonly<Record<string, string>> | undefined,
+): ContractPhase {
+  return runContractPhase({
+    frontend,
+    input,
+    entry,
+    read,
+    ...(host === undefined ? {} : { host }),
+  });
+}
+
 export async function runBuild(
   inputPath: string,
   options: BuildOptions,
@@ -1622,16 +1735,25 @@ export async function runBuild(
   try {
     // The contract phase comes first and asks no model: every file of the
     // program is read, contracted and validated before any target code exists.
-    const phase = runContractPhase({
-      frontend: frontendFor(String(inputFields["language"])),
+    const phase = contractPhaseFor(
+      frontendFor(String(inputFields["language"])),
       input,
-      entry: projectFields["entry"] as SourceModule,
-      read: moduleReader(project.directory),
-      ...(inputFields["host"] === undefined ? {} : { host: inputFields["host"] as Readonly<Record<string, string>> }),
-    });
-    const program = phase.program;
-    const units = compilationUnits(program, phase.body !== undefined);
-    const semantics = semanticFunctions(program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
+      projectFields["entry"] as SourceModule,
+      moduleReader(String(projectFields["directory"])),
+      inputFields["host"] as Readonly<Record<string, string>> | undefined,
+    );
+    const phaseFields = phase as unknown as Record<string, unknown>;
+    const program = phaseFields["program"] as ProgramContract;
+    const body = phaseFields["body"] as ProgramBody | undefined;
+    const objectNames = phaseFields["objectNames"] as Record<string, string>;
+    const objectLayouts = phaseFields["objectLayouts"] as Record<string, ObjectLayout>;
+    const objectKeys = phaseFields["objectKeys"] as LiteralKeys;
+    const modules = phaseFields["modules"] as SourceModule[];
+    const programFields = program as unknown as Record<string, unknown>;
+    const files = programFields["files"] as FileContract[];
+    const entry = programFields["entry"] as Record<string, unknown>;
+    const units = compilationUnits(program, body !== undefined);
+    const semantics = semanticFunctions(program, objectNames, body, objectLayouts, objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
     reporter(
@@ -1639,16 +1761,16 @@ export async function runBuild(
       "ok",
       `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + fn.ensures.length, 0)} postcondition(s) to check them against`,
     );
-    const sourceHash = hashValue(phase.modules.map((module) => [module.path, module.source]));
+    const sourceHash = hashValue(modules.map((module) => [module.path, module.source]));
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
     await storeWrite(store, paths.contract, program);
     reporter(
       "contract",
       "ok",
-      phase.body === undefined
-        ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(program.entry.function)} in ${program.entry.file}`
-        : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${program.entry.file}`,
+      body === undefined
+        ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(String(entry["function"]))} in ${String(entry["file"])}`
+        : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${String(entry["file"])}`,
     );
     // The program's own statements are held to the same deterministic rewrites
     // a function's are: a top-level loop of a program is a loop like any other,
@@ -1659,15 +1781,21 @@ export async function runBuild(
     // Resolving a program and writing out the source the toolchain runs are
     // the same for every round: only the objects it links change.
     const driver =
-      phase.body === undefined
+      body === undefined
         ? undefined
         : optimizeSemanticProgram(
-            resolvedDriver(phase.body, program, phase.objectNames, phase.objectLayouts, phase.objectKeys),
+            resolvedDriver(body as ProgramBody, program, objectNames, objectLayouts, objectKeys),
           );
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
-      validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
+      const driverFields = driver as unknown as Record<string, unknown>;
+      const bodies = driverFields["bodies"] as SemanticFunction[];
+      validateSemanticProgram(
+        driver,
+        undefined,
+        new Map(bodies.map((fn) => [String((fn as unknown as Record<string, unknown>)["name"]), fn])),
+      );
       reporter("ir", "ok", "Program IR: the program is resolved and validated");
     }
     // The machine backend is asked whether it can lower this program before
@@ -1680,19 +1808,22 @@ export async function runBuild(
     // ones the project asked for.
     let bodyLowering: ProgramLowering | undefined;
     if (backendKind === "machine") {
-      const refusal = machineRefusalOf(units, semantics, contractsByName(program.files), target);
+      const refusal = machineRefusalOf(units, semantics, contractsByName(files), target);
       if (refusal !== null) {
+        const refusalFields = refusal as unknown as Record<string, unknown>;
+        const reason = String(refusalFields["reason"]);
+        const detail = refusalFields["detail"] as string | undefined;
         reporter(
           "assemble",
           "info",
-          `The machine backend refused to lower ${refusal.function} (${refusal.reason}); the C backend is used instead`,
+          `The machine backend refused to lower ${String(refusalFields["function"])} (${reason}); the C backend is used instead`,
         );
-        if (refusal.detail !== undefined && refusal.detail.trim() !== "") {
-          reporter("assemble", "info", refusal.detail.trim());
+        if (detail !== undefined && detail.trim() !== "") {
+          reporter("assemble", "info", detail.trim());
         }
         backendKind = "c";
         build.backend = "c";
-        build.backendFallback = { function: refusal.function, reason: refusal.reason };
+        build.backendFallback = backendFallbackOf(String(refusalFields["function"]), reason);
       } else if (driver !== undefined) {
         // Every function the program declares for itself is lowered the same
         // way the functions a candidate implements are: into an object the
@@ -1700,13 +1831,13 @@ export async function runBuild(
         // driver, and so does everything whose call to it would hand over
         // what only one convention carries.
         bodyLowering = programLoweringOf(driver, new Set(units.map(unitKey)), target);
-        for (const note of bodyLowering.notes) reporter("assemble", "info", note);
+        for (const note of (bodyLowering as unknown as Record<string, unknown>)["notes"] as string[]) reporter("assemble", "info", note);
       }
     }
     await writeBuildRecord(store, paths, build);
 
     assertAssemblerSupportsArch(target);
-    if (phase.body !== undefined) assertProgramOutput(outputKind, String((projectFields["entry"] as Record<string, unknown>)["source"]));
+    if (body !== undefined) assertProgramOutput(outputKind, String((projectFields["entry"] as Record<string, unknown>)["source"]));
 
     // What an earlier build proved per function. It is read before this build
     // writes to it, and it is written as each function is proved, so a build
@@ -1726,7 +1857,7 @@ export async function runBuild(
     // what proves the functions it is the only oracle for. A build that stops
     // at candidate selection has no program to link or to run, and so has no
     // proof to record for those functions either.
-    const checksProgram = phase.body !== undefined && String(mode) === "build";
+    const checksProgram = body !== undefined && String(mode) === "build";
     // Which model an implementation came from is part of what it is, so asking
     // for a different one rebuilds. A build that names no model reuses what the
     // last build used rather than invalidating everything for want of a name.
@@ -1766,16 +1897,17 @@ export async function runBuild(
     // the same one, and the driver that runs the program links it too. The
     // HTTP runtime is built for the program that is being built: how many
     // connections its server may hold, and whether it speaks TLS.
-    const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), String((projectFields["entry"] as Record<string, unknown>)["source"])]);
+    const http = httpRuntimeNeeds(body, [...modules.map((module) => module.source), String(entry["source"])]);
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,
       runtime: runtimeKind,
       target,
-      workspace: { workDirectory: base, functionName: program.entry.file },
+      workspace: { workDirectory: base, functionName: String(entry["file"]) },
       libraries,
       http,
     });
+
     // The machine, one measurement at a time however many functions are being
     // generated.
     const machines = machine();
@@ -1786,16 +1918,6 @@ export async function runBuild(
     // outright, so the earlier snapshot can land last and drop the entry of
     // whichever function finished first.
     let writing: Promise<void> = Promise.resolve();
-    const records = {
-      run<T>(task: () => T | Promise<T>): Promise<T> {
-        const next = writing.then(task, task);
-        writing = next.then(
-          () => {},
-          () => {},
-        );
-        return next;
-      },
-    };
     /** The functions this build took from an earlier one, by function name. */
     const reusedByFunction = new Map<string, string>();
     /**
@@ -1812,7 +1934,7 @@ export async function runBuild(
      * recorded calls rather than from the set of units this build happens to
      * compile.
      */
-    const contracts = contractsByName(program.files);
+    const contracts = contractsByName(files);
 
     /**
      * Records what this build proved: every function it verified against its
@@ -1914,7 +2036,7 @@ export async function runBuild(
         // A program is one module, so the functions a candidate calls are in
         // the module beside it. A build that compiles one function on its own
         // has nothing to hold beside it, and carries none.
-        ...(phase.body === undefined ? {} : { programFunctions: Object.values(semantics) }),
+        ...(body === undefined ? {} : { programFunctions: Object.values(semantics) }),
         target,
         output: outputKind,
         lowering: backendKind,
@@ -2007,7 +2129,13 @@ export async function runBuild(
         // the other wrote it, and one entry would be lost. One writer at a
         // time costs nothing: this is a write of a few kilobytes, and the
         // functions it is waiting for are still waiting on a model.
-        await records.run(() => storeWrite(store, paths.incremental, { ...incremental }));
+        const writeIncremental = (): Promise<void> => storeWrite(store, paths.incremental, { ...incremental });
+        const writeNext = writing.then(writeIncremental, writeIncremental);
+        writing = writeNext.then(
+          () => {},
+          () => {},
+        );
+        await writeNext;
       } else if (checksProgram) {
         awaitingProgram.set(key, entry);
       }
@@ -2061,40 +2189,50 @@ export async function runBuild(
       const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
       const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
       const selectedEntries: (readonly [string, string])[] = [];
+      const generationEntries: (readonly [string, Record<string, unknown>])[] = [];
       for (const entry of generated) {
-        const functionName = entry.unit.contract.function.name;
-        const key = unitNameKey(entry.unit, units);
-        candidateEntries.push([key, entry.result.candidates]);
+        const entryFields = entry as unknown as Record<string, unknown>;
+        const unit = entryFields["unit"] as CompilationUnit;
+        const resultFields = entryFields["result"] as Record<string, unknown>;
+        const functionName = String(contractFunction(unitContract(unit))["name"]);
+        const key = unitNameKey(unit, units);
+        const outcomes = resultFields["outcomes"] as Record<string, unknown>[];
+        candidateEntries.push([key, resultFields["candidates"] as Candidate[]]);
         verificationEntries.push([
           key,
-          entry.result.outcomes
-            .map((outcome) => outcome.verification)
-            .filter((outcome): outcome is VerificationResult => outcome !== undefined),
+          outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
         ]);
         benchmarkEntries.push([
           key,
-          entry.result.outcomes
-            .map((outcome) => outcome.benchmark)
-            .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
+          outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined),
         ]);
-        const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
+        const valid = outcomes.filter((outcome) => outcome["valid"] as boolean).length;
         reporter(
           "review",
           valid > 0 ? "ok" : "fail",
-          `${implementationLabel(outputKind)} for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
+          `${implementationLabel(outputKind)} for ${functionName}: ${(resultFields["candidates"] as unknown[]).length} candidate(s), ${valid} valid`,
         );
-        // What ships is what the toolchain built and verified, so a function
-        // with no valid candidate stops the build before anything is delivered.
-        if (entry.result.selected === null) {
-          const detail = entry.result.outcomes
-            .map(
-              (outcome) =>
-                `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`,
-            )
+        if (resultFields["selected"] === null) {
+          const detail = outcomes
+            .map((outcome) => {
+              const failure = outcome["failure"] as Record<string, unknown> | undefined;
+              return failure === undefined
+                ? `${String(outcome["candidate"])}:`
+                : `${String(outcome["candidate"])}: ${String(failure["category"] ?? "")} ${String(failure["message"] ?? "")}\n${String(failure["detail"] ?? "")}`;
+            })
             .join("\n");
           throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
-        selectedEntries.push([key, entry.result.selected]);
+        selectedEntries.push([key, String(resultFields["selected"])]);
+        generationEntries.push([
+          key,
+          {
+            file: String((unit as unknown as Record<string, unknown>)["file"]),
+            selected: resultFields["selected"],
+            benchmarkVector: resultFields["benchmarkVector"],
+            outcomes: resultFields["outcomes"],
+          },
+        ]);
       }
       const candidates = byName(candidateEntries);
       const verification = byName(verificationEntries);
@@ -2105,17 +2243,7 @@ export async function runBuild(
         model: build.model,
         modelConfig: build.modelConfig,
         compilerVersion: COMPILER_VERSION,
-        functions: Object.fromEntries(
-          generated.map((entry) => [
-            unitNameKey(entry.unit, units),
-            {
-              file: entry.unit.file,
-              selected: entry.result.selected,
-              benchmarkVector: entry.result.benchmarkVector,
-              outcomes: entry.result.outcomes,
-            },
-          ]),
-        ),
+        functions: Object.fromEntries(generationEntries),
         modelDurationNs: String(
           generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
         ),
@@ -2130,11 +2258,11 @@ export async function runBuild(
     // that program. So a build generates, links and runs, and generates again
     // with what the program printed until the two agree or the rounds run out.
     const programRounds =
-      phase.body === undefined || String(mode) !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
+      body === undefined || String(mode) !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
     let checked: ProgramVerification | undefined;
     let mismatch: ProgramMismatch | undefined;
     let selected: Record<string, string> = {};
-    const programFile = phase.body === undefined ? undefined : await programSource(base, id, project, phase.body, String(inputFields["language"]));
+    const programFile = body === undefined ? undefined : await programSource(base, id, project, body as ProgramBody, String(inputFields["language"]));
     // The linked program is named for the platform it was written for, and the
     // delivered program is the project's own name beside its sources.
     const programBinary = `program${EXECUTABLE_SUFFIX}`;
@@ -2149,7 +2277,7 @@ export async function runBuild(
       await generateUnits(mismatch);
       selected = await record();
       if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
-      const runtime = await prepareRuntime();
+      const runtime = await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
       const objectPaths = unitsGenerated().map((entry) =>
         join(join(base, unitKey(entry.unit)), `${entry.result.selected as string}.o`),
       );
@@ -2170,103 +2298,112 @@ export async function runBuild(
       // beside the ones the candidates were written into. What the backend
       // left in the driver stays there: the driver writes its definition,
       // and an object that calls it calls a function the linker can see.
-      const loweredBodies = new Set<string>();
+      const loweredBodies: string[] = [];
+      const driverFields = driver === undefined ? {} : driver as unknown as Record<string, unknown>;
+      const driverBodies = (driverFields["bodies"] ?? []) as SemanticFunction[];
+      const driverEntry = driverFields["entry"] as SemanticBlock | undefined;
       if (backendKind === "machine" && bodyLowering !== undefined) {
-        for (const body of driver.bodies) {
-          if (!bodyLowering.lowered.has(body.symbol)) continue;
-          const result = await buildMachineObject({
-            fn: body,
-            target,
-            callable: bodyLowering.callable,
-            objectPath: join(base, `${body.symbol}.o`),
-          });
-          objectPaths.push(result.objectPath);
-          loweredBodies.add(body.symbol);
-          if (result.threads && !threads.includes("pthread")) threads.push("pthread");
+        const loweringFields = bodyLowering as unknown as Record<string, unknown>;
+        const lowered = loweringFields["lowered"] as Set<string>;
+        const callable = loweringFields["callable"] as ReadonlySet<string>;
+        for (const body of driverBodies) {
+          const symbol = String((body as unknown as Record<string, unknown>)["symbol"]);
+          if (!lowered.has(symbol)) continue;
+          const result = await buildMachineObjectFor(body, target, callable, join(base, `${symbol}.o`));
+          const resultFields = result as unknown as Record<string, unknown>;
+          objectPaths.push(String(resultFields["objectPath"]));
+          loweredBodies.push(symbol);
+          if (resultFields["threads"] !== undefined && !threads.includes("pthread")) threads.push("pthread");
         }
       }
-      if (programIsParallel(driver.entry, driver.bodies)) threads.push("openmp");
+      if (driverEntry !== undefined && programIsParallel(driverEntry, driverBodies)) threads.push("openmp");
       for (const entry of unitsGenerated()) {
-        const selected = entry.result.selected;
-        if (selected === null) continue;
-        for (const threading of entry.result.outcomes.find((outcome) => outcome.candidate === selected)?.threads ?? []) {
-          if (!threads.includes(threading)) threads.push(threading);
+        const entryFields = entry as unknown as Record<string, unknown>;
+        const result = entryFields["result"] as Record<string, unknown>;
+        const selected = result["selected"];
+        if (selected === null || selected === undefined) continue;
+        const outcomes = result["outcomes"] as Record<string, unknown>[];
+        const outcome = outcomes.find((one) => String(one["candidate"]) === String(selected));
+        const threading = outcome === undefined ? undefined : outcome["threads"] as string[] | undefined;
+        for (const raw of threading ?? []) {
+          const name = raw as Threading;
+          if (!threads.includes(name)) threads.push(name);
         }
       }
       const isHttp = runtimeKind === "facil" || mentionsHttpModule(String((projectFields["entry"] as Record<string, unknown>)["source"]));
-      const runner =
-        backendKind === "wasm"
-          ? (await buildProgramModule({
-              // The module holds every function of the program: the candidate
-              // that was chosen for each of them, and the body the program runs
-              // as its entry.
-              functions: await programFunctions(base, unitsGenerated(), program, driver),
-              entry: driver.entry,
-              modulePath: programModule,
-              hostPath: programHost,
-              language: String(inputFields["language"]),
-            })).runner
-          : isHttp || runtimeKind === "none"
-            ? await buildProgramDriver({
-                objective: normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary,
-                mode: buildMode,
-                target,
-                program: driver,
-                workDirectory: base,
-                objectPaths,
-                loweredBodies: [...loweredBodies],
-                // A body that stayed in the driver and is called by an object
-                // is the definition the object's reference resolves to, so it
-                // is written as a function the linker can see.
-                sharedBodies: bodyLowering === undefined ? [] : [...bodyLowering.visible],
-                ...(runtime === undefined ? {} : { runtimeObjectPath: runtime.objectPath }),
-                includeHttpHeader: runtimeKind === "facil",
-                lowering: backendKind,
-                includeSqliteHeader: usesSqlite,
-                tls: http.tls,
-                libraryObjectPaths: (runtime?.libraryObjects ?? []).map((library) => library.objectPath),
-                threads,
-                outputPath: programPath,
-              })
-            : await buildProgramHost({
-                mode: buildMode,
-                program: driver,
-                workDirectory: base,
-                objectPaths,
-                outputPath: programPath,
-              });
+      let runner: Runner;
+      if (backendKind === "wasm") {
+        runner = await buildProgramModuleRunner(
+          await programFunctions(base, unitsGenerated(), program, driver as SemanticProgram),
+          driverEntry as SemanticBlock,
+          programModule,
+          programHost,
+          String(inputFields["language"]),
+        );
+      } else if (isHttp || runtimeKind === "none") {
+        runner = runnerOf(await buildProgramDriverFor(
+          normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary,
+          buildMode,
+          target,
+          driver as SemanticProgram,
+          base,
+          objectPaths,
+          loweredBodies,
+          bodyLowering === undefined ? [] : (bodyLowering as unknown as Record<string, unknown>)["visible"] as string[],
+          runtime === undefined ? undefined : String((runtime as unknown as Record<string, unknown>)["objectPath"]),
+          runtimeKind === "facil",
+          backendKind,
+          usesSqlite,
+          (http as unknown as Record<string, unknown>)["tls"] as boolean,
+          ((runtime === undefined ? undefined : (runtime as unknown as Record<string, unknown>)["libraryObjects"]) as Record<string, unknown>[] | undefined ?? []).map((library) => String(library["objectPath"])),
+          threads,
+          programPath,
+        ));
+      } else {
+        runner = await buildProgramHostFor(
+          buildMode,
+          driver as SemanticProgram,
+          base,
+          objectPaths,
+          programPath,
+        );
+      }
       // The project may ask that the delivered program not be run at all, and
       // a program built for another host cannot be run here: either way there
       // is no output the build can compare, so it is delivered as it was
       // linked and what it prints later is not the build's to say.
       if (programVerification === "none") break;
-      checked = await verifyProgram({
-        language: String(inputFields["language"]),
-        sourcePath: programFile.path,
-        directory: project.directory,
+      checked = await verifyProgramFor(
+        String(inputFields["language"]),
+        String((programFile as unknown as Record<string, unknown>)["path"]),
+        String(projectFields["directory"]),
         runner,
-        arguments: fields["arguments"] as string[],
-      });
+        fields["arguments"] as string[],
+      );
       // A program that stopped is as repairable as one that printed the wrong
       // thing, so the rounds are spent on it rather than on ending the build.
-      if (checked.passed) break;
-      mismatch = checked.difference;
+      const checkedFields = checked as unknown as Record<string, unknown>;
+      if (checkedFields["passed"] as boolean) break;
+      mismatch = checkedFields["difference"] as ProgramMismatch | undefined;
       if (round < programRounds) {
         reporter("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again`);
       }
     }
-    if (checked !== undefined && !checked.passed) {
-      const difference = checked.difference;
-      throw new CompilerError("VerificationError", "verify", difference?.failure ?? "the program does not print what the source prints", [
-          `line ${difference?.line}: the source prints ${JSON.stringify(difference?.expected)}, the program prints ${JSON.stringify(difference?.actual)}`,
-          ...(difference?.failureOutput === undefined ? [] : [`the program wrote to standard error:\n${difference.failureOutput}`]),
-        ].join("\n"), "", "", "");
-    }
     if (checked !== undefined) {
+      const checkedFields = checked as unknown as Record<string, unknown>;
+      if (!(checkedFields["passed"] as boolean)) {
+        const difference = checkedFields["difference"] as Record<string, unknown> | undefined;
+        const failureOutput = difference === undefined ? undefined : difference["failureOutput"];
+        throw new CompilerError("VerificationError", "verify", difference === undefined ? "the program does not print what the source prints" : String(difference["failure"] ?? "the program does not print what the source prints"), [
+            `line ${difference === undefined ? "" : String(difference["line"])}: the source prints ${JSON.stringify(difference === undefined ? undefined : difference["expected"])}, the program prints ${JSON.stringify(difference === undefined ? undefined : difference["actual"])}`,
+            ...(failureOutput === undefined ? [] : [`the program wrote to standard error:\n${String(failureOutput)}`]),
+          ].join("\n"), "", "", "");
+      }
+      const actual = String(checkedFields["actual"]);
       reporter(
         "verify",
         "ok",
-        `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
+        `Program output matches the source (${actual.split("\n").filter((line) => line !== "").length} line(s))`,
       );
     } else if (driver !== undefined && String(mode) === "build" && programVerification === "none") {
       // A program whose output is not checked is delivered without the
@@ -2296,50 +2433,48 @@ export async function runBuild(
     const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
     const outcomeEntries: (readonly [string, CandidateOutcome[]])[] = [];
     for (const entry of generated) {
-      const functionName = entry.unit.contract.function.name;
-      const key = unitNameKey(entry.unit, units);
-      candidateEntries.push([key, entry.result.candidates]);
-      outcomeEntries.push([key, entry.result.outcomes]);
+      const entryFields = entry as unknown as Record<string, unknown>;
+      const unit = entryFields["unit"] as CompilationUnit;
+      const functionName = String(contractFunction(unitContract(unit))["name"]);
+      const key = unitNameKey(unit, units);
+      const resultFields = entryFields["result"] as Record<string, unknown>;
+      const outcomes = resultFields["outcomes"] as Record<string, unknown>[];
+      const selectedCandidate = String(resultFields["selected"]);
+      candidateEntries.push([key, resultFields["candidates"] as Candidate[]]);
+      outcomeEntries.push([key, outcomes as unknown as CandidateOutcome[]]);
       verificationEntries.push([
         key,
-        entry.result.outcomes
-          .map((outcome) => outcome.verification)
-          .filter((outcome): outcome is VerificationResult => outcome !== undefined),
+        outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
       ]);
       benchmarkEntries.push([
         key,
-        entry.result.outcomes
-          .map((outcome) => outcome.benchmark)
-          .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
+        outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined),
       ]);
-      const outcome = entry.result.outcomes.find((entry2) => entry2.candidate === entry.result.selected);
+      const outcome = outcomes.find((one) => String(one["candidate"]) === selectedCandidate);
       if (reusedByFunction.has(key)) {
-        // Nothing was assembled or run for this function: what it delivered is
-        // what an earlier build built, linked and verified for these inputs.
         reporter(
           "assemble",
           "ok",
-          `${implementationLabel(outputKind)} for ${functionName} was not rebuilt: candidate ${outcome?.candidate ?? entry.result.selected} is reused from the build that verified it`,
+          `${implementationLabel(outputKind)} for ${functionName} was not rebuilt: candidate ${outcome === undefined ? selectedCandidate : String(outcome["candidate"])} is reused from the build that verified it`,
         );
         continue;
       }
       reporter("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
-      if (outcome?.verification === undefined) {
-        // A function whose contract states what it does rather than what it
-        // returns has no vector to run, so nothing was verified here. The
-        // program it belongs to is what says whether the two agree.
+      if (outcome === undefined || outcome["verification"] === undefined) {
         reporter("verify", "info", `${functionName} returns no value to verify, so the program it is part of is what checks it`);
         continue;
       }
+      const verificationFields = outcome["verification"] as Record<string, unknown>;
+      const benchmarkFields = outcome["benchmark"] as Record<string, unknown> | undefined;
       reporter(
         "verify",
         "ok",
-        `Correctness verified for ${functionName} (${outcome.verification.cases} test vectors, tolerance ${outcome.verification.tolerance ?? "exact"})`,
+        `Correctness verified for ${functionName} (${String(verificationFields["cases"])} test vectors, tolerance ${verificationFields["tolerance"] === undefined ? "exact" : String(verificationFields["tolerance"])})`,
       );
       reporter(
         "benchmark",
         "ok",
-        `Benchmark completed for ${functionName} (${outcome.benchmark?.iterations ?? 0} iterations, ${outcome.benchmark?.durationNs ?? 0} ns)`,
+        `Benchmark completed for ${functionName} (${benchmarkFields === undefined ? 0 : String(benchmarkFields["iterations"])} iterations, ${benchmarkFields === undefined ? 0 : String(benchmarkFields["durationNs"])} ns)`,
       );
     }
     const candidates = byName(candidateEntries);
@@ -2365,7 +2500,7 @@ export async function runBuild(
         await replace(join(base, from), storeResolve(store, to));
         delivered.push(storeResolve(store, to));
       };
-      if (phase.body !== undefined) {
+      if (body !== undefined) {
         // The program was linked and run above, by the round that agreed with
         // the source, so what is delivered is what was checked.
         if (outputKind === "wasm") {
@@ -2469,14 +2604,19 @@ export async function runBuild(
       build,
       contracts: Object.fromEntries(units.map((unit) => [unitNameKey(unit, units), unit.contract])),
       program,
-      ...(phase.body === undefined ? {} : { body: phase.body }),
+      ...(body === undefined ? {} : { body: body as ProgramBody }),
       candidates,
       verification,
       benchmark,
       generation: {
         selected,
         outcomes,
-        modelDurationNs: String(generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n)),
+        modelDurationNs: String(
+          generated.reduce((total, entry) => {
+            const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
+            return total + Number(resultFields["modelDurationNs"]);
+          }, 0),
+        ),
       },
       outputKind,
       outputPath,
@@ -2514,12 +2654,14 @@ async function loadStored(
     throw new CompilerError("StorageError", "load", `unknown project "${project}"`, `no contract at ${paths.contract}`, "", "", "");
   }
   const program = await storeRead<ProgramContract>(store, paths.contract);
+  const programFields = program as unknown as Record<string, unknown>;
+  const entry = programFields["entry"] as Record<string, unknown>;
   // A stored program records which functions it compiled, so `blaze test` and
   // `blaze benchmark` work on every one of them rather than on an entry the
   // program does not have.
   const build = (await storeExists(store, paths.build)) ? await storeRead<BuildStatus>(store, paths.build) : undefined;
   const compiled = build?.selectedCandidates === undefined ? {} : build.selectedCandidates;
-  const all = compilationUnits(program, program.entry.function === null);
+  const all = compilationUnits(program, entry["function"] === null);
   const units = all.filter(
     (unit) => Object.keys(compiled).length === 0 || compiled[unitNameKey(unit, all)] !== undefined,
   );
@@ -2536,6 +2678,9 @@ export async function runStored(
   const root = join(String(fields["cwd"]), STATE_DIRECTORY);
   const store = createJsonStore(root);
   const { paths, program, units } = await loadStored(store, root, project);
+  const programFields = program as unknown as Record<string, unknown>;
+  const files = programFields["files"] as FileContract[];
+  const entry = programFields["entry"] as Record<string, unknown>;
   if (units.length === 0) {
     throw new CompilerError("StorageError", action, `project "${project}" compiled no function`, "run blaze build first", "", "", "");
   }
@@ -2584,7 +2729,7 @@ export async function runStored(
     mode,
     runtime,
     target,
-    workspace: { workDirectory: base, functionName: program.entry.file },
+    workspace: { workDirectory: base, functionName: String(entry["file"]) },
     libraries,
     // The runtime is built for the program the stored candidates belong to, so
     // it is built for the same program the build built it for: the source of
@@ -2596,7 +2741,7 @@ export async function runStored(
   // given, which is what its own recorded calls say rather than what the build
   // happened to compile: the outline decided which of them is a call, and a
   // candidate is measured against the same rule it was checked under.
-  const contracts = contractsByName(program.files);
+  const contracts = contractsByName(files);
   // `blaze test` measures stored candidates one at a time, but it measures
   // them the way a build does, so it goes through the same machine.
   const machines = machine();
@@ -2631,7 +2776,7 @@ export async function runStored(
       // A program is one module, so the functions a candidate calls are in
       // the module beside it. A build that compiles one function on its own
       // has nothing to hold beside it, and carries none.
-      ...(program.entry.function === null ? { programFunctions: Object.values(functions) } : {}),
+      ...(entry["function"] === null ? { programFunctions: Object.values(functions) } : {}),
       target,
       output,
       lowering,
@@ -2704,19 +2849,25 @@ export interface SemanticIrOptions {
 export async function runSemanticIr(inputPath: string, options: SemanticIrOptions): Promise<string> {
   const fields = options as unknown as Record<string, unknown>;
   const { input, entry, directory } = readInput(inputPath);
-  const phase = runContractPhase({
-    frontend: frontendFor(input.language),
+  const phase = contractPhaseFor(
+    frontendFor(input.language),
     input,
     entry,
-    read: moduleReader(directory),
-    ...(input.host === undefined ? {} : { host: input.host }),
-  });
-  const semantics = semanticFunctions(phase.program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
+    moduleReader(directory),
+    input.host,
+  );
+  const phaseFields = phase as unknown as Record<string, unknown>;
+  const contract = phaseFields["program"] as ProgramContract;
+  const body = phaseFields["body"] as ProgramBody | undefined;
+  const objectNames = phaseFields["objectNames"] as Record<string, string>;
+  const objectLayouts = phaseFields["objectLayouts"] as Record<string, ObjectLayout>;
+  const objectKeys = phaseFields["objectKeys"] as LiteralKeys;
+  const semantics = semanticFunctions(contract, objectNames, body, objectLayouts, objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
   if (fields["function"] !== undefined || (fields["all"] as boolean | undefined) === true) {
     if (fields["function"] === undefined) {
-      return phase.program.files
+      return contract.files
         .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
         .join("\n");
     }
@@ -2728,15 +2879,15 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     // was lowered rather than what the frontend resolved.
     return printSemanticFunction(optimizeSemanticFunction(structuredClone(wanted), new Map(Object.entries(semantics))));
   }
-  if (phase.body === undefined) {
+  if (body === undefined) {
     throw new CompilerError("InputError", "ir", `${projectIdFor(inputPath)} has no program body`, "this project declares functions and runs nothing of its own; ask for one with --function, or for all of them with --all", "", "", "");
   }
   const callees = new Map(Object.entries(semantics));
   const program =
     fields["from"] === undefined
-      ? resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys)
-      : parseSemanticProgram(readFileSync(String(fields["from"]), "utf8"), phase.program);
-  validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])));
+      ? resolveProgram(body as ProgramBody, contract, objectNames, objectLayouts, objectKeys)
+      : parseSemanticProgram(readFileSync(String(fields["from"]), "utf8"), contract);
+  validateSemanticProgram(program, contract, new Map(program.bodies.map((fn) => [fn.name, fn])));
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
   return printSemanticProgram(optimizeSemanticProgram(program, callees));
