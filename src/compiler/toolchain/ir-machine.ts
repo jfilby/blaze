@@ -167,6 +167,7 @@ const DICTIONARY_SERVICES: Readonly<Record<string, DictionaryAnswer>> = {
   "blaze_rt_dict_get_text": "text",
   "blaze_rt_dict_set_text": "number",
   "blaze_rt_dict_has": "number",
+  "blaze_rt_own_key": "number",
   "blaze_rt_dict_len": "number",
   "blaze_rt_dict_delete": "number",
   "blaze_rt_dict_set_seq": "number",
@@ -201,6 +202,60 @@ const DICTIONARY_SERVICES: Readonly<Record<string, DictionaryAnswer>> = {
   "blaze_rt_json_field_value": "dynamic",
   "array.copy": "pointer",
   "array.join": "pointer",
+};
+
+/**
+ * The host services a module function may call: the builtin the source names,
+ * the runtime entry it lowers to, the kinds of the arguments it takes and what
+ * it answers.
+ *
+ * A file service answers a number — 1 or 0 for a question, the size or the kind
+ * for a question that names one — or a text where a name is the answer. The
+ * read of a file answers the value the runtime holds, which a text use unboxes,
+ * exactly as the dictionary services answer a value of another kind.
+ */
+const HOST_SERVICES: Readonly<
+  Record<
+    string,
+    { symbol: string; args: readonly ("text" | "number")[]; extra?: readonly number[]; returns: "number" | "text" | "dynamic" | "void" }
+  >
+> = {
+  "fs.readFileSync": { symbol: "blaze_rt_file_read", args: ["text", "text"], returns: "dynamic" },
+  "fs.writeFileSync": { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [0], returns: "number" },
+  "fs.appendFileSync": { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [1], returns: "number" },
+  "fs.existsSync": { symbol: "blaze_rt_file_exists", args: ["text"], returns: "number" },
+  "fs.fileSizeSync": { symbol: "blaze_rt_file_size", args: ["text"], returns: "number" },
+  "fs.fileKindSync": { symbol: "blaze_rt_file_kind", args: ["text"], returns: "number" },
+  "fs.mkdirSync": { symbol: "blaze_rt_dir_make", args: ["text", "number"], returns: "number" },
+  "fs.rmSync": { symbol: "blaze_rt_file_remove", args: ["text", "number"], returns: "number" },
+  "fs.renameSync": { symbol: "blaze_rt_file_rename", args: ["text", "text"], returns: "number" },
+  "fs.copyFileSync": { symbol: "blaze_rt_file_copy", args: ["text", "text"], returns: "number" },
+  "fs.dirCountSync": { symbol: "blaze_rt_dir_count", args: ["text"], returns: "number" },
+  "fs.dirNameSync": { symbol: "blaze_rt_dir_name", args: ["text", "number"], returns: "text" },
+  "fs.dirIsDirSync": { symbol: "blaze_rt_dir_is_dir", args: ["text", "number"], returns: "number" },
+  "process.cwd": { symbol: "blaze_rt_current_dir", args: [], returns: "text" },
+  "process.pid": { symbol: "blaze_rt_process_id", args: [], returns: "number" },
+  "os.tmpdir": { symbol: "blaze_rt_temp_dir", args: [], returns: "text" },
+  "os.platform": { symbol: "blaze_rt_host_platform", args: [], returns: "text" },
+  "os.arch": { symbol: "blaze_rt_host_arch", args: [], returns: "text" },
+  "crypto.randomUUID": { symbol: "blaze_rt_random_uuid", args: [], returns: "text" },
+  "fs.fsyncPath": { symbol: "blaze_rt_file_sync", args: ["text"], returns: "number" },
+  "timers.sleepMs": { symbol: "blaze_rt_sleep_ms", args: ["number"], returns: "number" },
+  "exec.new": { symbol: "blaze_rt_command_new", args: [], returns: "number" },
+  "exec.arg": { symbol: "blaze_rt_command_arg", args: ["number", "text"], returns: "number" },
+  "exec.cwd": { symbol: "blaze_rt_command_cwd", args: ["number", "text"], returns: "number" },
+  "exec.env": { symbol: "blaze_rt_command_env", args: ["number", "text", "text"], returns: "number" },
+  "exec.input": { symbol: "blaze_rt_command_input", args: ["number", "text"], returns: "number" },
+  "exec.run": { symbol: "blaze_rt_command_run", args: ["number", "number"], returns: "number" },
+  "exec.signal": { symbol: "blaze_rt_command_signal", args: ["number"], returns: "number" },
+  "exec.errno": { symbol: "blaze_rt_command_errno", args: ["number"], returns: "number" },
+  "exec.timedOut": { symbol: "blaze_rt_command_timed_out", args: ["number"], returns: "number" },
+  "exec.stdout": { symbol: "blaze_rt_command_stdout", args: ["number"], returns: "text" },
+  "exec.stderr": { symbol: "blaze_rt_command_stderr", args: ["number"], returns: "text" },
+  "exec.free": { symbol: "blaze_rt_command_free", args: ["number"], returns: "void" },
+  "env.count": { symbol: "blaze_rt_env_count", args: [], returns: "number" },
+  "env.at": { symbol: "blaze_rt_env_at", args: ["number"], returns: "text" },
+  "os.cpuCount": { symbol: "blaze_rt_cpu_count", args: [], returns: "number" },
 };
 
 /**
@@ -10708,6 +10763,7 @@ class Machine {
       return;
     }
     if (this.dictionaryBuiltin(call)) return;
+    if (this.hostBuiltin(call)) return;
     // The dynamic values the runtime holds. A handle is a number the runtime
     // answers and a text is a pointer to the bytes it says, so the wall between
     // them is crossed here: a text is boxed into the handle the runtime reads,
@@ -10763,6 +10819,47 @@ class Machine {
       const text = this.hold(TEXT, "blaze_date_text");
       this.store(text);
       this.callSymbol("blaze_rt_date_parse", [text], NUMBER);
+      return;
+    }
+    if (call.callee === "fs.readFileSync" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      // The path and the mode are the texts they are written as, and the answer
+      // is the handle the runtime carries the text in: this backend keeps a
+      // dynamic value as the bits of the double the handle is.
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_file_path");
+      this.store(path);
+      this.at(call.args[1], TEXT);
+      const mode = this.hold(TEXT, "blaze_file_mode");
+      this.store(mode);
+      this.callSymbol("blaze_rt_file_read", [path, mode], NUMBER);
+      this.dynamicResult();
+      return;
+    }
+    if (call.callee === "blaze_rt_sha256_create") {
+      // The hasher is a handle the runtime made and keeps: it answers the
+      // double that names one, and the chain hands it back to the next call.
+      this.callSymbol("blaze_rt_sha256_create", [], NUMBER);
+      return;
+    }
+    if (call.callee === "blaze_rt_sha256_update" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      const hasher = this.hold(NUMBER, "blaze_hasher");
+      this.store(hasher);
+      this.at(call.args[1], TEXT);
+      const text = this.hold(TEXT, "blaze_hash_text");
+      this.store(text);
+      this.callSymbol("blaze_rt_sha256_update", [hasher, text], NUMBER);
+      return;
+    }
+    if (call.callee === "blaze_rt_sha256_digest" && argument !== undefined) {
+      this.at(argument, NUMBER);
+      const hasher = this.hold(NUMBER, "blaze_hasher");
+      this.store(hasher);
+      this.callSymbol("blaze_rt_sha256_digest", [hasher], NUMBER);
+      // The runtime answers the hex digest as the handle a text is carried in,
+      // and the IR says the answer is a text: the answer is already in the
+      // register the unboxing takes it from.
+      this.runtime("_to_text");
       return;
     }
     if (call.callee === "posix.dirname" && argument !== undefined) {
@@ -11271,11 +11368,15 @@ class Machine {
       this.callSymbol("blaze_rt_read_line", [], TEXT);
       return;
     }
-    if (call.callee === "cwdPath" || call.callee === "processId" || call.callee === "cpuCount") {
+    if (call.callee === "cwdPath" || call.callee === "processId" || call.callee === "hostProcessId" || call.callee === "cpuCount") {
       // The host answers each with a value and takes nothing: the path is a
       // text and the two counts are numbers.
       const symbol =
-        call.callee === "cwdPath" ? "blaze_rt_cwd" : call.callee === "processId" ? "blaze_rt_process_id" : "blaze_rt_cpu_count";
+        call.callee === "cwdPath"
+          ? "blaze_rt_cwd"
+          : call.callee === "processId" || call.callee === "hostProcessId"
+            ? "blaze_rt_process_id"
+            : "blaze_rt_cpu_count";
       this.callSymbol(symbol, [], call.callee === "cwdPath" ? TEXT : NUMBER);
       return;
     }
@@ -11320,7 +11421,10 @@ class Machine {
       this.at(call.args[0], TEXT);
       const path = this.hold(TEXT, "blaze_make_path");
       this.store(path);
-      this.callSymbol("blaze_rt_dir_make", [path], NUMBER);
+      this.at({ k: "const", type: NUMBER, text: "1" }, NUMBER);
+      const recursive = this.hold(NUMBER, "blaze_make_recursive");
+      this.store(recursive);
+      this.callSymbol("blaze_rt_dir_make", [path, recursive], NUMBER);
       return;
     }
     if (call.callee === "renamePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
@@ -11369,7 +11473,10 @@ class Machine {
       this.at(call.args[1], TEXT);
       const text = this.hold(TEXT, "blaze_file_text");
       this.store(text);
-      this.callSymbol("blaze_rt_file_write", [path, text], NUMBER);
+      this.at({ k: "const", type: NUMBER, text: "0" }, NUMBER);
+      const append = this.hold(NUMBER, "blaze_file_append");
+      this.store(append);
+      this.callSymbol("blaze_rt_file_write", [path, text, append], NUMBER);
       return;
     }
     if (call.callee === "process.env") {
@@ -11386,6 +11493,22 @@ class Machine {
       this.at(call.args[0], TEXT);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_print_error_text");
+      return;
+    }
+    if (call.callee === "stdoutWrite") {
+      this.at(call.args[0], TEXT);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_print_text");
+      return;
+    }
+    if (call.callee === "hostArgumentCount") {
+      this.runtime("_host_argument_count");
+      return;
+    }
+    if (call.callee === "hostArgument" && call.args[0] !== undefined) {
+      this.at(call.args[0], NUMBER);
+      this.code.movRegReg(RDI, RAX);
+      this.runtime("_host_argument");
       return;
     }
     if (call.callee === "process.hrtime.bigint") {
@@ -11429,6 +11552,55 @@ class Machine {
    * before the call is made, because reading one may be a call of its own and
    * that call takes the registers the others are waiting in.
    */
+  /**
+   * A host service, through the table that names it.
+   *
+   * Every argument is read at the kind the table states and written down before
+   * the call is made, because reading one may be a call that takes the
+   * registers the others wait in. A value that is the same on every call — the
+   * flag a write takes — is a constant the table hands over beside them.
+   */
+  private hostBuiltin(call: SemanticCall): boolean {
+    const service = HOST_SERVICES[call.callee];
+    if (service === undefined) return false;
+    const held: Held[] = [];
+    for (const [at, kind] of service.args.entries()) {
+      const argument = call.args[at];
+      if (argument === undefined) throw machineError(`${call.callee} is called with fewer arguments than the host takes`);
+      if (kind === "text") {
+        this.at(argument, TEXT);
+        const slot = this.hold(TEXT, "blaze_host_text");
+        this.store(slot);
+        held.push(slot);
+      } else {
+        this.at(argument, NUMBER);
+        const slot = this.hold(NUMBER, "blaze_host_number");
+        this.store(slot);
+        held.push(slot);
+      }
+    }
+    for (const value of service.extra ?? []) {
+      const constant: SemanticValue = { k: "const", type: NUMBER, text: String(value) };
+      this.at(constant, NUMBER);
+      const slot = this.hold(NUMBER, "blaze_host_constant");
+      this.store(slot);
+      held.push(slot);
+    }
+    if (service.returns === "void") {
+      // A service that answers nothing still answers this language a number:
+      // the call is made, and the one it hands back is what a statement reads.
+      this.callSymbol(service.symbol, held, VOID_TYPE);
+      this.code.movRegImm(RAX, 1n);
+      this.code.zeroFloat(XMM0);
+      this.code.cvtIntToFloat(XMM0, RAX, false);
+      return true;
+    }
+    const answer = service.returns === "text" ? TEXT : NUMBER;
+    this.callSymbol(service.symbol, held, answer);
+    if (service.returns === "dynamic") this.dynamicResult();
+    return true;
+  }
+
   private dictionaryBuiltin(call: SemanticCall): boolean {
     const answer = DICTIONARY_SERVICES[call.callee];
     if (answer === undefined) return false;

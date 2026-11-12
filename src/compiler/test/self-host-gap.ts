@@ -57,7 +57,11 @@ const NOT_COMPILER: ReadonlySet<string> = new Set(["node_modules", ".blaze", "te
  * so the report measures the sources a native binary is made of. The Node
  * compiler still loads them at run time through the manifest's `imports`.
  */
-const HOST_SOURCES: ReadonlySet<string> = new Set(["ai/review-node.ts", "ai/commandcode.ts"]);
+const HOST_SOURCES: ReadonlySet<string> = new Set([
+  "ai/review-node.ts",
+  "ai/commandcode.ts",
+  "core/platform-node.ts",
+]);
 
 /** One source the frontend cannot read, and what it said about it. */
 export interface RefusedSource {
@@ -171,6 +175,12 @@ export async function selfHostGap(directory = COMPILER_ROOT): Promise<SelfHostGa
   const entryPath = files.includes(ENTRY) ? ENTRY : (files[0] as string);
   const records = readModuleGraph({
     frontend: typeScriptFrontend,
+    // The project maps the two host boundaries to the adapters a native build
+    // links; the measurement reads the same files a native build reads.
+    modules: {
+      "#host/model": "ai/review-native.ts",
+      "#host/platform": "core/platform-native.ts",
+    },
     entry: { path: entryPath, source: sources.get(entryPath) ?? "" },
     roots: files.filter((path) => path !== entryPath),
     read: (path) => sources.get(path) ?? null,

@@ -232,7 +232,56 @@ const COMPARE_OPERATORS: Record<string, string> = {
  * it for a function the machine backend would not write, and a builtin it does
  * not know is a function the fallback cannot lower either.
  */
+/**
+ * The host services the compiler's adapter asks for, as the C call each one is.
+ *
+ * The names are the builtins the frontend writes and the arguments are the
+ * pointers and numbers the ABI takes: a file write appends the flag it was
+ * written with, and a question about a path answers the number the runtime
+ * already does.
+ */
+const HOST_CALLS: Readonly<Record<string, (args: string[]) => string>> = {
+  "fs.readFileSync": (args) => `blaze_rt_file_read(${args[0]}, ${args[1]})`,
+  "fs.writeFileSync": (args) => `blaze_rt_file_write(${args[0]}, ${args[1]}, 0.0)`,
+  "fs.appendFileSync": (args) => `blaze_rt_file_write(${args[0]}, ${args[1]}, 1.0)`,
+  "fs.existsSync": (args) => `blaze_rt_file_exists(${args[0]})`,
+  "fs.fileSizeSync": (args) => `blaze_rt_file_size(${args[0]})`,
+  "fs.fileKindSync": (args) => `blaze_rt_file_kind(${args[0]})`,
+  "fs.mkdirSync": (args) => `blaze_rt_dir_make(${args[0]}, ${args[1]})`,
+  "fs.rmSync": (args) => `blaze_rt_file_remove(${args[0]}, ${args[1]})`,
+  "fs.renameSync": (args) => `blaze_rt_file_rename(${args[0]}, ${args[1]})`,
+  "fs.copyFileSync": (args) => `blaze_rt_file_copy(${args[0]}, ${args[1]})`,
+  "fs.dirCountSync": (args) => `blaze_rt_dir_count(${args[0]})`,
+  "fs.dirNameSync": (args) => `blaze_rt_dir_name(${args[0]}, ${args[1]})`,
+  "fs.dirIsDirSync": (args) => `blaze_rt_dir_is_dir(${args[0]}, ${args[1]})`,
+  "process.cwd": () => `blaze_rt_current_dir()`,
+  "process.pid": () => `blaze_rt_process_id()`,
+  "os.tmpdir": () => `blaze_rt_temp_dir()`,
+  "os.platform": () => `blaze_rt_host_platform()`,
+  "os.arch": () => `blaze_rt_host_arch()`,
+  "crypto.randomUUID": () => `blaze_rt_random_uuid()`,
+  "fs.fsyncPath": (args) => `blaze_rt_file_sync(${args[0]})`,
+  "timers.sleepMs": (args) => `(blaze_rt_sleep_ms(${args[0]}), 1.0)`,
+  "exec.new": () => `blaze_rt_command_new()`,
+  "exec.arg": (args) => `blaze_rt_command_arg(${args[0]}, ${args[1]})`,
+  "exec.cwd": (args) => `blaze_rt_command_cwd(${args[0]}, ${args[1]})`,
+  "exec.env": (args) => `blaze_rt_command_env(${args[0]}, ${args[1]}, ${args[2]})`,
+  "exec.input": (args) => `blaze_rt_command_input(${args[0]}, ${args[1]})`,
+  "exec.run": (args) => `blaze_rt_command_run(${args[0]}, ${args[1]})`,
+  "exec.signal": (args) => `blaze_rt_command_signal(${args[0]})`,
+  "exec.errno": (args) => `blaze_rt_command_errno(${args[0]})`,
+  "exec.timedOut": (args) => `blaze_rt_command_timed_out(${args[0]})`,
+  "exec.stdout": (args) => `blaze_rt_command_stdout(${args[0]})`,
+  "exec.stderr": (args) => `blaze_rt_command_stderr(${args[0]})`,
+  "exec.free": (args) => `(blaze_rt_command_free(${args[0]}), 1.0)`,
+  "env.count": () => `blaze_rt_env_count()`,
+  "env.at": (args) => `blaze_rt_env_at(${args[0]})`,
+  "os.cpuCount": () => `blaze_rt_cpu_count()`,
+};
+
 function builtinExpression(name: string, args: string[]): string {
+  const host = HOST_CALLS[name];
+  if (host !== undefined) return host(args);
   switch (name) {
     case "Math.abs":
       return `fabs(${args[0]})`;
@@ -299,6 +348,8 @@ function builtinExpression(name: string, args: string[]): string {
       return `${RUNTIME_NAME}_read_line()`;
     case "cwdPath":
       return `${RUNTIME_NAME}_cwd()`;
+    case "hostProcessId":
+      return `${RUNTIME_NAME}_process_id()`;
     case "processId":
       return `${RUNTIME_NAME}_process_id()`;
     case "cpuCount":
@@ -312,7 +363,7 @@ function builtinExpression(name: string, args: string[]): string {
     case "copyPath":
       return `${RUNTIME_NAME}_file_copy(${args[0]}, ${args[1]})`;
     case "makeDir":
-      return `${RUNTIME_NAME}_dir_make(${args[0]})`;
+      return `${RUNTIME_NAME}_dir_make(${args[0]}, 1.0)`;
     case "renamePath":
       return `${RUNTIME_NAME}_path_rename(${args[0]}, ${args[1]})`;
     case "dirList":
@@ -326,7 +377,7 @@ function builtinExpression(name: string, args: string[]): string {
     case "fs.writeFileSync":
       // The file is written and the answer is the bytes written, which a
       // statement drops: the comma expression keeps the call and answers zero.
-      return `(${RUNTIME_NAME}_file_write(${args[0]}, ${args[1]}), 0.0)`;
+      return `(${RUNTIME_NAME}_file_write(${args[0]}, ${args[1]}, 0.0), 0.0)`;
     case "process.env":
       // The environment variable a module function reads is the runtime's to
       // ask for: the name is the text it is spelled with, and the answer is
@@ -336,6 +387,12 @@ function builtinExpression(name: string, args: string[]): string {
       // The error stream is the runtime's own, and a program writes there
       // through the entry that flushes the output it has already written.
       return `${RUNTIME_NAME}_print_error_text(${args[0]})`;
+    case "stdoutWrite":
+      return `(${RUNTIME_NAME}_print_text(${args[0]}), 0.0)`;
+    case "hostArgumentCount":
+      return `${RUNTIME_NAME}_host_argument_count()`;
+    case "hostArgument":
+      return `${RUNTIME_NAME}_host_argument(${args[0]})`;
     case "Date.parse":
       // A date text read back to the milliseconds it names since the epoch,
       // NaN where the text names none, which is the runtime's own reading.
@@ -497,6 +554,16 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_dict_set_text(${args[0]}, ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_has":
       return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
+    case "blaze_rt_own_key":
+      return `blaze_rt_own_key(${args[0]}, ${args[1]})`;
+    case "blaze_rt_sha256_create":
+      return `blaze_rt_sha256_create()`;
+    case "blaze_rt_sha256_update":
+      return `blaze_rt_sha256_update(${args[0]}, ${args[1]})`;
+    // The digest is the handle a text is carried in, and a call written where
+    // a text is read takes the text the runtime holds out of it.
+    case "blaze_rt_sha256_digest":
+      return `blaze_rt_to_text(blaze_rt_sha256_digest(${args[0]}))`;
     case "blaze_rt_is_array":
       return `blaze_rt_is_array(${args[0]})`;
     case "blaze_rt_object_has_field":
@@ -1616,6 +1683,13 @@ class FunctionEmitter {
       if (isReference(value.type)) return `((double)(uintptr_t)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;
     }
+    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    // A value the runtime holds, read where a text is expected, is the text it
+    // says: the handle is the double the runtime unboxes, and a text already
+    // is the pointer the parameter takes. The read comes before the branch
+    // below, which hands an untyped value straight through because a text is
+    // not converted.
+    if (fromDynamic && as !== null && isTextType(as)) return `${RUNTIME_NAME}_to_text(${written})`;
     if (as === null || isTextType(value.type) || isTextType(as)) {
       // A string a use reads as a number is the number its text states: the
       // language reads the '+text' written in front of one as the number it
@@ -1631,7 +1705,6 @@ class FunctionEmitter {
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
     if (isWideType(as)) return this.widen(written, value, as);
-    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
     if (fromDynamic && isNumber(as)) {
       return `${RUNTIME_NAME}_to_number(${written})`;
     }
@@ -1641,6 +1714,10 @@ class FunctionEmitter {
       // direction. A cast straight from a double is not a C conversion.
       return `(${declaredType(as)})(uintptr_t)(${written})`;
     }
+    // A reference read at a number is the address it is. The runtime's handles
+    // are the doubles their addresses say, so a layout question a value the
+    // read could not shape is asked of a record is asked with this.
+    if (isReference(value.type) && isNumber(as)) return `(double)(uintptr_t)(${written})`;
     if (isNumber(value.type) && isNumber(as)) {
       return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name
         ? written

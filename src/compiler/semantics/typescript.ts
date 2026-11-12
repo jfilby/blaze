@@ -8838,6 +8838,13 @@ class TypeScriptParser {
       const constant = init.k === "ident" ? this.constants.get(init.name) : undefined;
       const direct = init.k === "ident" && constant?.fields !== undefined;
       const baseShape = this.shapeOf(init);
+      // A record keyed by text holds the entries the source wrote, not fields a
+      // layout states: a key the pattern names is read the way `table.a` is,
+      // through the dictionary the value is.
+      const keyedCollection: CollectionValue | null =
+        baseShape !== null && baseShape.kind === "record" && baseShape.index !== null
+          ? { kind: "map", key: TEXT_RESULT, value: this.typeExprOfShape(baseShape.index) }
+          : null;
       let base: Expression = init;
       let head: Statement | null = null;
       if (!direct) {
@@ -8849,7 +8856,12 @@ class TypeScriptParser {
       }
       fields.forEach((entry) => {
         const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", constant?.fields?.get(entry.field)) : null;
-        const held: Expression = expanded ?? { k: "member", base, field: entry.field };
+        const keyed = keyedCollection === null
+          ? null
+          : this.collectionMethod(base, keyedCollection, "get", [
+              { k: "text", parts: [{ k: "text", value: entry.field }] },
+            ]);
+        const held: Expression = expanded ?? keyed ?? { k: "member", base, field: entry.field };
         const read: Expression = entry.default === undefined ? held : { k: "binary", op: "??", left: held, right: entry.default };
         const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
         // The value the file wrote for a constant field is the value the name
@@ -8881,8 +8893,7 @@ class TypeScriptParser {
           // layout the file declared: what is left is a dictionary of every
           // entry the pattern does not name, in the order the source holds
           // them.
-          const value = this.typeExprOfShape(baseShape.index);
-          const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value };
+          const collection: CollectionValue = keyedCollection as CollectionValue;
           const helper = this.dictionaryRestHelper(collection, [...named], line);
           const read: Expression = { k: "call", name: helper.name, args: [base] };
           this.collectionExpressions.set(read, collection);
@@ -12513,7 +12524,11 @@ class TypeScriptParser {
               replace({ k: "call", name: "parseInt", args: [args[0] as Expression] });
               continue;
             }
-            if (radix.k === "literal" && (radix.text === "2" || radix.text === "8" || radix.text === "16")) {
+            // Any other radix is the parser's own call: the runtime reads the
+            // base at run time, so a radix the source wrote out and one it
+            // computed are the same call. A radix that is a text is not a
+            // number the runtime reads, and is refused.
+            if (radix !== undefined && this.valueTypeOf(radix).kind !== "text") {
               replace({ k: "call", name: "Number.parseInt", args });
               continue;
             }
@@ -12619,7 +12634,7 @@ class TypeScriptParser {
             // entries the runtime holds.
             const dictionary = unknownReference(held) || (held.kind === "primitive" && held.name === "f64");
             if (dictionary) {
-              const has: Expression = { k: "call", name: "blaze_rt_dict_has", args: [receiver, key] };
+              const has: Expression = { k: "call", name: "blaze_rt_own_key", args: [receiver, key] };
               const answer: Expression = { k: "binary", op: "===", left: has, right: { k: "literal", text: "1" } };
               this.expressionTypes.set(answer, BOOLEAN_RESULT);
               replace(answer);
@@ -13484,7 +13499,9 @@ class TypeScriptParser {
           const radix = args[1];
           if (radix !== undefined && radix.k === "literal" && radix.text === "10") {
             args = [args[0] as Expression];
-          } else if (radix !== undefined && radix.k === "literal" && (radix.text === "2" || radix.text === "8" || radix.text === "16")) {
+          } else if (radix !== undefined && this.valueTypeOf(radix).kind !== "text") {
+            // A radix the source computes is read at run time by the parser,
+            // and the call is the same one a radix written out makes.
             target.name = "Number.parseInt";
           } else {
             // A radix the source computes is the runtime's parse.
@@ -14778,7 +14795,15 @@ class TypeScriptParser {
     captures: readonly string[],
     line: number,
   ): ArrowBinding {
-    const captureTypes = captures.map((capture) => this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE);
+    const captureTypes = captures.map((capture) => {
+      const type = this.boxTypeOf(capture) ?? this.valueTypes.get(capture) ?? ANY_TYPE;
+      // A text codec is no value of its own: the name holds the zero it is, so
+      // a closure that captures one is handed a number and not a reference to
+      // a type no layout names.
+      return type.kind === "ref" && (type.name === "__TextEncoder" || type.name === "__TextDecoder")
+        ? NUMBER_RESULT
+        : type;
+    });
     const captured = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] as TypeExpr }));
     const written = params.map((param) => ({
       name: param.name,
@@ -14935,9 +14960,11 @@ class TypeScriptParser {
         if (held.kind !== "slice" && held.kind !== "array") {
           // `a.concat(x)` with a value that is not a list appends that value:
           // the language makes it the last element, which is a one-element list
-          // of the element the answer holds. A value of another type is not one
-          // the list could hold, and is refused as before.
-          if (typeToString(held) !== typeToString(elements)) {
+          // of the element the answer holds. A value whose type the read does
+          // not hold is read at the element's type — a function another file
+          // answers is what its declaration says — and a value of another type
+          // is not one the list could hold, and is refused as before.
+          if (typeToString(held) !== typeToString(elements) && !unknownReference(held)) {
             this.report(
               "concat joins lists",
               `a list is joined with a list of its elements, or with one element; the source wrote ${typeToString(held)}`,
@@ -16386,6 +16413,28 @@ class TypeScriptParser {
           values: names.map((name): Expression => ({ k: "member", base: value as Expression, field: name })),
         };
         this.expressionTypes.set(listed, { kind: "slice", of: element });
+        return listed;
+      }
+    }
+    // A value the read does not hold at a record is the dictionary the program
+    // built, or the record another module handed over: the runtime asks the
+    // shape when the program runs, and the keys are the entries it holds. The
+    // list is the block of texts the helper lays down, one key per entry. A
+    // name the file wrote as a constant is not one of those: its keys are the
+    // names the file wrote, and the branch below answers them.
+    const namedConstant = value !== undefined && value.k === "ident" ? this.constants.get(value.name) : undefined;
+    if (
+      method === "keys" &&
+      value !== undefined &&
+      namedConstant?.fields === undefined &&
+      unknownReference(this.valueTypeOf(value))
+    ) {
+      const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: ANY_TYPE };
+      const helper = this.collectionListHelper(collection, "keys", this.peek().line);
+      if (helper !== null) {
+        const listed: Expression = { k: "call", name: helper.name, args: [value] };
+        this.expressionTypes.set(listed, helper.returns);
+        this.expressionShapes.set(listed, { kind: "list", of: helper.elementShape });
         return listed;
       }
     }
@@ -17866,6 +17915,8 @@ class TypeScriptParser {
     this.collectHelpers.set(key, made);
     return made;
   }
+
+
 
   private splitHelper(line: number, withLimit: boolean): { name: string; returns: TypeExpr } {
     const key = JSON.stringify(["split", withLimit]);
@@ -19497,6 +19548,62 @@ class TypeScriptParser {
         this.expect("(");
         this.expect(")");
         return { k: "call", name: "process.hrtime.bigint", args: [] };
+      }
+      // A host call: `fs.readFileSync` and the operations the runtime answers
+      // for the compiler's own adapter. The name is the builtin the backends
+      // lower, the arguments are read at the types it states, and the answer is
+      // the value the runtime holds, which the declared type reads.
+      if (
+        (token.text === "fs" || token.text === "os" || token.text === "timers" || token.text === "exec" || token.text === "env") &&
+        this.at(".") &&
+        this.peek(1).kind === "ident" &&
+        builtinFor(`${token.text}.${this.peek(1).text}`) !== null
+      ) {
+        const operation = `${token.text}.${this.peek(1).text}`;
+        const builtin = builtinFor(operation);
+        this.next();
+        this.next();
+        const args = this.readCallArguments(builtin?.params ?? []);
+        const called: Expression = { k: "call", name: operation, args };
+        this.expressionTypes.set(called, builtin?.returns ?? ANY_TYPE);
+        return called;
+      }
+      // `crypto.randomUUID()` is the runtime's own uuid: sixteen random bytes
+      // with the version and the variant bits set.
+      if (
+        token.text === "crypto" &&
+        this.at(".") &&
+        this.peek(1).text === "randomUUID" &&
+        this.peek(2).text === "("
+      ) {
+        this.next();
+        this.next();
+        this.next();
+        this.expect(")");
+        const called: Expression = { k: "call", name: "crypto.randomUUID", args: [] };
+        this.expressionTypes.set(called, TEXT_RESULT);
+        return called;
+      }
+      // `process.cwd()` is the directory the program runs in, and `process.pid`
+      // is the process it runs as: both are the host's to answer.
+      if (
+        token.text === "process" &&
+        this.at(".") &&
+        (this.peek(1).text === "cwd" || this.peek(1).text === "pid")
+      ) {
+        const field = this.peek(1).text;
+        this.next();
+        this.next();
+        if (field === "cwd") {
+          this.expect("(");
+          this.expect(")");
+        } else if (this.at("(")) {
+          this.next();
+          this.expect(")");
+        }
+        const called: Expression = { k: "call", name: `process.${field}`, args: [] };
+        this.expressionTypes.set(called, field === "cwd" ? TEXT_RESULT : NUMBER_RESULT);
+        return called;
       }
       // `Deno.args` names the same command line under a host that hands over
       // the arguments alone: node counts the program and the file it runs

@@ -26,6 +26,7 @@ async function build(
   source: string,
   backend?: "c" | "machine",
   files: Record<string, string> = {},
+  verifyProgram = true,
 ): Promise<{ directory: string; binary: string; status: { backend: string; reason?: string } }> {
   const directory = await scratch("blaze-language-feature-");
   for (const [name, text] of Object.entries(files)) await writeFile(join(directory, name), text, "utf8");
@@ -35,6 +36,7 @@ async function build(
     sourceFile: "main.ts",
     model: { provider: "replay", file: REPLAY },
     output: "machine",
+    ...(verifyProgram ? {} : { verifyProgram: false }),
     ...(backend === undefined ? {} : { backend }),
   });
   const outcome = await runBuild(
@@ -5657,6 +5659,170 @@ test("a number read in its radix and a text of a code point read", async () => {
     "",
   ].join("\n"));
   assert.equal(output.trim(), "255 16 A");
+});
+
+test("parseInt reads the radix the source computes", async () => {
+  // The radix is a value the program settles on when it runs, and the runtime
+  // reads the base it names. A radix read out of a document is a value the
+  // compiler cannot see, which the runtime reads as the number it says.
+  const source = [
+    "export function demo(): string {",
+    "  const radix = JSON.parse(`16`);",
+    "  return `${parseInt(`ff`, radix)} ${Number.parseInt(`777`, 8)}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "255 511", `the ${backend} backend`);
+  }
+});
+
+test("a hash is the runtime's SHA-256 hasher, on both native backends", async () => {
+  // The self-hosting fingerprint is `createHash("sha256")`, so the hasher the
+  // runtime carries has to be reachable from a function a backend lowers: the
+  // chain is the create, the updates and the digest, and the digest is the
+  // text the runtime holds a handle for.
+  const source = [
+    "export function hashText(text: string): string {",
+    "  return createHash(`sha256`).update(text, `utf8`).digest(`hex`);",
+    "}",
+    "export function two(): string {",
+    "  const hasher = createHash(`sha256`);",
+    "  hasher.update(`a`);",
+    "  hasher.update(`bc`);",
+    "  return hasher.digest(`hex`);",
+    "}",
+    "console.log(`${hashText(`abc`)} ${hashText(``)} ${two()}`);",
+    "",
+  ].join("\n");
+  const abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  const empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  for (const backend of ["c", "machine"] as const) {
+    const { binary } = await build(source, backend, {}, false);
+    const output = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(output.code, 0, `the ${backend} backend exits cleanly: ${output.stderr}`);
+    assert.equal(output.stdout.trim(), `${abc} ${empty} ${abc}`, `the ${backend} backend`);
+  }
+});
+
+test("a module function reads a file the runtime opens, on both native backends", async () => {
+  // A compiler source reads its project's files through the host boundary, and
+  // the read is the runtime's: the path and the mode cross as texts, and the
+  // answer is the text the runtime carries.
+  const directory = await scratch("blaze-file-read-");
+  const path = join(directory, "probe.txt");
+  await writeFile(path, "hello from a file", "utf8");
+  const source = [
+    "export function readText(): string {",
+    `  return fs.readFileSync(\`${path}\`, \`utf8\`);`,
+    "}",
+    "console.log(readText());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { binary } = await build(source, backend, {}, false);
+    const output = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(output.code, 0, `the ${backend} backend exits cleanly: ${output.stderr}`);
+    assert.equal(output.stdout, "hello from a file\n", `the ${backend} backend`);
+  }
+});
+
+test("a module function asks the host for the file services, on both native backends", async () => {
+  // The compiler's own adapter writes its store, reads it back, lists it,
+  // moves it and removes it, and each of those is a host service the runtime
+  // answers. The program builds the tree under a directory it is handed and
+  // prints what each answer was.
+  const directory = await scratch("blaze-host-files-");
+  const root = join(directory, "work");
+  const source = [
+    "export function run(): string {",
+    `  fs.mkdirSync(\`${root}/tree/one\`, 1);`,
+    `  fs.writeFileSync(\`${root}/tree/one/a.txt\`, \`hello\`);`,
+    `  fs.appendFileSync(\`${root}/tree/one/a.txt\`, \` world\`);`,
+    `  const size = fs.fileSizeSync(\`${root}/tree/one/a.txt\`);`,
+    `  const kind = fs.fileKindSync(\`${root}/tree/one/a.txt\`);`,
+    `  const there = fs.existsSync(\`${root}/tree/one/a.txt\`);`,
+    `  const synced = fs.fsyncPath(\`${root}/tree/one/a.txt\`);`,
+    "  const waited = timers.sleepMs(1);",
+    `  fs.copyFileSync(\`${root}/tree/one/a.txt\`, \`${root}/tree/one/b.txt\`);`,
+    `  fs.renameSync(\`${root}/tree/one/b.txt\`, \`${root}/tree/one/c.txt\`);`,
+    `  const count = fs.dirCountSync(\`${root}/tree/one\`);`,
+    "  let names = ``;",
+    "  let dirs = 0;",
+    "  for (let at = 0; at < count; at++) {",
+    `    names += \`\${fs.dirNameSync(\`${root}/tree/one\`, at)};\`;`,
+    `    dirs += fs.dirIsDirSync(\`${root}/tree/one\`, at);`,
+    "  }",
+    `  fs.rmSync(\`${root}\`, 1);`,
+    `  const gone = fs.existsSync(\`${root}\`);`,
+    "  return `${size} ${kind} ${there} ${synced} ${waited} ${count} ${dirs} ${gone} ${names} ${process.cwd()} ${os.tmpdir()} ${os.platform()} ${os.arch()} ${process.pid} ${crypto.randomUUID()}`;",
+    "}",
+    "console.log(run());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const { binary } = await build(source, backend, {}, false);
+    const output = run(binary, [], { timeoutMs: 60_000 });
+    assert.equal(output.code, 0, `the ${backend} backend exits cleanly: ${output.stderr}`);
+    const printed = output.stdout.trim();
+    const fields = printed.split(" ");
+    assert.equal(fields[0], "11", `the appended file holds eleven bytes (${backend})`);
+    assert.equal(fields[1], "1", `the path names a file (${backend})`);
+    assert.equal(fields[2], "1", `the file is there (${backend})`);
+    assert.equal(fields[3], "1", `the file is synced (${backend})`);
+    assert.equal(fields[4], "1", `the wait is over (${backend})`);
+    assert.equal(fields[5], "2", `the directory holds two entries (${backend})`);
+    assert.equal(fields[6], "0", `neither entry is a directory (${backend})`);
+    assert.equal(fields[7], "0", `the tree is gone (${backend})`);
+    assert.ok(fields[8]?.includes("a.txt;") && fields[8].includes("c.txt;"), `the listing names both entries (${backend}): ${fields[8]}`);
+    assert.ok((fields[9] as string).length > 0, `the current directory is a text (${backend})`);
+    assert.ok((fields[10] as string).length > 0, `the temporary directory is a text (${backend})`);
+    assert.equal(fields[11], process.platform, `the platform is the host's (${backend})`);
+    assert.ok((fields[12] as string).length > 0, `the architecture is a text (${backend})`);
+    assert.ok(Number(fields[13]) > 0, `the process id is a number (${backend})`);
+    assert.equal((fields[14] as string).length, 36, `the uuid is thirty-six characters (${backend})`);
+  }
+});
+
+test("a rest field of a pattern holds the entries the pattern did not name", async () => {
+  // A `Record<string, V>` is a dictionary, and the rest of a pattern over one is
+  // the entries left: the copy is a dictionary of its own, so the value the
+  // pattern read is untouched and the keys it kept are the ones not named.
+  const source = [
+    "export function demo(): string {",
+    "  const table: Record<string, number> = { a: 1, b: 2, c: 3 };",
+    "  const { a, ...rest } = table;",
+    "  const keys = Object.keys(rest).join(`,`);",
+    "  let total = 0;",
+    "  for (const [key, value] of Object.entries(rest)) total += value;",
+    "  return `${a} ${keys} ${total} ${table.a} ${table.b}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  for (const backend of ["c", "machine"] as const) {
+    const output = await agreesWithNode(source, {}, backend);
+    assert.equal(output.trim(), "1 b,c 5 1 2", `the ${backend} backend keeps the entries left`);
+  }
+});
+
+test("a destructured field of a text record is the text entry it names", async () => {
+  // A `Record<string, string>` holds texts, not numbers: the read of a field is
+  // the dictionary's text read, and the whole record is read the same way when
+  // the field is written on it.
+  const source = [
+    "export function demo(): string {",
+    "  const table: Record<string, string> = { a: `x`, b: `y` };",
+    "  const { a } = table;",
+    "  return `${a} ${table.b}`;",
+    "}",
+    "console.log(demo());",
+    "",
+  ].join("\n");
+  const output = await agreesWithNode(source);
+  assert.equal(output.trim(), "x y");
 });
 
 test("a text spread into a list is its characters and Array.from is the same list", async () => {

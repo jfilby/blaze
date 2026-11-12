@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostChild, HostSignal, HostSpawnOptions } from "./platform.ts";
+import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostChild, HostSignal, HostSpawnOptions, WebAssemblyEngine } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename as nodeBasename,
@@ -181,6 +181,12 @@ export function monotonicTimeNs(): bigint {
  */
 export function hostEnvironment(): Readonly<Record<string, string | undefined>> {
   return process.env;
+}
+
+/** The WebAssembly engine this process has, or null where it has none. */
+export function webAssemblyEngine(): WebAssemblyEngine | null {
+  const carrier = globalThis as { WebAssembly?: WebAssemblyEngine };
+  return carrier.WebAssembly ?? null;
 }
 
 /** The line a bounded run writes when the program itself is not there. */

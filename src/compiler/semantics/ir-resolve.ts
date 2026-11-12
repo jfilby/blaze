@@ -3957,7 +3957,10 @@ class ProgramResolver {
         },
         args,
         returns,
-        effects: [],
+        // A builtin's effects are the world it reads, and a call that reads the
+        // world is not a value the optimizer may move past the statement that
+        // changes what it reads.
+        effects: [...(builtin.effects ?? [])],
         builtin: true,
         bigint: false,
         wide: null,

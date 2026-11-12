@@ -31,6 +31,7 @@ export function phaseOf(
     input,
     entry: { path: entryFile, source: files[entryFile] },
     read: (path) => files[path] ?? null,
+    ...(input.host === undefined ? {} : { host: input.host }),
   });
 }
 

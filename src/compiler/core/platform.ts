@@ -130,6 +130,22 @@ export interface DirectoryEntry {
 }
 
 /**
+ * The WebAssembly engine the host process carries, where it carries one.
+ *
+ * A build verifies a module's boundary in this process when the engine is
+ * here, and asks a child process when it is not. The boundary names the
+ * operations, not the host: a native command has no engine and answers null.
+ */
+export interface WebAssemblyEngine {
+  validate(bytes: Uint8Array): boolean;
+  Module: {
+    new (bytes: Uint8Array): unknown;
+    imports(module: unknown): { module: string; name: string; kind: string }[];
+    exports(module: unknown): { name: string }[];
+  };
+}
+
+/**
  * What a file is: its size in bytes, and whether it is a file or a directory.
  */
 export interface FileInfo {
@@ -181,6 +197,7 @@ export {
   spawnSync,
   stat,
   tmpdir,
+  webAssemblyEngine,
   writeFile,
   writeFileSync,
-} from "./platform-node.ts";
+} from "#host/platform";

@@ -168,6 +168,10 @@ export function typeToString(type: TypeExpr): string {
     case "array":
       return type.length === null ? `array<${typeToString(type.of)}>` : `array<${typeToString(type.of)},${type.length}>`;
     case "ref":
+      // The text codecs are compile-time markers: the frontend tracks one by a
+      // name no contract can hold, and the value that crosses as one is the
+      // zero the name holds.
+      if (type.name === "__TextEncoder" || type.name === "__TextDecoder") return "f64";
       if (type.name !== undefined) return `ref<${type.name}>`;
       return type.of === null ? "ref<any>" : `ref<${typeToString(type.of)}>`;
     case "text":

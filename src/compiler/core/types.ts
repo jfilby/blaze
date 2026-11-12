@@ -492,6 +492,18 @@ export interface SourceInput {
   verifyProgram?: boolean;
   /** What lowers the IR. Absent when the output kind implies it. */
   backend?: BackendKind;
+  /**
+   * The file a build reads in place of one the project holds.
+   *
+   * A build that compiles a source for a host it does not run on reads that
+   * host's adapter instead of the running host's: the key is the project-relative
+   * path an import names, and the value is the file read for it. The module keeps
+   * the name it was imported by, so every import of it is the same module; the
+   * replacement's own imports resolve beside the file the replacement is in.
+   * Both the Node compiler and the native one apply the same table, so the
+   * program they build is the same program.
+   */
+  host?: Readonly<Record<string, string>>;
   /** How the toolchain builds. Defaults to `debug`. */
   mode?: BuildMode;
   target?: Partial<TargetSpec>;

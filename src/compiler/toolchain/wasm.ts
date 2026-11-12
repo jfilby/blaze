@@ -14,7 +14,8 @@
  * the module reads it at the offsets the contract gives.
  */
 
-import { readFile, stat, writeFile } from "../core/platform.ts";
+import { readFile, stat, webAssemblyEngine, writeFile } from "../core/platform.ts";
+import type { WebAssemblyEngine } from "../core/platform.ts";
 import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
@@ -303,14 +304,6 @@ export function boundaryProblems(bytes: Uint8Array, expected?: string): string[]
  * one; the question asked of it is whether it is there at all, not whether it
  * has this shape.
  */
-interface Engine {
-  validate(bytes: Uint8Array): boolean;
-  Module: {
-    new (bytes: Uint8Array): unknown;
-    imports(module: unknown): { module: string; name: string; kind: string }[];
-    exports(module: unknown): { name: string }[];
-  };
-}
 
 /**
  * The engine this process has, or null where it has none.
@@ -319,9 +312,8 @@ interface Engine {
  * second opinion. Where there is not, `null` says so and the caller asks the
  * child process instead.
  */
-function engineHere(): Engine | null {
-  const carrier = globalThis as { WebAssembly?: Engine };
-  return carrier.WebAssembly ?? null;
+function engineHere(): WebAssemblyEngine | null {
+  return webAssemblyEngine();
 }
 
 /** Rejects a module that reaches outside the memory the host provides. */

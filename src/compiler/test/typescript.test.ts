@@ -5820,6 +5820,28 @@ test("a number read in its radix and a text of a code point read", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("parseInt reads a radix the source computes", () => {
+  // The base is read at run time, so a radix held in a name is the same call a
+  // radix written out makes. The one-argument form still reads base ten.
+  const source = [
+    "export function read(text: string, radix: number): number {",
+    "  return parseInt(text, radix);",
+    "}",
+    "export function ten(text: string): number {",
+    "  return parseInt(text);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "main.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const parsed = read.analysis.functions.find((entry) => entry.name === "read")?.handle;
+  assert.ok(parsed !== undefined, "read is a function of the module");
+  assert.match(JSON.stringify(parsed), /"Number\.parseInt"/, "the computed radix is the parser's own call");
+  const baseTen = read.analysis.functions.find((entry) => entry.name === "ten")?.handle;
+  assert.ok(baseTen !== undefined, "ten is a function of the module");
+  assert.match(JSON.stringify(baseTen), /"parseInt"/, "no radix is the base-ten read");
+});
+
 test("a text spread into a list is its characters", () => {
   // `[...text]` is the characters of the text, so the list methods written
   // after it read a list of texts and not the text itself.
@@ -5881,6 +5903,32 @@ test("Object.hasOwn asks a constant record its own keys", () => {
     "",
   ].join("\n");
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
+});
+
+test("Object.keys and Object.hasOwn ask a value the read cannot shape", () => {
+  // The fields of a value whose type the read does not hold are not known where
+  // the question is written: a dynamic object, a dictionary the program built
+  // and a record this compiler laid out each answer at run time, and the
+  // runtime asks the shape.
+  const source = [
+    "export function names(value): string {",
+    "  return Object.keys(value).join(`,`);",
+    "}",
+    "export function has(value, key: string): boolean {",
+    "  return Object.hasOwn(value, key);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.equal(read.count, 0, read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const names = read.analysis.functions.find((entry) => entry.name === "names")?.handle;
+  assert.ok(names !== undefined, "names is a function of the module");
+  const written = read.analysis.functions.map((entry) => JSON.stringify(entry.handle)).join("\n");
+  assert.match(written, /blaze_rt_dict_len/, "the list is the count of the entries");
+  assert.match(written, /blaze_rt_dict_key_at/, "and the key at each position");
+  const has = read.analysis.functions.find((entry) => entry.name === "has")?.handle;
+  assert.ok(has !== undefined, "has is a function of the module");
+  assert.match(JSON.stringify(has), /blaze_rt_own_key/, "the question is the runtime's own");
 });
 
 test("a choice of two text reads is a text", () => {
@@ -6345,11 +6393,12 @@ test("a project maps a host specifier to one of its own modules", () => {
   assert.deepEqual(phase.program.edges, [{ from: "main.ts", to: "lib.ts", symbols: ["callModel"] }]);
 });
 
-test("hasOwn over a value the read cannot name asks the dictionary the runtime holds", () => {
+test("hasOwn over a value the read cannot name asks the value's own entries", () => {
   // A package writes `Object.hasOwn(t, k)` where `t` came out of a table and
-  // has no annotation. The value is the runtime's dictionary, so the question
-  // is the dictionary's; the answer is the comparison the question is, not the
-  // number the runtime returns.
+  // has no annotation. The value is whatever the runtime holds — a dictionary,
+  // a parsed object or a record's layout — so the question is the one that
+  // asks each shape's own entries; the answer is the comparison the question
+  // is, not the number the runtime returns.
   const source = [
     "export function has(t: any, k: string): boolean {",
     "  return Object.hasOwn(t, k);",
@@ -6359,7 +6408,7 @@ test("hasOwn over a value the read cannot name asks the dictionary the runtime h
   const read = readTypeScriptModule(source, "main.ts", false);
   assert.deepEqual(read.refused, []);
   const body = JSON.stringify((read.analysis.functions.find((entry) => entry.name === "has")?.handle as { body: unknown[] }).body);
-  assert.match(body, /blaze_rt_dict_has/, "the question is the dictionary's");
+  assert.match(body, /blaze_rt_own_key/, "the question is the value's own");
   assert.match(body, /"op":"==="/, "the answer is a truth");
 });
 

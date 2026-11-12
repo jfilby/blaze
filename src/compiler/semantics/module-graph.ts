@@ -102,6 +102,14 @@ export interface ModuleGraphRequest {
    */
   resolvePackages?: boolean;
   /**
+   * A module a project replaces, by the path a source imports.
+   *
+   * A project may map a host specifier to a file of its own; the file is read
+   * under the name the source imports, so a file that names `#host/platform`
+   * is read as the adapter the project selected.
+   */
+  host?: Readonly<Record<string, string>>;
+  /**
    * The project file each host specifier names, by specifier.
    *
    * A `#`-prefixed import is the host boundary unless the project maps it to a
@@ -795,7 +803,12 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   while (pending.length > 0) {
     const path = pending.shift() as string;
     if (records.has(path)) continue;
-    const source = path === request.entry.path ? request.entry.source : read(path);
+    // A file the project names a replacement for is read from that file, and
+    // the module keeps the name the import gave it. What the replacement
+    // imports resolves beside the file it was written in, not beside the name
+    // it answers for.
+    const sourcePath = request.host?.[path] ?? path;
+    const source = path === request.entry.path ? request.entry.source : read(sourcePath);
     if (source === null) throw contractPhaseError(`cannot read module ${path}`);
     if (source.trim() === "") throw contractPhaseError(`module ${path} is empty`);
 
@@ -813,8 +826,8 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     const strict = request.requireImports !== false;
     for (const entry of record.analysis.imports) {
       const resolved = strict
-        ? requireImport(request, read, path, entry)
-        : resolveImport(request, read, path, entry);
+        ? requireImport(request, read, sourcePath, entry)
+        : resolveImport(request, read, sourcePath, entry);
       // An import left unbound keeps its place, so the resolved list still
       // answers by the index the imports are written at.
       record.resolved.push(resolved ?? "");
@@ -825,8 +838,8 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // followed beside the runtime imports but is never checked for a symbol.
     for (const entry of record.analysis.typeImports ?? []) {
       const resolved = strict
-        ? requireImport(request, read, path, entry)
-        : resolveImport(request, read, path, entry);
+        ? requireImport(request, read, sourcePath, entry)
+        : resolveImport(request, read, sourcePath, entry);
       record.typeResolved.push(resolved ?? "");
       if (resolved !== null) pending.push(resolved);
     }
@@ -959,12 +972,16 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // are resolved against the analysis the contract is built from, so every
     // import is paired with the module it names.
     const strict = request.requireImports !== false;
+    // A replacement's own imports resolve beside the file it is written in,
+    // in the linked read as in the first: the module keeps the name the
+    // import gave it, and the host table names the file that answers for it.
+    const sourcePath = request.host?.[record.path] ?? record.path;
     record.resolved = record.analysis.imports.map((entry) => {
-      const resolved = strict ? requireImport(request, read, record.path, entry) : resolveImport(request, read, record.path, entry);
+      const resolved = strict ? requireImport(request, read, sourcePath, entry) : resolveImport(request, read, sourcePath, entry);
       return resolved ?? "";
     });
     record.typeResolved = (record.analysis.typeImports ?? []).map((entry) => {
-      const resolved = strict ? requireImport(request, read, record.path, entry) : resolveImport(request, read, record.path, entry);
+      const resolved = strict ? requireImport(request, read, sourcePath, entry) : resolveImport(request, read, sourcePath, entry);
       return resolved ?? "";
     });
   }

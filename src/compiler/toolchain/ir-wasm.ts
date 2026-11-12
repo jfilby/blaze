@@ -3663,6 +3663,9 @@ class Body {
       case "cwdPath":
         this.callService("blaze_rt_cwd");
         return TEXT;
+      case "hostProcessId":
+        this.callService("blaze_rt_process_id");
+        return F64_TYPE;
       case "processId":
         this.callService("blaze_rt_process_id");
         return F64_TYPE;
@@ -3690,6 +3693,7 @@ class Body {
         return F64_TYPE;
       case "makeDir":
         this.textArgument(argument(0));
+        this.value({ k: "const", type: F64_TYPE, text: "1" }, F64_TYPE);
         this.callService("blaze_rt_dir_make");
         return F64_TYPE;
       case "renamePath":
@@ -3714,10 +3718,11 @@ class Body {
         this.callService("blaze_rt_path_exists");
         return F64_TYPE;
       case "fs.writeFileSync":
-        // The path and the text are texts at their offsets, and the answer is
-        // the bytes written, which a statement drops.
+        // The path and the text are texts at their offsets, the append flag is
+        // zero, and the answer is the bytes written, which a statement drops.
         this.textArgument(argument(0));
         this.textArgument(argument(1));
+        this.value({ k: "const", type: F64_TYPE, text: "0" }, F64_TYPE);
         this.callService("blaze_rt_file_write");
         return F64_TYPE;
       case "Number":

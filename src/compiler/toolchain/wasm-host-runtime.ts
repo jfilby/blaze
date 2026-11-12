@@ -126,6 +126,8 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_md5_digest",
   "blaze_rt_file_read",
   "blaze_rt_file_write",
+  "blaze_rt_file_exists",
+  "blaze_rt_file_kind",
   "blaze_rt_path_exists",
   "blaze_rt_path_kind",
   "blaze_rt_file_size",
@@ -1401,7 +1403,7 @@ export function blaze_rt_sleep_ms(milliseconds) {
   if (milliseconds > 0) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
   }
-  return 0;
+  return 1;
 }
 `,
   },
@@ -1452,7 +1454,7 @@ export function blaze_rt_file_copy(from, to) {
   {
     service: "blaze_rt_dir_make",
     source: `
-export function blaze_rt_dir_make(path) {
+export function blaze_rt_dir_make(path, recursive) {
   const name = new TextDecoder().decode(textBytes(path));
   try {
     mkdirSync(name, { recursive: true });
@@ -1525,6 +1527,22 @@ export function blaze_rt_file_size(path) {
 `,
   },
   {
+    service: "blaze_rt_file_exists",
+    source: `
+export function blaze_rt_file_exists(path) {
+  return blaze_rt_path_exists(path);
+}
+`,
+  },
+  {
+    service: "blaze_rt_file_kind",
+    source: `
+export function blaze_rt_file_kind(path) {
+  return blaze_rt_path_kind(path);
+}
+`,
+  },
+  {
     service: "blaze_rt_path_exists",
     source: `
 export function blaze_rt_path_exists(path) {
@@ -1536,12 +1554,13 @@ export function blaze_rt_path_exists(path) {
   {
     service: "blaze_rt_file_write",
     source: `
-export function blaze_rt_file_write(path, text) {
+export function blaze_rt_file_write(path, text, append) {
   const name = new TextDecoder().decode(textBytes(path));
   const bytes = textBytes(text);
   try {
-    writeFileSync(name, bytes);
-    return bytes.length;
+    if (Number(append) !== 0) appendFileSync(name, bytes);
+    else writeFileSync(name, bytes);
+    return 1;
   } catch {
     return 0;
   }

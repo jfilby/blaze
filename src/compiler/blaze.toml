@@ -13,3 +13,7 @@ mode = "debug"
 # "#host/model" through package.json to ai/review-node.ts, which carries the
 # AI SDK; this project maps the same name to the adapter a native binary has.
 "#host/model" = "ai/review-native.ts"
+# The platform boundary. Node resolves "#host/platform" through package.json
+# to core/platform-node.ts; the self-build links the adapter written in the
+# subset, which answers the same names from the runtime's host ABI.
+"#host/platform" = "core/platform-native.ts"
