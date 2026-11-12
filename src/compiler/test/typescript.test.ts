@@ -5905,6 +5905,44 @@ test("Object.hasOwn asks a constant record its own keys", () => {
   assert.deepEqual(readTypeScriptModule(source, "main.ts", false).refused, []);
 });
 
+test("an index over an object the file wrote asks the keys it wrote", () => {
+  // `TABLE[key]` over a constant object is the comparisons its keys are: the
+  // key is read once and compared against each name, and a key the object does
+  // not hold is the absence the optional property is. The table's name does not
+  // reach the body, because a compiled function has no environment to read it
+  // from.
+  const source = [
+    'const TABLE: Partial<Record<string, string>> = { a: "x", b: "y" };',
+    "export function f(key: string): string | undefined {",
+    "  return TABLE[key];",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.deepEqual(read.refused, [], read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const body = JSON.stringify(read.analysis.functions.find((entry) => entry.name === "f")?.handle);
+  assert.doesNotMatch(body, /TABLE/, "the table's name is not read");
+  assert.match(body, /"op":"==="/, "the key is compared with a written key");
+  assert.match(body, /"k":"conditional"/, "a written key binds the value, and a miss is absence");
+});
+
+test("a name held at a function type is called through the value it holds", () => {
+  // A local chosen between two functions is a value of a function type: the
+  // call is made through the value, at the signature the type states.
+  const source = [
+    "type Ticker = (tick: () => number, ms: number) => number;",
+    "export function start(chosen: Ticker): number {",
+    "  const ticker = chosen;",
+    "  return ticker(() => 1, 10);",
+    "}",
+    "",
+  ].join("\n");
+  const read = readTypeScriptModule(source, "module.ts", false);
+  assert.deepEqual(read.refused, [], read.refused.map((one) => `${one.line}: ${one.message}`).join("; "));
+  const body = JSON.stringify(read.analysis.functions.find((entry) => entry.name === "start")?.handle);
+  assert.match(body, /"k":"invoke"/, "the call is through the value");
+});
+
 test("Object.keys and Object.hasOwn ask a value the read cannot shape", () => {
   // The fields of a value whose type the read does not hold are not known where
   // the question is written: a dynamic object, a dictionary the program built

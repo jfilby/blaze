@@ -6682,6 +6682,18 @@ what is missing is the source-level `BigInt` constructor over a runtime text
 and the `asIntN`/`asUintN` questions, so the evaluator's arithmetic reads the
 same in a compiled function.
 
+The width question is the hard half of that slice. The language's `bigint` is
+held at the machine word until a file's literals reach past it, and then at
+the unsigned 256-bit whole number. The contract evaluator's integers are
+signed and unbounded: a span can be negative, `BigInt.asIntN` produces a
+negative value, and a contract constant may be the top of the 256-bit range.
+A `u256` carrier compares unsigned, so `span < 0n` is false for a negative
+span held as its complement, and `asIntN` cannot answer what it answers in the
+source. The slice is a signed wide carrier for the language's `bigint` (the
+`i256` primitive the contract type table already names), chosen where a file
+holds signed values, with the constructor, the wrap and the comparisons read
+at it. Until then the self-build stops at the evaluator's first `BigInt` call.
+
 ### 7. Close the fixed point
 
 Run the ladder as a test: Node builds stage 1, stage 1 builds stage 2, stage 2
