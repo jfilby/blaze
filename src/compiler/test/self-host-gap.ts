@@ -53,7 +53,7 @@ const NOT_COMPILER: ReadonlySet<string> = new Set(["node_modules", ".blaze", "te
  * `ai/review-node.ts` is what `package.json` maps `#host/model` to, and it is
  * the only file that names the AI SDK and `zod`; `ai/commandcode.ts` is the one
  * provider it carries. A native build maps the same boundary to
- * `ai/review-native.ts` (§5a of the spec) and never compiles either of these,
+ * `ai/review-native.ts` (the host boundary of the spec) and never compiles either of these,
  * so the report measures the sources a native binary is made of. The Node
  * compiler still loads them at run time through the manifest's `imports`.
  */

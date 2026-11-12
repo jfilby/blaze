@@ -3,9 +3,9 @@
  *
  * The first fixed point uses `--model replay`, which the compiler answers
  * itself without a host, so this adapter refuses every provider that would need
- * the network. It is the file a native project maps `#host/model` to (§5a of
- * the self-hosting spec); the HTTP transport replaces it when model review is
- * ported, not before.
+ * the network. It is the file a native project maps `#host/model` to (the host
+ * boundary of the self-hosting spec); the HTTP transport replaces it when model
+ * review is ported, not before.
  */
 
 import { CompilerError } from "../core/errors.ts";

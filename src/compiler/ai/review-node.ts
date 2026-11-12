@@ -4,7 +4,7 @@
  * This is the only source that names the AI SDK. It is the host's answer to the
  * `#host/model` boundary: the compiler asks for a backend by that specifier,
  * `package.json` maps it here for Node, and a native project maps the same name
- * to an adapter of its own (§5a of the self-hosting spec). Keeping the SDK
+ * to an adapter of its own (the host boundary of the self-hosting spec). Keeping the SDK
  * behind the boundary is what lets the compiler's own tree be built without
  * compiling the SDK's sources.
  */

@@ -23,7 +23,7 @@
  *     constructs. It is the host's, asked for through the `#host/model`
  *     boundary: `ai/review-node.ts` carries the AI SDK for the Node compiler,
  *     and a native project maps the same name to the transport it links
- *     (§4i6 of the self-hosting spec).
+ *     (the host boundary in docs/specs/self-hosting.md).
  */
 
 import { createSdkBackend } from "#host/model";
