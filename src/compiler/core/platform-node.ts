@@ -123,6 +123,15 @@ export function isDirectoryPath(path: string): boolean {
   }
 }
 
+/** Whether a path names a file rather than a directory. */
+export function isFilePath(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A file the compiler opened, and the two things it does with it: writes it
  * through to the disk and closes it. The shape is the compiler's own, so a
@@ -329,8 +338,8 @@ export function basenameSuffix(path: string, suffix: string): string {
  * Three parts are what the compiler asks of it, and the third is optional
  * because a call that joins two is the common one.
  */
-export function join(first: string, second: string, third?: string): string {
-  return third === undefined ? nodeJoin(first, second) : nodeJoin(first, second, third);
+export function join(first: string, second: string): string {
+  return nodeJoin(first, second);
 }
 
 /** The separator a path is written with on this platform. */

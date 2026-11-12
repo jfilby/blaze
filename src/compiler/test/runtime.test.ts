@@ -196,15 +196,15 @@ test("the file services write, list, move and remove what the host does", async 
     "",
   ].join("\n");
   await mkdir(join(directory, "run"));
-  await writeFile(join(directory, "run", `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
-  await writeFile(join(directory, "run", "runtime.c"), runtimeSourceSource(), "utf8");
-  await writeFile(join(directory, "run", "probe.c"), probe, "utf8");
+  await writeFile(join(join(directory, "run"), `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(join(directory, "run"), "runtime.c"), runtimeSourceSource(), "utf8");
+  await writeFile(join(join(directory, "run"), "probe.c"), probe, "utf8");
   const built = run("gcc", ["-std=c11", "-O2", "-o", "probe", "probe.c", "runtime.c", "-lm"], {
     cwd: join(directory, "run"),
     timeoutMs: 120_000,
   });
   assert.equal(built.code, 0, built.stderr);
-  const delivered = run(join(directory, "run", "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
+  const delivered = run(join(join(directory, "run"), "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, `the file services answer the host (exit ${delivered.code})`);
 });
 
@@ -276,15 +276,15 @@ test("the command services start a program, wait for it, and answer what it said
     "",
   ].join("\n");
   await mkdir(join(directory, "run"));
-  await writeFile(join(directory, "run", `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
-  await writeFile(join(directory, "run", "runtime.c"), runtimeSourceSource(), "utf8");
-  await writeFile(join(directory, "run", "probe.c"), probe, "utf8");
+  await writeFile(join(join(directory, "run"), `${RUNTIME_NAME}.h`), runtimeHeaderSource(), "utf8");
+  await writeFile(join(join(directory, "run"), "runtime.c"), runtimeSourceSource(), "utf8");
+  await writeFile(join(join(directory, "run"), "probe.c"), probe, "utf8");
   const built = run("gcc", ["-std=c11", "-O2", "-o", "probe", "probe.c", "runtime.c", "-lm"], {
     cwd: join(directory, "run"),
     timeoutMs: 120_000,
   });
   assert.equal(built.code, 0, built.stderr);
-  const delivered = run(join(directory, "run", "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
+  const delivered = run(join(join(directory, "run"), "probe"), [], { cwd: join(directory, "run"), timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, `the command services answer the host (exit ${delivered.code})`);
 });
 

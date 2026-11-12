@@ -77,11 +77,10 @@ export function normalize(path: string): string {
 }
 
 /** Two or three path parts joined and normalized. */
-export function join(first: string, second: string, third?: string): string {
+export function join(first: string, second: string): string {
   const parts: string[] = [];
   if (first !== "") parts.push(first);
   if (second !== "") parts.push(second);
-  if (third !== undefined && third !== "") parts.push(third);
   return normalizePath(parts.join(sep));
 }
 
@@ -219,6 +218,11 @@ export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
 /** Whether a path names a directory. */
 export function isDirectoryPath(path: string): boolean {
   return fs.fileKindSync(path) === 2;
+}
+
+/** Whether a path names a file rather than a directory. */
+export function isFilePath(path: string): boolean {
+  return fs.fileKindSync(path) === 1;
 }
 
 /** What a file is: its size in bytes, and whether it is a file or a directory. */

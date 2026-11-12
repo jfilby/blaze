@@ -88,8 +88,8 @@ test("the facil.io walk finds C sources and include directories without a shell"
   await mkdir(join(root, "http1_parser"), { recursive: true });
   await mkdir(join(root, "tls"), { recursive: true });
   await writeFile(join(root, "fio.c"), "int fio;\n", "utf8");
-  await writeFile(join(root, "http1_parser", "http1_parser.c"), "int parser;\n", "utf8");
-  await writeFile(join(root, "tls", "fio_tls_missing.c"), "int tls;\n", "utf8");
+  await writeFile(join(join(root, "http1_parser"), "http1_parser.c"), "int parser;\n", "utf8");
+  await writeFile(join(join(root, "tls"), "fio_tls_missing.c"), "int tls;\n", "utf8");
   await writeFile(join(root, "README.md"), "not a translation unit\n", "utf8");
 
   const tree = await walkFacilIoTree(root);
@@ -97,8 +97,8 @@ test("the facil.io walk finds C sources and include directories without a shell"
     [...tree.sources].sort(),
     [
       join(root, "fio.c"),
-      join(root, "http1_parser", "http1_parser.c"),
-      join(root, "tls", "fio_tls_missing.c"),
+      join(join(root, "http1_parser"), "http1_parser.c"),
+      join(join(root, "tls"), "fio_tls_missing.c"),
     ].sort(),
   );
   assert.deepEqual(
@@ -108,15 +108,15 @@ test("the facil.io walk finds C sources and include directories without a shell"
 });
 
 test("vendored sources are found from the compiler data root", async () => {
-  assert.equal(vendoredFacilIoDir(), join(compilerDataRoot(), "deps", "facil.io"));
-  assert.equal(vendoredSqliteDir(), join(compilerDataRoot(), "deps", "sqlite3"));
+  assert.equal(vendoredFacilIoDir(), join(join(compilerDataRoot(), "deps"), "facil.io"));
+  assert.equal(vendoredSqliteDir(), join(join(compilerDataRoot(), "deps"), "sqlite3"));
   assert.equal((await stat(facilIoSourceDir())).isDirectory(), true);
   assert.equal((await stat(vendoredSqliteDir())).isDirectory(), true);
 });
 
 test("the compiler fingerprints the package its host names", async () => {
   assert.equal((await stat(join(compilerSourceRoot(), "cli.ts"))).isFile(), true);
-  assert.equal((await stat(join(compilerSourceRoot(), "core", "version.ts"))).isFile(), true);
+  assert.equal((await stat(join(join(compilerSourceRoot(), "core"), "version.ts"))).isFile(), true);
 });
 
 test("a QNX AArch64 build falls back to C when the machine backend refuses", async () => {

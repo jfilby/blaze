@@ -8,7 +8,7 @@ import {
   vectorValues,
 } from "../toolchain/verifier.ts";
 import { parseContract, preconditionFailures, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
-import { createJsonStore, hashText, serializeJson } from "../core/json-store.ts";
+import { createJsonStore, hashText, serializeJson, storeResolve, storeRead, storeReadIfValid, storeWrite, storeExists, storeReadText, storeWriteText, storeRemove, storeMkdirp } from "../core/json-store.ts";
 import { readIncremental } from "../incremental.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
 import { probeFault } from "../codegen.ts";
@@ -238,41 +238,41 @@ test("a whole number and the double that holds it are the same result", () => {
 test("the store keeps every path inside its root", async () => {
   const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
-  await assert.rejects(() => store.read("../escape.json"), /escapes root/);
-  await assert.rejects(() => store.read("/etc/passwd"), /must be relative/);
-  await assert.rejects(() => store.write("projects/../../escape.json", {}), /escapes root/);
+  await assert.rejects(() => storeRead(store, "../escape.json"), /escapes root/);
+  await assert.rejects(() => storeRead(store, "/etc/passwd"), /must be relative/);
+  await assert.rejects(() => storeWrite(store, "projects/../../escape.json", {}), /escapes root/);
   // Asking whether a path is there is not a reason to allow one that leaves
   // the root: reported as merely absent, an escaping path reads as a build
   // that was never made.
-  await assert.rejects(() => store.exists("/etc/passwd"), /must be relative/);
-  await assert.rejects(() => store.exists("../../escape.json"), /escapes root/);
+  await assert.rejects(() => storeExists(store, "/etc/passwd"), /must be relative/);
+  await assert.rejects(() => storeExists(store, "../../escape.json"), /escapes root/);
 });
 
 test("the store round trips values and leaves no temporary files", async () => {
   const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
   const value = { id: "dot-product", status: "success", nested: [1, 2, { deep: true }] };
-  await store.write("projects/dot-product/build.json", value);
-  assert.deepEqual(await store.read("projects/dot-product/build.json"), value);
-  assert.equal(await store.exists("projects/dot-product/build.json"), true);
-  assert.equal(await store.exists("projects/dot-product/missing.json"), false);
-  assert.equal(await readFile(store.resolve("projects/dot-product/build.json"), "utf8"), serializeJson(value));
+  await storeWrite(store, "projects/dot-product/build.json", value);
+  assert.deepEqual(await storeRead(store, "projects/dot-product/build.json"), value);
+  assert.equal(await storeExists(store, "projects/dot-product/build.json"), true);
+  assert.equal(await storeExists(store, "projects/dot-product/missing.json"), false);
+  assert.equal(await readFile(storeResolve(store, "projects/dot-product/build.json"), "utf8"), serializeJson(value));
 
-  await store.writeText("projects/dot-product/output/function.s", "\t.globl f\n");
-  assert.equal(await store.readText("projects/dot-product/output/function.s"), "\t.globl f\n");
+  await storeWriteText(store, "projects/dot-product/output/function.s", "\t.globl f\n");
+  assert.equal(await storeReadText(store, "projects/dot-product/output/function.s"), "\t.globl f\n");
 
-  await store.remove("projects/dot-project");
-  assert.equal(await store.exists("projects/dot-product/build.json"), true);
+  await storeRemove(store, "projects/dot-project");
+  assert.equal(await storeExists(store, "projects/dot-product/build.json"), true);
 });
 
 test("a record that is present but unreadable is a fault, not a record that is not there", async (t) => {
   const root = await scratch("blaze-store-");
   const store = createJsonStore(root);
   const path = "projects/p/build.json";
-  await store.mkdirp("projects/p");
-  await writeFile(store.resolve(path), '{"selected":"c1"}\n', "utf8");
-  await chmod(store.resolve(path), 0o000);
-  if (await readFile(store.resolve(path), "utf8").then(() => true, () => false)) {
+  await storeMkdirp(store, "projects/p");
+  await writeFile(storeResolve(store, path), '{"selected":"c1"}\n', "utf8");
+  await chmod(storeResolve(store, path), 0o000);
+  if (await readFile(storeResolve(store, path), "utf8").then(() => true, () => false)) {
     t.skip("this user can read a file with no permissions, so there is nothing to refuse");
     return;
   }
@@ -281,16 +281,16 @@ test("a record that is present but unreadable is a fault, not a record that is n
   // with a build that never read what was there. The file is present and the
   // contents are perfectly good JSON, so nothing about it is a cache to throw
   // away: the fault is ours, and the caller has to be told which.
-  await assert.rejects(() => store.readIfValid(path), /cannot read projects\/p\/build\.json/);
+  await assert.rejects(() => storeReadIfValid(store, path), /cannot read projects\/p\/build\.json/);
   await assert.rejects(() => readIncremental(store, path), /cannot read projects\/p\/build\.json/);
 
   // What it does tolerate is a record it can do without: one that is not
   // there, and one that is not JSON.
-  await chmod(store.resolve(path), 0o644);
-  await writeFile(store.resolve(path), "{ not json", "utf8");
-  assert.equal(await store.readIfValid(path), undefined);
+  await chmod(storeResolve(store, path), 0o644);
+  await writeFile(storeResolve(store, path), "{ not json", "utf8");
+  assert.equal(await storeReadIfValid(store, path), undefined);
   assert.deepEqual(Object.keys(await readIncremental(store, path)), []);
-  assert.equal(await store.readIfValid("projects/p/absent.json"), undefined);
+  assert.equal(await storeReadIfValid(store, "projects/p/absent.json"), undefined);
 });
 
 test("hashes identify content", () => {

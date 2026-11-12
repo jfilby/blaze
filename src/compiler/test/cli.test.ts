@@ -63,7 +63,7 @@ test("init writes a project file that builds machine code", async () => {
   // Machine code is the default, so an object arrives with no toolchain asked
   // for, and it is a program that runs.
   const project = basename(directory);
-  const delivered = join(await storeDirectory(directory, project), "output", project);
+  const delivered = join(join(await storeDirectory(directory, project), "output"), project);
   const executed = run(delivered, [], { timeoutMs: 60_000 });
   assert.equal(executed.code, 0, executed.stderr);
   assert.equal(executed.stdout, "3\n");
@@ -87,7 +87,7 @@ test("--verify=none builds a program without running it and records that", async
 
   // The program is delivered, and running it is what this test does after the
   // build; the build itself did not run it to compare against the source.
-  const delivered = join(state, "output", project);
+  const delivered = join(join(state, "output"), project);
   const executed = run(delivered, [], { timeoutMs: 60_000 });
   assert.equal(executed.code, 0, executed.stderr);
   assert.equal(executed.stdout, "3\n");

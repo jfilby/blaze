@@ -31,7 +31,7 @@ async function cacheEntries(workDirectory: string): Promise<string[]> {
 /** The objects a work directory's runtime cache holds, in entry order. */
 async function cacheObjects(workDirectory: string): Promise<Buffer[]> {
   const entries = await cacheEntries(workDirectory);
-  return Promise.all(entries.map((entry) => readFile(join(workDirectory, RUNTIME_CACHE_DIRECTORY, entry))));
+  return Promise.all(entries.map((entry) => readFile(join(join(workDirectory, RUNTIME_CACHE_DIRECTORY), entry))));
 }
 
 test("a runtime object compiled once is copied out of the cache instead of compiled again", async () => {
@@ -43,7 +43,7 @@ test("a runtime object compiled once is copied out of the cache instead of compi
 
   const entries = await cacheEntries(workDirectory);
   assert.equal(entries.length, 1, `one object was kept, but ${entries.join(", ")} were`);
-  const cached = join(workDirectory, RUNTIME_CACHE_DIRECTORY, entries[0] as string);
+  const cached = join(join(workDirectory, RUNTIME_CACHE_DIRECTORY), entries[0] as string);
 
   // A byte pattern that no compile of the runtime would produce: what the next
   // build links is either that pattern, which is the cache answering, or a real

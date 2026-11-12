@@ -145,6 +145,7 @@ export {
   hostWriteOut,
   isAbsolute,
   isDirectoryPath,
+  isFilePath,
   join,
   mkdir,
   mkdtemp,

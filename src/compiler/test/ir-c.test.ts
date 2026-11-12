@@ -336,7 +336,7 @@ test("the C code removes a tree and copies a file", async () => {
   const directory = await scratch("blaze-c-remove-");
   const tree = join(directory, "tree");
   await mkdir(join(tree, "sub"), { recursive: true });
-  await writeFile(join(tree, "sub", "file.txt"), "x");
+  await writeFile(join(join(tree, "sub"), "file.txt"), "x");
   const call = (callee: string, args: SemanticValue[]): SemanticFunction =>
     subject(
       F64,

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { readIncremental, reusable, unitKeys, type IncrementalEntry, type UnitKeyInput, type UnitKeys } from "../incremental.ts";
 import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, GenerationConfig, ObjectLayout, ProgramContract } from "../core/types.ts";
-import { createJsonStore } from "../core/json-store.ts";
+import { createJsonStore, storeWrite, storeWriteText, storeRead } from "../core/json-store.ts";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprints } from "../core/version.ts";
 import { join } from "node:path";
@@ -277,7 +277,7 @@ test("an object from another lowering is rebuilt and an object from this one is 
 test("a record that is not JSON is no record, not a build that cannot start", async () => {
   const root = await scratch("blaze-incremental-");
   const store = createJsonStore(join(root, ".blaze"));
-  await store.writeText("projects/p/incremental.json", "{ not json");
+  await storeWriteText(store, "projects/p/incremental.json", "{ not json");
 
   // A cache the compiler cannot read is one it rebuilds. Failing here instead
   // leaves a project with no way back short of deleting the file by hand.
@@ -296,9 +296,9 @@ test("two stores writing the same path do not share a temporary name", async () 
   // counter per store restarts at zero for each of them, so two writes that
   // overlap here would write the same temporary and one would rename the
   // other's away.
-  await Promise.all([first.write("projects/p/build.json", { from: "first" }), second.write("projects/p/build.json", { from: "second" })]);
+  await Promise.all([storeWrite(first, "projects/p/build.json", { from: "first" }), storeWrite(second, "projects/p/build.json", { from: "second" })]);
 
-  const written = await first.read<{ from: string }>("projects/p/build.json");
+  const written = await storeRead<{ from: string }>(first, "projects/p/build.json");
   assert.ok(["first", "second"].includes(written.from), `unexpected record: ${JSON.stringify(written)}`);
   const left = (await readdir(join(root, ".blaze/projects/p"))).filter((name) => name.endsWith(".tmp"));
   assert.deepEqual(left, [], "a temporary file was left behind");
@@ -445,7 +445,7 @@ test("the engine stamp names the release and the sources that decide a function"
   // made and calls it freshly proved.
   const root = await scratch("blaze-engine-");
   await mkdir(join(root, "toolchain"), { recursive: true });
-  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 1;\n", "utf8");
+  await writeFile(join(join(root, "toolchain"), "ir-c.ts"), "export const lowering = 1;\n", "utf8");
   const before = await fingerprintSources(root);
   const stamp = engineStamp(before);
   assert.match(stamp, new RegExp(`^${COMPILER_VERSION.replace(/\./g, "\\.")}\\+[0-9a-f]{8}$`));
@@ -453,12 +453,12 @@ test("the engine stamp names the release and the sources that decide a function"
   // A lowering-only source decides what the IR becomes and not what it is, so
   // the candidates an earlier build reviewed still stand and nothing is worth
   // asking the user about.
-  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 2;\n", "utf8");
+  await writeFile(join(join(root, "toolchain"), "ir-c.ts"), "export const lowering = 2;\n", "utf8");
   const loweringOnly = await fingerprintSources(root);
   assert.notEqual(loweringOnly.lowering, before.lowering, "the edit did not reach the lowering");
   assert.equal(engineStamp(loweringOnly), stamp, "a lowering edit moved the engine");
 
-  await writeFile(join(root, "toolchain", "ir-c.ts"), "export const lowering = 1;\n", "utf8");
+  await writeFile(join(join(root, "toolchain"), "ir-c.ts"), "export const lowering = 1;\n", "utf8");
   await writeFile(join(root, "review.ts"), "export const prompt = 1;\n", "utf8");
   const reviewSide = await fingerprintSources(root);
   assert.notEqual(reviewSide.review, before.review, "the edit did not reach the review");
@@ -560,8 +560,8 @@ test("two projects whose names share a prefix each read their own record", async
     }) as BuildStatus;
   // `app-2` is written last, so a lookup that takes the first directory
   // alphabetically — which is what it used to do — reads `app-2` for `app`.
-  await store.write("projects/app-0123456789ab/build.json", at("app", "2026-01-01T00:00:00.000Z"));
-  await store.write("projects/app-2-0123456789ab/build.json", at("app-2", "2026-02-01T00:00:00.000Z"));
+  await storeWrite(store, "projects/app-0123456789ab/build.json", at("app", "2026-01-01T00:00:00.000Z"));
+  await storeWrite(store, "projects/app-2-0123456789ab/build.json", at("app-2", "2026-02-01T00:00:00.000Z"));
   assert.equal((await inspectProject("app", directory)).id, "app");
   assert.equal((await inspectProject("app-2", directory)).id, "app-2");
 });

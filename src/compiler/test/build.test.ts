@@ -1491,7 +1491,7 @@ test("a project that asks for no check of its program's output builds a program 
     stages.some((line) => line === "verify/ok: Program output is not checked (verifyProgram = false)"),
     `the build says the program's output is not checked: ${stages.join("\n")}`,
   );
-  const delivered = join(await storeDirectory(directory, "input"), "output", "input");
+  const delivered = join(join(await storeDirectory(directory, "input"), "output"), "input");
   const stopped = run(delivered, [], { timeoutMs: 30_000 });
   assert.equal(stopped.code, 2, stopped.stdout);
   assert.equal(stopped.stdout, "", "the delivered program printed nothing before it stopped");

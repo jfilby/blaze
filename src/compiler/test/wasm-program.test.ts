@@ -248,7 +248,7 @@ test("a program removes a tree and copies a file through the host", async () => 
   const directory = await scratch("blaze-wasm-remove-");
   const tree = join(directory, "tree");
   await mkdir(join(tree, "sub"), { recursive: true });
-  await writeFile(join(tree, "sub", "file.txt"), "x");
+  await writeFile(join(join(tree, "sub"), "file.txt"), "x");
   const from = join(directory, "from.txt");
   const to = join(directory, "to.txt");
   await writeFile(from, "hello");

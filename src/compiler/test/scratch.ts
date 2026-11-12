@@ -67,7 +67,7 @@ export async function scratch(prefix: string): Promise<string> {
  * project's, rather than naming one.
  */
 export async function storeDirectory(directory: string, project: string): Promise<string> {
-  const projects = join(directory, ".blaze", "projects");
+  const projects = join(join(directory, ".blaze"), "projects");
   const found = (await readdir(projects).catch(() => [] as string[])).filter((entry) =>
     entry.startsWith(`${project}-`),
   );

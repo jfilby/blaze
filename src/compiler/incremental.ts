@@ -26,7 +26,7 @@
  * read the record before the other wrote it and lose an entry between them.
  */
 
-import { hashValue, type JsonStore } from "./core/json-store.ts";
+import { hashValue, type JsonStore, storeReadIfValid } from "./core/json-store.ts";
 import { contractsByName } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
 import type {
@@ -258,7 +258,7 @@ export function reusable(
  * is raised, because a build that took it for absent would write over it.
  */
 export async function readIncremental(store: JsonStore, path: string): Promise<IncrementalRecord> {
-  const value = await store.readIfValid<unknown>(path);
+  const value = await storeReadIfValid<unknown>(store, path);
   // The record is keyed by whatever the source named its functions, and
   // `__proto__` is a legal name. On an object with the usual prototype,
   // assigning to that key is not an assignment at all: it is the inherited
