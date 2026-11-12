@@ -376,7 +376,7 @@ test("a Python program is built and checked against the source it was written as
     test: { randomCases: 6, maxLength: 64, seed: 7 },
     benchmark: { iterations: 200 },
   });
-  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success", outcome.build.error?.message ?? "");
   // The delivered program is beside the project file, and it prints what the
   // source prints.
@@ -424,7 +424,7 @@ test("a Python program that calls a function of another file is built and checke
     test: { randomCases: 6, maxLength: 64, seed: 7 },
     benchmark: { iterations: 200 },
   });
-  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("input.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success", outcome.build.error?.message ?? "");
   const delivered = run(join(directory, "input"), [], { cwd: directory, timeoutMs: 60_000 });
   assert.equal(delivered.code, 0, delivered.stderr);

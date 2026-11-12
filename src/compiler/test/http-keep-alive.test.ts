@@ -31,7 +31,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** How the server answers a request. */
 type Mode = "keep-alive" | "close" | "chunked";

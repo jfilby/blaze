@@ -26,7 +26,7 @@ import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
-const quiet = { stage: () => {} };
+const quiet = () => {};
 const nimAvailable = run("nim", ["--version"], { timeoutMs: 30_000 }).code === 0;
 
 const DOT = [
@@ -1725,7 +1725,7 @@ async function deliveredByMachine(
   const outcome = await runBuild(
     "blaze.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}`, ...(mode === undefined ? {} : { mode }) },
-    { stage: (_at: string, _level: string, message: string) => notes.push(message) },
+    (_at: string, _level: string, message: string) => notes.push(message),
     "build",
   );
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");

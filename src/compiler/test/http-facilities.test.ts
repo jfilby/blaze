@@ -23,7 +23,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 type Backend = "c" | "machine";
 

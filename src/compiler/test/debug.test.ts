@@ -63,7 +63,7 @@ test("candidates are reviewed at the same time when candidate concurrency allows
     3,
   );
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(peak(), 3, "three candidates should have been in flight together");
 });
@@ -75,7 +75,7 @@ test("candidate concurrency of one reviews candidates one at a time", async (t) 
     { generation: { maxCandidates: 3, maxAttempts: 1, candidateConcurrency: 1 } },
   );
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(peak(), 1, "a candidate must be reviewed before the next is asked for");
   // One record per candidate, whatever order they were produced in.
@@ -98,7 +98,7 @@ test("without --debug the prompts stay out of the way", async (t) => {
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success", endpoint.url);
   assert.equal(written.join(""), "", "a quiet build writes no diagnostics");
 });
@@ -116,7 +116,7 @@ test("--debug prints the system and user prompt of every review", async (t) => {
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, () => {}, "build");
   assert.equal(outcome.build.status, "success");
   assert.equal(outcome.build.selectedCandidates?.square, "c1");
 
@@ -157,7 +157,7 @@ test("--debug prints the answer the compiler could not read", async (t) => {
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, () => {}, "build");
   assert.equal(outcome.build.status, "success");
 
   const debug = written.join("");
@@ -187,7 +187,7 @@ test("without --debug the answer that could not be read is not printed", async (
     process.stderr.write = original;
   });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
   assert.equal(outcome.build.status, "success", endpoint.url);
   assert.equal(written.join(""), "", "a quiet build writes no diagnostics");
 });
@@ -197,7 +197,7 @@ test("the prompt reaches the model as the contract and the instructions", async 
   const directory = await scratch("blaze-debug-");
   await writeProject(join(directory, "blaze.toml"), SQUARE);
 
-  await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, { stage: () => {} }, "build");
+  await runBuild("blaze.toml", { cwd: directory, reuse: false, debug: true }, () => {}, "build");
 
   assert.equal(endpoint.prompts.length, 2, "the IR is reviewed, and then the target it was lowered into");
   const sent = endpoint.prompts[0] ?? "";
@@ -254,7 +254,7 @@ test("functions are reviewed at the same time when function concurrency allows i
   // that generated one function at a time could never get past the first.
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 2 }, 2);
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 2, "both functions should have been in flight together");
@@ -264,7 +264,7 @@ test("functions are reviewed at the same time when function concurrency allows i
 test("function concurrency of one reviews functions one at a time", async (t) => {
   const { directory, endpoint } = await pairProject(t, { functionConcurrency: 1 });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 1, "a function must be answered before the next is asked for");
@@ -313,7 +313,7 @@ test("the default reviews up to three functions at a time", async (t) => {
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });
 
-  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, { stage: () => {} }, "build");
+  const outcome = await runBuild("blaze.toml", { cwd: directory, reuse: false }, () => {}, "build");
 
   assert.equal(outcome.build.status, "success");
   assert.equal(endpoint.peak(), 3, "three functions at a time is the default");

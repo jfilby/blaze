@@ -9,7 +9,7 @@ import { chatEndpoint, type ChatEndpoint, type ChatEndpointOptions } from "./mod
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 const SOURCE = "export function square(x: number): number {\n  return x * x;\n}\n";
 
 /**
@@ -123,7 +123,7 @@ test("the compiler says which model it is waiting for", async (t) => {
     runBuild(
       "input.toml",
       { cwd: directory, reuse: false },
-      { stage: (_stage, _status, message) => lines.push(message) },
+      (_stage, _status, message) => lines.push(message),
       "build",
     ),
   );
@@ -148,7 +148,7 @@ test("an answer that is not a review is asked for again, and costs no round", as
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false },
-    { stage: (_stage, _status, message) => lines.push(message) },
+    (_stage, _status, message) => lines.push(message),
     "build",
   );
 
@@ -238,7 +238,7 @@ test("an answer the provider stopped short of says why it stopped", async (t) =>
       runBuild(
         "input.toml",
         { cwd: directory, reuse: false },
-        { stage: (_stage, _status, message) => lines.push(message) },
+        (_stage, _status, message) => lines.push(message),
         "build",
       ),
     (error: unknown) =>
@@ -322,7 +322,7 @@ test("a reply cut off at the token limit is not a review", async (t) => {
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false },
-    { stage: (_stage, _status, message) => lines.push(message) },
+    (_stage, _status, message) => lines.push(message),
     "build",
   );
 

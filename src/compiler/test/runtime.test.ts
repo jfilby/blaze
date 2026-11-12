@@ -63,7 +63,7 @@ const ALLOCATING: SourceInput = {
   generation: { maxCandidates: 1, maxAttempts: 1 },
 };
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 async function workspace(name: string, input: SourceInput = INPUT): Promise<string> {
   const directory = await scratch(`blaze-${name}-`);

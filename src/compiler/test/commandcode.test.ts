@@ -22,7 +22,7 @@ import { CompilerError } from "../core/errors.ts";
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 const SQUARE = "export function square(x: number): number {\n  return x * x;\n}\n";
 /** A review, which is the only shape an answer takes now. */
 const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";

@@ -31,7 +31,7 @@ import { phaseOf, semanticsOf } from "./phase.ts";
 import { writeProject } from "./project.ts";
 import { scratch } from "./scratch.ts";
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 /** A review that finds nothing to change, which is what most rounds answer. */
 const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
@@ -227,7 +227,7 @@ test("a proposal the compiler refuses leaves the artifact as it was, and says wh
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: "openai-compatible/stub", maxAttempts: 1 },
-    { stage: (_stage, _status, message) => log.push(message) },
+    (_stage, _status, message) => log.push(message),
     "build",
   );
 

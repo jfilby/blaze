@@ -209,7 +209,7 @@ test("qcc links the generated runtime into a QNX executable", async (t) => {
   }
 });
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 test("a QNX C program builds and links for both targets", async (t) => {
   const qcc = run("qcc", ["-V"], { timeoutMs: 30_000 });

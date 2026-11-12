@@ -25,7 +25,7 @@ const QNX_X86: TargetSpec = { arch: "x86_64", os: "qnx", abi: "sysv", cpu: "", f
 const QNX_ARM: TargetSpec = { arch: "aarch64", os: "qnx", abi: "aapcs", cpu: "", features: [] };
 const LINUX_X86: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] };
 
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 test("QNX refuses the runtimes and libraries it cannot provide", () => {
   assert.doesNotThrow(() => assertRuntimeSupported(QNX_X86, "none"));

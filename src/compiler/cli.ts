@@ -134,14 +134,13 @@ Environment:
 `;
 
 function consoleReporter(): Reporter {
-  return {
-    stage(stage, status, message) {
-      const mark = status === "ok" ? "✓" : status === "fail" ? "✗" : "·";
-      // Every message names the step it is about, so the stage is not printed
-      // again beside it.
-      void stage;
-      hostWriteOut(`${mark} ${message}\n`);
-    },
+  return (stage: string, status: "ok" | "fail" | "info", message: string) => {
+    const state = String(status);
+    const mark = state === "ok" ? "✓" : state === "fail" ? "✗" : "·";
+    // Every message names the step it is about, so the stage is not printed
+    // again beside it.
+    void stage;
+    hostWriteOut(`${mark} ${message}\n`);
   };
 }
 

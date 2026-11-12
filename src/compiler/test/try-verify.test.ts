@@ -156,7 +156,7 @@ test("a function with a try block is built and answers what the source answers",
   const outcome = await runBuild(
     "blaze.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
-    { stage: () => {} },
+    () => {},
     "build",
   );
   assert.ok(outcome.outputPath !== null, "a program build delivers its binary");

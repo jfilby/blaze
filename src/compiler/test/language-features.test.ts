@@ -19,7 +19,7 @@ import { scratch } from "./scratch.ts";
 import { writeProject } from "./project.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** Builds a program and answers the binary and the directory it was built in. */
 async function build(

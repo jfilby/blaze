@@ -20,7 +20,7 @@ import { scratch } from "./scratch.ts";
 import { writeProject } from "./project.ts";
 import { run } from "../core/process.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /**
  * A program that calls every call of the facility.

@@ -28,7 +28,7 @@ import type { SemanticFunction } from "../core/semantic-ir.ts";
 
 /** A review that finds nothing to change, which is what most rounds answer. */
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 /** The files of a program, and the file its body is in. */
 const PROGRAM = {

@@ -7,7 +7,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 const SOURCE = "const p = new Promise((resolve) => resolve(42));\nconsole.log(await p);\n";
 

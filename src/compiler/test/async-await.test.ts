@@ -22,7 +22,7 @@ import { writeProject } from "./project.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { phaseOf } from "./phase.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 const NIM = run("nim", ["--version"], { timeoutMs: 30_000 }).code === 0;
 const SOUND = "verdict: sound\nreason: the body computes what the contract states, and no rule applies to it";
 

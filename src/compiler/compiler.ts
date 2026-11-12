@@ -154,9 +154,7 @@ export const STATE_DIRECTORY = ".blaze";
  */
 const PROGRAM_REPAIR_ROUNDS = 2;
 
-export interface Reporter {
-  stage(stage: string, status: "ok" | "fail" | "info", message: string): void;
-}
+export type Reporter = (stage: string, status: "ok" | "fail" | "info", message: string) => void;
 
 export interface BuildOptions {
   /** Directory the compiler was run from; state lives in `<cwd>/.blaze`. */
@@ -1449,15 +1447,16 @@ export async function runBuild(
   let libraries: LibraryKind[] = [];
   let usesSqlite = false;
   let inputFields: Record<string, unknown> = {};
+  let projectFields: Record<string, unknown> = {};
   try {
     project = readInput(absoluteInput);
-    const projectFields = project as unknown as Record<string, unknown>;
+    projectFields = project as unknown as Record<string, unknown>;
     inputFields = projectFields["input"] as Record<string, unknown>;
-    const input = inputFields as unknown as SourceInput;
+    const input = projectFields["input"] as unknown as SourceInput;
     assertGenerationInput(absoluteInput, input);
     target = assertBuildableTarget(normalizeTarget(inputFields["target"] as Partial<TargetSpec> | undefined), inputFields["entry"] as string | undefined);
     targetForRecord = target;
-    toolchainId = toolchainFor(target).id;
+    toolchainId = String((toolchainFor(target) as unknown as Record<string, unknown>)["id"]);
     outputKind = resolveOutputKind((fields["output"] as OutputKind | undefined) ?? (inputFields["output"] as OutputKind | undefined));
     runtimeKind = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? (inputFields["runtime"] as RuntimeKind | undefined), outputKind);
     assertRuntimeSupported(target, runtimeKind);
@@ -1468,8 +1467,8 @@ export async function runBuild(
     // it runs on. A wasm module links no library at all, and a program hosted
     // by Nim is lowered by the host's own emitter, which knows no library, so
     // both are refused here rather than failing later at the link.
-    usesSqlite = usesSqliteSource(project.entry.source);
-    libraries = libraryKindsFor(project.entry.source, target);
+    usesSqlite = usesSqliteSource(String((projectFields["entry"] as Record<string, unknown>)["source"]));
+    libraries = libraryKindsFor(String((projectFields["entry"] as Record<string, unknown>)["source"]), target);
     if (usesSqlite && outputKind === "wasm") {
       throw new CompilerError("InputError", "input", "a WebAssembly module cannot use SQLite", "a wasm module links no library; build it with --output machine, or drop the SQLite calls", "", "", "");
     }
@@ -1486,8 +1485,8 @@ export async function runBuild(
   // resolves anything: it is the one setting that changes what the generated
   // program carries, and it is chosen here, so a reader is told what was
   // selected before anything built can be looked at.
-  reporter.stage("mode", "info", `Mode: ${buildMode} (${optimizationOptions(buildMode).join(" ")})`);
-  const input = project.input;
+  reporter("mode", "info", `Mode: ${buildMode} (${optimizationOptions(buildMode, undefined).join(" ")})`);
+  const input = inputFields as unknown as SourceInput;
   // A source comparison runs the delivered program on this host. A program
   // built for another host cannot be run here, so the build records that it
   // made no comparison rather than trying to run the wrong machine's code.
@@ -1503,7 +1502,7 @@ export async function runBuild(
   // A generate exists to show what a model made of the IR, so with none
   // configured there is nothing to show: it refuses rather than handing back
   // the IR as it stands under a generate's name.
-  if (mode === "generate" && !modelRequested) {
+  if (String(mode) === "generate" && !modelRequested) {
     throw await recordRejected(
       store,
       paths,
@@ -1515,10 +1514,12 @@ export async function runBuild(
   }
   // A reused build is answered by the model that reviewed the stored candidate,
   // so that is the model to name.
-  const modelName = (fields["reuse"] as boolean) ? previousBuild?.model : (requested ?? environment.AI_MODEL);
+  const previousFields = previousBuild as unknown as Record<string, unknown> | undefined;
+  const previousModel = previousFields === undefined ? undefined : previousFields["model"] as string | undefined;
+  const modelName = (fields["reuse"] as boolean) ? previousModel : (requested ?? environment.AI_MODEL);
   // The model is part of every answer this compiler gives, so it is named
   // before anything can fail, including a model that cannot be reached.
-  reporter.stage("model", "info", `Model: ${modelName ?? "(unset)"}`);
+  reporter("model", "info", `Model: ${modelName ?? "(unset)"}`);
 
   // The engine is read before anything is written, because a build that is
   // going to stop must stop without having touched the record of the last one.
@@ -1530,15 +1531,15 @@ export async function runBuild(
   // and, on a terminal, confirmed: the question is what a person can answer
   // and a script cannot, and a build that has no way to ask answers for
   // itself. `--recompile` is the same answer given in advance.
-  const previousEngine = previousBuild?.engine;
-  const engineChanged = previousEngine !== undefined && previousEngine !== engine;
+  const previousEngine = previousFields === undefined ? undefined : previousFields["engine"] as string | undefined;
+  const engineChanged = previousEngine !== undefined && String(previousEngine) !== engine;
   if (engineChanged && (fields["reuse"] as boolean) !== true) {
-    reporter.stage(
+    reporter(
       "engine",
       "info",
-      `Engine changed: ${previousEngine} -> ${engine} (last build ${agoFrom(previousBuild?.updatedAt)})`,
+      `Engine changed: ${previousEngine} -> ${engine} (last build ${agoFrom(previousFields === undefined ? undefined : previousFields["updatedAt"] as string | undefined)})`,
     );
-    reporter.stage(
+    reporter(
       "engine",
       "info",
       "The stored objects were built by different rules, so every function is reviewed again from the semantic IR",
@@ -1587,7 +1588,7 @@ export async function runBuild(
     sourceHash: "",
     contractHash: "",
     model: modelName ?? "unset",
-    modelConfig: modelName ?? previousBuild?.modelConfig ?? "unset",
+    modelConfig: modelName ?? (previousFields === undefined ? undefined : previousFields["modelConfig"] as string | undefined) ?? "unset",
     compilerVersion: COMPILER_VERSION,
     engine,
     // The flag is the record of a build that was told to recompile. An engine
@@ -1619,7 +1620,7 @@ export async function runBuild(
     const phase = runContractPhase({
       frontend: frontendFor(String(inputFields["language"])),
       input,
-      entry: project.entry,
+      entry: projectFields["entry"] as SourceModule,
       read: moduleReader(project.directory),
       ...(inputFields["host"] === undefined ? {} : { host: inputFields["host"] as Readonly<Record<string, string>> }),
     });
@@ -1628,7 +1629,7 @@ export async function runBuild(
     const semantics = semanticFunctions(program, phase.objectNames, phase.body, phase.objectLayouts, phase.objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
-    reporter.stage(
+    reporter(
       "ir",
       "ok",
       `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + fn.ensures.length, 0)} postcondition(s) to check them against`,
@@ -1637,7 +1638,7 @@ export async function runBuild(
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
     await storeWrite(store, paths.contract, program);
-    reporter.stage(
+    reporter(
       "contract",
       "ok",
       phase.body === undefined
@@ -1662,7 +1663,7 @@ export async function runBuild(
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
       validateSemanticProgram(driver, undefined, new Map(driver.bodies.map((fn) => [fn.name, fn])));
-      reporter.stage("ir", "ok", "Program IR: the program is resolved and validated");
+      reporter("ir", "ok", "Program IR: the program is resolved and validated");
     }
     // The machine backend is asked whether it can lower this program before
     // anything is generated. The lowering of a program is one thing: the
@@ -1676,13 +1677,13 @@ export async function runBuild(
     if (backendKind === "machine") {
       const refusal = machineRefusalOf(units, semantics, contractsByName(program.files), target);
       if (refusal !== null) {
-        reporter.stage(
+        reporter(
           "assemble",
           "info",
           `The machine backend refused to lower ${refusal.function} (${refusal.reason}); the C backend is used instead`,
         );
         if (refusal.detail !== undefined && refusal.detail.trim() !== "") {
-          reporter.stage("assemble", "info", refusal.detail.trim());
+          reporter("assemble", "info", refusal.detail.trim());
         }
         backendKind = "c";
         build.backend = "c";
@@ -1694,13 +1695,13 @@ export async function runBuild(
         // driver, and so does everything whose call to it would hand over
         // what only one convention carries.
         bodyLowering = programLoweringOf(driver, new Set(units.map(unitKey)), target);
-        for (const note of bodyLowering.notes) reporter.stage("assemble", "info", note);
+        for (const note of bodyLowering.notes) reporter("assemble", "info", note);
       }
     }
     await writeBuildRecord(store, paths, build);
 
     assertAssemblerSupportsArch(target);
-    if (phase.body !== undefined) assertProgramOutput(outputKind, project.entry.source);
+    if (phase.body !== undefined) assertProgramOutput(outputKind, String((projectFields["entry"] as Record<string, unknown>)["source"]));
 
     // What an earlier build proved per function. It is read before this build
     // writes to it, and it is written as each function is proved, so a build
@@ -1720,13 +1721,13 @@ export async function runBuild(
     // what proves the functions it is the only oracle for. A build that stops
     // at candidate selection has no program to link or to run, and so has no
     // proof to record for those functions either.
-    const checksProgram = phase.body !== undefined && mode === "build";
+    const checksProgram = phase.body !== undefined && String(mode) === "build";
     // Which model an implementation came from is part of what it is, so asking
     // for a different one rebuilds. A build that names no model reuses what the
     // last build used rather than invalidating everything for want of a name.
     const modelKey = (fields["reuse"] as boolean)
-      ? (previousBuild?.model ?? "unset")
-      : (requested ?? environment.AI_MODEL ?? previousBuild?.model ?? "unset");
+      ? (previousFields === undefined ? "unset" : String(previousFields["model"] ?? "unset"))
+      : (requested ?? environment.AI_MODEL ?? (previousFields === undefined ? undefined : previousFields["model"] as string | undefined) ?? "unset");
     // What the compiler itself is decides what an implementation is and how it
     // is proved, and it is in the key so that editing the prompt, the runtime
     // or the assembler rules rebuilds rather than reuses an object that the
@@ -1760,7 +1761,7 @@ export async function runBuild(
     // the same one, and the driver that runs the program links it too. The
     // HTTP runtime is built for the program that is being built: how many
     // connections its server may hold, and whether it speaks TLS.
-    const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), project.entry.source]);
+    const http = httpRuntimeNeeds(phase.body, [...phase.modules.map((module) => module.source), String((projectFields["entry"] as Record<string, unknown>)["source"])]);
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,
@@ -1890,7 +1891,7 @@ export async function runBuild(
       }
 
       if (reuse.level === "assembly" && reuse.missing.length > 0) {
-        reporter.stage(
+        reporter(
           "reuse",
           "info",
           `${functionName} is rebuilt from its stored implementation: ${reuse.missing.map((file) => basename(file)).join(", ")} ${reuse.missing.length === 1 ? "is" : "are"} gone`,
@@ -1931,7 +1932,7 @@ export async function runBuild(
                     // its own are not the same failure to wait out, and a gateway
                     // that reports the tokens is the only place they are counted.
                     const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
-                    reporter.stage(
+                    reporter(
                       "review",
                       "info",
                       `Asking again: ${functionName}, ${stage} of candidate ${candidate}, round ${attempt}, ${reason}${finish}; request ${retry} of ${retries}, waiting for ${modelName ?? "(unset)"}`,
@@ -1966,10 +1967,10 @@ export async function runBuild(
           ? {}
           : { programFailure: { mismatch, previous } }),
         onNote: (note) => {
-          reporter.stage("review", "info", `${functionName}: ${note}`);
+          reporter("review", "info", `${functionName}: ${note}`);
         },
         onReview: ({ stage, candidate, candidates, attempt, attempts }) => {
-          reporter.stage(
+          reporter(
             "review",
             "info",
             `Reviewing the ${stage === "ir" ? "semantic IR" : implementationLabel(outputKind)}: ${functionName}, candidate ${candidate} of ${candidates}, round ${attempt} of ${attempts}, waiting for ${modelName ?? "(unset)"}`,
@@ -2072,7 +2073,7 @@ export async function runBuild(
             .filter((outcome): outcome is BenchmarkResult => outcome !== undefined),
         ]);
         const valid = entry.result.outcomes.filter((outcome) => outcome.valid).length;
-        reporter.stage(
+        reporter(
           "review",
           valid > 0 ? "ok" : "fail",
           `${implementationLabel(outputKind)} for ${functionName}: ${entry.result.candidates.length} candidate(s), ${valid} valid`,
@@ -2124,7 +2125,7 @@ export async function runBuild(
     // that program. So a build generates, links and runs, and generates again
     // with what the program printed until the two agree or the rounds run out.
     const programRounds =
-      phase.body === undefined || mode !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
+      phase.body === undefined || String(mode) !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
     let checked: ProgramVerification | undefined;
     let mismatch: ProgramMismatch | undefined;
     let selected: Record<string, string> = {};
@@ -2142,7 +2143,7 @@ export async function runBuild(
     for (let round = 1; round <= programRounds; round += 1) {
       await generateUnits(mismatch);
       selected = await record();
-      if (driver === undefined || programFile === undefined || mode !== "build") break;
+      if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
       const runtime = await prepareRuntime();
       const objectPaths = unitsGenerated().map((entry) =>
         join(join(base, unitKey(entry.unit)), `${entry.result.selected as string}.o`),
@@ -2187,7 +2188,7 @@ export async function runBuild(
           if (!threads.includes(threading)) threads.push(threading);
         }
       }
-      const isHttp = runtimeKind === "facil" || mentionsHttpModule(project.entry.source);
+      const isHttp = runtimeKind === "facil" || mentionsHttpModule(String((projectFields["entry"] as Record<string, unknown>)["source"]));
       const runner =
         backendKind === "wasm"
           ? (await buildProgramModule({
@@ -2246,7 +2247,7 @@ export async function runBuild(
       if (checked.passed) break;
       mismatch = checked.difference;
       if (round < programRounds) {
-        reporter.stage("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again`);
+        reporter("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again`);
       }
     }
     if (checked !== undefined && !checked.passed) {
@@ -2257,16 +2258,16 @@ export async function runBuild(
         ].join("\n"), "", "", "");
     }
     if (checked !== undefined) {
-      reporter.stage(
+      reporter(
         "verify",
         "ok",
         `Program output matches the source (${checked.actual.split("\n").filter((line) => line !== "").length} line(s))`,
       );
-    } else if (driver !== undefined && mode === "build" && programVerification === "none") {
+    } else if (driver !== undefined && String(mode) === "build" && programVerification === "none") {
       // A program whose output is not checked is delivered without the
       // comparison, and the build says why rather than leaving the absence of
       // a verdict where a verdict would be.
-      reporter.stage(
+      reporter(
         "verify",
         "ok",
         (inputFields["verifyProgram"] as boolean | undefined) === false
@@ -2280,7 +2281,7 @@ export async function runBuild(
     if (checked !== undefined) await prove();
     // A build that delivered a program says whether it checked that program's
     // output. A function-only build has no program and leaves the field out.
-    if (driver !== undefined && mode === "build") build.programVerification = programVerification;
+    if (driver !== undefined && String(mode) === "build") build.programVerification = programVerification;
 
     const generated = unitsGenerated();
     // Keyed by whatever the source named the function, so these are built from
@@ -2310,27 +2311,27 @@ export async function runBuild(
       if (reusedByFunction.has(key)) {
         // Nothing was assembled or run for this function: what it delivered is
         // what an earlier build built, linked and verified for these inputs.
-        reporter.stage(
+        reporter(
           "assemble",
           "ok",
           `${implementationLabel(outputKind)} for ${functionName} was not rebuilt: candidate ${outcome?.candidate ?? entry.result.selected} is reused from the build that verified it`,
         );
         continue;
       }
-      reporter.stage("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
+      reporter("assemble", "ok", `${implementationLabel(outputKind)} built into a testable implementation`);
       if (outcome?.verification === undefined) {
         // A function whose contract states what it does rather than what it
         // returns has no vector to run, so nothing was verified here. The
         // program it belongs to is what says whether the two agree.
-        reporter.stage("verify", "info", `${functionName} returns no value to verify, so the program it is part of is what checks it`);
+        reporter("verify", "info", `${functionName} returns no value to verify, so the program it is part of is what checks it`);
         continue;
       }
-      reporter.stage(
+      reporter(
         "verify",
         "ok",
         `Correctness verified for ${functionName} (${outcome.verification.cases} test vectors, tolerance ${outcome.verification.tolerance ?? "exact"})`,
       );
-      reporter.stage(
+      reporter(
         "benchmark",
         "ok",
         `Benchmark completed for ${functionName} (${outcome.benchmark?.iterations ?? 0} iterations, ${outcome.benchmark?.durationNs ?? 0} ns)`,
@@ -2343,7 +2344,7 @@ export async function runBuild(
 
     let outputPath: string | null = null;
     let outputAssemblyPath: string | null = null;
-    if (mode === "build") {
+    if (String(mode) === "build") {
       const delivered: string[] = [];
       // A file that is replaced may be the file of a program that is still
       // running: a rebuild while the old binary serves is the usual way round,
@@ -2443,7 +2444,7 @@ export async function runBuild(
       // still in the page cache when the machine loses power leaves a
       // successful build record pointing at nothing.
       for (const path of delivered) await flushToDisk(path);
-      reporter.stage("output", "ok", `Output (${outputKind}):\n${delivered.map((path) => `  ${path}`).join("\n")}`);
+      reporter("output", "ok", `Output (${outputKind}):\n${delivered.map((path) => `  ${path}`).join("\n")}`);
     }
     // A build with no program to check has proved everything its functions
     // could prove on their own, so the record of that is written now.
@@ -2562,7 +2563,7 @@ export async function runStored(
     if (Array.isArray(candidates)) stored[name] = candidates;
   }
 
-  reporter.stage("model", "info", `Model: ${build?.model ?? "unknown"}`);
+  reporter("model", "info", `Model: ${build?.model ?? "unknown"}`);
   const output = build?.outputKind ?? "machine";
   const lowering = build?.backend ?? impliedBackend(output);
   const mode = build?.mode ?? "debug";
@@ -2652,17 +2653,17 @@ export async function runStored(
     // A function that states no postcondition has no vector to run, so there is
     // nothing to report for it here.
     if (result.verification === undefined && result.benchmark === undefined) {
-      reporter.stage(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
+      reporter(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
       continue;
     }
     if (action === "test") {
-      reporter.stage(
+      reporter(
         "verify",
         result.verification?.passed === true ? "ok" : "fail",
         `Correctness verified for ${functionName} (${result.verification?.cases ?? 0} test vectors)`,
       );
     } else {
-      reporter.stage(
+      reporter(
         "benchmark",
         "ok",
         `Benchmark completed for ${functionName} (${result.benchmark?.iterations ?? 0} iterations, ${result.benchmark?.durationNs ?? 0} ns)`,

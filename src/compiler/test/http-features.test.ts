@@ -17,7 +17,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** The port the programs of this suite are served on. */
 const PORT = 18150;

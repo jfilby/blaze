@@ -16,7 +16,7 @@ import { scratch } from "./scratch.ts";
 import { writeProject } from "./project.ts";
 import { run } from "../core/process.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /**
  * A program that opens a database in memory, creates a table, inserts a row and

@@ -26,7 +26,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** The port the server of these tests is served on. */
 const PORT = 18170;

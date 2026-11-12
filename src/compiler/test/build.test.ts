@@ -55,7 +55,7 @@ async function workspace(name: string, input: SourceInput = INPUT): Promise<stri
  * links beside the project file, so a test that builds the example builds a
  * copy: the repository is not the test's scratch directory.
  */
-const quiet = { stage: () => {} };
+const quiet = () => {};
 
 test("a backend that cannot deliver the output kind asked for is refused", async () => {
   // The two axes are separate, so the pair is checked rather than either one
@@ -197,7 +197,7 @@ test("a program the machine backend refuses is lowered by the C backend, and the
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false },
-    { stage: (_stage, _status, message) => log.push(message) },
+    (_stage, _status, message) => log.push(message),
     "build",
   );
 
@@ -399,7 +399,7 @@ test("a build says that it resolved and validated the IR before it asked for any
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${REPLAY}` },
-    { stage: (stage, _status, message) => { stages.push(stage); log.push(message); } },
+    (stage, _status, message) => { stages.push(stage); log.push(message); },
     "build",
   );
 
@@ -684,7 +684,7 @@ test("an engine that changed is recompiled when the user says so, and without as
   await writeStoredRecord(directory, first.project, { ...record, engine: "0.1.0+00000000" });
 
   const log: string[] = [];
-  const listening: Reporter = { stage: (_stage, _status, message) => log.push(message) };
+  const listening: Reporter = (_stage, _status, message) => log.push(message);
   // No confirm hook at all is a build that has nobody to ask: a pipe, a log, a
   // script. It says what happened and goes on to build.
   const second = await runBuild("input.toml", { cwd: directory, reuse: false, model: `replay:${replay}` }, listening, "build");
@@ -742,7 +742,7 @@ test("a stored implementation whose files are gone is rebuilt from it, without a
   const second = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${replay}` },
-    { stage: (_stage, _status, message) => log.push(message) },
+    (_stage, _status, message) => log.push(message),
     "build",
   );
 
@@ -1474,7 +1474,7 @@ test("a delivered program that stops where its source does not fails the build",
 test("a project that asks for no check of its program's output builds a program that stops", async () => {
   const directory = await servingProgram("unchecked-output", false);
   const stages: string[] = [];
-  const seen: Reporter = { stage: (name, level, message) => stages.push(`${name}/${level}: ${message}`) };
+  const seen: Reporter = (name, level, message) => stages.push(`${name}/${level}: ${message}`);
   const outcome = await runBuild(
     "input.toml",
     { cwd: directory, reuse: false, model: `replay:${HELLO_WORLD_REPLAY}`, maxAttempts: 1 },

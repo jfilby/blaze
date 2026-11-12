@@ -23,7 +23,7 @@ import { writeProject } from "./project.ts";
 import { foldWhole } from "../semantics/whole-arithmetic.ts";
 
 const REPLAY = new URL("./fixtures/dot-product-replay.json", import.meta.url).pathname;
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** The IR of a program's body, lowered the way a build lowers it. */
 function programIr(source: string): string {

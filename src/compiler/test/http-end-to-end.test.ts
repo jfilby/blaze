@@ -20,7 +20,7 @@ import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
 
-const QUIET = { stage: () => {} };
+const QUIET = () => {};
 
 /** A program that serves "Hello, World" on every route. */
 const HTTP_SOURCE = "const port = 18080;\nhttp.serve(port);\n";
