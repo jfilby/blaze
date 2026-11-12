@@ -5623,6 +5623,17 @@ before it, and the entry's statements travel with the entry file. A program
 whose two files each increment their own counter prints 1, 2, 1 rather than 1,
 2, 3.
 
+### 4i13. A body that reads a module value is contracted by what it does
+
+A top-level value is a cell the functions share, not a value a contract can
+state over the parameters. The frontend's contract reader knew the file's
+constants and its imports, but not its state, so a function whose result read
+`let value = 0` was refused as an identifier it did not declare. The state
+names are part of what the file holds now: the body is uncontractable and the
+function is contracted by what it does, exactly as a body that reads a
+constant it cannot state is. What the cell holds, and how it is initialized,
+is the next slice.
+
 ## The next slices
 
 ### What the measurement says now

@@ -89,6 +89,7 @@ test("fs.existsSync answers whether a path names anything", async () => {
   }
 });
 
+
 test("two files' module-level counters are two cells", async () => {
   // A compiled function has no environment, so a top-level number is a cell
   // the runtime holds. The cells are the program's, not a file's: two files

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { frontendFor } from "../semantics/frontend.ts";
+import type { SourceInput } from "../core/types.ts";
 import { pythonFrontend } from "../semantics/python.ts";
 import { readTypeScriptModule, typeScriptFrontend } from "../semantics/typescript.ts";
 import { readModuleGraph } from "../semantics/module-graph.ts";
@@ -24,6 +25,22 @@ function contractOfExport(source: string, name: string): FunctionContract {
 }
 
 const typescript = frontendFor("typescript");
+
+test("a function that reads a module value is contracted by what it does", () => {
+  // A top-level value is a cell the functions share, not a value a contract
+  // can state over the parameters: the body is contracted by what it does,
+  // and the read is not refused as an identifier the body did not declare.
+  const frontend = frontendFor("typescript");
+  const analysis = frontend.analyze(
+    ["let value = 0;", "export function read(): number {", "  return value;", "}", ""].join("\n"),
+    "lib.ts",
+    false,
+  );
+  const declared = analysis.functions.find((entry) => entry.name === "read");
+  assert.ok(declared !== undefined);
+  const contract = frontend.contractFor(analysis, declared, { language: "typescript" } as SourceInput);
+  assert.deepEqual(contract.ensures, []);
+});
 
 test("an arrow's concise body may be the assignment it writes", () => {
   // `() => (current ??= "none")` is the write and the value it wrote: the

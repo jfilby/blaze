@@ -6212,6 +6212,7 @@ class TypeScriptParser {
       default: defaultExport,
       body,
       constants: this.exportedConstants(),
+      ...(this.state.size === 0 ? {} : { state: this.state }),
       awaitingLink: this.deferred.size > 0 || (this.waitForFunction && !this.linked),
     };
   }
@@ -23382,6 +23383,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
             functions: analysis.functions.filter((entry) => entry.internal === true),
             default: null,
             body: statements,
+            ...(scanned.state.size === 0 ? {} : { state: scanned.state }),
             wideBigint,
           },
           // The program parser read the whole text, so the module parse's
@@ -23422,6 +23424,10 @@ export const typeScriptFrontend: Frontend = {
     const declaration = declared.handle as TypeScriptFunction;
     const held = analysis.constants as ReadonlyMap<string, unknown> | undefined;
     const moduleNames = new Set<string>(held === undefined ? [] : [...held.keys()]);
+    // A value the file holds is a name a body may read; a contract states what
+    // a function answers over its parameters, so a body that reads one is
+    // contracted by what it does rather than refused.
+    for (const name of analysis.state ?? []) moduleNames.add(name);
     // A value the file imports is a name it reads; a name it neither declares
     // nor imports is the refusal.
     for (const entry of analysis.imports) {

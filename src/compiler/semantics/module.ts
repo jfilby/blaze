@@ -366,6 +366,13 @@ export interface ModuleAnalysis {
    */
   constants?: unknown;
   /**
+   * The names the file holds as state rather than as values it wrote out: a
+   * top-level value computed by a call, a collection, a counter. A compiled
+   * function has no environment, so the name is a cell the runtime holds, and
+   * the contract phase carries where it lives.
+   */
+  state?: ReadonlySet<string>;
+  /**
    * The type each exported top-level declaration writes, where its value is not
    * a constant the file wrote out.
    *
