@@ -1202,11 +1202,21 @@ function unshapedReference(value: Inferred): boolean {
  */
 function sameShape(left: Shape, right: Shape): boolean {
   if (left.fields.length !== right.fields.length) return false;
+  // A pair record is a generated shape with exactly two fields. Its two sides
+  // are two values of their own kinds: an unknown reference on one side is the
+  // shaped reference the other literal wrote, but it is not a number or a
+  // list, so pairs with different field kinds stay apart.
+  const pair = left.fields.length === 2 &&
+    left.fields.some((field) => field.name === "first") &&
+    left.fields.some((field) => field.name === "second");
   return left.fields.every((field) => {
     const known = right.fields.find((entry) => entry.name === field.name);
     if (known === undefined) return false;
     if (describe(known.value) === describe(field.value)) return true;
-    return unshapedReference(known.value) || unshapedReference(field.value);
+    if (!pair) return unshapedReference(known.value) || unshapedReference(field.value);
+    if (unshapedReference(known.value)) return field.value.kind === "type" && field.value.type.kind === "ref";
+    if (unshapedReference(field.value)) return known.value.kind === "type" && known.value.type.kind === "ref";
+    return false;
   });
 }
 
@@ -1225,6 +1235,7 @@ function sameShape(left: Shape, right: Shape): boolean {
 function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
   const keys = [...shapes.keys()];
   const parent = new Map<string, string>(keys.map((key) => [key, key]));
+  const members = new Map<string, string[]>(keys.map((key) => [key, [key]]));
   const find = (key: string): string => {
     let root = key;
     while (parent.get(root) !== root) root = parent.get(root) as string;
@@ -1249,8 +1260,33 @@ function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
       // reference can hold, so reading it as the reference says nothing false.
       const firstShaped = first.fields.some((field) => !unshapedReference(field.value));
       const secondShaped = second.fields.some((field) => !unshapedReference(field.value));
+      // The relation is not transitive: a shape that says nothing about a
+      // reference is the same as either of two shaped ones, and the shaped
+      // ones are not the same as each other. A union is made only where every
+      // member of one group is the same object as every member of the other.
+      const leftGroup = members.get(find(keys[left])) as string[];
+      const rightGroup = members.get(find(keys[right])) as string[];
+      let compatible = true;
+      for (const a of leftGroup) {
+        for (const b of rightGroup) {
+          const one = shapes.get(a);
+          const other = shapes.get(b);
+          if (one === undefined || other === undefined || sameShape(one, other)) continue;
+          compatible = false;
+          break;
+        }
+        if (!compatible) break;
+      }
+      if (!compatible) continue;
       const keep = firstShaped === secondShaped ? keys[left] : firstShaped ? keys[left] : keys[right];
-      parent.set(find(keys[right]), find(keep));
+      const leftRoot = find(keys[left]);
+      const rightRoot = find(keys[right]);
+      const root = keep === keys[left] ? leftRoot : rightRoot;
+      const gone = root === leftRoot ? rightRoot : leftRoot;
+      parent.set(gone, root);
+      const merged = members.get(root) as string[];
+      merged.push(...(members.get(gone) as string[]));
+      members.delete(gone);
     }
   }
   return new Map(keys.map((key) => [key, find(key)]));
@@ -1447,6 +1483,7 @@ export function resolveObjects(
           // A field one literal wrote as a reference and another as a null is a
           // reference: the null is a value the reference can hold.
           if (unshapedReference(known.value)) known.value = field.value;
+
         }
       }
       shapes.clear();

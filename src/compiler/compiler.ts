@@ -2589,7 +2589,9 @@ export async function runStored(
   // missing the one function it kept. A record with no prototype holds what
   // it holds and nothing else.
   const stored = Object.create(null) as Record<string, Candidate[]>;
-  for (const [name, candidates] of Object.entries(await store.read<Record<string, Candidate[]>>(paths.candidates))) {
+  const candidatesByName = await store.read<Record<string, Candidate[]>>(paths.candidates);
+  for (const name of Object.keys(candidatesByName)) {
+    const candidates = candidatesByName[name];
     if (Array.isArray(candidates)) stored[name] = candidates;
   }
 

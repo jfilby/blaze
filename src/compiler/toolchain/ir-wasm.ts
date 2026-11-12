@@ -344,31 +344,51 @@ const WIDTHS: Record<string, number> = {
   bool: 1, i8: 1, u8: 1, i16: 2, u16: 2, i32: 4, u32: 4, f32: 4, i64: 8, u64: 8, usize: 8, isize: 8, f64: 8,
 };
 
-/** The loads that read a value at a width, by the carrier it is read into. */
-const LOADS: Record<string, Record<string, { code: number; align: number }>> = {
-  "127": { "1": { code: 0x2c, align: 0 }, "2": { code: 0x2e, align: 1 }, "4": { code: 0x28, align: 2 } },
-  "126": { "1": { code: 0x30, align: 0 }, "2": { code: 0x32, align: 1 }, "4": { code: 0x34, align: 2 }, "8": { code: 0x29, align: 3 } },
-  "125": { "4": { code: 0x2a, align: 2 } },
-  "124": { "8": { code: 0x2b, align: 3 } },
-};
+/** The load that reads a value of one width from one carrier's bytes. */
+function loadAt(held: number, size: number, unsigned: boolean): { code: number; align: number } | null {
+  if (held === I32) {
+    if (unsigned) {
+      if (size === 1) return { code: 0x2d, align: 0 };
+      if (size === 2) return { code: 0x2f, align: 1 };
+      if (size === 4) return { code: 0x28, align: 2 };
+      return null;
+    }
+    if (size === 1) return { code: 0x2c, align: 0 };
+    if (size === 2) return { code: 0x2e, align: 1 };
+    if (size === 4) return { code: 0x28, align: 2 };
+    return null;
+  }
+  if (held === I64) {
+    if (size === 1) return { code: 0x30, align: 0 };
+    if (size === 2) return { code: 0x32, align: 1 };
+    if (size === 4) return { code: 0x34, align: 2 };
+    if (size === 8) return { code: 0x29, align: 3 };
+    return null;
+  }
+  if (held === F32 && size === 4) return { code: 0x2a, align: 2 };
+  if (held === F64 && size === 8) return { code: 0x2b, align: 3 };
+  return null;
+}
 
-/**
- * The loads of a whole number the module reads as unsigned, which the format
- * spells out separately for the one- and two-byte widths: the same bytes read
- * as a signed byte of `-1` are `255` here, and a sign-extended `u32` is a
- * number past the range the source wrote.
- */
-const UNSIGNED_LOADS: Record<string, Record<string, { code: number; align: number }>> = {
-  "127": { "1": { code: 0x2d, align: 0 }, "2": { code: 0x2f, align: 1 }, "4": { code: 0x28, align: 2 } },
-};
-
-/** The stores that write a value at a width, by the carrier it is written from. */
-const STORES: Record<string, Record<string, { code: number; align: number }>> = {
-  "127": { "1": { code: 0x3a, align: 0 }, "2": { code: 0x3b, align: 1 }, "4": { code: 0x36, align: 2 } },
-  "126": { "1": { code: 0x3c, align: 0 }, "2": { code: 0x3d, align: 1 }, "4": { code: 0x3e, align: 2 }, "8": { code: 0x37, align: 3 } },
-  "125": { "4": { code: 0x38, align: 2 } },
-  "124": { "8": { code: 0x39, align: 3 } },
-};
+/** The store that writes a value of one width from one carrier. */
+function storeAt(held: number, size: number): { code: number; align: number } | null {
+  if (held === I32) {
+    if (size === 1) return { code: 0x3a, align: 0 };
+    if (size === 2) return { code: 0x3b, align: 1 };
+    if (size === 4) return { code: 0x36, align: 2 };
+    return null;
+  }
+  if (held === I64) {
+    if (size === 1) return { code: 0x3c, align: 0 };
+    if (size === 2) return { code: 0x3d, align: 1 };
+    if (size === 4) return { code: 0x3e, align: 2 };
+    if (size === 8) return { code: 0x37, align: 3 };
+    return null;
+  }
+  if (held === F32 && size === 4) return { code: 0x38, align: 2 };
+  if (held === F64 && size === 8) return { code: 0x39, align: 3 };
+  return null;
+}
 
 /**
  * The facts about a type that is not one of the primitives: a reference, a
@@ -497,14 +517,13 @@ function facts(type: SemanticType): TypeFacts {
   const held = wasm === "i64" ? I64 : wasm === "f32" ? F32 : wasm === "f64" ? F64 : I32;
   const isUnsigned = type.name === "u8" || type.name === "u16" || type.name === "u32" || type.name === "u64" || type.name === "usize";
   const size = WIDTHS[type.name] ?? 8;
-  const loads = (isUnsigned ? UNSIGNED_LOADS[String(held)] : undefined) ?? LOADS[String(held)];
   const computed: TypeFacts = {
     held,
     unsigned: isUnsigned,
     size,
     shift: size <= 1 ? -1 : size === 2 ? 1 : size === 4 ? 2 : 3,
-    load: loads?.[String(size)] ?? REFERENCE.load,
-    store: STORES[String(held)]?.[String(size)] ?? REFERENCE.store,
+    load: loadAt(held, size, isUnsigned) ?? REFERENCE.load,
+    store: storeAt(held, size) ?? REFERENCE.store,
   };
   return computed;
 }
@@ -557,20 +576,21 @@ const UNSIGNED_BINARY: Record<string, Record<string, number>> = {
  * `-1294967296`. A conversion that always took the signed one turned a whole
  * number the source wrote into a different number.
  */
-const TO_FLOAT: Record<string, Record<string, { signed: number; unsigned: number }>> = {
-  "127": { "125": { signed: 0xb2, unsigned: 0xb3 }, "124": { signed: 0xb7, unsigned: 0xb8 } },
-  "126": { "125": { signed: 0xb4, unsigned: 0xb5 }, "124": { signed: 0xb9, unsigned: 0xba } },
-};
-
-/**
- * Converting a float to a whole number, by the same two carriers. Which of the
- * two it is here is the destination's own business, because the destination is
- * the one deciding what it can hold.
- */
-const TO_WHOLE: Record<string, Record<string, { signed: number; unsigned: number }>> = {
-  "125": { "127": { signed: 0xa8, unsigned: 0xa9 }, "126": { signed: 0xae, unsigned: 0xaf } },
-  "124": { "127": { signed: 0xaa, unsigned: 0xab }, "126": { signed: 0xb0, unsigned: 0xb1 } },
-};
+/** The conversion opcode between one carrier and another, and its unsigned twin. */
+function conversionPair(from: number, to: number, whole: boolean): { signed: number; unsigned: number } | null {
+  if (whole) {
+    if (from === I32 && to === F32) return { signed: 0xb2, unsigned: 0xb3 };
+    if (from === I32 && to === F64) return { signed: 0xb7, unsigned: 0xb8 };
+    if (from === I64 && to === F32) return { signed: 0xb4, unsigned: 0xb5 };
+    if (from === I64 && to === F64) return { signed: 0xb9, unsigned: 0xba };
+    return null;
+  }
+  if (from === F32 && to === I32) return { signed: 0xa8, unsigned: 0xa9 };
+  if (from === F32 && to === I64) return { signed: 0xae, unsigned: 0xaf };
+  if (from === F64 && to === I32) return { signed: 0xaa, unsigned: 0xab };
+  if (from === F64 && to === I64) return { signed: 0xb0, unsigned: 0xb1 };
+  return null;
+}
 
 /**
  * The maths builtin each source name is a single instruction of, keyed by the
@@ -1285,9 +1305,8 @@ class Body {
     // whole number: widening reads the source's own spelling and narrowing
     // reads the destination's.
     const whole = held === I32 || held === I64;
-    const table = whole ? TO_FLOAT : TO_WHOLE;
-    const pair = table[held]?.[wanted];
-    if (pair === undefined) {
+    const pair = conversionPair(held, wanted, whole);
+    if (pair === null) {
       unreachable("convert between carriers", this.name, this.candidate);
     }
     this.op(whole ? (facts(from).unsigned ? pair.unsigned : pair.signed) : facts(to).unsigned ? pair.unsigned : pair.signed);

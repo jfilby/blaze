@@ -20303,6 +20303,12 @@ class TypeScriptParser {
     // kept under a spelling of its own and used where the pairs are written.
     const computedKeys = new Map<string, Expression>();
     const put = (name: string, value: Expression, spread = false): void => {
+      // An arrow stored in a field is a closure the IR lays out, so it carries
+      // the code entry the frontend wrote beside it.
+      if (value.k === "arrow" && value.code === undefined) {
+        const binding = this.arrowBindings.get(value.name);
+        if (binding !== undefined) value.code = this.closureCode(binding);
+      }
       parts.push({ field: { name, value } });
       const at = fields.findIndex((field) => field.name === name);
       if (at >= 0 && (spread || spreadFields.has(name))) {
