@@ -36,6 +36,49 @@ export interface BoundedCommand {
   readonly missing?: string;
 }
 
+/** The output side of a child process: text, chunk by chunk. */
+export interface HostReadable {
+  setEncoding(encoding: string): void;
+  on(event: string, handler: (chunk: string) => void): void;
+}
+
+/** The failure a child reports when it could not start or was stopped. */
+export interface HostError {
+  code?: string;
+  message?: string;
+}
+
+/** The input side of a child process. */
+export interface HostWritable {
+  on(event: string, handler: (error: unknown) => void): void;
+  end(text?: string): void;
+}
+
+/**
+ * One child process, as the command that starts it reads it: the streams it
+ * writes and the events that say how it ended.
+ *
+ * The shape is the boundary's own and not the host's: a build asks a child for
+ * its output and for its close, and a host that has no asynchronous child is
+ * simply without `spawn`, so the build runs its children in order.
+ */
+export interface HostChild {
+  readonly stdout?: HostReadable | null;
+  readonly stderr?: HostReadable | null;
+  readonly stdin?: HostWritable | null;
+  on(event: "error", handler: (error: HostError) => void): void;
+  on(event: "close", handler: (status: number | null, signal: string | null) => void): void;
+  kill(signal: string): void;
+  readonly pid?: number;
+}
+
+/** What a child is started with, as the command that starts it names it. */
+export interface HostSpawnOptions {
+  cwd?: string;
+  env?: Readonly<Record<string, string | undefined>>;
+  stdio?: readonly string[];
+}
+
 /**
  * The process the command runs in, as the command line needs it.
  *
@@ -64,6 +107,11 @@ export interface Host {
   onSignal?(signal: HostSignal, handler: () => void): () => void;
   /** Raises a signal again once its handler has settled what it was doing. */
   raiseSignal?(signal: HostSignal): void;
+  /**
+   * Starts a child the caller can wait on without blocking the process. A host
+   * without one still runs children: the build runs them one after another.
+   */
+  spawn?(command: string, args: readonly string[], options: HostSpawnOptions): HostChild;
   /** The command that runs a program with a bounded heap. */
   boundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand;
 }
@@ -130,7 +178,6 @@ export {
   sep,
   setTimeout,
   sleep,
-  spawn,
   spawnSync,
   stat,
   tmpdir,

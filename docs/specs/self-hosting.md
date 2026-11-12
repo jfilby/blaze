@@ -5587,6 +5587,11 @@ is the one that asks. The same shape is what the adapter's `spawn` and
 timers use: a host without an asynchronous child runs its children in order
 rather than pretending to have one.
 
+`Host.spawn` is the same shape: the Node host answers it with its
+asynchronous child, and a host without it makes `runAsync` ask `run` instead,
+so the children are run in order rather than the build pretending to have an
+event loop it does not have.
+
 ## The next slices
 
 ### What the measurement says now

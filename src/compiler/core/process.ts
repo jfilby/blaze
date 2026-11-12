@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { clearTimeout, host, hostEnvironment, monotonicTimeNs, spawn, spawnSync, type BoundedCommand } from "./platform.ts";
+import { clearTimeout, host, hostEnvironment, monotonicTimeNs, spawnSync, type BoundedCommand, type HostError } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;
@@ -153,6 +153,11 @@ export function run(command: string, args: readonly string[], options: RunOption
  * fit.
  */
 export function runAsync(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
+  // A host without an asynchronous child has one process primitive, the one
+  // `run` uses: the children are run in order, and the answer is the answer
+  // the blocking run gives.
+  if (host.spawn === undefined) return Promise.resolve(run(command, args, options));
+  const spawnChild = host.spawn;
   const started = monotonicTimeNs();
   const spawned: BoundedCommand = options.heapBytes === undefined
     ? { command, args: [...args] }
@@ -161,7 +166,7 @@ export function runAsync(command: string, args: readonly string[], options: RunO
   const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise<RunResult>((settle) => {
-    const child = spawn(spawned.command, spawned.args, {
+    const child = spawnChild(spawned.command, spawned.args, {
       cwd: options.cwd,
       env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
@@ -231,13 +236,15 @@ export function runAsync(command: string, args: readonly string[], options: RunO
     child.stdout?.on("data", (chunk: string) => gather("stdout", chunk));
     child.stderr?.on("data", (chunk: string) => gather("stderr", chunk));
 
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      launchError = error;
+    child.on("error", (error: HostError) => {
+      launchError = error as NodeJS.ErrnoException;
       // A child that never launched has no streams to drain and no exit to
       // wait for, so the answer is the failure itself.
       finish(null, null);
     });
-    child.on("close", (status: number | null, signal: NodeJS.Signals | null) => finish(status, signal));
+    child.on("close", (status: number | null, signal: string | null) =>
+      finish(status, signal as NodeJS.Signals | null),
+    );
     // A run that ends before it read what was written to it is the run's answer,
     // not this process's: the pipe is closed under the write, and that is not the
     // thing that went wrong.

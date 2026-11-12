@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostSignal } from "./platform.ts";
+import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostChild, HostSignal, HostSpawnOptions } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename as nodeBasename,
@@ -45,7 +45,7 @@ import { clearTimeout } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export {
@@ -220,6 +220,8 @@ export const host: Host = {
   raiseSignal: (signal: HostSignal): void => {
     process.kill(process.pid, signal);
   },
+  spawn: (command: string, args: readonly string[], options: HostSpawnOptions): HostChild =>
+    spawn(command, args, options as SpawnOptions) as unknown as HostChild,
   boundHeap: (command: string, args: readonly string[], bytes: number): BoundedCommand => {
     const kilobytes = Math.max(1, Math.floor(bytes / 1024));
     return {
