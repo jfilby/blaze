@@ -5611,6 +5611,18 @@ names of the value is what the shape declares. The value itself is not yet a
 value the object pass or the IR carries, which is the next slice: a module
 value has no storage in a function that is compiled on its own.
 
+### 4i12. The cells a program's modules hold are the program's
+
+A module numbers its top-level values from zero: `let count = 0` is a cell the
+runtime holds and every function of the module reads it as
+`blaze_rt_global_get(0)`. A program has one array of cells, so two modules that
+each count shared the first one and the second module's calls counted on the
+first module's value. The contract phase now numbers the cells once for the
+program: each file's body and functions are moved past the cells of the files
+before it, and the entry's statements travel with the entry file. A program
+whose two files each increment their own counter prints 1, 2, 1 rather than 1,
+2, 3.
+
 ## The next slices
 
 ### What the measurement says now

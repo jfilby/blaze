@@ -89,6 +89,27 @@ test("fs.existsSync answers whether a path names anything", async () => {
   }
 });
 
+test("two files' module-level counters are two cells", async () => {
+  // A compiled function has no environment, so a top-level number is a cell
+  // the runtime holds. The cells are the program's, not a file's: two files
+  // that each count start from their own zero.
+  const output = await agreesWithNode(
+    [
+      'import { nextA } from "./a.ts";',
+      'import { nextB } from "./b.ts";',
+      "console.log(nextA());",
+      "console.log(nextA());",
+      "console.log(nextB());",
+      "",
+    ].join("\n"),
+    {
+      "a.ts": ["let count = 0;", "export function nextA(): number {", "  count += 1;", "  return count;", "}", ""].join("\n"),
+      "b.ts": ["let count = 0;", "export function nextB(): number {", "  count += 1;", "  return count;", "}", ""].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "1\n2\n1");
+});
+
 test("fs.writeFileSync writes the text a program names", async () => {
   // The write is a host service: the path and the text are the texts they are,
   // and the file the program names holds what it wrote when it ends. Both a
