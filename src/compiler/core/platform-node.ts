@@ -12,7 +12,7 @@
  * them, and that is the point of the boundary.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   copyFile,
@@ -113,6 +113,14 @@ export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
 /** What a file is: its size in bytes, and whether it is a file or a directory. */
 export async function stat(path: string): Promise<FileInfo> {
   return nodeStat(path);
+}
+/** Whether a path names a directory. */
+export function isDirectoryPath(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -305,9 +313,14 @@ export function hostBoundHeap(command: string, args: readonly string[], bytes: n
   };
 }
 
-/** The last part of a path, or the path with its extension taken off. */
-export function basename(path: string, suffix?: string): string {
-  return suffix === undefined ? nodeBasename(path) : nodeBasename(path, suffix);
+/** The last part of a path. */
+export function basename(path: string): string {
+  return nodeBasename(path);
+}
+
+/** The last part of a path, with the suffix taken off where it is there. */
+export function basenameSuffix(path: string, suffix: string): string {
+  return nodeBasename(path, suffix);
 }
 
 /**

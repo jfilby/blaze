@@ -78,7 +78,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "structuredClone": { params: [ANY], returns: ANY, arity: 1 },
   "process.execPath": { params: [], returns: TEXT, arity: 0 },
   "blaze_rt_state_get": { params: [TEXT], returns: F64, arity: 1 },
-  "blaze_rt_state_set": { params: [TEXT, F64], returns: F64, arity: 2 },
+  "blaze_rt_state_set": { params: [TEXT, ANY], returns: F64, arity: 2 },
   "blaze_rt_as_int_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },

@@ -331,7 +331,7 @@ function declaredType(type: SemanticType | null): string {
 }
 
 function driverError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "link", message, detail });
+  return new CompilerError("LinkError", "link", message, detail, "", "", "");
 }
 
 /**

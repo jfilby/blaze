@@ -102,14 +102,19 @@ export function dirname(path: string): string {
   return normalized.slice(0, cut);
 }
 
-/** The last part of a path, with the suffix taken off where it is there. */
-export function basename(path: string, suffix?: string): string {
+/** The last part of a path. */
+export function basename(path: string): string {
   const normalized = normalizePath(path);
   const cut = normalized.lastIndexOf(sep);
-  let name = cut < 0 ? normalized : normalized.slice(cut + 1);
-  if (name === "") name = normalized === sep ? sep : ".";
-  if (suffix !== undefined && suffix !== "" && name.endsWith(suffix) && name !== suffix) {
-    name = name.slice(0, name.length - suffix.length);
+  const name = cut < 0 ? normalized : normalized.slice(cut + 1);
+  return name === "" ? (normalized === sep ? sep : ".") : name;
+}
+
+/** The last part of a path, with the suffix taken off where it is there. */
+export function basenameSuffix(path: string, suffix: string): string {
+  const name = basename(path);
+  if (suffix !== "" && name.endsWith(suffix) && name !== suffix) {
+    return name.slice(0, name.length - suffix.length);
   }
   return name;
 }
@@ -178,7 +183,7 @@ export function readFileSync(path: string, _mode?: string): string {
 }
 
 /** Writes a file without a child process. */
-export function writeFileSync(path: string, text: string): void {
+export function writeFileSync(path: string, text: string, _mode?: string): void {
   fs.writeFileSync(path, text);
 }
 
@@ -209,6 +214,11 @@ export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
     });
   }
   return found;
+}
+
+/** Whether a path names a directory. */
+export function isDirectoryPath(path: string): boolean {
+  return fs.fileKindSync(path) === 2;
 }
 
 /** What a file is: its size in bytes, and whether it is a file or a directory. */

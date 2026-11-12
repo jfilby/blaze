@@ -411,15 +411,10 @@ function adapterEntries(): readonly string[] {
   const missing = declared.filter((symbol) => !written.includes(symbol));
   const extra = written.filter((symbol) => !declared.includes(symbol));
   if (missing.length > 0 || extra.length > 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the SQLite adapter and the SQLite ABI do not agree",
-      detail: [
+    throw new CompilerError("LinkError", "compile", "the SQLite adapter and the SQLite ABI do not agree", [
         ...(missing.length === 0 ? [] : [`the adapter does not implement: ${missing.join(", ")}`]),
         ...(extra.length === 0 ? [] : [`the adapter implements what the ABI does not name: ${extra.join(", ")}`]),
-      ].join("\n"),
-    });
+      ].join("\n"), "", "", "");
   }
   return declared;
 }
@@ -533,21 +528,11 @@ export async function buildSqliteLibrary(
     const compiled = run(command.command, command.args, { timeoutMs: 600_000 });
     if (compiled.spawnError !== undefined) {
       await rm(building, { force: true }).catch(() => undefined);
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the C compiler is not available",
-        detail: compiled.spawnError,
-      });
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
     }
     if (compiled.code !== 0) {
       await rm(building, { force: true }).catch(() => undefined);
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: "the SQLite amalgamation did not build",
-        detail: `${amalgamation}\n${compiled.stderr.trim()}`,
-      });
+      throw new CompilerError("LinkError", "compile", "the SQLite amalgamation did not build", `${amalgamation}\n${compiled.stderr.trim()}`, "", "", "");
     }
     // Two builds of one project can miss the same key at once, so the rename
     // can find the name already there. The object is a function of the key, so
@@ -576,20 +561,10 @@ export async function buildSqliteLibrary(
   ]);
   const adapter = run(adapterCommand.command, adapterCommand.args, { timeoutMs: 300_000 });
   if (adapter.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the C compiler is not available",
-      detail: adapter.spawnError,
-    });
+    throw new CompilerError("TargetError", "compile", "the C compiler is not available", adapter.spawnError, "", "", "");
   }
   if (adapter.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the SQLite adapter did not build",
-      detail: `${adapterPath}\n${adapter.stderr.trim()}`,
-    });
+    throw new CompilerError("LinkError", "compile", "the SQLite adapter did not build", `${adapterPath}\n${adapter.stderr.trim()}`, "", "", "");
   }
 
   // The two are bundled into one relocatable object, exactly as the facil
@@ -598,12 +573,7 @@ export async function buildSqliteLibrary(
   const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject, sqliteObject]);
   const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "link",
-      message: "the SQLite library did not bundle",
-      detail: bundled.stderr.trim() ?? bundled.spawnError ?? "",
-    });
+    throw new CompilerError("LinkError", "link", "the SQLite library did not bundle", bundled.stderr.trim() ?? bundled.spawnError ?? "", "", "", "");
   }
 
   return { headerPath, objectPath };

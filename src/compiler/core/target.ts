@@ -25,12 +25,7 @@ export const DEFAULT_TARGET: TargetSpec = {
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `target.${field} must be a non-empty string`,
-      detail: `received ${JSON.stringify(value)}`,
-    });
+    throw new CompilerError("TargetError", "target", `target.${field} must be a non-empty string`, `received ${JSON.stringify(value)}`, "", "", "");
   }
   return value;
 }
@@ -39,12 +34,7 @@ function requireMember<T extends string>(value: unknown, allowed: readonly T[], 
   const text = requireString(value, field);
   const match = allowed.find((entry) => entry === text.toLowerCase());
   if (match === undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `unsupported target.${field} "${text}"`,
-      detail: `supported: ${allowed.join(", ")}`,
-    });
+    throw new CompilerError("TargetError", "target", `unsupported target.${field} "${text}"`, `supported: ${allowed.join(", ")}`, "", "", "");
   }
   return match;
 }
@@ -57,29 +47,16 @@ export function normalizeTarget(partial: Partial<TargetSpec> | undefined): Targe
 
   const features = partial.features ?? [];
   if (!Array.isArray(features) || features.some((feature) => typeof feature !== "string")) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: "target.features must be an array of strings",
-    });
+    throw new CompilerError("TargetError", "target", "target.features must be an array of strings", "", "", "", "");
   }
 
   // An empty cpu means "whatever the toolchain defaults to".
   if (partial.cpu !== undefined && typeof partial.cpu !== "string") {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: "target.cpu must be a string",
-      detail: `received ${JSON.stringify(partial.cpu)}`,
-    });
+    throw new CompilerError("TargetError", "target", "target.cpu must be a string", `received ${JSON.stringify(partial.cpu)}`, "", "", "");
   }
   const cpu = partial.cpu ?? "";
   if (cpu !== "" && !/^[A-Za-z0-9_.-]+$/.test(cpu)) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `target.cpu "${cpu}" is not a valid assembler architecture selector`,
-    });
+    throw new CompilerError("TargetError", "target", `target.cpu "${cpu}" is not a valid assembler architecture selector`, "", "", "", "");
   }
 
   return {
@@ -104,14 +81,8 @@ function supportedTarget(target: TargetSpec): boolean {
 
 export function assertBuildableTarget(target: TargetSpec, functionName?: string): TargetSpec {
   if (supportedTarget(target)) return target;
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "target",
-    message:
-      `version 0.1 builds x86_64/linux/sysv, x86_64/qnx/sysv and ` +
-      `aarch64/qnx/aapcs only (got ${target.arch}/${target.os}/${target.abi})`,
-    function: functionName,
-  });
+  throw new CompilerError("TargetError", "target", `version 0.1 builds x86_64/linux/sysv, x86_64/qnx/sysv and ` +
+      `aarch64/qnx/aapcs only (got ${target.arch}/${target.os}/${target.abi})`, "", functionName, "", "");
 }
 
 /**
@@ -136,24 +107,14 @@ export function assertRuntimeSupported(target: TargetSpec, runtime: RuntimeKind)
   if (target.os !== "qnx") return;
   const detail = QNX_RUNTIME_REFUSALS[runtime];
   if (detail === undefined) return;
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "target",
-    message: `the "${runtime}" runtime is not available on QNX`,
-    detail,
-  });
+  throw new CompilerError("TargetError", "target", `the "${runtime}" runtime is not available on QNX`, detail, "", "", "");
 }
 
 export function assertLibrarySupported(target: TargetSpec, library: LibraryKind): void {
   if (target.os !== "qnx") return;
   const detail = QNX_LIBRARY_REFUSALS[library];
   if (detail === undefined) return;
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "target",
-    message: `the "${library}" library is not available on QNX`,
-    detail,
-  });
+  throw new CompilerError("TargetError", "target", `the "${library}" library is not available on QNX`, detail, "", "", "");
 }
 
 /**
@@ -173,12 +134,7 @@ export function programVerificationFor(
   if (requested === "none") return "none";
   if (requested === "source") {
     if (target.os !== hostPlatform()) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "target",
-        message: "a source check needs a program this host can run",
-        detail: `the program is built for ${target.os}, and this host is ${hostPlatform()}; build for this host or pass --verify=none`,
-      });
+      throw new CompilerError("TargetError", "target", "a source check needs a program this host can run", `the program is built for ${target.os}, and this host is ${hostPlatform()}; build for this host or pass --verify=none`, "", "", "");
     }
     return "source";
   }

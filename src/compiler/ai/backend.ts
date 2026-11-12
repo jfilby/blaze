@@ -45,7 +45,7 @@ export interface AiBackend {
 }
 
 export function reviewError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
+  return new CompilerError("AiReviewError", "review", message, detail, "", "", "");
 }
 
 /* -------------------------------------------------------------------------- */

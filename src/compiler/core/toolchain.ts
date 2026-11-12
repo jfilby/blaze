@@ -87,11 +87,7 @@ function qcc(target: TargetSpec): Toolchain {
         ? "gcc_ntoaarch64le"
         : undefined;
   if (selector === undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `QNX has no cross compiler selected for ${target.arch}`,
-    });
+    throw new CompilerError("TargetError", "target", `QNX has no cross compiler selected for ${target.arch}`, "", "", "", "");
   }
   const triple = target.arch === "x86_64" ? "x86_64-pc-nto-qnx8.0.0" : "aarch64-unknown-nto-qnx8.0.0";
   return {
@@ -143,11 +139,7 @@ export function toolchainFor(
 ): Toolchain {
   if (target.os === "linux") return GCC;
   if (target.os !== "qnx") {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "target",
-      message: `no toolchain is selected for ${target.os}`,
-    });
+    throw new CompilerError("TargetError", "target", `no toolchain is selected for ${target.os}`, "", "", "", "");
   }
 
   if (host === "qnx") {
@@ -155,12 +147,7 @@ export function toolchainFor(
     // on. A cross build is the Linux-hosted qcc command instead.
     const native = normalizedArch(hostArchitecture);
     if (native !== undefined && native !== target.arch) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "target",
-        message: `a QNX host builds ${native} natively and cannot build ${target.arch}`,
-        detail: "cross-build the other architecture from a Linux host with qcc",
-      });
+      throw new CompilerError("TargetError", "target", `a QNX host builds ${native} natively and cannot build ${target.arch}`, "cross-build the other architecture from a Linux host with qcc", "", "", "");
     }
     return QNX_CLANG;
   }
@@ -331,12 +318,7 @@ export function threadingOptionsFor(
   threading: readonly Threading[],
 ): string[] {
   if (threading.includes("openmp") && !toolchain.supportsOpenMp) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: `the ${toolchain.id} toolchain does not provide OpenMP`,
-      detail: "build the function with the machine backend, or use a toolchain that has an OpenMP runtime",
-    });
+    throw new CompilerError("TargetError", "compile", `the ${toolchain.id} toolchain does not provide OpenMP`, "build the function with the machine backend, or use a toolchain that has an OpenMP runtime", "", "", "");
   }
   return threadingOptions(threading);
 }

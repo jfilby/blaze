@@ -391,11 +391,7 @@ const C_OPERATORS: Record<string, string> = {
 export function cOperator(op: string): string {
   const written = C_OPERATORS[op];
   if (written === undefined) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "link",
-      message: `C cannot spell the operator ${op}`,
-    });
+    throw new CompilerError("LinkError", "link", `C cannot spell the operator ${op}`, "", "", "", "");
   }
   return written;
 }

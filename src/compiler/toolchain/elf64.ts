@@ -136,11 +136,7 @@ class StringTable {
     for (const character of name) {
       const code = character.codePointAt(0) ?? 0;
       if (code > 0x7f) {
-        throw new CompilerError({
-          category: "AssemblyError",
-          stage: "assemble",
-          message: `the symbol name ${JSON.stringify(name)} is not one the object format holds`,
-        });
+        throw new CompilerError("AssemblyError", "assemble", `the symbol name ${JSON.stringify(name)} is not one the object format holds`, "", "", "", "");
       }
       this.bytes.push(code);
     }
@@ -215,11 +211,7 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
   }
   for (const relocation of request.relocations) {
     if (index.has(relocation.symbol)) continue;
-    throw new CompilerError({
-      category: "AssemblyError",
-      stage: "assemble",
-      message: `the machine code refers to ${relocation.symbol}, which the object does not name`,
-    });
+    throw new CompilerError("AssemblyError", "assemble", `the machine code refers to ${relocation.symbol}, which the object does not name`, "", "", "", "");
   }
 
   const relocationSize = request.relocations.length * RELOCATION_SIZE;

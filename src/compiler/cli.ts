@@ -14,12 +14,13 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, readFile, resolve, parseArgs, stat, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
-import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
+import { existsSync, writeFileSync, readFile, resolve, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
+import { CompilerError, isCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
   STATE_DIRECTORY,
   inspectProject,
+  projectStateLine,
   listProjects,
   projectIdFor,
   runBuild,
@@ -29,7 +30,6 @@ import {
   type Reporter,
   type SemanticIrOptions,
 } from "./compiler.ts";
-import { targetSummary } from "./core/target.ts";
 import { compareBuildRecords, compareProjectStates } from "./core/compare.ts";
 import {
   BACKENDS,
@@ -43,7 +43,7 @@ import {
   type VerificationMode,
   type RuntimeKind,
 } from "./core/types.ts";
-import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core/terminal-title.ts";
+import { NO_TITLE_ANIMATION, startBuildTitle, stopTitleAnimation, type TitleAnimation } from "./core/terminal-title.ts";
 
 /**
  * The tab title of a command that is working. A command that answers at once
@@ -149,12 +149,7 @@ function consoleReporter(): Reporter {
 function defaultProjectFile(): string {
   const candidate = resolve(hostCwd(), PROJECT_FILE);
   if (!existsSync(candidate)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `no ${PROJECT_FILE} in ${hostCwd()}`,
-      detail: "run from a project directory, or name the input: blaze build <input.toml>",
-    });
+    throw new CompilerError("InputError", "input", `no ${PROJECT_FILE} in ${hostCwd()}`, "run from a project directory, or name the input: blaze build <input.toml>", "", "", "");
   }
   return candidate;
 }
@@ -189,12 +184,7 @@ backend = "machine"
 function initProject(): void {
   const path = resolve(hostCwd(), PROJECT_FILE);
   if (existsSync(path)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} already exists`,
-      detail: "blaze init writes a new project file; edit the one that is there, or remove it and run this again",
-    });
+    throw new CompilerError("InputError", "input", `${path} already exists`, "blaze init writes a new project file; edit the one that is there, or remove it and run this again", "", "", "");
   }
   writeFileSync(path, PROJECT_FILE_TEMPLATE, "utf8");
   hostWriteOut(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
@@ -233,6 +223,11 @@ function optionNumber(value: string | undefined, name: string, minimum = 1, maxi
   return parsed;
 }
 
+/** Whether a text names a verification mode the build accepts. */
+function isVerificationMode(value: string): boolean {
+  return value === "source" || value === "none";
+}
+
 function buildOptions(values: Record<string, unknown>, arguments_: readonly string[] = []): BuildOptions {
   const output = values.output;
   if (output !== undefined && !OUTPUT_KINDS.includes(output as OutputKind)) {
@@ -250,53 +245,62 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
   if (mode !== undefined && !BUILD_MODES.includes(mode as BuildMode)) {
     throw new Error(`--mode must be one of ${BUILD_MODES.join(", ")}, got "${String(mode)}"`);
   }
-  const verify = values.verify;
-  if (verify !== undefined && verify !== "source" && verify !== "none") {
-    throw new Error(`--verify must be one of source, none, got "${String(verify)}"`);
+  const rawVerify = values.verify;
+  let verify: VerificationMode | undefined = undefined;
+  if (rawVerify !== undefined) {
+    if (typeof rawVerify === "string") {
+      const held = rawVerify as string;
+      if (!isVerificationMode(held)) {
+        throw new Error(`--verify must be one of source, none, got "${held}"`);
+      }
+      verify = held as VerificationMode;
+    } else {
+      throw new Error(`--verify must be one of source, none, got "${String(rawVerify)}"`);
+    }
   }
-  const recompile = values.recompile === true;
+  const recompile = values.recompile ? true : false;
   // The two ask opposite things of the record: `--reuse` builds only from what
   // is stored, `--recompile` builds only what is not, so a build asking for
   // both is refused rather than resolved in favour of either.
-  if (recompile && values.reuse === true) {
+  if (recompile && values.reuse) {
     throw new Error("--recompile and --reuse ask for opposite builds: one rebuilds everything, the other rebuilds nothing");
   }
   return {
     cwd: hostCwd(),
-    reuse: values.reuse === true,
+    reuse: values.reuse ? true : false,
     ...(recompile ? { recompile: true } : {}),
     confirm: terminalConfirm,
     // What is left on the command line after the command and the project is
     // what the program is given: `blaze build 12` checks it the way it runs.
     arguments: [...arguments_],
-    ...(values.debug === true ? { debug: true } : {}),
+    ...(values.debug ? { debug: true } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
     ...(mode === undefined ? {} : { mode: mode as BuildMode }),
     ...(verify === undefined ? {} : { verify: verify as VerificationMode }),
     ...(runtime === undefined ? {} : { runtime: runtime as RuntimeKind }),
     ...(backend === undefined ? {} : { backend: backend as BackendKind }),
-    ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") === undefined
+    ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates", 1, undefined) === undefined
       ? {}
-      : { maxCandidates: optionNumber(values["max-candidates"] as string | undefined, "--max-candidates") }),
-    ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") === undefined
+      : { maxCandidates: optionNumber(values["max-candidates"] as string | undefined, "--max-candidates", 1, undefined) }),
+    ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts", 1, undefined) === undefined
       ? {}
-      : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts") }),
+      : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts", 1, undefined) }),
     ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) === undefined
       ? {}
       : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) }),
-    ...(optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") === undefined
+    ...(optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency", 1, undefined) === undefined
       ? {}
-      : { candidateConcurrency: optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency") }),
-    ...(optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") === undefined
+      : { candidateConcurrency: optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency", 1, undefined) }),
+    ...(optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency", 1, undefined) === undefined
       ? {}
-      : { functionConcurrency: optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency") }),
-    ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0) === undefined
+      : { functionConcurrency: optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency", 1, undefined) }),
+    ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0, undefined) === undefined
       ? {}
-      : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0) }),
-    ...(optionNumber(values["max-length"] as string | undefined, "--max-length") === undefined
+      : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0, undefined) }),
+    ...(optionNumber(values["max-length"] as string | undefined, "--max-length", 1, undefined) === undefined
       ? {}
-      : { maxLength: optionNumber(values["max-length"] as string | undefined, "--max-length") }),
+      : { maxLength: optionNumber(values["max-length"] as string | undefined, "--max-length", 1, undefined) }),
   };
 }
 
@@ -306,34 +310,33 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
  * diagnostic file for a build that never started would send a reader looking
  * for an error that is not there.
  */
-function reportCancelled(error: SerializedCompilerError): void {
-  hostWriteOut(`\n· ${error.message}\n`);
-  if (error.detail !== undefined && error.detail.trim() !== "") {
-    hostWriteOut(`\n${error.detail.trim()}\n`);
+function reportCancelled(message: string, detail: string | undefined): void {
+  hostWriteOut(`\n· ${message}\n`);
+  if (detail !== undefined && detail.trim() !== "") {
+    hostWriteOut(`\n${detail.trim()}\n`);
   }
 }
 
-function reportError(error: SerializedCompilerError): void {
-  hostWriteError(`\n✗ ${error.stage} failed: ${error.message}\n`);
+function reportError(
+  stage: string,
+  message: string,
+  detail: string | undefined,
+  functionName: string | undefined,
+  candidate: string | undefined,
+  project: string | undefined,
+): void {
+  hostWriteError(`\n✗ ${stage} failed: ${message}\n`);
   const context = [
-    error.function === undefined ? undefined : `  function:  ${error.function}`,
-    error.candidate === undefined ? undefined : `  candidate: ${error.candidate}`,
+    functionName === undefined ? undefined : `  function:  ${functionName}`,
+    candidate === undefined ? undefined : `  candidate: ${candidate}`,
   ].filter((line) => line !== undefined);
   if (context.length > 0) hostWriteError(`${context.join("\n")}\n`);
-  if (error.detail !== undefined && error.detail.trim() !== "") {
-    hostWriteError(`\n${error.detail.trim()}\n`);
+  if (detail !== undefined && detail.trim() !== "") {
+    hostWriteError(`\n${detail.trim()}\n`);
   }
-  if (error.project !== undefined) {
-    hostWriteError(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${error.project}/build.json\n`);
+  if (project !== undefined) {
+    hostWriteError(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${project}/build.json\n`);
   }
-}
-
-/** The candidate each compiled function selected, in one column. */
-function selectedLabel(build: BuildStatus): string {
-  const selected = build.selectedCandidates ?? {};
-  const names = Object.keys(selected);
-  if (names.length === 0) return "-";
-  return names.map((name) => `${name}#${selected[name]}`).join(",");
 }
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -363,12 +366,12 @@ async function main(argv: readonly string[]): Promise<number> {
       all: { type: "boolean" },
     },
   });
-  const values = parsed.values as Record<string, unknown>;
+  const values = parsed.values as unknown as Record<string, unknown>;
   const [command, argument, ...rest] = parsed.positionals;
 
-  if (values.help === true || command === undefined) {
+  if (values.help || command === undefined) {
     hostWriteOut(USAGE);
-    return command === undefined && values.help !== true ? 1 : 0;
+    return command === undefined && !values.help ? 1 : 0;
   }
 
   const options = buildOptions(values, rest);
@@ -378,17 +381,17 @@ async function main(argv: readonly string[]): Promise<number> {
     case "generate": {
       // With no argument, build the project described by ./blaze.toml.
       const input = argument ?? defaultProjectFile();
-      const title = titleAnimation(projectIdFor(resolve(input)));
+      const title = titleAnimation(projectIdFor(resolve(input, ".")));
       try {
-        const outcome = await runBuild(input, options, consoleReporter(), command);
+        await runBuild(input, options, consoleReporter(), command);
         if (command === "generate") {
-          hostWriteOut(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
+          hostWriteOut(`\nProject: ${STATE_DIRECTORY}/projects/${projectIdFor(input)}\n`);
         }
       } catch (cause) {
-        title.stop("fail");
+        stopTitleAnimation(title, "fail");
         throw cause;
       }
-      title.stop("ok");
+      stopTitleAnimation(title, "ok");
       return 0;
     }
     case "init": {
@@ -405,17 +408,17 @@ async function main(argv: readonly string[]): Promise<number> {
       try {
         await runStored(argument, options, consoleReporter(), command);
       } catch (cause) {
-        title.stop("fail");
+        stopTitleAnimation(title, "fail");
         throw cause;
       }
-      title.stop("ok");
+      stopTitleAnimation(title, "ok");
       return 0;
     }
     case "ir": {
       const irOptions: SemanticIrOptions = {
         ...(typeof values.from === "string" ? { from: values.from } : {}),
         ...(typeof values.function === "string" ? { function: values.function } : {}),
-        ...(values.all === true ? { all: true } : {}),
+        ...(values.all ? { all: true } : {}),
       };
       const input = argument ?? defaultProjectFile();
       hostWriteOut(await runSemanticIr(input, irOptions));
@@ -426,8 +429,8 @@ async function main(argv: readonly string[]): Promise<number> {
         hostWriteError(`blaze inspect needs a project name\n\n${USAGE}`);
         return 1;
       }
-      const build = await inspectProject(argument, hostCwd());
-      hostWriteOut(`${JSON.stringify(build, null, 2)}\n`);
+      const build = await inspectProject(argument, hostCwd()) as unknown as Record<string, unknown>;
+      hostWriteOut(`${JSON.stringify(build)}\n`);
       return 0;
     }
     case "compare": {
@@ -435,16 +438,19 @@ async function main(argv: readonly string[]): Promise<number> {
         hostWriteError(`blaze compare needs two build records\n\n${USAGE}`);
         return 1;
       }
-      const [leftInfo, rightInfo] = await Promise.all([stat(argument), stat(rest[0])]);
-      if (leftInfo.isDirectory() !== rightInfo.isDirectory()) {
+      const leftDirectory = isDirectoryPath(argument);
+      if (leftDirectory !== isDirectoryPath(rest[0])) {
         throw new Error("compare needs two build records or two project state directories");
       }
-      const differences = leftInfo.isDirectory()
-        ? await compareProjectStates(argument, rest[0])
-        : compareBuildRecords(
-            JSON.parse(await readFile(argument, "utf8")) as BuildStatus,
-            JSON.parse(await readFile(rest[0], "utf8")) as BuildStatus,
-          );
+      let differences: string[] = [];
+      if (leftDirectory) {
+        differences = await compareProjectStates(argument, rest[0]);
+      } else {
+        differences = compareBuildRecords(
+          JSON.parse(await readFile(argument, "utf8")) as BuildStatus,
+          JSON.parse(await readFile(rest[0], "utf8")) as BuildStatus,
+        );
+      }
       if (differences.length === 0) {
         hostWriteOut("The build records agree\n");
         return 0;
@@ -459,12 +465,7 @@ async function main(argv: readonly string[]): Promise<number> {
         return 0;
       }
       for (const project of projects) {
-        const build = await inspectProject(project, hostCwd()).catch(() => undefined);
-        const state =
-          build === undefined
-            ? ""
-            : `  ${build.status}  ${selectedLabel(build)}  ${build.model}  ${targetSummary(build.target)}`;
-        hostWriteOut(`${project}${state}\n`);
+        hostWriteOut(`${await projectStateLine(project, hostCwd())}\n`);
       }
       return 0;
     }
@@ -477,17 +478,15 @@ async function main(argv: readonly string[]): Promise<number> {
 try {
   hostSetExitCode(await main(hostArguments()));
 } catch (cause) {
-  const failure = isCompilerError(cause)
-    ? cause.toJSON()
-    : {
-        category: "InputError" as const,
-        stage: "cli",
-        message: cause instanceof Error ? cause.message : String(cause),
-        detail: cause instanceof Error ? cause.stack : undefined,
-      };
-  // A declined recompile is the one exit that is not a fault: nothing was
-  // built, nothing was damaged, and the last build is still the project's.
-  if (failure.category === "CancelledError") reportCancelled(failure);
-  else reportError(failure);
+  if (isCompilerError(cause)) {
+    // A declined recompile is the one exit that is not a fault: nothing was
+    // built, nothing was damaged, and the last build is still the project's.
+    if (cause.category === "CancelledError") reportCancelled(cause.message, cause.detail);
+    else reportError(cause.stage, cause.message, cause.detail, cause.functionName, cause.candidate, cause.project);
+  } else {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const stack = cause instanceof Error ? cause.stack : undefined;
+    reportError("cli", message, stack, undefined, undefined, undefined);
+  }
   hostSetExitCode(1);
 }

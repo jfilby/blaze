@@ -114,14 +114,7 @@ function isForbidden(mnemonic: string): boolean {
 const SYMBOL = /^[A-Za-z_.$][A-Za-z0-9_.$]*$/;
 
 function assemblyError(message: string, detail: string | undefined, functionName: string, candidate?: string): CompilerError {
-  return new CompilerError({
-    category: "AssemblyError",
-    stage: "assemble",
-    message,
-    function: functionName,
-    candidate,
-    detail,
-  });
+  return new CompilerError("AssemblyError", "assemble", message, detail, functionName, candidate, "");
 }
 
 
@@ -293,20 +286,10 @@ export function assertAssemblerSupportsArch(
     timeoutMs: 30_000,
   });
   if (result.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "assemble",
-      message: "the assembler is not available",
-      detail: result.spawnError,
-    });
+    throw new CompilerError("TargetError", "assemble", "the assembler is not available", result.spawnError, "", "", "");
   }
   if (result.code !== 0) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "assemble",
-      message: `the assembler does not support target.cpu "${target.cpu}"`,
-      detail: result.stderr.trim(),
-    });
+    throw new CompilerError("TargetError", "assemble", `the assembler does not support target.cpu "${target.cpu}"`, result.stderr.trim(), "", "", "");
   }
 }
 
@@ -391,12 +374,7 @@ export async function assemble(request: AssembleRequest): Promise<AssembleResult
   const command = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
   const result = run(command.command, command.args, { timeoutMs: 60_000 });
   if (result.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "assemble",
-      message: "the assembler is not available",
-      detail: result.spawnError,
-    });
+    throw new CompilerError("TargetError", "assemble", "the assembler is not available", result.spawnError, "", "", "");
   }
   if (result.code !== 0) {
     throw assemblyError(

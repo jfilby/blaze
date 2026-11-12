@@ -113,30 +113,15 @@ export async function buildModelLibrary(
   ]);
   const adapter = run(adapterCommand.command, adapterCommand.args, { timeoutMs: 300_000 });
   if (adapter.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the C compiler is not available",
-      detail: adapter.spawnError,
-    });
+    throw new CompilerError("TargetError", "compile", "the C compiler is not available", adapter.spawnError, "", "", "");
   }
   if (adapter.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the Model adapter did not build",
-      detail: `${adapterPath}\n${adapter.stderr.trim()}`,
-    });
+    throw new CompilerError("LinkError", "compile", "the Model adapter did not build", `${adapterPath}\n${adapter.stderr.trim()}`, "", "", "");
   }
   const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject]);
   const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "link",
-      message: "the Model library did not bundle",
-      detail: bundled.stderr.trim() ?? bundled.spawnError ?? "",
-    });
+    throw new CompilerError("LinkError", "link", "the Model library did not bundle", bundled.stderr.trim() ?? bundled.spawnError ?? "", "", "", "");
   }
   return { headerPath, objectPath };
 }

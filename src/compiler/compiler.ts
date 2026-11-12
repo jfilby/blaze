@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -256,12 +256,7 @@ export interface ProjectPaths {
 function resolveOutputKind(requested: OutputKind | undefined): OutputKind {
   if (requested === undefined) return "ir";
   if (!OUTPUT_KINDS.includes(requested)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `unknown output kind "${String(requested)}"`,
-      detail: `expected one of ${OUTPUT_KINDS.join(", ")}`,
-    });
+    throw new CompilerError("InputError", "input", `unknown output kind "${String(requested)}"`, `expected one of ${OUTPUT_KINDS.join(", ")}`, "", "", "");
   }
   return requested;
 }
@@ -302,21 +297,11 @@ export function impliedBackend(output: OutputKind): BackendKind {
 function resolveBackend(requested: BackendKind | undefined, output: OutputKind): BackendKind {
   if (requested === undefined) return impliedBackend(output);
   if (!BACKENDS.includes(requested)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `unknown backend "${String(requested)}"`,
-      detail: `expected one of ${BACKENDS.join(", ")}`,
-    });
+    throw new CompilerError("InputError", "input", `unknown backend "${String(requested)}"`, `expected one of ${BACKENDS.join(", ")}`, "", "", "");
   }
   if (!BACKEND_DELIVERS[requested].includes(output)) {
     const deliverable = BACKEND_DELIVERS[requested].join(", ");
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `the "${requested}" backend cannot deliver the "${output}" output kind`,
-      detail: `it delivers ${deliverable}; build it without --backend, or name one of ${BACKENDS.filter((backend) => BACKEND_DELIVERS[backend].includes(output)).join(", ")}`,
-    });
+    throw new CompilerError("InputError", "input", `the "${requested}" backend cannot deliver the "${output}" output kind`, `it delivers ${deliverable}; build it without --backend, or name one of ${BACKENDS.filter((backend) => BACKEND_DELIVERS[backend].includes(output)).join(", ")}`, "", "", "");
   }
   return requested;
 }
@@ -329,12 +314,7 @@ function resolveBackend(requested: BackendKind | undefined, output: OutputKind):
 function resolveBuildMode(requested: BuildMode | undefined): BuildMode {
   if (requested === undefined) return "debug";
   if (!BUILD_MODES.includes(requested)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `unknown mode "${String(requested)}"`,
-      detail: `expected one of ${BUILD_MODES.join(", ")}`,
-    });
+    throw new CompilerError("InputError", "input", `unknown mode "${String(requested)}"`, `expected one of ${BUILD_MODES.join(", ")}`, "", "", "");
   }
   return requested;
 }
@@ -345,21 +325,11 @@ function resolveBuildMode(requested: BuildMode | undefined): BuildMode {
  */
 function resolveRuntimeKind(requested: RuntimeKind | undefined, output: OutputKind): RuntimeKind {
   if (output === "wasm" && requested !== undefined && requested !== "none") {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `a WebAssembly module cannot link the "${requested}" runtime`,
-      detail: "a wasm module imports no host runtime; build it with --output machine, or drop --runtime",
-    });
+    throw new CompilerError("InputError", "input", `a WebAssembly module cannot link the "${requested}" runtime`, "a wasm module imports no host runtime; build it with --output machine, or drop --runtime", "", "", "");
   }
   if (requested === undefined) return "none";
   if (!RUNTIME_KINDS.includes(requested)) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `unknown runtime "${String(requested)}"`,
-      detail: `expected one of ${RUNTIME_KINDS.join(", ")}`,
-    });
+    throw new CompilerError("InputError", "input", `unknown runtime "${String(requested)}"`, `expected one of ${RUNTIME_KINDS.join(", ")}`, "", "", "");
   }
   return requested;
 }
@@ -389,7 +359,7 @@ function libraryKindsFor(source: string, target: TargetSpec): LibraryKind[] {
  * `.toml` file names its own project, so examples can stay flat.
  */
 export function projectIdFor(inputPath: string): string {
-  const name = basename(inputPath, extname(inputPath));
+  const name = basenameSuffix(inputPath, extname(inputPath));
   if (name === "blaze") {
     const directory = basename(dirname(inputPath));
     if (directory !== "" && directory !== "." && directory !== "..") return directory;
@@ -490,37 +460,22 @@ function readInput(path: string): ProjectInput {
   try {
     text = readFileSync(path, "utf8");
   } catch (cause) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `cannot read input file ${path}`,
-      detail: cause instanceof Error ? cause.message : String(cause),
-    });
+    throw new CompilerError("InputError", "input", `cannot read input file ${path}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
   }
   // A source file is not a project file. Saying so beats reporting a TOML
   // parse error on code the compiler was never meant to read directly.
   if (extname(path) !== ".toml") {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} is a source file, not a project file`,
-      detail: "blaze builds the TOML project file, which names the source file to compile; run blaze build with the blaze.toml beside it",
-    });
+    throw new CompilerError("InputError", "input", `${path} is a source file, not a project file`, "blaze builds the TOML project file, which names the source file to compile; run blaze build with the blaze.toml beside it", "", "", "");
   }
   let parsed: unknown;
   try {
     parsed = parseToml(text);
   } catch (cause) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} is not valid TOML`,
-      detail: cause instanceof Error ? cause.message : String(cause),
-    });
+    throw new CompilerError("InputError", "input", `${path} is not valid TOML`, cause instanceof Error ? cause.message : String(cause), "", "", "");
   }
   const input = parsed as Partial<SourceInput> & { sourceFile?: string };
   if (typeof input.language !== "string") {
-    throw new CompilerError({ category: "InputError", stage: "input", message: `${path} must define "language"` });
+    throw new CompilerError("InputError", "input", `${path} must define "language"`, "", "", "", "");
   }
   // A host table names a file for a path the project holds, and every entry is
   // a path of its own: a table with a value that is not a path, or a key that
@@ -528,16 +483,11 @@ function readInput(path: string): ProjectInput {
   if (input.host !== undefined) {
     const table = input.host as unknown;
     if (typeof table !== "object" || table === null || Array.isArray(table)) {
-      throw new CompilerError({ category: "InputError", stage: "input", message: `${path} has a "host" that is not a table` });
+      throw new CompilerError("InputError", "input", `${path} has a "host" that is not a table`, "", "", "", "");
     }
     for (const [from, to] of Object.entries(table as Record<string, unknown>)) {
       if (typeof to !== "string" || to === "" || from === "") {
-        throw new CompilerError({
-          category: "InputError",
-          stage: "input",
-          message: `${path} has a host replacement that is not a path`,
-          detail: `"${from}" is read as ${typeof to === "string" ? JSON.stringify(to) : typeof to}`,
-        });
+        throw new CompilerError("InputError", "input", `${path} has a host replacement that is not a path`, `"${from}" is read as ${typeof to === "string" ? JSON.stringify(to) : typeof to}`, "", "", "");
       }
     }
   }
@@ -550,61 +500,33 @@ function readInput(path: string): ProjectInput {
   let entryPath = INLINE_MODULE;
   if (input.sourceFile !== undefined) {
     if (typeof input.sourceFile !== "string" || input.sourceFile === "") {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: `${path} has an empty "sourceFile"`,
-      });
+      throw new CompilerError("InputError", "input", `${path} has an empty "sourceFile"`, "", "", "", "");
     }
     const sourcePath = resolve(directory, input.sourceFile);
     try {
       entryPath = relative(directory, sourcePath);
       input.source = readFileSync(sourcePath, "utf8");
     } catch (cause) {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: `cannot read source file ${sourcePath}`,
-        detail: cause instanceof Error ? cause.message : String(cause),
-      });
+      throw new CompilerError("InputError", "input", `cannot read source file ${sourcePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
     }
   }
 
   if (typeof input.source !== "string" || input.source.trim() === "") {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} must define "source" or "sourceFile"`,
-    });
+    throw new CompilerError("InputError", "input", `${path} must define "source" or "sourceFile"`, "", "", "", "");
   }
   // A module map names the file a host specifier is built from. The key is the
   // boundary the sources import, and the value is a path inside the project:
   // anything else would let a project file silently rename its own sources.
   if (input.modules !== undefined) {
     if (input.modules === null || typeof input.modules !== "object" || Array.isArray(input.modules)) {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: `${path} has a "modules" that is not a table`,
-        detail: 'write "[modules]" with entries such as \"#platform\" = "core/platform-native.ts"',
-      });
+      throw new CompilerError("InputError", "input", `${path} has a "modules" that is not a table`, 'write "[modules]" with entries such as \"#platform\" = "core/platform-native.ts"', "", "", "");
     }
     for (const [specifier, target] of Object.entries(input.modules)) {
       if (!specifier.startsWith("#")) {
-        throw new CompilerError({
-          category: "InputError",
-          stage: "input",
-          message: `${path} maps "${specifier}", which is not a host specifier`,
-          detail: "only a #-prefixed import is the boundary a project may map to its own file",
-        });
+        throw new CompilerError("InputError", "input", `${path} maps "${specifier}", which is not a host specifier`, "only a #-prefixed import is the boundary a project may map to its own file", "", "", "");
       }
       if (typeof target !== "string" || target === "" || target.startsWith("/") || target.includes("..")) {
-        throw new CompilerError({
-          category: "InputError",
-          stage: "input",
-          message: `${path} maps "${specifier}" to ${JSON.stringify(target)}`,
-          detail: "the mapped module is a path inside the project, such as \"core/platform-native.ts\"",
-        });
+        throw new CompilerError("InputError", "input", `${path} maps "${specifier}" to ${JSON.stringify(target)}`, "the mapped module is a path inside the project, such as \"core/platform-native.ts\"", "", "", "");
       }
     }
   }
@@ -649,12 +571,7 @@ function rejectCredentials(path: string, input: Record<string, unknown>): void {
       // that `x-api-key`, `api_key` and `apiKey2` are one shape of a key.
       const name = key.toLowerCase().replace(/[^a-z0-9]/g, "");
       if (CREDENTIAL_WORDS.some((word) => name.includes(word))) {
-        throw new CompilerError({
-          category: "InputError",
-          stage: "input",
-          message: `${path} puts a credential in "${at}"`,
-          detail: "a project names its provider and model; the API key comes from the environment",
-        });
+        throw new CompilerError("InputError", "input", `${path} puts a credential in "${at}"`, "a project names its provider and model; the API key comes from the environment", "", "", "");
       }
       // An array is an object here, so the branch above already walks into
       // it, by index. There is no second kind of container to look for.
@@ -669,21 +586,12 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
   if (selection === undefined) return undefined;
   if (typeof selection === "string") return selection;
   if (typeof selection !== "object" || selection === null) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} has a "model" that is neither a string nor an object`,
-    });
+    throw new CompilerError("InputError", "input", `${path} has a "model" that is neither a string nor an object`, "", "", "", "");
   }
   const { provider, model, file } = selection as ModelSelection;
   if (provider === "replay") {
     if (file === undefined || file === "") {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: `${path} selects the replay provider without a "file"`,
-        detail: 'the offline provider serves recorded IR: "model": { "provider": "replay", "file": "candidate.json" }',
-      });
+      throw new CompilerError("InputError", "input", `${path} selects the replay provider without a "file"`, 'the offline provider serves recorded IR: "model": { "provider": "replay", "file": "candidate.json" }', "", "", "");
     }
     return `replay:${file}`;
   }
@@ -693,12 +601,7 @@ export function modelSpec(selection: SourceInput["model"], path: string): string
   // the other not is a selection gone wrong, and is reported.
   if (provider === undefined && model === undefined && file === undefined) return undefined;
   if (provider === undefined || provider === "" || model === undefined || model === "") {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} must name both a provider and a model`,
-      detail: '"model": { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.5" }',
-    });
+    throw new CompilerError("InputError", "input", `${path} must name both a provider and a model`, '"model": { "provider": "openrouter", "model": "anthropic/claude-sonnet-4.5" }', "", "", "");
   }
   return `${provider}/${model}`;
 }
@@ -722,12 +625,7 @@ function assertGenerationInput(path: string, input: SourceInput): void {
   const generation = input.generation;
   if (generation === undefined) return;
   const refuse = (setting: string, value: number, why: string): void => {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "input",
-      message: `${path} sets "generation.${setting}" to ${value}`,
-      detail: `"generation.${setting}" must be ${why}`,
-    });
+    throw new CompilerError("InputError", "input", `${path} sets "generation.${setting}" to ${value}`, `"generation.${setting}" must be ${why}`, "", "", "");
   };
   const timeoutSeconds = generation.timeoutSeconds;
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
@@ -844,8 +742,8 @@ async function recordRejected(
   target: TargetSpec | undefined,
   cause: unknown,
 ): Promise<CompilerError> {
-  const failure = toCompilerError(cause, { category: "InputError", stage: "input" });
-  const error = new CompilerError({ ...failure.toJSON(), project: id });
+  const failure = toCompilerError(cause, "InputError", "input", "", "", "", "", "");
+  const error = new CompilerError(failure.category, failure.stage, failure.message, failure.detail, failure.functionName, failure.candidate, id);
   const stamp = new Date().toISOString();
   // The target the project named is known before most refusals, and a record
   // that named the default target instead would tell a later reader the
@@ -1265,14 +1163,8 @@ function directCalleesOf(block: SemanticBlock): string[] {
 function assertProgramOutput(output: OutputKind, source: string): void {
   if (output !== "wasm") return;
   if (!/\bhttp\b/.test(source)) return;
-  throw new CompilerError({
-    category: "InputError",
-    stage: "input",
-    message: "a WebAssembly module cannot serve HTTP requests",
-    detail:
-      "the host ABI of a wasm module carries the runtime services the module imports, and a server is not one " +
-      "of them; build the program with another output kind",
-  });
+  throw new CompilerError("InputError", "input", "a WebAssembly module cannot serve HTTP requests", "the host ABI of a wasm module carries the runtime services the module imports, and a server is not one " +
+      "of them; build the program with another output kind", "", "", "");
 }
 
 /** What a build may reuse of one function: how much, and what is missing. */
@@ -1334,18 +1226,11 @@ function unitReuse(request: UnitReuseRequest): UnitReuse {
   const { entry, keys, required } = request;
   if (entry === undefined || entry.reviewKey !== keys.review) {
     if (!required) return { level: null, entry: undefined, missing: [] };
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "reuse",
-      message:
-        entry === undefined
+    throw new CompilerError("StorageError", "reuse", entry === undefined
           ? `no stored implementation to reuse for ${request.functionName}`
-          : `the stored implementation of ${request.functionName} was reviewed from different inputs`,
-      detail:
-        entry === undefined
+          : `the stored implementation of ${request.functionName} was reviewed from different inputs`, entry === undefined
           ? `nothing is stored for ${request.id}; run blaze build without --reuse to build it`
-          : "its contract, the functions it is linked against, the target, the options, the model or the compiler's own review of a function changed; run blaze build without --reuse to build it again",
-    });
+          : "its contract, the functions it is linked against, the target, the options, the model or the compiler's own review of a function changed; run blaze build without --reuse to build it again", "", "", "");
   }
   // The stored candidate's own IR decides which files it produced: one that
   // calls a function of the program is never linked on its own, so its
@@ -1451,20 +1336,10 @@ export async function runBuild(
     usesSqlite = usesSqliteSource(project.entry.source);
     libraries = libraryKindsFor(project.entry.source, target);
     if (usesSqlite && outputKind === "wasm") {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: "a WebAssembly module cannot use SQLite",
-        detail: "a wasm module links no library; build it with --output machine, or drop the SQLite calls",
-      });
+      throw new CompilerError("InputError", "input", "a WebAssembly module cannot use SQLite", "a wasm module links no library; build it with --output machine, or drop the SQLite calls", "", "", "");
     }
     if (usesSqlite && runtimeKind === "nim") {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: "a program hosted by Nim cannot use SQLite",
-        detail: "the Nim host links the runtime and no library; build it with --runtime none, or drop the SQLite calls",
-      });
+      throw new CompilerError("InputError", "input", "a program hosted by Nim cannot use SQLite", "the Nim host links the runtime and no library; build it with --runtime none, or drop the SQLite calls", "", "", "");
     }
     backendKind = resolveBackend(options.backend ?? input.backend, outputKind);
     buildMode = resolveBuildMode(options.mode ?? input.mode);
@@ -1500,12 +1375,7 @@ export async function runBuild(
       id,
       previousBuild,
       targetForRecord,
-      new CompilerError({
-        category: "InputError",
-        stage: "input",
-        message: "generate asks a model",
-        detail: "set AI_MODEL or pass --model provider/model; blaze build runs the rules alone without one",
-      }),
+      new CompilerError("InputError", "input", "generate asks a model", "set AI_MODEL or pass --model provider/model; blaze build runs the rules alone without one", "", "", ""),
     );
   }
   // A reused build is answered by the model that reviewed the stored candidate,
@@ -1541,12 +1411,7 @@ export async function runBuild(
     if (options.recompile !== true && options.confirm !== undefined) {
       const recompile = await options.confirm("Recompile every function from scratch? [y/N] ");
       if (!recompile) {
-        throw new CompilerError({
-          category: "CancelledError",
-          stage: "engine",
-          message: `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`,
-          detail: "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it",
-        });
+        throw new CompilerError("CancelledError", "engine", `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`, "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it", "", "", "");
       }
     }
   }
@@ -1919,12 +1784,7 @@ export async function runBuild(
           ? {
               backend: () => {
                 if (options.reuse) {
-                  throw new CompilerError({
-                    category: "StorageError",
-                    stage: "reuse",
-                    message: `the stored implementation of ${functionName} no longer satisfies its contract`,
-                    detail: "run blaze build without --reuse to review it again",
-                  });
+                  throw new CompilerError("StorageError", "reuse", `the stored implementation of ${functionName} no longer satisfies its contract`, "run blaze build without --reuse to review it again", "", "", "");
                 }
                 return createBackend(requireModel(), {
                   timeoutMs: requestTimeoutMs(input),
@@ -2091,13 +1951,7 @@ export async function runBuild(
                 `${outcome.candidate}: ${outcome.failure?.category ?? ""} ${outcome.failure?.message ?? ""}\n${outcome.failure?.detail ?? ""}`,
             )
             .join("\n");
-          throw new CompilerError({
-            category: "VerificationError",
-            stage: "verify",
-            message: `no candidate for ${functionName} satisfied the contract`,
-            function: functionName,
-            detail: detail.trim(),
-          });
+          throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
         selectedEntries.push([key, entry.result.selected]);
       }
@@ -2262,15 +2116,10 @@ export async function runBuild(
     }
     if (checked !== undefined && !checked.passed) {
       const difference = checked.difference;
-      throw new CompilerError({
-        category: "VerificationError",
-        stage: "verify",
-        message: difference?.failure ?? "the program does not print what the source prints",
-        detail: [
+      throw new CompilerError("VerificationError", "verify", difference?.failure ?? "the program does not print what the source prints", [
           `line ${difference?.line}: the source prints ${JSON.stringify(difference?.expected)}, the program prints ${JSON.stringify(difference?.actual)}`,
           ...(difference?.failureOutput === undefined ? [] : [`the program wrote to standard error:\n${difference.failureOutput}`]),
-        ].join("\n"),
-      });
+        ].join("\n"), "", "", "");
     }
     if (checked !== undefined) {
       reporter.stage(
@@ -2494,8 +2343,8 @@ export async function runBuild(
     };
   } catch (cause) {
     // The project is known from here on, so the CLI can point at the record.
-    const failure = toCompilerError(cause, { category: "AiReviewError", stage: mode });
-    const error = new CompilerError({ ...failure.toJSON(), project: id });
+    const failure = toCompilerError(cause, "AiReviewError", mode, "", "", "", "", "");
+    const error = new CompilerError(failure.category, failure.stage, failure.message, failure.detail, failure.functionName, failure.candidate, id);
     build.status = "failed";
     build.error = error.toJSON();
     build.updatedAt = new Date().toISOString();
@@ -2520,12 +2369,7 @@ async function loadStored(
 ): Promise<{ paths: ProjectPaths; program: ProgramContract; units: CompilationUnit[] }> {
   const paths = await storedPaths(store, project);
   if (!(await store.exists(paths.contract))) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "load",
-      message: `unknown project "${project}"`,
-      detail: `no contract at ${paths.contract}`,
-    });
+    throw new CompilerError("StorageError", "load", `unknown project "${project}"`, `no contract at ${paths.contract}`, "", "", "");
   }
   const program = await store.read<ProgramContract>(paths.contract);
   // A stored program records which functions it compiled, so `blaze test` and
@@ -2549,20 +2393,10 @@ export async function runStored(
   const store = createJsonStore(join(options.cwd, STATE_DIRECTORY));
   const { paths, program, units } = await loadStored(store, project);
   if (units.length === 0) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: action,
-      message: `project "${project}" compiled no function`,
-      detail: "run blaze build first",
-    });
+    throw new CompilerError("StorageError", action, `project "${project}" compiled no function`, "run blaze build first", "", "", "");
   }
   if (!(await store.exists(paths.candidates))) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: action,
-      message: `project "${project}" has no stored candidates`,
-      detail: "run blaze build first",
-    });
+    throw new CompilerError("StorageError", action, `project "${project}" has no stored candidates`, "run blaze build first", "", "", "");
   }
   const input = await store.exists(paths.input) ? await store.read<SourceInput>(paths.input) : ({} as SourceInput);
   const build = await store.readIfValid<BuildStatus>(paths.build);
@@ -2571,15 +2405,10 @@ export async function runStored(
   // implementation that was never delivered and write that measurement into
   // the record as the project's own.
   if (build !== undefined && build.status !== "success") {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: action,
-      message: `project "${project}" has no successful build to ${action}`,
-      detail: [
+    throw new CompilerError("StorageError", action, `project "${project}" has no successful build to ${action}`, [
         `the last build of this project ${build.status === "building" ? "never finished" : "failed"}: ${build.error?.message ?? "no diagnostic is recorded"}`,
         `run ${STATE_DIRECTORY} > projects > ${project} > build.json for the whole of it, then build again`,
-      ].join("\n"),
-    });
+      ].join("\n"), "", "", "");
   }
   // Every record below is keyed by whatever the source named its functions,
   // and `__proto__` is a legal identifier. On an object with the usual
@@ -2646,11 +2475,7 @@ export async function runStored(
     const chosen = build?.selectedCandidates?.[key];
     const candidate = candidates.find((entry) => entry.id === chosen);
     if (candidate === undefined) {
-      throw new CompilerError({
-        category: "StorageError",
-        stage: action,
-        message: `project "${project}" has no candidate to ${action} for ${functionName}`,
-      });
+      throw new CompilerError("StorageError", action, `project "${project}" has no candidate to ${action} for ${functionName}`, "", "", "", "");
     }
     const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
     const result = await evaluateStoredCandidate({
@@ -2752,24 +2577,14 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     }
     const wanted = Object.values(semantics).find((fn) => fn.name === options.function);
     if (wanted === undefined) {
-      throw new CompilerError({
-        category: "InputError",
-        stage: "ir",
-        message: `${projectIdFor(inputPath)} has no function called ${options.function}`,
-        detail: `it declares ${Object.keys(semantics).join(", ") || "nothing"}`,
-      });
+      throw new CompilerError("InputError", "ir", `${projectIdFor(inputPath)} has no function called ${options.function}`, `it declares ${Object.keys(semantics).join(", ") || "nothing"}`, "", "", "");
     }
     // What the backends are handed is folded, so what is printed here is what
     // was lowered rather than what the frontend resolved.
     return printSemanticFunction(optimizeSemanticFunction(structuredClone(wanted), new Map(Object.entries(semantics))));
   }
   if (phase.body === undefined) {
-    throw new CompilerError({
-      category: "InputError",
-      stage: "ir",
-      message: `${projectIdFor(inputPath)} has no program body`,
-      detail: "this project declares functions and runs nothing of its own; ask for one with --function, or for all of them with --all",
-    });
+    throw new CompilerError("InputError", "ir", `${projectIdFor(inputPath)} has no program body`, "this project declares functions and runs nothing of its own; ask for one with --function, or for all of them with --all", "", "", "");
   }
   const callees = new Map(Object.entries(semantics));
   const program =
@@ -2786,12 +2601,7 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
   const store = createJsonStore(join(cwd, STATE_DIRECTORY));
   const paths = await storedPaths(store, project);
   if (!(await store.exists(paths.build))) {
-    throw new CompilerError({
-      category: "StorageError",
-      stage: "inspect",
-      message: `unknown project "${project}"`,
-      detail: `no build record at ${paths.build}`,
-    });
+    throw new CompilerError("StorageError", "inspect", `unknown project "${project}"`, `no build record at ${paths.build}`, "", "", "");
   }
   return store.read<BuildStatus>(paths.build);
 }
@@ -2800,6 +2610,18 @@ export async function listProjects(cwd: string): Promise<string[]> {
   const store = createJsonStore(join(cwd, STATE_DIRECTORY));
   const entries = await readdirEntries(store.resolve("projects")).catch(() => []);
   return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+/** One line of `blaze projects`: the project and the build it last had. */
+export async function projectStateLine(project: string, cwd: string): Promise<string> {
+  const build = await inspectProject(project, cwd).catch(() => undefined);
+  if (build === undefined) return project;
+  const selected = build.selectedCandidates ?? {};
+  const names = Object.keys(selected);
+  const label = names.length === 0
+    ? "-"
+    : names.map((name) => `${name}#${selected[name]}`).join(",");
+  return `${project}  ${build.status}  ${build.model}  ${label}`;
 }
 
 /** How many functions the program contract covers, for the build report. */

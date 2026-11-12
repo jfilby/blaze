@@ -100,16 +100,8 @@ export interface ModuleRequest {
  * refusal says which function it was and not only what it is.
  */
 function unreachable(what: string, name: string, candidate?: string): never {
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "compile",
-    message: `a WebAssembly module cannot ${what}, in ${name}`,
-    detail:
-      "the host ABI of a wasm module carries the runtime services the module imports, and this construct " +
-      "needs one the ABI does not have. The c, asm and machine output kinds reach the whole runtime",
-    function: name,
-    candidate,
-  });
+  throw new CompilerError("TargetError", "compile", `a WebAssembly module cannot ${what}, in ${name}`, "the host ABI of a wasm module carries the runtime services the module imports, and this construct " +
+      "needs one the ABI does not have. The c, asm and machine output kinds reach the whole runtime", name, candidate, "");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -682,12 +674,7 @@ function compoundCode(held: number, type: SemanticType, op: string): number {
   if (op === "**=") {
     // There is no power instruction, and a compound power is not the low half
     // of a computation every backend runs: it is refused here, by name.
-    throw new CompilerError({
-      category: "AssemblyError",
-      stage: "wasm",
-      message: "this backend has not written a pow",
-      detail: "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code",
-    });
+    throw new CompilerError("AssemblyError", "wasm", "this backend has not written a pow", "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code", "", "", "");
   }
   const name = COMPOUND[op] as string;
   const code = facts(type).unsigned ? UNSIGNED_BINARY[String(held)][name] : undefined;
@@ -1210,11 +1197,7 @@ class Body {
       const local = (this.scopes[position] as Scope).names.get(name);
       if (local !== undefined) return local;
     }
-    throw new CompilerError({
-      category: "SemanticIrError",
-      stage: "semantic-ir",
-      message: `the body of ${this.name} reads "${name}", which it declares nowhere`,
-    });
+    throw new CompilerError("SemanticIrError", "semantic-ir", `the body of ${this.name} reads "${name}", which it declares nowhere`, "", "", "", "");
   }
 
   private get(name: string): Local {
@@ -1252,11 +1235,7 @@ class Body {
   private depth(id: string): number {
     const at = this.labelAt.get(id);
     if (at !== undefined) return this.frames.length - 1 - at;
-    throw new CompilerError({
-      category: "SemanticIrError",
-      stage: "semantic-ir",
-      message: `a jump to "${id}" leaves no block or loop it is a break or a continue of`,
-    });
+    throw new CompilerError("SemanticIrError", "semantic-ir", `a jump to "${id}" leaves no block or loop it is a break or a continue of`, "", "", "", "");
   }
 
   /**
@@ -2347,12 +2326,7 @@ class Body {
     const at = this.scratchBase + this.scratchTaken;
     this.scratchTaken += bytes;
     if (this.scratchTaken > SCRATCH_LIMIT) {
-      throw new CompilerError({
-        category: "AssemblyError",
-        stage: "wasm",
-        message: "this function keeps more wide numbers in flight than the module has scratch for",
-        detail: `every value an operation is computing on is thirty-two bytes and they live in a region of their own below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}; split the expression`,
-      });
+      throw new CompilerError("AssemblyError", "wasm", "this function keeps more wide numbers in flight than the module has scratch for", `every value an operation is computing on is thirty-two bytes and they live in a region of their own below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}; split the expression`, "", "", "");
     }
     return at;
   }
@@ -2544,12 +2518,7 @@ class Body {
    * which would be a wrong answer wearing a module's clothes.
    */
   private wideRefuse(op: string): never {
-    throw new CompilerError({
-      category: "AssemblyError",
-      stage: "wasm",
-      message: `this backend has not written a wide ${op}`,
-      detail: `a whole number of this width is four 64 bit limbs in the host's memory and WebAssembly has one instruction per limb, so this is written out by hand and ${op} is not written yet`,
-    });
+    throw new CompilerError("AssemblyError", "wasm", `this backend has not written a wide ${op}`, `a whole number of this width is four 64 bit limbs in the host's memory and WebAssembly has one instruction per limb, so this is written out by hand and ${op} is not written yet`, "", "", "");
   }
 
   /** The number a literal denotes at one carrier. */
@@ -3471,14 +3440,7 @@ class Body {
       this.release(F64, local);
       return;
     }
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: `a WebAssembly module cannot call ${callee}, in ${this.name}`,
-      detail: "this backend has no instruction for it",
-      function: this.name,
-      candidate: this.candidate,
-    });
+    throw new CompilerError("TargetError", "compile", `a WebAssembly module cannot call ${callee}, in ${this.name}`, "this backend has no instruction for it", this.name, this.candidate, "");
   }
 
   /**
@@ -4197,13 +4159,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
     functions.push({ fn: entryFunction(program.entry), name: "the body of the program", export: ENTRY_EXPORT });
   }
   if (functions.length === 0) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "a WebAssembly module holds no function",
-      detail: "the module of a program holds every function of the program and the body it runs",
-      candidate,
-    });
+    throw new CompilerError("TargetError", "compile", "a WebAssembly module holds no function", "the module of a program holds every function of the program and the body it runs", "", candidate, "");
   }
 
   // The first pass: what the module imports, and how much scratch each of its
@@ -4230,13 +4186,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
     used += size;
   }
   if (used > SCRATCH_LIMIT) {
-    throw new CompilerError({
-      category: "AssemblyError",
-      stage: "wasm",
-      message: "the module keeps more wide numbers in flight than it has scratch for",
-      detail: `every value an operation is computing on is thirty-two bytes and they live in a region below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}`,
-      candidate,
-    });
+    throw new CompilerError("AssemblyError", "wasm", "the module keeps more wide numbers in flight than it has scratch for", `every value an operation is computing on is thirty-two bytes and they live in a region below the module's constants, of which there are ${(SCRATCH_LIMIT / 32) | 0}`, "", candidate, "");
   }
   const offset = Math.max(WIDE_DATA_BASE, used);
 
@@ -4253,12 +4203,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   const signatures = services.map((symbol) => {
     const service = hostServiceBySymbol(symbol);
     if (service === null) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: `"${symbol}" is not a service of the host ABI`,
-        candidate,
-      });
+      throw new CompilerError("TargetError", "compile", `"${symbol}" is not a service of the host ABI`, "", "", candidate, "");
     }
     return service;
   });
@@ -5076,14 +5021,7 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
   );
   const detail = await inspect(request.modulePath, functionName, bytes);
   if (detail !== null) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: `the WebAssembly module for ${functionName} violates the contract`,
-      detail: detail.slice(0, 2000),
-      function: functionName,
-      candidate: request.candidate,
-    });
+    throw new CompilerError("TargetError", "compile", `the WebAssembly module for ${functionName} violates the contract`, detail.slice(0, 2000), functionName, request.candidate, "");
   }
   await writeFile(request.modulePath, bytes);
   // The host is the runtime: it carries the implementations of the services the
@@ -5117,13 +5055,7 @@ export async function buildProgramModule(request: ProgramModuleRequest): Promise
   );
   const detail = await inspect(request.modulePath, request.entry === undefined ? undefined : ENTRY_EXPORT, bytes);
   if (detail !== null) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the WebAssembly module of the program violates the contract",
-      detail: detail.slice(0, 2000),
-      candidate: request.candidate,
-    });
+    throw new CompilerError("TargetError", "compile", "the WebAssembly module of the program violates the contract", detail.slice(0, 2000), "", request.candidate, "");
   }
   await writeFile(request.modulePath, bytes);
   // The host is the runtime: it carries the implementations of the services the

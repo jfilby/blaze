@@ -213,20 +213,14 @@ export class VercelAiBackend implements AiBackend {
         if (!cause.retryable) throw cause.failure;
         answers.push({ reason: cause.reason, stop: cause.stop, answer: cause.answer });
         if (retry === this.retries) {
-          throw new CompilerError({
-            category: "AiReviewError",
-            stage: "review",
-            message: cause.failure.message,
-            function: request.contract.function.name,
-            detail: [
+          throw new CompilerError("AiReviewError", "review", cause.failure.message, [
               `asked ${this.retries + 1} times, and no answer carried a review:`,
               ...answers.flatMap((entry, at) => [
                 `- request ${at + 1}: ${entry.reason}${entry.stop === undefined ? "" : ` (${describeProviderStop(entry.stop)})`}`,
                 ...quoteReply(entry.answer),
               ]),
               ...(cause.failure.detail === undefined ? [] : [cause.failure.detail]),
-            ].join("\n"),
-          });
+            ].join("\n"), request.contract.function.name, "", "");
         }
         this.onRetry?.({
           stage: request.stage,

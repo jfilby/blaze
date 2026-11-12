@@ -91,7 +91,7 @@ const ENV_KEYS: Record<ProviderName, readonly string[]> = {
 const GENERIC_ENV_KEYS: readonly string[] = ["AI_API_KEY", "OPENCODE_API_KEY"];
 
 function generationError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "AiReviewError", stage: "review", message, detail });
+  return new CompilerError("AiReviewError", "review", message, detail, "", "", "");
 }
 
 function firstEnvKey(env: Readonly<Record<string, string | undefined>>, keys: readonly string[]): string | undefined {

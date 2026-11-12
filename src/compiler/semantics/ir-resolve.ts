@@ -392,12 +392,7 @@ const REF_NULL: TypeExpr = { kind: "ref", of: null };
 const F64: TypeExpr = { kind: "primitive", name: "f64" };
 
 function programError(message: string, body: ProgramBody, line: number, detail?: string): CompilerError {
-  return new CompilerError({
-    category: "ContractError",
-    stage: "program",
-    message,
-    detail: detail ?? (line === 0 ? body.file : `line ${line} of ${body.file}`),
-  });
+  return new CompilerError("ContractError", "program", message, detail ?? (line === 0 ? body.file : `line ${line} of ${body.file}`), "", "", "");
 }
 
 function primitive(type: SemanticType | null): PrimitiveTypeName | null {
@@ -5705,12 +5700,7 @@ class ProgramLowering {
         // block do not count with the same one.
         const array = this.value(statement.buffer, null, statement.line);
         if (array.k !== "local") {
-          throw new CompilerError({
-            category: "ContractError",
-            stage: "program",
-            message: "a fill is written of an array the program did not name",
-            detail: "fill an array a name holds",
-          });
+          throw new CompilerError("ContractError", "program", "a fill is written of an array the program did not name", "fill an array a name holds", "", "", "");
         }
         const element = (statement.held.element ?? F64);
         this.pending.push({
@@ -5977,12 +5967,7 @@ class ProgramLowering {
         // of its own first, so the fill has a name to walk.
         const array = this.value(value.buffer, null, line);
         if (array.k !== "local") {
-          throw new CompilerError({
-            category: "ContractError",
-            stage: "program",
-            message: "a fill is written of an array the program allocated",
-            detail: "the resolver resolved the array to a name; the lowering writes it down under that name",
-          });
+          throw new CompilerError("ContractError", "program", "a fill is written of an array the program allocated", "the resolver resolved the array to a name; the lowering writes it down under that name", "", "", "");
         }
         const element = (value.held.element ?? F64);
         this.pending.push({
@@ -6019,20 +6004,10 @@ class ProgramLowering {
         // the value a field is read of.
         const object = value.object;
         if (object.k !== "reference" && object.k !== "field" && object.k !== "call") {
-          throw new CompilerError({
-            category: "ContractError",
-            stage: "program",
-            message: "a field is read of something the resolver did not read an object of",
-            detail: "the field read's object is neither a name nor another field read; the resolver refuses one that is",
-          });
+          throw new CompilerError("ContractError", "program", "a field is read of something the resolver did not read an object of", "the field read's object is neither a name nor another field read; the resolver refuses one that is", "", "", "");
         }
         if (object.k === "reference" && object.held.kind !== "object") {
-          throw new CompilerError({
-            category: "ContractError",
-            stage: "program",
-            message: `"${object.name}" is not an object`,
-            detail: "the field read's object is a name of a slot that is not an object; the resolver refuses one that is",
-          });
+          throw new CompilerError("ContractError", "program", `"${object.name}" is not an object`, "the field read's object is a name of a slot that is not an object; the resolver refuses one that is", "", "", "");
         }
         const base =
           object.k === "reference"

@@ -43,14 +43,7 @@ export interface TestVector {
 }
 
 function verificationError(message: string, detail: string | undefined, functionName: string, candidate?: string): CompilerError {
-  return new CompilerError({
-    category: "VerificationError",
-    stage: "verify",
-    message,
-    function: functionName,
-    candidate,
-    detail,
-  });
+  return new CompilerError("VerificationError", "verify", message, detail, functionName, candidate, "");
 }
 
 type ScalarValue = number | bigint | boolean;
@@ -83,11 +76,7 @@ function parseFloatingText(text: string): number {
   if (lowered === "nan" || lowered === "-nan") return 0 / 0;
   const parsed = Number(text);
   if (Number.isNaN(parsed)) {
-    throw new CompilerError({
-      category: "VerificationError",
-      stage: "verify",
-      message: `the candidate printed "${text}", which is not a number`,
-    });
+    throw new CompilerError("VerificationError", "verify", `the candidate printed "${text}", which is not a number`, "", "", "", "");
   }
   return parsed;
 }
@@ -201,11 +190,7 @@ function randomScalar(random: () => number, type: ScalarType): ScalarValue {
     }
     return randomWhole(random, low, high);
   }
-  throw new CompilerError({
-    category: "VerificationError",
-    stage: "verify",
-    message: `cannot generate test values of type ${String(type.name)}`,
-  });
+  throw new CompilerError("VerificationError", "verify", `cannot generate test values of type ${String(type.name)}`, "", "", "", "");
 }
 
 function patternValue(kind: "zeros" | "ones" | "ramp" | "alternating", index: number): number {

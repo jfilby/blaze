@@ -73,7 +73,7 @@ function isFloat(type: TypeExpr): boolean {
 }
 
 function hostError(message: string, detail?: string, functionName?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "host", message, function: functionName, detail });
+  return new CompilerError("LinkError", "host", message, detail, functionName, "", "");
 }
 
 function elementNimType(type: TypeExpr): string {
@@ -3597,12 +3597,7 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
     { timeoutMs: 600_000 },
   );
   if (result.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "host",
-      message: "the Nim compiler is not available",
-      detail: `${result.spawnError}\ninstall Nim, or build this project with --runtime none`,
-    });
+    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${result.spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
   }
   if (result.code !== 0) {
     throw hostError(

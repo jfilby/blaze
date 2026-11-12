@@ -61,14 +61,7 @@ const WASM_TYPES: Record<string, string> = {
 };
 
 function wasmError(message: string, detail?: string, functionName?: string, candidate?: string): CompilerError {
-  return new CompilerError({
-    category: "AssemblyError",
-    stage: "assemble",
-    message,
-    function: functionName,
-    candidate,
-    detail,
-  });
+  return new CompilerError("AssemblyError", "assemble", message, detail, functionName, candidate, "");
 }
 
 /**
@@ -125,12 +118,7 @@ export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildRes
 
   const assembled = run("wat2wasm", ["--no-check", request.textPath, "-o", request.modulePath], { timeoutMs: 60_000 });
   if (assembled.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "assemble",
-      message: "a wasm build needs the WebAssembly text assembler wat2wasm",
-      detail: "install wabt (https://github.com/WebAssembly/wabt) so that wat2wasm is on PATH",
-    });
+    throw new CompilerError("TargetError", "assemble", "a wasm build needs the WebAssembly text assembler wat2wasm", "install wabt (https://github.com/WebAssembly/wabt) so that wat2wasm is on PATH", "", "", "");
   }
   if (assembled.code !== 0) {
     throw wasmError(
@@ -189,12 +177,7 @@ export function readVaruint(bytes: Uint8Array, at: number, bits: number): { valu
     if ((byte & 0x80) === 0) return { value: value >>> 0, next: index + 1 };
     shift += 7;
   }
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "compile",
-    message: "the module ends in the middle of a length",
-    detail: "the bytes read back are not a module the compiler emitted",
-  });
+  throw new CompilerError("TargetError", "compile", "the module ends in the middle of a length", "the bytes read back are not a module the compiler emitted", "", "", "");
 }
 
 /** The bytes of one section, which is where its own lengths are counted from. */

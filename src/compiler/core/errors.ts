@@ -22,17 +22,6 @@ export type ErrorCategory =
   | "TargetError"
   | "StorageError";
 
-export interface CompilerErrorInit {
-  category: ErrorCategory;
-  stage: string;
-  message: string;
-  function?: string;
-  candidate?: string;
-  detail?: string;
-  /** Project the failure belongs to, once a build has started. */
-  project?: string;
-}
-
 /** The shape stored in JSON build records. */
 export interface SerializedCompilerError {
   category: ErrorCategory;
@@ -52,15 +41,23 @@ export class CompilerError extends Error {
   readonly detail?: string;
   readonly project?: string;
 
-  constructor(init: CompilerErrorInit) {
-    super(init.message);
+  constructor(
+    category: ErrorCategory,
+    stage: string,
+    message: string,
+    detail: string | undefined,
+    functionName: string | undefined,
+    candidate: string | undefined,
+    project: string | undefined,
+  ) {
+    super(message);
     this.name = "CompilerError";
-    this.category = init.category;
-    this.stage = init.stage;
-    this.functionName = init.function;
-    this.candidate = init.candidate;
-    this.detail = init.detail;
-    this.project = init.project;
+    this.category = category;
+    this.stage = stage;
+    this.functionName = functionName === "" ? undefined : functionName;
+    this.candidate = candidate === "" ? undefined : candidate;
+    this.detail = detail === "" ? undefined : detail;
+    this.project = project === "" ? undefined : project;
   }
 
   toJSON(): SerializedCompilerError {
@@ -81,9 +78,21 @@ export function isCompilerError(value: unknown): value is CompilerError {
 }
 
 /** Wraps anything thrown into a CompilerError without losing the message. */
-export function toCompilerError(value: unknown, init: Omit<CompilerErrorInit, "message"> & { message?: string }): CompilerError {
+export function toCompilerError(
+  value: unknown,
+  category: ErrorCategory,
+  stage: string,
+  message: string,
+  detail: string | undefined,
+  functionName: string | undefined,
+  candidate: string | undefined,
+  project: string | undefined,
+): CompilerError {
   if (isCompilerError(value)) return value;
-  const message = init.message ?? (value instanceof Error ? value.message : String(value));
-  const detail = init.detail ?? (value instanceof Error && value.stack ? value.stack : undefined);
-  return new CompilerError({ ...init, message, detail });
+  // The value is whatever was thrown: a text when the program wrote one, and
+  // the text of the error otherwise. Its fields are not read, because an
+  // unknown value has no layout the compiler can pick a field out of.
+  const text = message === "" ? String(value) : message;
+  const full = detail === "" ? "" : detail;
+  return new CompilerError(category, stage, text, full, functionName, candidate, project);
 }

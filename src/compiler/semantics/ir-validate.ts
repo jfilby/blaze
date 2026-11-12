@@ -1567,6 +1567,9 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   // block holds: the two sides of `[...a, ...b]` are lists of the one element
   // type the read fixed, and the service moves bytes.
   const listService = call.builtin && (call.callee === "array.copy" || call.callee === "array.join");
+  // A state cell holds whatever the module value is: the type the getter
+  // states, boxed or cast at the call.
+  const stateCell = call.builtin && call.callee === "blaze_rt_state_set";
   // Variable-arity builtins may carry more types than arguments; that is expected.
   for (let index = 0; index < params.length; index += 1) {
     const parameter = contractType(params[index]);
@@ -1576,7 +1579,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     }
     const argument = call.argTypes[index];
     if (argument === undefined) continue;
-    if (settlesAny || listService) continue;
+    if (settlesAny || listService || (stateCell && index === 1)) continue;
     // An unshaped reference parameter takes any reference: the deep copy and
     // the settle functions ask about the value, not about the fields a record
     // it points at was laid out with.
@@ -2376,10 +2379,5 @@ export function validateSemanticModule(module: SemanticModule, program?: Program
 /** The one error a caller is given: what it read, and everything wrong with it. */
 function refuse(message: string, problems: string[]): void {
   if (problems.length === 0) return;
-  throw new CompilerError({
-    category: "SemanticIrError",
-    stage: "ir",
-    message,
-    detail: problems.join("\n"),
-  });
+  throw new CompilerError("SemanticIrError", "ir", message, problems.join("\n"), "", "", "");
 }

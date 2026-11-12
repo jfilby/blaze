@@ -1931,12 +1931,7 @@ export async function buildFacilRuntime(
     sourceDirOk = false;
   }
   if (!sourceDirOk) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "link",
-      message: "facil.io is not available",
-      detail: `the facil.io HTTP runtime requires its vendored source at ${sourceDir}, pinned to ${FACIL_IO_VERSION}`,
-    });
+    throw new CompilerError("LinkError", "link", "facil.io is not available", `the facil.io HTTP runtime requires its vendored source at ${sourceDir}, pinned to ${FACIL_IO_VERSION}`, "", "", "");
   }
 
   /* List facil.io's C translation units needed for an HTTP server.
@@ -1950,12 +1945,7 @@ export async function buildFacilRuntime(
   try {
     tree = await walkFacilIoTree(sourceDir);
   } catch (cause) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "could not enumerate facil.io sources",
-      detail: cause instanceof Error ? cause.message : String(cause),
-    });
+    throw new CompilerError("LinkError", "compile", "could not enumerate facil.io sources", cause instanceof Error ? cause.message : String(cause), "", "", "");
   }
   const tlsBackend = needs.tls ? join(sourceDir, "tls/fio_tls_openssl.c") : join(sourceDir, "tls/fio_tls_missing.c");
   const facilSources = tree.sources
@@ -1963,12 +1953,7 @@ export async function buildFacilRuntime(
     .filter((line) => !line.includes("/tls/fio_tls_openssl.c") && !line.includes("/tls/fio_tls_missing.c"))
     .concat(tlsBackend);
   if (facilSources.length === 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "no facil.io sources found",
-      detail: sourceDir,
-    });
+    throw new CompilerError("LinkError", "compile", "no facil.io sources found", sourceDir, "", "", "");
   }
 
   /* facil.io spreads its public headers across subdirectories, so add every
@@ -2043,12 +2028,7 @@ export async function buildFacilRuntime(
     ]);
     const compiled = await runAsync(command.command, command.args, { timeoutMs: 300_000 });
     if (compiled.spawnError !== undefined || compiled.code !== 0) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: "the HTTP adapter did not compile",
-        detail: `${adapterSource}\n${compiled.stderr.trim() || compiled.spawnError || ""}`,
-      });
+      throw new CompilerError("LinkError", "compile", "the HTTP adapter did not compile", `${adapterSource}\n${compiled.stderr.trim() || compiled.spawnError || ""}`, "", "", "");
     }
   })();
   // A build that stops on a unit must not leave the two promises above to fail
@@ -2069,12 +2049,7 @@ export async function buildFacilRuntime(
       timeoutMs: 300_000,
     });
     if (compiled.spawnError !== undefined || compiled.code !== 0) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: "facil.io did not compile",
-        detail: `${source}\n${compiled.stderr.trim() || compiled.spawnError || ""}`,
-      });
+      throw new CompilerError("LinkError", "compile", "facil.io did not compile", `${source}\n${compiled.stderr.trim() || compiled.spawnError || ""}`, "", "", "");
     }
     return objectPath;
   });
@@ -2086,12 +2061,7 @@ export async function buildFacilRuntime(
   const bundle = relocatableLinkCommand(toolchain, bundledObject, [adapterObject, rtObject, ...facilObjects]);
   const linked = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
   if (linked.spawnError !== undefined || linked.code !== 0) {
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "link",
-      message: "the HTTP runtime did not bundle",
-      detail: `${linked.stderr.trim() ?? linked.spawnError ?? ""}`,
-    });
+    throw new CompilerError("LinkError", "link", "the HTTP runtime did not bundle", `${linked.stderr.trim() ?? linked.spawnError ?? ""}`, "", "", "");
   }
 
   return { headerPath, objectPath: bundledObject };

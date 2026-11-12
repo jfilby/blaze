@@ -29,7 +29,7 @@ import type { ResolvedType, TypeTable } from "./typescript-types.ts";
 
 /** An error of the contract phase, which is where the graph is read. */
 export function contractPhaseError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
+  return new CompilerError("ContractError", "contract", message, detail, "", "", "");
 }
 
 /** The path a source given inline to a project file is known by. */

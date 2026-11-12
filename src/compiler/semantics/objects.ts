@@ -96,7 +96,7 @@ export function asField(value: Inferred): Inferred {
 }
 
 function objectsError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
+  return new CompilerError("ContractError", "contract", message, detail, "", "", "");
 }
 
 /**
@@ -668,6 +668,11 @@ class BodyTypes {
   private call(name: string): void {
     if (!this.called.includes(name)) this.called.push(name);
   }
+}
+
+/** A shape key with every reference's target replaced by a wildcard. */
+function wildcardShape(key: string): string {
+  return key.replace(/ref<[^<>]*>/g, "ref<*>");
 }
 
 export function describe(value: Inferred): string {
@@ -1359,6 +1364,15 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
       if (unshapedReference(known.value)) {
         known.value = field.value;
         continue;
+      }
+      // A nested object that differs only where one of its own fields says
+      // nothing about the reference it points at is the same object: keep the
+      // nested type that names the layout.
+      if (field.value.kind === "object" && known.value.kind === "object") {
+        if (wildcardShape(field.value.key) === wildcardShape(known.value.key)) {
+          if (known.value.key.includes("ref<any>")) known.value = field.value;
+          continue;
+        }
       }
       throw objectsError(
         `${body.path}: ${body.functionName} writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,

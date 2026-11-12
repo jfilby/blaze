@@ -14,10 +14,5 @@ import type { ModelConfiguration } from "./model.ts";
 
 /** The backend a provider configuration constructs on a native host. */
 export function createSdkBackend(configuration: ModelConfiguration, _options: BackendOptions = {}): AiBackend {
-  throw new CompilerError({
-    category: "AiReviewError",
-    stage: "review",
-    message: `the ${configuration.provider} provider needs a transport this build does not carry`,
-    detail: "build with --model replay; provider review is the last host service a native compiler gains",
-  });
+  throw new CompilerError("AiReviewError", "review", `the ${configuration.provider} provider needs a transport this build does not carry`, "build with --model replay; provider review is the last host service a native compiler gains", "", "", "");
 }

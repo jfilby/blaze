@@ -221,12 +221,7 @@ const ARITH_OPS: readonly ArithOp[] = [
 /** A number the IR text states, or a refusal of what is not one. */
 function integer(text: string, what: string): number {
   if (!/^-?\d+$/.test(text)) {
-    throw new CompilerError({
-      category: "SemanticIrError",
-      stage: "ir",
-      message: `${what} is not a number`,
-      detail: `the IR text states a number of elements, and "${text}" is not one`,
-    });
+    throw new CompilerError("SemanticIrError", "ir", `${what} is not a number`, `the IR text states a number of elements, and "${text}" is not one`, "", "", "");
   }
   return Number(text);
 }
@@ -872,12 +867,7 @@ function functionSignature(fn: SemanticFunction): FunctionSignature {
 
 /** A line of the text is not a program, said as the line it was written on. */
 function fail(line: number, expected: string, found: string): never {
-  throw new CompilerError({
-    category: "ContractError",
-    stage: "ir",
-    message: `the IR text is not a program at line ${line}`,
-    detail: `line ${line}: expected ${expected}, found "${found}"`,
-  });
+  throw new CompilerError("ContractError", "ir", `the IR text is not a program at line ${line}`, `line ${line}: expected ${expected}, found "${found}"`, "", "", "");
 }
 
 /** One value read out of a line, in the shape the printer wrote it. */

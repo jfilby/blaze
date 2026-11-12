@@ -11,7 +11,7 @@ import { CompilerError } from "../core/errors.ts";
 
 /** The error every refusal of a frontend is. */
 export function frontendError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
+  return new CompilerError("FrontendError", "frontend", message, detail, "", "", "");
 }
 
 /** One construct the parser could not read, and where it was written. */

@@ -29,12 +29,7 @@ export function selectBenchmarkVector(contract: FunctionContract, parsed: Parsed
     }
   }
   if (preconditionFailures(parsed, vectorValues(contract, best)).length > 0) {
-    throw new CompilerError({
-      category: "BenchmarkError",
-      stage: "benchmark",
-      message: "the benchmark vector violates the contract preconditions",
-      function: contract.function.name,
-    });
+    throw new CompilerError("BenchmarkError", "benchmark", "the benchmark vector violates the contract preconditions", "", contract.function.name, "", "");
   }
   return best;
 }
@@ -71,48 +66,20 @@ export function benchmarkCandidate(request: BenchmarkRequest): BenchmarkResult {
       heapBytes: GENERATED_HEAP_BYTES,
     });
     if (execution.spawnError !== undefined) {
-      throw new CompilerError({
-        category: "BenchmarkError",
-        stage: "benchmark",
-        message: `cannot run the candidate for ${request.contract.function.name}`,
-        function: request.contract.function.name,
-        candidate: request.candidate,
-        detail: execution.spawnError,
-      });
+      throw new CompilerError("BenchmarkError", "benchmark", `cannot run the candidate for ${request.contract.function.name}`, execution.spawnError, request.contract.function.name, request.candidate, "");
     }
 
     const stopped = benchmarkStop(execution);
     if (stopped !== null) {
-      throw new CompilerError({
-        category: "BenchmarkError",
-        stage: "benchmark",
-        message: `the benchmark run for ${request.contract.function.name} ${stopped}`,
-        function: request.contract.function.name,
-        candidate: request.candidate,
-        detail: execution.stderr.trim().slice(0, 2000),
-      });
+      throw new CompilerError("BenchmarkError", "benchmark", `the benchmark run for ${request.contract.function.name} ${stopped}`, execution.stderr.trim().slice(0, 2000), request.contract.function.name, request.candidate, "");
     }
     const line = execution.stdout.split("\n").find((entry) => entry.startsWith("BENCH "));
     if (line === undefined) {
-      throw new CompilerError({
-        category: "BenchmarkError",
-        stage: "benchmark",
-        message: `the benchmark run for ${request.contract.function.name} produced no result`,
-        function: request.contract.function.name,
-        candidate: request.candidate,
-        detail: execution.stdout.trim().slice(0, 400),
-      });
+      throw new CompilerError("BenchmarkError", "benchmark", `the benchmark run for ${request.contract.function.name} produced no result`, execution.stdout.trim().slice(0, 400), request.contract.function.name, request.candidate, "");
     }
     const durationNs = Number.parseInt(line.split(" ")[1], 10);
     if (!Number.isFinite(durationNs) || durationNs <= 0) {
-      throw new CompilerError({
-        category: "BenchmarkError",
-        stage: "benchmark",
-        message: `the benchmark reported an invalid duration for ${request.contract.function.name}`,
-        function: request.contract.function.name,
-        candidate: request.candidate,
-        detail: line,
-      });
+      throw new CompilerError("BenchmarkError", "benchmark", `the benchmark reported an invalid duration for ${request.contract.function.name}`, line, request.contract.function.name, request.candidate, "");
     }
     durations.push(durationNs);
   }

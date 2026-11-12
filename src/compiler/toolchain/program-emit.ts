@@ -343,7 +343,7 @@ export interface ProgramTarget {
 
 /** A node neither target has been taught to write, which is a refusal. */
 function emitError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "SemanticIrError", stage: "emit", message, detail });
+  return new CompilerError("SemanticIrError", "emit", message, detail, "", "", "");
 }
 
 /** One line at a depth of a block. */

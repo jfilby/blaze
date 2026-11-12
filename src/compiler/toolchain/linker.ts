@@ -60,7 +60,7 @@ const C_SCALARS: Record<string, string> = {
 };
 
 function linkError(message: string, detail?: string, functionName?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "link", message, function: functionName, detail });
+  return new CompilerError("LinkError", "link", message, detail, functionName, "", "");
 }
 
 function isFloatScalar(type: TypeExpr): boolean {

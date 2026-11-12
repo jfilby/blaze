@@ -965,13 +965,7 @@ async function buildCandidate(
     // Reached only when the candidate is standalone, which is what leaves it
     // with a binary to run its vectors against.
     if (built.runner === null) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "link",
-        message: `candidate ${candidate.id} produced no binary to verify`,
-        function: request.contract.function.name,
-        candidate: candidate.id,
-      });
+      throw new CompilerError("LinkError", "link", `candidate ${candidate.id} produced no binary to verify`, "", request.contract.function.name, candidate.id, "");
     }
 
 
@@ -1026,12 +1020,7 @@ async function buildCandidate(
       },
     };
   } catch (cause) {
-    const error = toCompilerError(cause, {
-      category: "AssemblyError",
-      stage: "assemble",
-      function: request.contract.function.name,
-      candidate: candidate.id,
-    });
+    const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", request.contract.function.name, candidate.id, "");
     return {
       outcome: {
         candidate: candidate.id,
@@ -1217,7 +1206,7 @@ function revise(
     try {
       validateSemanticFunction(outcome.applied, request.contract, context.functions);
     } catch (cause) {
-      const error = toCompilerError(cause, { category: "SemanticIrError", stage: "ir" });
+      const error = toCompilerError(cause, "SemanticIrError", "ir", "", "", "", "", "");
       const note = `\`${proposal.text}\` was refused: the rule applies, but what it produced is not a function the compiler may lower\n${error.detail ?? error.message}`;
       refused.push(note);
       request.onNote?.(note);
@@ -1490,12 +1479,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   }
 
   if (candidates.length === 0) {
-    throw new CompilerError({
-      category: "AiReviewError",
-      stage: "review",
-      message: "no candidate was produced",
-      function: request.contract.function.name,
-    });
+    throw new CompilerError("AiReviewError", "review", "no candidate was produced", "", request.contract.function.name, "", "");
   }
 
   let selected = selectCandidate(outcomes, request.contract);
@@ -1598,14 +1582,7 @@ export async function evaluateStoredCandidate(request: StoredCandidateRequest): 
     vectors,
   );
   if (!outcome.valid) {
-    throw new CompilerError({
-      category: outcome.failure?.category === "VerificationError" ? "VerificationError" : "AssemblyError",
-      stage: outcome.failure?.stage ?? "verify",
-      message: outcome.failure?.message ?? `candidate ${request.candidate.id} is not valid`,
-      function: request.contract.function.name,
-      candidate: request.candidate.id,
-      detail: outcome.failure?.detail,
-    });
+    throw new CompilerError(outcome.failure?.category === "VerificationError" ? "VerificationError" : "AssemblyError", outcome.failure?.stage ?? "verify", outcome.failure?.message ?? `candidate ${request.candidate.id} is not valid`, outcome.failure?.detail, request.contract.function.name, request.candidate.id, "");
   }
   const result: StoredCandidateResult = {};
   if (outcome.verification !== undefined) result.verification = outcome.verification;

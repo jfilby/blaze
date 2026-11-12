@@ -73,20 +73,10 @@ export function identifyCompiler(toolchain: Toolchain): Promise<string> {
     const command = compileCommand(toolchain, ["--version"]);
     const version = run(command.command, command.args, { timeoutMs: 30_000 });
     if (version.spawnError !== undefined) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the C compiler is not available",
-        detail: version.spawnError,
-      });
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", version.spawnError, "", "", "");
     }
     if (version.code !== 0) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the C compiler did not say what it is",
-        detail: version.stderr.trim(),
-      });
+      throw new CompilerError("TargetError", "compile", "the C compiler did not say what it is", version.stderr.trim(), "", "", "");
     }
     return version.stdout.split("\n")[0]?.trim() ?? "";
   })();
@@ -175,21 +165,11 @@ export async function compileRuntimeSource(request: {
   const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
   if (compiled.spawnError !== undefined) {
     await discard(building);
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the C compiler is not available",
-      detail: compiled.spawnError,
-    });
+    throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
   }
   if (compiled.code !== 0) {
     await discard(building);
-    throw new CompilerError({
-      category: "LinkError",
-      stage: "compile",
-      message: "the compiler runtime did not build",
-      detail: `${sourcePath}\n${compiled.stderr.trim()}`,
-    });
+    throw new CompilerError("LinkError", "compile", "the compiler runtime did not build", `${sourcePath}\n${compiled.stderr.trim()}`, "", "", "");
   }
 
   // Two builds of one project can miss the same key at once, so the rename can

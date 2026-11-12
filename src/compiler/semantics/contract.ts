@@ -96,12 +96,7 @@ export function isSignedType(name: PrimitiveTypeName): boolean {
 export function parsePrimitiveName(name: string): PrimitiveTypeName {
   const match = PRIMITIVE_TYPES.find((entry) => entry === name);
   if (match === undefined) {
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "contract",
-      message: `unknown type "${name}"`,
-      detail: `known types: ${PRIMITIVE_TYPES.join(", ")}`,
-    });
+    throw new CompilerError("ContractError", "contract", `unknown type "${name}"`, `known types: ${PRIMITIVE_TYPES.join(", ")}`, "", "", "");
   }
   return match;
 }
@@ -141,20 +136,12 @@ export function parseType(text: string): TypeExpr {
       // An array of no elements is the array an empty literal is, and a layout
       // states the type a field holds once it has been written.
       if (!Number.isInteger(length) || length < 0) {
-        throw new CompilerError({
-          category: "ContractError",
-          stage: "contract",
-          message: `invalid array length in "${text}"`,
-        });
+        throw new CompilerError("ContractError", "contract", `invalid array length in "${text}"`, "", "", "", "");
       }
       return { kind: "array", of: parseType(parts[0]), length };
     }
   }
-  throw new CompilerError({
-    category: "ContractError",
-    stage: "contract",
-    message: `unsupported type expression "${text}"`,
-  });
+  throw new CompilerError("ContractError", "contract", `unsupported type expression "${text}"`, "", "", "", "");
 }
 
 export function typeToString(type: TypeExpr): string {
@@ -291,7 +278,7 @@ function tokenize(source: string): Token[] {
     if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1] ?? ""))) {
       const match = /^(?:0[xX][0-9a-fA-F]+|[0-9]*\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(source.slice(index));
       if (match === null) {
-        throw new CompilerError({ category: "ContractError", stage: "contract", message: `bad number in "${source}"` });
+        throw new CompilerError("ContractError", "contract", `bad number in "${source}"`, "", "", "", "");
       }
       tokens.push({ kind: "number", text: match[0] });
       index += match[0].length;
@@ -300,7 +287,7 @@ function tokenize(source: string): Token[] {
     if (/[A-Za-z_]/.test(character)) {
       const match = /^[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(index));
       if (match === null) {
-        throw new CompilerError({ category: "ContractError", stage: "contract", message: `bad identifier in "${source}"` });
+        throw new CompilerError("ContractError", "contract", `bad identifier in "${source}"`, "", "", "", "");
       }
       tokens.push({ kind: "ident", text: match[0] });
       index += match[0].length;
@@ -308,11 +295,7 @@ function tokenize(source: string): Token[] {
     }
     const operator = OPERATORS.find((candidate) => source.startsWith(candidate, index));
     if (operator === undefined) {
-      throw new CompilerError({
-        category: "ContractError",
-        stage: "contract",
-        message: `unexpected character "${character}" in expression "${source}"`,
-      });
+      throw new CompilerError("ContractError", "contract", `unexpected character "${character}" in expression "${source}"`, "", "", "", "");
     }
     tokens.push({ kind: "op", text: operator });
     index += operator.length;
@@ -365,11 +348,7 @@ class ExpressionParser {
   }
 
   private error(message: string): CompilerError {
-    return new CompilerError({
-      category: "ContractError",
-      stage: "contract",
-      message: `${message} in expression "${this.source}"`,
-    });
+    return new CompilerError("ContractError", "contract", `${message} in expression "${this.source}"`, "", "", "", "");
   }
 
   private parseOr(): Expr {
@@ -607,7 +586,7 @@ export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
 }
 
 function contractError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
+  return new CompilerError("ContractError", "contract", message, detail, "", "", "");
 }
 
 /* -------------------------------------------------------------------------- */

@@ -57,14 +57,7 @@ const FORBIDDEN_TOKENS = [
 const INLINE_ASSEMBLY: RegExp = /\b(?:__)?asm(?:__)?(?:\s+(?:__)?volatile(?:__)?)?\s*[("]/;
 
 function cError(message: string, detail: string | undefined, functionName: string, candidate?: string): CompilerError {
-  return new CompilerError({
-    category: "AssemblyError",
-    stage: "compile",
-    message,
-    function: functionName,
-    candidate,
-    detail,
-  });
+  return new CompilerError("AssemblyError", "compile", message, detail, functionName, candidate, "");
 }
 
 export function cSignature(contract: FunctionContract): string {
@@ -154,12 +147,7 @@ export async function compileC(request: CompileCRequest): Promise<CompileCResult
   ]);
   const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
   if (compiled.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "compile",
-      message: "the C compiler is not available",
-      detail: compiled.spawnError,
-    });
+    throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
   }
   if (compiled.code !== 0) {
     throw cError(

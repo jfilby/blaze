@@ -633,7 +633,7 @@ function operationWidth(type: SemanticType): 4 | 8 {
 }
 
 function machineError(message: string, detail?: string, functionName?: string): CompilerError {
-  return new CompilerError({ category: "AssemblyError", stage: "assemble", message, function: functionName, detail });
+  return new CompilerError("AssemblyError", "assemble", message, detail, functionName, "", "");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -706,12 +706,7 @@ export interface MachineResult {
  */
 export function assertMachineTarget(target: TargetSpec): void {
   if (target.arch === "x86_64" && target.abi === "sysv") return;
-  throw new CompilerError({
-    category: "TargetError",
-    stage: "assemble",
-    message: `the machine backend cannot build for ${target.arch}-${target.os}-${target.abi}`,
-    detail: "it writes x86-64 System V code itself; build with --backend c for another target",
-  });
+  throw new CompilerError("TargetError", "assemble", `the machine backend cannot build for ${target.arch}-${target.os}-${target.abi}`, "it writes x86-64 System V code itself; build with --backend c for another target", "", "", "");
 }
 
 /**
@@ -757,7 +752,7 @@ export function machineRefusal(
     );
     return null;
   } catch (cause) {
-    const error = toCompilerError(cause, { category: "AssemblyError", stage: "assemble" });
+    const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", "", "", "");
     return { reason: error.message, detail: error.detail };
   }
 }
@@ -9040,11 +9035,7 @@ class Machine {
     // number would take the first eight bytes of it — the count would be the low
     // half of the number being shifted, and the answer wrong rather than refused.
     if (isWideType(value.right.type)) {
-      throw new CompilerError({
-        category: "SemanticIrError",
-        stage: "semantic-ir",
-        message: `the count of a shift by ${op} is a wide number, which is not the number of bits to move`,
-      });
+      throw new CompilerError("SemanticIrError", "semantic-ir", `the count of a shift by ${op} is a wide number, which is not the number of bits to move`, "", "", "", "");
     }
     const type = value.type;
     const limbs = this.limbsOf(type);

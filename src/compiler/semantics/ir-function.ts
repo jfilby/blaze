@@ -2597,13 +2597,7 @@ class FunctionBody {
   /** A refusal that names the function and the line it was written at. */
   private error(message: string, line: number, detail?: string): CompilerError {
     const name = this.contract.function.name;
-    return new CompilerError({
-      category: "SemanticIrError",
-      stage: "ir",
-      function: name,
-      message: `${name}: ${message}`,
-      detail: detail === undefined ? `line ${line} of ${name}` : `line ${line} of ${name}: ${detail}`,
-    });
+    return new CompilerError("SemanticIrError", "ir", `${name}: ${message}`, detail === undefined ? `line ${line} of ${name}` : `line ${line} of ${name}: ${detail}`, name, "", "");
   }
 }
 

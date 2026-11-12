@@ -190,7 +190,7 @@ const TAKEN: Record<string, true> = {
 };
 
 function backendError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "link", message, detail });
+  return new CompilerError("LinkError", "link", message, detail, "", "", "");
 }
 
 function pad(depth: number): string {
@@ -290,6 +290,10 @@ function builtinExpression(name: string, args: string[]): string {
   const host = hostCall(name, args);
   if (host !== null) return host;
   switch (name) {
+    case "require":
+      // The module a program requires is a namespace the compiler reads the
+      // calls out of; the handle itself is nothing.
+      return "0.0";
     case "Math.abs":
       return `fabs(${args[0]})`;
     case "Math.sqrt":
@@ -1762,12 +1766,7 @@ class FunctionEmitter {
               ? 0
               : -1;
         if (kind < 0) {
-          throw new CompilerError({
-            category: "SemanticIrError",
-            stage: "semantic-ir",
-            message: `a ${typeText(value.type)} is handed to a use that reads a value the compiler cannot name`,
-            detail: "a dynamic value holds numbers and texts; a list of references has no dynamic form yet",
-          });
+          throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(value.type)} is handed to a use that reads a value the compiler cannot name`, "a dynamic value holds numbers and texts; a list of references has no dynamic form yet", "", "", "");
         }
         return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), sizeof(${declaredType(element)}), (int64_t)${kind})`;
       }
@@ -1831,14 +1830,8 @@ class FunctionEmitter {
   private widen(written: string, value: SemanticValue, as: SemanticType): string {
     if (isWideType(value.type)) return written;
     if (!isInteger(value.type)) {
-      throw new CompilerError({
-        category: "SemanticIrError",
-        stage: "semantic-ir",
-        message: `a ${typeText(value.type)} is handed to a use that reads a wide number`,
-        detail:
-          "a wide number is four limbs, and a whole number is the only narrower value that has a limb in it: " +
-          "the kernel every backend widens with takes one machine word. Convert the value first, and say which of the two you meant",
-      });
+      throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(value.type)} is handed to a use that reads a wide number`, "a wide number is four limbs, and a whole number is the only narrower value that has a limb in it: " +
+          "the kernel every backend widens with takes one machine word. Convert the value first, and say which of the two you meant", "", "", "");
     }
     const out = this.temporary("blaze_wide");
     const signed = as.kind === "primitive" && as.name === "i256";
@@ -2403,11 +2396,7 @@ class FunctionEmitter {
       // build that stops here says what is wrong; the same request answered
       // anyway is a build that fails somewhere else entirely.
       if (isWideType(value.right.type)) {
-        throw new CompilerError({
-          category: "SemanticIrError",
-          stage: "semantic-ir",
-          message: `the count of a shift by ${value.op} is a ${typeText(value.right.type)}, which is a whole number rather than the number of bits to move`,
-        });
+        throw new CompilerError("SemanticIrError", "semantic-ir", `the count of a shift by ${value.op} is a ${typeText(value.right.type)}, which is a whole number rather than the number of bits to move`, "", "", "", "");
       }
       const out = this.temporary("blaze_wide");
       const moved = this.temporary("blaze_wide");
@@ -2941,40 +2930,20 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
     ]);
     const stopped = run(stop.command, stop.args, { timeoutMs: 120_000 });
     if (stopped.spawnError !== undefined) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the C compiler is not available",
-        detail: stopped.spawnError,
-      });
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", stopped.spawnError, "", "", "");
     }
     if (stopped.code !== 0) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: `the C compiler could not stop at assembly for ${functionName}`,
-        detail: `${request.sourcePath}\n${stopped.stderr.trim()}`,
-      });
+      throw new CompilerError("LinkError", "compile", `the C compiler could not stop at assembly for ${functionName}`, `${request.sourcePath}\n${stopped.stderr.trim()}`, "", "", "");
     }
     // The object is the assembly assembled, so the object and the delivered
     // assembly are one compilation rather than two that happen to agree.
     const assembly = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
     const assembled = run(assembly.command, assembly.args, { timeoutMs: 120_000 });
     if (assembled.spawnError !== undefined) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the assembler is not available",
-        detail: assembled.spawnError,
-      });
+      throw new CompilerError("TargetError", "compile", "the assembler is not available", assembled.spawnError, "", "", "");
     }
     if (assembled.code !== 0) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: `the assembler could not build the object of ${functionName}`,
-        detail: `${request.assemblyPath}\n${assembled.stderr.trim()}`,
-      });
+      throw new CompilerError("LinkError", "compile", `the assembler could not build the object of ${functionName}`, `${request.assemblyPath}\n${assembled.stderr.trim()}`, "", "", "");
     }
   } else {
     const command = compileCommand(toolchain, [
@@ -2990,20 +2959,10 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
     ]);
     const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
     if (compiled.spawnError !== undefined) {
-      throw new CompilerError({
-        category: "TargetError",
-        stage: "compile",
-        message: "the C compiler is not available",
-        detail: compiled.spawnError,
-      });
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
     }
     if (compiled.code !== 0) {
-      throw new CompilerError({
-        category: "LinkError",
-        stage: "compile",
-        message: `the C compiler rejected the IR of ${functionName}`,
-        detail: `${request.sourcePath}\n${compiled.stderr.trim()}`,
-      });
+      throw new CompilerError("LinkError", "compile", `the C compiler rejected the IR of ${functionName}`, `${request.sourcePath}\n${compiled.stderr.trim()}`, "", "", "");
     }
   }
 

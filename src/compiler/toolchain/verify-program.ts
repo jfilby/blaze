@@ -401,12 +401,7 @@ function stoppedMismatch(failure: string, expectedOutput: string, actualOutput: 
 export async function verifyProgram(request: ProgramVerificationRequest): Promise<ProgramVerification> {
   const toolchain = TOOLCHAIN[request.language.toLowerCase()];
   if (toolchain === undefined) {
-    throw new CompilerError({
-      category: "VerificationError",
-      stage: "verify",
-      message: `a program in ${request.language} cannot be checked`,
-      detail: `checked against: ${Object.keys(TOOLCHAIN).join(", ")}; a program is checked against the toolchain that runs its source`,
-    });
+    throw new CompilerError("VerificationError", "verify", `a program in ${request.language} cannot be checked`, `checked against: ${Object.keys(TOOLCHAIN).join(", ")}; a program is checked against the toolchain that runs its source`, "", "", "");
   }
 
   // A program reads the arguments it is given, so both runs get the same ones.
@@ -428,20 +423,10 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   }
   const source = run(toolchain.command, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
   if (source.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "VerificationError",
-      stage: "verify",
-      message: `${toolchain.command} is not available, so the program cannot be checked`,
-      detail: `${source.spawnError}\ninstall ${toolchain.command}, or build this project as a function entry`,
-    });
+    throw new CompilerError("VerificationError", "verify", `${toolchain.command} is not available, so the program cannot be checked`, `${source.spawnError}\ninstall ${toolchain.command}, or build this project as a function entry`, "", "", "");
   }
   if (source.code !== 0) {
-    throw new CompilerError({
-      category: "VerificationError",
-      stage: "verify",
-      message: "the program source does not run",
-      detail: `${formatCommand(toolchain.command, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`,
-    });
+    throw new CompilerError("VerificationError", "verify", "the program source does not run", `${formatCommand(toolchain.command, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`, "", "", "");
   }
 
   // The delivered program is given a heap of its own: one that allocates

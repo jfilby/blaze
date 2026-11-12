@@ -82,20 +82,12 @@ export function createJsonStore(root: string): JsonStore {
 
   const resolveInStore = (relativePath: string): string => {
     if (isAbsolute(relativePath)) {
-      throw new CompilerError({
-        category: "StorageError",
-        stage: "storage",
-        message: `store paths must be relative: ${relativePath}`,
-      });
+      throw new CompilerError("StorageError", "storage", `store paths must be relative: ${relativePath}`, "", "", "", "");
     }
     const target = resolve(absoluteRoot, normalize(relativePath));
     const rel = relative(absoluteRoot, target);
     if (rel.startsWith("..") || rel.split(sep).includes("..")) {
-      throw new CompilerError({
-        category: "StorageError",
-        stage: "storage",
-        message: `store path escapes root: ${relativePath}`,
-      });
+      throw new CompilerError("StorageError", "storage", `store path escapes root: ${relativePath}`, "", "", "", "");
     }
     return target;
   };
@@ -110,22 +102,12 @@ export function createJsonStore(root: string): JsonStore {
       try {
         text = await readFile(file, "utf8");
       } catch (cause) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot read ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot read ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
       try {
         return JSON.parse(text) as T;
       } catch (cause) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `${relativePath} is not valid JSON`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `${relativePath} is not valid JSON`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
 
@@ -141,12 +123,7 @@ export function createJsonStore(root: string): JsonStore {
       try {
         text = await readFile(file, "utf8");
       } catch (cause) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot read ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot read ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
       try {
         return JSON.parse(text) as T;
@@ -170,12 +147,7 @@ export function createJsonStore(root: string): JsonStore {
         await syncPath(dirname(file));
       } catch (cause) {
         await rm(temporary, { force: true });
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot write ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
 
@@ -197,12 +169,7 @@ export function createJsonStore(root: string): JsonStore {
       try {
         return await readFile(file, "utf8");
       } catch (cause) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot read ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot read ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
 
@@ -222,12 +189,7 @@ export function createJsonStore(root: string): JsonStore {
         await syncPath(dirname(file));
       } catch (cause) {
         await rm(temporary, { force: true });
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot write ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
 
@@ -239,12 +201,7 @@ export function createJsonStore(root: string): JsonStore {
       try {
         await mkdir(resolveInStore(relativePath), { recursive: true });
       } catch (cause) {
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot create ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot create ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
 
@@ -255,12 +212,7 @@ export function createJsonStore(root: string): JsonStore {
         // A directory nobody created is a directory with nothing in it: the
         // caller is asking what projects exist, and one that does not is none.
         if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [];
-        throw new CompilerError({
-          category: "StorageError",
-          stage: "storage",
-          message: `cannot list ${relativePath}`,
-          detail: cause instanceof Error ? cause.message : String(cause),
-        });
+        throw new CompilerError("StorageError", "storage", `cannot list ${relativePath}`, cause instanceof Error ? cause.message : String(cause), "", "", "");
       }
     },
   };

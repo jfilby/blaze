@@ -188,7 +188,7 @@ iterator programValues[T: SomeNumber](first, last, stride: T, inclusive, down: b
 `;
 
 function hostError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "LinkError", stage: "host", message, detail });
+  return new CompilerError("LinkError", "host", message, detail, "", "", "");
 }
 
 const NIM_ELEMENT_SIZES: Record<string, number> = {
@@ -1015,80 +1015,41 @@ ${anchor}
     // once in C and shared by every backend that has it. This runtime has no
     // `u256` at all, so a program that computes one here is refused by name
     // rather than written as an operation on a type this target does not have.
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: `the Nim driver cannot write a wide number's ${op}`,
-      detail:
-        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
-        "build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", `the Nim driver cannot write a wide number's ${op}`, "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   wideMulMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot write a wide number's mul_mod",
-      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot write a wide number's mul_mod", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   wideAddMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot write a wide number's add_mod",
-      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot write a wide number's add_mod", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   wideSubMod(_left: string, _right: string, _modulus: string, _as: SemanticType): string {
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot write a wide number's sub_mod",
-      detail: "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot write a wide number's sub_mod", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   widen(_value: string, _as: SemanticType): string {
     // The same reason as the binary above: a `u256` is four limbs and this
     // runtime declares no such type, so a whole number widened into one is
     // refused by name rather than written as a type this target does not have.
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot widen a whole number into a wide number",
-      detail:
-        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
-        "build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot widen a whole number into a wide number", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   wideCompare(_op: string, _left: string, _right: string, _as: SemanticType): string {
     // The same reason as the binary above: ordering two wide numbers is the
     // kernel's walk of four limbs and this runtime declares no such type.
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot compare two wide numbers",
-      detail:
-        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
-        "build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot compare two wide numbers", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   wideUnary(_op: string, _operand: string, _as: SemanticType): string {
     // The same reason again: a complement and a negation cover all four limbs.
-    throw new CompilerError({
-      category: "ContractError",
-      stage: "program",
-      message: "the Nim driver cannot write a wide number's own complement or negation",
-      detail:
-        "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
-        "build this program with the C driver, which shares that kernel",
-    });
+    throw new CompilerError("ContractError", "program", "the Nim driver cannot write a wide number's own complement or negation", "a u256 is four limbs with the kernel's carry and borrow propagation, and this runtime declares no such type; " +
+        "build this program with the C driver, which shares that kernel", "", "", "");
   }
 
   operator(op: string): string {
@@ -1140,12 +1101,7 @@ export async function buildProgramHost(request: ProgramHostRequest): Promise<Run
     { timeoutMs: 600_000 },
   );
   if (result.spawnError !== undefined) {
-    throw new CompilerError({
-      category: "TargetError",
-      stage: "host",
-      message: "the Nim compiler is not available",
-      detail: `${result.spawnError}\ninstall Nim, or build this project with --runtime none`,
-    });
+    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${result.spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
   }
   if (result.code !== 0) {
     throw hostError("the Nim program driver did not build", `${adapterPath}\n${hostPath}\n${result.stderr.trim()}`);

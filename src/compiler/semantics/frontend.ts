@@ -38,7 +38,7 @@ import type { Expression, Statement } from "../core/ir.ts";
 import type { TypeExpr } from "../core/types.ts";
 
 function frontendError(message: string, detail?: string): CompilerError {
-  return new CompilerError({ category: "FrontendError", stage: "frontend", message, detail });
+  return new CompilerError("FrontendError", "frontend", message, detail, "", "", "");
 }
 
 /* -------------------------------------------------------------------------- */

@@ -379,20 +379,12 @@ export class Encoder {
   finish(): Uint8Array {
     for (const fixup of this.fixups) {
       if (!this.labels.has(fixup.label)) {
-        throw new CompilerError({
-          category: "AssemblyError",
-          stage: "assemble",
-          message: `the machine code jumps to ${fixup.label}, which is never bound`,
-        });
+        throw new CompilerError("AssemblyError", "assemble", `the machine code jumps to ${fixup.label}, which is never bound`, "", "", "", "");
       }
     }
     for (const place of this.places) {
       if (!this.labels.has(place.label)) {
-        throw new CompilerError({
-          category: "AssemblyError",
-          stage: "assemble",
-          message: `the machine code takes the address of ${place.label}, which is never bound`,
-        });
+        throw new CompilerError("AssemblyError", "assemble", `the machine code takes the address of ${place.label}, which is never bound`, "", "", "", "");
       }
     }
     // Widening one jump moves everything after it, which can put a later jump

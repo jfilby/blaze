@@ -53,6 +53,11 @@ export interface TitleAnimation {
   stop(outcome: BuildOutcome): void;
 }
 
+/** Settles a title at the outcome the command reached. */
+export function stopTitleAnimation(animation: TitleAnimation, outcome: BuildOutcome): void {
+  animation.stop(outcome);
+}
+
 /** The animation for a command that must not touch the terminal. */
 export const NO_TITLE_ANIMATION: TitleAnimation = { stop: () => {} };
 
