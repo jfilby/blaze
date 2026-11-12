@@ -126,7 +126,7 @@ export function assembleContract(assembly: ContractAssembly): FunctionContract {
     version: "1",
     function: { name, symbol: assembly.symbol ?? symbolFor(name), params: parameters, returns: typeToString(returns) },
     requires: buffers.requires,
-    ensures: assembly.result === null || returns.kind === "void" ? [] : [`result == ${assembly.result}`],
+    ensures: assembly.result === null || (returns.kind !== "primitive" && returns.kind !== "text") ? [] : [`result == ${assembly.result}`],
     memory: { reads: buffers.reads, writes: [], aliasing: [] },
     effects,
     numeric: normalizeNumeric(input.numeric),

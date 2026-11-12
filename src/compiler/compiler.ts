@@ -447,6 +447,11 @@ function projectPaths(id: string, storeId: string): ProjectPaths {
   };
 }
 
+/** The project input a record holds, at the type the phase reads it as. */
+function sourceInputOf(value: unknown): SourceInput {
+  return value as SourceInput;
+}
+
 /** A project file, plus what the compiler needs to read the program it names. */
 interface ProjectInput {
   input: SourceInput;
@@ -1452,7 +1457,7 @@ export async function runBuild(
     project = readInput(absoluteInput);
     projectFields = project as unknown as Record<string, unknown>;
     inputFields = projectFields["input"] as Record<string, unknown>;
-    const input = projectFields["input"] as unknown as SourceInput;
+    const input = sourceInputOf(projectFields["input"]);
     assertGenerationInput(absoluteInput, input);
     target = assertBuildableTarget(normalizeTarget(inputFields["target"] as Partial<TargetSpec> | undefined), inputFields["entry"] as string | undefined);
     targetForRecord = target;

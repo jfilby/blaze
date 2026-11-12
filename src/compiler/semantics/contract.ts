@@ -889,6 +889,7 @@ function numericType(left: StaticType, right: StaticType): TypeExpr {
  * the evaluator said nothing useful about what it meant.
  */
 function comparable(op: string, left: StaticType, right: StaticType): void {
+  if (left.kind === "text" && right.kind === "text") return;
   if (left.kind === "primitive" && right.kind === "primitive") {
     if (isNumericType(left.name) && isNumericType(right.name)) return;
     if (left.name === "bool" && right.name === "bool") return;
@@ -898,6 +899,7 @@ function comparable(op: string, left: StaticType, right: StaticType): void {
     const other = left.kind === "null" ? right : left;
     if (other.kind === "ptr" || other.kind === "slice" || other.kind === "array" || other.kind === "ref") return;
   }
+  
   throw contractError(`${op} requires comparable operands, got ${describeType(left)} and ${describeType(right)}`);
 }
 /**
