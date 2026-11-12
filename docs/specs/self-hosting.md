@@ -5634,6 +5634,31 @@ function is contracted by what it does, exactly as a body that reads a
 constant it cannot state is. What the cell holds, and how it is initialized,
 is the next slice.
 
+### 4i14. A module value is read through the getter the module wrote
+
+A compiled function has no environment, so a top-level value a module holds is
+not a name a function can read: it is computed where the module wrote it. The
+frontend now writes a getter for each such value (`__value_<name>`, internal),
+whose body is the declaration's initializer read in the module that wrote it,
+and a read of the name is a call of that getter — in the module itself and in
+a file that imports the name, where the graph links the value's name to the
+getter's signature. A value that is a plain number keeps its runtime cell;
+a value computed by a call, a collection or an object is the getter's answer.
+
+The getter is written only where the read can hold the initializer: the
+initializer is read once in a trial, and a value whose initializer needs a
+construct the file does not read is left as it was, so the measurement does
+not grow by a construct the value's own read does not carry. A collection or
+an object the file holds keeps the shape the file declared rather than a
+getter: its methods are the collection's, and a fresh value per read would not
+be the one the declaration named.
+
+The getter recomputes the value on every read, which is what a read-only value
+is; a value a function **writes** needs a cell the runtime holds, and the
+frontend refuses the write rather than reading it as a local that is not
+there. The refusal names the getter; the cell is the next slice, together with
+a read that keeps the value's shape so a member of it resolves.
+
 ## The next slices
 
 ### What the measurement says now

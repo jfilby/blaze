@@ -1142,6 +1142,10 @@ interface ScannedFile {
   constants: Map<string, ConstantInfo>;
   /** The top-level names that are values the running program holds, not constants. */
   state: Set<string>;
+  /** The initializer of each top-level state value, by the name it is bound to. */
+  initializers: Map<string, { start: number; end: number }>;
+  /** The state values the file offers: an exported top-level value. */
+  exportedState: Set<string>;
   /**
    * The top-level `let` names a number, by the slot the runtime holds them in.
    *
@@ -1443,6 +1447,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const collections = new Map<string, { start: number; end: number }>();
   const allocations = new Map<string, string>();
   const state = new Set<string>();
+  const initializers = new Map<string, { start: number; end: number }>();
+  const exportedState = new Set<string>();
   const numeric = new Map<string, number>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
@@ -1545,12 +1551,15 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           while (open < tokens.length) {
             const written = mark(tokens[open]);
             if (written === "<") depth += 1;
-            else if (written === ">") {
-              depth -= 1;
-              if (depth === 0) {
-                open += 1;
-                break;
-              }
+            // A nested type argument closes with `>>` or `>>>`, one token for
+            // two or three closings: counting them as one leaves the scan open
+            // and the collection is never recorded.
+            else if (written === ">>") depth -= 2;
+            else if (written === ">>>") depth -= 3;
+            else if (written === ">") depth -= 1;
+            if (depth <= 0) {
+              open += 1;
+              break;
             }
             open += 1;
           }
@@ -1571,6 +1580,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
             : { keys: written.keys, values: written.values, keyKind: written.keyKind, exported: offered });
         } else {
           state.add(name);
+          initializers.set(name, { start, end: written.end });
+          if (offered) exportedState.add(name);
         }
         index = written.end;
         continue;
@@ -1587,6 +1598,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           found.set(name, { expression: { range: { start, end } }, exported: offered });
         } else {
           state.add(name);
+          initializers.set(name, { start, end: whole });
+          if (offered) exportedState.add(name);
         }
         index = whole;
         continue;
@@ -1603,6 +1616,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
           if (!locals.has(name)) found.set(name, { fields: object.fields, exported: offered });
         } else {
           state.add(name);
+          initializers.set(name, { start, end });
+          if (offered) exportedState.add(name);
           // The values are computed, but the names are written down: a
           // question about the keys is still one the source answers.
           if (!locals.has(name) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
@@ -1635,6 +1650,8 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       const shared = construction && nameCount(tokens, name) > 2;
       if (!constant || shared) {
         state.add(name);
+        initializers.set(name, { start, end });
+        if (offered) exportedState.add(name);
         // A module-level counter is a number the runtime holds in a cell:
         // `let temporaryWrites = 0` is the one shape this reads, because a
         // number is the value a global cell can hold.
@@ -1654,7 +1671,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // the name the list writes. A list with a `from` names another module and
   // offers nothing of this one's.
   exportConstantLists(tokens, found);
-  return { constants: found, state, numeric, shapes, annotations, collections, allocations };
+  return { constants: found, state, initializers, exportedState, numeric, shapes, annotations, collections, allocations };
 }
 
 /**
@@ -3256,6 +3273,11 @@ export interface ImportedFunction {
    * that payload.
    */
   async?: boolean;
+  /**
+   * The import is a value the exporting module holds: a read of the name is a
+   * call of the getter the module offers, not a function reference.
+   */
+  valueGetter?: boolean;
 }
 
 interface CollectionValue {
@@ -3932,6 +3954,8 @@ class TypeScriptParser {
     constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map(),
     stateAllocations: ReadonlyMap<string, string> = new Map(),
     numericGlobals: ReadonlyMap<string, number> = new Map(),
+    stateInitializers: ReadonlyMap<string, { start: number; end: number }> = new Map(),
+    exportedState: ReadonlySet<string> = new Set(),
   ) {
     this.tokens = tokens;
     this.importedTypeNames = new Set(importedTypeNames);
@@ -3946,6 +3970,8 @@ class TypeScriptParser {
     this.constantCollections = constantCollections;
     this.state = state;
     this.numericGlobals = numericGlobals;
+    this.stateInitializers = stateInitializers;
+    this.exportedState = exportedState;
     this.shapes = shapes;
     this.stateAllocations = stateAllocations;
     // A block the program allocates at the top of the file is a sequence of the
@@ -3968,6 +3994,14 @@ class TypeScriptParser {
   private readonly state: ReadonlySet<string>;
   /** The module-level numbers the runtime holds in cells, by the cell's slot. */
   private readonly numericGlobals: ReadonlyMap<string, number>;
+  /** The initializer of each module value, by the name it is bound to. */
+  private readonly stateInitializers: ReadonlyMap<string, { start: number; end: number }>;
+  /** The state names the file offers. */
+  private readonly exportedState: ReadonlySet<string>;
+  /** The value getters this module offers, by the value's name. */
+  private readonly valueGetters = new Map<string, { name: string; type: TypeExpr }>();
+  /** The imported names that are values read through a getter. */
+  private readonly valueGetterNames = new Set<string>();
   /** The field names of a computed top-level object, by the name it is held at. */
   private readonly shapes: ReadonlyMap<string, ConstantInfo>;
   /** The element type of a top-level allocation the program holds, by name. */
@@ -6034,6 +6068,18 @@ class TypeScriptParser {
         }
         continue;
       }
+      // `export` in front of a value names the value, not a declaration of a
+      // function: the value branch below reads the getter, and the export word
+      // is consumed here so it sees the declaration it names.
+      if (
+        this.at("export") &&
+        (this.peek(1).text === "const" || this.peek(1).text === "let" || this.peek(1).text === "var") &&
+        this.stateInitializers.has(this.peek(2).text) &&
+        !this.constantCollections.has(this.peek(2).text) &&
+        !this.shapes.has(this.peek(2).text)
+      ) {
+        this.next();
+      }
       if (
         this.at("function") ||
         this.at("export") ||
@@ -6053,6 +6099,72 @@ class TypeScriptParser {
       // is a library. In the entry module the value is a statement the program
       // runs, so the body tokens keep it for the program parser.
       if (this.at("const") || this.at("let") || this.at("var")) {
+        const valueStart = this.position;
+        this.next();
+        const valueToken = this.peek();
+        const valueName = valueToken.kind === "ident" ? valueToken.text : "";
+        // A value the file holds is not a constant the read can inline: a
+        // function that reads it calls the getter the module offers for it,
+        // and the getter returns the value the declaration wrote. A module
+        // value has one name and one getter, and the getter is the module
+        // function a file that imports the name calls.
+        if (
+          !entry &&
+          valueName !== "" &&
+          this.stateInitializers.has(valueName) &&
+          !this.numericGlobals.has(valueName) &&
+          !this.constants.has(valueName) &&
+          // A collection or an object the file holds is read through the shape
+          // the file declared, not through a getter: its methods are the
+          // collection's, and a fresh value per read would not be the one the
+          // declaration named.
+          !this.constantCollections.has(valueName) &&
+          !this.shapes.has(valueName)
+        ) {
+          const range = this.stateInitializers.get(valueName) as { start: number; end: number };
+          const annotation = this.constantAnnotations.get(valueName);
+          let type: TypeExpr | null = null;
+          if (annotation !== undefined) {
+            const savedTokens = this.tokens;
+            const savedPosition = this.position;
+            this.tokens = this.allTokens;
+            this.position = annotation.start;
+            type = this.readTypeAnnotation("a value type", new Set(["=", ";"]));
+            this.tokens = savedTokens;
+            this.position = savedPosition;
+          }
+          const line = valueToken.line;
+          // The initializer is read once to see whether this read can hold it.
+          // A value whose initializer needs a construct the file does not read
+          // is left as it was: the getter is a way to read a value the module
+          // holds, and a value the read cannot hold is not one a getter can
+          // carry either.
+          const savedDiagnostics = this.diagnostics;
+          const savedReporting = this.reporting;
+          const trial = new Diagnostics();
+          this.diagnostics = trial;
+          this.reporting = 0;
+          let initializer: Expression | null = null;
+          try {
+            initializer = this.readAt(type, () => this.readRange(range.start, range.end));
+          } catch {
+            initializer = null;
+          } finally {
+            const refused = trial.entries.length > 0;
+            this.diagnostics = savedDiagnostics;
+            this.reporting = savedReporting;
+            if (refused) initializer = null;
+          }
+          if (initializer !== null) {
+            const valueType = type ?? this.valueTypeOf(initializer) ?? ANY_TYPE;
+            const getterName = `__value_${valueName}`;
+            const getter = this.declared(getterName, [], valueType, [{ kind: "result", value: initializer, line }], false, line);
+            getter.internal = true;
+            functions.push(getter);
+            this.valueGetters.set(valueName, { name: getterName, type: valueType });
+          }
+        }
+        this.position = valueStart;
         this.synchronize();
         this.accept(";");
         if (entry) runs = true;
@@ -6193,6 +6305,9 @@ class TypeScriptParser {
     for (const fn of functions) if (fn.exported) exportedNames.add(fn.name);
     for (const [name, constant] of this.constants) if (constant.exported === true) exportedNames.add(name);
     for (const entry of this.reexports) for (const name of entry.names) exportedNames.add(name);
+    // A top-level value the file offers is a name an importing module may bind:
+    // the getter it reads through is the function the module holds.
+    for (const name of this.exportedState) exportedNames.add(name);
     for (const name of Object.keys(namesExported)) exportedNames.add(name);
     // `export { sleep as setTimeout }` offers the alias, which is the name a
     // module imports.
@@ -6213,6 +6328,7 @@ class TypeScriptParser {
       body,
       constants: this.exportedConstants(),
       ...(this.state.size === 0 ? {} : { state: this.state }),
+      ...(this.valueGetters.size === 0 ? {} : { valueGetters: new Map([...this.valueGetters].map(([name, getter]) => [name, getter.name])) }),
       awaitingLink: this.deferred.size > 0 || (this.waitForFunction && !this.linked),
     };
   }
@@ -6253,6 +6369,7 @@ class TypeScriptParser {
     if (signature.shape !== undefined) this.declaredReturnShapes.set(name, signature.shape);
     if (signature.collection !== undefined) this.declaredCollections.set(name, signature.collection);
     if (signature.async === true) this.promiseFunctions.add(name);
+    if (signature.valueGetter === true) this.valueGetterNames.add(name);
   }
 
   private prescanFunctions(): void {
@@ -8971,6 +9088,26 @@ class TypeScriptParser {
   private readAssignment(): Statement | null {
     const start = this.position;
     const target = this.next();
+    // A module value is read through the getter the module offers, and a value
+    // a function writes needs a cell the runtime holds; a write to the name is
+    // not the environment write the language means, so it is refused rather
+    // than read as a local that is not there.
+    if (
+      target.kind === "ident" &&
+      (this.valueGetters.has(target.text) || this.valueGetterNames.has(target.text))
+    ) {
+      const operator = this.peek().text;
+      if (operator === "=" || operator === "++" || operator === "--" || operator in COMPOUND_OPERATORS) {
+        this.report(
+          `"${target.text}" is a module value read through its getter`,
+          "a compiled function has no environment: a module value a function writes needs a cell, which this build does not carry yet",
+          target,
+        );
+        this.synchronize();
+        this.accept(";");
+        return { kind: "expression", value: this.hole(), line: target.line };
+      }
+    }
     if (target.kind !== "ident") {
       if (target.text === "[") {
         this.position = start;
@@ -19405,6 +19542,16 @@ class TypeScriptParser {
       if (arrow !== undefined && !this.at("(") && token.text !== this.arrowDeclared) {
         return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
       }
+      // A value another module holds is read through the getter that module
+      // offers: the name is a call, not a function reference.
+      if (this.valueGetterNames.has(token.text) && this.peek().text !== "(") {
+        const valueType = this.declaredReturns.get(token.text) ?? ANY_TYPE;
+        const read: Expression = { k: "call", name: token.text, args: [], returns: valueType };
+        this.expressionTypes.set(read, valueType);
+        const valueShape = this.declaredReturnShapes.get(token.text);
+        if (valueShape !== undefined) this.expressionShapes.set(read, valueShape);
+        return read;
+      }
       // A function the file declares is a value where it is not called: a
       // collection method takes the function itself, and the name is a name
       // the body did not declare, so the declaration is the value.
@@ -19414,6 +19561,17 @@ class TypeScriptParser {
       }
       const slot = this.numericGlobal(token.text);
       if (slot !== null) return this.globalRead(slot);
+      // A module value is read by the getter the module offers: a compiled
+      // function has no environment, so the value is computed where the module
+      // wrote it and the call answers it.
+      const getter = this.valueGetters.get(token.text);
+      if (getter !== undefined && this.peek().text !== "(") {
+        const call: Expression = { k: "call", name: getter.name, args: [], returns: getter.type };
+        this.expressionTypes.set(call, getter.type);
+        const shape = this.importedValueShapes.get(token.text);
+        if (shape !== undefined) this.expressionShapes.set(call, shape);
+        return call;
+      }
       return { k: "ident", name: token.text };
     }
     if (token.kind === "punct" && token.text === "[") return this.arrayLiteral(token);
@@ -23346,6 +23504,8 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     scanned.collections,
     scanned.allocations,
     scanned.numeric,
+    scanned.initializers,
+    scanned.exportedState,
   );
   parser.wideBigint = wideBigint;
   // The type each imported value's declaration writes, for a value whose own
@@ -23384,6 +23544,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
             default: null,
             body: statements,
             ...(scanned.state.size === 0 ? {} : { state: scanned.state }),
+            ...(parser["valueGetters"].size === 0 ? {} : { valueGetters: new Map([...parser["valueGetters"]].map(([name, getter]) => [name, getter.name])) }),
             wideBigint,
           },
           // The program parser read the whole text, so the module parse's

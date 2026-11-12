@@ -93,6 +93,36 @@ test("a value another module constructs is read where it is written", () => {
 });
 
 
+test("a module value written by a function is refused", () => {
+  // A module value is read through its getter; a write to it would need a cell
+  // the runtime holds, and a build without one refuses the write rather than
+  // reading it as a local that is not there.
+  assert.throws(
+    () =>
+      phaseOf(
+        "typescript",
+        {
+          "main.ts": 'import { write } from "./lib.ts";\nwrite();\n',
+          "lib.ts": [
+            "function make(): number {",
+            "  return 1;",
+            "}",
+            "const value = make();",
+            "export function write(): void {",
+            "  value = 2;",
+            "}",
+            "",
+          ].join("\n"),
+        },
+        "main.ts",
+      ),
+    (error: unknown) => {
+      const detail = (error as { detail?: string }).detail ?? "";
+      return detail.includes("module value read through its getter");
+    },
+  );
+});
+
 test("a class a function returns crosses the link with its methods", () => {
   // The declaration a return type names is in the module that wrote it, not in
   // the file the import names: the importing file is read against the class,

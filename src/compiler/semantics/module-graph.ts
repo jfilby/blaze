@@ -241,7 +241,26 @@ function importedFunctionsOf(
       // calls a file writes to it are read against the parameters and result
       // the declaration states.
       const declared = declaredOffered(target, imported, records, new Set());
-      if (declared === undefined) continue;
+      if (declared === undefined) {
+        // A value the exporting module holds is offered under the value's name
+        // and read through the getter function the module wrote for it.
+        const getterName = target.analysis.valueGetters?.get(imported);
+        const getter =
+          getterName === undefined ? undefined : target.analysis.functions.find((entry) => entry.name === getterName);
+        if (getter !== undefined) {
+          const signature: ImportedFunction = {
+            params: getter.params.map((param) => param.type),
+            returns: getter.returns,
+            valueGetter: true,
+          };
+          const linked = new Set<string>();
+          for (const param of getter.params) linkedTypeNames(param.type, linked);
+          linkedTypeNames(getter.returns, linked);
+          bindLinkedDeclarations(record, linked, records);
+          functions.set(local, signature);
+        }
+        continue;
+      }
       const signature: ImportedFunction = {
         params: declared.params.map((param) => param.type),
         returns: declared.returns,

@@ -271,6 +271,14 @@ function targetFunction(
   seen.add(path);
   const direct = contracts.get(path)?.functions[name];
   if (direct !== undefined) return direct;
+  // A value the module holds is linked through the getter the module wrote for
+  // it: the value's name is what an importing file writes, and the getter's
+  // symbol is what the call becomes.
+  const getterName = records.find((one) => one.path === path)?.analysis.valueGetters?.get(name);
+  if (getterName !== undefined) {
+    const getter = contracts.get(path)?.functions[getterName];
+    if (getter !== undefined) return getter;
+  }
   const record = records.find((one) => one.path === path);
   if (record === undefined) return null;
   for (const [index, entry] of record.analysis.imports.entries()) {
@@ -581,7 +589,10 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
     // compiles nothing, and a file that imports one of them reaches the
     // function the other module declared.
     const declaredReexports = (record.analysis.reexports ?? []).reduce((count, entry) => count + entry.names.length, 0);
-    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && declaredReexports === 0 && !(record.path === request.entry.path && body !== undefined)) {
+    // A value the file holds is offered under its name even where what it
+    // holds is not a constant the read wrote out.
+    const declaredNames = record.analysis.exportedNames?.length ?? 0;
+    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && declaredReexports === 0 && declaredNames === 0 && !(record.path === request.entry.path && body !== undefined)) {
       throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
     }
     contracts.set(record.path, file);

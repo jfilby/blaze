@@ -90,6 +90,53 @@ test("fs.existsSync answers whether a path names anything", async () => {
 });
 
 
+test("an imported module value is read through its getter", async () => {
+  // The value is held by the module that wrote it; a file that imports the
+  // name reads it through the getter, and the getter's call is the link edge.
+  const output = await agreesWithNode(
+    ['import { read } from "./use.ts";', "console.log(read());", ""].join("\n"),
+    {
+      "lib.ts": [
+        "function make(): number {",
+        "  return 7;",
+        "}",
+        "export const value = make();",
+        "",
+      ].join("\n"),
+      "use.ts": [
+        'import { value } from "./lib.ts";',
+        "export function read(): number {",
+        "  return value;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "7");
+});
+
+test("a module value another file initializes is read by its getter", async () => {
+  // A compiled function has no environment: a top-level value the module holds
+  // is computed where the module wrote it, and a function that reads it calls
+  // the getter the module offers.
+  const output = await agreesWithNode(
+    ['import { read } from "./lib.ts";', "console.log(read());", ""].join("\n"),
+    {
+      "lib.ts": [
+        "function make(): number {",
+        "  return 7;",
+        "}",
+        "const value = make();",
+        "export function read(): number {",
+        "  return value;",
+        "}",
+        "",
+      ].join("\n"),
+    },
+  );
+  assert.equal(output.trim(), "7");
+});
+
 test("two files' module-level counters are two cells", async () => {
   // A compiled function has no environment, so a top-level number is a cell
   // the runtime holds. The cells are the program's, not a file's: two files

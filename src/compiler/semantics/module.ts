@@ -372,6 +372,8 @@ export interface ModuleAnalysis {
    * the contract phase carries where it lives.
    */
   state?: ReadonlySet<string>;
+  /** The getter each module value is read through, by the value's name. */
+  valueGetters?: ReadonlyMap<string, string>;
   /**
    * The type each exported top-level declaration writes, where its value is not
    * a constant the file wrote out.
