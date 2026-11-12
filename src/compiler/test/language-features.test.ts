@@ -5842,6 +5842,22 @@ test("a wide whole number is computed with a choice of written numbers", async (
   assert.equal(output.trim(), ((123456789n * 987654321n + 1n + (123456789n >> 3n)) & ((1n << 256n) - 1n)).toString(16));
 });
 
+test("Number of a wide whole number is the double it names", async () => {
+  // A 256-bit value read as a double is the decimal the runtime's formatter
+  // writes, read back by the C library: the same rounding Number(BigInt) does,
+  // not a conversion through the low machine word.
+  const output = await agreesWithNode([
+    "const WIDE = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn;",
+    "const MID = 0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefn;",
+    "export function toDouble(value: bigint): number { return Number(value); }",
+    "console.log(`${toDouble(WIDE)} ${toDouble(MID)}`);",
+    "",
+  ].join("\n"));
+  const wide = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn;
+  const mid = 0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefn;
+  assert.equal(output.trim(), `${Number(wide)} ${Number(mid)}`);
+});
+
 test("Math.fround reads a number at the single precision", async () => {
   const output = await agreesWithNode([
     "console.log(`${Math.fround(1.1)} ${Math.fround(0.1)} ${Math.fround(16777217)}`);",

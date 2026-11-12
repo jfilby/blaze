@@ -2097,6 +2097,7 @@ const U256_DECLARATIONS: readonly string[] = [
   "void blaze_rt_u256_sub_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "void blaze_rt_u256_mul_mod(blaze_u256* out, const blaze_u256* left, const blaze_u256* right, const blaze_u256* mod)",
   "uint64_t blaze_rt_u256_to_u64(const blaze_u256* value)",
+  "double blaze_rt_u256_to_double(const blaze_u256* value)",
   "size_t blaze_rt_u256_format(const blaze_u256* value, unsigned base, unsigned char* buffer, size_t size)",
   "int blaze_rt_u256_parse(blaze_u256* out, const char* text, size_t length)",
   "void blaze_rt_print_u256(const blaze_u256* value)",
@@ -2124,6 +2125,7 @@ const I256_DECLARATIONS: readonly string[] = [
   "int blaze_rt_i256_equal(const blaze_i256* left, const blaze_i256* right)",
   "void blaze_rt_i256_from_i64(blaze_i256* out, int64_t value)",
   "int64_t blaze_rt_i256_to_i64(const blaze_i256* value)",
+  "double blaze_rt_i256_to_double(const blaze_i256* value)",
   "size_t blaze_rt_i256_format(const blaze_i256* value, unsigned base, unsigned char* buffer, size_t size)",
   "int blaze_rt_i256_parse(blaze_i256* out, const char* text, size_t length)",
   "void blaze_rt_print_i256(const blaze_i256* value)",
@@ -3265,6 +3267,15 @@ uint64_t blaze_rt_u256_to_u64(const blaze_u256* value) {
   return value->limbs[0];
 }
 
+/* The double a wide number is: the decimal the formatter writes, read by the C
+   library, so the conversion rounds the way Number(BigInt) rounds. */
+double blaze_rt_u256_to_double(const blaze_u256* value) {
+  char text[80];
+  const size_t written = blaze_rt_u256_format(value, 10u, (unsigned char*)text, sizeof text);
+  text[written] = '\0';
+  return strtod(text, NULL);
+}
+
 /* A wide number as text. Decimal has no cheap C spelling, so it is produced by
    repeated long division of the limbs; the remainder of one turn is at most
    nine, which is what makes it one digit per turn. Hexadecimal reads the limbs
@@ -3631,6 +3642,13 @@ void blaze_rt_i256_from_i64(blaze_i256* out, int64_t value) {
 
 int64_t blaze_rt_i256_to_i64(const blaze_i256* value) {
   return (int64_t)value->limbs[0];
+}
+
+double blaze_rt_i256_to_double(const blaze_i256* value) {
+  char text[80];
+  const size_t written = blaze_rt_i256_format(value, 10u, (unsigned char*)text, sizeof text);
+  text[written] = '\0';
+  return strtod(text, NULL);
 }
 
 /* A wide number as text. Decimal prints a leading minus when the value is negative and then the magnitude's digits; hexadecimal reads the limbs top down and skips the leading zeros. Only decimal and hexadecimal are answered. */

@@ -159,9 +159,11 @@ complement, and `asIntN`/`asUintN` cannot answer what they answer in the
 source. The slice is a signed wide carrier for the language's `bigint` (the
 `i256` primitive the contract type table already names), chosen where a file
 holds signed values, with the constructor, the wrap and the comparisons read at
-it. `Number(bigint)` also needs a wide-to-double conversion; the whole-number
-formatter already writes the decimal `strtod` reads back, so that is the
-conversion to add rather than a cast through the low word.
+it. `Number(bigint)` is carried now: a wide value is the decimal the
+runtime's formatter writes, and the C library's `strtod` reads it back, so the
+conversion rounds the way `Number(BigInt)` rounds rather than through the low
+machine word. The C and machine backends answer it; a wasm host service is
+still open.
 
 The next language slice is `structuredClone`, which `compiler.ts`,
 `codegen.ts` and `semantics/repair.ts` use to copy an IR tree before a pass
@@ -175,8 +177,8 @@ the layout it already has.
 In the order they block rung 4:
 
 1. **The contract evaluator's integers.** `BigInt(text)`, `BigInt.asIntN` /
-   `asUintN`, signed comparisons and `Number(bigint)`, so `semantics/contract.ts`
-   builds. This is the current blocker.
+   `asUintN` and signed comparisons, so `semantics/contract.ts` builds.
+   `Number(bigint)` is done; this is the current blocker.
 2. **`structuredClone` over the runtime's values.** Records, dictionaries and
    lists, so `compiler.ts`, `codegen.ts` and `semantics/repair.ts` build.
 3. **An object the file returns whole.** A compiled function cannot read a

@@ -1382,6 +1382,14 @@ class FunctionEmitter {
     // it makes of the pointer it is. A number and a dynamic value are already
     // the value it reads.
     if (call.callee === "parseInt" || call.callee === "Number") {
+      // A wide whole number is read as the decimal the formatter writes, which
+      // is the double `Number(BigInt)` answers; the runtime's formatter and the
+      // C library's reader do the conversion with the one rounding.
+      const first = call.args[0];
+      if (call.callee === "Number" && first !== undefined && isWideType(first.type)) {
+        const signed = first.type.kind === "primitive" && first.type.name === "i256";
+        return `({ ${signed ? "blaze_i256" : "blaze_u256"} blaze_wide = ${this.raw(first, depth)}; ${RUNTIME_NAME}_${signed ? "i256" : "u256"}_to_double(&blaze_wide); })`;
+      }
       // The argument is read at the parameter's type, which is a value the
       // runtime holds: a text arrives boxed, and the runtime reads the number
       // the value says out of it.

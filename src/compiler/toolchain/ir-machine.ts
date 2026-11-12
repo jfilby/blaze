@@ -11522,6 +11522,20 @@ class Machine {
       this.runtime("_monotonic_ns");
       return;
     }
+    if (call.callee === "Number" && call.args[0] !== undefined) {
+      const wide = call.args[0];
+      const wideType = wide.type;
+      if (wideType.kind === "primitive" && (wideType.name === "u256" || wideType.name === "i256")) {
+        // A wide whole number is the decimal the runtime's formatter writes,
+        // read back by the C library: the double Number(BigInt) answers.
+        const slot = this.hold(wideType, "blaze_wide_number");
+        this.wideValue(wide);
+        this.wideStore(slot);
+        this.code.leaMemReg(mem(RSP, slot.offset), RDI);
+        this.library(wideType.name === "i256" ? "_i256_to_double" : "_u256_to_double");
+        return;
+      }
+    }
     if (call.callee === "Number.parseInt") {
       this.at(call.args[0], TEXT);
       const text = this.hold(TEXT, "blaze_parse_int_text");
