@@ -23320,7 +23320,14 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // them, exactly as the file's own constants are.
   const imported = (context as { values?: ReadonlyMap<string, ConstantInfo> } | undefined)?.values;
   if (imported !== undefined) {
-    for (const [name, constant] of imported) scanned.constants.set(name, constant);
+    for (const [name, constant] of imported) {
+      // A value another module constructs is read where it is written, and its
+      // expression is a range in that file's text. The shape it was exported
+      // at crosses the link; the range does not, because reading it against
+      // this file's tokens reads a range this file does not have.
+      if ((constant as { constructed?: boolean }).constructed === true) continue;
+      scanned.constants.set(name, constant);
+    }
   }
   const parser = new TypeScriptParser(
     withoutClasses(tokens, classTable),

@@ -18,7 +18,7 @@
 
 import { posix } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
-import type { SourceModule } from "../core/types.ts";
+import type { SourceModule, TypeExpr } from "../core/types.ts";
 import { refusalError, type Diagnostic } from "./diagnostics.ts";
 import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
@@ -133,6 +133,86 @@ export function offeredValues(records: readonly ModuleRecord[]): OfferedValues[]
   return offered;
 }
 
+/** The names a contract type names, which are the declarations it links. */
+function linkedTypeNames(type: TypeExpr, into: Set<string>): void {
+  if (type.kind === "ref") {
+    if (typeof type.name === "string") into.add(type.name);
+    if (type.of !== null) linkedTypeNames(type.of, into);
+    return;
+  }
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
+    linkedTypeNames(type.of, into);
+  }
+}
+
+/** The names a value's shape names, which are the declarations it links. */
+function linkedShapeNames(shape: ResolvedType, into: Set<string>): void {
+  if (shape.kind === "ref") {
+    if (shape.name !== null) into.add(shape.name);
+    return;
+  }
+  if (shape.kind === "list" || shape.kind === "set") {
+    linkedShapeNames(shape.of, into);
+    return;
+  }
+  if (shape.kind === "map") {
+    linkedShapeNames(shape.key, into);
+    linkedShapeNames(shape.value, into);
+    return;
+  }
+  if (shape.kind === "record") {
+    for (const field of shape.fields.values()) linkedShapeNames(field.type, into);
+    if (shape.index !== null) linkedShapeNames(shape.index, into);
+    return;
+  }
+  if (shape.kind === "function") {
+    for (const param of shape.params) linkedShapeNames(param, into);
+    linkedShapeNames(shape.returns, into);
+  }
+}
+
+/**
+ * Binds the declarations a linked signature or value names.
+ *
+ * A function's contract states its parameters and result as types, and a
+ * value's shape is a record of fields: a name in either is a declaration the
+ * exporting module wrote, or one a re-export reached. The importing file is
+ * read against those declarations, so a method of a class another module
+ * answers is a method there. The declaration is searched for in the program's
+ * modules rather than only in the file the import names, because a re-export
+ * offers another module's declaration under its own name.
+ */
+function bindLinkedDeclarations(
+  record: ModuleRecord,
+  names: ReadonlySet<string>,
+  records: ReadonlyMap<string, ModuleRecord>,
+): void {
+  const ownTypes = record.analysis.types;
+  const ownClasses = record.analysis.classes;
+  for (const name of names) {
+    if (ownTypes !== undefined && !ownTypes.declarations.has(name) && !ownTypes.imported.has(name)) {
+      for (const source of records.values()) {
+        const types = source.analysis.types;
+        if (types === undefined) continue;
+        const declared = types.declarations.get(name) ?? types.exported.get(name) ?? types.imported.get(name);
+        if (declared !== undefined) {
+          ownTypes.imported.set(name, declared);
+          break;
+        }
+      }
+    }
+    if (ownClasses !== undefined && !ownClasses.names.has(name)) {
+      for (const source of records.values()) {
+        const offered = classOffered(source, name, records, new Set());
+        if (offered === undefined) continue;
+        ownClasses.names.add(name);
+        ownClasses.classes.set(name, offered);
+        break;
+      }
+    }
+  }
+}
+
 /**
  * The signatures of the functions another module declares, by the names this
  * file imports them under.
@@ -177,6 +257,10 @@ function importedFunctionsOf(
       if (handle?.collection !== undefined) signature.collection = handle.collection;
       const paramShapes = handle?.params?.map((param) => param.shape ?? null);
       if (paramShapes !== undefined) signature.paramShapes = paramShapes;
+      const linked = new Set<string>();
+      for (const param of declared.params) linkedTypeNames(param.type, linked);
+      linkedTypeNames(declared.returns, linked);
+      bindLinkedDeclarations(record, linked, records);
       functions.set(local, signature);
     }
   });
@@ -331,6 +415,8 @@ function cachingReader(read: (path: string) => string | null): (path: string) =>
  * the source wrote it.
  */
 function importedValuesOf(
+  record: ModuleRecord,
+  records: ReadonlyMap<string, ModuleRecord>,
   imports: readonly ModuleImport[],
   resolved: readonly string[],
   offered: readonly OfferedValues[],
@@ -345,7 +431,12 @@ function importedValuesOf(
       const held = target.values.get(name);
       if (held !== undefined) values.set(name, held);
       const shape = target.shapes.get(name);
-      if (shape !== undefined) shapes.set(name, shape);
+      if (shape !== undefined) {
+        shapes.set(name, shape);
+        const linked = new Set<string>();
+        linkedShapeNames(shape as ResolvedType, linked);
+        bindLinkedDeclarations(record, linked, records);
+      }
     }
     // A value the file reads under another name is bound under that name: the
     // exported name is what the other module offers, and the alias is what this
@@ -788,7 +879,7 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
         }
       }
     }
-    const imported = importedValuesOf(record.analysis.imports, record.resolved, offered);
+    const imported = importedValuesOf(record, records, record.analysis.imports, record.resolved, offered);
     const values = imported.values;
     // The signatures of the functions this file calls are what a call answers,
     // and the graph has read the modules that write them by now.

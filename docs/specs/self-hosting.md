@@ -5592,6 +5592,25 @@ asynchronous child, and a host without it makes `runAsync` ask `run` instead,
 so the children are run in order rather than the build pretending to have an
 event loop it does not have.
 
+### 4i11. A declaration a signature names crosses the link
+
+A function's contract states its parameters and result as names, and a value's
+shape is a record of fields. When a module imports a function that answers a
+`Handle`, the importing file is read against the class the exporting module
+wrote: the graph binds the declarations a signature or a value shape names,
+looking through re-exports for the module that actually declares them. Both
+the synchronous result and the payload of an `async` result are read this way,
+so `const handle = open(); handle.sync();` and `const handle = await open();
+handle.sync();` resolve the method where it is declared.
+
+A value another module *constructs* is a different crossing: its initializer is
+a range in the exporting file's text, and reading that range against the
+importing file's tokens reads text the file does not have. The construction's
+shape crosses; the range does not. The importing file reads whole, and what it
+names of the value is what the shape declares. The value itself is not yet a
+value the object pass or the IR carries, which is the next slice: a module
+value has no storage in a function that is compiled on its own.
+
 ## The next slices
 
 ### What the measurement says now

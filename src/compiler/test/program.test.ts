@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CompilerError } from "../core/errors.ts";
 import { frontendFor } from "../semantics/frontend.ts";
+import { readModuleGraph } from "../semantics/module-graph.ts";
 import { entryContract, INLINE_MODULE, runContractPhase } from "../semantics/program.ts";
 import type { ProgramContract, SourceInput, SourceModule } from "../core/types.ts";
 import { diagnostic, phaseOf, programOf } from "./phase.ts";
@@ -67,6 +68,76 @@ test("a private helper two files name is linked under a symbol its file makes un
   assert.ok(aCalls.includes(`"name":"${aHelper.function.symbol}"`), "a's body calls its own helper");
   assert.ok(!aCalls.includes(`"name":"${bHelper.function.symbol}"`), "a's body does not call b's helper");
   assert.ok(bCalls.includes(`"name":"${bHelper.function.symbol}"`), "b's body calls its own helper");
+});
+
+test("a value another module constructs is read where it is written", () => {
+  // The constructed value is read where it is written, and its expression is a
+  // range in that file's text. The shape it was exported at crosses the link;
+  // the range does not, because reading it against this file's tokens would
+  // read a range the file does not have. The read of the importing file is the
+  // one that holds the field it names.
+  const files = {
+    "main.ts": 'import { read } from "./b.ts";\nread();\n',
+    "b.ts": 'import { settings } from "./a.ts";\nexport function read(): number {\n  return settings.value;\n}\n',
+    "a.ts": ["export class Settings {", "  value = 1;", "}", "export const settings = new Settings();", ""].join("\n"),
+  };
+  const records = readModuleGraph({
+    frontend: frontendFor("typescript"),
+    entry: { path: "main.ts", source: files["main.ts"] as string },
+    read: (path) => files[path as keyof typeof files] ?? null,
+  });
+  const b = records.find((record) => record.path === "b.ts");
+  assert.ok(b !== undefined);
+  assert.equal(b.refusedCount, 0, "the importing file is read whole");
+  assert.equal(b.refused.length, 0);
+});
+
+
+test("a class a function returns crosses the link with its methods", () => {
+  // The declaration a return type names is in the module that wrote it, not in
+  // the file the import names: the importing file is read against the class,
+  // so the method a value of it has is a method there. The same holds for the
+  // payload of an async function.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": 'import { go, goAsync } from "./b.ts";\ngo();\ngoAsync();\n',
+      "b.ts": [
+        'import { open, openAsync } from "./a.ts";',
+        "export function go(): number {",
+        "  const handle = open();",
+        "  handle.sync();",
+        "  return 1;",
+        "}",
+        "export async function goAsync(): Promise<number> {",
+        "  const handle = await openAsync();",
+        "  handle.sync();",
+        "  return 1;",
+        "}",
+        "",
+      ].join("\n"),
+      "a.ts": [
+        "export class Handle {",
+        "  value = 0;",
+        "  sync(): void {",
+        "    this.value = 1;",
+        "  }",
+        "}",
+        "export function open(): Handle {",
+        "  return new Handle();",
+        "}",
+        "export async function openAsync(): Promise<Handle> {",
+        "  return new Handle();",
+        "}",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const b = phase.program.files.find((file) => file.path === "b.ts");
+  assert.ok(b !== undefined);
+  assert.ok(b.functions.go !== undefined);
+  assert.ok(b.functions.goAsync !== undefined);
 });
 
 test("an imported function shadows a builtin of the same name", () => {
