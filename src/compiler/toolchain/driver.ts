@@ -1126,6 +1126,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "envGet":
+        return `${RUNTIME_NAME}_env_get(${argument(0)})`;
       case "readTextFile":
         return `${RUNTIME_NAME}_file_read_text(${argument(0)}, ${argument(1)})`;
       case "syncFile":

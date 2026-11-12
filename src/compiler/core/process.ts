@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { host, hostEnvironment, monotonicTimeNs, spawn, spawnSync, type BoundedCommand } from "./platform.ts";
+import { clearTimeout, host, hostEnvironment, monotonicTimeNs, spawn, spawnSync, type BoundedCommand } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;

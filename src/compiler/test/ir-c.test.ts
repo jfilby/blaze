@@ -189,6 +189,29 @@ test("the C code names the platform it runs on", async () => {
   assert.equal(await lowered(name("hostArchName"), (called) => `printf("%s", ${called}());`), process.arch);
 });
 
+test("the C code reads an environment variable", async () => {
+  const fn = subject(
+    TEXT,
+    handsBack({
+      k: "call",
+      type: TEXT,
+      call: {
+        callee: "envGet",
+        builtin: true,
+        signature: { name: "envGet", symbol: "envGet", params: [{ name: "name", type: "ptr<u8>" }], returns: "ptr<u8>" },
+        args: [literal("PATH")],
+        argTypes: [TEXT],
+        returns: TEXT,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  const printed = await lowered(fn, (name) => `printf("%s", ${name}());`);
+  assert.equal(printed, process.env.PATH ?? "");
+});
+
 test("the C code runs a command and reads its streams", async () => {
   const invoked = (command: string, input: string, timeout: number, cwd: string): SemanticFunction =>
     subject(

@@ -5573,6 +5573,20 @@ what a name the program does not declare reaches. A program that calls an
 imported two-argument `resolve` resolves and prints the imported function's
 signature.
 
+### 4i10. A host capability a source checks for is not a stub
+
+The terminal title settles its spinner when the process exits or when a
+signal arrives, and both are host services: a Node host has `process.once`;
+a native host has no signal emitter until the runtime carries one. Making
+the three services optional on `Host` is how the boundary says which host has
+which capability: `startBuildTitle` checks for `onExit`/`onSignal` before it
+registers anything, paints the working title either way, and settles on the
+command's own exit where the host cannot settle on its signal. The services
+are omitted, not declared and left empty; a source that decorates a terminal
+is the one that asks. The same shape is what the adapter's `spawn` and
+timers use: a host without an asynchronous child runs its children in order
+rather than pretending to have one.
+
 ## The next slices
 
 ### What the measurement says now
@@ -5629,8 +5643,11 @@ The frontend is no longer the queue for the compiler's own sources. What
    processor count, sleep, the terminal question, the exit status and a line
    of input, the command run (the Nim runtime merges the child's error stream
    into its output), the platform and architecture names, a file read as a
-   text and flushed to the disk; it lacks the signal handlers a command's
-   `host` value also carries. Each is a service the C, Nim
+   text and flushed to the disk, and a variable of the environment. The
+   signal handlers of a command's `host` value are optional capabilities: a
+   host that cannot hand its own exit to the program is without them, and the
+   terminal title shows the working title but does not settle it from a
+   signal there (§4i10). Each is a service the C, Nim
    and wasm hosts answer, and a builtin the subset may name. The adapter is
    written when those are in, not as a stub over names that resolve to
    nothing.

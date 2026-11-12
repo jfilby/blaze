@@ -277,6 +277,8 @@ function builtinExpression(name: string, args: string[]): string {
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
       return `${RUNTIME_NAME}_type_of(${args[0]})`;
+    case "envGet":
+      return `${RUNTIME_NAME}_env_get(${args[0]})`;
     case "readTextFile":
       return `${RUNTIME_NAME}_file_read_text(${args[0]}, ${args[1]})`;
     case "syncFile":

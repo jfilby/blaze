@@ -11199,6 +11199,13 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "envGet" && call.args[0] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const name = this.hold(TEXT, "blaze_env_name");
+      this.store(name);
+      this.callSymbol("blaze_rt_env_get", [name], TEXT);
+      return;
+    }
     if (call.callee === "readTextFile" && call.args[0] !== undefined && call.args[1] !== undefined) {
       this.at(call.args[0], TEXT);
       const path = this.hold(TEXT, "blaze_read_text_path");

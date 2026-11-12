@@ -216,12 +216,12 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
 
   function onInterrupt(): void {
     settle("fail");
-    host.raiseSignal("SIGINT");
+    host.raiseSignal?.("SIGINT");
   }
 
   function onTerminate(): void {
     settle("fail");
-    host.raiseSignal("SIGTERM");
+    host.raiseSignal?.("SIGTERM");
   }
 
   emit(workingTitle(name, frame, resolvedBrand));
@@ -229,9 +229,12 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     frame += 1;
     emit(workingTitle(name, frame, resolvedBrand));
   }, SPINNER_FRAME_MS);
-  detachExit = host.onExit(onExit);
-  detachInterrupt = host.onSignal("SIGINT", onInterrupt);
-  detachTerminate = host.onSignal("SIGTERM", onTerminate);
+  // A host that cannot register a handler still shows the working title; it
+  // simply cannot settle it from a signal, and the process's own exit ends
+  // the animation with it.
+  detachExit = host.onExit?.(onExit) ?? (() => {});
+  detachInterrupt = host.onSignal?.("SIGINT", onInterrupt) ?? (() => {});
+  detachTerminate = host.onSignal?.("SIGTERM", onTerminate) ?? (() => {});
 
   return { stop: settle };
 }

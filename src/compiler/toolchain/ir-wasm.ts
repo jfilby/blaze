@@ -3620,6 +3620,10 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "envGet":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_env_get");
+        return TEXT;
       case "readTextFile":
         this.textArgument(argument(0));
         this.textArgument(argument(1));

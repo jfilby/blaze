@@ -41,6 +41,7 @@ import {
   sep as nodeSep,
 } from "node:path";
 import { availableParallelism, cpus, tmpdir } from "node:os";
+import { clearTimeout } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -49,6 +50,7 @@ import { fileURLToPath } from "node:url";
 
 export {
   availableParallelism,
+  clearTimeout,
   appendFile,
   copyFile,
   cpus,

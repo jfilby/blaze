@@ -185,6 +185,13 @@ test("a program reads a file as a text and flushes it", async () => {
   assert.equal(result.stdout, "hello\n1\n");
 });
 
+test("a program reads an environment variable", async () => {
+  const files = { "main.ts": ['console.log(envGet("PATH"));', ""].join("\n") };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `${process.env.PATH ?? ""}\n`);
+});
+
 test("a program names the platform it runs on", async () => {
   const files = { "main.ts": ["console.log(hostPlatformName());", "console.log(hostArchName());", ""].join("\n") };
   const result = await runProgram(files, "main.ts");

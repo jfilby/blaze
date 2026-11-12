@@ -358,6 +358,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** Flushes a file's writes to the disk, so a record that was written is the
    *  one a crash finds. */
   "syncFile": { params: [TEXT], returns: F64, arity: 1 },
+  /** The value the environment sets a name to, and the empty text where it
+   *  sets nothing. */
+  "envGet": { params: [TEXT], returns: TEXT, arity: 1 },
   /** The directory the process runs in, as the path it is. */
   "cwdPath": { params: [], returns: TEXT, arity: 0 },
   /** The process's own id, which a temporary name may carry. */

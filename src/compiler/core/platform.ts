@@ -54,12 +54,16 @@ export interface Host {
   setExitCode(code: number): void;
   /** The answer to one question, or undefined when there is nobody to ask. */
   ask(question: string): Promise<string | undefined>;
-  /** Calls the handler when the process exits; the answer detaches it. */
-  onExit(handler: () => void): () => void;
+  /**
+   * Calls the handler when the process exits; the answer detaches it. A host
+   * that cannot hand its own exit to the program is without it, and a command
+   * that decorates the terminal checks for it before it decorates anything.
+   */
+  onExit?(handler: () => void): () => void;
   /** Calls the handler once for a signal; the answer detaches it. */
-  onSignal(signal: HostSignal, handler: () => void): () => void;
+  onSignal?(signal: HostSignal, handler: () => void): () => void;
   /** Raises a signal again once its handler has settled what it was doing. */
-  raiseSignal(signal: HostSignal): void;
+  raiseSignal?(signal: HostSignal): void;
   /** The command that runs a program with a bounded heap. */
   boundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand;
 }
@@ -90,6 +94,7 @@ export {
   appendFile,
   availableParallelism,
   basename,
+  clearTimeout,
   compilerDataRoot,
   compilerSourceRoot,
   copyFile,
