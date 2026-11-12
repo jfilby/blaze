@@ -1905,6 +1905,19 @@ proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.i
 proc c_fclose(stream: pointer): cint {.importc: "fclose", header: "<stdio.h>".}
 proc c_strlen(text: cstring): csize_t {.importc: "strlen", header: "<string.h>".}
 
+proc blaze_rt_host_platform*(): cstring {.exportc, cdecl.} =
+  ## The platform name the compiler spells.
+  when defined(linux): blazePathManaged("linux")
+  elif defined(macosx): blazePathManaged("darwin")
+  else: blazePathManaged("unknown")
+
+proc blaze_rt_host_architecture*(): cstring {.exportc, cdecl.} =
+  ## The architecture name the compiler spells.
+  when defined(amd64): blazePathManaged("x64")
+  elif defined(arm64): blazePathManaged("arm64")
+  elif defined(i386): blazePathManaged("ia32")
+  else: blazePathManaged("unknown")
+
 proc blaze_rt_process_run*(command, input: cstring, timeoutMs: float64, cwd: cstring): cstring {.exportc, cdecl.} =
   ## Runs a command line through the shell. The host's output and error
   ## streams are one stream here: the child's standard error is written to

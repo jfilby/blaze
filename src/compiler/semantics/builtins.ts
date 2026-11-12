@@ -347,6 +347,12 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  run: its status, its signal, whether it was stopped at its deadline, and
    *  what it wrote to the two streams. The input is written to its stdin. */
   "runCommand": { params: [TEXT, TEXT, F64, TEXT], returns: TEXT, arity: 4 },
+  /** The name of the platform the process runs on, as the compiler spells it:
+   *  "linux", "darwin" or another name the host answers. */
+  "hostPlatformName": { params: [], returns: TEXT, arity: 0 },
+  /** The architecture the process runs on, as the compiler spells it: "x64",
+   *  "arm64" and the names the host answers. */
+  "hostArchName": { params: [], returns: TEXT, arity: 0 },
   /** The directory the process runs in, as the path it is. */
   "cwdPath": { params: [], returns: TEXT, arity: 0 },
   /** The process's own id, which a temporary name may carry. */

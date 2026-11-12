@@ -169,6 +169,13 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("a program names the platform it runs on", async () => {
+  const files = { "main.ts": ["console.log(hostPlatformName());", "console.log(hostArchName());", ""].join("\n") };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, `${process.platform}\n${process.arch}\n`);
+});
+
 test("a program runs a command through the host", async () => {
   const files = {
     "main.ts": [

@@ -135,6 +135,8 @@ const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_path_remove",
   "blaze_rt_file_copy",
   "blaze_rt_file_append",
+  "blaze_rt_host_platform",
+  "blaze_rt_host_architecture",
   "blaze_rt_process_run",
   "blaze_rt_stream_is_tty",
   "blaze_rt_set_exit_code",
@@ -1238,6 +1240,22 @@ export function blaze_rt_md5_digest(hasher) {
   const boxed = dynLookup(hasher);
   if (boxed === null || boxed.kind !== "hasher") return dynRegister({ kind: "text", text: "" });
   return dynRegister({ kind: "text", text: md5(boxed.chunks.join("")) });
+}
+`,
+  },
+  {
+    service: "blaze_rt_host_platform",
+    source: `
+export function blaze_rt_host_platform() {
+  return makeText(process.platform);
+}
+`,
+  },
+  {
+    service: "blaze_rt_host_architecture",
+    source: `
+export function blaze_rt_host_architecture() {
+  return makeText(process.arch);
 }
 `,
   },

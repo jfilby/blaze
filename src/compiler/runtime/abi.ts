@@ -1145,6 +1145,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_host_platform",
+    "const char*",
+    [],
+    "The name of the platform the process runs on.",
+    "Returns a managed string: the platform name the compiler spells, as linux or darwin.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_host_architecture",
+    "const char*",
+    [],
+    "The architecture the process runs on.",
+    "Returns a managed string: the architecture name the compiler spells, as x64 or arm64.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_process_run",
     "const char*",
     [["command", "const char*"], ["input", "const char*"], ["timeout_ms", "double"], ["cwd", "const char*"]],
@@ -6425,6 +6441,34 @@ double blaze_rt_file_read(const char* path, const char* mode) {
   if (!answer) { free(buf); blaze_rt_raise("out of memory"); return 0.0; }
   answer[len] = 0;
   return blaze_rt_box_string(answer);
+}
+
+const char* blaze_rt_host_platform(void) {
+#if defined(__linux__)
+  static const char* name = "linux";
+#elif defined(__APPLE__)
+  static const char* name = "darwin";
+#elif defined(__QNXNTO__)
+  static const char* name = "qnx";
+#elif defined(_WIN32)
+  static const char* name = "win32";
+#else
+  static const char* name = "unknown";
+#endif
+  return blaze_rt_string_new((const unsigned char*)name, strlen(name));
+}
+
+const char* blaze_rt_host_architecture(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+  static const char* name = "x64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  static const char* name = "arm64";
+#elif defined(__i386__)
+  static const char* name = "ia32";
+#else
+  static const char* name = "unknown";
+#endif
+  return blaze_rt_string_new((const unsigned char*)name, strlen(name));
 }
 
 typedef struct {

@@ -115,6 +115,30 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code names the platform it runs on", async () => {
+  const name = (callee: string): SemanticFunction =>
+    subject(
+      TEXT,
+      handsBack({
+        k: "call",
+        type: TEXT,
+        call: {
+          callee,
+          builtin: true,
+          signature: { name: callee, symbol: callee, params: [], returns: "ptr<u8>" },
+          args: [],
+          argTypes: [],
+          returns: TEXT,
+          effects: [],
+          ownership: "none",
+          retain: false,
+        },
+      }),
+    );
+  assert.equal(await lowered(name("hostPlatformName"), (called) => `printf("%s", ${called}());`), process.platform);
+  assert.equal(await lowered(name("hostArchName"), (called) => `printf("%s", ${called}());`), process.arch);
+});
+
 test("the C code runs a command and reads its streams", async () => {
   const invoked = (command: string, input: string, timeout: number, cwd: string): SemanticFunction =>
     subject(

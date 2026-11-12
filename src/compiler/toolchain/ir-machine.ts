@@ -11199,6 +11199,10 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "hostPlatformName" || call.callee === "hostArchName") {
+      this.callSymbol(call.callee === "hostPlatformName" ? "blaze_rt_host_platform" : "blaze_rt_host_architecture", [], TEXT);
+      return;
+    }
     if (
       call.callee === "runCommand" &&
       call.args[0] !== undefined &&

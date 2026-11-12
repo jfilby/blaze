@@ -3620,6 +3620,12 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "hostPlatformName":
+        this.callService("blaze_rt_host_platform");
+        return TEXT;
+      case "hostArchName":
+        this.callService("blaze_rt_host_architecture");
+        return TEXT;
       case "runCommand":
         this.textArgument(argument(0));
         this.textArgument(argument(1));
