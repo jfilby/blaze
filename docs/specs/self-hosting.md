@@ -6664,6 +6664,24 @@ values: a dynamic object and dictionary copy their entries, a list copies its
 block, and a laid-out record copies its fields at the layout it already has.
 Until then the self-build stops at the first function that copies a value.
 
+Two more readings were crossed while measuring past the clone. `TABLE[key]`
+over an object the file wrote is the chain of the keys it wrote, ending in
+absence, rather than a dangling name in the body. A name held at a function
+type — `const ticker = dependencies.ticker ?? intervalTicker` — is called
+through the shape the value has, the same call a field of a function type is,
+so a callback a parameter carries is a call the body makes. The title's
+repeating tick became a platform operation (`setInterval`/`clearInterval`):
+Node runs it unref'd, and the native adapter answers a timer that never fires,
+because the first fixed point prints the frame a build settles on.
+
+Past those, the self-build reaches `BigInt`: the contract evaluator reads a
+literal's digits with `BigInt(token.text)`, wraps with `BigInt.asIntN` and
+compares whole numbers. The language carries whole numbers of one and two
+hundred and fifty-six bits, and the runtime parses a text into the wide one;
+what is missing is the source-level `BigInt` constructor over a runtime text
+and the `asIntN`/`asUintN` questions, so the evaluator's arithmetic reads the
+same in a compiled function.
+
 ### 7. Close the fixed point
 
 Run the ladder as a test: Node builds stage 1, stage 1 builds stage 2, stage 2

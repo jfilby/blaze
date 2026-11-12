@@ -11846,6 +11846,30 @@ class TypeScriptParser {
         this.next();
         const index = this.readExpression();
         this.expect("]");
+        // `TABLE[key]` over an object the file wrote is the chain of the keys
+        // it wrote: the key the source computed is compared against each name,
+        // and a key the object does not hold is the absence it is.
+        if (target.k === "ident") {
+          const constant = this.constants.get(target.name);
+          if (constant?.fields !== undefined) {
+            const keys = [...constant.fields.keys()];
+            let answer: Expression = { k: "null" };
+            for (let at = keys.length - 1; at >= 0; at -= 1) {
+              const name = keys[at] as string;
+              const value = this.constantValue(target.name, constant.fields.get(name));
+              if (value === null) continue;
+              const condition: Expression = {
+                k: "binary",
+                op: "===",
+                left: index,
+                right: { k: "text", parts: [{ k: "text", value: name }] },
+              };
+              answer = { k: "conditional", condition, then: value, otherwise: answer };
+            }
+            replace(answer);
+            continue;
+          }
+        }
         // `m[key]` on a record or a map is one entry of the dictionary, read
         // the way `m.get(key)` reads it.
         const indexed = this.collectionOfExpression(target);
@@ -11982,6 +12006,20 @@ class TypeScriptParser {
               const answered = this.shapeForRead(held.returns);
               if (answered !== null) this.expressionShapes.set(made, answered);
             }
+            replace(made);
+            continue;
+          }
+          // A name held at a function type is called through the value: its
+          // shape states the parameters and the result, and a local a `??`
+          // chose between two functions carries that shape too.
+          const heldShape = this.shapeOf(target);
+          if (heldShape !== null && heldShape.kind === "function") {
+            const params = heldShape.params.map((param) => this.typeExprOfShape(param));
+            const returns = this.typeExprOfShape(heldShape.returns);
+            const args = this.readCallArguments(params);
+            const made: Expression = { k: "invoke", callee: target, args, params, returns };
+            const answered = this.shapeForRead(heldShape.returns);
+            if (answered !== null) this.expressionShapes.set(made, answered);
             replace(made);
             continue;
           }

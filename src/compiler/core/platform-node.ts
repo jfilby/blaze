@@ -41,7 +41,7 @@ import {
   sep as nodeSep,
 } from "node:path";
 import { availableParallelism, cpus, tmpdir } from "node:os";
-import { clearTimeout } from "node:timers";
+import { clearInterval as nodeClearInterval, clearTimeout, setInterval as nodeSetInterval } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -75,6 +75,28 @@ export {
   writeFile,
   writeFileSync,
 };
+
+/** A timer that does not keep the process alive on its own. */
+interface UnrefTimer {
+  unref?: () => void;
+}
+
+/**
+ * Runs the callback every interval, and answers the timer that stops it.
+ *
+ * The timer is unref'd: a title animation is cosmetic, and a command that has
+ * finished its work must not wait for one.
+ */
+export function setInterval(tick: () => void, milliseconds: number): unknown {
+  const timer: UnrefTimer = nodeSetInterval(tick, milliseconds) as unknown as UnrefTimer;
+  timer.unref?.();
+  return timer;
+}
+
+/** Stops the timer an interval call answered. */
+export function clearInterval(timer: unknown): void {
+  nodeClearInterval(timer as NodeJS.Timeout);
+}
 
 /**
  * The entries of a directory, each with what it is.

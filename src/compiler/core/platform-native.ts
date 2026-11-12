@@ -364,6 +364,22 @@ export function clearTimeout(_handle: unknown): void {
   return;
 }
 
+/**
+ * A repeating tick, which a native command has no scheduler to run.
+ *
+ * The title animation asks for one; the output it writes is the frame the
+ * build settles on, and a build that has nothing else to do is not kept
+ * running for a spinner. The handle is zero because there is no timer to stop.
+ */
+export function setInterval(_tick: () => void, _milliseconds: number): number {
+  return 0;
+}
+
+/** Stops a tick the native host never scheduled. */
+export function clearInterval(_handle: unknown): void {
+  return;
+}
+
 /** A random UUID, which a build record carries. */
 export function randomUUID(): string {
   return crypto.randomUUID();

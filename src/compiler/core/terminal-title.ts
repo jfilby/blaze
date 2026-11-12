@@ -10,7 +10,7 @@
  * otherwise be able to drive the terminal.
  */
 
-import { hostOnExit, hostOnSignal, hostRaiseSignal, hostStdoutIsTTY, hostWriteOut } from "./platform.ts";
+import { clearInterval, hostOnExit, hostOnSignal, hostRaiseSignal, hostStdoutIsTTY, hostWriteOut, setInterval } from "./platform.ts";
 
 /** What blaze calls itself in a tab, whatever it is doing. */
 export const BRAND = "B";
@@ -141,8 +141,6 @@ export function streamTitleSink(stream: { write(text: string): unknown; isTTY?: 
 
 function intervalTicker(tick: () => void, ms: number): () => void {
   const timer = setInterval(tick, ms);
-  // Never keep the event loop alive for a cosmetic animation.
-  timer.unref?.();
   return () => clearInterval(timer);
 }
 
