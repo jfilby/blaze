@@ -1145,6 +1145,22 @@ export const RUNTIME_ABI: readonly RuntimeEntry[] = [
     { tags: ["host"] },
   ),
   entry(
+    "blaze_rt_file_read_text",
+    "const char*",
+    [["path", "const char*"], ["mode", "const char*"]],
+    "Reads a file as a text.",
+    "Returns a managed string with the file's bytes; a file that is not there reads as the empty string.",
+    { tags: ["host"] },
+  ),
+  entry(
+    "blaze_rt_file_sync",
+    "double",
+    [["path", "const char*"]],
+    "Flushes a file's writes to the disk.",
+    "Returns one where the file was flushed and zero where it could not be.",
+    { tags: ["host"] },
+  ),
+  entry(
     "blaze_rt_host_platform",
     "const char*",
     [],
@@ -6868,6 +6884,24 @@ double blaze_rt_file_size(const char* path) {
 double blaze_rt_path_exists(const char* path) {
   if (path == NULL) return 0.0;
   return access(path, F_OK) == 0 ? 1.0 : 0.0;
+}
+
+const char* blaze_rt_file_read_text(const char* path, const char* mode) {
+  const double boxed = blaze_rt_file_read(path, mode);
+  blaze_dyn* d = blaze_dyn_lookup(boxed);
+  if (d == NULL || d->kind != BLAZE_DYN_TEXT || d->text == NULL) {
+    return blaze_rt_string_new((const unsigned char*)"", 0);
+  }
+  return d->text;
+}
+
+double blaze_rt_file_sync(const char* path) {
+  if (path == NULL) return 0.0;
+  const int descriptor = open(path, O_RDONLY);
+  if (descriptor < 0) return 0.0;
+  const int flushed = fsync(descriptor);
+  close(descriptor);
+  return flushed == 0 ? 1.0 : 0.0;
 }
 
 double blaze_rt_file_write(const char* path, const char* text) {

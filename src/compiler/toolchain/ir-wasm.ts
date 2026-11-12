@@ -3620,6 +3620,15 @@ class Body {
         this.textArgument(argument(1));
         this.callService("blaze_rt_file_read");
         return DYNAMIC_TYPE;
+      case "readTextFile":
+        this.textArgument(argument(0));
+        this.textArgument(argument(1));
+        this.callService("blaze_rt_file_read_text");
+        return TEXT;
+      case "syncFile":
+        this.textArgument(argument(0));
+        this.callService("blaze_rt_file_sync");
+        return F64_TYPE;
       case "hostPlatformName":
         this.callService("blaze_rt_host_platform");
         return TEXT;

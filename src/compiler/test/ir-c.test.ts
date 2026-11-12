@@ -115,6 +115,56 @@ test("the C code makes a directory and moves a file", async () => {
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("the C code reads a file as a text and flushes it", async () => {
+  const directory = await scratch("blaze-c-read-");
+  const path = join(directory, "data.txt");
+  await writeFile(path, "hello");
+  const read = subject(
+    TEXT,
+    handsBack({
+      k: "call",
+      type: TEXT,
+      call: {
+        callee: "readTextFile",
+        builtin: true,
+        signature: {
+          name: "readTextFile",
+          symbol: "readTextFile",
+          params: [{ name: "path", type: "ptr<u8>" }, { name: "mode", type: "ptr<u8>" }],
+          returns: "ptr<u8>",
+        },
+        args: [literal(path), literal("utf8")],
+        argTypes: [TEXT, TEXT],
+        returns: TEXT,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  assert.equal(await lowered(read, (name) => `printf("%s", ${name}());`), "hello");
+
+  const sync = subject(
+    F64,
+    handsBack({
+      k: "call",
+      type: F64,
+      call: {
+        callee: "syncFile",
+        builtin: true,
+        signature: { name: "syncFile", symbol: "syncFile", params: [{ name: "path", type: "ptr<u8>" }], returns: "f64" },
+        args: [literal(path)],
+        argTypes: [TEXT],
+        returns: F64,
+        effects: [],
+        ownership: "none",
+        retain: false,
+      },
+    }),
+  );
+  assert.equal(await lowered(sync, (name) => `printf("%.17g", ${name}());`), "1");
+});
+
 test("the C code names the platform it runs on", async () => {
   const name = (callee: string): SemanticFunction =>
     subject(

@@ -1898,7 +1898,34 @@ proc blaze_rt_sha256_create*(): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_sha256_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
 proc blaze_rt_sha256_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_date_parse*(text: cstring): float64 {.exportc, cdecl.} = 0.0
-proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} =
+  ## The file's text, boxed as the dynamic value the runtime carries.
+  if path == nil: return blaze_rt_box_string("")
+  try:
+    blaze_rt_box_string(readFile($path))
+  except CatchableError:
+    blaze_rt_box_string("")
+
+proc blaze_rt_file_read_text*(path: cstring, mode: cstring): cstring {.exportc, cdecl.} =
+  ## The file's text as the managed string a text value is.
+  if path == nil: return blazePathManaged("")
+  try:
+    blazePathManaged(readFile($path))
+  except CatchableError:
+    blazePathManaged("")
+
+proc c_open_flags(path: cstring, flags: cint): cint {.importc: "open", varargs, header: "<fcntl.h>".}
+proc c_fsync(descriptor: cint): cint {.importc: "fsync", header: "<unistd.h>".}
+proc c_close(descriptor: cint): cint {.importc: "close", header: "<unistd.h>".}
+
+proc blaze_rt_file_sync*(path: cstring): float64 {.exportc, cdecl.} =
+  ## Flushes the file's writes to the disk.
+  if path == nil: return 0.0
+  let descriptor = c_open_flags(path, 0)
+  if descriptor < 0: return 0.0
+  let flushed = c_fsync(descriptor)
+  discard c_close(descriptor)
+  flushed == 0
 
 proc c_fopen(path, mode: cstring): pointer {.importc: "fopen", header: "<stdio.h>".}
 proc c_fwrite(data: pointer, size, count: csize_t, stream: pointer): csize_t {.importc: "fwrite", header: "<stdio.h>".}

@@ -510,7 +510,7 @@ export function generateWasmHost(contract: FunctionContract, options: WasmHostOp
 
 import { spawnSync } from "node:child_process";
 import * as os from "node:os";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 ${hashes ? 'import { createHash } from "node:crypto";' : ""}
 
 ${hostRuntimeSource(services)}
@@ -681,7 +681,7 @@ export function generateWasmProgramHost(options: WasmProgramHostOptions): string
 
 import { spawnSync } from "node:child_process";
 import * as os from "node:os";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 ${hashes ? 'import { createHash } from "node:crypto";' : ""}
 
 ${hostRuntimeSource(services)}

@@ -1126,6 +1126,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_md5_create()`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+      case "readTextFile":
+        return `${RUNTIME_NAME}_file_read_text(${argument(0)}, ${argument(1)})`;
+      case "syncFile":
+        return `${RUNTIME_NAME}_file_sync(${argument(0)})`;
       case "hostPlatformName":
         return `${RUNTIME_NAME}_host_platform()`;
       case "hostArchName":

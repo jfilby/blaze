@@ -169,6 +169,22 @@ test("a program makes a directory and moves a file through the host", async () =
   assert.equal(await readFile(to, "utf8"), "x");
 });
 
+test("a program reads a file as a text and flushes it", async () => {
+  const directory = await scratch("blaze-wasm-read-");
+  const path = join(directory, "data.txt");
+  await writeFile(path, "hello");
+  const files = {
+    "main.ts": [
+      `console.log(readTextFile(${JSON.stringify(path)}, "utf8"));`,
+      `console.log(syncFile(${JSON.stringify(path)}));`,
+      "",
+    ].join("\n"),
+  };
+  const result = await runProgram(files, "main.ts");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "hello\n1\n");
+});
+
 test("a program names the platform it runs on", async () => {
   const files = { "main.ts": ["console.log(hostPlatformName());", "console.log(hostArchName());", ""].join("\n") };
   const result = await runProgram(files, "main.ts");

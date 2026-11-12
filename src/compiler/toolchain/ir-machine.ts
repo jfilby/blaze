@@ -11199,6 +11199,23 @@ class Machine {
       this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
       return;
     }
+    if (call.callee === "readTextFile" && call.args[0] !== undefined && call.args[1] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_read_text_path");
+      this.store(path);
+      this.at(call.args[1], TEXT);
+      const mode = this.hold(TEXT, "blaze_read_text_mode");
+      this.store(mode);
+      this.callSymbol("blaze_rt_file_read_text", [path, mode], TEXT);
+      return;
+    }
+    if (call.callee === "syncFile" && call.args[0] !== undefined) {
+      this.at(call.args[0], TEXT);
+      const path = this.hold(TEXT, "blaze_sync_path");
+      this.store(path);
+      this.callSymbol("blaze_rt_file_sync", [path], NUMBER);
+      return;
+    }
     if (call.callee === "hostPlatformName" || call.callee === "hostArchName") {
       this.callSymbol(call.callee === "hostPlatformName" ? "blaze_rt_host_platform" : "blaze_rt_host_architecture", [], TEXT);
       return;
