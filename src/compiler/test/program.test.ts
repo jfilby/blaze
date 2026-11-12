@@ -123,6 +123,45 @@ test("a module value written by a function is refused", () => {
   );
 });
 
+test("a module value read through its getter keeps the types of its fields", () => {
+  // The getter answers the type the declaration states. A field of that type
+  // is read through the declaration the same module wrote, and the name of the
+  // field's own type is linked with it.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": 'import { run } from "./b.ts";\nrun();\n',
+      "b.ts": 'import { host } from "./a.ts";\nexport function run(): void {\n  host.out.write("x");\n}\n',
+      "a.ts": [
+        "export interface Stream {",
+        "  write(text: string): void;",
+        "}",
+        "export interface Host {",
+        "  readonly out: Stream;",
+        "}",
+        "export class NativeStream implements Stream {",
+        "  count = 0;",
+        "  write(text: string): void {",
+        "    this.count += 1;",
+        "  }",
+        "}",
+        "export class NativeHost implements Host {",
+        "  readonly out: NativeStream;",
+        "  constructor() {",
+        "    this.out = new NativeStream();",
+        "  }",
+        "}",
+        "export const host: Host = new NativeHost();",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  const b = phase.program.files.find((file) => file.path === "b.ts");
+  assert.ok(b !== undefined);
+  assert.ok(b.functions.run !== undefined);
+});
+
 test("a class a function returns crosses the link with its methods", () => {
   // The declaration a return type names is in the module that wrote it, not in
   // the file the import names: the importing file is read against the class,

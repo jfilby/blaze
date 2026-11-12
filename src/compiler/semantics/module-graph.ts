@@ -182,6 +182,18 @@ function linkedShapeNames(shape: ResolvedType, into: Set<string>): void {
  * modules rather than only in the file the import names, because a re-export
  * offers another module's declaration under its own name.
  */
+/** The names a written type text names, which are the declarations it links. */
+function linkedNamesInText(text: string, into: Set<string>): void {
+  for (const match of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const name = match[0];
+    if (name === "ref" || name === "ptr" || name === "slice" || name === "array" || name === "boxedtext") continue;
+    if (name === "f32" || name === "f64" || name === "u8" || name === "u16" || name === "u32" || name === "u64") continue;
+    if (name === "i8" || name === "i16" || name === "i32" || name === "i64" || name === "usize" || name === "isize") continue;
+    if (name === "bool" || name === "text" || name === "void" || name === "any") continue;
+    into.add(name);
+  }
+}
+
 function bindLinkedDeclarations(
   record: ModuleRecord,
   names: ReadonlySet<string>,
@@ -189,16 +201,32 @@ function bindLinkedDeclarations(
 ): void {
   const ownTypes = record.analysis.types;
   const ownClasses = record.analysis.classes;
-  for (const name of names) {
+  // A declaration names other declarations: an interface's fields, a base it
+  // extends, an alias's target, a class's fields and methods. A value of the
+  // interface read in this file needs those names too, because a field is read
+  // through the type the declaration gives it. The work list is the names the
+  // linked types name, expanded until it names nothing new.
+  const pending = [...names];
+  const seen = new Set<string>(pending);
+  while (pending.length > 0) {
+    const name = pending.pop() as string;
     if (ownTypes !== undefined && !ownTypes.declarations.has(name) && !ownTypes.imported.has(name)) {
       for (const source of records.values()) {
         const types = source.analysis.types;
         if (types === undefined) continue;
         const declared = types.declarations.get(name) ?? types.exported.get(name) ?? types.imported.get(name);
-        if (declared !== undefined) {
-          ownTypes.imported.set(name, declared);
-          break;
+        if (declared === undefined) continue;
+        ownTypes.imported.set(name, declared);
+        const named = new Set<string>();
+        for (const field of declared.fields.values()) linkedNamesInText(field.typeName, named);
+        for (const base of declared.extends) linkedNamesInText(base, named);
+        if (declared.target !== null) linkedNamesInText(declared.target, named);
+        for (const next of named) {
+          if (seen.has(next)) continue;
+          seen.add(next);
+          pending.push(next);
         }
+        break;
       }
     }
     if (ownClasses !== undefined && !ownClasses.names.has(name)) {
@@ -207,6 +235,17 @@ function bindLinkedDeclarations(
         if (offered === undefined) continue;
         ownClasses.names.add(name);
         ownClasses.classes.set(name, offered);
+        const named = new Set<string>();
+        for (const field of offered.fields) linkedNamesInText(field.typeName, named);
+        for (const method of [...offered.methods, ...offered.getters]) {
+          linkedNamesInText(method.returnTypeName, named);
+          for (const param of method.params) linkedNamesInText(param.typeName, named);
+        }
+        for (const next of named) {
+          if (seen.has(next)) continue;
+          seen.add(next);
+          pending.push(next);
+        }
         break;
       }
     }

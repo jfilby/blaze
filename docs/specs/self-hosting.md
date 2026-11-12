@@ -5645,6 +5645,14 @@ a file that imports the name, where the graph links the value's name to the
 getter's signature. A value that is a plain number keeps its runtime cell;
 a value computed by a call, a collection or an object is the getter's answer.
 
+A value the file **constructs** (`export const host = new NativeHost()`) is a
+constant the declaring file may inline, but a module that imports it cannot
+read the construction's range: the getter is where it crosses, and its range
+is the construction's own. The declaration a getter answers names other
+declarations — an interface's field types, a base it extends, a class's fields
+and methods — and those names are linked with it, so `host.stdout.write` reads
+the stream's declaration where the host's declaration was linked.
+
 The getter is written only where the read can hold the initializer: the
 initializer is read once in a trial, and a value whose initializer needs a
 construct the file does not read is left as it was, so the measurement does

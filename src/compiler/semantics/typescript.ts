@@ -6074,7 +6074,8 @@ class TypeScriptParser {
       if (
         this.at("export") &&
         (this.peek(1).text === "const" || this.peek(1).text === "let" || this.peek(1).text === "var") &&
-        this.stateInitializers.has(this.peek(2).text) &&
+        (this.stateInitializers.has(this.peek(2).text) ||
+          this.constants.get(this.peek(2).text)?.constructed === true) &&
         !this.constantCollections.has(this.peek(2).text) &&
         !this.shapes.has(this.peek(2).text)
       ) {
@@ -6111,9 +6112,12 @@ class TypeScriptParser {
         if (
           !entry &&
           valueName !== "" &&
-          this.stateInitializers.has(valueName) &&
+          (this.stateInitializers.has(valueName) || this.constants.get(valueName)?.constructed === true) &&
           !this.numericGlobals.has(valueName) &&
-          !this.constants.has(valueName) &&
+          // A value the file constructs is a constant the same file may inline,
+          // but a module that imports it cannot read its construction: the
+          // getter is where the value crosses.
+          (!this.constants.has(valueName) || this.constants.get(valueName)?.constructed === true) &&
           // A collection or an object the file holds is read through the shape
           // the file declared, not through a getter: its methods are the
           // collection's, and a fresh value per read would not be the one the
@@ -6121,7 +6125,20 @@ class TypeScriptParser {
           !this.constantCollections.has(valueName) &&
           !this.shapes.has(valueName)
         ) {
-          const range = this.stateInitializers.get(valueName) as { start: number; end: number };
+          // A value the file constructs is a constant with the range of its
+          // construction; a value the file holds as state has the range the
+          // scanner recorded for it.
+          const constant = this.constants.get(valueName);
+          const range =
+            this.stateInitializers.get(valueName) ??
+            (constant?.constructed === true ? constant.expression?.range : undefined);
+          if (range === undefined) {
+            this.position = valueStart;
+            this.synchronize();
+            this.accept(";");
+            if (entry) runs = true;
+            continue;
+          }
           const annotation = this.constantAnnotations.get(valueName);
           let type: TypeExpr | null = null;
           if (annotation !== undefined) {
