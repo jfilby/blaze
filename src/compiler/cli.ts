@@ -14,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, readFile, resolve, parseArgs, stat, host } from "./core/platform.ts";
+import { existsSync, writeFileSync, readFile, resolve, parseArgs, stat, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
 import { CompilerError, isCompilerError, type SerializedCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -50,7 +50,7 @@ import { NO_TITLE_ANIMATION, startBuildTitle, type TitleAnimation } from "./core
  * never owns the tab: it would replace the shell's own title for a blink.
  */
 function titleAnimation(label: string): TitleAnimation {
-  if (!host.stdout.isTTY) return NO_TITLE_ANIMATION;
+  if (!hostStdoutIsTTY()) return NO_TITLE_ANIMATION;
   return startBuildTitle(label);
 }
 
@@ -140,19 +140,19 @@ function consoleReporter(): Reporter {
       // Every message names the step it is about, so the stage is not printed
       // again beside it.
       void stage;
-      host.stdout.write(`${mark} ${message}\n`);
+      hostWriteOut(`${mark} ${message}\n`);
     },
   };
 }
 
 /** The project `blaze build` builds when no path is given. */
 function defaultProjectFile(): string {
-  const candidate = resolve(host.cwd(), PROJECT_FILE);
+  const candidate = resolve(hostCwd(), PROJECT_FILE);
   if (!existsSync(candidate)) {
     throw new CompilerError({
       category: "InputError",
       stage: "input",
-      message: `no ${PROJECT_FILE} in ${host.cwd()}`,
+      message: `no ${PROJECT_FILE} in ${hostCwd()}`,
       detail: "run from a project directory, or name the input: blaze build <input.toml>",
     });
   }
@@ -187,7 +187,7 @@ backend = "machine"
  * by the same name would read the new one and never the old.
  */
 function initProject(): void {
-  const path = resolve(host.cwd(), PROJECT_FILE);
+  const path = resolve(hostCwd(), PROJECT_FILE);
   if (existsSync(path)) {
     throw new CompilerError({
       category: "InputError",
@@ -197,7 +197,7 @@ function initProject(): void {
     });
   }
   writeFileSync(path, PROJECT_FILE_TEMPLATE, "utf8");
-  host.stdout.write(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
+  hostWriteOut(`created ${path}\n\nWrite ${PROJECT_FILE}'s sourceFile, then run blaze build.\n`);
 }
 
 /**
@@ -208,7 +208,7 @@ function initProject(): void {
  * stdout either way, so a log says what happened.
  */
 async function terminalConfirm(question: string): Promise<boolean> {
-  const answer = await host.ask(question);
+  const answer = await hostAsk(question);
   if (answer === undefined) return true;
   const choice = answer.trim().toLowerCase();
   return choice === "y" || choice === "yes";
@@ -262,7 +262,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     throw new Error("--recompile and --reuse ask for opposite builds: one rebuilds everything, the other rebuilds nothing");
   }
   return {
-    cwd: host.cwd(),
+    cwd: hostCwd(),
     reuse: values.reuse === true,
     ...(recompile ? { recompile: true } : {}),
     confirm: terminalConfirm,
@@ -307,24 +307,24 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
  * for an error that is not there.
  */
 function reportCancelled(error: SerializedCompilerError): void {
-  host.stdout.write(`\n· ${error.message}\n`);
+  hostWriteOut(`\n· ${error.message}\n`);
   if (error.detail !== undefined && error.detail.trim() !== "") {
-    host.stdout.write(`\n${error.detail.trim()}\n`);
+    hostWriteOut(`\n${error.detail.trim()}\n`);
   }
 }
 
 function reportError(error: SerializedCompilerError): void {
-  host.stderr.write(`\n✗ ${error.stage} failed: ${error.message}\n`);
+  hostWriteError(`\n✗ ${error.stage} failed: ${error.message}\n`);
   const context = [
     error.function === undefined ? undefined : `  function:  ${error.function}`,
     error.candidate === undefined ? undefined : `  candidate: ${error.candidate}`,
   ].filter((line) => line !== undefined);
-  if (context.length > 0) host.stderr.write(`${context.join("\n")}\n`);
+  if (context.length > 0) hostWriteError(`${context.join("\n")}\n`);
   if (error.detail !== undefined && error.detail.trim() !== "") {
-    host.stderr.write(`\n${error.detail.trim()}\n`);
+    hostWriteError(`\n${error.detail.trim()}\n`);
   }
   if (error.project !== undefined) {
-    host.stderr.write(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${error.project}/build.json\n`);
+    hostWriteError(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${error.project}/build.json\n`);
   }
 }
 
@@ -367,7 +367,7 @@ async function main(argv: readonly string[]): Promise<number> {
   const [command, argument, ...rest] = parsed.positionals;
 
   if (values.help === true || command === undefined) {
-    host.stdout.write(USAGE);
+    hostWriteOut(USAGE);
     return command === undefined && values.help !== true ? 1 : 0;
   }
 
@@ -382,7 +382,7 @@ async function main(argv: readonly string[]): Promise<number> {
       try {
         const outcome = await runBuild(input, options, consoleReporter(), command);
         if (command === "generate") {
-          host.stdout.write(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
+          hostWriteOut(`\nProject: ${STATE_DIRECTORY}/projects/${outcome.project}\n`);
         }
       } catch (cause) {
         title.stop("fail");
@@ -398,7 +398,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case "test":
     case "benchmark": {
       if (argument === undefined) {
-        host.stderr.write(`blaze ${command} needs a project name\n\n${USAGE}`);
+        hostWriteError(`blaze ${command} needs a project name\n\n${USAGE}`);
         return 1;
       }
       const title = titleAnimation(argument);
@@ -418,21 +418,21 @@ async function main(argv: readonly string[]): Promise<number> {
         ...(values.all === true ? { all: true } : {}),
       };
       const input = argument ?? defaultProjectFile();
-      host.stdout.write(await runSemanticIr(input, irOptions));
+      hostWriteOut(await runSemanticIr(input, irOptions));
       return 0;
     }
     case "inspect": {
       if (argument === undefined) {
-        host.stderr.write(`blaze inspect needs a project name\n\n${USAGE}`);
+        hostWriteError(`blaze inspect needs a project name\n\n${USAGE}`);
         return 1;
       }
-      const build = await inspectProject(argument, host.cwd());
-      host.stdout.write(`${JSON.stringify(build, null, 2)}\n`);
+      const build = await inspectProject(argument, hostCwd());
+      hostWriteOut(`${JSON.stringify(build, null, 2)}\n`);
       return 0;
     }
     case "compare": {
       if (argument === undefined || rest[0] === undefined) {
-        host.stderr.write(`blaze compare needs two build records\n\n${USAGE}`);
+        hostWriteError(`blaze compare needs two build records\n\n${USAGE}`);
         return 1;
       }
       const [leftInfo, rightInfo] = await Promise.all([stat(argument), stat(rest[0])]);
@@ -446,36 +446,36 @@ async function main(argv: readonly string[]): Promise<number> {
             JSON.parse(await readFile(rest[0], "utf8")) as BuildStatus,
           );
       if (differences.length === 0) {
-        host.stdout.write("The build records agree\n");
+        hostWriteOut("The build records agree\n");
         return 0;
       }
-      host.stdout.write(`The build records differ:\n${differences.map((line) => `  ${line}`).join("\n")}\n`);
+      hostWriteOut(`The build records differ:\n${differences.map((line) => `  ${line}`).join("\n")}\n`);
       return 1;
     }
     case "projects": {
-      const projects = await listProjects(host.cwd());
+      const projects = await listProjects(hostCwd());
       if (projects.length === 0) {
-        host.stdout.write(`no projects in ${STATE_DIRECTORY}/projects\n`);
+        hostWriteOut(`no projects in ${STATE_DIRECTORY}/projects\n`);
         return 0;
       }
       for (const project of projects) {
-        const build = await inspectProject(project, host.cwd()).catch(() => undefined);
+        const build = await inspectProject(project, hostCwd()).catch(() => undefined);
         const state =
           build === undefined
             ? ""
             : `  ${build.status}  ${selectedLabel(build)}  ${build.model}  ${targetSummary(build.target)}`;
-        host.stdout.write(`${project}${state}\n`);
+        hostWriteOut(`${project}${state}\n`);
       }
       return 0;
     }
     default:
-      host.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
+      hostWriteError(`unknown command "${command}"\n\n${USAGE}`);
       return 1;
   }
 }
 
 try {
-  host.setExitCode(await main(host.arguments));
+  hostSetExitCode(await main(hostArguments()));
 } catch (cause) {
   const failure = isCompilerError(cause)
     ? cause.toJSON()
@@ -489,5 +489,5 @@ try {
   // built, nothing was damaged, and the last build is still the project's.
   if (failure.category === "CancelledError") reportCancelled(failure);
   else reportError(failure);
-  host.setExitCode(1);
+  hostSetExitCode(1);
 }

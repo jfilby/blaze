@@ -20,7 +20,15 @@
  * runtime carries both, and this adapter reads the text one.
  */
 
-import type { BoundedCommand, DirectoryEntry, FileInfo, Host, WebAssemblyEngine } from "./platform.ts";
+import type {
+  BoundedCommand,
+  DirectoryEntry,
+  FileInfo,
+  HostChild,
+  HostSignal,
+  HostSpawnOptions,
+  WebAssemblyEngine,
+} from "./platform.ts";
 
 /* -------------------------------------------------------------------------- */
 /* The command line                                                            */
@@ -477,35 +485,76 @@ function boundedCommand(command: string, args: readonly string[], _bytes: number
   return { command, args: [...args] };
 }
 
-/** The line a bounded run writes when the program itself is not there. */
-const MISSING_PROGRAM = "blaze: no such program: ";
+/** The arguments the command was given, after the program and script names. */
+export function hostArguments(): readonly string[] {
+  return argumentTexts();
+}
 
-/** The native process, as the command line sees it. */
-export const host: Host = {
-  arguments: argumentTexts(),
-  stdout: {
-    write: (text: string): unknown => {
-      stdoutWrite(text);
-      return 0;
-    },
-  },
-  stderr: {
-    write: (text: string): unknown => {
-      process.stderr.write(text);
-      return 0;
-    },
-  },
-  platform: hostPlatform(),
-  cwd: (): string => process.cwd(),
-  setExitCode: (code: number): void => {
-    setExitCode(code);
-  },
-  ask: async (question: string): Promise<string | undefined> => {
-    stdoutWrite(question);
-    return readLine();
-  },
-  boundHeap: (command: string, args: readonly string[], bytes: number): BoundedCommand => boundedCommand(command, args, bytes),
-};
+/** Whether the output stream is a terminal, which a title may decorate. */
+export function hostStdoutIsTTY(): boolean {
+  return streamIsTTY(1) !== 0;
+}
+
+/** Writes to the output stream, as it is given. */
+export function hostWriteOut(text: string): void {
+  stdoutWrite(text);
+}
+
+/** Writes to the error stream, as it is given. */
+export function hostWriteError(text: string): void {
+  process.stderr.write(text);
+}
+
+/** The directory the process runs in. */
+export function hostCwd(): string {
+  return process.cwd();
+}
+
+/** Sets the status the process leaves with. */
+export function hostSetExitCode(code: number): void {
+  setExitCode(code);
+}
+
+/** The answer to one question, or undefined when there is nobody to ask. */
+export async function hostAsk(question: string): Promise<string | undefined> {
+  stdoutWrite(question);
+  return readLine();
+}
+
+/** A detach that has nothing to detach: the native process owns no handlers. */
+function noDetach(): void {
+  return;
+}
+
+/** Calls the handler when the process exits; the native host has no exit hook. */
+export function hostOnExit(_handler: () => void): () => void {
+  return noDetach;
+}
+
+/** Calls the handler once for a signal; the native host has no signal hook. */
+export function hostOnSignal(_signal: HostSignal, _handler: () => void): () => void {
+  return noDetach;
+}
+
+/** The native host has no signal of its own to raise again. */
+export function hostRaiseSignal(_signal: HostSignal): void {
+  return;
+}
+
+/** Whether the host can start a child without blocking the process. */
+export function hostSpawnSupport(): boolean {
+  return false;
+}
+
+/** Starts a child the caller can wait on without blocking the process. */
+export function hostSpawn(_command: string, _args: readonly string[], _options: HostSpawnOptions): HostChild {
+  throw new Error("this host runs its children one after another");
+}
+
+/** The command that runs a program with a bounded heap. */
+export function hostBoundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand {
+  return boundedCommand(command, args, bytes);
+}
 
 /* -------------------------------------------------------------------------- */
 /* The command line reader                                                     */

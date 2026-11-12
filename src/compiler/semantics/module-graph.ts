@@ -122,23 +122,56 @@ export interface ModuleGraphRequest {
 /** The values every module of the program offers, in discovery order. */
 export interface OfferedValues {
   path: string;
-  values: ReadonlyMap<string, unknown>;
+  values: Map<string, unknown>;
   /** The type each offered declaration writes, where its value is not one the
    *  file wrote out. */
-  shapes: ReadonlyMap<string, unknown>;
+  shapes: Map<string, unknown>;
 }
 
 /** The values every module of the program offers, in discovery order. */
 export function offeredValues(records: readonly ModuleRecord[]): OfferedValues[] {
   const offered: OfferedValues[] = [];
+  const byPath = new Map<string, OfferedValues>();
   for (const record of records) {
     const values = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
     const shapes = record.analysis.valueShapes as ReadonlyMap<string, unknown> | undefined;
-    if (values !== undefined || shapes !== undefined) {
-      offered.push({ path: record.path, values: values ?? new Map(), shapes: shapes ?? new Map() });
+    const entry: OfferedValues = { path: record.path, values: new Map(values ?? []), shapes: new Map(shapes ?? []) };
+    offered.push(entry);
+    byPath.set(record.path, entry);
+  }
+  // A module that re-exports a value offers what the module that declares it
+  // offers: `export { host } from "#host/platform"` is the value, under the
+  // name this module writes. The bind runs until no module gains a name, so a
+  // re-export of a re-export crosses as well.
+  let linked = true;
+  while (linked) {
+    linked = false;
+    for (const record of records) {
+      const own = byPath.get(record.path);
+      if (own === undefined) continue;
+      for (const entry of record.analysis.reexports ?? []) {
+        const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+        if (index < 0) continue;
+        const target = byPath.get(record.resolved[index] ?? "");
+        if (target === undefined) continue;
+        for (const name of entry.names) {
+          const renamed = entry.renames?.find((one) => one.local === name);
+          const exported = renamed === undefined ? name : renamed.exported;
+          const value = target.values.get(name);
+          if (value !== undefined && !own.values.has(exported)) {
+            own.values.set(exported, value);
+            linked = true;
+          }
+          const shape = target.shapes.get(name);
+          if (shape !== undefined && !own.shapes.has(exported)) {
+            own.shapes.set(exported, shape);
+            linked = true;
+          }
+        }
+      }
     }
   }
-  return offered;
+  return offered.filter((one) => one.values.size > 0 || one.shapes.size > 0);
 }
 
 /** The names a contract type names, which are the declarations it links. */
@@ -268,6 +301,38 @@ function bindLinkedDeclarations(
  * writes it, and a call here answers what that function declares. The graph has
  * already read the module, so the signature is the one its analysis kept.
  */
+/**
+ * The getter a module's value is read through, following a re-export.
+ *
+ * A module that re-exports a value names a getter the other module wrote:
+ * `export { host } from "#host/platform"` offers `host` only as the getter in
+ * the adapter, so the search crosses each re-export to the module that holds
+ * the value.
+ */
+function valueGetterOf(
+  record: ModuleRecord,
+  name: string,
+  records: ReadonlyMap<string, ModuleRecord>,
+  seen: Set<string>,
+): { path: string; name: string } | undefined {
+  if (seen.has(record.path)) return undefined;
+  seen.add(record.path);
+  const direct = record.analysis.valueGetters?.get(name);
+  if (direct !== undefined) return { path: record.path, name: direct };
+  for (const entry of record.analysis.reexports ?? []) {
+    const renamed = entry.renames?.find((one) => one.exported === name);
+    const wanted = renamed === undefined ? name : renamed.local;
+    if (!entry.names.includes(wanted)) continue;
+    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+    if (index < 0) continue;
+    const target = records.get(record.resolved[index] ?? "");
+    if (target === undefined) continue;
+    const found = valueGetterOf(target, wanted, records, seen);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 function importedFunctionsOf(
   record: ModuleRecord,
   records: ReadonlyMap<string, ModuleRecord>,
@@ -291,9 +356,11 @@ function importedFunctionsOf(
       if (declared === undefined) {
         // A value the exporting module holds is offered under the value's name
         // and read through the getter function the module wrote for it.
-        const getterName = target.analysis.valueGetters?.get(imported);
+        const getterName = valueGetterOf(target, imported, records, new Set());
         const getter =
-          getterName === undefined ? undefined : target.analysis.functions.find((entry) => entry.name === getterName);
+          getterName === undefined
+            ? undefined
+            : records.get(getterName.path)?.analysis.functions.find((entry) => entry.name === getterName.name);
         if (getter !== undefined) {
           const signature: ImportedFunction = {
             params: getter.params.map((param) => param.type),

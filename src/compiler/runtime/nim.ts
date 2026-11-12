@@ -782,6 +782,26 @@ proc blaze_rt_argv*(index: csize_t): float64 {.exportc, cdecl.} =
   let argument = int(index) - 2
   if argument >= 0 and argument < blazeArguments.len: blazeArguments[argument] else: blazeNaN()
 
+var blazeHostArguments: seq[string] = @[]
+
+proc blaze_rt_host_arguments_set*(values: cstring, count: csize_t) {.exportc, cdecl.} =
+  ## The argument texts the host handed the program: borrowed for the length
+  ## of the run, so the adapter keeps its own copy of each.
+  blazeHostArguments = @[]
+  if values == nil: return
+  let slots = cast[ptr UncheckedArray[cstring]](values)
+  for index in 0 ..< int(count):
+    let slot = slots[index]
+    blazeHostArguments.add(if slot == nil: "" else: $slot)
+
+proc blaze_rt_host_argument_count*(): csize_t {.exportc, cdecl.} =
+  csize_t(blazeHostArguments.len)
+
+proc blaze_rt_host_argument*(index: csize_t): cstring {.exportc, cdecl.} =
+  let at = int(index)
+  let text = if at >= 0 and at < blazeHostArguments.len: blazeHostArguments[at] else: ""
+  blaze_rt_string_new(cast[pointer](text.cstring), csize_t(text.len))
+
 proc blaze_rt_print_text*(text: cstring) {.exportc, cdecl.} =
   if text != nil: stdout.write($text)
 

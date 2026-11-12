@@ -12,12 +12,6 @@
  * sources that ask changing.
  */
 
-/** One of the command's own streams: a terminal or a pipe, and a write. */
-export interface HostStream {
-  readonly isTTY?: boolean;
-  write(text: string): unknown;
-}
-
 /** A signal the command handles so a title does not outlive it. */
 export type HostSignal = "SIGINT" | "SIGTERM";
 
@@ -80,43 +74,6 @@ export interface HostSpawnOptions {
 }
 
 /**
- * The process the command runs in, as the command line needs it.
- *
- * The arguments are the command's own, after the program and script names;
- * the streams are where a command writes what it says; and the exit code is
- * the answer the process leaves behind. Asking a question and handling a
- * signal are operations of the host because a native command has no
- * `readline` module and no Node signal emitter to reach for.
- */
-export interface Host {
-  readonly arguments: readonly string[];
-  readonly stdout: HostStream;
-  readonly stderr: HostStream;
-  readonly platform: string;
-  cwd(): string;
-  setExitCode(code: number): void;
-  /** The answer to one question, or undefined when there is nobody to ask. */
-  ask(question: string): Promise<string | undefined>;
-  /**
-   * Calls the handler when the process exits; the answer detaches it. A host
-   * that cannot hand its own exit to the program is without it, and a command
-   * that decorates the terminal checks for it before it decorates anything.
-   */
-  onExit?(handler: () => void): () => void;
-  /** Calls the handler once for a signal; the answer detaches it. */
-  onSignal?(signal: HostSignal, handler: () => void): () => void;
-  /** Raises a signal again once its handler has settled what it was doing. */
-  raiseSignal?(signal: HostSignal): void;
-  /**
-   * Starts a child the caller can wait on without blocking the process. A host
-   * without one still runs children: the build runs them one after another.
-   */
-  spawn?(command: string, args: readonly string[], options: HostSpawnOptions): HostChild;
-  /** The command that runs a program with a bounded heap. */
-  boundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand;
-}
-
-/**
  * One entry a directory lists: its name, and what it is.
  *
  * The shape is the compiler's own rather than the host's: a source that lists
@@ -168,10 +125,22 @@ export {
   existsSync,
   extname,
   fileURLToPath,
-  host,
   hostArchitecture,
+  hostArguments,
+  hostAsk,
+  hostBoundHeap,
+  hostCwd,
   hostEnvironment,
+  hostOnExit,
+  hostOnSignal,
   hostPlatform,
+  hostRaiseSignal,
+  hostSetExitCode,
+  hostSpawn,
+  hostSpawnSupport,
+  hostStdoutIsTTY,
+  hostWriteError,
+  hostWriteOut,
   isAbsolute,
   join,
   mkdir,

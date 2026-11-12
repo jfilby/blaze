@@ -10,7 +10,7 @@
  * otherwise be able to drive the terminal.
  */
 
-import { host } from "./platform.ts";
+import { hostOnExit, hostOnSignal, hostRaiseSignal, hostStdoutIsTTY, hostWriteOut } from "./platform.ts";
 
 /** What blaze calls itself in a tab, whatever it is doing. */
 export const BRAND = "B";
@@ -177,7 +177,7 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     resolvedBrand = dependencies.brand ?? BRAND;
   }
   const name = sanitizeTitlePart(label);
-  const sink = dependencies.sink ?? streamTitleSink(host.stdout);
+  const sink = dependencies.sink ?? streamTitleSink({ write: hostWriteOut, isTTY: hostStdoutIsTTY() });
   const ticker = dependencies.ticker ?? intervalTicker;
   let frame = 0;
   let cancel: (() => void) | undefined;
@@ -216,12 +216,12 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
 
   function onInterrupt(): void {
     settle("fail");
-    host.raiseSignal?.("SIGINT");
+    hostRaiseSignal("SIGINT");
   }
 
   function onTerminate(): void {
     settle("fail");
-    host.raiseSignal?.("SIGTERM");
+    hostRaiseSignal("SIGTERM");
   }
 
   emit(workingTitle(name, frame, resolvedBrand));
@@ -232,9 +232,9 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
   // A host that cannot register a handler still shows the working title; it
   // simply cannot settle it from a signal, and the process's own exit ends
   // the animation with it.
-  detachExit = host.onExit?.(onExit) ?? (() => {});
-  detachInterrupt = host.onSignal?.("SIGINT", onInterrupt) ?? (() => {});
-  detachTerminate = host.onSignal?.("SIGTERM", onTerminate) ?? (() => {});
+  detachExit = hostOnExit(onExit);
+  detachInterrupt = hostOnSignal("SIGINT", onInterrupt);
+  detachTerminate = hostOnSignal("SIGTERM", onTerminate);
 
   return { stop: settle };
 }

@@ -33,7 +33,7 @@ import type {
   LanguageModelV4Usage,
   SharedV4Warning,
 } from "@ai-sdk/provider";
-import { host, randomUUID } from "../core/platform.ts";
+import { hostCwd, hostPlatform, randomUUID } from "../core/platform.ts";
 import { z } from "zod";
 import { COMMANDCODE_BASE_URL } from "./model.ts";
 
@@ -225,9 +225,9 @@ function toWire(modelId: string, options: LanguageModelV4CallOptions, warnings: 
   const joined = system.join("\n\n");
   return {
     config: {
-      workingDir: host.cwd(),
+      workingDir: hostCwd(),
       date: new Date().toISOString().slice(0, 10),
-      environment: host.platform,
+      environment: hostPlatform(),
       structure: [],
       isGitRepo: false,
       currentBranch: "",

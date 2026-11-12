@@ -108,6 +108,10 @@ proc programNumbers(): seq[float64] =
   for index in 1 .. paramCount():
     result.add(programNumber(paramStr(index)))
 
+proc programTextArguments(): seq[string] =
+  for index in 1 .. paramCount():
+    result.add(paramStr(index))
+
 proc programFail(message: string) =
   stderr.write("program: " & message & "\\n")
   quit(2)
@@ -434,7 +438,13 @@ ${anchor}
     var argumentStorage = programArguments
     ${RUNTIME_NAME}_arguments_set(cast[ptr UncheckedArray[float64]](addr argumentStorage[0]), csize_t(argumentStorage.len))
   else:
-    ${RUNTIME_NAME}_arguments_set(nil, 0)`];
+    ${RUNTIME_NAME}_arguments_set(nil, 0)
+  let programTexts = programTextArguments()
+  if programTexts.len > 0:
+    var textStorage = programTexts
+    ${RUNTIME_NAME}_host_arguments_set(cast[cstring](addr textStorage[0]), csize_t(textStorage.len))
+  else:
+    ${RUNTIME_NAME}_host_arguments_set(nil, 0)`];
   }
 
   closeProgram(releases: readonly string[]): string[] {

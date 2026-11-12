@@ -26,7 +26,7 @@ import {
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
-import type { BoundedCommand, DirectoryEntry, FileInfo, Host, HostChild, HostSignal, HostSpawnOptions, WebAssemblyEngine } from "./platform.ts";
+import type { BoundedCommand, DirectoryEntry, FileInfo, HostChild, HostSignal, HostSpawnOptions, WebAssemblyEngine } from "./platform.ts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename as nodeBasename,
@@ -192,60 +192,96 @@ export function webAssemblyEngine(): WebAssemblyEngine | null {
 /** The line a bounded run writes when the program itself is not there. */
 const MISSING_PROGRAM = "blaze: no such program: ";
 
-/** The Node process, as the command line sees it. */
-export const host: Host = {
-  arguments: process.argv.slice(2),
-  stdout: process.stdout,
-  stderr: process.stderr,
-  platform: process.platform,
-  cwd: () => process.cwd(),
-  setExitCode: (code: number): void => {
-    process.exitCode = code;
-  },
-  ask: async (question: string): Promise<string | undefined> => {
-    if (process.stdin.isTTY !== true) return undefined;
-    const prompt = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      return await prompt.question(question);
-    } finally {
-      prompt.close();
-    }
-  },
-  onExit: (handler: () => void): (() => void) => {
-    process.once("exit", handler);
-    return () => {
-      process.off("exit", handler);
-    };
-  },
-  onSignal: (signal: HostSignal, handler: () => void): (() => void) => {
-    process.once(signal, handler);
-    return () => {
-      process.off(signal, handler);
-    };
-  },
-  raiseSignal: (signal: HostSignal): void => {
-    process.kill(process.pid, signal);
-  },
-  spawn: (command: string, args: readonly string[], options: HostSpawnOptions): HostChild =>
-    spawn(command, args, options as SpawnOptions) as unknown as HostChild,
-  boundHeap: (command: string, args: readonly string[], bytes: number): BoundedCommand => {
-    const kilobytes = Math.max(1, Math.floor(bytes / 1024));
-    return {
-      command: "/bin/sh",
-      args: [
-        "-c",
-        [
-          `ulimit -d ${kilobytes} 2>/dev/null || { echo "blaze: this shell cannot bound the memory of a program" >&2; exit 125; }`,
-          `command -v "$0" >/dev/null 2>&1 || { echo "${MISSING_PROGRAM}$0" >&2; exit 127; }`,
-          `exec "$0" "$@"`,
-        ].join("\n"),
-        command,
-        ...args,
-      ],
-      missing: MISSING_PROGRAM,
-    };
-  },
-};
+/** The arguments the command was given, after the program and script names. */
+export function hostArguments(): readonly string[] {
+  return process.argv.slice(2);
+}
+
+/** Whether the output stream is a terminal, which a title may decorate. */
+export function hostStdoutIsTTY(): boolean {
+  return process.stdout.isTTY === true;
+}
+
+/** Writes to the output stream, as it is given. */
+export function hostWriteOut(text: string): void {
+  process.stdout.write(text);
+}
+
+/** Writes to the error stream, as it is given. */
+export function hostWriteError(text: string): void {
+  process.stderr.write(text);
+}
+
+/** The directory the process runs in. */
+export function hostCwd(): string {
+  return process.cwd();
+}
+
+/** Sets the status the process leaves with. */
+export function hostSetExitCode(code: number): void {
+  process.exitCode = code;
+}
+
+/** The answer to one question, or undefined when there is nobody to ask. */
+export async function hostAsk(question: string): Promise<string | undefined> {
+  if (process.stdin.isTTY !== true) return undefined;
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await prompt.question(question);
+  } finally {
+    prompt.close();
+  }
+}
+
+/** Calls the handler when the process exits; the answer detaches it. */
+export function hostOnExit(handler: () => void): () => void {
+  process.once("exit", handler);
+  return () => {
+    process.off("exit", handler);
+  };
+}
+
+/** Calls the handler once for a signal; the answer detaches it. */
+export function hostOnSignal(signal: HostSignal, handler: () => void): () => void {
+  process.once(signal, handler);
+  return () => {
+    process.off(signal, handler);
+  };
+}
+
+/** Raises a signal again once its handler has settled what it was doing. */
+export function hostRaiseSignal(signal: HostSignal): void {
+  process.kill(process.pid, signal);
+}
+
+/** Whether the host can start a child without blocking the process. */
+export function hostSpawnSupport(): boolean {
+  return true;
+}
+
+/** Starts a child the caller can wait on without blocking the process. */
+export function hostSpawn(command: string, args: readonly string[], options: HostSpawnOptions): HostChild {
+  return spawn(command, args, options as SpawnOptions) as unknown as HostChild;
+}
+
+/** The command that runs a program with a bounded heap. */
+export function hostBoundHeap(command: string, args: readonly string[], bytes: number): BoundedCommand {
+  const kilobytes = Math.max(1, Math.floor(bytes / 1024));
+  return {
+    command: "/bin/sh",
+    args: [
+      "-c",
+      [
+        `ulimit -d ${kilobytes} 2>/dev/null || { echo "blaze: this shell cannot bound the memory of a program" >&2; exit 125; }`,
+        `command -v "$0" >/dev/null 2>&1 || { echo "${MISSING_PROGRAM}$0" >&2; exit 127; }`,
+        `exec "$0" "$@"`,
+      ].join("\n"),
+      command,
+      ...args,
+    ],
+    missing: MISSING_PROGRAM,
+  };
+}
 
 /** The last part of a path, or the path with its extension taken off. */
 export function basename(path: string, suffix?: string): string {

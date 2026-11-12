@@ -6622,6 +6622,48 @@ key, as `table.a` does, rather than as a layout field of the dictionary handle:
 the handle is not a record, so the layout read degraded to the handle itself and
 a rest pattern's names were bound to the whole dictionary.
 
+### The platform boundary is a file, and the host is functions
+
+`core/platform.ts` now re-exports `#host/platform`: `package.json` maps it to
+`core/platform-node.ts` for Node, and `blaze.toml` maps it to
+`core/platform-native.ts` for the self-build. The native adapter names no host
+module and no host object; it is written in the subset and answers the same
+names over the runtime ABI. The gap report measures the native adapter and
+leaves the Node implementation out, as it already did for the model boundary.
+
+The host is exported as functions rather than as one `host` object
+(`hostArguments`, `hostWriteOut`, `hostWriteError`, `hostCwd`, `hostAsk`,
+`hostSetExitCode`, `hostBoundHeap`, `hostSpawnSupport`/`hostSpawn`, and the
+exit/signal hooks). A module-level object annotated with a layout is held as a
+shape in the file that writes it; a compiled function in another module has no
+environment to read it from, and the value therefore has to cross as a getter
+or as a link edge. A function crosses as a link edge. The adapter and the Node
+implementation both answer the functions, so no source branches on the host.
+
+The runtime gained the text command line the compiler needs: the driver hands
+the runtime the host's `argv` texts beside the numeric arguments a program
+reads (`blaze_rt_host_arguments_set`, `blaze_rt_host_argument_count`,
+`blaze_rt_host_argument`), and `stdoutWrite` writes to the output stream the
+way `process.stderr.write` writes to the error stream. Without them a native
+compiler could read a project file only as a number.
+
+Reaching the adapter in the IR surfaced four frontend readings, each fixed
+where it was written: a value a module re-exports is offered by that module
+(the value and its shape follow the re-export chain); an exported object the
+file holds as state gets a getter so another module can read it; a truth
+returned by a function is `result == true`, not `result == 1`, because the
+contract language does not compare a bool with a number; and a field a
+constant object does not write reads as the absence the optional property is,
+rather than leaving the name of the object in the body.
+
+The next refusal is a language feature, not a host one:
+`compiler.ts: machineRefusalOf` calls `structuredClone` on a semantic IR value.
+The compiler copies IR trees before a pass rewrites them, and a compiled
+function has no deep-copy service. The slice is a clone over the runtime's
+values: a dynamic object and dictionary copy their entries, a list copies its
+block, and a laid-out record copies its fields at the layout it already has.
+Until then the self-build stops at the first function that copies a value.
+
 ### 7. Close the fixed point
 
 Run the ladder as a test: Node builds stage 1, stage 1 builds stage 2, stage 2

@@ -6077,7 +6077,7 @@ class TypeScriptParser {
         (this.stateInitializers.has(this.peek(2).text) ||
           this.constants.get(this.peek(2).text)?.constructed === true) &&
         !this.constantCollections.has(this.peek(2).text) &&
-        !this.shapes.has(this.peek(2).text)
+        (!this.shapes.has(this.peek(2).text) || this.crossesByGetter(this.peek(2).text))
       ) {
         this.next();
       }
@@ -6123,7 +6123,11 @@ class TypeScriptParser {
           // collection's, and a fresh value per read would not be the one the
           // declaration named.
           !this.constantCollections.has(valueName) &&
-          !this.shapes.has(valueName)
+          // An exported object the file holds as state is read through a getter
+          // by the modules that import it: a shape is enough to read a field
+          // here, but the value itself has to cross a module, and the getter is
+          // where it does.
+          (!this.shapes.has(valueName) || this.crossesByGetter(valueName))
         ) {
           // A value the file constructs is a constant with the range of its
           // construction; a value the file holds as state has the range the
@@ -6669,7 +6673,7 @@ class TypeScriptParser {
       // The arrows the refused declaration wrote are read again, by the parser
       // the program reads bodies with: they are functions of the program then,
       // not of this module.
-      this.closures.length = closuresBefore;
+      this.dropClosures(closuresBefore);
       this.position = start;
       // A function is skipped by the braces it is written in, whatever the
       // parser read of it; a construct that is not one is skipped as the
@@ -6681,7 +6685,7 @@ class TypeScriptParser {
       // not functions of the module after all, and the declaration is not a
       // statement of the body either, so nothing reads it a second time.
       functions.length = before;
-      this.closures.length = closuresBefore;
+      this.dropClosures(closuresBefore);
     }
     // What the declaration is, as opposed to what its body does: a file that
     // imports the name calls it against this signature, whether or not the
@@ -13623,6 +13627,13 @@ class TypeScriptParser {
             replace(expanded);
             continue;
           }
+          // A field the constant does not write is the absence the optional
+          // property is: `DEFAULT_GENERATION.timeoutSeconds` names a field the
+          // default object leaves unset, and the value of it is nothing.
+          if (constant?.fields !== undefined && !constant.fields.has(field.text)) {
+            replace({ k: "null" });
+            continue;
+          }
         }
         // `Number.MAX_SAFE_INTEGER` and its neighbours are numbers the
         // language writes down, not values the runtime holds.
@@ -16063,6 +16074,21 @@ class TypeScriptParser {
       if (shape !== null && shape.kind !== "any") shapes.set(name, shape);
     }
     return shapes;
+  }
+
+  /**
+   * Whether a value crosses a module through a getter.
+   *
+   * A shape-held value is read from the shape where it is written; a module
+   * that imports the name needs the value itself, and the getter is what hands
+   * it over. Only an object of fields is one of those: a record keyed by text
+   * (`Record<string, V>`) is a dictionary whose shape states no fields, and a
+   * value the file wrote out is read where the import binds it.
+   */
+  private crossesByGetter(name: string): boolean {
+    if (!this.exportedState.has(name) || this.constants.has(name)) return false;
+    const shape = this.constantAnnotationShape(name);
+    return shape !== null && shape.kind === "record" && shape.index === null && shape.fields.size > 0;
   }
 
   private constantAnnotationShape(name: string): ResolvedType | null {
@@ -22332,6 +22358,24 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
   }
 
   /** The counters a nested parser advanced, taken back by the file. */
+  /**
+   * Drops the closures a declaration read and did not keep.
+   *
+   * The helper each collection method is lowered to is cached by the shape it
+   * walks, so a second body over the same shape reuses the function. A helper
+   * whose closure is dropped has to leave the cache with it: a body read after
+   * the drop that reused the name would call a function the file no longer
+   * holds.
+   */
+  private dropClosures(to: number): void {
+    const kept = new Set<string>();
+    for (const closure of this.closures.slice(0, to)) kept.add(closure.name);
+    this.closures.length = to;
+    for (const [key, helper] of this.collectHelpers) {
+      if (!kept.has(helper.name)) this.collectHelpers.delete(key);
+    }
+  }
+
   private adopt(child: TypeScriptParser): void {
     // An assignment a template string interpolates is a statement of the body
     // the string is written in, so it runs before that statement and not
@@ -22911,6 +22955,9 @@ class BodyAnalysis {
   private serialize(expression: Expression, loop: LoopContext | null, line: number): string {
     switch (expression.k) {
       case "literal":
+        // A truth is written as the truth it is: `result == 0` compares a bool
+        // with a number, and the contract language has no such comparison.
+        return expression.boolean === true ? (expression.text === "1" ? "true" : "false") : expression.text;
       case "bigint":
         return expression.text;
       case "null":

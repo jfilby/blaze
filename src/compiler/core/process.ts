@@ -11,7 +11,7 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { clearTimeout, host, hostEnvironment, monotonicTimeNs, spawnSync, type BoundedCommand, type HostError } from "./platform.ts";
+import { clearTimeout, hostBoundHeap, hostEnvironment, hostSpawn, hostSpawnSupport, monotonicTimeNs, spawnSync, type BoundedCommand, type HostError } from "./platform.ts";
 
 export interface RunOptions {
   cwd?: string;
@@ -83,7 +83,7 @@ export function run(command: string, args: readonly string[], options: RunOption
   // start it.
   const spawned: BoundedCommand = options.heapBytes === undefined
     ? { command, args: [...args] }
-    : host.boundHeap(command, args, options.heapBytes);
+    : hostBoundHeap(command, args, options.heapBytes);
   const result = spawnSync(spawned.command, spawned.args, {
     cwd: options.cwd,
     env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
@@ -156,12 +156,12 @@ export function runAsync(command: string, args: readonly string[], options: RunO
   // A host without an asynchronous child has one process primitive, the one
   // `run` uses: the children are run in order, and the answer is the answer
   // the blocking run gives.
-  if (host.spawn === undefined) return Promise.resolve(run(command, args, options));
-  const spawnChild = host.spawn;
+  if (!hostSpawnSupport()) return Promise.resolve(run(command, args, options));
+  const spawnChild = hostSpawn;
   const started = monotonicTimeNs();
   const spawned: BoundedCommand = options.heapBytes === undefined
     ? { command, args: [...args] }
-    : host.boundHeap(command, args, options.heapBytes);
+    : hostBoundHeap(command, args, options.heapBytes);
   const maxBuffer = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER;
   const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
