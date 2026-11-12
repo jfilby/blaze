@@ -323,14 +323,14 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
 /* Reading one back                                                             */
 /* -------------------------------------------------------------------------- */
 
-const SECTION_TYPES: Record<number, string> = {
-  [SHT_PROGBITS]: "PROGBITS",
-  [SHT_SYMTAB]: "SYMTAB",
-  [SHT_STRTAB]: "STRTAB",
-  [SHT_RELA]: "RELA",
+const SECTION_TYPES: Record<string, string> = {
+  "1": "PROGBITS",
+  "2": "SYMTAB",
+  "3": "STRTAB",
+  "4": "RELA",
 };
 
-const RELOCATION_TYPES: Record<number, string> = { [R_X86_64_PC32]: "PC32", [R_X86_64_PLT32]: "PLT32" };
+const RELOCATION_TYPES: Record<string, string> = { "2": "PC32", "4": "PLT32" };
 
 interface ReadSection {
   readonly name: string;
@@ -432,7 +432,7 @@ export function describeObject(bytes: Uint8Array): string {
     const kind = view.getUint32(where + 4, true);
     return {
       name: readString(bytes, sectionNamesOffset + view.getUint32(where, true)),
-      type: SECTION_TYPES[kind] ?? String(kind),
+      type: SECTION_TYPES[String(kind)] ?? String(kind),
       kind,
       flags: view.getUint32(where + 8, true),
       offset: Number(view.getBigUint64(where + 24, true)),
@@ -476,7 +476,7 @@ export function describeObject(bytes: Uint8Array): string {
       const symbolAt = table.offset + Number(info / 0x1_0000_0000n) * table.entrySize;
       const type = Number(info & 0xffn);
       entries.push(
-        `  text+${Number(view.getBigUint64(at, true))} ${RELOCATION_TYPES[type] ?? String(type)} ${readString(bytes, stringsAt + view.getUint32(symbolAt, true))}`,
+        `  text+${Number(view.getBigUint64(at, true))} ${RELOCATION_TYPES[String(type)] ?? String(type)} ${readString(bytes, stringsAt + view.getUint32(symbolAt, true))}`,
       );
     }
     lines.push("relocations:", ...entries, "");

@@ -67,7 +67,7 @@ import type {
 import { builtinFor } from "./builtins.ts";
 import { cMemberName } from "../toolchain/c-names.ts";
 import { contractText, parseType } from "./contract.ts";
-import { NO_CALLEES, reductionsFor, refusalFor, type Callees } from "./parallel.ts";
+import { reductionsFor, refusalFor, type Callees } from "./parallel.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
 
 /* -------------------------------------------------------------------------- */
@@ -1440,7 +1440,7 @@ function typeProblems(context: Context, tree: Tree): string[] {
     }
 
     for (const value of statementValues(statement)) {
-      walked(value, (inner) => problems.push(...valueTypeProblems(prefix, inner, context)));
+      walked(value, (inner) => { problems.push(...valueTypeProblems(prefix, inner, context)); });
     }
   }
 
@@ -1577,6 +1577,10 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     const argument = call.argTypes[index];
     if (argument === undefined) continue;
     if (settlesAny || listService) continue;
+    // An unshaped reference parameter takes any reference: the deep copy and
+    // the settle functions ask about the value, not about the fields a record
+    // it points at was laid out with.
+    if (parameter.kind === "ref" && parameter.of === null && argument.kind === "ref") continue;
     if (!typeEquals(parameter, argument)) {
       problems.push(`${prefix}argument ${index + 1} of ${call.callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
     }
@@ -2017,7 +2021,7 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
         problems.push(`${where}returns ${read}, which the block it is written in does not hold`);
       }
     }
-    walked(value, (inner) => problems.push(...valueTypeProblems(where, inner, context)));
+    walked(value, (inner) => { problems.push(...valueTypeProblems(where, inner, context)); });
   }
 
   return problems;
@@ -2331,7 +2335,7 @@ function functionProblems(
 export function semanticFunctionProblems(
   fn: SemanticFunction,
   contract?: FunctionContract,
-  callees: Callees = NO_CALLEES,
+  callees: Callees = new Map(),
 ): string[] {
   return functionProblems(fn, contract, undefined, callees);
 }
@@ -2359,7 +2363,7 @@ export function validateSemanticProgram(program: SemanticProgram, contract?: Pro
 export function validateSemanticFunction(
   fn: SemanticFunction,
   contract?: FunctionContract,
-  callees: Callees = NO_CALLEES,
+  callees: Callees = new Map(),
 ): void {
   refuse(`${fn.symbol} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees));
 }

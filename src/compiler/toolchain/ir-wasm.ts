@@ -24,12 +24,12 @@ import { stat, writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, generateWasmProgramHost, INSPECT_MODULE, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";
-import { HOST_SERVICE_BY_SYMBOL } from "./wasm-host-runtime.ts";
+import { hostServiceBySymbol } from "./wasm-host-runtime.ts";
 import type { Runner } from "../core/types.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import { rulesFor } from "../semantics/language.ts";
 import type { FunctionContract } from "../core/types.ts";
-import { ARGV, ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
+import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   isWide,
   isWideType,
@@ -345,11 +345,11 @@ const WIDTHS: Record<string, number> = {
 };
 
 /** The loads that read a value at a width, by the carrier it is read into. */
-const LOADS: Record<number, Record<number, { code: number; align: number }>> = {
-  [I32]: { 1: { code: 0x2c, align: 0 }, 2: { code: 0x2e, align: 1 }, 4: { code: 0x28, align: 2 } },
-  [I64]: { 1: { code: 0x30, align: 0 }, 2: { code: 0x32, align: 1 }, 4: { code: 0x34, align: 2 }, 8: { code: 0x29, align: 3 } },
-  [F32]: { 4: { code: 0x2a, align: 2 } },
-  [F64]: { 8: { code: 0x2b, align: 3 } },
+const LOADS: Record<string, Record<string, { code: number; align: number }>> = {
+  "127": { "1": { code: 0x2c, align: 0 }, "2": { code: 0x2e, align: 1 }, "4": { code: 0x28, align: 2 } },
+  "126": { "1": { code: 0x30, align: 0 }, "2": { code: 0x32, align: 1 }, "4": { code: 0x34, align: 2 }, "8": { code: 0x29, align: 3 } },
+  "125": { "4": { code: 0x2a, align: 2 } },
+  "124": { "8": { code: 0x2b, align: 3 } },
 };
 
 /**
@@ -358,16 +358,16 @@ const LOADS: Record<number, Record<number, { code: number; align: number }>> = {
  * as a signed byte of `-1` are `255` here, and a sign-extended `u32` is a
  * number past the range the source wrote.
  */
-const UNSIGNED_LOADS: Record<number, Record<number, { code: number; align: number }>> = {
-  [I32]: { 1: { code: 0x2d, align: 0 }, 2: { code: 0x2f, align: 1 }, 4: { code: 0x28, align: 2 } },
+const UNSIGNED_LOADS: Record<string, Record<string, { code: number; align: number }>> = {
+  "127": { "1": { code: 0x2d, align: 0 }, "2": { code: 0x2f, align: 1 }, "4": { code: 0x28, align: 2 } },
 };
 
 /** The stores that write a value at a width, by the carrier it is written from. */
-const STORES: Record<number, Record<number, { code: number; align: number }>> = {
-  [I32]: { 1: { code: 0x3a, align: 0 }, 2: { code: 0x3b, align: 1 }, 4: { code: 0x36, align: 2 } },
-  [I64]: { 1: { code: 0x3c, align: 0 }, 2: { code: 0x3d, align: 1 }, 4: { code: 0x3e, align: 2 }, 8: { code: 0x37, align: 3 } },
-  [F32]: { 4: { code: 0x38, align: 2 } },
-  [F64]: { 8: { code: 0x39, align: 3 } },
+const STORES: Record<string, Record<string, { code: number; align: number }>> = {
+  "127": { "1": { code: 0x3a, align: 0 }, "2": { code: 0x3b, align: 1 }, "4": { code: 0x36, align: 2 } },
+  "126": { "1": { code: 0x3c, align: 0 }, "2": { code: 0x3d, align: 1 }, "4": { code: 0x3e, align: 2 }, "8": { code: 0x37, align: 3 } },
+  "125": { "4": { code: 0x38, align: 2 } },
+  "124": { "8": { code: 0x39, align: 3 } },
 };
 
 /**
@@ -378,7 +378,7 @@ const STORES: Record<number, Record<number, { code: number; align: number }>> = 
  * arrives with no argument of its own.
  */
 const REFERENCE: TypeFacts = {
-  held: I32,
+  held: 127,
   unsigned: false,
   size: 8,
   shift: 3,
@@ -395,7 +395,7 @@ const REFERENCE: TypeFacts = {
  * object the program laid out is a pointer, and stays one.
  */
 const DYNAMIC: TypeFacts = {
-  held: F64,
+  held: 124,
   unsigned: false,
   size: 8,
   shift: 3,
@@ -419,7 +419,7 @@ const DYNAMIC: TypeFacts = {
  * written refuses rather than being carried out four limbs wide.
  */
 const WIDE: TypeFacts = {
-  held: I32,
+  held: 127,
   unsigned: false,
   size: 4,
   shift: 2,
@@ -477,8 +477,6 @@ function byteViewOf(value: bigint): bigint[] {
   return limbs;
 }
 
-const FACTS = new Map<string, TypeFacts>();
-
 function facts(type: SemanticType): TypeFacts {
   // A wide number is refused here rather than described, and this is the one
   // place the refusal belongs. Everything below is a table keyed by a single
@@ -495,40 +493,37 @@ function facts(type: SemanticType): TypeFacts {
   // memory, and the runtime carries it as a double.
   if (type.kind === "ref" && type.of === null && type.name === undefined) return DYNAMIC;
   if (type.kind !== "primitive") return REFERENCE;
-  const known = FACTS.get(type.name);
-  if (known !== undefined) return known;
   const wasm = wasmValueType(type);
   const held = wasm === "i64" ? I64 : wasm === "f32" ? F32 : wasm === "f64" ? F64 : I32;
   const isUnsigned = type.name === "u8" || type.name === "u16" || type.name === "u32" || type.name === "u64" || type.name === "usize";
   const size = WIDTHS[type.name] ?? 8;
-  const loads = (isUnsigned ? UNSIGNED_LOADS[held] : undefined) ?? LOADS[held];
+  const loads = (isUnsigned ? UNSIGNED_LOADS[String(held)] : undefined) ?? LOADS[String(held)];
   const computed: TypeFacts = {
     held,
     unsigned: isUnsigned,
     size,
-    shift: size <= 1 ? -1 : Math.log2(size),
-    load: loads?.[size] ?? REFERENCE.load,
-    store: STORES[held]?.[size] ?? REFERENCE.store,
+    shift: size <= 1 ? -1 : size === 2 ? 1 : size === 4 ? 2 : 3,
+    load: loads?.[String(size)] ?? REFERENCE.load,
+    store: STORES[String(held)]?.[String(size)] ?? REFERENCE.store,
   };
-  FACTS.set(type.name, computed);
   return computed;
 }
 
 /** The binary operators of one carrier type, by the name the IR gives them. */
-const BINARY: Record<number, Record<string, number>> = {
-  [I32]: {
+const BINARY: Record<string, Record<string, number>> = {
+  "127": {
     add: 0x6a, sub: 0x6b, mul: 0x6c, div: 0x6d, mod: 0x6f, and: 0x71, or: 0x72, xor: 0x73,
     shl: 0x74, shr: 0x75, ushr: 0x76, eq: 0x46, ne: 0x47, lt: 0x48, gt: 0x4a, le: 0x4c, ge: 0x4e,
   },
-  [I64]: {
+  "126": {
     add: 0x7c, sub: 0x7d, mul: 0x7e, div: 0x7f, mod: 0x81, and: 0x83, or: 0x84, xor: 0x85,
     shl: 0x86, shr: 0x87, ushr: 0x88, eq: 0x51, ne: 0x52, lt: 0x53, gt: 0x55, le: 0x57, ge: 0x59,
   },
-  [F32]: {
+  "125": {
     add: 0x92, sub: 0x93, mul: 0x94, div: 0x95, min: 0x96, max: 0x97,
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60,
   },
-  [F64]: {
+  "124": {
     add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, min: 0xa4, max: 0xa5,
     eq: 0x61, ne: 0x62, lt: 0x63, gt: 0x64, le: 0x65, ge: 0x66,
   },
@@ -545,11 +540,11 @@ const BINARY: Record<number, Record<string, number>> = {
  * a bitwise operator, and the amount of a shift, which is masked either way —
  * is in `BINARY` and is not repeated here.
  */
-const UNSIGNED_BINARY: Record<number, Record<string, number>> = {
-  [I32]: { div: 0x6e, mod: 0x70, shr: 0x76, ushr: 0x76, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
-  [I64]: { div: 0x80, mod: 0x82, shr: 0x88, ushr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
-  [F32]: {},
-  [F64]: {},
+const UNSIGNED_BINARY: Record<string, Record<string, number>> = {
+  "127": { div: 0x6e, mod: 0x70, shr: 0x76, ushr: 0x76, lt: 0x49, gt: 0x4b, le: 0x4d, ge: 0x4f },
+  "126": { div: 0x80, mod: 0x82, shr: 0x88, ushr: 0x88, lt: 0x54, gt: 0x56, le: 0x58, ge: 0x5a },
+  "125": {},
+  "124": {},
 };
 
 /**
@@ -562,9 +557,9 @@ const UNSIGNED_BINARY: Record<number, Record<string, number>> = {
  * `-1294967296`. A conversion that always took the signed one turned a whole
  * number the source wrote into a different number.
  */
-const TO_FLOAT: Record<number, Record<number, { signed: number; unsigned: number }>> = {
-  [I32]: { [F32]: { signed: 0xb2, unsigned: 0xb3 }, [F64]: { signed: 0xb7, unsigned: 0xb8 } },
-  [I64]: { [F32]: { signed: 0xb4, unsigned: 0xb5 }, [F64]: { signed: 0xb9, unsigned: 0xba } },
+const TO_FLOAT: Record<string, Record<string, { signed: number; unsigned: number }>> = {
+  "127": { "125": { signed: 0xb2, unsigned: 0xb3 }, "124": { signed: 0xb7, unsigned: 0xb8 } },
+  "126": { "125": { signed: 0xb4, unsigned: 0xb5 }, "124": { signed: 0xb9, unsigned: 0xba } },
 };
 
 /**
@@ -572,9 +567,9 @@ const TO_FLOAT: Record<number, Record<number, { signed: number; unsigned: number
  * two it is here is the destination's own business, because the destination is
  * the one deciding what it can hold.
  */
-const TO_WHOLE: Record<number, Record<number, { signed: number; unsigned: number }>> = {
-  [F32]: { [I32]: { signed: 0xa8, unsigned: 0xa9 }, [I64]: { signed: 0xae, unsigned: 0xaf } },
-  [F64]: { [I32]: { signed: 0xaa, unsigned: 0xab }, [I64]: { signed: 0xb0, unsigned: 0xb1 } },
+const TO_WHOLE: Record<string, Record<string, { signed: number; unsigned: number }>> = {
+  "125": { "127": { signed: 0xa8, unsigned: 0xa9 }, "126": { signed: 0xae, unsigned: 0xaf } },
+  "124": { "127": { signed: 0xaa, unsigned: 0xab }, "126": { signed: 0xb0, unsigned: 0xb1 } },
 };
 
 /**
@@ -601,8 +596,8 @@ const MATH: Record<string, number> = {
  * read and no process to read it from.
  */
 const ARGV_NAMES: Record<string, true> = {
-  [ARGV]: true,
-  [ARGV_LENGTH]: true,
+  argv: true,
+  argvLength: true,
 };
 
 /**
@@ -640,7 +635,6 @@ function isWholeNumber(name: string): boolean {
  * module rather than made per constant. A constant is read back one byte at a
  * time straight after it is written, so nothing else is looking at it.
  */
-const FLOAT_BYTES = new DataView(new ArrayBuffer(8));
 
 const COMPOUND: Record<string, string> = {
   "+=": "add",
@@ -676,8 +670,8 @@ function compoundCode(held: number, type: SemanticType, op: string): number {
     });
   }
   const name = COMPOUND[op] as string;
-  const code = facts(type).unsigned ? UNSIGNED_BINARY[held][name] : undefined;
-  return (code ?? BINARY[held][name]) as number;
+  const code = facts(type).unsigned ? UNSIGNED_BINARY[String(held)][name] : undefined;
+  return (code ?? BINARY[String(held)][name]) as number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -812,11 +806,14 @@ class Module {
     const key = `${wide ? "f64" : "f32"}:${value}`;
     const known = this.pooled.get(key);
     if (known !== undefined) return known;
-    if (wide) FLOAT_BYTES.setFloat64(0, value, true);
-    else FLOAT_BYTES.setFloat32(0, value, true);
+    // The bytes are read out of a window this call owns: a module-level view
+    // would be state a compiled function cannot read.
+    const view = new DataView(new ArrayBuffer(8));
+    if (wide) view.setFloat64(0, value, true);
+    else view.setFloat32(0, value, true);
     const size = wide ? 8 : 4;
     const bytes: number[] = [];
-    for (let at = 0; at < size; at += 1) bytes.push(FLOAT_BYTES.getUint8(at));
+    for (let at = 0; at < size; at += 1) bytes.push(view.getUint8(at));
     this.pooled.set(key, this.floats.length);
     this.floats.push({ type: wide ? F64 : F32, opcode: wide ? 0x44 : 0x43, bytes });
     return this.floats.length - 1;
@@ -829,7 +826,13 @@ class Module {
     if (known !== undefined) return known;
     const bytes: number[] = [];
     for (const limb of byteViewOf(value)) {
-      for (let at = 0; at < 8; at += 1) bytes.push(Number((limb >> BigInt(at * 8)) & 0xffn));
+      // Each byte is the low one of what is left, and the rest is shifted down
+      // by a whole number of bytes that is written as a bigint constant.
+      let rest = limb;
+      for (let at = 0; at < 8; at += 1) {
+        bytes.push(Number(rest & 0xffn));
+        rest = rest >> 8n;
+      }
     }
     const at = this.dataBytes(bytes);
     this.wideConstants.set(key, at);
@@ -1011,7 +1014,9 @@ class Body {
     if (reused === undefined) this.declared.push(held);
     const scope = this.scopes[this.scopes.length - 1] as Scope;
     scope.names.set(name, local);
-    scope.allocated?.push(local.index);
+    // A push written as a statement of its own: the optional chain is the
+    // question, and the push is only there when the answer is yes.
+    if (scope.allocated !== null) scope.allocated.push(local.index);
     return local;
   }
 
@@ -1328,7 +1333,7 @@ class Body {
       return;
     }
     this.float(0, held === F64);
-    this.op(BINARY[held].ne as number);
+    this.op(BINARY[String(held)].ne as number);
   }
 
   /** The falsity of what is on the stack, at the carrier it is held in. */
@@ -1342,7 +1347,7 @@ class Body {
       return;
     }
     this.float(0, held === F64);
-    this.op(BINARY[held].eq as number);
+    this.op(BINARY[String(held)].eq as number);
   }
 
   /**
@@ -1390,7 +1395,7 @@ class Body {
       this.i32(shift);
       this.op(0x74);
     }
-    this.op(BINARY[I32].add as number);
+    this.op(BINARY[String(I32)].add as number);
   }
 
   /**
@@ -1470,7 +1475,7 @@ class Body {
         }
         this.value(value.of, ADDRESS);
         this.i32(8);
-        this.op(BINARY[I32].sub as number);
+        this.op(BINARY[String(I32)].sub as number);
         this.op(0x29);
         this.code.varuint(3);
         this.code.varuint(0);
@@ -1544,7 +1549,7 @@ class Body {
             this.i32(shift);
             this.op(0x74); // `i32.shl`
           }
-          this.op(BINARY[I32].add as number);
+          this.op(BINARY[String(I32)].add as number);
           this.value(value.values[index] as SemanticValue, element);
           const store = facts(element).store;
           this.op(store.code);
@@ -1625,23 +1630,23 @@ class Body {
           if (held === I64) this.i64(-1n);
           else this.i32(-1);
           this.value(value.operand, value.type);
-          this.op(BINARY[held].xor as number);
+          this.op(BINARY[String(held)].xor as number);
         } else if (value.op === "bitNot") {
           if (held === F64) this.float(0, true);
           else this.float(0, false);
           this.value(value.operand, value.type);
-          this.op(BINARY[held].sub as number);
+          this.op(BINARY[String(held)].sub as number);
           if (held === F64) this.float(1, true);
           else this.float(1, false);
-          this.op(BINARY[held].sub as number);
+          this.op(BINARY[String(held)].sub as number);
         } else if (held === I64) {
           this.i64(0n);
           this.value(value.operand, value.type);
-          this.op(BINARY[held].sub as number);
+          this.op(BINARY[String(held)].sub as number);
         } else if (held === I32) {
           this.i32(0);
           this.value(value.operand, value.type);
-          this.op(BINARY[held].sub as number);
+          this.op(BINARY[String(held)].sub as number);
         } else {
           this.value(value.operand, value.type);
           this.op(held === F32 ? 0x8c : 0x9a);
@@ -1660,7 +1665,7 @@ class Body {
         else if (width === F64) this.float(0, true);
         else if (width === F32) this.float(0, false);
         else this.i32(0);
-        this.op(BINARY[width][value.negate ? "ne" : "eq"] as number);
+        this.op(BINARY[String(width)][value.negate ? "ne" : "eq"] as number);
         this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "select":
@@ -1699,7 +1704,7 @@ class Body {
         else if (held === F64) this.float(0, true);
         else if (held === F32) this.float(0, false);
         else this.i32(0);
-        this.op(BINARY[held].eq as number);
+        this.op(BINARY[String(held)].eq as number);
         this.op(0x04);
         this.code.byte(0x40);
         this.push(null);
@@ -1805,7 +1810,7 @@ class Body {
           this.value(value.right, TEXT);
           this.callService("blaze_rt_text_compare");
           this.i32(0);
-          this.op(BINARY[I32][value.op] as number);
+          this.op(BINARY[String(I32)][value.op] as number);
           this.convert({ kind: "primitive", name: "i32" }, at);
           return;
         }
@@ -1841,8 +1846,8 @@ class Body {
           this.convert(value.type, at);
           return;
         }
-        const unsignedOp = facts(compared).unsigned ? UNSIGNED_BINARY[held][value.op] : undefined;
-        const op = unsignedOp ?? BINARY[held][value.op];
+        const unsignedOp = facts(compared).unsigned ? UNSIGNED_BINARY[String(held)][value.op] : undefined;
+        const op = unsignedOp ?? BINARY[String(held)][value.op];
         if (op === undefined) {
           if (value.op === "floorDiv" || value.op === "floorMod") {
             // A floor division and a floored remainder are the operations of a
@@ -2882,7 +2887,7 @@ class Body {
         else if (held === F64) this.float(1, true);
         else if (held === F32) this.float(1, false);
         else this.i32(1);
-        this.op(statement.op === "++" ? (BINARY[held].add as number) : (BINARY[held].sub as number));
+        this.op(statement.op === "++" ? (BINARY[String(held)].add as number) : (BINARY[String(held)].sub as number));
         this.set(statement.name);
         return;
       }
@@ -3075,7 +3080,7 @@ class Body {
         const count = this.borrow(I32);
         this.localAt(buffer.index);
         this.i32(8);
-        this.op(BINARY[I32].sub as number);
+        this.op(BINARY[String(I32)].sub as number);
         this.op(0x29); // `i64.load`
         this.code.varuint(3);
         this.code.varuint(0);
@@ -3094,7 +3099,7 @@ class Body {
         // The turn is done when the index has reached the count.
         this.localAt(index);
         this.localAt(count);
-        this.op(UNSIGNED_BINARY[I32].ge as number);
+        this.op(UNSIGNED_BINARY[String(I32)].ge as number);
         this.op(0x0d); // `br_if`
         this.code.varuint(1);
         // The element is written at the address the index names.
@@ -3105,7 +3110,7 @@ class Body {
           this.i32(shift);
           this.op(0x74); // `i32.shl`
         }
-        this.op(BINARY[I32].add as number);
+        this.op(BINARY[String(I32)].add as number);
         this.value(statement.value, element);
         const store = facts(element).store;
         this.op(store.code);
@@ -3115,7 +3120,7 @@ class Body {
         // so a `continue` does not skip it.
         this.localAt(index);
         this.i32(1);
-        this.op(BINARY[I32].add as number);
+        this.op(BINARY[String(I32)].add as number);
         this.keep(index);
         this.op(0x0c); // `br`
         this.code.varuint(0);
@@ -3201,7 +3206,7 @@ class Body {
       else this.constant(startConstant.text, startConstant.type, loop.type);
       if (stepConstant === null) this.read(step);
       else this.constant(stepConstant.text, stepConstant.type, loop.type);
-      this.op(BINARY[held].sub as number);
+      this.op(BINARY[String(held)].sub as number);
       this.set(loop.variable);
       if (start !== -1) this.release(held, start);
     }
@@ -3268,7 +3273,7 @@ class Body {
       else this.constant(stepConstant.text, stepConstant.type, loop.type);
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
-      this.op(BINARY[facts(loop.type).held].add as number);
+      this.op(BINARY[String(facts(loop.type).held)].add as number);
       // The value the counter moves to is the value the test below reads, so
       // it is written down and left on the stack: a `local.tee` is one
       // instruction where a write and a read are two.
@@ -3283,8 +3288,8 @@ class Body {
       // `each` walk below does: a loop counting up to a `u32` bound past the
       // signed range ends before it begins under the signed comparison, because
       // the same bits are a negative number.
-      const unsignedStop = facts(loop.type).unsigned ? UNSIGNED_BINARY[facts(loop.type).held][stop] : undefined;
-      this.op((unsignedStop ?? BINARY[facts(loop.type).held][stop]) as number);
+      const unsignedStop = facts(loop.type).unsigned ? UNSIGNED_BINARY[String(facts(loop.type).held)][stop] : undefined;
+      this.op((unsignedStop ?? BINARY[String(facts(loop.type).held)][stop]) as number);
       // The exit is tested against the falsity of the comparison, for the
       // reason the `while` above gives.
       this.op(0x45);
@@ -3299,13 +3304,13 @@ class Body {
       // does not change what it holds.
       const index = this.get(loop.index);
       this.i32(1);
-      this.op(BINARY[I32].add as number);
+      this.op(BINARY[String(I32)].add as number);
       this.keepAndRead(index.index);
       this.read(end);
       // The count is read out of the host's memory as a whole number, so it is
       // ordered as one: a count past the signed range is a count, not a
       // negative number the walk has already passed.
-      this.op(UNSIGNED_BINARY[I32].ge as number);
+      this.op(UNSIGNED_BINARY[String(I32)].ge as number);
       this.exitTest();
       this.address(
         { k: "local", type: this.resolve(loop.of).type, name: loop.of },
@@ -3392,10 +3397,10 @@ class Body {
       this.keep(at);
       this.i64(0n);
       this.localAt(at);
-      this.op(BINARY[I64].sub as number);
+      this.op(BINARY[String(I64)].sub as number);
       this.localAt(at);
       this.localAt(at);
-      this.op(BINARY[I64].lt as number);
+      this.op(BINARY[String(I64)].lt as number);
       this.op(0x1b); // `select`
       this.release(I64, at);
       return;
@@ -3411,7 +3416,7 @@ class Body {
       this.localAt(right);
       this.localAt(left);
       this.localAt(right);
-      this.op(BINARY[I64][callee === "whole.min" ? "lt" : "gt"] as number);
+      this.op(BINARY[String(I64)][callee === "whole.min" ? "lt" : "gt"] as number);
       this.op(0x1b); // `select`
       this.release(I64, right);
       this.release(I64, left);
@@ -3434,15 +3439,15 @@ class Body {
       this.tee(local);
       this.read(local);
       this.float(0.5, true);
-      this.op(BINARY[F64].add as number);
+      this.op(BINARY[String(F64)].add as number);
       this.op(0x9c); // floor
       this.read(local);
       this.float(0.5, true);
-      this.op(BINARY[F64].sub as number);
+      this.op(BINARY[String(F64)].sub as number);
       this.op(0x9b); // ceil
       this.read(local);
       this.float(0, true);
-      this.op(BINARY[F64].ge as number);
+      this.op(BINARY[String(F64)].ge as number);
       this.op(0x1b); // select
       this.release(F64, local);
       return;
@@ -4227,8 +4232,8 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   }
 
   const signatures = services.map((symbol) => {
-    const service = HOST_SERVICE_BY_SYMBOL.get(symbol);
-    if (service === undefined) {
+    const service = hostServiceBySymbol(symbol);
+    if (service === null) {
       throw new CompilerError({
         category: "TargetError",
         stage: "compile",
@@ -4486,20 +4491,20 @@ function dataBase(module: Module): number {
 /* -------------------------------------------------------------------------- */
 
 /** The sections of a module, by the id the format gives them. */
-const SECTIONS: Record<number, string> = {
-  0: "custom",
-  1: "types",
-  2: "imports",
-  3: "functions",
-  4: "tables",
-  5: "memory",
-  6: "globals",
-  7: "exports",
-  8: "start",
-  9: "elements",
-  10: "code",
-  11: "data",
-  12: "data count",
+const SECTIONS: Record<string, string> = {
+  "0": "custom",
+  "1": "types",
+  "2": "imports",
+  "3": "functions",
+  "4": "tables",
+  "5": "memory",
+  "6": "globals",
+  "7": "exports",
+  "8": "start",
+  "9": "elements",
+  "10": "code",
+  "11": "data",
+  "12": "data count",
 };
 
 /**
@@ -4525,7 +4530,7 @@ export function describeModule(bytes: Uint8Array): string {
   while (at < bytes.length) {
     const id = bytes[at] ?? 0;
     const size = readVaruint(bytes, at + 1, 32);
-    const name = SECTIONS[id] ?? `section ${id}`;
+    const name = SECTIONS[String(id)] ?? `section ${id}`;
     lines.push(`${name}: ${size.value} bytes`);
     sections.set(id, bodyOf(bytes, size));
     at = size.next + size.value;
@@ -4584,13 +4589,13 @@ export function describeModule(bytes: Uint8Array): string {
 }
 
 /** The value types the format names, by the byte it writes them as. */
-const VALUE_TYPES: Record<number, string> = {
-  0x7f: "i32",
-  0x7e: "i64",
-  0x7d: "f32",
-  0x7c: "f64",
-  0x70: "funcref",
-  0x6f: "externref",
+const VALUE_TYPES: Record<string, string> = {
+  "0x7f": "i32",
+  "0x7e": "i64",
+  "0x7d": "f32",
+  "0x7c": "f64",
+  "0x70": "funcref",
+  "0x6f": "externref",
 };
 
 /** The types of the module, as the signature the format writes them in. */
@@ -4607,7 +4612,7 @@ function readTypes(body: Uint8Array | undefined): string[] {
     const names: string[] = [];
     let cursor = parameters.next;
     for (let position = 0; position < parameters.value && cursor < body.length; position += 1) {
-      names.push(VALUE_TYPES[body[cursor] ?? 0] ?? "unknown");
+      names.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
     }
     at = cursor;
@@ -4615,7 +4620,7 @@ function readTypes(body: Uint8Array | undefined): string[] {
     const answers: string[] = [];
     cursor = results.next;
     for (let position = 0; position < results.value && cursor < body.length; position += 1) {
-      answers.push(VALUE_TYPES[body[cursor] ?? 0] ?? "unknown");
+      answers.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
     }
     at = cursor;
@@ -4662,7 +4667,7 @@ function readGlobals(body: Uint8Array | undefined): string[] {
   const count = readVaruint(body, 0, 32);
   let at = count.next;
   for (let index = 0; index < count.value && at < body.length; index += 1) {
-    const type = VALUE_TYPES[body[at] ?? 0] ?? "unknown";
+    const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
     const mutable = (body[at + 1] ?? 0) !== 0;
     at += 2;
     // The initialiser is a constant expression, which ends at its `end`.
@@ -4719,7 +4724,7 @@ function readFunction(body: Uint8Array): string[] {
   for (let index = 0; index < locals.value && at < body.length; index += 1) {
     const count = readVaruint(body, at, 32);
     at = count.next;
-    const type = VALUE_TYPES[body[at] ?? 0] ?? "unknown";
+    const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
     at += 1;
     if (index === 0) lines.push(`locals: ${count.value} x ${type}`);
     local += count.value;
@@ -4728,7 +4733,7 @@ function readFunction(body: Uint8Array): string[] {
     const start = at;
     const opcode = body[at] ?? 0;
     at += 1;
-    const instruction = INSTRUCTIONS[opcode];
+    const instruction = INSTRUCTIONS[String(opcode)];
     if (instruction === undefined) {
       lines.push(`${start.toString(16).padStart(4, "0")}  (unknown opcode 0x${opcode.toString(16)})`);
       break;
@@ -4777,7 +4782,7 @@ function readImmediate(body: Uint8Array, at: number, kind: string): { text: stri
     case "block": {
       const byte = body[at] ?? 0x40;
       if (byte === 0x40) return { text: "", next: at + 1 };
-      return { text: VALUE_TYPES[byte] ?? "unknown", next: at + 1 };
+      return { text: VALUE_TYPES[String(byte)] ?? "unknown", next: at + 1 };
     }
     case "br_table": {
       const count = readVaruint(body, at, 32);
@@ -4845,188 +4850,188 @@ function readVarint64(bytes: Uint8Array, at: number): { value: bigint; next: num
  * instruction it can meet, and the ones missing from it are the ones a module
  * this compiler wrote never carries.
  */
-const INSTRUCTIONS: Record<number, [string, string]> = {
-  0x00: ["unreachable", ""],
-  0x01: ["nop", ""],
-  0x02: ["block", "block"],
-  0x03: ["loop", "block"],
-  0x04: ["if", "block"],
-  0x05: ["else", ""],
-  0x0b: ["end", ""],
-  0x0c: ["br", "index"],
-  0x0d: ["br_if", "index"],
-  0x0e: ["br_table", "br_table"],
-  0x0f: ["return", ""],
-  0x10: ["call", "index"],
-  0x11: ["call_indirect", "call_indirect"],
-  0x1a: ["drop", ""],
-  0x1b: ["select", ""],
-  0x1c: ["select", "select"],
-  0x20: ["local.get", "index"],
-  0x21: ["local.set", "index"],
-  0x22: ["local.tee", "index"],
-  0x23: ["global.get", "index"],
-  0x24: ["global.set", "index"],
-  0x28: ["i32.load", "memarg"],
-  0x29: ["i64.load", "memarg"],
-  0x2a: ["f32.load", "memarg"],
-  0x2b: ["f64.load", "memarg"],
-  0x2c: ["i32.load8_s", "memarg"],
-  0x2d: ["i32.load8_u", "memarg"],
-  0x2e: ["i32.load16_s", "memarg"],
-  0x2f: ["i32.load16_u", "memarg"],
-  0x30: ["i64.load8_s", "memarg"],
-  0x31: ["i64.load8_u", "memarg"],
-  0x32: ["i64.load16_s", "memarg"],
-  0x33: ["i64.load16_u", "memarg"],
-  0x34: ["i64.load32_s", "memarg"],
-  0x35: ["i64.load32_u", "memarg"],
-  0x36: ["i32.store", "memarg"],
-  0x37: ["i64.store", "memarg"],
-  0x38: ["f32.store", "memarg"],
-  0x39: ["f64.store", "memarg"],
-  0x3a: ["i32.store8", "memarg"],
-  0x3b: ["i32.store16", "memarg"],
-  0x3c: ["i64.store8", "memarg"],
-  0x3d: ["i64.store16", "memarg"],
-  0x3e: ["i64.store32", "memarg"],
-  0x3f: ["memory.size", ""],
-  0x40: ["memory.grow", ""],
-  0x41: ["i32.const", "i32"],
-  0x42: ["i64.const", "i64"],
-  0x43: ["f32.const", "f32"],
-  0x44: ["f64.const", "f64"],
-  0x45: ["i32.eqz", ""],
-  0x46: ["i32.eq", ""],
-  0x47: ["i32.ne", ""],
-  0x48: ["i32.lt_s", ""],
-  0x49: ["i32.lt_u", ""],
-  0x4a: ["i32.gt_s", ""],
-  0x4b: ["i32.gt_u", ""],
-  0x4c: ["i32.le_s", ""],
-  0x4d: ["i32.le_u", ""],
-  0x4e: ["i32.ge_s", ""],
-  0x4f: ["i32.ge_u", ""],
-  0x50: ["i64.eqz", ""],
-  0x51: ["i64.eq", ""],
-  0x52: ["i64.ne", ""],
-  0x53: ["i64.lt_s", ""],
-  0x54: ["i64.lt_u", ""],
-  0x55: ["i64.gt_s", ""],
-  0x56: ["i64.gt_u", ""],
-  0x57: ["i64.le_s", ""],
-  0x58: ["i64.le_u", ""],
-  0x59: ["i64.ge_s", ""],
-  0x5a: ["i64.ge_u", ""],
-  0x5b: ["f32.eq", ""],
-  0x5c: ["f32.ne", ""],
-  0x5d: ["f32.lt", ""],
-  0x5e: ["f32.gt", ""],
-  0x5f: ["f32.le", ""],
-  0x60: ["f32.ge", ""],
-  0x61: ["f64.eq", ""],
-  0x62: ["f64.ne", ""],
-  0x63: ["f64.lt", ""],
-  0x64: ["f64.gt", ""],
-  0x65: ["f64.le", ""],
-  0x66: ["f64.ge", ""],
-  0x67: ["i32.clz", ""],
-  0x68: ["i32.ctz", ""],
-  0x69: ["i32.popcnt", ""],
-  0x6a: ["i32.add", ""],
-  0x6b: ["i32.sub", ""],
-  0x6c: ["i32.mul", ""],
-  0x6d: ["i32.div_s", ""],
-  0x6e: ["i32.div_u", ""],
-  0x6f: ["i32.rem_s", ""],
-  0x70: ["i32.rem_u", ""],
-  0x71: ["i32.and", ""],
-  0x72: ["i32.or", ""],
-  0x73: ["i32.xor", ""],
-  0x74: ["i32.shl", ""],
-  0x75: ["i32.shr_s", ""],
-  0x76: ["i32.shr_u", ""],
-  0x77: ["i32.rotl", ""],
-  0x78: ["i32.rotr", ""],
-  0x79: ["i64.clz", ""],
-  0x7a: ["i64.ctz", ""],
-  0x7b: ["i64.popcnt", ""],
-  0x7c: ["i64.add", ""],
-  0x7d: ["i64.sub", ""],
-  0x7e: ["i64.mul", ""],
-  0x7f: ["i64.div_s", ""],
-  0x80: ["i64.div_u", ""],
-  0x81: ["i64.rem_s", ""],
-  0x82: ["i64.rem_u", ""],
-  0x83: ["i64.and", ""],
-  0x84: ["i64.or", ""],
-  0x85: ["i64.xor", ""],
-  0x86: ["i64.shl", ""],
-  0x87: ["i64.shr_s", ""],
-  0x88: ["i64.shr_u", ""],
-  0x89: ["i64.rotl", ""],
-  0x8a: ["i64.rotr", ""],
-  0x8b: ["f32.abs", ""],
-  0x8c: ["f32.neg", ""],
-  0x8d: ["f32.ceil", ""],
-  0x8e: ["f32.floor", ""],
-  0x8f: ["f32.trunc", ""],
-  0x90: ["f32.nearest", ""],
-  0x91: ["f32.sqrt", ""],
-  0x92: ["f32.add", ""],
-  0x93: ["f32.sub", ""],
-  0x94: ["f32.mul", ""],
-  0x95: ["f32.div", ""],
-  0x96: ["f32.min", ""],
-  0x97: ["f32.max", ""],
-  0x98: ["f32.copysign", ""],
-  0x99: ["f64.abs", ""],
-  0x9a: ["f64.neg", ""],
-  0x9b: ["f64.ceil", ""],
-  0x9c: ["f64.floor", ""],
-  0x9d: ["f64.trunc", ""],
-  0x9e: ["f64.nearest", ""],
-  0x9f: ["f64.sqrt", ""],
-  0xa0: ["f64.add", ""],
-  0xa1: ["f64.sub", ""],
-  0xa2: ["f64.mul", ""],
-  0xa3: ["f64.div", ""],
-  0xa4: ["f64.min", ""],
-  0xa5: ["f64.max", ""],
-  0xa6: ["f64.copysign", ""],
-  0xa7: ["i32.wrap_i64", ""],
-  0xa8: ["i32.trunc_f32_s", ""],
-  0xa9: ["i32.trunc_f32_u", ""],
-  0xaa: ["i32.trunc_f64_s", ""],
-  0xab: ["i32.trunc_f64_u", ""],
-  0xac: ["i64.extend_i32_s", ""],
-  0xad: ["i64.extend_i32_u", ""],
-  0xae: ["i64.trunc_f32_s", ""],
-  0xaf: ["i64.trunc_f32_u", ""],
-  0xb0: ["i64.trunc_f64_s", ""],
-  0xb1: ["i64.trunc_f64_u", ""],
-  0xb2: ["f32.convert_i32_s", ""],
-  0xb3: ["f32.convert_i32_u", ""],
-  0xb4: ["f32.convert_i64_s", ""],
-  0xb5: ["f32.convert_i64_u", ""],
-  0xb6: ["f32.demote_f64", ""],
-  0xb7: ["f64.convert_i32_s", ""],
-  0xb8: ["f64.convert_i32_u", ""],
-  0xb9: ["f64.convert_i64_s", ""],
-  0xba: ["f64.convert_i64_u", ""],
-  0xbb: ["f64.promote_f32", ""],
-  0xbc: ["i32.reinterpret_f32", ""],
-  0xbd: ["i64.reinterpret_f64", ""],
-  0xbe: ["f32.reinterpret_i32", ""],
-  0xbf: ["f64.reinterpret_i64", ""],
-  0xc0: ["i32.trunc_sat_f32_s", ""],
-  0xc1: ["i32.trunc_sat_f32_u", ""],
-  0xc2: ["i32.trunc_sat_f64_s", ""],
-  0xc3: ["i32.trunc_sat_f64_u", ""],
-  0xc4: ["i64.trunc_sat_f32_s", ""],
-  0xc5: ["i64.trunc_sat_f32_u", ""],
-  0xc6: ["i64.trunc_sat_f64_s", ""],
-  0xc7: ["i64.trunc_sat_f64_u", ""],
+const INSTRUCTIONS: Record<string, [string, string]> = {
+  "0x00": ["unreachable", ""],
+  "0x01": ["nop", ""],
+  "0x02": ["block", "block"],
+  "0x03": ["loop", "block"],
+  "0x04": ["if", "block"],
+  "0x05": ["else", ""],
+  "0x0b": ["end", ""],
+  "0x0c": ["br", "index"],
+  "0x0d": ["br_if", "index"],
+  "0x0e": ["br_table", "br_table"],
+  "0x0f": ["return", ""],
+  "0x10": ["call", "index"],
+  "0x11": ["call_indirect", "call_indirect"],
+  "0x1a": ["drop", ""],
+  "0x1b": ["select", ""],
+  "0x1c": ["select", "select"],
+  "0x20": ["local.get", "index"],
+  "0x21": ["local.set", "index"],
+  "0x22": ["local.tee", "index"],
+  "0x23": ["global.get", "index"],
+  "0x24": ["global.set", "index"],
+  "0x28": ["i32.load", "memarg"],
+  "0x29": ["i64.load", "memarg"],
+  "0x2a": ["f32.load", "memarg"],
+  "0x2b": ["f64.load", "memarg"],
+  "0x2c": ["i32.load8_s", "memarg"],
+  "0x2d": ["i32.load8_u", "memarg"],
+  "0x2e": ["i32.load16_s", "memarg"],
+  "0x2f": ["i32.load16_u", "memarg"],
+  "0x30": ["i64.load8_s", "memarg"],
+  "0x31": ["i64.load8_u", "memarg"],
+  "0x32": ["i64.load16_s", "memarg"],
+  "0x33": ["i64.load16_u", "memarg"],
+  "0x34": ["i64.load32_s", "memarg"],
+  "0x35": ["i64.load32_u", "memarg"],
+  "0x36": ["i32.store", "memarg"],
+  "0x37": ["i64.store", "memarg"],
+  "0x38": ["f32.store", "memarg"],
+  "0x39": ["f64.store", "memarg"],
+  "0x3a": ["i32.store8", "memarg"],
+  "0x3b": ["i32.store16", "memarg"],
+  "0x3c": ["i64.store8", "memarg"],
+  "0x3d": ["i64.store16", "memarg"],
+  "0x3e": ["i64.store32", "memarg"],
+  "0x3f": ["memory.size", ""],
+  "0x40": ["memory.grow", ""],
+  "0x41": ["i32.const", "i32"],
+  "0x42": ["i64.const", "i64"],
+  "0x43": ["f32.const", "f32"],
+  "0x44": ["f64.const", "f64"],
+  "0x45": ["i32.eqz", ""],
+  "0x46": ["i32.eq", ""],
+  "0x47": ["i32.ne", ""],
+  "0x48": ["i32.lt_s", ""],
+  "0x49": ["i32.lt_u", ""],
+  "0x4a": ["i32.gt_s", ""],
+  "0x4b": ["i32.gt_u", ""],
+  "0x4c": ["i32.le_s", ""],
+  "0x4d": ["i32.le_u", ""],
+  "0x4e": ["i32.ge_s", ""],
+  "0x4f": ["i32.ge_u", ""],
+  "0x50": ["i64.eqz", ""],
+  "0x51": ["i64.eq", ""],
+  "0x52": ["i64.ne", ""],
+  "0x53": ["i64.lt_s", ""],
+  "0x54": ["i64.lt_u", ""],
+  "0x55": ["i64.gt_s", ""],
+  "0x56": ["i64.gt_u", ""],
+  "0x57": ["i64.le_s", ""],
+  "0x58": ["i64.le_u", ""],
+  "0x59": ["i64.ge_s", ""],
+  "0x5a": ["i64.ge_u", ""],
+  "0x5b": ["f32.eq", ""],
+  "0x5c": ["f32.ne", ""],
+  "0x5d": ["f32.lt", ""],
+  "0x5e": ["f32.gt", ""],
+  "0x5f": ["f32.le", ""],
+  "0x60": ["f32.ge", ""],
+  "0x61": ["f64.eq", ""],
+  "0x62": ["f64.ne", ""],
+  "0x63": ["f64.lt", ""],
+  "0x64": ["f64.gt", ""],
+  "0x65": ["f64.le", ""],
+  "0x66": ["f64.ge", ""],
+  "0x67": ["i32.clz", ""],
+  "0x68": ["i32.ctz", ""],
+  "0x69": ["i32.popcnt", ""],
+  "0x6a": ["i32.add", ""],
+  "0x6b": ["i32.sub", ""],
+  "0x6c": ["i32.mul", ""],
+  "0x6d": ["i32.div_s", ""],
+  "0x6e": ["i32.div_u", ""],
+  "0x6f": ["i32.rem_s", ""],
+  "0x70": ["i32.rem_u", ""],
+  "0x71": ["i32.and", ""],
+  "0x72": ["i32.or", ""],
+  "0x73": ["i32.xor", ""],
+  "0x74": ["i32.shl", ""],
+  "0x75": ["i32.shr_s", ""],
+  "0x76": ["i32.shr_u", ""],
+  "0x77": ["i32.rotl", ""],
+  "0x78": ["i32.rotr", ""],
+  "0x79": ["i64.clz", ""],
+  "0x7a": ["i64.ctz", ""],
+  "0x7b": ["i64.popcnt", ""],
+  "0x7c": ["i64.add", ""],
+  "0x7d": ["i64.sub", ""],
+  "0x7e": ["i64.mul", ""],
+  "0x7f": ["i64.div_s", ""],
+  "0x80": ["i64.div_u", ""],
+  "0x81": ["i64.rem_s", ""],
+  "0x82": ["i64.rem_u", ""],
+  "0x83": ["i64.and", ""],
+  "0x84": ["i64.or", ""],
+  "0x85": ["i64.xor", ""],
+  "0x86": ["i64.shl", ""],
+  "0x87": ["i64.shr_s", ""],
+  "0x88": ["i64.shr_u", ""],
+  "0x89": ["i64.rotl", ""],
+  "0x8a": ["i64.rotr", ""],
+  "0x8b": ["f32.abs", ""],
+  "0x8c": ["f32.neg", ""],
+  "0x8d": ["f32.ceil", ""],
+  "0x8e": ["f32.floor", ""],
+  "0x8f": ["f32.trunc", ""],
+  "0x90": ["f32.nearest", ""],
+  "0x91": ["f32.sqrt", ""],
+  "0x92": ["f32.add", ""],
+  "0x93": ["f32.sub", ""],
+  "0x94": ["f32.mul", ""],
+  "0x95": ["f32.div", ""],
+  "0x96": ["f32.min", ""],
+  "0x97": ["f32.max", ""],
+  "0x98": ["f32.copysign", ""],
+  "0x99": ["f64.abs", ""],
+  "0x9a": ["f64.neg", ""],
+  "0x9b": ["f64.ceil", ""],
+  "0x9c": ["f64.floor", ""],
+  "0x9d": ["f64.trunc", ""],
+  "0x9e": ["f64.nearest", ""],
+  "0x9f": ["f64.sqrt", ""],
+  "0xa0": ["f64.add", ""],
+  "0xa1": ["f64.sub", ""],
+  "0xa2": ["f64.mul", ""],
+  "0xa3": ["f64.div", ""],
+  "0xa4": ["f64.min", ""],
+  "0xa5": ["f64.max", ""],
+  "0xa6": ["f64.copysign", ""],
+  "0xa7": ["i32.wrap_i64", ""],
+  "0xa8": ["i32.trunc_f32_s", ""],
+  "0xa9": ["i32.trunc_f32_u", ""],
+  "0xaa": ["i32.trunc_f64_s", ""],
+  "0xab": ["i32.trunc_f64_u", ""],
+  "0xac": ["i64.extend_i32_s", ""],
+  "0xad": ["i64.extend_i32_u", ""],
+  "0xae": ["i64.trunc_f32_s", ""],
+  "0xaf": ["i64.trunc_f32_u", ""],
+  "0xb0": ["i64.trunc_f64_s", ""],
+  "0xb1": ["i64.trunc_f64_u", ""],
+  "0xb2": ["f32.convert_i32_s", ""],
+  "0xb3": ["f32.convert_i32_u", ""],
+  "0xb4": ["f32.convert_i64_s", ""],
+  "0xb5": ["f32.convert_i64_u", ""],
+  "0xb6": ["f32.demote_f64", ""],
+  "0xb7": ["f64.convert_i32_s", ""],
+  "0xb8": ["f64.convert_i32_u", ""],
+  "0xb9": ["f64.convert_i64_s", ""],
+  "0xba": ["f64.convert_i64_u", ""],
+  "0xbb": ["f64.promote_f32", ""],
+  "0xbc": ["i32.reinterpret_f32", ""],
+  "0xbd": ["i64.reinterpret_f64", ""],
+  "0xbe": ["f32.reinterpret_i32", ""],
+  "0xbf": ["f64.reinterpret_i64", ""],
+  "0xc0": ["i32.trunc_sat_f32_s", ""],
+  "0xc1": ["i32.trunc_sat_f32_u", ""],
+  "0xc2": ["i32.trunc_sat_f64_s", ""],
+  "0xc3": ["i32.trunc_sat_f64_u", ""],
+  "0xc4": ["i64.trunc_sat_f32_s", ""],
+  "0xc5": ["i64.trunc_sat_f32_u", ""],
+  "0xc6": ["i64.trunc_sat_f64_s", ""],
+  "0xc7": ["i64.trunc_sat_f64_u", ""],
 };
 
 /* -------------------------------------------------------------------------- */

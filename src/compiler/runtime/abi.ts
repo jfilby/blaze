@@ -14,11 +14,6 @@
  */
 
 import type { BuildMode, RuntimeKind } from "../core/types.ts";
-import { isHttpSymbol } from "./http.ts";
-import { isSqliteSymbol } from "./sqlite.ts";
-import { isTritonSymbol } from "./triton.ts";
-import { isModelSymbol } from "./model.ts";
-import { isSglangSymbol } from "./sglang.ts";
 
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
@@ -38,7 +33,7 @@ export const DEFAULT_ALIGNMENT = 16;
  * than through a host entry: the patterns are the compiler's own, and matching
  * one is an operation over a text the runtime already lays out.
  */
-const REGEX_RUNTIME_SOURCE = String.raw`/* A small backtracking regular expression engine for the patterns a source
+const REGEX_RUNTIME_SOURCE = `/* A small backtracking regular expression engine for the patterns a source
    writes. Bytes, not codepoints: a text is bytes and every pattern the
    compiler writes is ASCII. The engine is reachable through the compiler's
    text helpers, so it needs no host service and no new ABI entry. */
@@ -157,11 +152,11 @@ static void brx_class_word(unsigned char* cls) {
 
 static void brx_class_space(unsigned char* cls) {
   brx_class_add(cls, ' ');
-  brx_class_add(cls, '\t');
-  brx_class_add(cls, '\n');
-  brx_class_add(cls, '\r');
-  brx_class_add(cls, '\f');
-  brx_class_add(cls, '\v');
+  brx_class_add(cls, '\\t');
+  brx_class_add(cls, '\\n');
+  brx_class_add(cls, '\\r');
+  brx_class_add(cls, '\\f');
+  brx_class_add(cls, '\\v');
 }
 
 static void brx_class_digit(unsigned char* cls) {
@@ -219,11 +214,11 @@ static int brx_class_escape(BrxParser* p, unsigned char* cls) {
       brx_class_invert(tmp);
       for (i = 0; i < 32; i++) cls[i] |= tmp[i];
       return 0;
-    case 'n': brx_class_add(cls, '\n'); return 0;
-    case 'r': brx_class_add(cls, '\r'); return 0;
-    case 't': brx_class_add(cls, '\t'); return 0;
-    case 'f': brx_class_add(cls, '\f'); return 0;
-    case 'v': brx_class_add(cls, '\v'); return 0;
+    case 'n': brx_class_add(cls, '\\n'); return 0;
+    case 'r': brx_class_add(cls, '\\r'); return 0;
+    case 't': brx_class_add(cls, '\\t'); return 0;
+    case 'f': brx_class_add(cls, '\\f'); return 0;
+    case 'v': brx_class_add(cls, '\\v'); return 0;
     case '0': brx_class_add(cls, 0); return 0;
     case 'x': {
       int value = brx_read_hex(p, 2);
@@ -251,22 +246,22 @@ static BrxNode* brx_class(BrxParser* p) {
     negate = 1;
     p->p++;
   }
-  while (*p->p != '\0' && (*p->p != ']' || first)) {
+  while (*p->p != '\\0' && (*p->p != ']' || first)) {
     int from;
     int to;
     first = 0;
-    if (*p->p == '\\') {
+    if (*p->p == '\\\\') {
       p->p++;
       if (*p->p == 'd' || *p->p == 'D' || *p->p == 'w' || *p->p == 'W' || *p->p == 's' || *p->p == 'S') {
         brx_class_escape(p, node->cls);
         continue;
       }
       from = (int)(unsigned char)*p->p;
-      if (*p->p == 'n') from = '\n';
-      else if (*p->p == 'r') from = '\r';
-      else if (*p->p == 't') from = '\t';
-      else if (*p->p == 'f') from = '\f';
-      else if (*p->p == 'v') from = '\v';
+      if (*p->p == 'n') from = '\\n';
+      else if (*p->p == 'r') from = '\\r';
+      else if (*p->p == 't') from = '\\t';
+      else if (*p->p == 'f') from = '\\f';
+      else if (*p->p == 'v') from = '\\v';
       else if (*p->p == '0') from = 0;
       else if (*p->p == 'x') {
         p->p++;
@@ -283,17 +278,17 @@ static BrxNode* brx_class(BrxParser* p) {
     } else {
       from = (int)(unsigned char)*p->p++;
     }
-    if (*p->p == '-' && p->p[1] != ']' && p->p[1] != '\0') {
+    if (*p->p == '-' && p->p[1] != ']' && p->p[1] != '\\0') {
       p->p++;
-      if (*p->p == '\\') {
+      if (*p->p == '\\\\') {
         int kind;
         p->p++;
         kind = (unsigned char)*p->p++;
-        if (kind == 'n') to = '\n';
-        else if (kind == 'r') to = '\r';
-        else if (kind == 't') to = '\t';
-        else if (kind == 'f') to = '\f';
-        else if (kind == 'v') to = '\v';
+        if (kind == 'n') to = '\\n';
+        else if (kind == 'r') to = '\\r';
+        else if (kind == 't') to = '\\t';
+        else if (kind == 'f') to = '\\f';
+        else if (kind == 'v') to = '\\v';
         else if (kind == '0') to = 0;
         else if (kind == 'x') { to = brx_read_hex(p, 2); if (to < 0) to = 'x'; }
         else if (kind == 'u') { to = brx_read_hex(p, 4); if (to < 0) to = 'u'; to &= 0xff; }
@@ -343,7 +338,7 @@ static BrxNode* brx_atom(BrxParser* p) {
     p->p++;
     return brx_node(BRX_EOL);
   }
-  if (*p->p == '\\') {
+  if (*p->p == '\\\\') {
     int c;
     p->p++;
     c = (unsigned char)*p->p++;
@@ -359,11 +354,11 @@ static BrxNode* brx_atom(BrxParser* p) {
       return node;
     }
     node = brx_node(BRX_CHAR);
-    if (c == 'n') node->ch = '\n';
-    else if (c == 'r') node->ch = '\r';
-    else if (c == 't') node->ch = '\t';
-    else if (c == 'f') node->ch = '\f';
-    else if (c == 'v') node->ch = '\v';
+    if (c == 'n') node->ch = '\\n';
+    else if (c == 'r') node->ch = '\\r';
+    else if (c == 't') node->ch = '\\t';
+    else if (c == 'f') node->ch = '\\f';
+    else if (c == 'v') node->ch = '\\v';
     else if (c == '0') node->ch = 0;
     else if (c == 'x') {
       int value = brx_read_hex(p, 2);
@@ -450,7 +445,7 @@ static BrxNode* brx_repeat(BrxParser* p) {
 static BrxNode* brx_sequence(BrxParser* p) {
   BrxNode* head = NULL;
   BrxNode* tail = NULL;
-  while (*p->p != '\0' && *p->p != '|' && *p->p != ')') {
+  while (*p->p != '\\0' && *p->p != '|' && *p->p != ')') {
     BrxNode* atom = brx_repeat(p);
     if (head == NULL) head = atom;
     else tail->next = atom;
@@ -581,7 +576,7 @@ static int brx_match(BrxNode* node, int pos, const BrxCtx* ctx, BrxState* state,
       }
       return -1;
     case BRX_ANY:
-      if (pos < ctx->length && (ctx->re->dotall || ctx->text[pos] != '\n')) {
+      if (pos < ctx->length && (ctx->re->dotall || ctx->text[pos] != '\\n')) {
         return brx_match(node->next, pos + 1, ctx, state, cont);
       }
       return -1;
@@ -591,14 +586,14 @@ static int brx_match(BrxNode* node, int pos, const BrxCtx* ctx, BrxState* state,
       }
       return -1;
     case BRX_BOL:
-      if (pos == 0 || (ctx->re->multiline && ctx->text[pos - 1] == '\n')) {
+      if (pos == 0 || (ctx->re->multiline && ctx->text[pos - 1] == '\\n')) {
         return brx_match(node->next, pos, ctx, state, cont);
       }
       return -1;
     case BRX_EOL:
       if (pos == ctx->length ||
-          (ctx->re->multiline && ctx->text[pos] == '\n') ||
-          (!ctx->re->multiline && pos == ctx->length - 1 && ctx->text[pos] == '\n')) {
+          (ctx->re->multiline && ctx->text[pos] == '\\n') ||
+          (!ctx->re->multiline && pos == ctx->length - 1 && ctx->text[pos] == '\\n')) {
         return brx_match(node->next, pos, ctx, state, cont);
       }
       return -1;
@@ -677,7 +672,7 @@ static BrxRegex* brx_compile(const char* pattern, const char* flags) {
   if (pattern == NULL) pattern = "";
   if (flags == NULL) flags = "";
   re = (BrxRegex*)calloc(1, sizeof(BrxRegex));
-  for (i = 0; flags[i] != '\0'; i++) {
+  for (i = 0; flags[i] != '\\0'; i++) {
     if (flags[i] == 'i') re->icase = 1;
     else if (flags[i] == 'm') re->multiline = 1;
     else if (flags[i] == 's') re->dotall = 1;
@@ -834,7 +829,7 @@ static void brx_put(BrxBuilder* out, const char* text, size_t length) {
   }
   memcpy(out->data + out->length, text, length);
   out->length += length;
-  out->data[out->length] = '\0';
+  out->data[out->length] = '\\0';
 }
 
 static void brx_putc(BrxBuilder* out, char c) {
@@ -843,7 +838,7 @@ static void brx_putc(BrxBuilder* out, char c) {
 
 static void brx_replacement(BrxBuilder* out, const char* replacement, const char* text, int length, const BrxState* state) {
   int i = 0;
-  while (replacement[i] != '\0') {
+  while (replacement[i] != '\\0') {
     if (replacement[i] != '$') {
       brx_putc(out, replacement[i++]);
       continue;
@@ -864,7 +859,7 @@ static void brx_replacement(BrxBuilder* out, const char* replacement, const char
     } else if (replacement[i] == 96) {
       brx_put(out, text, (size_t)state->caps[0]);
       i++;
-    } else if (replacement[i] == '\'') {
+    } else if (replacement[i] == '\\'') {
       brx_put(out, text + state->caps[1], (size_t)(length - state->caps[1]));
       i++;
     } else {
@@ -1093,6 +1088,10 @@ entry(
   entry("blaze_rt_global_set", "double", [["slot", "double"], ["value", "double"]], "Writes a module-level number.", "Returns the value written.", { tags: ["host"] }),
   entry("blaze_rt_global_post_inc", "double", [["slot", "double"]], "Steps a module-level number up.", "Returns the value before the step.", { tags: ["host"] }),
   entry("blaze_rt_global_post_dec", "double", [["slot", "double"]], "Steps a module-level number down.", "Returns the value before the step.", { tags: ["host"] }),
+  entry("blaze_rt_exec_path", "const char*", [], "The path of the running program.", "Returns a managed string holding the path the operating system started.", { tags: ["host"] }),
+  entry("blaze_rt_state_get", "double", [["key", "const char*"]], "Reads a named state cell.", "Returns the value the cell holds, or zero before it is written.", { tags: ["host"] }),
+  entry("blaze_rt_state_set", "double", [["key", "const char*"], ["value", "double"]], "Writes a named state cell.", "Returns the value written.", { tags: ["host"] }),
+  entry("blaze_rt_path_extname", "const char*", [["path", "const char*"]], "The extension of a POSIX path.", "Returns a managed string: the last dot of the last component and what follows it, or the empty text where there is none.", { tags: ["host"] }),
   entry(
     "blaze_rt_timestamp_iso",
     "const char*",
@@ -1111,6 +1110,8 @@ entry(
   ),
   entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
   entry("blaze_rt_object_copy", "double", [["value", "double"]], "Copies a record.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
+  entry("blaze_rt_clone", "double", [["value", "double"]], "Copies a value deeply.", "A record copies its fields, a list copies its elements, a dynamic object copies its entries, and a number or a text is itself.", { tags: ["object"] }),
+  entry("blaze_rt_clone_block", "void*", [["block", "void*"], ["element", "const char*"]], "Copies a block of elements deeply.", "Each element is copied at the type text the block holds, and the answer is a block of its own.", { tags: ["object"] }),
   entry("blaze_rt_object_set_text", "double", [["object", "double"], ["field", "const char*"], ["value", "const char*"]], "Writes a text into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
   entry("blaze_rt_object_set_ref", "double", [["object", "double"], ["field", "const char*"], ["value", "double"]], "Writes a reference into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
   entry("blaze_rt_object_set_list", "double", [["object", "double"], ["field", "const char*"], ["value", "const void*"]], "Writes a list into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
@@ -1502,6 +1503,14 @@ entry(
     [["text", "const char*"]],
     "Copies a managed string into a new one.",
     "Returns a managed string the caller owns.",
+    { tags: ["memory"] },
+  ),
+  entry(
+    "blaze_rt_encode_uri_component",
+    "const char*",
+    [["text", "const char*"]],
+    "Percent-encodes a text as a URI component.",
+    "Returns a managed string holding the encoded text.",
     { tags: ["memory"] },
   ),
   entry(
@@ -2195,28 +2204,6 @@ export const RUNTIME_SYMBOLS: Record<string, true> = Object.fromEntries(
  */
 export const RUNTIME_ANCHOR: readonly string[] = RUNTIME_ABI.map((item) => item.symbol);
 
-/**
- * True when generated code is allowed to reference a symbol.
- *
- * The SQLite symbols are here because a program that uses SQLite calls the
- * library it links beside the runtime, and the sandbox every backend checks a
- * call against has to admit them: the C backend refuses a candidate that calls
- * outside the runtime ABI, and the machine backend refuses a function that
- * refers to a symbol that is neither the runtime, nor the C library, nor a
- * function of the program.
- */
-export function isRuntimeSymbol(symbol: string): boolean {
-  return (
-    RUNTIME_SYMBOLS[symbol] === true ||
-    WIDE_SYMBOLS[symbol] === true ||
-    TEXT_SYMBOLS[symbol] === true ||
-    isHttpSymbol(symbol) ||
-    isSqliteSymbol(symbol) ||
-    isTritonSymbol(symbol) ||
-    isModelSymbol(symbol) ||
-    isSglangSymbol(symbol)
-  );
-}
 const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
 #define BLAZE_RT_H
 
@@ -4417,6 +4404,68 @@ static size_t blaze_rt_global_slot(double slot) {
   const size_t index = (size_t)slot;
   return index < BLAZE_RT_GLOBALS ? index : 0;
 }
+const char* blaze_rt_path_extname(const char* path) {
+  if (path == NULL) return blaze_rt_string_new(NULL, 0);
+  const char* base = strrchr(path, '/');
+  base = base == NULL ? path : base + 1;
+  const char* dot = strrchr(base, '.');
+  if (dot == NULL || dot == base) return blaze_rt_string_new(NULL, 0);
+  return blaze_rt_string_new((const unsigned char*)dot, strlen(dot));
+}
+
+const char* blaze_rt_exec_path(void) {
+  char buffer[4096];
+  const ssize_t written = readlink("/proc/self/exe", buffer, sizeof buffer - 1);
+  if (written <= 0) return blaze_rt_string_new(NULL, 0);
+  return blaze_rt_string_new((const unsigned char*)buffer, (size_t)written);
+}
+
+typedef struct {
+  char* key;
+  double value;
+} blaze_rt_state_cell;
+
+static blaze_rt_state_cell* blaze_rt_state_cells = NULL;
+static size_t blaze_rt_state_count = 0;
+static size_t blaze_rt_state_capacity = 0;
+
+/* A module value the program holds, by the name the module and the value
+   spell together. The table grows once per cell and never gives one back, the
+   same life the module's own values have. */
+static blaze_rt_state_cell* blaze_rt_state_cell_of(const char* key) {
+  if (key == NULL) return NULL;
+  for (size_t index = 0; index < blaze_rt_state_count; index += 1) {
+    if (strcmp(blaze_rt_state_cells[index].key, key) == 0) return &blaze_rt_state_cells[index];
+  }
+  if (blaze_rt_state_count + 1 >= blaze_rt_state_capacity) {
+    const size_t capacity = blaze_rt_state_capacity ? blaze_rt_state_capacity * 2 : 32;
+    blaze_rt_state_cell* grown = (blaze_rt_state_cell*)realloc(blaze_rt_state_cells, capacity * sizeof(blaze_rt_state_cell));
+    if (grown == NULL) return NULL;
+    blaze_rt_state_cells = grown;
+    blaze_rt_state_capacity = capacity;
+  }
+  const size_t length = strlen(key);
+  char* copied = (char*)malloc(length + 1);
+  if (copied == NULL) return NULL;
+  memcpy(copied, key, length + 1);
+  blaze_rt_state_cell* cell = &blaze_rt_state_cells[blaze_rt_state_count];
+  cell->key = copied;
+  cell->value = 0.0;
+  blaze_rt_state_count += 1;
+  return cell;
+}
+
+double blaze_rt_state_get(const char* key) {
+  blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
+  return cell == NULL ? 0.0 : cell->value;
+}
+
+double blaze_rt_state_set(const char* key, double value) {
+  blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
+  if (cell != NULL) cell->value = value;
+  return value;
+}
+
 double blaze_rt_global_get(double slot) {
   return blaze_rt_globals[blaze_rt_global_slot(slot)];
 }
@@ -4448,6 +4497,36 @@ const char* blaze_rt_timestamp_iso(void) {
 
 const char* blaze_rt_string_clone(const char* text) {
   return blaze_rt_string_new((const unsigned char*)text, blaze_rt_string_length(text));
+}
+
+/* The characters a URI component leaves as they are: the unreserved set of
+   RFC 3986 and the four marks a JavaScript source keeps. Every other byte is
+   percent-encoded, so a text of UTF-8 is encoded one byte at a time. */
+const char* blaze_rt_encode_uri_component(const char* text) {
+  if (text == NULL) return blaze_rt_string_new(NULL, 0);
+  const size_t length = strlen(text);
+  char* out = (char*)malloc(length * 3 + 1);
+  if (out == NULL) return blaze_rt_string_new(NULL, 0);
+  static const char hex[] = "0123456789ABCDEF";
+  size_t written = 0;
+  for (size_t index = 0; index < length; index += 1) {
+    const unsigned char letter = (unsigned char)text[index];
+    const int unreserved = (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z') ||
+      (letter >= '0' && letter <= '9') || letter == '-' || letter == '_' || letter == '.' ||
+      letter == '!' || letter == '~' || letter == '*' || letter == '\\'' || letter == '(' || letter == ')';
+    if (unreserved) {
+      out[written] = (char)letter;
+      written += 1;
+      continue;
+    }
+    out[written] = '%';
+    out[written + 1] = hex[(letter >> 4) & 0x0F];
+    out[written + 2] = hex[letter & 0x0F];
+    written += 3;
+  }
+  const char* made = blaze_rt_string_new((const unsigned char*)out, written);
+  free(out);
+  return made;
 }
 
 /* Two texts are compared by what they say and not by where they are: a text
@@ -7877,6 +7956,136 @@ double blaze_rt_object_copy(double base) {
   memcpy(copy, object, header->length);
   blaze_rt_header_of(copy)->descriptor = header->descriptor;
   return (double)(uintptr_t)copy;
+}
+
+/* The type a layout names inside a slice, a ref or a ptr. */
+static void blaze_rt_clone_inner(const char* type, char* out, size_t room) {
+  size_t length = strlen(type);
+  size_t open = 0;
+  while (open < length && type[open] != '<') open += 1;
+  size_t close = length > 0 && type[length - 1] == '>' ? length - 1 : length;
+  size_t count = close > open + 1 ? close - open - 1 : 0;
+  if (count >= room) count = room - 1;
+  if (count > 0) memcpy(out, type + open + 1, count);
+  out[count] = '\0';
+}
+
+void* blaze_rt_clone_block(void* block, const char* element);
+double blaze_rt_clone(double value);
+static void* blaze_rt_clone_object(void* object);
+
+/* One field or element copied at the type its layout states. A number and a
+   text are values the language never writes through, so they are the same
+   value in the copy; a list is a block of its own, and a reference names a
+   record copied its own fields deep. */
+static void blaze_rt_clone_at(unsigned char* to, const unsigned char* from, const char* type) {
+  if (type == NULL) return;
+  if (strncmp(type, "slice<", 6) == 0) {
+    void* block = NULL;
+    memcpy(&block, from, sizeof block);
+    char element[64];
+    blaze_rt_clone_inner(type, element, sizeof element);
+    void* copy = block == NULL ? NULL : blaze_rt_clone_block(block, element);
+    memcpy(to, &copy, sizeof copy);
+    return;
+  }
+  if (strncmp(type, "ref<", 4) == 0) {
+    char inner[64];
+    blaze_rt_clone_inner(type, inner, sizeof inner);
+    if (strcmp(inner, "any") == 0) {
+      double held = 0;
+      memcpy(&held, from, sizeof held);
+      double copy = blaze_rt_clone(held);
+      memcpy(to, &copy, sizeof copy);
+      return;
+    }
+    void* reference = NULL;
+    memcpy(&reference, from, sizeof reference);
+    void* copy = reference == NULL ? NULL : blaze_rt_clone_object(reference);
+    memcpy(to, &copy, sizeof copy);
+    return;
+  }
+  memcpy(to, from, blaze_rt_layout_size(type));
+}
+
+/* A block of elements copied: each one is read at the type the caller names,
+   so a list of records copies the records and a list of numbers copies the
+   numbers. */
+void* blaze_rt_clone_block(void* block, const char* element) {
+  if (block == NULL) return NULL;
+  const blaze_rt_header* header = blaze_rt_header_of(block);
+  const size_t size = blaze_rt_layout_size(element);
+  if (size == 0) return NULL;
+  const size_t count = (size_t)(header->length / size);
+  void* copy = blaze_rt_allocate(count * size);
+  for (size_t index = 0; index < count; index += 1) {
+    blaze_rt_clone_at((unsigned char*)copy + index * size, (const unsigned char*)block + index * size, element);
+  }
+  return copy;
+}
+
+/* A record copied field by field, at the layout in its header. */
+static void* blaze_rt_clone_object(void* object) {
+  if (object == NULL) return NULL;
+  const blaze_rt_header* header = blaze_rt_header_of(object);
+  if (header->magic != BLAZE_RT_MAGIC) return object;
+  if (header->descriptor == NULL) return object;
+  void* copy = (void*)(uintptr_t)blaze_rt_object_copy((double)(uintptr_t)object);
+  const char* cursor = header->descriptor;
+  blaze_rt_layout_field field;
+  while (blaze_rt_layout_next(&cursor, &field)) {
+    blaze_rt_clone_at((unsigned char*)copy + field.offset, (const unsigned char*)object + field.offset, field.type);
+  }
+  return copy;
+}
+
+/* A dynamic value copied: an array copies its elements, an object copies its
+   values, and a number, a text or nothing is the value it already is. */
+static double blaze_rt_clone_dynamic(double value) {
+  blaze_dyn* held = blaze_dyn_lookup(value);
+  if (held == NULL) return value;
+  if (held->kind == BLAZE_DYN_ARRAY) {
+    double copy = blaze_rt_dyn_array_new();
+    if (held->items != NULL) {
+      for (size_t index = 0; index < held->count; index += 1) {
+        blaze_rt_array_push(copy, blaze_rt_clone(((double*)held->items)[index]));
+      }
+    }
+    return copy;
+  }
+  if (held->kind == BLAZE_DYN_OBJECT) {
+    blaze_dyn* made = blaze_dyn_new(BLAZE_DYN_OBJECT);
+    if (made == NULL) return value;
+    double copy = blaze_dyn_register(made);
+    made->items = NULL;
+    made->count = 0;
+    made->capacity = 0;
+    if (held->items != NULL) {
+      made->items = malloc(held->count * 2 * sizeof(double));
+      if (made->items == NULL) return value;
+      made->capacity = held->count;
+      made->count = held->count;
+      for (size_t index = 0; index < held->count; index += 1) {
+        ((double*)made->items)[index * 2] = ((double*)held->items)[index * 2];
+        ((double*)made->items)[index * 2 + 1] = blaze_rt_clone(((double*)held->items)[index * 2 + 1]);
+      }
+    }
+    return copy;
+  }
+  return value;
+}
+
+/* structuredClone(value): a record or a dynamic value copied deep. A number,
+   a text and nothing are copied by being themselves, which is what the
+   language's own deep copy answers for them. */
+double blaze_rt_clone(double value) {
+  if (blaze_dyn_lookup(value) != NULL) return blaze_rt_clone_dynamic(value);
+  if (value >= 4096.0) {
+    void* object = (void*)(uintptr_t)value;
+    const blaze_rt_header* header = blaze_rt_header_of(object);
+    if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) return (double)(uintptr_t)blaze_rt_clone_object(object);
+  }
+  return value;
 }
 
 /* The address of a field, refused where the record was not laid out with it:

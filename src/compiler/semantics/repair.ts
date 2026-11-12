@@ -112,6 +112,17 @@ export const REPAIR_RULES: readonly RepairRule[] = [
   },
 ];
 
+/**
+ * The repair rules, as the catalogue a review prompt lists.
+ *
+ * A module's object constant crosses an import as a getter over a value the
+ * importing module cannot read in place, and a function that answers it is the
+ * value the import can call.
+ */
+export function repairRules(): readonly RepairRule[] {
+  return REPAIR_RULES;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Applying a proposal                                                        */
 /* -------------------------------------------------------------------------- */
@@ -915,8 +926,13 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
 function powerOfTwoExponent(text: string): number | null {
   const value = Number(text);
   if (!Number.isInteger(value) || value < 2) return null;
-  const exponent = Math.log2(value);
-  return Number.isInteger(exponent) && exponent >= 1 && exponent <= 10 ? exponent : null;
+  let exponent = 0;
+  let held = value;
+  while (held > 1) {
+    held = held / 2;
+    exponent += 1;
+  }
+  return Math.pow(2, exponent) === value && exponent >= 1 && exponent <= 10 ? exponent : null;
 }
 
 /** A float type, which is the only one the two forms are the same number in. */

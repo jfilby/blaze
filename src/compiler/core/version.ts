@@ -147,13 +147,16 @@ export async function fingerprintSources(root: string): Promise<Fingerprints> {
   return { review: review.digest("hex"), lowering: lowering.digest("hex") };
 }
 
-/** One read of the tree, however many functions ask for its fingerprint. */
-let reading: Promise<Fingerprints> | undefined;
-
-/** The fingerprints of the compiler this process is running. */
+/**
+ * The fingerprints of the compiler this process is running.
+ *
+ * The tree is read where the question is asked: a compiled function owns no
+ * module-level promise, so a process-wide cache of the read would be state the
+ * binary cannot hold. The read is a source hash, and the build asks for it
+ * once.
+ */
 export async function toolchainFingerprints(): Promise<Fingerprints> {
-  reading ??= fingerprintSources(PACKAGE_ROOT);
-  return reading;
+  return fingerprintSources(PACKAGE_ROOT);
 }
 
 /**

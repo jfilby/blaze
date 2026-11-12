@@ -194,9 +194,7 @@ export function closingBrace(text: string, open: number): number {
 }
 
 /** The words a regular expression may follow without being a division. */
-const REGEX_AFTER_WORD: ReadonlySet<string> = new Set([
-  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "case", "do", "else", "yield", "await",
-]);
+
 
 /**
  * Whether a `/` at one place starts a pattern rather than a division.
@@ -214,7 +212,9 @@ function valueExpected(text: string, at: number): boolean {
   if (/[A-Za-z0-9_$]/.test(character)) {
     let start = index;
     while (start >= 0 && /[A-Za-z0-9_$]/.test(text[start] as string)) start -= 1;
-    return REGEX_AFTER_WORD.has(text.slice(start + 1, index + 1));
+    return new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "case", "do", "else", "yield", "await",
+]).has(text.slice(start + 1, index + 1));
   }
   if (character === ")" || character === "]" || character === "}" || character === "`" || character === '"' || character === "'") return false;
   return true;
@@ -248,7 +248,7 @@ const ANY_TYPE: TypeExpr = { kind: "ref", of: null };
  * A namespace is a namespace and not a value: nothing reads one, and a call of
  * one is the only thing that may be written of it.
  */
-const NAMESPACES: ReadonlySet<string> = new Set(["Math", "http", "JSON", "Date", "Promise", "posix"]);
+
 
 
 /** Statements the parser reads to the end of the statement and reports. */
@@ -286,9 +286,7 @@ const ARITHMETIC_OPERATORS: readonly BinaryOp[] = ["+", "-", "*", "/"];
  * reader decides it by what precedes it; `=` and `;` are the ends of a form
  * that writes no brace at all.
  */
-const FUNCTION_BODY_STOPS: ReadonlySet<string> = new Set(["{", "=", ";"]);
 /** Where the type of one parameter ends: the comma or paren of its own list. */
-const PARAMETER_TYPE_STOPS: ReadonlySet<string> = new Set([",", ")", "="]);
 
 /**
  * Where an `as` or `satisfies` type ends. A type is followed by the rest of the
@@ -296,36 +294,7 @@ const PARAMETER_TYPE_STOPS: ReadonlySet<string> = new Set([",", ")", "="]);
  * the ones that stop it. A union and an intersection are type operators, not
  * expression ones, and the scanner reads them as part of the type.
  */
-const EXPRESSION_TYPE_STOPS: ReadonlySet<string> = new Set([
-  ",",
-  ")",
-  "]",
-  "}",
-  ";",
-  ".",
-  "?",
-  ":",
-  "=",
-  "==",
-  "===",
-  "!=",
-  "!==",
-  "<=",
-  ">",
-  ">=",
-  "+",
-  "-",
-  "*",
-  "/",
-  "%",
-  "<<",
-  ">>",
-  ">>>",
-  "^",
-  "&&",
-  "||",
-  "??",
-]);
+
 
 /**
  * The keywords the subset does not read, and what a source writes instead of
@@ -363,7 +332,7 @@ export function refusedKeyword(text: string): string | undefined {
 }
 
 /** The refused constructs whose own `{ ... }` is skipped with them. */
-const REFUSED_WITH_BODY: ReadonlySet<string> = new Set(["class", "enum", "namespace", "struct", "with"]);
+
 
 
 
@@ -1384,7 +1353,7 @@ function initializerEnd(tokens: readonly Token[], from: number): number {
  * read without running anything: every element is a number, a text, a whole
  * number, or an array of those.
  */
-function constantList(tokens: readonly Token[], open: number, close: number): boolean {
+function constantList(tokens: readonly Token[], open: number, close: number, known?: (name: string) => boolean): boolean {
   let depth = 0;
   let from = open + 1;
   const elements: (readonly [number, number])[] = [];
@@ -1406,10 +1375,10 @@ function constantList(tokens: readonly Token[], open: number, close: number): bo
     // A string whose text is `[` is a string, not a nested list.
     if (mark(tokens[start]) === "[") {
       const nested = closingBracket(tokens, start);
-      if (nested !== end + 1 || !constantList(tokens, start, nested - 1)) return false;
+      if (nested !== end + 1 || !constantList(tokens, start, nested - 1, known)) return false;
       continue;
     }
-    if (!constantRange(tokens, start, end)) return false;
+    if (!constantRange(tokens, start, end, known)) return false;
   }
   return true;
 }
@@ -1441,6 +1410,7 @@ function writtenName(tokens: readonly Token[], name: string): boolean {
 }
 
 function scanConstants(tokens: readonly Token[]): ScannedFile {
+  const trusted = constantImports(tokens);
   const found = new Map<string, ConstantInfo>();
   const shapes = new Map<string, ConstantInfo>();
   const annotations = new Map<string, { start: number; end: number; exported: boolean }>();
@@ -1455,7 +1425,24 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   // The declarations are collected first so a body is never read as the file's
   // constant: a parameter spelled `P` is the parameter, whatever the file
   // writes at the top of it.
-  const locals = localNames(tokens);
+  // The names a body declares, which are not the file's however a field or a
+  // parameter of the same spelling appears elsewhere. A field key is a name
+  // followed by a colon, and the wider `localNames` set carries those too.
+  const bodyDeclarations = new Set<string>();
+  {
+    let depth = 0;
+    for (let at = 0; at < tokens.length; at += 1) {
+      const token = tokens[at] as Token;
+      const written = mark(token);
+      if (written === "{" || written === "${") depth += 1;
+      else if (written === "}") depth -= 1;
+
+      else if (depth > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
+        const name = tokens[at + 1];
+        if (name?.kind === "ident") bodyDeclarations.add(name.text);
+      }
+    }
+  }
   const closing = (open: number): number => {
     let depth = 0;
     for (let index = open; index < tokens.length; index += 1) {
@@ -1507,6 +1494,12 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       tokens[index + 1]?.kind === "ident"
     ) {
       const name = (tokens[index + 1] as Token).text;
+      // A name a body declares is that body's: the file's own scope does not
+      // hold it, however the scan of the text reaches the declaration.
+      if (bodyDeclarations.has(name)) {
+        index += 1;
+        continue;
+      }
       const mutable = token.text !== "const";
       // `export const NAME = ...` offers the value to a module that imports the
       // name, and what it offers is the value itself.
@@ -1544,7 +1537,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // allocation, and a method written above the declaration is read before
       // it: the span is kept so that read can resolve the collection.
       const allocated = tokens[start]?.text === "new" ? tokens[start + 1] : undefined;
-      if (allocated?.kind === "ident" && COLLECTION_CONSTRUCTORS.has(allocated.text)) {
+      if (allocated?.kind === "ident" && new Set(["Map", "Set", "WeakMap", "WeakSet"]).has(allocated.text)) {
         let open = start + 2;
         if (tokens[open]?.text === "<") {
           let depth = 0;
@@ -1564,7 +1557,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
             open += 1;
           }
         }
-        if (tokens[open]?.text === "(" && !locals.has(name)) {
+        if (tokens[open]?.text === "(" && !bodyDeclarations.has(name)) {
           collections.set(name, { start: start + 1, end: open });
         }
       }
@@ -1574,7 +1567,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // the addition is not the one the source wrote.
       const written = collectionLiteral(tokens, start);
       if (written !== null) {
-        if (!mutable && !locals.has(name) && !mutatesCollection(tokens, name)) {
+        if (!mutable && !bodyDeclarations.has(name) && !mutatesCollection(tokens, name)) {
           found.set(name, written.values === null
             ? { keys: written.keys, keyKind: written.keyKind, exported: offered }
             : { keys: written.keys, values: written.values, keyKind: written.keyKind, exported: offered });
@@ -1594,7 +1587,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         // An array whose every element is written down is the file's constant,
         // inlined where it is read, unless a body writes the name: a value a
         // program changes is state rather than a constant.
-        if (!mutable && whole === end && constantList(tokens, start, end - 1) && !locals.has(name) && !writtenName(tokens, name)) {
+        if (!mutable && whole === end && constantList(tokens, start, end - 1, (one) => found.has(one) || trusted.has(one)) && !bodyDeclarations.has(name) && !writtenName(tokens, name)) {
           found.set(name, { expression: { range: { start, end } }, exported: offered });
         } else {
           state.add(name);
@@ -1606,21 +1599,21 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       }
       if (tokens[start]?.text === "{") {
         const end = closing(start);
-        const object = objectConstants(tokens, start, end);
+        const object = objectConstants(tokens, start, end, (one) => found.has(one) || trusted.has(one));
         // An object whose every field is a constant is the file's constant (a
         // curve's fields are), and a body's read of one is the value written
         // there. An object with a field computed at run time is state the
         // running program holds, and a function that reads it is read where the
         // program is.
         if (!mutable && object.all) {
-          if (!locals.has(name)) found.set(name, { fields: object.fields, exported: offered });
+          if (!bodyDeclarations.has(name)) found.set(name, { fields: object.fields, exported: offered });
         } else {
           state.add(name);
           initializers.set(name, { start, end });
           if (offered) exportedState.add(name);
           // The values are computed, but the names are written down: a
           // question about the keys is still one the source answers.
-          if (!locals.has(name) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
+          if (!bodyDeclarations.has(name) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
         }
         index = end;
         continue;
@@ -1638,13 +1631,13 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
       // one and is never written again is as constant as a `const`: a package
       // writes its pattern once at the top of the file and reads it in every
       // function, and a pattern is two texts rather than state.
-      if (!locals.has(name) && tokens[start]?.kind === "regex" && end === start + 1 && !writtenName(tokens, name)) {
+      if (!bodyDeclarations.has(name) && tokens[start]?.kind === "regex" && end === start + 1 && !writtenName(tokens, name)) {
         found.set(name, { expression: { range: { start, end } }, exported: offered });
         index = end + 1;
         continue;
       }
       const construction = !mutable && constructorRange(tokens, start, end);
-      const constant = !mutable && (construction || constantRange(tokens, start, end));
+      const constant = !mutable && (construction || constantRange(tokens, start, end, (one) => found.has(one) || trusted.has(one)));
       // An instance is inlined only where the file reads it once: two reads of
       // a name are two reads of one object, and two allocations are two.
       const shared = construction && nameCount(tokens, name) > 2;
@@ -1655,13 +1648,24 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         // A module-level counter is a number the runtime holds in a cell:
         // `let temporaryWrites = 0` is the one shape this reads, because a
         // number is the value a global cell can hold.
-        if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !locals.has(name)) {
+        if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !bodyDeclarations.has(name)) {
           numeric.set(name, numeric.size);
         }
         const element = allocationElement(tokens, start);
         if (element !== null) allocations.set(name, element);
       }
-      else if (!locals.has(name)) { found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) }); }
+      else if (!bodyDeclarations.has(name)) {
+        found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) });
+        // A value the file constructs is read where the file reads it, but a
+        // module that imports it cannot read the construction: it crosses as
+        // the getter, which is a function of this file. The getter is made
+        // from the initializer range like any other state value's.
+        if (construction) {
+          state.add(name);
+          initializers.set(name, { start, end });
+          if (offered) exportedState.add(name);
+        }
+      }
       index = end + 1;
       continue;
     }
@@ -1734,37 +1738,6 @@ function exportConstantLists(tokens: readonly Token[], found: Map<string, Consta
  * that only means a constant of the same name is not read where the source may
  * mean the body's own.
  */
-function localNames(tokens: readonly Token[]): Set<string> {
-  const names = new Set<string>();
-  let depth = 0;
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index] as Token;
-    if (mark(token) === "{") {
-      depth += 1;
-      continue;
-    }
-    if (mark(token) === "}") {
-      depth -= 1;
-      continue;
-    }
-    if (depth > 0 && (token.text === "let" || token.text === "const" || token.text === "var")) {
-      const name = tokens[index + 1];
-      if (name?.kind === "ident") names.add(name.text);
-    }
-    if (token.kind === "ident" && tokens[index + 1]?.text === ":") {
-      // A top-level `const NAME: Type` is the file's name, not a body's: the
-      // annotation is what made it look like a parameter here.
-      const before = tokens[index - 1]?.text;
-      if (depth === 0 && (before === "const" || before === "let" || before === "var")) continue;
-      // A conditional writes `condition ? a : b`, and a `case` writes its
-      // label before a colon: neither is a parameter's annotation, and a name
-      // the file declares is not a body's because it stands before one.
-      if (before === "?" || before === ":" || before === "case") continue;
-      names.add(token.text);
-    }
-  }
-  return names;
-}
 
 /**
  * The names a file's imports bind.
@@ -1775,6 +1748,37 @@ function localNames(tokens: readonly Token[]): Set<string> {
  * from the tokens rather than from the parse, because classes are lowered
  * before the imports are read and their fields may name an imported type.
  */
+/**
+ * The value names a file imports from the module that declares the IR's own
+ * type constants. Those names are constant objects, and a table that writes
+ * `params: [TEXT]` is as constant as the table that writes the object out.
+ */
+function constantImports(tokens: readonly Token[]): Set<string> {
+  const names = new Set<string>();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index]?.text !== "import") continue;
+    const named: string[] = [];
+    let at = index + 1;
+    if (tokens[at]?.text === "type") at += 1;
+    if (tokens[at]?.text === "{") {
+      at += 1;
+      while (at < tokens.length && tokens[at]?.text !== "}") {
+        const token = tokens[at] as Token;
+        if (token.kind === "ident" && tokens[at + 1]?.text !== "as") named.push(token.text);
+        else if (token.kind === "ident" && tokens[at + 2]?.text !== undefined) named.push(token.text);
+        at += 1;
+      }
+      at += 1;
+    }
+    while (at < tokens.length && tokens[at]?.kind !== "string" && tokens[at]?.text !== ";") at += 1;
+    const specifier = tokens[at];
+    if (specifier !== undefined && specifier.kind === "string" && specifier.text.endsWith("semantic-ir.ts")) {
+      for (const name of named) names.add(name);
+    }
+  }
+  return names;
+}
+
 function importedNames(tokens: readonly Token[]): Set<string> {
   const names = new Set<string>();
   let index = 0;
@@ -2876,7 +2880,7 @@ interface Declaration extends Span {
 }
 
 /** The constant fields of an object literal, by the name each is written under. */
-function objectConstants(tokens: readonly Token[], open: number, close: number): { fields: Map<string, ConstantValue>; names: string[]; all: boolean } {
+function objectConstants(tokens: readonly Token[], open: number, close: number, known?: (name: string) => boolean): { fields: Map<string, ConstantValue>; names: string[]; all: boolean } {
   const fields = new Map<string, ConstantValue>();
   const names: string[] = [];
   let total = 0;
@@ -2894,9 +2898,10 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
       index += 1;
       continue;
     }
-    if (depth === 0 && token.kind === "ident" && tokens[index + 1]?.text === ":") {
+    if (depth === 0 && (token.kind === "ident" || token.kind === "string") && tokens[index + 1]?.text === ":") {
+      const fieldName = token.kind === "string" ? unescape(token.text, token.line) : token.text;
       total += 1;
-      names.push(token.text);
+      names.push(fieldName);
       const start = index + 2;
       let end = start;
       let nested = 0;
@@ -2907,7 +2912,8 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
         else if (written === "," && nested === 0) break;
         end += 1;
       }
-      if (constantRange(tokens, start, end)) fields.set(token.text, { range: { start, end } });
+      if (constantRange(tokens, start, end, known)) fields.set(fieldName, { range: { start, end } });
+
       index = end + 1;
       continue;
     }
@@ -2921,15 +2927,23 @@ function objectConstants(tokens: readonly Token[], open: number, close: number):
  * read without running anything: a number, a string, a `BigInt` of one, or an
  * arithmetic expression of those.
  */
-function constantRange(tokens: readonly Token[], start: number, end: number): boolean {
+function constantRange(tokens: readonly Token[], start: number, end: number, known?: (name: string) => boolean): boolean {
   if (end <= start) return false;
-  const operators: ReadonlySet<string> = new Set(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", "(", ")"]);
+  const operators: ReadonlySet<string> = new Set(["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", "(", ")", "{", "}", "[", "]", ",", ":"]);
   for (let index = start; index < end; index += 1) {
     const token = tokens[index] as Token;
     if (token.kind === "number" || token.kind === "bigint" || token.kind === "string" || token.kind === "regex") continue;
     if (token.kind === "punct" && operators.has(token.text)) continue;
     if (token.kind === "ident" && token.text === "BigInt") continue;
-    if (token.kind === "ident" && (token.text === "true" || token.text === "false")) continue;
+    if (token.kind === "ident" && (token.text === "true" || token.text === "false" || token.text === "null" || token.text === "undefined")) continue;
+    // A field of a nested object is its own name, written before the colon:
+    // `{ command: "node", flags: [] }` is a value the file wrote, and the name
+    // is a key rather than a value the read would have to find.
+    if (token.kind === "ident" && tokens[index + 1]?.text === ":") continue;
+    // A name the file already declared as a constant is the value it holds:
+    // a table of register numbers or of type descriptions is as constant as
+    // the numbers it names.
+    if (token.kind === "ident" && known !== undefined && known(token.text)) continue;
     return false;
   }
   return true;
@@ -2964,7 +2978,13 @@ const PUNCTUATION = ["...", "===", "!==", "**=", "**", "==", "!=", "<=", ">=", "
  * two forms share a character, so this is the one question the scanner asks of
  * the token before it.
  */
-const REGEX_PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
+
+
+function regexAllowed(tokens: readonly Token[]): boolean {
+  const last = tokens[tokens.length - 1];
+  if (last === undefined) return true;
+  if (last.kind === "number" || last.kind === "bigint" || last.kind === "string" || last.kind === "regex") return false;
+  if (last.kind === "ident") return new Set([
   "return",
   "case",
   "throw",
@@ -2980,13 +3000,7 @@ const REGEX_PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
   "yield",
   "await",
   "default",
-]);
-
-function regexAllowed(tokens: readonly Token[]): boolean {
-  const last = tokens[tokens.length - 1];
-  if (last === undefined) return true;
-  if (last.kind === "number" || last.kind === "bigint" || last.kind === "string" || last.kind === "regex") return false;
-  if (last.kind === "ident") return REGEX_PREFIX_KEYWORDS.has(last.text);
+]).has(last.text);
   if (last.kind === "punct") {
     return last.text !== ")" && last.text !== "]" && last.text !== "}" && last.text !== "++" && last.text !== "--";
   }
@@ -3386,34 +3400,14 @@ function fileHoldsWideBigint(tokens: readonly Token[]): boolean {
  * function of the file for. A method it has no reading of is a method of a
  * class the source declared, and the class is what says what it is.
  */
-const COLLECTION_METHODS: ReadonlySet<string> = new Set([
-  "map",
-  "flat",
-  "flatMap",
-  "filter",
-  "forEach",
-  "every",
-  "some",
-  "find",
-  "findIndex",
-  "reduce",
-  "sort",
-  "reverse",
-  "join",
-  "includes",
-  "indexOf",
-  "at",
-  "slice",
-  "fill",
-  "concat",
-]);
+
 
 /** The constructors a `new` expression names to allocate a map or a set. */
-const COLLECTION_CONSTRUCTORS: ReadonlySet<string> = new Set(["Map", "Set", "WeakMap", "WeakSet"]);
+
 
 /** The operators that stand in front of a value, as opposed to between two. */
 /** Where a loop's initialiser states the type of the name it declares. */
-const LOOP_INIT_STOPS: ReadonlySet<string> = new Set(["=", "of", ";"]);
+
 
 const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
 
@@ -3428,14 +3422,14 @@ const UNARY_OPERATORS: readonly string[] = ["!", "-", "+", "~"];
  * `,`, `;`, `)` or `]` at the type's own depth ends an annotation too, and none
  * of them is a type's own token, so each one is a stop.
  */
-const ARROW_RETURN_STOPS: ReadonlySet<string> = new Set(["=>", ",", ";", ")", "]", "}", "?", ":", "=", "&&", "||"]);
+
 
 /**
  * Where a method's result type ends: the body's brace follows it, where an
  * arrow's `=>` follows an arrow's. A method states its type and then writes its
  * body, so the brace is the end of the type and not a brace inside it.
  */
-const METHOD_RETURN_STOPS: ReadonlySet<string> = new Set(["{", ";", "=", ","]);
+
 
 class TypeScriptParser {
   tokens: Token[];
@@ -3986,6 +3980,7 @@ class TypeScriptParser {
     for (const name of this.importedTypeNames) this.pendingValues.add(name);
     this.typeTable.classes = this.classTable.names;
     this.position = 0;
+    this.seedStateGetters();
   }
 
   /** The file's constants, which a compiled function reads where it was written. */
@@ -4000,6 +3995,8 @@ class TypeScriptParser {
   private readonly exportedState: ReadonlySet<string>;
   /** The value getters this module offers, by the value's name. */
   private readonly valueGetters = new Map<string, { name: string; type: TypeExpr }>();
+  /** The initializer each getter runs, and the statements it needs first. */
+  private readonly stateInitials = new Map<string, { init: Expression; prelude: Statement[] }>();
   /** The imported names that are values read through a getter. */
   private readonly valueGetterNames = new Set<string>();
   /** The field names of a computed top-level object, by the name it is held at. */
@@ -5329,7 +5326,27 @@ class TypeScriptParser {
    * written at.
    */
   private collectionCallbackParameters(receiver: Expression, method: string): readonly ArrowParameterType[] | null {
-    if (!COLLECTION_METHODS.has(method)) return null;
+    if (!new Set([
+  "map",
+  "flat",
+  "flatMap",
+  "filter",
+  "forEach",
+  "every",
+  "some",
+  "find",
+  "findIndex",
+  "reduce",
+  "sort",
+  "reverse",
+  "join",
+  "includes",
+  "indexOf",
+  "at",
+  "slice",
+  "fill",
+  "concat",
+]).has(method)) return null;
     if (method === "join" || method === "includes" || method === "indexOf" || method === "at" || method === "slice") return null;
     const sequence = this.valueTypeOf(receiver);
     if (sequence.kind !== "slice" && sequence.kind !== "array") return null;
@@ -6114,6 +6131,7 @@ class TypeScriptParser {
           valueName !== "" &&
           (this.stateInitializers.has(valueName) || this.constants.get(valueName)?.constructed === true) &&
           !this.numericGlobals.has(valueName) &&
+          !this.valueGetters.has(valueName) &&
           // A value the file constructs is a constant the same file may inline,
           // but a module that imports it cannot read its construction: the
           // getter is where the value crosses.
@@ -6349,7 +6367,7 @@ class TypeScriptParser {
       body,
       constants: this.exportedConstants(),
       ...(this.state.size === 0 ? {} : { state: this.state }),
-      ...(this.valueGetters.size === 0 ? {} : { valueGetters: new Map([...this.valueGetters].map(([name, getter]) => [name, getter.name])) }),
+      ...(this.valueGetters.size === 0 ? {} : { valueGetters: new Map([...this.valueGetters].map((entry) => [entry[0], entry[1].name])) }),
       awaitingLink: this.deferred.size > 0 || (this.waitForFunction && !this.linked),
     };
   }
@@ -6512,7 +6530,7 @@ class TypeScriptParser {
           continue;
         }
         index += 1;
-        const finish = Math.min(end, this.typeTokensEnd(index, PARAMETER_TYPE_STOPS));
+        const finish = Math.min(end, this.typeTokensEnd(index, new Set([",", ")", "="])));
         const single = finish === index + 1 && tokens[index]?.kind === "ident" ? (tokens[index] as Token).text : null;
         try {
           const shape = resolveAnnotation(tokens, index, finish, this.typeTable);
@@ -6541,7 +6559,7 @@ class TypeScriptParser {
       after += 1;
       // The annotation ends where the body's brace or the overload's semicolon
       // is, which is the same read `skipFunctionBody` makes of a signature.
-      const finish = this.typeTokensEnd(after, FUNCTION_BODY_STOPS);
+      const finish = this.typeTokensEnd(after, new Set(["{", "=", ";"]));
       const last = text(finish);
       this.declaredReturnSingle.set(
         name.text,
@@ -6657,7 +6675,11 @@ class TypeScriptParser {
     // module's interface rather than one of the body's own declarations.
     // `export { f }` adds no function and refuses nothing: it names functions,
     // and is not a statement the body runs.
-    const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(entry.handle as TypeScriptFunction, this.state));
+    // A module number lives in a runtime cell a compiled function reads and
+    // writes; it is not state the program body has to hold for it.
+    const moduleState = new Set(this.state);
+    for (const name of this.numericGlobals.keys()) moduleState.delete(name);
+    const readsProgramState = entries.length > 0 && entries.some((entry) => readsState(entry.handle as TypeScriptFunction, moduleState));
     const refused = trial.entries.length > 0;
     // An exported function is the module's interface. Handing it to the program
     // parser would not read the module's own refusal: the program parser does
@@ -6759,7 +6781,7 @@ class TypeScriptParser {
     // type and the rest of the signature was read as a statement of the file.
     // The annotation is skipped as a type, and the body is the brace after it.
     if (this.tokens[index]?.text === ":") {
-      index = this.typeTokensEnd(index, FUNCTION_BODY_STOPS);
+      index = this.typeTokensEnd(index, new Set(["{", "=", ";"]));
     }
     while (index < this.tokens.length && this.tokens[index].text !== "{") index += 1;
     let depth = 0;
@@ -7474,9 +7496,9 @@ class TypeScriptParser {
   private annotationCollectionAt(start: number, stops: ReadonlySet<string>): CollectionValue | null {
     const end = this.typeEndAt(start, stops);
     const head = this.tokens[start];
-    const kind = head?.text === "Map" || head?.text === "WeakMap" || head?.text === "Record"
+    const kind = head?.text === "Map" || head?.text === "ReadonlyMap" || head?.text === "WeakMap" || head?.text === "Record"
       ? "map" as const
-      : head?.text === "Set" || head?.text === "WeakSet"
+      : head?.text === "Set" || head?.text === "ReadonlySet" || head?.text === "WeakSet"
         ? "set" as const
         : null;
     if (kind === null) return null;
@@ -8520,6 +8542,13 @@ class TypeScriptParser {
       }
       this.accept(";");
       this.pending.push(...alsoDeclared);
+      // A module-level number the file holds is a cell the runtime owns, and
+      // the declaration is the write that starts it. A function reads the cell,
+      // so the value has to be there before the call.
+      const moduleSlot = this.numericGlobals.get(name.text);
+      if (moduleSlot !== undefined && this.stateInitializers.has(name.text) && !this.valueTypes.has(name.text)) {
+        return this.globalWrite(moduleSlot, init, name.line);
+      }
       // An arrow is called by the name it is bound to: the function it lifted to
       // already carries the values it captured, so the name is not a slot the
       // body reads. A name bound to a value that is not an arrow is not one.
@@ -8734,7 +8763,7 @@ class TypeScriptParser {
       // writes; one that does not is skipped as the statement it is. Skipping
       // `yield x;` as a block ran to the next `{` in the file, which was a
       // function or class the source wrote after it.
-      if (REFUSED_WITH_BODY.has(token.text)) this.skipBlock();
+      if (new Set(["class", "enum", "namespace", "struct", "with"]).has(token.text)) this.skipBlock();
       else this.synchronize();
       return { kind: "expression", value: this.hole(), line: token.line };
     }
@@ -10011,7 +10040,7 @@ class TypeScriptParser {
     // like every other, and what the loop reads is the value at the `=`.
     if (this.at(":")) {
       this.next();
-      this.skipBalancedTypeTokens(LOOP_INIT_STOPS);
+      this.skipBalancedTypeTokens(new Set(["=", "of", ";"]));
     }
     if (this.at("of")) return this.readForOf(start, variable.text, null);
     this.expect("=");
@@ -10319,6 +10348,12 @@ class TypeScriptParser {
     this.expect("(");
     const condition = this.readExpression();
     this.expect(")");
+    // The statements the condition needed before itself run before the `if`,
+    // not inside the first arm the body reads: a map spread in a condition
+    // declares the list it walks, and a declaration inside the arm is one the
+    // condition above it cannot see.
+    const conditionPending = this.pendingBefore;
+    this.pendingBefore = [];
     // A branch whose condition is written false is not code the program runs,
     // and what it holds is not a construct the build should refuse.
     const dead = isNumberLiteral(condition, "0");
@@ -10329,6 +10364,7 @@ class TypeScriptParser {
       const read = (): Statement[] => (this.at("if") ? [this.readIf()] : this.readBody());
       otherwise.push(...this.withNarrowing(settled, read));
     }
+    this.pendingBefore = [...conditionPending, ...this.pendingBefore];
     if (dead && otherwise.length === 0) return { kind: "expression", value: { k: "literal", text: "0" }, line: start.line };
     return { kind: "if", condition, then, otherwise, line: start.line };
   }
@@ -10396,6 +10432,7 @@ class TypeScriptParser {
     const of = this.peek();
     let walked: string;
     let written: Expression | null = null;
+    let ofPending: Statement[] = [];
     // The source of a loop is read with the iteration flag raised, so an
     // `entries()` written where a loop walks it is marked rather than refused:
     // the pair it names is not an element a typed array holds.
@@ -10405,8 +10442,49 @@ class TypeScriptParser {
       if (of.kind === "ident" && this.peek(1).text === ")") {
         this.next();
         walked = of.text;
+        // A list or a text the file wrote out is walked as the value it is: a
+        // constant array has no running-program name to read.
+        const constant = this.constants.get(of.text);
+        const expanded = constant === undefined ? null : this.constantValue(of.text, constant.expression);
+        if (expanded !== null) {
+          const held = this.valueTypeOf(expanded);
+          if (held.kind === "slice" || held.kind === "array" || held.kind === "text") {
+            written = expanded;
+            walked = `__walk${this.walkCount}`;
+            this.walkCount += 1;
+            this.valueTypes.set(walked, held);
+          }
+        }
+        if (written === null) {
+          // A value the module holds or another module offers is read through
+          // its getter: an array it holds is walked as the value the call
+          // answers, not as a name this body does not declare.
+          const own = this.valueGetters.get(of.text);
+          const imported = this.valueGetterNames.has(of.text) ? this.declaredReturns.get(of.text) ?? ANY_TYPE : null;
+          const read: Expression | null = own !== undefined
+            ? { k: "call", name: own.name, args: [], returns: own.type }
+            : imported !== null
+              ? { k: "call", name: of.text, args: [], returns: imported }
+              : null;
+          if (read !== null) {
+            this.expressionTypes.set(read, imported ?? own?.type ?? ANY_TYPE);
+            const held = this.valueTypeOf(read);
+            if (held.kind === "slice" || held.kind === "array" || held.kind === "text") {
+              written = read;
+              walked = `__walk${this.walkCount}`;
+              this.walkCount += 1;
+              this.valueTypes.set(walked, held);
+            }
+          }
+        }
       } else {
+        // The statements the source expression needs before itself run before
+        // the loop, not inside the body the value is walked by.
+        const outerPending = this.pendingBefore;
+        this.pendingBefore = [];
         written = this.readExpression();
+        ofPending = this.pendingBefore;
+        this.pendingBefore = outerPending;
         walked = `__walk${this.walkCount}`;
         this.walkCount += 1;
         this.valueTypes.set(walked, this.valueTypeOf(written));
@@ -10461,7 +10539,7 @@ class TypeScriptParser {
     // The value is read once, before the loop starts. It is recorded after the
     // body is read, because the body's own pending statements belong inside it.
     if (written !== null) {
-      this.pendingBefore.push({ kind: "declare", name: walked, type: null, init: written, line: start.line });
+      this.pendingBefore.push(...ofPending, { kind: "declare", name: walked, type: null, init: written, line: start.line });
     }
     return { kind: "forOf", variable: item, of: walked, body, line: start.line };
   }
@@ -11123,15 +11201,40 @@ class TypeScriptParser {
    * this read knows the object has, and a run-time tag is what would answer it.
    */
   private membership(key: Expression, object: Expression): Expression {
+    // An object literal the source wrote is the names it wrote, exactly as an
+    // object constant of the file is: the literal may have been written out
+    // here by the read that inlines such a constant.
+    if (object.k === "object") {
+      let read = key;
+      if (!this.repeatable(key)) {
+        const held = `__member${this.fieldCount++}`;
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.valueTypes.set(held, this.valueTypeOf(key));
+        read = { k: "ident", name: held };
+      }
+      const names = object.fields.map((field) => field.name);
+      let answer: Expression = { k: "literal", text: "0" };
+      for (let at = names.length - 1; at >= 0; at -= 1) {
+        answer = {
+          k: "conditional",
+          condition: { k: "binary", op: "===", left: read, right: { k: "text", parts: [{ k: "text", value: names[at] as string }] } },
+          then: { k: "literal", text: "1" },
+          otherwise: answer,
+        };
+      }
+      this.expressionTypes.set(answer, BOOLEAN_RESULT);
+      return answer;
+    }
     const constant = object.k === "ident" ? this.constants.get(object.name) : undefined;
     if (constant?.fields !== undefined) {
+      // The key is read once, before the chain: a key computed by a call would
+      // otherwise run once per name the object wrote.
+      let read = key;
       if (!this.repeatable(key)) {
-        this.report(
-          "a record's keys read the key once",
-          "write the key into a name first, as in const k = f(); k in TABLE",
-          this.peek(),
-        );
-        return this.hole();
+        const held = `__member${this.fieldCount++}`;
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.valueTypes.set(held, this.valueTypeOf(key));
+        read = { k: "ident", name: held };
       }
       // The chain asks the last key first, so the comparisons run in the order
       // the source wrote them.
@@ -11140,7 +11243,7 @@ class TypeScriptParser {
       for (let at = keys.length - 1; at >= 0; at -= 1) {
         answer = {
           k: "conditional",
-          condition: { k: "binary", op: "===", left: key, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
+          condition: { k: "binary", op: "===", left: read, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
           then: { k: "literal", text: "1" },
           otherwise: answer,
         };
@@ -11200,13 +11303,12 @@ class TypeScriptParser {
       // does not answer.
       [...shape.fields.values()].every((field) => !field.optional)
     ) {
+      let read = key;
       if (!this.repeatable(key)) {
-        this.report(
-          "a record's keys read the key once",
-          "write the key into a name first, as in const k = f(); k in TABLE",
-          this.peek(),
-        );
-        return this.hole();
+        const held = `__member${this.fieldCount++}`;
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.valueTypes.set(held, this.valueTypeOf(key));
+        read = { k: "ident", name: held };
       }
       const keys = [...shape.fields.keys()];
       let answer: Expression = { k: "literal", text: "0" };
@@ -11215,7 +11317,7 @@ class TypeScriptParser {
       for (let at = keys.length - 1; at >= 0; at -= 1) {
         answer = {
           k: "conditional",
-          condition: { k: "binary", op: "===", left: key, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
+          condition: { k: "binary", op: "===", left: read, right: { k: "text", parts: [{ k: "text", value: keys[at] as string }] } },
           then: { k: "literal", text: "1" },
           otherwise: answer,
         };
@@ -11731,6 +11833,156 @@ class TypeScriptParser {
    * `a?.b.c` reads `a.b.c` only where `a` is not null. A second `?.` nests
    * another conditional inside the first.
    */
+  /**
+   * The getter every module value the program holds is read through.
+   *
+   * A compiled function owns no module scope, so a top-level value built by a
+   * call is read by a function of the module that answers it. The function is
+   * registered before the file is read, so a body written above the value is
+   * a call of the getter rather than a read of a name the body does not hold.
+   */
+  private seedStateGetters(): void {
+    for (const name of this.state) {
+      if (this.numericGlobals.has(name) || this.valueGetters.has(name)) continue;
+      if (!this.stateInitializers.has(name)) continue;
+      let type: TypeExpr = ANY_TYPE;
+      let collection: CollectionValue | null = null;
+      const annotation = this.constantAnnotations.get(name);
+      const getterName = `__value_${name}`;
+      if (annotation !== undefined) {
+        const savedTokens = this.tokens;
+        const savedPosition = this.position;
+        const savedDiagnostics = this.diagnostics;
+        this.diagnostics = new Diagnostics();
+        this.tokens = this.allTokens;
+        this.position = annotation.start;
+        try {
+          collection = this.annotationCollection(new Set(["=", ";"]));
+          this.position = annotation.start;
+          type = this.readTypeAnnotation("a value type", new Set(["=", ";"]));
+        } catch {
+          type = ANY_TYPE;
+        } finally {
+          this.tokens = savedTokens;
+          this.position = savedPosition;
+          this.diagnostics = savedDiagnostics;
+        }
+      }
+      if (collection !== null) this.declaredCollections.set(getterName, collection);
+      this.valueGetters.set(name, { name: getterName, type });
+    }
+    // The initializer is read once for its type and kept: a value written out
+    // has the type the source wrote, and an unannotated one the type its
+    // initializer is.
+    for (const [name, getter] of this.valueGetters) {
+      const range = this.stateInitializers.get(name);
+      if (range === undefined) continue;
+      const savedTokens = this.tokens;
+      const savedPosition = this.position;
+      const savedDiagnostics = this.diagnostics;
+      const savedPending = this.pendingBefore;
+      this.diagnostics = new Diagnostics();
+      this.pendingBefore = [];
+      let init: Expression | null = null;
+      try {
+        init = this.readAt(getter.type.kind === "ref" && getter.type.of === null && getter.type.name === undefined ? null : getter.type,
+          () => this.readRange(range.start, range.end));
+      } catch {
+        init = null;
+      }
+      const prelude = this.pendingBefore;
+      this.pendingBefore = savedPending;
+      this.diagnostics = savedDiagnostics;
+      this.tokens = savedTokens;
+      this.position = savedPosition;
+      if (init === null) continue;
+      if (getter.type.kind === "ref" && getter.type.of === null && getter.type.name === undefined) getter.type = this.valueTypeOf(init);
+      const held = this.collectionOfExpression(init);
+      if (held !== null) this.declaredCollections.set(getter.name, held);
+      this.stateInitials.set(name, { init, prelude });
+    }
+  }
+
+  /**
+   * The getter functions the seeded values are read through.
+   *
+   * Each cell is initialized once: the first read writes the value the module
+   * wrote into a named state cell and marks it, and every later read answers
+   * that cell. A value the module wrote out as a constant is inlined where it
+   * is read and never reaches here.
+   */
+  materializeStateGetters(): DeclaredFunction[] {
+    const made: DeclaredFunction[] = [];
+    const valueKey = (name: string): Expression => ({
+      k: "text",
+      parts: [{ k: "text", value: `${this.path}:${name}` }],
+    });
+    for (const [name, getter] of this.valueGetters) {
+      const range = this.stateInitializers.get(name);
+      if (range === undefined) continue;
+      let held = this.stateInitials.get(name);
+      if (held === undefined) {
+        // The initializer was not read while the file was still unparsed: a
+        // call it makes names a function the parse has now read. It is read
+        // here, where that function is known.
+        const savedTokens = this.tokens;
+        const savedPosition = this.position;
+        const savedPending = this.pendingBefore;
+        this.pendingBefore = [];
+        let init: Expression | null = null;
+        try {
+          init = this.readAt(getter.type, () => this.readRange(range.start, range.end));
+        } catch {
+          init = null;
+        }
+        const prelude = this.pendingBefore;
+        this.pendingBefore = savedPending;
+        this.tokens = savedTokens;
+        this.position = savedPosition;
+        if (init === null) continue;
+        if (getter.type.kind === "ref" && getter.type.of === null && getter.type.name === undefined) getter.type = this.valueTypeOf(init);
+        held = { init, prelude };
+        this.stateInitials.set(name, held);
+      }
+      const init = held.init;
+      const type = getter.type;
+      this.declaredReturns.set(getter.name, type);
+      this.valueTypes.set(name, type);
+      const readCell = (key: Expression): Expression => {
+        const call: Expression = { k: "call", name: "blaze_rt_state_get", args: [key], returns: type };
+        this.expressionTypes.set(call, type);
+        return call;
+      };
+      const readFlag: Expression = { k: "call", name: "blaze_rt_state_get", args: [valueKey(`${name}#init`)], returns: NUMBER_RESULT };
+      this.expressionTypes.set(readFlag, NUMBER_RESULT);
+      const condition: Expression = {
+        k: "binary",
+        op: "!==",
+        left: readFlag,
+        right: { k: "literal", text: "0" },
+      };
+      this.expressionTypes.set(condition, BOOLEAN_RESULT);
+      const write = (key: Expression, value: Expression): Statement => ({
+        kind: "expression",
+        value: { k: "call", name: "blaze_rt_state_set", args: [key, value] },
+        line: range.start,
+      });
+      const declared: Statement = { kind: "declare", name: "made", type, init, line: range.start };
+      const writeOne: Expression = { k: "literal", text: "1" };
+      const body: Statement[] = [
+        { kind: "if", condition, then: [{ kind: "result", value: readCell(valueKey(name)), line: range.start }], otherwise: [], line: range.start },
+        ...held.prelude,
+        declared,
+        write(valueKey(name), { k: "ident", name: "made" }),
+        write(valueKey(`${name}#init`), writeOne),
+        { kind: "result", value: { k: "ident", name: "made" }, line: range.start },
+      ];
+      const handle: TypeScriptFunction = { name: getter.name, params: [], returns: type, body, line: range.start, closure: true };
+      made.push({ name: getter.name, exported: false, internal: true, params: [], returns: type, handle });
+    }
+    return made;
+  }
+
   /**
    * The cell a module-level number lives in, where the name is that number.
    *
@@ -12635,6 +12887,9 @@ class TypeScriptParser {
           const constant = named === null ? undefined : this.constants.get(named);
           const declared = named === null ? undefined : this.shapes.get(named);
           let fieldNames: readonly string[] | undefined = declared?.names;
+          if (receiver !== undefined && receiver.k === "object") {
+            fieldNames = receiver.fields.map((field) => field.name);
+          }
           if (constant?.fields !== undefined) {
             const written: string[] = [];
             for (const name of constant.fields.keys()) written.push(name);
@@ -12871,7 +13126,7 @@ class TypeScriptParser {
             continue;
           }
         }
-        if (target.k === "member" && target.base.k === "ident" && NAMESPACES.has(target.base.name)) {
+        if (target.k === "member" && target.base.k === "ident" && new Set(["Math", "http", "JSON", "Date", "Promise", "posix"]).has(target.base.name)) {
           // A call of a namespace is a call of the name the namespace and the
           // member spell together: `Math.floor(x)` is `Math.floor(x)`, and
           // `http.requestPath(req)` is the HTTP call of that name. It is not a
@@ -13238,6 +13493,52 @@ class TypeScriptParser {
               };
               this.expressionTypes.set(guarded, elements.of);
               replace(guarded);
+              continue;
+            }
+            // A pop read as a value is its last element and the change to the
+            // list, in that order: the element is written into a name before
+            // the pop runs, and the name is what the expression answers. A
+            // statement `a.pop()` answers a name nothing reads, which is the
+            // same program.
+            if (
+              place !== null &&
+              sequence !== null &&
+              (sequence.kind === "slice" || sequence.kind === "array") &&
+              target.field === "pop" &&
+              args.length === 0 &&
+              spreads === null
+            ) {
+              const list: Expression = place.base === null
+                ? { k: "ident", name: place.target }
+                : { k: "member", base: { k: "ident", name: place.base }, field: place.target };
+              const last: Expression = {
+                k: "index",
+                base: list,
+                index: { k: "binary", op: "-", left: { k: "lengthOf", of: list }, right: { k: "literal", text: "1" } },
+              };
+              this.expressionTypes.set(last, sequence.of);
+              const read: Expression = {
+                k: "conditional",
+                condition: { k: "binary", op: ">", left: { k: "lengthOf", of: list }, right: { k: "literal", text: "0" } },
+                then: last,
+                otherwise: this.zeroFor(sequence.of),
+              };
+              this.expressionTypes.set(read, sequence.of);
+              const held = `__popped${this.fieldCount++}`;
+              this.pendingBefore.push({ kind: "declare", name: held, type: sequence.of, init: read, line: callLine });
+              this.valueTypes.set(held, sequence.of);
+              const append: Expression = {
+                k: "append",
+                target: place.target,
+                base: place.base,
+                helper: this.appendHelper("pop", sequence.of, 0, callLine)?.name ?? "",
+                op: "pop",
+                values: [],
+              };
+              this.pendingBefore.push(this.appendWrite(append, callLine));
+              const answer: Expression = { k: "ident", name: held };
+              this.expressionTypes.set(answer, sequence.of);
+              replace(answer);
               continue;
             }
             if (
@@ -13614,7 +13915,36 @@ class TypeScriptParser {
       // names the element type the list holds.
       if (this.at("as") || this.at("satisfies")) {
         const assertion = this.next().text;
-        const type = this.readTypeAnnotation("a type assertion", EXPRESSION_TYPE_STOPS);
+        const type = this.readTypeAnnotation("a type assertion", new Set([
+  ",",
+  ")",
+  "]",
+  "}",
+  ";",
+  ".",
+  "?",
+  ":",
+  "=",
+  "==",
+  "===",
+  "!=",
+  "!==",
+  "<=",
+  ">",
+  ">=",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "<<",
+  ">>",
+  ">>>",
+  "^",
+  "&&",
+  "||",
+  "??",
+]));
         const shape = this.lastAnnotationShape();
         this.applyExpected(current(), type, shape);
         // `value as Record<string, unknown>` where the value is `unknown` is
@@ -13855,6 +14185,15 @@ class TypeScriptParser {
             continue;
           }
         }
+        // `process.execPath` names the running program, which is a host
+        // service and not a field of a value: it is the call the runtime
+        // answers, read where it is written.
+        if (target.k === "ident" && target.name === "process" && field.text === "execPath") {
+          const read: Expression = { k: "call", name: "process.execPath", args: [], returns: TEXT_RESULT };
+          this.expressionTypes.set(read, TEXT_RESULT);
+          replace(read);
+          continue;
+        }
         replace({ k: "member", base: target, field: memberNameOf(field.text) });
         continue;
       }
@@ -14052,7 +14391,7 @@ class TypeScriptParser {
   private precision(of: Expression): Expression {
     const open = this.next();
     const digits = this.next();
-    const count = digits.kind === "number" ? Number(digits.text) : Number.NaN;
+    const count = digits.kind === "number" ? Number(digits.text) : 0 / 0;
     if (digits.kind !== "number" || !/^\d+$/.test(digits.text) || count < 1 || count > 100) {
       this.report(
         "the significant digits a number is written at are written out, as in x.toPrecision(17)",
@@ -14144,7 +14483,7 @@ class TypeScriptParser {
       if (close < 0) return null;
       let after = close + 1;
       if (this.tokens[after]?.kind === "punct" && this.tokens[after]?.text === ":") {
-        after = this.typeEndAt(after + 1, ARROW_RETURN_STOPS);
+        after = this.typeEndAt(after + 1, new Set(["=>", ",", ";", ")", "]", "}", "?", ":", "=", "&&", "||"]));
       }
       if (!(this.tokens[after]?.kind === "punct" && this.tokens[after]?.text === "=>")) return null;
     } else if (!(token.kind === "ident" && this.tokens[head + 1]?.kind === "punct" && this.tokens[head + 1]?.text === "=>")) {
@@ -14460,7 +14799,7 @@ class TypeScriptParser {
     if (this.accept(":")) {
       stated = this.readTypeAnnotation(
         "an arrow function's result type",
-        method ? METHOD_RETURN_STOPS : ARROW_RETURN_STOPS,
+        method ? new Set(["{", ";", "=", ","]) : new Set(["=>", ",", ";", ")", "]", "}", "?", ":", "=", "&&", "||"]),
         isAsync,
       );
       statedShape = this.lastAnnotationShape();
@@ -14548,7 +14887,12 @@ class TypeScriptParser {
         this.pendingValues.add(param.name);
       }
     });
-    const body: Statement[] = this.readReturning(stated, () => {
+    // The statements a body expression needs before itself belong inside the
+    // arrow, not in the function around it: a concise body that reads a map's
+    // entries declares the list it walks there, and the closure captures it.
+    const outerPending = this.pendingBefore;
+    this.pendingBefore = [];
+    const readBody: Statement[] = this.readReturning(stated, () => {
       if (this.at("{")) {
         const read = [...prelude, ...this.readFunctionBlock()];
         // `() => {}` runs nothing and answers nothing: the return is the one
@@ -14568,6 +14912,11 @@ class TypeScriptParser {
       // empty list it answers is built at the type the arrow declares.
       return [...prelude, { kind: "result" as const, value: this.readAt(stated, () => this.readExpression(), statedShape), line }];
     }, statedShape);
+    const innerPending = this.pendingBefore;
+    this.pendingBefore = outerPending;
+    const body: Statement[] = innerPending.length === 0
+      ? readBody
+      : [...readBody.slice(0, prelude.length), ...innerPending, ...readBody.slice(prelude.length)];
     // What the arrow answers is read while its parameters are still in scope: a
     // body that calls a method answers what the method answers, and a field it
     // reads through a parameter answers what the parameter's shape declares.
@@ -14989,7 +15338,27 @@ class TypeScriptParser {
       const held = this.collectionOfExpression(receiver);
       if (held !== null && held.kind === "map") return this.entryPairs(receiver, held, line);
     }
-    if (!COLLECTION_METHODS.has(method)) return null;
+    if (!new Set([
+  "map",
+  "flat",
+  "flatMap",
+  "filter",
+  "forEach",
+  "every",
+  "some",
+  "find",
+  "findIndex",
+  "reduce",
+  "sort",
+  "reverse",
+  "join",
+  "includes",
+  "indexOf",
+  "at",
+  "slice",
+  "fill",
+  "concat",
+]).has(method)) return null;
     if (elements === null) return null;
     if (
       method === "join" ||
@@ -19723,6 +20092,23 @@ class TypeScriptParser {
       if (constant !== undefined) {
         const expanded = this.constantValue(token.text, constant.expression);
         if (expanded !== null) return expanded;
+        // An object constant read whole is the literal the file wrote: a
+        // compiled function has no module scope to read the name from, so the
+        // fields are written where the name is read. A field whose value is
+        // not a constant leaves the name to the module's own value.
+        if (constant.fields !== undefined && !this.at("[")) {
+          const fields: { name: string; value: Expression }[] = [];
+          let written = true;
+          for (const [field, value] of constant.fields) {
+            const held = this.constantValue(token.text, value);
+            if (held === null) {
+              written = false;
+              break;
+            }
+            fields.push({ name: field, value: held });
+          }
+          if (written) return { k: "object", fields };
+        }
       }
       // A name bound to an arrow is that arrow: read where a value is expected,
       // it is the closure the arrow is, carrying the values it captured.
@@ -19760,6 +20146,9 @@ class TypeScriptParser {
         if (shape !== undefined) this.expressionShapes.set(call, shape);
         return call;
       }
+      // A name an import binds is not a value this read can answer yet: the
+      // link is where the getter it is read through arrives.
+      if (!this.linked && this.pendingValues.has(token.text)) this.waitForFunction = true;
       return { k: "ident", name: token.text };
     }
     if (token.kind === "punct" && token.text === "[") return this.arrayLiteral(token);
@@ -20086,8 +20475,27 @@ class TypeScriptParser {
         put(name, value);
       } else if (key.kind === "ident") {
         // `{ line }` is `{ line: line }`: the field is named by the name the
-        // value is held at, and the value is that name.
-        put(name, { k: "ident", name });
+        // value is held at, and the value is that name. The name is read the
+        // way every other value is: a constant where the file wrote one, a
+        // cell where the module holds one, and the getter otherwise.
+        let held: Expression = { k: "ident", name };
+        const constant = this.constants.get(name);
+        if (constant !== undefined) {
+          const expanded = this.constantValue(name, constant.expression);
+          if (expanded !== null) held = expanded;
+        } else {
+          const slot = this.numericGlobal(name);
+          if (slot !== null) held = this.globalRead(slot);
+          else {
+            const getter = this.valueGetters.get(name);
+            if (getter !== undefined) {
+              const read: Expression = { k: "call", name: getter.name, args: [], returns: getter.type };
+              this.expressionTypes.set(read, getter.type);
+              held = read;
+            }
+          }
+        }
+        put(name, held);
       } else {
         this.report("an object field needs a value", `write ${name}: value`, key);
       }
@@ -20123,7 +20531,8 @@ class TypeScriptParser {
         return call;
       };
       let written = result();
-      for (const field of fields) {
+      for (let at = 0; at < fields.length; at += 1) {
+        const field = fields[at] as { name: string; value: Expression };
         const held = this.valueTypeOf(field.value);
         const kind = held.kind === "text"
           ? "text"
@@ -20174,7 +20583,8 @@ class TypeScriptParser {
       if (parts.some((part) => "dictionary" in part)) {
         const helper = this.collectionMergeHelper(collection, line);
         const written: Expression[] = [];
-        for (const part of parts) {
+        for (let at = 0; at < parts.length; at += 1) {
+          const part = parts[at] as { field: { name: string; value: Expression } } | { dictionary: Expression };
           if ("dictionary" in part) written.push(part.dictionary);
           else {
             const one = {
@@ -20340,7 +20750,9 @@ class TypeScriptParser {
     };
     const settleRun = (): void => {
       if (element === null) return;
-      for (const written of run) this.applyExpected(written, { kind: "slice", of: element }, elementShape);
+      for (let at = 0; at < run.length; at += 1) {
+        this.applyExpected(run[at] as Expression, { kind: "slice", of: element }, elementShape);
+      }
     };
     const flush = (): void => {
       if (run.length === 0) return;
@@ -21373,7 +21785,36 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       // type is erased like every other assertion, and the entry is read.
       if (this.at("as") || this.at("satisfies")) {
         this.next();
-        this.readTypeAnnotation("a tuple assertion", EXPRESSION_TYPE_STOPS);
+        this.readTypeAnnotation("a tuple assertion", new Set([
+  ",",
+  ")",
+  "]",
+  "}",
+  ";",
+  ".",
+  "?",
+  ":",
+  "=",
+  "==",
+  "===",
+  "!=",
+  "!==",
+  "<=",
+  ">",
+  ">=",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "<<",
+  ">>",
+  ">>>",
+  "^",
+  "&&",
+  "||",
+  "??",
+]));
       }
       pairs.push({ key, value });
       if (!this.accept(",")) break;
@@ -22754,7 +23195,7 @@ const LOOP_REMEDY =
  * the body is contracted by what it does rather than by an expression it
  * cannot meet.
  */
-const CONTRACT_BINARY = new Set(["+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!="]);
+
 
 class BodyAnalysis {
   private readonly declaration: TypeScriptFunction;
@@ -22836,7 +23277,7 @@ class BodyAnalysis {
           // power is a body the contract cannot state: it is contracted by what
           // it does instead, which is where a body that prints or branches
           // already goes.
-          if (!CONTRACT_BINARY.has(binary)) {
+          if (!new Set(["+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!="]).has(binary)) {
             this.uncontractable(
               `applies "${binary}" to "${statement.target}"`,
               statement.line,
@@ -23730,6 +24171,8 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // a read that stands alone waits for a link that may never come.
   parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
   const analysis = parser.parseModule(path, entry);
+  const stateGetters = parser.materializeStateGetters();
+  if (stateGetters.length > 0) analysis.functions.push(...stateGetters);
   // A file read as a program has its whole text readable as statements, so a
   // nested function inside a function, and a builtin only the program parser
   // holds, are read by the parser whose grammar carries them. The module
@@ -23749,11 +24192,11 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
             imports: analysis.imports,
             typeImports: analysis.typeImports,
             types: analysis.types,
-            functions: analysis.functions.filter((entry) => entry.internal === true),
+            functions: analysis.functions,
             default: null,
             body: statements,
             ...(scanned.state.size === 0 ? {} : { state: scanned.state }),
-            ...(parser["valueGetters"].size === 0 ? {} : { valueGetters: new Map([...parser["valueGetters"]].map(([name, getter]) => [name, getter.name])) }),
+            ...(parser["valueGetters"].size === 0 ? {} : { valueGetters: new Map([...parser["valueGetters"]].map((entry) => [entry[0], entry[1].name])) }),
             wideBigint,
           },
           // The program parser read the whole text, so the module parse's

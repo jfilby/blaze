@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { test } from "node:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
@@ -7,7 +8,6 @@ import { runBuild } from "../compiler.ts";
 import { storeDirectory } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import {
-  isRuntimeSymbol,
   RUNTIME_ABI,
   RUNTIME_NAME,
   runtimeHeaderSource,

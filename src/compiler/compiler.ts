@@ -38,7 +38,7 @@
 
 import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase } from "./semantics/program.ts";
 import { contractsByName, vectorChecked, type ContractsByName } from "./semantics/calls.ts";

@@ -685,6 +685,68 @@ proc blaze_rt_text_length*(text: cstring): csize_t {.exportc, cdecl.} =
 proc blaze_rt_string_clone*(text: cstring): cstring {.exportc, cdecl.} =
   blaze_rt_string_new(cast[pointer](text), blaze_rt_string_length(text))
 
+proc c_readlink(path: cstring, buffer: cstring, size: csize_t): int {.importc: "readlink", header: "<unistd.h>".}
+
+var blazeStateCells: seq[(string, float64)] = @[]
+
+proc blazeStateIndex(key: string): int =
+  for index, cell in blazeStateCells:
+    if cell[0] == key: return index
+  -1
+
+proc blaze_rt_state_get*(key: cstring): float64 {.exportc, cdecl.} =
+  if key == nil: return 0.0
+  let index = blazeStateIndex($key)
+  if index < 0: return 0.0
+  blazeStateCells[index][1]
+
+proc blaze_rt_state_set*(key: cstring, value: float64): float64 {.exportc, cdecl.} =
+  if key == nil: return value
+  let index = blazeStateIndex($key)
+  if index < 0: blazeStateCells.add(($key, value))
+  else: blazeStateCells[index][1] = value
+  value
+
+proc blaze_rt_path_extname*(path: cstring): cstring {.exportc, cdecl.} =
+  ## The last dot of the last component and what follows it, as Node reads it:
+  ## a name that starts with the dot has no extension.
+  if path == nil: return blaze_rt_string_new(nil, 0)
+  let text = $path
+  let slash = text.rfind('/')
+  let base = if slash < 0: 0 else: slash + 1
+  let dot = text.rfind('.')
+  if dot < 0 or dot == base: return blaze_rt_string_new(nil, 0)
+  blaze_rt_string_new(cast[pointer](unsafeAddr text[dot]), csize_t(text.len - dot))
+
+proc blaze_rt_exec_path*(): cstring {.exportc, cdecl.} =
+  ## The executable the operating system started, which a program naming a
+  ## runner needs: the compiler runs its own binary for the host it built.
+  var buffer: array[4096, char]
+  let written = c_readlink("/proc/self/exe", cast[cstring](addr buffer[0]), csize_t(buffer.len - 1))
+  if written <= 0: return blaze_rt_string_new(nil, 0)
+  blaze_rt_string_new(addr buffer[0], csize_t(written))
+
+proc blaze_rt_encode_uri_component*(text: cstring): cstring {.exportc, cdecl.} =
+  ## The bytes a URI component leaves as they are, and every other byte
+  ## percent-encoded in upper-case hexadecimal.
+  if text == nil: return blaze_rt_string_new(nil, 0)
+  const hex = "0123456789ABCDEF"
+  var written = ""
+  for letter in $text:
+    let code = ord(letter)
+    let unreserved = (code >= ord('A') and code <= ord('Z')) or
+      (code >= ord('a') and code <= ord('z')) or
+      (code >= ord('0') and code <= ord('9')) or
+      letter in {'-', '_', '.', '!', '~', '*', '\'', '(', ')'}
+    if unreserved:
+      written.add letter
+      continue
+    written.add '%'
+    written.add hex[(code shr 4) and 15]
+    written.add hex[code and 15]
+  if written.len == 0: return blaze_rt_string_new(nil, 0)
+  blaze_rt_string_new(cast[pointer](unsafeAddr written[0]), csize_t(written.len))
+
 ## Two texts are compared by what they say and not by where they are: a text
 ## built at run time and one written out are two addresses that can say the
 ## same thing. A text that is nothing is the smaller of the two, so two texts
@@ -1942,6 +2004,107 @@ proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
 proc blaze_rt_object_copy*(base: float64): float64 {.exportc, cdecl.} = base
+
+## The width of one element a type text names, which is the width the header
+## and the layouts of the C runtime use.
+proc blazeCloneSize(kind: cstring): csize_t =
+  let name = $kind
+  if name == "f32" or name == "i32" or name == "u32": return 4
+  if name == "i16" or name == "u16": return 2
+  if name == "i8" or name == "u8" or name == "bool": return 1
+  sizeof(pointer)
+
+proc blazeCloneElement(to, from: pointer; kind: cstring)
+proc blazeCloneBlock(block: pointer; element: cstring): pointer
+proc blazeCloneObject(object: pointer): pointer
+
+## The element of a block, copied at the type its layout states.
+proc blazeCloneElement(to, from: pointer; kind: cstring) =
+  let name = $kind
+  if name.len > 6 and name[0 .. 5] == "slice<":
+    let inner = name[6 ..< name.len - 1]
+    var block: pointer = nil
+    copyMem(addr block, from, sizeof(block))
+    let clone = if block == nil: nil else: blazeCloneBlock(block, inner)
+    copyMem(to, unsafeAddr clone, sizeof(clone))
+    return
+  if name.len > 4 and name[0 .. 3] == "ref<":
+    let inner = name[4 ..< name.len - 1]
+    if inner == "any":
+      var value: float64 = 0.0
+      copyMem(addr value, from, sizeof(value))
+      let clone = blaze_rt_clone(value)
+      copyMem(to, unsafeAddr clone, sizeof(clone))
+      return
+    var reference: pointer = nil
+    copyMem(addr reference, from, sizeof(reference))
+    let clone = if reference == nil: nil else: blazeCloneObject(reference)
+    copyMem(to, unsafeAddr clone, sizeof(clone))
+    return
+  copyMem(to, from, blazeCloneSize(kind))
+
+proc blazeCloneBlock(block: pointer; element: cstring): pointer =
+  if block == nil: return nil
+  let size = blazeCloneSize(element)
+  if size == 0: return nil
+  let bytes = blaze_rt_object_size(block)
+  let count = bytes div size
+  let copy = blaze_rt_allocate(bytes)
+  for at in 0 ..< count:
+    blazeCloneElement(cast[pointer](cast[uint](copy) + at * uint(size)), cast[pointer](cast[uint](block) + at * uint(size)), element)
+  copy
+
+## A record copied field by field, at the layout in its header.
+proc blazeCloneObject(object: pointer): pointer =
+  if object == nil: return nil
+  let header = headerOf(object)
+  if header[].magic != BlazeMagic or header[].descriptor == nil: return object
+  let bytes = header[].length
+  let copy = blaze_rt_allocate(csize_t(bytes))
+  if bytes > 0'u64: copyMem(copy, object, csize_t(bytes))
+  headerOf(copy)[].descriptor = header[].descriptor
+  var field = cast[cstring](header[].descriptor)
+  while field[0] != '\0':
+    let name = $field
+    field = cast[cstring](cast[uint](field) + uint(name.len) + 1)
+    let offset = $field
+    field = cast[cstring](cast[uint](field) + uint(offset.len) + 1)
+    let kind = $field
+    field = cast[cstring](cast[uint](field) + uint(kind.len) + 1)
+    let at = uint(offset)
+    blazeCloneElement(cast[pointer](cast[uint](copy) + at), cast[pointer](cast[uint](object) + at), kind)
+  copy
+
+## A dynamic value copied: an array copies its elements and an object copies
+## its values; a number, a text and nothing are the value they already are.
+proc blazeCloneDynamic(value: float64): float64 =
+  let index = blazeDynIndex(value)
+  if index < 0: return value
+  let held = blazeDynValues[index]
+  case held.kind
+  of dynArray:
+    var copy = BlazeDyn(kind: dynArray)
+    for element in held.items: copy.items.add blaze_rt_clone(element)
+    blazeDynRegister(copy)
+  of dynObject:
+    var copy = BlazeDyn(kind: dynObject)
+    for entry in held.entries:
+      copy.entries.add (entry[0], blaze_rt_clone(entry[1]))
+    blazeDynRegister(copy)
+  else:
+    value
+
+proc blaze_rt_clone_block*(block: pointer; element: cstring): pointer {.exportc, cdecl.} =
+  blazeCloneBlock(block, element)
+
+proc blaze_rt_clone*(value: float64): float64 {.exportc, cdecl.} =
+  if blazeDynIndex(value) >= 0: return blazeCloneDynamic(value)
+  if value >= 4096.0:
+    let object = cast[pointer](cast[uint](value))
+    let header = headerOf(object)
+    if header[].magic == BlazeMagic and header[].descriptor != nil:
+      return float64(cast[uint](blazeCloneObject(object)))
+  value
 proc blaze_rt_object_set_text*(target: float64, field, value: cstring): float64 {.exportc, cdecl.} = target
 proc blaze_rt_object_set_ref*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target
 proc blaze_rt_object_set_number*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target

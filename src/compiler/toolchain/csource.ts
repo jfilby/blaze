@@ -16,7 +16,8 @@ import { cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { BuildMode, FunctionContract, TargetSpec } from "../core/types.ts";
-import { isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
+import { RUNTIME_NAME } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { cTargetOptions } from "../core/target.ts";
 import { candidateOptions, compileCommand, toolchainFor } from "../core/toolchain.ts";
 

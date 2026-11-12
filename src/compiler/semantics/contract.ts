@@ -222,7 +222,7 @@ export function bufferElement(type: TypeExpr): TypeExpr {
 export type ReduceOp = "sum" | "product" | "min" | "max";
 
 export type Expr =
-  | { t: "int"; value: bigint }
+  | { t: "int"; value: Whole }
   | { t: "float"; value: number }
   | { t: "bool"; value: boolean }
   | { t: "null" }
@@ -483,7 +483,7 @@ class ExpressionParser {
     if (token.kind === "number") {
       return /[.eE]/.test(token.text) && !/^0[xX]/.test(token.text)
         ? { t: "float", value: Number(token.text) }
-        : { t: "int", value: token.text.startsWith("0x") || token.text.startsWith("0X") ? BigInt(token.text) : BigInt(token.text) };
+        : { t: "int", value: wholeFromText(token.text) };
     }
     if (token.kind === "op" && token.text === "(") {
       const inner = this.parseOr();
@@ -545,13 +545,32 @@ export interface BufferValue {
   readonly values: readonly Value[];
 }
 
-export type Value = bigint | number | boolean | string | null | BufferValue;
+/**
+ * A whole number the evaluator carries: a sign and the magnitude it has.
+ *
+ * The contract language's integers are signed and can reach the top of the
+ * 256-bit range, which no one machine word holds. The magnitude is an unsigned
+ * 256-bit value; a sign is kept beside it, and every operation that wraps to a
+ * contract type computes the two's-complement bits first, so a negative and an
+ * unsigned value of the same bits are told apart by the type the source wrote.
+ */
+export interface Whole {
+  readonly negative: boolean;
+  readonly magnitude: bigint;
+}
+
+export type Value = Whole | bigint | number | boolean | string | null | BufferValue;
+
+export function isWhole(value: Value): value is Whole {
+  return typeof value === "object" && value !== null && "magnitude" in value;
+}
 
 export function isBufferValue(value: Value): value is BufferValue {
-  return typeof value === "object" && value !== null && "values" in value;
+  return typeof value === "object" && value !== null && "values" in value && !isWhole(value);
 }
 
 export function formatValue(value: Value): string {
+  if (isWhole(value)) return formatWhole(value);
   if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") {
     if (Number.isNaN(value)) return "nan";
@@ -589,6 +608,278 @@ export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
 
 function contractError(message: string, detail?: string): CompilerError {
   return new CompilerError({ category: "ContractError", stage: "contract", message, detail });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Whole numbers                                                              */
+/* -------------------------------------------------------------------------- */
+
+/** Every bit a whole number has. */
+const WHOLE_MASK = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn;
+/** The highest bit of a 256-bit whole number. */
+const WHOLE_SIGN = 0x8000000000000000000000000000000000000000000000000000000000000000n;
+/** A digit lookup missed: a value no digit and no magnitude can take. */
+const NO_DIGIT = WHOLE_MASK;
+/** The double at 2^256, which no 256-bit whole number reaches. */
+const WHOLE_LIMIT = 115792089237316195423570985008687907853269984665640564039457584007913129639936;
+
+/** A whole number with nothing in it. */
+function zeroWhole(): Whole {
+  return { negative: false, magnitude: 0n };
+}
+
+/** A whole number holding the small integer a count or a length names. */
+function wholeOfNumber(value: number): Whole {
+  if (!Number.isFinite(value)) throw contractError(`a count must be finite, got ${value}`);
+  if (value === 0) return zeroWhole();
+  const negative = value < 0;
+  const magnitude = Math.abs(Math.trunc(value));
+  if (magnitude >= WHOLE_LIMIT) return { negative, magnitude: WHOLE_MASK };
+  const text = `${magnitude}`;
+  return { negative, magnitude: wholeFromDecimal(text).magnitude };
+}
+
+/** The whole number represented by a run of decimal digits. */
+function wholeFromDecimal(text: string): Whole {
+  let magnitude = 0n;
+  let at = 0;
+  while (at < text.length) {
+    const digit = digitOf(text[at]);
+    at += 1;
+    if (digit === NO_DIGIT) throw contractError(`"${text}" is not a number`);
+    if (digit >= 10n) throw contractError(`"${text}" is not a decimal number`);
+    magnitude = (magnitude * 10n + digit) & WHOLE_MASK;
+  }
+  return { negative: false, magnitude };
+}
+
+/** The value of one written digit, or NO_DIGIT where the character is none. */
+function digitOf(character: string): bigint {
+  if (character === "0") return 0n;
+  if (character === "1") return 1n;
+  if (character === "2") return 2n;
+  if (character === "3") return 3n;
+  if (character === "4") return 4n;
+  if (character === "5") return 5n;
+  if (character === "6") return 6n;
+  if (character === "7") return 7n;
+  if (character === "8") return 8n;
+  if (character === "9") return 9n;
+  const lower = character.toLowerCase();
+  if (lower === "a") return 10n;
+  if (lower === "b") return 11n;
+  if (lower === "c") return 12n;
+  if (lower === "d") return 13n;
+  if (lower === "e") return 14n;
+  if (lower === "f") return 15n;
+  return NO_DIGIT;
+}
+
+/** The character a digit is written as, for a digit below sixteen. */
+function digitText(digit: bigint): string {
+  if (digit === 0n) return "0";
+  if (digit === 1n) return "1";
+  if (digit === 2n) return "2";
+  if (digit === 3n) return "3";
+  if (digit === 4n) return "4";
+  if (digit === 5n) return "5";
+  if (digit === 6n) return "6";
+  if (digit === 7n) return "7";
+  if (digit === 8n) return "8";
+  if (digit === 9n) return "9";
+  if (digit === 10n) return "a";
+  if (digit === 11n) return "b";
+  if (digit === 12n) return "c";
+  if (digit === 13n) return "d";
+  if (digit === 14n) return "e";
+  return "f";
+}
+
+/** A whole number written in the source, decimal or hexadecimal. */
+function wholeFromText(text: string): Whole {
+  let at = 0;
+  let negative = false;
+  if (text[at] === "-") {
+    negative = true;
+    at += 1;
+  } else if (text[at] === "+") {
+    at += 1;
+  }
+  let base = 10n;
+  let baseNumber = 10;
+  if (text[at] === "0" && (text[at + 1] === "x" || text[at + 1] === "X")) {
+    base = 16n;
+    baseNumber = 16;
+    at += 2;
+  }
+  let magnitude = 0n;
+  while (at < text.length) {
+    const character = text[at];
+    at += 1;
+    if (character === "_") continue;
+    const digit = digitOf(character);
+    if (digit === NO_DIGIT || digit >= BigInt(baseNumber)) {
+      throw contractError(`"${text}" is not a number`);
+    }
+    magnitude = (magnitude * base + digit) & WHOLE_MASK;
+  }
+  return { negative: negative && magnitude !== 0n, magnitude };
+}
+
+/** A whole number as the digits it is, with a minus in front of a negative. */
+function formatWhole(value: Whole): string {
+  if (value.magnitude === 0n) return "0";
+  let magnitude = value.magnitude;
+  let text = "";
+  while (magnitude > 0n) {
+    const digit = magnitude % 10n;
+    text = digitText(digit) + text;
+    magnitude = magnitude / 10n;
+  }
+  return value.negative ? `-${text}` : text;
+}
+
+/** A whole number as a double, through the decimal the C library reads. */
+function wholeToNumber(value: Whole): number {
+  return Number(formatWhole(value));
+}
+
+/** The two's-complement bits a whole number is, at 256 bits. */
+function wholeBits(value: Whole): bigint {
+  if (!value.negative) return value.magnitude & WHOLE_MASK;
+  return ((WHOLE_MASK - value.magnitude) + 1n) & WHOLE_MASK;
+}
+
+/** The whole number a 256-bit two's-complement value names. */
+function wholeFromBits(bits: bigint): Whole {
+  const low = bits & WHOLE_MASK;
+  if ((low & WHOLE_SIGN) !== 0n) {
+    const magnitude = ((WHOLE_MASK - low) + 1n) & WHOLE_MASK;
+    return { negative: magnitude !== 0n, magnitude };
+  }
+  return { negative: false, magnitude: low };
+}
+
+/** The bits a type of the given width keeps. */
+function widthMask(width: number): bigint {
+  if (width >= 256) return WHOLE_MASK;
+  if (width === 8) return 0xffn;
+  if (width === 16) return 0xffffn;
+  if (width === 32) return 0xffffffffn;
+  return 0xffffffffffffffffn;
+}
+
+/** The bit that says a signed value of the given width is negative. */
+function widthSign(width: number): bigint {
+  if (width >= 256) return WHOLE_SIGN;
+  if (width === 8) return 0x80n;
+  if (width === 16) return 0x8000n;
+  if (width === 32) return 0x80000000n;
+  return 0x8000000000000000n;
+}
+
+/** The whole number a type holds, from the bits an operation computed. */
+function wrapWhole(value: Whole, name: PrimitiveTypeName): Whole {
+  if (name === "bool") {
+    const bits = wholeBits(value) & WHOLE_MASK;
+    return { negative: false, magnitude: bits === 0n ? 0n : 1n };
+  }
+  const width = integerBits(name);
+  const mask = widthMask(width);
+  const low = wholeBits(value) & mask;
+  if (!isSignedType(name)) return { negative: false, magnitude: low };
+  const sign = widthSign(width);
+  if ((low & sign) !== 0n) {
+    const magnitude = ((mask - low) + 1n) & mask;
+    return { negative: true, magnitude };
+  }
+  return { negative: false, magnitude: low };
+}
+
+/** The whole number a type holds, from a 256-bit two's-complement value. */
+function wrapWholeBits(bits: bigint, name: PrimitiveTypeName): Whole {
+  return wrapWhole(wholeFromBits(bits), name);
+}
+
+/** The whole number an external test or harness value names. */
+function wholeOfValue(value: bigint | Whole): Whole {
+  if (isWhole(value)) return value;
+  if (value < 0n) return { negative: true, magnitude: (0n - value) & WHOLE_MASK };
+  return { negative: false, magnitude: value & WHOLE_MASK };
+}
+
+/** Left compared with right, as the mathematical values they are. */
+function compareWhole(left: Whole, right: Whole): number {
+  if (left.negative !== right.negative) return left.negative ? -1 : 1;
+  if (left.magnitude === right.magnitude) return 0;
+  const less = left.magnitude < right.magnitude;
+  if (left.negative) return less ? 1 : -1;
+  return less ? -1 : 1;
+}
+
+/** Whether a whole number is the zero. */
+function wholeIsZero(value: Whole): boolean {
+  return value.magnitude === 0n;
+}
+
+/** The bits the sum, difference or product of two whole numbers has. */
+function wholeAdd(left: Whole, right: Whole): bigint {
+  return (wholeBits(left) + wholeBits(right)) & WHOLE_MASK;
+}
+
+function wholeSubtract(left: Whole, right: Whole): bigint {
+  return (wholeBits(left) - wholeBits(right)) & WHOLE_MASK;
+}
+
+function wholeMultiply(left: Whole, right: Whole): bigint {
+  return (wholeBits(left) * wholeBits(right)) & WHOLE_MASK;
+}
+
+/** The quotient two whole numbers have, truncating toward zero as the language does. */
+function wholeDivide(left: Whole, right: Whole): Whole {
+  if (wholeIsZero(right)) throw contractError("division by zero");
+  const magnitude = left.magnitude / right.magnitude;
+  const negative = magnitude !== 0n && left.negative !== right.negative;
+  return { negative, magnitude };
+}
+
+/** The whole number a double that is already an integer names. */
+function wholeFromIntegerFloat(value: number): Whole {
+  if (value === 0) return zeroWhole();
+  const negative = value < 0;
+  let remaining = Math.abs(value);
+  if (remaining >= WHOLE_LIMIT) return { negative, magnitude: WHOLE_MASK };
+  // A double above 2^53 names an integer only with trailing zero bits, and
+  // its decimal text is the shortest that round trips, not its value. Halving
+  // it until the digits are exact, then multiplying them back, keeps every
+  // bit the double holds.
+  let shift = 0;
+  while (remaining > 9007199254740992) {
+    remaining = remaining / 2;
+    shift += 1;
+  }
+  let whole = wholeOfNumber(remaining);
+  while (shift > 0) {
+    whole = wholeFromBits(wholeMultiply(whole, wholeOfNumber(2)));
+    shift -= 1;
+  }
+  if (negative) return wholeFromBits((0n - wholeBits(whole)) & WHOLE_MASK);
+  return whole;
+}
+
+
+/** A whole number against a double, exactly, including values past 2^53. */
+function compareWholeToFloat(whole: Whole, float: number): number {
+  if (Number.isNaN(float)) return 0 / 0;
+  if (float === 1 / 0) return -1;
+  if (float === -1 / 0) return 1;
+  if (float > 0 && float >= WHOLE_LIMIT) return -1;
+  if (float < 0 && -float >= WHOLE_LIMIT) return 1;
+  if (!Number.isInteger(float)) {
+    const floor = wholeFromIntegerFloat(Math.floor(float));
+    return compareWhole(whole, floor) <= 0 ? -1 : 1;
+  }
+  return compareWhole(whole, wholeFromIntegerFloat(float));
 }
 
 /** A static type as seen by the type checker; `null` is a type of its own. */
@@ -785,10 +1076,8 @@ export interface EvalContext {
   readonly values: ReadonlyMap<string, Value>;
 }
 
-function wrapInteger(value: bigint, name: PrimitiveTypeName): bigint {
-  if (name === "bool") return value === 0n ? 0n : 1n;
-  const bits = integerBits(name);
-  return isSignedType(name) ? BigInt.asIntN(bits, value) : BigInt.asUintN(bits, value);
+function wrapInteger(value: Whole, name: PrimitiveTypeName): Whole {
+  return wrapWholeBits(wholeBits(value), name);
 }
 
 function roundFloat(value: number, type: StaticType): number {
@@ -797,25 +1086,26 @@ function roundFloat(value: number, type: StaticType): number {
 }
 
 function asNumber(value: Value, type: StaticType): number {
-  if (typeof value === "bigint") return Number(value);
+  if (isWhole(value)) return wholeToNumber(value);
+  if (typeof value === "bigint") return wholeToNumber(wholeOfValue(value));
   if (typeof value === "number") return value;
   throw contractError(`expected a number, got ${formatValue(value)} (${describeType(type)})`);
 }
 
 function compareValues(left: Value, right: Value): number {
-  if (typeof left === "bigint" && typeof right === "bigint") {
-    return left < right ? -1 : left > right ? 1 : 0;
-  }
+  const leftWhole = isWhole(left) ? left : typeof left === "bigint" ? wholeOfValue(left) : null;
+  const rightWhole = isWhole(right) ? right : typeof right === "bigint" ? wholeOfValue(right) : null;
+  if (leftWhole !== null && rightWhole !== null) return compareWhole(leftWhole, rightWhole);
   if (typeof left === "number" && typeof right === "number") {
     // Nothing is ordered against not-a-number. Answering that nothing is
     // greater made every `>` and `>=` on a NaN true, so a result of NaN
     // satisfied a postcondition it broke, and a comparison that should fail
     // let an unchecked input through.
-    if (Number.isNaN(left) || Number.isNaN(right)) return Number.NaN;
+    if (Number.isNaN(left) || Number.isNaN(right)) return 0 / 0;
     return left < right ? -1 : left > right ? 1 : 0;
   }
-  if (typeof left === "bigint" && typeof right === "number") return compareIntegerToFloat(left, right);
-  if (typeof left === "number" && typeof right === "bigint") return -compareIntegerToFloat(right, left);
+  if (leftWhole !== null && typeof right === "number") return compareWholeToFloat(leftWhole, right);
+  if (typeof left === "number" && rightWhole !== null) return -compareWholeToFloat(rightWhole, left);
   throw contractError(`cannot compare ${formatValue(left)} with ${formatValue(right)}`);
 }
 
@@ -824,21 +1114,6 @@ function compareValues(left: Value, right: Value): number {
  * double at or above 2^53 is an exact integer, so both sides can be brought to
  * exact integers before comparing.
  */
-function compareIntegerToFloat(integer: bigint, float: number): number {
-  if (Number.isNaN(float)) return Number.NaN;
-  if (float === Number.POSITIVE_INFINITY) return -1;
-  if (float === Number.NEGATIVE_INFINITY) return 1;
-  if (!Number.isInteger(float)) {
-    // A whole number is never equal to a fraction, and it is below one when
-    // it is at or below its floor. Comparing against the floor made 2 >= 2.5
-    // and 1 == 1.5 true, and rounded the bound in the program's favour.
-    return integer <= BigInt(Math.floor(float)) ? -1 : 1;
-  }
-  // The order is the integer against the float. Reading it the other way
-  // round reported 1 >= 2.0 as true, because 2 is the greater of the two.
-  const exact = BigInt(float);
-  return integer < exact ? -1 : integer > exact ? 1 : 0;
-}
 
 function valuesEqual(left: Value, right: Value): boolean {
   if (isBufferValue(left) || isBufferValue(right) || left === null || right === null) {
@@ -869,7 +1144,8 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       if (!context.values.has(expression.name)) {
         throw contractError(`unbound identifier "${expression.name}"`);
       }
-      return context.values.get(expression.name) as Value;
+      const held = context.values.get(expression.name) as Value;
+      return typeof held === "bigint" ? wholeOfValue(held) : held;
     }
     case "index": {
       const base = evaluate(expression.base, context);
@@ -877,15 +1153,16 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
         throw contractError(`cannot index ${formatValue(base)}`);
       }
       const indexValue = evaluate(expression.index, context);
-      if (typeof indexValue !== "bigint") {
+      const indexWhole = isWhole(indexValue) ? indexValue : typeof indexValue === "bigint" ? wholeOfValue(indexValue) : null;
+      if (indexWhole === null) {
         throw contractError(`index must be an integer, got ${formatValue(indexValue)}`);
       }
-      if (indexValue < 0n || indexValue >= BigInt(base.values.length)) {
+      if (compareWhole(indexWhole, zeroWhole()) < 0 || compareWhole(indexWhole, wholeOfNumber(base.values.length)) >= 0) {
         throw contractError(
-          `index ${indexValue} out of bounds for ${expression.base.t === "var" ? expression.base.name : "expression"} of length ${base.values.length}`,
+          `index ${formatValue(indexWhole)} out of bounds for ${expression.base.t === "var" ? expression.base.name : "expression"} of length ${base.values.length}`,
         );
       }
-      return base.values[Number(indexValue)];
+      return base.values[wholeToNumber(indexWhole)];
     }
     case "slice": {
       const base = evaluate(expression.base, context);
@@ -896,20 +1173,22 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       const sliceBound = (bound: Expr | null, defaultValue: number): number => {
         if (bound === null) return defaultValue;
         const value = evaluate(bound, context);
-        if (typeof value !== "bigint") {
+        const whole = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
+        if (whole === null) {
           throw contractError(`slice bound must be an integer, got ${formatValue(value)}`);
         }
-        let n = Number(value);
+        let n = wholeToNumber(whole);
         if (n < 0) n = len + n;
         return n;
       };
       let step = 1;
       if (expression.step !== null) {
         const stepValue = evaluate(expression.step, context);
-        if (typeof stepValue !== "bigint") {
+        const stepWhole = isWhole(stepValue) ? stepValue : typeof stepValue === "bigint" ? wholeOfValue(stepValue) : null;
+        if (stepWhole === null) {
           throw contractError(`slice step must be an integer, got ${formatValue(stepValue)}`);
         }
-        step = Number(stepValue);
+        step = wholeToNumber(stepWhole);
       }
       if (step === 0) {
         throw contractError("slice step must not be zero");
@@ -934,7 +1213,7 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
         if (!isBufferValue(argument)) {
           throw contractError(`len() requires a buffer, got ${formatValue(argument)}`);
         }
-        return BigInt(argument.values.length);
+        return wholeOfNumber(argument.values.length);
       }
       const values = expression.args.map((argument) => evaluate(argument, context));
       if (expression.name === "min") {
@@ -948,23 +1227,24 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
     case "reduce": {
       const from = evaluate(expression.from, context);
       const to = evaluate(expression.to, context);
-      if (typeof from !== "bigint") {
+      const fromWhole = isWhole(from) ? from : typeof from === "bigint" ? wholeOfValue(from) : null;
+      if (fromWhole === null) {
         throw contractError("the lower bound of a reduction must be an integer", `got ${formatValue(from)}`);
       }
-      const count = reductionCount(from, to, expression.exclusive);
+      const count = reductionCount(fromWhole, to, expression.exclusive);
       const innerValues = new Map(context.values);
       let accumulator: Value | null = null;
       const bodyEnv = new Map(context.env);
       bodyEnv.set(expression.varName, { kind: "primitive", name: "usize" });
       const bodyType = typeOf(expression.body, bodyEnv);
-      if (count > MAXIMUM_REDUCTION_TERMS) {
+      if (wholeToNumber(count) > MAXIMUM_REDUCTION_TERMS) {
         throw contractError(
           `reduction over ${count} terms exceeds the limit of ${MAXIMUM_REDUCTION_TERMS}`,
           "the bounds are derived from the test inputs, which are far larger than the contract intends",
         );
       }
-      for (let term = 0n; term < count; term += 1n) {
-        const index = from + term;
+      for (let term = zeroWhole(); compareWhole(term, count) < 0; term = wholeFromBits(wholeAdd(term, wholeOfNumber(1)))) {
+        const index = wholeFromBits(wholeAdd(fromWhole, term));
         innerValues.set(expression.varName, index);
         const value = evaluate(expression.body, { env: bodyEnv, values: innerValues });
         if (accumulator === null) {
@@ -983,7 +1263,7 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
           throw contractError(`empty ${expression.op}() reduction has no result`);
         }
         const one = expression.op === "sum" ? 0 : 1;
-        accumulator = isIntegerType(bodyType.name) ? BigInt(one) : roundFloat(one, bodyType);
+        accumulator = isIntegerType(bodyType.name) ? wholeOfNumber(one) : roundFloat(one, bodyType);
       }
       return normalizeReduceResult(accumulator, expression.op, bodyType);
     }
@@ -995,8 +1275,10 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       }
       const type = typeOf(expression.operand, context.env);
       if (type.kind === "primitive" && isIntegerType(type.name)) {
-        if (typeof operand !== "bigint") throw contractError(`unary - requires an integer, got ${formatValue(operand)}`);
-        return wrapInteger(-operand, type.name);
+        const whole = isWhole(operand) ? operand : typeof operand === "bigint" ? wholeOfValue(operand) : null;
+        if (whole === null) throw contractError(`unary - requires an integer, got ${formatValue(operand)}`);
+        const bits = (0n - wholeBits(whole)) & WHOLE_MASK;
+        return wrapInteger(wholeFromBits(bits), type.name);
       }
       return roundFloat(-asNumber(operand, type), type);
     }
@@ -1011,28 +1293,34 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
  * the way a counted loop reaches it, up for a half open range and down for an
  * inclusive one.
  */
-function reductionCount(from: bigint, to: Value, exclusive: boolean): bigint {
-  if (typeof to === "bigint") {
-    const span = to - from;
-    if (exclusive) return span > 0n ? span : 0n;
-    return span >= 0n ? span + 1n : 0n;
+function reductionCount(from: Whole, to: Value, exclusive: boolean): Whole {
+  const target = isWhole(to) ? to : typeof to === "bigint" ? wholeOfValue(to) : null;
+  if (target !== null) {
+    if (compareWhole(target, from) <= 0) return zeroWhole();
+    const span = wholeFromBits(wholeSubtract(target, from));
+    if (exclusive) return span;
+    return wholeFromBits(wholeAdd(span, wholeOfNumber(1)));
   }
   if (typeof to !== "number" || !Number.isFinite(to)) {
     throw contractError(`a reduction bound must be a finite number, got ${formatValue(to)}`);
   }
-  const remaining = to - Number(from);
-  if (exclusive) return remaining > 0 ? BigInt(Math.ceil(remaining)) : 0n;
-  return remaining >= 0 ? BigInt(Math.floor(remaining)) + 1n : 0n;
+  const remaining = to - wholeToNumber(from);
+  if (exclusive) return wholeOfNumber(remaining > 0 ? Math.ceil(remaining) : 0);
+  return wholeOfNumber(remaining >= 0 ? Math.floor(remaining) + 1 : 0);
 }
 
 function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: StaticType): Value {
   if (op === "min") return compareValues(value, accumulator) < 0 ? value : accumulator;
   if (op === "max") return compareValues(value, accumulator) > 0 ? value : accumulator;
   if (op === "sum") {
-    if (typeof accumulator === "bigint" && typeof value === "bigint") return accumulator + value;
+    const left = isWhole(accumulator) ? accumulator : typeof accumulator === "bigint" ? wholeOfValue(accumulator) : null;
+    const right = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
+    if (left !== null && right !== null) return wholeFromBits(wholeAdd(left, right));
     return roundFloat(asNumber(accumulator, bodyType) + asNumber(value, bodyType), bodyType);
   }
-  if (typeof accumulator === "bigint" && typeof value === "bigint") return accumulator * value;
+  const left = isWhole(accumulator) ? accumulator : typeof accumulator === "bigint" ? wholeOfValue(accumulator) : null;
+  const right = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
+  if (left !== null && right !== null) return wholeFromBits(wholeMultiply(left, right));
   return roundFloat(asNumber(accumulator, bodyType) * asNumber(value, bodyType), bodyType);
 }
 
@@ -1041,8 +1329,9 @@ function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType)
   // it sums: a sum of 100 bytes of 5 is 500, and not 244.
   if (op !== "sum" && op !== "product" || bodyType.kind === "null") return value;
   const type = op === "sum" ? sumType(bodyType) : productType(bodyType);
-  if (type.kind === "primitive" && isIntegerType(type.name) && typeof value === "bigint") {
-    return wrapInteger(value, type.name);
+  if (type.kind === "primitive" && isIntegerType(type.name)) {
+    const whole = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
+    if (whole !== null) return wrapInteger(whole, type.name);
   }
   if (type.kind === "primitive" && type.name === "f32" && typeof value === "number") {
     return Math.fround(value);
@@ -1092,14 +1381,16 @@ function evaluateBinary(expression: Expr & { t: "binary" }, context: EvalContext
   }
 
   if (isIntegerType(type.name)) {
-    if (typeof left !== "bigint" || typeof right !== "bigint") {
+    const leftWhole = isWhole(left) ? left : typeof left === "bigint" ? wholeOfValue(left) : null;
+    const rightWhole = isWhole(right) ? right : typeof right === "bigint" ? wholeOfValue(right) : null;
+    if (leftWhole === null || rightWhole === null) {
       throw contractError(`integer arithmetic requires integer operands, got ${formatValue(left)} and ${formatValue(right)}`);
     }
-    if (expression.op === "+") return wrapInteger(left + right, type.name);
-    if (expression.op === "-") return wrapInteger(left - right, type.name);
-    if (expression.op === "*") return wrapInteger(left * right, type.name);
-    if (right === 0n) throw contractError("division by zero");
-    return wrapInteger(left / right, type.name);
+    if (expression.op === "+") return wrapInteger(wholeFromBits(wholeAdd(leftWhole, rightWhole)), type.name);
+    if (expression.op === "-") return wrapInteger(wholeFromBits(wholeSubtract(leftWhole, rightWhole)), type.name);
+    if (expression.op === "*") return wrapInteger(wholeFromBits(wholeMultiply(leftWhole, rightWhole)), type.name);
+    if (wholeIsZero(rightWhole)) throw contractError("division by zero");
+    return wrapInteger(wholeDivide(leftWhole, rightWhole), type.name);
   }
 
   const leftNumber = asNumber(left, type);
@@ -1343,7 +1634,15 @@ export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<stri
       "a contract with a definition is checked by the program it is part of",
     );
   }
-  return evaluate(parsed.resultDefinition, { env: parsed.env, values });
+  const value = evaluate(parsed.resultDefinition, { env: parsed.env, values });
+  // Callers compare this value with the candidate's printed result, which is a
+  // host whole number, so a Whole leaves through the boundary as one.
+  return isWhole(value) ? wholeToBigInt(value) : value;
+}
+
+/** The host form of a whole number: its sign and its magnitude. */
+function wholeToBigInt(value: Whole): bigint {
+  return value.negative ? -value.magnitude : value.magnitude;
 }
 
 /** Postconditions that the given result violates. */
@@ -1386,19 +1685,16 @@ export function comparisonTolerance(returns: TypeExpr, terms: number): number | 
 }
 
 export function valuesMatch(expected: Value, actual: Value, tolerance: number | null): boolean {
-  if (typeof expected === "bigint" || typeof actual === "bigint") {
-    if (typeof expected === "bigint" && typeof actual === "bigint") return expected === actual;
+  const expectedWhole = isWhole(expected) ? expected : typeof expected === "bigint" ? wholeOfValue(expected) : null;
+  const actualWhole = isWhole(actual) ? actual : typeof actual === "bigint" ? wholeOfValue(actual) : null;
+  if (expectedWhole !== null || actualWhole !== null) {
+    if (expectedWhole !== null && actualWhole !== null) return compareWhole(expectedWhole, actualWhole) === 0;
     // The reference computes in the type its expression has and the candidate
     // in the type it returns, so one side is a whole number and the other a
-    // double. They agree when the double is that whole number and no other,
-    // and a double past 2^53 cannot name every whole number, so it is compared
-    // as the number it is.
-    const whole = typeof expected === "bigint" ? expected : actual;
-    const floating = typeof expected === "bigint" ? actual : expected;
-    if (typeof whole !== "bigint" || typeof floating !== "number") return false;
-    if (!Number.isInteger(floating)) return false;
-    if (floating > Number.MAX_SAFE_INTEGER || floating < Number.MIN_SAFE_INTEGER) return floating === Number(whole);
-    return BigInt(floating) === whole;
+    // double. They agree when the double is that whole number and no other.
+    if (expectedWhole !== null && typeof actual === "number") return compareWholeToFloat(expectedWhole, actual) === 0;
+    if (actualWhole !== null && typeof expected === "number") return compareWholeToFloat(actualWhole, expected) === 0;
+    return false;
   }
   // A text result is the word it says itself: it matches the word the
   // candidate printed and nothing about a number.
@@ -1414,7 +1710,12 @@ export function valuesMatch(expected: Value, actual: Value, tolerance: number | 
     if (expected === actual) return true;
     if (tolerance === null) return false;
     const scale = Math.max(Math.abs(expected), Math.abs(actual));
-    return Math.abs(expected - actual) <= tolerance * Math.max(scale, Number.MIN_VALUE);
+    return Math.abs(expected - actual) <= tolerance * Math.max(scale, 5e-324);
+  }
+  if (expected === null || actual === null) return expected === actual;
+  if (isBufferValue(expected) && isBufferValue(actual)) {
+    if (expected.values.length !== actual.values.length) return false;
+    return expected.values.every((value, index) => valuesMatch(value, actual.values[index] as Value, tolerance));
   }
   return false;
 }

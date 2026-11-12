@@ -172,13 +172,13 @@ interface Literal {
 const REF_NULL: TypeExpr = { kind: "ref", of: null };
 
 /** A number written in the source, which is a double. */
-const DOUBLE: Inferred = { kind: "type", type: F64 };
+const DOUBLE: Inferred = { kind: "type", type: { kind: "primitive", name: "f64" } };
 
 /** A reference the source left unshaped, which is what `null` is. */
-const ANY: Inferred = { kind: "type", type: ANY_REF };
+const ANY: Inferred = { kind: "type", type: { kind: "ref", of: null } };
 
 /** A whole number, as a length and an index are counted. */
-const WHOLE: Inferred = { kind: "type", type: USIZE };
+const WHOLE: Inferred = { kind: "type", type: { kind: "primitive", name: "usize" } };
 
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
@@ -1657,6 +1657,29 @@ class FunctionBody {
           call: this.semanticCall(signature.symbol, signature, args.map((argument) => argument.value), returns, direct.effects, false),
         },
         inferred: asType(returns),
+      };
+    }
+    // `structuredClone(value)` is the language's deep copy: a scalar or a text
+    // is the value itself, and an object, a list or a dictionary is copied by
+    // the runtime when the program runs. The copy carries the type the source
+    // read the value at, so a field of it reads as it did.
+    if (expression.name === "structuredClone" && expression.args.length === 1) {
+      const argument = this.typed(expression.args[0], null, line);
+      const type = argument.value.type;
+      if (type.kind === "primitive" || type.kind === "text") return argument;
+      const signature = {
+        name: "structuredClone",
+        symbol: "structuredClone",
+        params: [{ name: "value", type: contractText(type) }],
+        returns: contractText(type),
+      };
+      return {
+        value: {
+          k: "call",
+          type,
+          call: this.semanticCall("structuredClone", signature, [argument.value], type, [], true, [type]),
+        },
+        inferred: asType(type),
       };
     }
     const builtin = builtinFor(expression.name);

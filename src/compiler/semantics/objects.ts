@@ -396,7 +396,7 @@ class BodyTypes {
         return { kind: "type", type: ANY_REF };
       }
       case "call": {
-        for (const argument of expression.args) this.expression(argument);
+        const walked = expression.args.map((argument) => this.expression(argument));
         // `BigInt(x)` of a value written out is the whole number it names, and
         // the builder that lowers the body folds it to the literal. What the
         // layout pass needs is the type it is held at, which is the type of the
@@ -417,6 +417,12 @@ class BodyTypes {
         if (direct !== undefined) {
           this.call(this.callees.get(directOverload) !== undefined ? directOverload : expression.name);
           return { kind: "type", type: direct };
+        }
+        // The deep copy answers the type of the value it copies, so the layout
+        // of a copied value is the layout the source wrote.
+        if (expression.name === "structuredClone" && walked.length === 1) {
+          const held = walked[0] as { kind: "type"; type: TypeExpr } | { kind: "object"; key: unknown };
+          return held.kind === "type" ? { kind: "type", type: held.type } : { kind: "type", type: ANY_REF };
         }
         const builtin = builtinFor(expression.name);
         if (builtin !== null) {

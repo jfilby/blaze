@@ -290,16 +290,15 @@ globalThis.sqlite = await (async () => {
  * it is a command line no reader can read — and the command line is what the
  * build prints when the source does not run.
  */
-let sqlitePrelude: Promise<string> | null = null;
-
 async function sqlitePreludePath(): Promise<string> {
-  sqlitePrelude ??= (async () => {
-    const directory = await mkdtemp(join(tmpdir(), "blaze-sqlite-"));
-    const path = join(directory, "sqlite-prelude.mjs");
-    await writeFile(path, SQLITE_PRELUDE_SOURCE, "utf8");
-    return path;
-  })();
-  return sqlitePrelude;
+  // The file is made for the build that asks for it. A process-wide cache of
+  // the promise was the module state this function carried, and a compiled
+  // function owns no module state: a second path per build is a whole file
+  // written twice, and the answer is the same file.
+  const directory = await mkdtemp(join(tmpdir(), "blaze-sqlite-"));
+  const path = join(directory, "sqlite-prelude.mjs");
+  await writeFile(path, SQLITE_PRELUDE_SOURCE, "utf8");
+  return path;
 }
 
 /** Whether a source reads the command line the way a Deno program does. */

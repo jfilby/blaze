@@ -240,53 +240,66 @@ const COMPARE_OPERATORS: Record<string, string> = {
  * written with, and a question about a path answers the number the runtime
  * already does.
  */
-const HOST_CALLS: Readonly<Record<string, (args: string[]) => string>> = {
-  "fs.readFileSync": (args) => `blaze_rt_file_read(${args[0]}, ${args[1]})`,
-  "fs.writeFileSync": (args) => `blaze_rt_file_write(${args[0]}, ${args[1]}, 0.0)`,
-  "fs.appendFileSync": (args) => `blaze_rt_file_write(${args[0]}, ${args[1]}, 1.0)`,
-  "fs.existsSync": (args) => `blaze_rt_file_exists(${args[0]})`,
-  "fs.fileSizeSync": (args) => `blaze_rt_file_size(${args[0]})`,
-  "fs.fileKindSync": (args) => `blaze_rt_file_kind(${args[0]})`,
-  "fs.mkdirSync": (args) => `blaze_rt_dir_make(${args[0]}, ${args[1]})`,
-  "fs.rmSync": (args) => `blaze_rt_file_remove(${args[0]}, ${args[1]})`,
-  "fs.renameSync": (args) => `blaze_rt_file_rename(${args[0]}, ${args[1]})`,
-  "fs.copyFileSync": (args) => `blaze_rt_file_copy(${args[0]}, ${args[1]})`,
-  "fs.dirCountSync": (args) => `blaze_rt_dir_count(${args[0]})`,
-  "fs.dirNameSync": (args) => `blaze_rt_dir_name(${args[0]}, ${args[1]})`,
-  "fs.dirIsDirSync": (args) => `blaze_rt_dir_is_dir(${args[0]}, ${args[1]})`,
-  "process.cwd": () => `blaze_rt_current_dir()`,
-  "process.pid": () => `blaze_rt_process_id()`,
-  "os.tmpdir": () => `blaze_rt_temp_dir()`,
-  "os.platform": () => `blaze_rt_host_platform()`,
-  "os.arch": () => `blaze_rt_host_arch()`,
-  "crypto.randomUUID": () => `blaze_rt_random_uuid()`,
-  "fs.fsyncPath": (args) => `blaze_rt_file_sync(${args[0]})`,
-  "timers.sleepMs": (args) => `(blaze_rt_sleep_ms(${args[0]}), 1.0)`,
-  "exec.new": () => `blaze_rt_command_new()`,
-  "exec.arg": (args) => `blaze_rt_command_arg(${args[0]}, ${args[1]})`,
-  "exec.cwd": (args) => `blaze_rt_command_cwd(${args[0]}, ${args[1]})`,
-  "exec.env": (args) => `blaze_rt_command_env(${args[0]}, ${args[1]}, ${args[2]})`,
-  "exec.input": (args) => `blaze_rt_command_input(${args[0]}, ${args[1]})`,
-  "exec.run": (args) => `blaze_rt_command_run(${args[0]}, ${args[1]})`,
-  "exec.signal": (args) => `blaze_rt_command_signal(${args[0]})`,
-  "exec.errno": (args) => `blaze_rt_command_errno(${args[0]})`,
-  "exec.timedOut": (args) => `blaze_rt_command_timed_out(${args[0]})`,
-  "exec.stdout": (args) => `blaze_rt_command_stdout(${args[0]})`,
-  "exec.stderr": (args) => `blaze_rt_command_stderr(${args[0]})`,
-  "exec.free": (args) => `(blaze_rt_command_free(${args[0]}), 1.0)`,
-  "env.count": () => `blaze_rt_env_count()`,
-  "env.at": (args) => `blaze_rt_env_at(${args[0]})`,
-  "os.cpuCount": () => `blaze_rt_cpu_count()`,
-};
+/**
+ * The host services a function may call, as the C each one is.
+ *
+ * A function rather than a table of arrows: a compiled function owns no
+ * module object, and a table of closures read by name is one it cannot carry.
+ */
+function hostCall(name: string, args: string[]): string | null {
+  if (name === "fs.readFileSync") return `blaze_rt_file_read(${args[0]}, ${args[1]})`;
+  if (name === "fs.writeFileSync") return `blaze_rt_file_write(${args[0]}, ${args[1]}, 0.0)`;
+  if (name === "fs.appendFileSync") return `blaze_rt_file_write(${args[0]}, ${args[1]}, 1.0)`;
+  if (name === "fs.existsSync") return `blaze_rt_file_exists(${args[0]})`;
+  if (name === "fs.fileSizeSync") return `blaze_rt_file_size(${args[0]})`;
+  if (name === "fs.fileKindSync") return `blaze_rt_file_kind(${args[0]})`;
+  if (name === "fs.mkdirSync") return `blaze_rt_dir_make(${args[0]}, ${args[1]})`;
+  if (name === "fs.rmSync") return `blaze_rt_file_remove(${args[0]}, ${args[1]})`;
+  if (name === "fs.renameSync") return `blaze_rt_file_rename(${args[0]}, ${args[1]})`;
+  if (name === "fs.copyFileSync") return `blaze_rt_file_copy(${args[0]}, ${args[1]})`;
+  if (name === "fs.dirCountSync") return `blaze_rt_dir_count(${args[0]})`;
+  if (name === "fs.dirNameSync") return `blaze_rt_dir_name(${args[0]}, ${args[1]})`;
+  if (name === "fs.dirIsDirSync") return `blaze_rt_dir_is_dir(${args[0]}, ${args[1]})`;
+  if (name === "process.cwd") return `blaze_rt_current_dir()`;
+  if (name === "process.pid") return `blaze_rt_process_id()`;
+  if (name === "os.tmpdir") return `blaze_rt_temp_dir()`;
+  if (name === "os.platform") return `blaze_rt_host_platform()`;
+  if (name === "os.arch") return `blaze_rt_host_arch()`;
+  if (name === "crypto.randomUUID") return `blaze_rt_random_uuid()`;
+  if (name === "fs.fsyncPath") return `blaze_rt_file_sync(${args[0]})`;
+  if (name === "timers.sleepMs") return `(blaze_rt_sleep_ms(${args[0]}), 1.0)`;
+  if (name === "exec.new") return `blaze_rt_command_new()`;
+  if (name === "exec.arg") return `blaze_rt_command_arg(${args[0]}, ${args[1]})`;
+  if (name === "exec.cwd") return `blaze_rt_command_cwd(${args[0]}, ${args[1]})`;
+  if (name === "exec.env") return `blaze_rt_command_env(${args[0]}, ${args[1]}, ${args[2]})`;
+  if (name === "exec.input") return `blaze_rt_command_input(${args[0]}, ${args[1]})`;
+  if (name === "exec.run") return `blaze_rt_command_run(${args[0]}, ${args[1]})`;
+  if (name === "exec.signal") return `blaze_rt_command_signal(${args[0]})`;
+  if (name === "exec.errno") return `blaze_rt_command_errno(${args[0]})`;
+  if (name === "exec.timedOut") return `blaze_rt_command_timed_out(${args[0]})`;
+  if (name === "exec.stdout") return `blaze_rt_command_stdout(${args[0]})`;
+  if (name === "exec.stderr") return `blaze_rt_command_stderr(${args[0]})`;
+  if (name === "exec.free") return `(blaze_rt_command_free(${args[0]}), 1.0)`;
+  if (name === "env.count") return `blaze_rt_env_count()`;
+  if (name === "env.at") return `blaze_rt_env_at(${args[0]})`;
+  if (name === "os.cpuCount") return `blaze_rt_cpu_count()`;
+  return null;
+}
 
 function builtinExpression(name: string, args: string[]): string {
-  const host = HOST_CALLS[name];
-  if (host !== undefined) return host(args);
+  const host = hostCall(name, args);
+  if (host !== null) return host;
   switch (name) {
     case "Math.abs":
       return `fabs(${args[0]})`;
     case "Math.sqrt":
       return `sqrt(${args[0]})`;
+    case "Math.log":
+      return `log(${args[0]})`;
+    case "Math.pow":
+      return `pow(${args[0]}, ${args[1]})`;
+    case "Math.sign":
+      return `({ double blaze_sign = ${args[0]}; blaze_sign > 0.0 ? 1.0 : blaze_sign < 0.0 ? -1.0 : blaze_sign; })`;
     case "Math.floor":
       return `floor(${args[0]})`;
     case "Math.trunc":
@@ -403,8 +416,12 @@ function builtinExpression(name: string, args: string[]): string {
       return `${RUNTIME_NAME}_path_dirname(${args[0]})`;
     case "posix.normalize":
       return `${RUNTIME_NAME}_path_normalize(${args[0]})`;
+    case "posix.extname":
+      return `${RUNTIME_NAME}_path_extname(${args[0]})`;
     case "posix.join":
-      return `${RUNTIME_NAME}_path_join(${args[0]}, ${args[1]})`;
+      return args.length >= 3
+        ? `${RUNTIME_NAME}_path_join(${RUNTIME_NAME}_path_join(${args[0]}, ${args[1]}), ${args[2]})`
+        : `${RUNTIME_NAME}_path_join(${args[0]}, ${args[1]})`;
     case "process.hrtime.bigint":
       // The reading is the runtime's, and it is a whole number of nanoseconds:
       // a duration measured over two readings is the difference of two whole
@@ -431,7 +448,7 @@ function builtinExpression(name: string, args: string[]): string {
     case "Promise.await.nothing":
       return `(blaze_promise_await_nothing((void*)(uintptr_t)(${args[0]})), 0.0)`;
     case "Promise.resolve":
-      return `(double)(uintptr_t)blaze_promise_resolved_number(${args[0]})`;
+      return `(double)(uintptr_t)blaze_promise_resolved_number(${args[0] ?? "0.0"})`;
     case "Promise.resolve.text":
       return `(double)(uintptr_t)blaze_promise_resolved_text(${args[0]})`;
     case "Promise.resolve.bool":
@@ -488,6 +505,10 @@ function builtinExpression(name: string, args: string[]): string {
       return `blaze_rt_number_same(${args[0]}, ${args[1]})`;
     case "blaze_rt_text_length":
       return `((double)blaze_rt_text_length(${args[0]}))`;
+    case "encodeURIComponent":
+      return `blaze_rt_encode_uri_component(${args[0]})`;
+    case "process.execPath":
+      return `${RUNTIME_NAME}_exec_path()`;
     case "blaze_rt_as_int_n":
       return `blaze_rt_as_int_n(${args[0]}, ${args[1]})`;
     case "blaze_rt_as_uint_n":
@@ -1320,6 +1341,35 @@ class FunctionEmitter {
       this.declareCallee(call);
       return `${call.signature.symbol}(${args.join(", ")})`;
     }
+    if (call.callee === "blaze_rt_state_get") {
+      // A named cell holds the bits of the value the module keeps: a pointer,
+      // a text, a handle or a number. The type the read states says which of
+      // them the bits are, and a pointer is cast back from the address.
+      const held = call.returns;
+      const pointer = held.kind === "text" || held.kind === "slice" || held.kind === "array" || held.kind === "ptr"
+        || (held.kind === "ref" && !(held.of === null && held.name === undefined));
+      const stored = `${RUNTIME_NAME}_state_get(${args[0]})`;
+      return pointer ? `((${declaredType(held)})(uintptr_t)(${stored}))` : stored;
+    }
+    if (call.callee === "blaze_rt_state_set") {
+      const held = call.argTypes[1] ?? call.args[1]?.type ?? null;
+      const pointer = held !== null && (held.kind === "text" || held.kind === "slice" || held.kind === "array" || held.kind === "ptr"
+        || (held.kind === "ref" && !(held.of === null && held.name === undefined)));
+      return `${RUNTIME_NAME}_state_set(${args[0]}, ${pointer ? `(double)(uintptr_t)(${args[1]})` : args[1] ?? "0.0"})`;
+    }
+    if (call.callee === "structuredClone") {
+      const argument = call.args[0];
+      if (argument === undefined) return "0.0";
+      if (argument.type.kind === "primitive" || isTextType(argument.type)) return args[0] ?? "0.0";
+      if (argument.type.kind === "slice" || argument.type.kind === "array") {
+        return `((void*)${RUNTIME_NAME}_clone_block((void*)(uintptr_t)(${args[0]}), "${contractText(argument.type.of)}"))`;
+      }
+      const held = call.argTypes[0];
+      const dynamic = held === undefined || held.kind !== "ref" || (held.of === null && held.name === undefined);
+      return dynamic
+        ? `((double)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`
+        : `((void*)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`;
+    }
     if (call.callee === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
     if (call.callee === "u256_from_u64x2") {
       const out = this.temporary("blaze_wide");
@@ -1381,6 +1431,30 @@ class FunctionEmitter {
     // text is the number its text says, which the runtime reads out of the box
     // it makes of the pointer it is. A number and a dynamic value are already
     // the value it reads.
+    if (call.callee === "BigInt") {
+      // A whole number as the wide integer the language holds it in. The value
+      // is an integer double, which is exact below 2^53 and has trailing zero
+      // bits above it; each 64 bit limb is read by the arithmetic the double
+      // already carries.
+      const out = this.temporary("blaze_wide");
+      return (
+        `({ blaze_u256 ${out}; double blaze_wide_value = (${args[0] ?? "0.0"}); ` +
+        `double blaze_wide_rest = blaze_wide_value < 0.0 ? -blaze_wide_value : blaze_wide_value; ` +
+        `uint64_t blaze_wide_l0 = (uint64_t)fmod(blaze_wide_rest, 18446744073709551616.0); ` +
+        `double blaze_wide_high = floor(blaze_wide_rest / 18446744073709551616.0); ` +
+        `uint64_t blaze_wide_l1 = (uint64_t)fmod(blaze_wide_high, 18446744073709551616.0); ` +
+        `blaze_wide_high = floor(blaze_wide_high / 18446744073709551616.0); ` +
+        `uint64_t blaze_wide_l2 = (uint64_t)fmod(blaze_wide_high, 18446744073709551616.0); ` +
+        `blaze_wide_high = floor(blaze_wide_high / 18446744073709551616.0); ` +
+        `uint64_t blaze_wide_l3 = (uint64_t)blaze_wide_high; ` +
+        `if (blaze_wide_value < 0.0) { uint64_t blaze_carry = 1; ` +
+        `blaze_wide_l0 = ~blaze_wide_l0 + blaze_carry; blaze_carry = blaze_wide_l0 < blaze_carry ? 1 : 0; ` +
+        `blaze_wide_l1 = ~blaze_wide_l1 + blaze_carry; blaze_carry = blaze_wide_l1 < blaze_carry ? 1 : 0; ` +
+        `blaze_wide_l2 = ~blaze_wide_l2 + blaze_carry; blaze_carry = blaze_wide_l2 < blaze_carry ? 1 : 0; ` +
+        `blaze_wide_l3 = ~blaze_wide_l3 + blaze_carry; } ` +
+        `${RUNTIME_NAME}_u256_from_u64x4(&${out}, blaze_wide_l0, blaze_wide_l1, blaze_wide_l2, blaze_wide_l3); ${out}; })`
+      );
+    }
     if (call.callee === "parseInt" || call.callee === "Number") {
       // A wide whole number is read as the decimal the formatter writes, which
       // is the double `Number(BigInt)` answers; the runtime's formatter and the

@@ -21,8 +21,7 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, PrimitiveTypeName, Runner, TypeExpr } from "../core/types.ts";
 import {
-  HOST_SERVICE_BY_SYMBOL,
-  HOST_SERVICES,
+  hostServiceBySymbol,
   IMPLEMENTED_SERVICES,
   MEMORY_IMPORT,
   POW_IMPORT,
@@ -284,7 +283,7 @@ export function boundaryProblems(bytes: Uint8Array, expected?: string): string[]
       continue;
     }
     if (entry.name === POW_IMPORT) continue;
-    if (!HOST_SERVICE_BY_SYMBOL.has(entry.name)) {
+    if (hostServiceBySymbol(entry.name) === null) {
       problems.push(`the module must not import "${entry.name}"; it is not a service of the host ABI`);
     }
   }
@@ -332,7 +331,7 @@ const memoryImports = imports.filter((entry) => entry.kind === "memory");
 if (memoryImports.length !== 1 || memoryImports[0].module !== "env" || memoryImports[0].name !== "memory") {
   problems.push('the module must import exactly one memory: (import "env" "memory" ...)');
 }
-const services = ${JSON.stringify(HOST_SERVICES.map((service) => service.symbol))};
+const services = ["blaze_rt_allocate","blaze_rt_allocate_uninitialized","blaze_rt_fround","blaze_rt_json_parse","blaze_rt_json_stringify","blaze_rt_md5_create","blaze_rt_md5_update","blaze_rt_md5_digest","blaze_rt_file_read","blaze_rt_file_write","blaze_rt_file_exists","blaze_rt_file_size","blaze_rt_file_kind","blaze_rt_dir_make","blaze_rt_file_copy","blaze_rt_process_id","blaze_rt_host_platform","blaze_rt_cpu_count","blaze_rt_file_sync","blaze_rt_sleep_ms","blaze_rt_env_get","blaze_rt_path_dirname","blaze_rt_path_normalize","blaze_rt_path_join","blaze_rt_array_push","blaze_rt_array_get","blaze_rt_array_length","blaze_rt_array_set","blaze_rt_dyn_array_new","blaze_rt_is_array","blaze_rt_to_text","blaze_rt_type_of","blaze_rt_box_number","blaze_rt_box_string","blaze_rt_box_null","blaze_rt_json_get","blaze_rt_random","blaze_rt_monotonic_ms","blaze_rt_monotonic_ns","blaze_rt_to_number","blaze_rt_reallocate","blaze_rt_string_append","blaze_rt_retain","blaze_rt_release","blaze_rt_string_new","blaze_rt_string_length","blaze_rt_text_length","blaze_rt_string_clone","blaze_rt_text_compare","blaze_rt_array_new","blaze_rt_array_resize","blaze_rt_object_new","blaze_rt_object_size","blaze_rt_object_describe","blaze_rt_object_has_field","blaze_rt_argv_count","blaze_rt_argv","blaze_rt_print_text","blaze_rt_print_error_text","blaze_rt_print_text_n","blaze_rt_print_number","blaze_rt_print_whole","blaze_rt_format_number","blaze_rt_format_number_fixed","blaze_rt_format_number_precision","blaze_rt_print_newline","blaze_rt_raise","blaze_rt_cwd","blaze_rt_dir_list","blaze_rt_exit_code","blaze_rt_file_append","blaze_rt_file_read_text","blaze_rt_host_architecture","blaze_rt_length","blaze_rt_path_exists","blaze_rt_path_kind","blaze_rt_path_remove","blaze_rt_path_rename","blaze_rt_process_run","blaze_rt_read_line","blaze_rt_set_exit_code","blaze_rt_stream_is_tty","blaze_rt_u256_from_u64","blaze_rt_u256_from_u64x2","blaze_rt_u256_from_u64x4","blaze_rt_u256_mul","blaze_rt_u256_div","blaze_rt_u256_mod","blaze_rt_u256_invert_mod","blaze_rt_u256_add_mod","blaze_rt_u256_sub_mod","blaze_rt_u256_mul_mod","blaze_rt_u256_less","blaze_rt_u256_equal","blaze_rt_print_u256","blaze_rt_parse_int","blaze_rt_from_code_point","blaze_rt_text_code_point_at","blaze_rt_text_bytes","blaze_rt_view_load_float","blaze_rt_view_store_float","blaze_rt_text_index_of","blaze_rt_text_slice","blaze_rt_text_trim","blaze_rt_text_trim_start","blaze_rt_text_trim_end","blaze_rt_text_lower","blaze_rt_text_upper"];
 for (const entry of imports) {
   if (entry.kind === "memory") continue;
   if (entry.kind !== "function" || entry.module !== "env" || (entry.name !== "pow" && !services.includes(entry.name))) {
@@ -414,7 +413,7 @@ export function generateWasmHost(contract: FunctionContract, options: WasmHostOp
   }
   const services = options.services ?? [];
   for (const service of services) {
-    if (!HOST_SERVICE_BY_SYMBOL.has(service)) {
+    if (hostServiceBySymbol(service) === null) {
       throw wasmError(`"${service}" is not a service of the host ABI`, undefined, functionName);
     }
     if (!IMPLEMENTED_SERVICES.includes(service)) {
@@ -658,7 +657,7 @@ export interface WasmProgramHostOptions {
 export function generateWasmProgramHost(options: WasmProgramHostOptions): string {
   const services = options.services ?? [];
   for (const service of services) {
-    if (!HOST_SERVICE_BY_SYMBOL.has(service)) {
+    if (hostServiceBySymbol(service) === null) {
       throw wasmError(`"${service}" is not a service of the host ABI`);
     }
     if (!IMPLEMENTED_SERVICES.includes(service)) {

@@ -183,9 +183,24 @@ export const SQLITE_ABI: readonly SqliteEntry[] = [
 ];
 
 /** Symbols generated SQLite code may reference. Nothing else resolves at link time. */
-export const SQLITE_SYMBOLS: Record<string, true> = Object.fromEntries(
-  SQLITE_ABI.map((item) => [item.symbol, true as const]),
-);
+export const SQLITE_SYMBOLS: Record<string, true> = {
+  "blaze_sqlite_bind_null": true,
+  "blaze_sqlite_bind_number": true,
+  "blaze_sqlite_bind_text": true,
+  "blaze_sqlite_changes": true,
+  "blaze_sqlite_close": true,
+  "blaze_sqlite_column_count": true,
+  "blaze_sqlite_column_number": true,
+  "blaze_sqlite_column_text": true,
+  "blaze_sqlite_column_type": true,
+  "blaze_sqlite_error": true,
+  "blaze_sqlite_exec": true,
+  "blaze_sqlite_finalize": true,
+  "blaze_sqlite_last_insert_rowid": true,
+  "blaze_sqlite_open": true,
+  "blaze_sqlite_prepare": true,
+  "blaze_sqlite_step": true,
+};
 
 /** True when generated code is allowed to reference a SQLite symbol. */
 export function isSqliteSymbol(symbol: string): boolean {

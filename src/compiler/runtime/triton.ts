@@ -110,9 +110,15 @@ export const TRITON_ABI: readonly TritonEntry[] = [
 ];
 
 /** Symbols generated Triton/kernel code may reference. Nothing else resolves at link time. */
-export const TRITON_SYMBOLS: Record<string, true> = Object.fromEntries(
-  TRITON_ABI.map((item) => [item.symbol, true as const]),
-);
+export const TRITON_SYMBOLS: Record<string, true> = {
+  "blaze_triton_device_init": true,
+  "blaze_triton_device_sync": true,
+  "blaze_triton_free": true,
+  "blaze_triton_launch": true,
+  "blaze_triton_malloc": true,
+  "blaze_triton_memcpy_d2h": true,
+  "blaze_triton_memcpy_h2d": true,
+};
 
 /** True when generated code is allowed to reference a Triton symbol. */
 export function isTritonSymbol(symbol: string): boolean {

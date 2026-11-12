@@ -27,7 +27,7 @@
  */
 
 import { parseType, typeToString, isBufferType } from "../semantics/contract.ts";
-import { describeSites, inlineRefusal, REPAIR_RULES } from "../semantics/repair.ts";
+import { describeSites, inlineRefusal, repairRules } from "../semantics/repair.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
 import type {
   FunctionContract,
@@ -178,7 +178,7 @@ function renderNumerical(contract: FunctionContract): string[] {
 /** The rules, as a proposal names one. */
 function renderCatalogue(): string[] {
   const lines: string[] = [];
-  for (const rule of REPAIR_RULES) {
+  for (const rule of repairRules()) {
     lines.push(`- ${rule.name}: ${rule.summary}`, `  applies: ${rule.applies}`);
     // What a rule takes is said either way. Listing only the arguments a rule
     // has leaves a rule that takes none looking like one whose arguments were

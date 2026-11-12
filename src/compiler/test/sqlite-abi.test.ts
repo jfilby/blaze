@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SQLITE_ABI, isSqliteSymbol, sqliteHeaderSource, usesSqliteSource } from "../runtime/sqlite.ts";
 import { sqliteAdapterSource } from "../runtime/sqlite-build.ts";
-import { isRuntimeSymbol } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 
 test("the SQLite ABI declares every entry the API promises", () => {
   const header = sqliteHeaderSource();

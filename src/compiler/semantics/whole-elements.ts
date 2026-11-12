@@ -100,7 +100,7 @@ const WHOLE: SemanticType = { kind: "primitive", name: "i64" };
 const REACH = 2 ** 51;
 
 /** What nothing in the program bounds. */
-const UNBOUNDED = Number.POSITIVE_INFINITY;
+const UNBOUNDED = 1 / 0;
 
 /* -------------------------------------------------------------------------- */
 /* Literals                                                                    */
@@ -148,7 +148,16 @@ function placesOf(value: SemanticValue): number | null {
 function exponentOf(value: SemanticValue): number | null {
   const literal = literalOf(value);
   if (literal === null || !literal.whole || literal.value < 1 || literal.value > 2 ** 52) return null;
-  return (literal.value & (literal.value - 1)) === 0 ? Math.log2(literal.value) : null;
+  if ((literal.value & (literal.value - 1)) !== 0) return null;
+  // The exponent of the one bit the number has: halving until one is the
+  // power it is, without a logarithm the language does not carry.
+  let count = 0;
+  let held = literal.value;
+  while (held > 1) {
+    held = held / 2;
+    count += 1;
+  }
+  return count;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -297,7 +306,7 @@ interface Known {
 }
 
 /** What nothing in the program states about a value. */
-const unknown: Known = { whole: false, reach: UNBOUNDED, reduced: null };
+const unknown: Known = { whole: false, reach: 1 / 0, reduced: null };
 
 /** A slot that holds a number, which is the one this pass re-types. */
 type ValueSlot = Extract<SemanticSlot, { kind: "value" }>;

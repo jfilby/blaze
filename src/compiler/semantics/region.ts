@@ -43,7 +43,6 @@ export type Refusal = string;
 export type Callees = ReadonlyMap<string, SemanticFunction>;
 
 /** The names a build holds no callee for, so every call through them is refused. */
-export const NO_CALLEES: Callees = new Map();
 
 /** A block and every block nested inside it, itself included. */
 function blocksWithin(block: SemanticBlock): SemanticBlock[] {
@@ -72,7 +71,7 @@ function blocksWithin(block: SemanticBlock): SemanticBlock[] {
  * the loop the blocks are built in is the one whose turns should pay to rewind,
  * and an outer loop with a marked loop inside it keeps taking its storage fresh.
  */
-export function markRegionLoops(entry: SemanticBlock, callees: Callees = NO_CALLEES): void {
+export function markRegionLoops(entry: SemanticBlock, callees: Callees = new Map()): void {
   markWithin(entry, callees);
 }
 
@@ -247,7 +246,7 @@ interface Reach {
  * is still wanted after the turn ends. Everything below is a way of showing
  * that, and a way of showing it the compiler cannot take is a refusal.
  */
-export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): Refusal | null {
+export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Refusal | null {
   if (loop.kind === "while" || loop.kind === "doWhile") {
     return "a turn of a loop that may run any number of times cannot promise what the turn after it still wants";
   }

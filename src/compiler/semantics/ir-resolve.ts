@@ -419,7 +419,6 @@ function isBufferType(type: TypeExpr): boolean {
  * rule both resolvers ask, so a loop written in a function body and the same
  * loop written at the top of a module count in the same width.
  */
-const isWholeLiteral = isWholeNumberText;
 
 /**
  * The value a whole number written in the source is, or null where the text is
@@ -456,7 +455,7 @@ const U64_MAX = 18446744073709551615n;
 function countsWhole(value: DraftValue): boolean {
   if (value.k === "literal") {
     return value.held.type === null
-      ? isWholeLiteral(value.held.text)
+      ? isWholeNumberText(value.held.text)
       : isWhole(value.held.type);
   }
   const name = primitive(draftType(value));
@@ -848,6 +847,7 @@ function contractTextOfType(type: TypeExpr): string {
 function executorPayload(program: DraftProgram, callee?: (name: string) => DraftProgram | null): TypeExpr {
   const found: TypeExpr[] = [];
   const seen = new Set<string>();
+  const queued: DraftStatement[][] = [];
   const note = (value: DraftValue): void => {
     switch (value.k) {
       case "call": {
@@ -861,7 +861,7 @@ function executorPayload(program: DraftProgram, callee?: (name: string) => Draft
           if (argument.k === "function" && argument.name !== undefined && !seen.has(argument.name)) {
             seen.add(argument.name);
             const nested = callee?.(argument.name) ?? null;
-            if (nested !== null) walk(nested.statements);
+            if (nested !== null) queued.push(nested.statements);
           }
         }
         if (value.call.grid !== undefined) note(value.call.grid);
@@ -895,7 +895,7 @@ function executorPayload(program: DraftProgram, callee?: (name: string) => Draft
         return;
     }
   };
-  const walk = (statements: readonly DraftStatement[]): void => {
+  function walk(statements: readonly DraftStatement[]): void {
     for (const statement of statements) {
       switch (statement.kind) {
         case "declare":
@@ -949,7 +949,8 @@ function executorPayload(program: DraftProgram, callee?: (name: string) => Draft
           continue;
       }
     }
-  };
+    while (queued.length > 0) walk(queued.pop() as DraftStatement[]);
+  }
   walk(program.statements);
   const first = found[0];
   if (first === undefined) return { kind: "ref", of: null };
@@ -1091,7 +1092,7 @@ function sideType(value: DraftValue, result: TypeExpr | null): TypeExpr | null {
   // A literal with no type of its own is a number as the source wrote it, and
   // what it was written as is in its text: `1.5` is a fraction whatever it is
   // initializing, and a whole result does not hold one.
-  if (written === null) return value.k === "literal" && !isWholeLiteral(value.held.text) ? null : result;
+  if (written === null) return value.k === "literal" && !isWholeNumberText(value.held.text) ? null : result;
   return isWhole(written) ? result : null;
 }
 
@@ -1357,11 +1358,87 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
   const read: string[] = [];
   const scopes: Set<string>[] = [new Set(parameters)];
   const seen = (name: string): boolean => scopes.some((scope) => scope.has(name));
-  const note = (name: string): void => {
+  function note(name: string): void {
     if (seen(name) || read.includes(name)) return;
     read.push(name);
-  };
-  const walk = (statements: readonly ProgramStatement[]): void => {
+  }
+  function value(one: ProgramValue): void {
+    switch (one.k) {
+      case "name":
+        note(one.name);
+        return;
+      case "length":
+        note(one.of);
+        return;
+      case "lengthOf":
+        value(one.of);
+        return;
+      case "element":
+        note(one.buffer);
+        value(one.index);
+        return;
+      case "object":
+        for (const field of one.fields) value(field.value);
+        for (const spread of one.spreads ?? []) value(spread);
+        return;
+      case "field":
+        value(one.object);
+        return;
+      case "call":
+        one.args.forEach((one) => value(one));
+        return;
+      case "unary":
+        value(one.operand);
+        return;
+      case "binary":
+        value(one.left);
+        value(one.right);
+        return;
+      case "conditional":
+        value(one.condition);
+        value(one.then);
+        value(one.otherwise);
+        return;
+      case "text":
+        one.parts.forEach((part) => {
+          if (part.k === "value") value(part.value);
+        });
+        return;
+      case "arrow": {
+        // An arrow is called where it is written, so the names its body reads
+        // are the names the function around it reads: the call passes them.
+        for (const name of readsAround(one.body, new Set(one.params.map((param) => param.name)))) {
+          note(name);
+        }
+        return;
+      }
+      case "fixed":
+        value(one.of);
+        return;
+      case "shared":
+        value(one.count);
+        return;
+      case "sized":
+        value(one.count);
+        return;
+      case "view":
+        value(one.of);
+        value(one.offset);
+        value(one.count);
+        return;
+      case "fill":
+        value(one.buffer);
+        value(one.value);
+        return;
+      case "number":
+      case "whole":
+      case "boolean":
+      case "null":
+      case "buffer":
+        return;
+    }
+  }
+  function walk(statements: readonly ProgramStatement[]): void {
     for (const statement of statements) {
       switch (statement.kind) {
         case "declare":
@@ -1393,10 +1470,10 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
           note(statement.name);
           continue;
         case "print":
-          statement.values.forEach(value);
+          statement.values.forEach((one) => value(one));
           continue;
         case "invoke":
-          statement.args.forEach(value);
+          statement.args.forEach((one) => value(one));
           continue;
         case "if":
           value(statement.condition);
@@ -1460,83 +1537,7 @@ function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<
         }
       }
     }
-  };
-  const value = (one: ProgramValue): void => {
-    switch (one.k) {
-      case "name":
-        note(one.name);
-        return;
-      case "length":
-        note(one.of);
-        return;
-      case "lengthOf":
-        value(one.of);
-        return;
-      case "element":
-        note(one.buffer);
-        value(one.index);
-        return;
-      case "object":
-        for (const field of one.fields) value(field.value);
-        for (const spread of one.spreads ?? []) value(spread);
-        return;
-      case "field":
-        value(one.object);
-        return;
-      case "call":
-        one.args.forEach(value);
-        return;
-      case "unary":
-        value(one.operand);
-        return;
-      case "binary":
-        value(one.left);
-        value(one.right);
-        return;
-      case "conditional":
-        value(one.condition);
-        value(one.then);
-        value(one.otherwise);
-        return;
-      case "text":
-        one.parts.forEach((part) => {
-          if (part.k === "value") value(part.value);
-        });
-        return;
-      case "arrow": {
-        // An arrow is called where it is written, so the names its body reads
-        // are the names the function around it reads: the call passes them.
-        for (const name of readsAround(one.body, new Set(one.params.map((param) => param.name)))) {
-          note(name);
-        }
-        return;
-      }
-      case "fixed":
-        value(one.of);
-        return;
-      case "shared":
-        value(one.count);
-        return;
-      case "sized":
-        value(one.count);
-        return;
-      case "view":
-        value(one.of);
-        value(one.offset);
-        value(one.count);
-        return;
-      case "fill":
-        value(one.buffer);
-        value(one.value);
-        return;
-      case "number":
-      case "whole":
-      case "boolean":
-      case "null":
-      case "buffer":
-        return;
-    }
-  };
+  }
   walk(body);
   return read;
 }
@@ -2989,7 +2990,7 @@ class ProgramResolver {
       const written = this.value(statement.value, null, statement.line);
       // What the name holds after the write is what was written: a promise is
       // a promise and a value that is not one clears what the name said before.
-      if (promiseOf(written) === undefined) delete held.promise;
+      if (promiseOf(written) === undefined) held.promise = undefined;
       else held.promise = promiseOf(written);
       return { kind: "assign", name: held.name, op: statement.op, value: written, type: null, line: statement.line };
     }
@@ -4199,7 +4200,7 @@ class ProgramResolver {
         if (what === "the right" && counted && wideValue) continue;
         const name = primitive(draftType(side));
         const written = side.k === "literal" ? side.held.text : null;
-        if (name === null && (written === null || isWholeLiteral(written))) continue;
+        if (name === null && (written === null || isWholeNumberText(written))) continue;
         if (name !== null && isWhole(name)) continue;
         throw programError(
           `"${op}" needs whole numbers`,

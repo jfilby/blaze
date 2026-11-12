@@ -19,7 +19,7 @@ import { assembleCommand, assemblerProbeCommand, toolchainFor, type Toolchain } 
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
-import { isRuntimeSymbol } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import { callableFrom, type ContractsByName } from "../semantics/calls.ts";
 import { stackAlignmentProblems } from "./stack-frame.ts";

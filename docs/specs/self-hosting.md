@@ -277,3 +277,34 @@ binary is made of.
   compile time; their values are the zero they hold and never a contract type.
 - **Refusals are the queue.** A gap in the frontend or the IR is reported with
   a reason and a remedy; the report's count is the budget, not a target.
+
+## Where the self-build stands
+
+The gap report is at zero refusals: the frontend reads all 97 sources of the
+compiler; the tests and benchmarks are outside the binary. The build reaches the
+contract phase of every module in order, and these slices have landed:
+
+- the contract evaluator holds integers in a sign-and-magnitude 256-bit value,
+  with the wraps, shifts, comparisons, reductions and the exact
+  double-to-integer conversion the language gives them;
+- `structuredClone` is a deep copy in the IR and in both runtimes: records by
+  their descriptors, slices by their element type, dynamic arrays and objects;
+- `pop()` as a value, a push in an optional chain or a callback body, recursive
+  arrows and mutually recursive walkers are read;
+- module constants are inlined whole, including quoted keys, nested literals,
+  tables that name other constants, and constant lists walked by `for..of`;
+- `encodeURIComponent`, dynamic `BigInt(number)`, `Math.log`, `Math.pow`,
+  `Math.sign`, `posix.extname`, `process.execPath` and a three-part
+  `posix.join` are services the natives carry;
+- caches that were module-level promises or WeakMaps moved onto the value that
+  owns them (the type table holds its expansions), so no compiled function
+  reads those as module state;
+- a module value built by a call is read through a lazily initialized getter:
+  the first read writes the value into a named state cell and marks it, every
+  later read answers the cell, and a function reads the getter rather than a
+  module name. The host-service and runtime-ABI tables are literal sources, so
+  the wasm backend's host services are constants rather than derived state.
+
+The current gate is the frontend's remaining closure handling: a generated
+collection helper can still carry a free name (`__collect_typescript_24`), and
+the self-build stops there. Fixed point is not reached yet.

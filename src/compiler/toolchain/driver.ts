@@ -378,44 +378,55 @@ const WIDE_KERNELS: Record<string, string> = {
  * a name the frontend writes is the entry it lowers to, with the flag a write
  * takes beside the two texts it is handed.
  */
-const HOST_CALLS: Readonly<Record<string, (argument: (index: number) => string) => string>> = {
-  "fs.readFileSync": (argument) => `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`,
-  "fs.writeFileSync": (argument) => `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 0.0)`,
-  "fs.appendFileSync": (argument) => `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 1.0)`,
-  "fs.existsSync": (argument) => `${RUNTIME_NAME}_file_exists(${argument(0)})`,
-  "fs.fileSizeSync": (argument) => `${RUNTIME_NAME}_file_size(${argument(0)})`,
-  "fs.fileKindSync": (argument) => `${RUNTIME_NAME}_file_kind(${argument(0)})`,
-  "fs.mkdirSync": (argument) => `${RUNTIME_NAME}_dir_make(${argument(0)}, ${argument(1)})`,
-  "fs.rmSync": (argument) => `${RUNTIME_NAME}_file_remove(${argument(0)}, ${argument(1)})`,
-  "fs.renameSync": (argument) => `${RUNTIME_NAME}_file_rename(${argument(0)}, ${argument(1)})`,
-  "fs.copyFileSync": (argument) => `${RUNTIME_NAME}_file_copy(${argument(0)}, ${argument(1)})`,
-  "fs.dirCountSync": (argument) => `${RUNTIME_NAME}_dir_count(${argument(0)})`,
-  "fs.dirNameSync": (argument) => `${RUNTIME_NAME}_dir_name(${argument(0)}, ${argument(1)})`,
-  "fs.dirIsDirSync": (argument) => `${RUNTIME_NAME}_dir_is_dir(${argument(0)}, ${argument(1)})`,
-  "process.cwd": () => `${RUNTIME_NAME}_current_dir()`,
-  "process.pid": () => `${RUNTIME_NAME}_process_id()`,
-  "os.tmpdir": () => `${RUNTIME_NAME}_temp_dir()`,
-  "os.platform": () => `${RUNTIME_NAME}_host_platform()`,
-  "os.arch": () => `${RUNTIME_NAME}_host_arch()`,
-  "crypto.randomUUID": () => `${RUNTIME_NAME}_random_uuid()`,
-  "fs.fsyncPath": (argument) => `${RUNTIME_NAME}_file_sync(${argument(0)})`,
-  "timers.sleepMs": (argument) => `(${RUNTIME_NAME}_sleep_ms(${argument(0)}), 1.0)`,
-  "exec.new": () => `${RUNTIME_NAME}_command_new()`,
-  "exec.arg": (argument) => `${RUNTIME_NAME}_command_arg(${argument(0)}, ${argument(1)})`,
-  "exec.cwd": (argument) => `${RUNTIME_NAME}_command_cwd(${argument(0)}, ${argument(1)})`,
-  "exec.env": (argument) => `${RUNTIME_NAME}_command_env(${argument(0)}, ${argument(1)}, ${argument(2)})`,
-  "exec.input": (argument) => `${RUNTIME_NAME}_command_input(${argument(0)}, ${argument(1)})`,
-  "exec.run": (argument) => `${RUNTIME_NAME}_command_run(${argument(0)}, ${argument(1)})`,
-  "exec.signal": (argument) => `${RUNTIME_NAME}_command_signal(${argument(0)})`,
-  "exec.errno": (argument) => `${RUNTIME_NAME}_command_errno(${argument(0)})`,
-  "exec.timedOut": (argument) => `${RUNTIME_NAME}_command_timed_out(${argument(0)})`,
-  "exec.stdout": (argument) => `${RUNTIME_NAME}_command_stdout(${argument(0)})`,
-  "exec.stderr": (argument) => `${RUNTIME_NAME}_command_stderr(${argument(0)})`,
-  "exec.free": (argument) => `(${RUNTIME_NAME}_command_free(${argument(0)}), 1.0)`,
-  "env.count": () => `${RUNTIME_NAME}_env_count()`,
-  "env.at": (argument) => `${RUNTIME_NAME}_env_at(${argument(0)})`,
-  "os.cpuCount": () => `${RUNTIME_NAME}_cpu_count()`,
-};
+/**
+ * The host services the compiler's adapter asks for, as the call each one is.
+ *
+ * The driver writes a Nim host program, and the entries are the runtime's own:
+ * a name the frontend writes is the entry it lowers to, with the flag a write
+ * takes beside the two texts it is handed.
+ *
+ * A function rather than a table of arrows: a compiled function owns no module
+ * object, and a table of closures read by name is one it cannot carry.
+ */
+function hostCall(name: string, argument: (index: number) => string): string | null {
+  if (name === "fs.readFileSync") return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.writeFileSync") return `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 0.0)`;
+  if (name === "fs.appendFileSync") return `${RUNTIME_NAME}_file_write(${argument(0)}, ${argument(1)}, 1.0)`;
+  if (name === "fs.existsSync") return `${RUNTIME_NAME}_file_exists(${argument(0)})`;
+  if (name === "fs.fileSizeSync") return `${RUNTIME_NAME}_file_size(${argument(0)})`;
+  if (name === "fs.fileKindSync") return `${RUNTIME_NAME}_file_kind(${argument(0)})`;
+  if (name === "fs.mkdirSync") return `${RUNTIME_NAME}_dir_make(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.rmSync") return `${RUNTIME_NAME}_file_remove(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.renameSync") return `${RUNTIME_NAME}_file_rename(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.copyFileSync") return `${RUNTIME_NAME}_file_copy(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.dirCountSync") return `${RUNTIME_NAME}_dir_count(${argument(0)})`;
+  if (name === "fs.dirNameSync") return `${RUNTIME_NAME}_dir_name(${argument(0)}, ${argument(1)})`;
+  if (name === "fs.dirIsDirSync") return `${RUNTIME_NAME}_dir_is_dir(${argument(0)}, ${argument(1)})`;
+  if (name === "process.cwd") return `${RUNTIME_NAME}_current_dir()`;
+  if (name === "process.pid") return `${RUNTIME_NAME}_process_id()`;
+  if (name === "os.tmpdir") return `${RUNTIME_NAME}_temp_dir()`;
+  if (name === "os.platform") return `${RUNTIME_NAME}_host_platform()`;
+  if (name === "os.arch") return `${RUNTIME_NAME}_host_arch()`;
+  if (name === "crypto.randomUUID") return `${RUNTIME_NAME}_random_uuid()`;
+  if (name === "fs.fsyncPath") return `${RUNTIME_NAME}_file_sync(${argument(0)})`;
+  if (name === "timers.sleepMs") return `(${RUNTIME_NAME}_sleep_ms(${argument(0)}), 1.0)`;
+  if (name === "exec.new") return `${RUNTIME_NAME}_command_new()`;
+  if (name === "exec.arg") return `${RUNTIME_NAME}_command_arg(${argument(0)}, ${argument(1)})`;
+  if (name === "exec.cwd") return `${RUNTIME_NAME}_command_cwd(${argument(0)}, ${argument(1)})`;
+  if (name === "exec.env") return `${RUNTIME_NAME}_command_env(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+  if (name === "exec.input") return `${RUNTIME_NAME}_command_input(${argument(0)}, ${argument(1)})`;
+  if (name === "exec.run") return `${RUNTIME_NAME}_command_run(${argument(0)}, ${argument(1)})`;
+  if (name === "exec.signal") return `${RUNTIME_NAME}_command_signal(${argument(0)})`;
+  if (name === "exec.errno") return `${RUNTIME_NAME}_command_errno(${argument(0)})`;
+  if (name === "exec.timedOut") return `${RUNTIME_NAME}_command_timed_out(${argument(0)})`;
+  if (name === "exec.stdout") return `${RUNTIME_NAME}_command_stdout(${argument(0)})`;
+  if (name === "exec.stderr") return `${RUNTIME_NAME}_command_stderr(${argument(0)})`;
+  if (name === "exec.free") return `(${RUNTIME_NAME}_command_free(${argument(0)}), 1.0)`;
+  if (name === "env.count") return `${RUNTIME_NAME}_env_count()`;
+  if (name === "env.at") return `${RUNTIME_NAME}_env_at(${argument(0)})`;
+  if (name === "os.cpuCount") return `${RUNTIME_NAME}_cpu_count()`;
+  return null;
+}
 
 class CDriver implements ProgramTarget {
   /** The objects built so far, so each one built as a value is named apart. */
@@ -1011,8 +1022,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
     // The host services the compiler's adapter asks for: the name is the
     // builtin the frontend writes and the call is the runtime entry it names.
-    const host = HOST_CALLS[call.callee];
-    if (host !== undefined) return host(argument);
+    const host = hostCall(call.callee, argument);
+    if (host !== null) return host;
     switch (call.callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;

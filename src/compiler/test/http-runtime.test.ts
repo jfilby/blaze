@@ -5,7 +5,8 @@ import {
   httpHeaderSource,
   isHttpSymbol,
 } from "../runtime/http.ts";
-import { isRuntimeSymbol, RUNTIME_TITLES, RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
+import { RUNTIME_TITLES, RUNTIME_NAME, runtimeHeaderSource } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { RUNTIME_KINDS } from "../core/types.ts";
 import { buildStandaloneRuntime } from "../runtime/standalone.ts";
 import { readFile } from "node:fs/promises";

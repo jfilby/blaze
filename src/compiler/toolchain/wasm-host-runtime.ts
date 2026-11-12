@@ -25,7 +25,6 @@
  * the other two backends call.
  */
 
-import { RUNTIME_ABI } from "../runtime/abi.ts";
 
 /** One service of the host ABI: the name a module imports it under, and its signature. */
 export interface HostService {
@@ -46,22 +45,6 @@ export interface HostService {
  * and a whole number are an `i64`; a `double` is an `f64`; and a function that
  * answers nothing answers nothing at all.
  */
-const WASM_OF_C: Record<string, string> = {
-  "void": "",
-  "void*": "i32",
-  "const void*": "i32",
-  "char*": "i32",
-  "const char*": "i32",
-  "unsigned char*": "i32",
-  "const unsigned char*": "i32",
-  "double": "f64",
-  "size_t": "i64",
-  "unsigned": "i32",
-  "int": "i32",
-  "long long": "i64",
-  "int64_t": "i64",
-  "uint64_t": "i64",
-};
 
 /**
  * The services of the runtime ABI a module may import.
@@ -72,7 +55,7 @@ const WASM_OF_C: Record<string, string> = {
  * of a host — a promise, a thread team, a region, the command line the host
  * sets up — and a module has no host to ask.
  */
-const EXPOSED_SERVICES: readonly string[] = [
+export const EXPOSED_SERVICES: readonly string[] = [
   "blaze_rt_allocate",
   "blaze_rt_allocate_uninitialized",
   "blaze_rt_reallocate",
@@ -162,7 +145,7 @@ const EXPOSED_SERVICES: readonly string[] = [
  * a part of it: a module has no instruction that carries a two hundred and
  * fifty six bit number, so it calls the kernel the other two backends call.
  */
-const WIDE_SERVICES: readonly HostService[] = [
+export const WIDE_SERVICES: readonly HostService[] = [
   { symbol: "blaze_rt_u256_from_u64", params: ["i32", "i64"], result: null },
   { symbol: "blaze_rt_u256_from_u64x2", params: ["i32", "i64", "i64"], result: null },
   { symbol: "blaze_rt_u256_from_u64x4", params: ["i32", "i64", "i64", "i64", "i64"], result: null },
@@ -189,7 +172,7 @@ const WIDE_SERVICES: readonly HostService[] = [
  * service of the table that takes a text takes it that way. So this one
  * service takes the offset itself, and the host reads the text at it.
  */
-const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: string | null }> = {
+export const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: string | null }> = {
   blaze_rt_json_parse: { params: ["i32"], result: "f64" },
 };
 
@@ -203,7 +186,7 @@ const SIGNATURE_OVERRIDES: Record<string, { params: readonly string[]; result: s
  * a text as on this side of the wall: everything else it holds there is a
  * number too, and the host reads the whole number off it.
  */
-const TEXT_SERVICES: readonly HostService[] = [
+export const TEXT_SERVICES: readonly HostService[] = [
   { symbol: "blaze_rt_parse_int", params: ["i32", "f64"], result: "f64" },
   { symbol: "blaze_rt_from_code_point", params: ["f64"], result: "i32" },
   { symbol: "blaze_rt_text_code_point_at", params: ["i32", "f64"], result: "f64" },
@@ -227,28 +210,817 @@ const TEXT_SERVICES: readonly HostService[] = [
  * a call carries over unchanged.
  */
 export const HOST_SERVICES: readonly HostService[] = [
-  ...RUNTIME_ABI.filter((entry) => EXPOSED_SERVICES.includes(entry.symbol)).map((entry) => {
-    const signature = SIGNATURE_OVERRIDES[entry.symbol];
-    if (signature !== undefined) return { symbol: entry.symbol, ...signature };
-    return {
-      symbol: entry.symbol,
-      params: entry.params.map(([, type]) => {
-        const mapped = WASM_OF_C[type];
-        if (mapped === undefined) throw new Error(`the host ABI has no WebAssembly type for the C type "${type}"`);
-        return mapped;
-      }),
-      result: entry.returns === "void" ? null : (WASM_OF_C[entry.returns] as string),
-      ...(entry.noreturn === true ? { noreturn: true } : {}),
-    };
-  }),
-  ...WIDE_SERVICES,
-  ...TEXT_SERVICES,
+  {
+    "symbol": "blaze_rt_allocate",
+    "params": [
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_allocate_uninitialized",
+    "params": [
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_fround",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_json_parse",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_json_stringify",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_md5_create",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_md5_update",
+    "params": [
+      "f64",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_md5_digest",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_read",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_write",
+    "params": [
+      "i32",
+      "i32",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_exists",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_size",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_kind",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_dir_make",
+    "params": [
+      "i32",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_copy",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_process_id",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_host_platform",
+    "params": [],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_cpu_count",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_sync",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_sleep_ms",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_env_get",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_path_dirname",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_path_normalize",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_path_join",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_array_push",
+    "params": [
+      "f64",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_array_get",
+    "params": [
+      "f64",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_array_length",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_array_set",
+    "params": [
+      "f64",
+      "f64",
+      "f64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_dyn_array_new",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_is_array",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_to_text",
+    "params": [
+      "f64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_type_of",
+    "params": [
+      "f64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_box_number",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_box_string",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_box_null",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_json_get",
+    "params": [
+      "f64",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_random",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_monotonic_ms",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_monotonic_ns",
+    "params": [],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_to_number",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_reallocate",
+    "params": [
+      "i32",
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_string_append",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_retain",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_release",
+    "params": [
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_string_new",
+    "params": [
+      "i32",
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_string_length",
+    "params": [
+      "i32"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_text_length",
+    "params": [
+      "i32"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_string_clone",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_compare",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_array_new",
+    "params": [
+      "i64",
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_array_resize",
+    "params": [
+      "i32",
+      "i64",
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_object_new",
+    "params": [
+      "i64",
+      "i64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_object_size",
+    "params": [
+      "i32"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_object_describe",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_object_has_field",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_argv_count",
+    "params": [],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_argv",
+    "params": [
+      "i64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_print_text",
+    "params": [
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_print_error_text",
+    "params": [
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_print_text_n",
+    "params": [
+      "i32",
+      "i64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_print_number",
+    "params": [
+      "f64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_print_whole",
+    "params": [
+      "i64",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_format_number",
+    "params": [
+      "f64",
+      "i32",
+      "i64"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_format_number_fixed",
+    "params": [
+      "f64",
+      "i32",
+      "i32",
+      "i64"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_format_number_precision",
+    "params": [
+      "f64",
+      "i32",
+      "i32",
+      "i64"
+    ],
+    "result": "i64"
+  },
+  {
+    "symbol": "blaze_rt_print_newline",
+    "params": [],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_raise",
+    "params": [
+      "i32"
+    ],
+    "result": null,
+    "noreturn": true
+  },
+  {
+    "symbol": "blaze_rt_cwd",
+    "params": [],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_dir_list",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_exit_code",
+    "params": [],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_append",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_file_read_text",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_host_architecture",
+    "params": [],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_length",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_path_exists",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_path_kind",
+    "params": [
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_path_remove",
+    "params": [
+      "i32",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_path_rename",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_process_run",
+    "params": [
+      "i32",
+      "i32",
+      "f64",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_read_line",
+    "params": [],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_set_exit_code",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_stream_is_tty",
+    "params": [
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_u256_from_u64",
+    "params": [
+      "i32",
+      "i64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_from_u64x2",
+    "params": [
+      "i32",
+      "i64",
+      "i64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_from_u64x4",
+    "params": [
+      "i32",
+      "i64",
+      "i64",
+      "i64",
+      "i64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_mul",
+    "params": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_div",
+    "params": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_mod",
+    "params": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_invert_mod",
+    "params": [
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_add_mod",
+    "params": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_sub_mod",
+    "params": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_mul_mod",
+    "params": [
+      "i32",
+      "i32",
+      "i32",
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_u256_less",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_u256_equal",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_print_u256",
+    "params": [
+      "i32"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_parse_int",
+    "params": [
+      "i32",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_from_code_point",
+    "params": [
+      "f64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_code_point_at",
+    "params": [
+      "i32",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_text_bytes",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_view_load_float",
+    "params": [
+      "i32",
+      "f64",
+      "f64"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_view_store_float",
+    "params": [
+      "i32",
+      "f64",
+      "f64",
+      "f64"
+    ],
+    "result": null
+  },
+  {
+    "symbol": "blaze_rt_text_index_of",
+    "params": [
+      "i32",
+      "i32"
+    ],
+    "result": "f64"
+  },
+  {
+    "symbol": "blaze_rt_text_slice",
+    "params": [
+      "i32",
+      "f64",
+      "f64"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_trim",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_trim_start",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_trim_end",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_lower",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  },
+  {
+    "symbol": "blaze_rt_text_upper",
+    "params": [
+      "i32"
+    ],
+    "result": "i32"
+  }
 ];
-
 /** Every service by name, so a lowering asks for one without searching. */
-export const HOST_SERVICE_BY_SYMBOL: ReadonlyMap<string, HostService> = new Map(
-  HOST_SERVICES.map((service) => [service.symbol, service]),
-);
+/** The service a symbol names, or null where the host does not implement it. */
+export function hostServiceBySymbol(symbol: string): HostService | null {
+  for (const service of HOST_SERVICES) {
+    if (service.symbol === symbol) return service;
+  }
+  return null;
+}
 
 /** The name the memory is imported under, which is not a service. */
 export const MEMORY_IMPORT = "memory";
@@ -2181,4 +2953,113 @@ export function hostRuntimeSource(services: readonly string[]): string {
 }
 
 /** The services the runtime source implements, which is what the host can offer. */
-export const IMPLEMENTED_SERVICES: readonly string[] = RUNTIME_SERVICES.map((part) => part.service).filter((symbol): symbol is string => symbol !== null);
+export const IMPLEMENTED_SERVICES: readonly string[] = [
+  "blaze_rt_allocate",
+  "blaze_rt_allocate_uninitialized",
+  "blaze_rt_reallocate",
+  "blaze_rt_retain",
+  "blaze_rt_release",
+  "blaze_rt_string_new",
+  "blaze_rt_string_append",
+  "blaze_rt_string_clone",
+  "blaze_rt_string_length",
+  "blaze_rt_text_length",
+  "blaze_rt_text_compare",
+  "blaze_rt_array_new",
+  "blaze_rt_array_resize",
+  "blaze_rt_object_new",
+  "blaze_rt_object_describe",
+  "blaze_rt_object_has_field",
+  "blaze_rt_object_size",
+  "blaze_rt_fround",
+  "blaze_rt_print_text",
+  "blaze_rt_print_error_text",
+  "blaze_rt_print_text_n",
+  "blaze_rt_print_number",
+  "blaze_rt_print_whole",
+  "blaze_rt_print_newline",
+  "blaze_rt_raise",
+  "blaze_rt_to_text",
+  "blaze_rt_type_of",
+  "blaze_rt_to_number",
+  "blaze_rt_format_number",
+  "blaze_rt_format_number_fixed",
+  "blaze_rt_format_number_precision",
+  "blaze_rt_random",
+  "blaze_rt_monotonic_ms",
+  "blaze_rt_monotonic_ns",
+  "blaze_rt_argv_count",
+  "blaze_rt_argv",
+  "blaze_rt_json_parse",
+  "blaze_rt_json_stringify",
+  "blaze_rt_json_get",
+  "blaze_rt_dyn_array_new",
+  "blaze_rt_is_array",
+  "blaze_rt_box_number",
+  "blaze_rt_box_string",
+  "blaze_rt_box_null",
+  "blaze_rt_array_push",
+  "blaze_rt_array_get",
+  "blaze_rt_array_set",
+  "blaze_rt_length",
+  "blaze_rt_array_length",
+  "blaze_rt_md5_create",
+  "blaze_rt_md5_update",
+  "blaze_rt_md5_digest",
+  "blaze_rt_file_read_text",
+  "blaze_rt_file_sync",
+  "blaze_rt_host_platform",
+  "blaze_rt_host_architecture",
+  "blaze_rt_process_run",
+  "blaze_rt_stream_is_tty",
+  "blaze_rt_set_exit_code",
+  "blaze_rt_exit_code",
+  "blaze_rt_read_line",
+  "blaze_rt_cwd",
+  "blaze_rt_process_id",
+  "blaze_rt_cpu_count",
+  "blaze_rt_sleep_ms",
+  "blaze_rt_path_remove",
+  "blaze_rt_file_append",
+  "blaze_rt_file_copy",
+  "blaze_rt_dir_make",
+  "blaze_rt_path_rename",
+  "blaze_rt_dir_list",
+  "blaze_rt_path_kind",
+  "blaze_rt_file_size",
+  "blaze_rt_file_exists",
+  "blaze_rt_file_kind",
+  "blaze_rt_path_exists",
+  "blaze_rt_file_write",
+  "blaze_rt_file_read",
+  "blaze_rt_env_get",
+  "blaze_rt_path_dirname",
+  "blaze_rt_path_normalize",
+  "blaze_rt_path_join",
+  "blaze_rt_u256_from_u64",
+  "blaze_rt_u256_from_u64x2",
+  "blaze_rt_u256_from_u64x4",
+  "blaze_rt_u256_mul",
+  "blaze_rt_u256_div",
+  "blaze_rt_u256_mod",
+  "blaze_rt_u256_invert_mod",
+  "blaze_rt_u256_add_mod",
+  "blaze_rt_u256_sub_mod",
+  "blaze_rt_u256_mul_mod",
+  "blaze_rt_u256_less",
+  "blaze_rt_u256_equal",
+  "blaze_rt_print_u256",
+  "blaze_rt_parse_int",
+  "blaze_rt_from_code_point",
+  "blaze_rt_view_load_float",
+  "blaze_rt_view_store_float",
+  "blaze_rt_text_bytes",
+  "blaze_rt_text_code_point_at",
+  "blaze_rt_text_index_of",
+  "blaze_rt_text_slice",
+  "blaze_rt_text_trim",
+  "blaze_rt_text_trim_start",
+  "blaze_rt_text_trim_end",
+  "blaze_rt_text_lower",
+  "blaze_rt_text_upper"
+];

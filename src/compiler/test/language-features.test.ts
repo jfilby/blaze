@@ -6392,3 +6392,60 @@ test("the JavaScript forms a package writes are the statements they mean", async
   // wrong answer the resolver owes (see the self-hosting spec).
   assert.equal(output.trim(), "0 1 0 7 4 4");
 });
+
+test("structuredClone copies a record and the list and record inside it", async () => {
+  // The copy is its own block of values: writing one does not write the other,
+  // at either level the value is nested.
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const base = { values: [1, 2], nested: { n: 3 } };",
+    "  const copy = structuredClone(base);",
+    "  copy.values[0] = 9;",
+    "  copy.nested.n = 7;",
+    "  return base.values[0] * 100 + base.nested.n * 10 + copy.values[0] + copy.nested.n;",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "146");
+});
+
+test("encodeURIComponent writes the bytes a URI component leaves unescaped", async () => {
+  const output = await agreesWithNode([
+    "function g(): string {",
+    "  return encodeURIComponent(`a b&c/é`);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "a%20b%26c%2F%C3%A9");
+});
+
+test("BigInt of a number written at run time is that whole number", async () => {
+  const output = await agreesWithNode([
+    "function g(): number {",
+    "  const n = 128;",
+    "  return Number(BigInt(n) >> 3n);",
+    "}",
+    "console.log(g());",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "16");
+});
+
+test("a module map a function writes is read and written through its getter", async () => {
+  // The map is state the module holds, not a constant: the first read makes it
+  // and every later call reads the same one.
+  const output = await agreesWithNode([
+    "const cache: Map<string, number> = new Map<string, number>();",
+    "export function remember(key: string, value: number): number {",
+    "  const known = cache.get(key);",
+    "  if (known !== undefined) return known;",
+    "  cache.set(key, value);",
+    "  return value;",
+    "}",
+    "console.log(remember(`a`, 3) + remember(`a`, 5));",
+    "",
+  ].join("\n"));
+  assert.equal(output.trim(), "6");
+});

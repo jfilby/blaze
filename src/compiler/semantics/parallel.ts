@@ -71,10 +71,11 @@ export type Refusal = string;
  * has the bodies says so, and a caller that has not gets the answer that
  * assumes the worst.
  */
+export const NO_CALLEES: Callees = new Map();
+
 export type Callees = ReadonlyMap<string, SemanticFunction>;
 
 /** The names a build holds no callee for, so every call through it is refused. */
-export const NO_CALLEES: Callees = new Map();
 
 /**
  * A block and every block nested inside it, itself included.
@@ -104,7 +105,7 @@ function blocksWithin(block: SemanticBlock): SemanticBlock[] {
  * rewritten since is marked again the next time this runs rather than carrying a
  * verdict about a body that is no longer there.
  */
-export function markParallelLoops(entry: SemanticBlock, callees: Callees = NO_CALLEES): void {
+export function markParallelLoops(entry: SemanticBlock, callees: Callees = new Map()): void {
   for (const block of blocksWithin(entry)) {
     for (const statement of block.statements) {
       if (statement.k !== "loop") continue;
@@ -136,7 +137,7 @@ export function markParallelLoops(entry: SemanticBlock, callees: Callees = NO_CA
  * — which is why the callees are an argument: what a call reaches is the
  * callee's own body, and only the program knows what that body is.
  */
-export function refusalFor(loop: SemanticLoop, callees: Callees = NO_CALLEES): Refusal | null {
+export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Refusal | null {
   if (loop.kind === "while") return "a while loop counts to a condition, so one turn decides whether the next runs";
   if (loop.kind === "doWhile") return "a do-while counts to a condition, so one turn decides whether the next runs";
   // The C backend asks for the turns of a parallel loop in the form OpenMP calls
@@ -339,7 +340,7 @@ function calleeRefusal(name: string, reach: Reach): Refusal | null {
   // `createTree` spends the depth it was given — was refused here as a write to
   // a name the turn only found, which refused nearly every loop that calls a
   // function written the ordinary way.
-  const refusal = bodyRefusal(callee.entry, null, reach.callees, reach, NO_REDUCTIONS, callee.params.map((param) => param.name));
+  const refusal = bodyRefusal(callee.entry, null, reach.callees, reach, new Map(), callee.params.map((param) => param.name));
   reach.reading.delete(name);
   reach.verdicts.set(name, refusal);
   return refusal;
@@ -420,7 +421,7 @@ const MINIMUM_VALUES_PER_TURN = 8;
  * order, and a turn nobody measured is never handed to a thread on a number
  * this produced.
  */
-export function turnIsTooCheap(body: SemanticBlock, callees: Callees = NO_CALLEES): boolean {
+export function turnIsTooCheap(body: SemanticBlock, callees: Callees = new Map()): boolean {
   return turnIsTooCheapIn(body, { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() });
 }
 
@@ -511,7 +512,7 @@ function bodyRefusal(
   counter: string | null,
   callees: Callees,
   reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() },
-  combined: ReadonlyMap<string, SemanticReduction> = NO_REDUCTIONS,
+  combined: ReadonlyMap<string, SemanticReduction> = new Map(),
   perCall: readonly string[] = [],
 ): Refusal | null {
   // A name this body declares is the body's own, and every turn of it has one
@@ -566,8 +567,8 @@ function bodyRefusal(
       });
     }
     for (const statement of block.statements) {
-      const refusal = valueRefusal(statement, reach);
-      if (refusal !== null) return refusal;
+      const nestedRefusal = valueRefusal(statement, reach);
+      if (nestedRefusal !== null) return nestedRefusal;
       const written = writeRefusal(statement, accesses, declared, reach, combined);
       if (written !== null) return written;
       for (const value of statementValues(statement)) {
@@ -582,7 +583,10 @@ function bodyRefusal(
   // Every access is renamed to the buffer its name stands for before the rule
   // below reads them, so a write through one name and a read through another are
   // one buffer rather than two.
-  for (const access of accesses) access.buffer = bufferOf(access.buffer);
+  for (let at = 0; at < accesses.length; at += 1) {
+    const access = accesses[at];
+    access.buffer = bufferOf(access.buffer);
+  }
   if (counter === null) {
     return accesses.some((access) => access.written)
       ? "the body writes an element of an array, and nothing here says which turn writes which"
@@ -604,12 +608,12 @@ function bodyRefusal(
  */
 function valueRefusal(statement: SemanticStatement, reach: Reach): Refusal | null {
   for (const value of statementValues(statement)) {
-    let refusal: Refusal | null = null;
+    let heldRefusal: Refusal | null = null;
     walkValues(value, (inner) => {
-      if (refusal !== null || inner.k !== "call") return;
-      refusal = callRefusal(inner.call, reach);
+      if (heldRefusal !== null || inner.k !== "call") return;
+      heldRefusal = callRefusal(inner.call, reach);
     });
-    if (refusal !== null) return refusal;
+    if (heldRefusal !== null) return heldRefusal;
   }
   return null;
 }
@@ -712,8 +716,6 @@ function writeRefusal(
   }
 }
 
-/** What a loop that combines nothing is asked about, which is every loop but one. */
-const NO_REDUCTIONS: ReadonlyMap<string, SemanticReduction> = new Map();
 
 /**
  * Whether a value is a whole number, which is what makes combining it the same

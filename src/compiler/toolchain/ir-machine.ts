@@ -20,10 +20,11 @@
 import { readFileSync, stat, writeFile } from "../core/platform.ts";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { DEFAULT_ALIGNMENT, isRuntimeSymbol, RUNTIME_NAME } from "../runtime/abi.ts";
+import { DEFAULT_ALIGNMENT, RUNTIME_NAME } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import type { Condition } from "./x86.ts";
 import { integerLiteral } from "./c-names.ts";
-import { ARGV_LENGTH, BUILTINS, SHARED } from "../semantics/builtins.ts";
+import { ARGV_LENGTH, SHARED, builtinFor } from "../semantics/builtins.ts";
 import { parseType, symbolOf } from "../semantics/contract.ts";
 import {
   elementTypeOf,
@@ -72,12 +73,7 @@ import {
   R9,
   R10,
   R11,
-  R12,
-  R13,
-  R14,
-  R15,
   RAX,
-  RBX,
   RCX,
   RDI,
   RDX,
@@ -91,19 +87,6 @@ import {
   XMM0,
   XMM1,
   XMM2,
-  XMM3,
-  XMM4,
-  XMM5,
-  XMM6,
-  XMM7,
-  XMM8,
-  XMM9,
-  XMM10,
-  XMM11,
-  XMM12,
-  XMM13,
-  XMM14,
-  XMM15,
   frame,
   indexed,
   mem,
@@ -380,7 +363,6 @@ const IMMEDIATE_OPERATIONS: Record<string, true> = {
  * is the whole reason the object pointer cannot live in the scratch register
  * every other part of the lowering uses.
  */
-const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14];
 
 /**
  * The register an object allocated and filled as one value is held in across
@@ -392,7 +374,7 @@ const CALLEE_SAVED: readonly number[] = [RBX, R12, R13, R14];
  * and read back after it, which is a store and a load per call-valued field. A
  * register the convention says a callee leaves as it found them needs neither.
  */
-const OBJECT_POINTER = R15;
+const OBJECT_POINTER = 15;
 
 /**
  * The four general registers a wide number is carried in, least significant
@@ -408,7 +390,6 @@ const OBJECT_POINTER = R15;
  * value the body computes is passed, and a limb written there would be
  * indistinguishable from a scalar the body had just produced.
  */
-const WIDE_WORK: readonly number[] = [R8, R9, R10, R11];
 
 /**
  * The wide type a whole number is widened into when it is written in base
@@ -443,7 +424,7 @@ const WIDE_CONDITION: Record<CompareOp, Condition> = {
  *
  * Ten is what the convention has: xmm6 to xmm15. They are a register file of
  * their own, so a float pinned here costs nothing a whole number pinned in
- * `CALLEE_SAVED` would: the two lists are filled independently and neither
+ * `[3, 12, 13, 14]` would: the two lists are filled independently and neither
  * takes a register the other wanted. A float left in the frame instead costs a
  * load on every read and a store on every write, and a loop whose bound and
  * step are floats reads both on every turn.
@@ -453,7 +434,6 @@ const WIDE_CONDITION: Record<CompareOp, Condition> = {
  * them before it returns, so a value kept in one here survives the call the
  * same way a value kept in rbx does.
  */
-const VECTOR_CALLEE_SAVED: readonly number[] = [XMM6, XMM7, XMM8, XMM9, XMM10, XMM11, XMM12, XMM13, XMM14, XMM15];
 
 /**
  * The whole-number registers the convention does not ask a callee to preserve,
@@ -470,11 +450,10 @@ const VECTOR_CALLEE_SAVED: readonly number[] = [XMM6, XMM7, XMM8, XMM9, XMM10, X
  * computes passes through, and `rdx` is what a division and a one-byte write
  * go through, so none of the three is a place a name can be kept.
  */
-const CALLER_SAVED: readonly number[] = [RDI, RSI, R8, R9, R10, R11];
 
 /**
  * The vector registers the convention does not ask a callee to preserve, which
- * answer the same question as `CALLER_SAVED` does for a whole number.
+ * answer the same question as `[7, 6, 8, 9, 10, 11]` does for a whole number.
  *
  * `xmm0` is the accumulator and `xmm1` the scratch, and `xmm2` is the scratch of
  * the two sequences written out in place of a call the library would make: the
@@ -485,12 +464,11 @@ const CALLER_SAVED: readonly number[] = [RDI, RSI, R8, R9, R10, R11];
  * wrote over it was a different name's. The three left are the ones a name can
  * be kept in, which are also the fourth to seventh of the argument registers.
  */
-const VECTOR_CALLER_SAVED: readonly number[] = [XMM3, XMM4, XMM5];
 
 /**
  * How many registers the values of one expression may be held in at once.
  *
- * They come out of `VECTOR_CALLEE_SAVED`: a value held in a register the
+ * They come out of `[6, 7, 8, 9, 10, 11, 12, 13, 14, 15]`: a value held in a register the
  * convention does not preserve is gone the moment the expression calls
  * anything, and an expression holds one side of an arithmetic while the other
  * side — which is often the call — is written. A callee-saved register costs
@@ -1329,7 +1307,7 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
   const add = (value: SemanticValue | null): void => {
     if (value === null) return;
     into.push(value);
-    walkValues(value, (one) => into.push(one));
+    walkValues(value, (one) => { into.push(one); });
   };
   for (const statement of block.statements) {
     switch (statement.k) {
@@ -1528,7 +1506,7 @@ function firstArgumentOnStack(types: readonly SemanticType[]): number {
  */
 function reciprocalOfTwo(value: number): number | null {
   if (!Number.isFinite(value) || value === 0) return null;
-  const exponent = Math.log2(Math.abs(value));
+  const exponent = Math.log(Math.abs(value)) / Math.log(2);
   if (!Number.isInteger(exponent) || Math.abs(exponent) > 1022) return null;
   if (Math.pow(2, exponent) !== Math.abs(value)) return null;
   return Math.sign(value) * Math.pow(2, -exponent);
@@ -1698,20 +1676,20 @@ function replaceOnce<T>(node: T, match: SemanticValue, replacement: SemanticValu
   const found = valueKey(match);
   let replaced = false;
   let again = false;
-  const walk = (node: unknown): unknown => {
+  function walk(node: unknown): unknown {
     if (isValueNode(node) && valueKey(node) === found) {
       if (replaced) again = true;
       replaced = true;
       return structuredClone(replacement);
     }
-    if (Array.isArray(node)) return node.map(walk);
+    if (Array.isArray(node)) return node.map((entry) => walk(entry));
     if (node !== null && typeof node === "object") {
       return Object.fromEntries(
         Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, walk(entry)]),
       );
     }
     return node;
-  };
+  }
   const written = walk(node);
   if (!replaced || again) throw machineError("a value a rewrite asks for once is not in it, or is in it twice");
   return written as T;
@@ -2019,7 +1997,7 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
   // place a counter turns up without its value being asked for. A walk built on
   // it cannot leave an index alone: `walkValues` recurses into the index itself
   // and calls the visitor with whatever it finds there.
-  const wants = (value: SemanticValue): boolean => {
+  function wants(value: SemanticValue): boolean {
     switch (value.k) {
       case "local":
         return value.name === name;
@@ -2036,7 +2014,7 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
       case "argv":
         return value.index !== null && wants(value.index);
       case "call":
-        return value.call.args.some(wants);
+        return value.call.args.some((one) => wants(one));
       case "arith":
       case "compare":
       case "logical":
@@ -2046,7 +2024,7 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
         return (
           (value.count !== null && wants(value.count)) ||
           (value.view !== null && (wants(value.view.of) || wants(value.view.offset))) ||
-          value.values.some(wants)
+          value.values.some((one) => wants(one))
         );
       case "loadField":
         return wants(value.object);
@@ -2057,8 +2035,8 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
       default:
         return false;
     }
-  };
-  const walk = (block: SemanticBlock): boolean => {
+  }
+  function walk(block: SemanticBlock): boolean {
     for (const statement of block.statements) {
       // The index of an element write is left out, and everything else the
       // statement carries is walked.
@@ -2074,7 +2052,7 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
       }
     }
     return false;
-  };
+  }
   return walk(body);
 }
 
@@ -2703,7 +2681,7 @@ class Machine {
     };
     turning(this.fn.entry, 0);
     if (arithmetic === 0) return [];
-    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
+    const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(arithmetic, TEMPORARY_VECTORS), 0));
   }
 
@@ -2741,7 +2719,7 @@ class Machine {
     };
     counting(this.fn.entry, 0);
     if (deepest === 0) return [];
-    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
+    const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - deepest, 0));
   }
 
@@ -2792,7 +2770,7 @@ class Machine {
     };
     counting(this.fn.entry, 0);
     if (deepest === 0) return [];
-    const free = CALLEE_SAVED.filter((register) => !taken.has(register));
+    const free = [3, 12, 13, 14].filter((register) => !taken.has(register));
     return free.slice(0, Math.min(deepest, INDEX_REGISTERS));
   }
 
@@ -2820,7 +2798,7 @@ class Machine {
     };
     turning(this.fn.entry, 0);
     if (deepest === 0) return [];
-    const free = VECTOR_CALLEE_SAVED.filter((register) => !taken.has(register));
+    const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(deepest * 2, free.length), 0));
   }
 
@@ -3191,7 +3169,7 @@ class Machine {
    * a pop and sixteen bytes of stack. One no call reaches can be kept in a
    * register that costs nothing, because nothing is written over it between the
    * two places the value is read. So the two lists are filled independently —
-   * `CALLER_SAVED` first for a name nothing calls, `CALLEE_SAVED` for one
+   * `[7, 6, 8, 9, 10, 11]` first for a name nothing calls, `[3, 12, 13, 14]` for one
    * something does — and a float is pinned out of the vector file rather than
    * the general one, which is a register file of its own.
    *
@@ -3445,17 +3423,17 @@ class Machine {
       //
       // The register file is the other half of the answer, and it is worth
       // stating because the obvious way to give one of these four registers runs
-      // out at the first call. `CALLEE_SAVED` is `rbx`, `r12`, `r13` and `r14` —
+      // out at the first call. `[3, 12, 13, 14]` is `rbx`, `r12`, `r13` and `r14` —
       // four registers, and a wide number is four limbs. One wide name that has to
       // survive a call would therefore take the whole preserved file and leave
       // nothing for any other name that does, so a function holding a wide value
       // and a scalar live across one call could not have both in registers at
-      // once. `CALLER_SAVED` has six and would fit one wide name with two to
+      // once. `[7, 6, 8, 9, 10, 11]` has six and would fit one wide name with two to
       // spare, but nothing in it survives a call at all.
       //
       // So there is no pool a wide name can be pinned into that does not cost
       // more than it saves, and it is left in the frame. It is read into
-      // `WIDE_WORK` when an operation needs it and written back when one is done,
+      // `[8, 9, 10, 11]` when an operation needs it and written back when one is done,
       // which is the same traffic a pinned scalar would avoid and is paid once
       // per operation rather than once per access. Pinning one would only be
       // worth it for a name read many times between writes, and the answer to
@@ -3466,8 +3444,8 @@ class Machine {
       if (facts === undefined || facts.live.length === 0) return;
       const live = facts.live;
       const float = isFloatType(type);
-      const preserved = float ? VECTOR_CALLEE_SAVED : CALLEE_SAVED;
-      const given = float ? VECTOR_CALLER_SAVED : CALLER_SAVED;
+      const preserved = float ? [6, 7, 8, 9, 10, 11, 12, 13, 14, 15] : [3, 12, 13, 14];
+      const given = float ? [3, 4, 5] : [7, 6, 8, 9, 10, 11];
       const register = facts.acrossCall
         ? free(preserved, live, name)
         : (free(given, live, name) ?? free(preserved, live, name));
@@ -3653,7 +3631,7 @@ class Machine {
     // the caller was promised. A function that only calls code this backend
     // built needs none of them: that code saves the ones it uses.
     if (this.makesForeignCall()) {
-      for (const register of VECTOR_CALLEE_SAVED) {
+      for (const register of [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]) {
         if (pinned.has(register)) continue;
         this.pinnedVectors.push({ register, offset: this.reserve(8, 8), single: false });
       }
@@ -3833,7 +3811,7 @@ class Machine {
     this.wideLoad(this.wideResult);
     this.code.movRegMemSized(RCX, frame(this.wideSret.offset), 8, false);
     for (let limb = 0; limb < this.limbsOf(this.fn.returns); limb += 1) {
-      this.code.movMemRegSized(mem(RCX, limb * LIMB_BYTES), WIDE_WORK[limb], 8);
+      this.code.movMemRegSized(mem(RCX, limb * LIMB_BYTES), [8, 9, 10, 11][limb], 8);
     }
   }
 
@@ -5236,7 +5214,7 @@ class Machine {
     // and the register the outer body had it in is not that frame.
     const written = this.loopWrites(loop);
     const pool: number[] = [];
-    for (const register of CALLEE_SAVED) {
+    for (const register of [3, 12, 13, 14]) {
       if (this.pinnedRegisters.includes(register)) continue;
       if (this.spareIndexes.includes(register)) continue;
       if (register === OBJECT_POINTER && this.objectRegister === register) continue;
@@ -5461,7 +5439,7 @@ class Machine {
   ): boolean {
     const type: SemanticType = { kind: "primitive", name: "f64" };
     const whole: SemanticType = { kind: "primitive", name: "i64" };
-    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED, ...VECTOR_CALLEE_SAVED], 3);
+    const vectors = this.borrow([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 3);
     const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 3);
     if (vectors === null || registers === null) return false;
     const [sum, lane, spare] = vectors;
@@ -5601,7 +5579,7 @@ class Machine {
     // in, and the one the other side borrows in turn. None of them is the
     // accumulator's, which the build gave a name this loop adds into a register
     // of its own and which is therefore not free to write through.
-    const vectors = this.borrow([XMM0, XMM1, ...VECTOR_CALLER_SAVED, ...VECTOR_CALLEE_SAVED], 3);
+    const vectors = this.borrow([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 3);
     // One register for the cursor the pair load is written against, and one for
     // each array's first element: a load is written against a base and a
     // displacement, so two arrays cannot share one register however little they
@@ -7931,7 +7909,7 @@ class Machine {
       const index = this.plainIndex(value.index);
       if (typeof index !== "bigint") {
         if (index === null) return null;
-        if (index.register === null || !CALLEE_SAVED.includes(index.register)) return null;
+        if (index.register === null || ![3, 12, 13, 14].includes(index.register)) return null;
       }
     }
     return this.elementAddress(value.of, value.index, element);
@@ -7963,7 +7941,7 @@ class Machine {
     const register = held.register;
     if (register === null) return null;
     if (register === XMM0 || register === XMM1 || register === XMM2) return null;
-    if (!survives && !VECTOR_CALLEE_SAVED.includes(register)) return null;
+    if (!survives && ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15].includes(register)) return null;
     return register;
   }
 
@@ -8338,7 +8316,7 @@ class Machine {
       // written, and the stack and base pointers are not values a program has.
       if (register === null || register === RAX || register === RCX || register === RDX) continue;
       if (register === RSP || register === RBP) continue;
-      if (hasCall(other) && !CALLEE_SAVED.includes(register)) continue;
+      if (hasCall(other) && ![3, 12, 13, 14].includes(register)) continue;
       return { operation: op, register, carried };
     }
     return null;
@@ -8423,7 +8401,7 @@ class Machine {
   private wideLoad(held: Held): void {
     const limbs = this.limbsOf(held.type);
     for (let limb = 0; limb < limbs; limb += 1) {
-      this.code.movRegMemSized(WIDE_WORK[limb], this.limbOf(held.offset, limb), 8, false);
+      this.code.movRegMemSized([8, 9, 10, 11][limb], this.limbOf(held.offset, limb), 8, false);
     }
   }
 
@@ -8434,7 +8412,7 @@ class Machine {
   private wideStore(held: Held): void {
     const limbs = this.limbsOf(held.type);
     for (let limb = 0; limb < limbs; limb += 1) {
-      this.code.movMemRegSized(this.limbOf(held.offset, limb), WIDE_WORK[limb], 8);
+      this.code.movMemRegSized(this.limbOf(held.offset, limb), [8, 9, 10, 11][limb], 8);
     }
   }
 
@@ -8564,9 +8542,9 @@ class Machine {
   private wideAddModSpecial(value: SemanticValue & { k: "call" }, out: Held, c: bigint): void {
     const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
     this.wideValue(value.call.args[0] as SemanticValue);
-    this.code.aluRegMem("add", WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+    this.code.aluRegMem("add", [8, 9, 10, 11][0], this.limbOf(right.offset, 0), true);
     for (let limb = 1; limb < 4; limb += 1) {
-      this.code.aluRegMem("adc", WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+      this.code.aluRegMem("adc", [8, 9, 10, 11][limb], this.limbOf(right.offset, limb), true);
     }
     const carried = this.code.label("LwideCarried");
     const done = this.code.label("LwideAddDone");
@@ -8578,8 +8556,8 @@ class Machine {
     // would drop the carry it is carrying.
     this.code.alu("xor", RDX, RDX, false);
     this.code.movRegImm(RAX, c);
-    this.code.alu("add", WIDE_WORK[0], RAX, true);
-    for (let limb = 1; limb < 4; limb += 1) this.code.alu("adc", WIDE_WORK[limb], RDX, true);
+    this.code.alu("add", [8, 9, 10, 11][0], RAX, true);
+    for (let limb = 1; limb < 4; limb += 1) this.code.alu("adc", [8, 9, 10, 11][limb], RDX, true);
     this.wideStore(out);
     this.code.jmp(done);
     this.code.bind(carried);
@@ -8602,9 +8580,9 @@ class Machine {
   private wideSubModSpecial(value: SemanticValue & { k: "call" }, out: Held, c: bigint): void {
     const right = this.wideArgument(value.call.args[1] as SemanticValue, "blaze_wide_right", value.type);
     this.wideValue(value.call.args[0] as SemanticValue);
-    this.code.aluRegMem("sub", WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+    this.code.aluRegMem("sub", [8, 9, 10, 11][0], this.limbOf(right.offset, 0), true);
     for (let limb = 1; limb < 4; limb += 1) {
-      this.code.aluRegMem("sbb", WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+      this.code.aluRegMem("sbb", [8, 9, 10, 11][limb], this.limbOf(right.offset, limb), true);
     }
     const done = this.code.label("LwideSubDone");
     this.code.jcc("ae", done);
@@ -8613,8 +8591,8 @@ class Machine {
     // subtraction, because clearing it after would clear the borrow too.
     this.code.alu("xor", RDX, RDX, false);
     this.code.movRegImm(RAX, c);
-    this.code.alu("sub", WIDE_WORK[0], RAX, true);
-    for (let limb = 1; limb < 4; limb += 1) this.code.alu("sbb", WIDE_WORK[limb], RDX, true);
+    this.code.alu("sub", [8, 9, 10, 11][0], RAX, true);
+    for (let limb = 1; limb < 4; limb += 1) this.code.alu("sbb", [8, 9, 10, 11][limb], RDX, true);
     this.code.bind(done);
     this.wideStore(out);
   }
@@ -8630,7 +8608,7 @@ class Machine {
     const modulus = (1n << 256n) - c;
     for (let limb = 0; limb < 4; limb += 1) {
       this.code.movRegImm(RAX, (modulus >> BigInt(limb * 64)) & 0xffffffffffffffffn);
-      this.code.alu(limb === 0 ? "sub" : "sbb", WIDE_WORK[limb], RAX, true);
+      this.code.alu(limb === 0 ? "sub" : "sbb", [8, 9, 10, 11][limb], RAX, true);
     }
   }
 
@@ -8695,7 +8673,7 @@ class Machine {
     if (value.k === "const") {
       const whole = integerLiteral(value.text) ?? 0n;
       for (let limb = 0; limb < 4; limb += 1) {
-        this.code.movRegImm(WIDE_WORK[limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
+        this.code.movRegImm([8, 9, 10, 11][limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
       }
       return;
     }
@@ -8728,7 +8706,7 @@ class Machine {
         const offset = this.field(value.layout, value.field).offset;
         this.value(value.object);
         for (let limb = 0; limb < this.limbsOf(value.type); limb += 1) {
-          this.code.movRegMemSized(WIDE_WORK[limb], mem(RAX, offset + limb * LIMB_BYTES), 8, false);
+          this.code.movRegMemSized([8, 9, 10, 11][limb], mem(RAX, offset + limb * LIMB_BYTES), 8, false);
         }
         return;
       }
@@ -8746,17 +8724,17 @@ class Machine {
         // can be read as a wide number yet.
         if (value.call.callee === "u256_from_u64x2") {
           this.at(value.call.args[0], U64);
-          this.code.movRegReg(WIDE_WORK[0], RAX);
+          this.code.movRegReg([8, 9, 10, 11][0], RAX);
           this.at(value.call.args[1], U64);
-          this.code.movRegReg(WIDE_WORK[1], RAX);
-          this.code.alu("xor", WIDE_WORK[2], WIDE_WORK[2], false);
-          this.code.alu("xor", WIDE_WORK[3], WIDE_WORK[3], false);
+          this.code.movRegReg([8, 9, 10, 11][1], RAX);
+          this.code.alu("xor", [8, 9, 10, 11][2], [8, 9, 10, 11][2], false);
+          this.code.alu("xor", [8, 9, 10, 11][3], [8, 9, 10, 11][3], false);
           return;
         }
         if (value.call.callee === "u256_from_u64x4") {
           for (let limb = 0; limb < 4; limb += 1) {
             this.at(value.call.args[limb], U64);
-            this.code.movRegReg(WIDE_WORK[limb], RAX);
+            this.code.movRegReg([8, 9, 10, 11][limb], RAX);
           }
           return;
         }
@@ -8823,17 +8801,17 @@ class Machine {
       );
     }
     this.at(value, value.type);
-    this.code.movRegReg(WIDE_WORK[0], RAX);
+    this.code.movRegReg([8, 9, 10, 11][0], RAX);
     // A widening into a signed wide number sign-extends: the upper limbs are a
     // copy of the low one shifted arithmetically so every bit above it is the
     // sign bit. An unsigned one zeroes them.
     const signed = signedOf(value.type);
-    for (let limb = 1; limb < WIDE_WORK.length; limb += 1) {
+    for (let limb = 1; limb < [8, 9, 10, 11].length; limb += 1) {
       if (signed) {
-        this.code.movRegReg(WIDE_WORK[limb], RAX);
-        this.code.shiftImm("sar", WIDE_WORK[limb], 63);
+        this.code.movRegReg([8, 9, 10, 11][limb], RAX);
+        this.code.shiftImm("sar", [8, 9, 10, 11][limb], 63);
       } else {
-        this.code.alu("xor", WIDE_WORK[limb], WIDE_WORK[limb], false);
+        this.code.alu("xor", [8, 9, 10, 11][limb], [8, 9, 10, 11][limb], false);
       }
     }
   }
@@ -8901,16 +8879,16 @@ class Machine {
       // first limb is a plain add (it sets CF), and each limb after it folds
       // the carry in with `adcx`.
       this.code.movRegMemSized(RAX, this.limbOf(right.offset, 0), 8, false);
-      this.code.alu("add", WIDE_WORK[0], RAX, true);
+      this.code.alu("add", [8, 9, 10, 11][0], RAX, true);
       for (let limb = 1; limb < limbs; limb += 1) {
         this.code.movRegMemSized(RAX, this.limbOf(right.offset, limb), 8, false);
-        this.code.adcx(WIDE_WORK[limb], RAX);
+        this.code.adcx([8, 9, 10, 11][limb], RAX);
       }
     } else {
       const carry = value.op === "add" ? "adc" : value.op === "sub" ? "sbb" : null;
-      this.code.aluRegMem(plain, WIDE_WORK[0], this.limbOf(right.offset, 0), true);
+      this.code.aluRegMem(plain, [8, 9, 10, 11][0], this.limbOf(right.offset, 0), true);
       for (let limb = 1; limb < limbs; limb += 1) {
-        this.code.aluRegMem(carry ?? plain, WIDE_WORK[limb], this.limbOf(right.offset, limb), true);
+        this.code.aluRegMem(carry ?? plain, [8, 9, 10, 11][limb], this.limbOf(right.offset, limb), true);
       }
     }
   }
@@ -8928,7 +8906,7 @@ class Machine {
     if (value.op === "pos") return;
     if (value.op === "bitNot") {
       this.wideValue(value.operand);
-      for (let limb = 0; limb < limbs; limb += 1) this.code.not(WIDE_WORK[limb], true);
+      for (let limb = 0; limb < limbs; limb += 1) this.code.not([8, 9, 10, 11][limb], true);
       return;
     }
     if (value.op === "neg") {
@@ -8939,11 +8917,11 @@ class Machine {
       const value_ = this.hold(type, "blaze_wide_operand");
       this.wideValue(value.operand);
       this.wideStore(value_);
-      this.code.movRegImm(WIDE_WORK[0], 0n);
-      for (let limb = 1; limb < limbs; limb += 1) this.code.movRegImm(WIDE_WORK[limb], 0n);
-      this.code.aluRegMem("sub", WIDE_WORK[0], this.limbOf(value_.offset, 0), true);
+      this.code.movRegImm([8, 9, 10, 11][0], 0n);
+      for (let limb = 1; limb < limbs; limb += 1) this.code.movRegImm([8, 9, 10, 11][limb], 0n);
+      this.code.aluRegMem("sub", [8, 9, 10, 11][0], this.limbOf(value_.offset, 0), true);
       for (let limb = 1; limb < limbs; limb += 1) {
-        this.code.aluRegMem("sbb", WIDE_WORK[limb], this.limbOf(value_.offset, limb), true);
+        this.code.aluRegMem("sbb", [8, 9, 10, 11][limb], this.limbOf(value_.offset, limb), true);
       }
       return;
     }
@@ -9025,8 +9003,8 @@ class Machine {
     this.value(value.condition);
     this.code.test(RAX, true);
     for (let limb = 0; limb < limbs; limb += 1) {
-      this.code.movRegMemSized(WIDE_WORK[limb], this.limbOf(whenFalse.offset, limb), 8, false);
-      this.code.cmov("ne", WIDE_WORK[limb], this.limbOf(whenTrue.offset, limb), true);
+      this.code.movRegMemSized([8, 9, 10, 11][limb], this.limbOf(whenFalse.offset, limb), 8, false);
+      this.code.cmov("ne", [8, 9, 10, 11][limb], this.limbOf(whenTrue.offset, limb), true);
     }
   }
 
@@ -9088,14 +9066,14 @@ class Machine {
     // number going left takes its bits from below and a signed number going
     // left loses the ones it moves past rather than repeating them.
     if (signed && op === "shr") {
-      this.code.movRegReg(RDI, WIDE_WORK[limbs - 1]);
+      this.code.movRegReg(RDI, [8, 9, 10, 11][limbs - 1]);
       this.code.shiftImm("sar", RDI, 63);
       for (let at = 0; at < padding; at += LIMB_BYTES) {
         this.code.movMemRegSized(frame(region + padding + padding + at), RDI, 8);
       }
     }
     for (let limb = 0; limb < limbs; limb += 1) {
-      this.code.movMemRegSized(this.limbOf(base, limb), WIDE_WORK[limb], 8);
+      this.code.movMemRegSized(this.limbOf(base, limb), [8, 9, 10, 11][limb], 8);
     }
     // The amount: `k` whole limbs and `r` bits inside one. `k` is negated for a
     // shift left, because the limb it wants is below the one being written and
@@ -9140,9 +9118,9 @@ class Machine {
     // counts from, so the bits-within-a-limb amount goes back into it.
     this.code.movRegReg(RCX, RSI);
     for (let limb = 0; limb < limbs; limb += 1) {
-      this.code.movRegMemSized(WIDE_WORK[limb], indexed(RSP, RDX, 8, base + limb * LIMB_BYTES), 8, false);
+      this.code.movRegMemSized([8, 9, 10, 11][limb], indexed(RSP, RDX, 8, base + limb * LIMB_BYTES), 8, false);
     }
-    for (let limb = 0; limb < limbs; limb += 1) this.code.shift(op, WIDE_WORK[limb], true);
+    for (let limb = 0; limb < limbs; limb += 1) this.code.shift(op, [8, 9, 10, 11][limb], true);
     // Both halves of the neighbouring limb move the opposite way to the number:
     // a number going left takes the bits out of the limb below it and drops them
     // downwards. `63 - r` is kept in `rsi` because the count for a register shift
@@ -9163,14 +9141,14 @@ class Machine {
       this.code.shift(towards, RAX, true);
       this.code.movRegReg(RCX, RSI);
       this.code.shift(towards, RAX, true);
-      this.code.alu("or", WIDE_WORK[limb], RAX, true);
+      this.code.alu("or", [8, 9, 10, 11][limb], RAX, true);
     }
     // The mask the answer is combined with, which is what answers a count that
     // moved every bit out: every number but a signed one being moved down has
     // no bits left, and a signed one has already been given its sign by the
     // bounded count above.
     if (!answersItsSign) {
-      for (let limb = 0; limb < limbs; limb += 1) this.code.alu("and", WIDE_WORK[limb], RDI, true);
+      for (let limb = 0; limb < limbs; limb += 1) this.code.alu("and", [8, 9, 10, 11][limb], RDI, true);
     }
   }
 
@@ -9579,20 +9557,21 @@ class Machine {
     // in that statement, because the call is this lowering's own.
     const parts = value.parts.map(() => ({ pointer: this.hold(POINTER, "blaze_part"), length: this.hold(USIZE, "blaze_length") }));
     const unmeasured: number[] = [];
-    value.parts.forEach((part, at) => {
+    for (let at = 0; at < value.parts.length; at += 1) {
+      const part = value.parts[at];
       if (part.k === "text") {
         this.literal(part.value);
         this.code.leaLabel(RAX, this.lastLiteral);
         this.store(parts[at].pointer);
         this.code.movRegImm(RAX, BigInt(Buffer.byteLength(part.value, "utf8")));
         this.store(parts[at].length);
-        return;
+        continue;
       }
       // A part that came back measured is as long as it says, and one that did
       // not is text to begin with, which is the only shape left to measure.
       if (!this.asTextPart(part.value, parts[at].length)) unmeasured.push(at);
       this.store(parts[at].pointer);
-    });
+    }
     for (const at of unmeasured) {
       this.code.movRegMem(RAX, frame(parts[at].pointer.offset));
       this.code.movRegReg(RDI, RAX);
@@ -9931,7 +9910,7 @@ class Machine {
       this.code.movRegReg(RDI, RAX);
       this.external("blaze_rt_object_size");
       this.callForeign("blaze_rt_object_size");
-      this.code.shiftImm("shr", RAX, Math.log2(bytes));
+      this.code.shiftImm("shr", RAX, bytes === 1 ? 0 : bytes === 2 ? 1 : bytes === 4 ? 2 : 3);
       return;
     }
     throw machineError(
@@ -10411,7 +10390,7 @@ class Machine {
         this.wideValue(written.value);
         this.code.movRegMem(RCX, frame(address.offset));
         for (let limb = 0; limb < this.limbsOf(type); limb += 1) {
-          this.code.movMemRegSized(mem(RCX, field.offset + limb * LIMB_BYTES), WIDE_WORK[limb], 8);
+          this.code.movMemRegSized(mem(RCX, field.offset + limb * LIMB_BYTES), [8, 9, 10, 11][limb], 8);
         }
         continue;
       }
@@ -11554,7 +11533,7 @@ class Machine {
       return;
     }
     const library = MATH_LIBRARY[call.callee];
-    if (library === undefined || BUILTINS[call.callee] === undefined) {
+    if (library === undefined || builtinFor(call.callee) === null) {
       throw machineError(`${this.fn.symbol} calls ${call.callee}, which this backend does not lower`);
     }
     this.at(argument, NUMBER);
@@ -11757,7 +11736,7 @@ class Machine {
         // where the callee's own copy of it reads.
         this.wideLoad(held);
         for (let limb = 0; limb < this.limbsOf(held.type); limb += 1) {
-          this.code.movMemRegSized(mem(RSP, (at + limb) * 8 - slots * 8), WIDE_WORK[limb], 8);
+          this.code.movMemRegSized(mem(RSP, (at + limb) * 8 - slots * 8), [8, 9, 10, 11][limb], 8);
         }
         continue;
       }

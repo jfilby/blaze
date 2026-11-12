@@ -45,7 +45,7 @@ import { hasCall, isInteger, isTextType, isUnsigned, isWideType, slotType, state
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
-import { markParallelLoops, NO_CALLEES, type Callees } from "./parallel.ts";
+import { markParallelLoops, type Callees } from "./parallel.ts";
 import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
 
@@ -100,9 +100,9 @@ function asNumber(text: string): number | null {
 
 /** The text a number is written back as, which is the shortest form of it. */
 function asText(value: number): string {
-  if (Number.isNaN(value)) return "NaN";
-  if (value === Infinity) return "Infinity";
-  if (value === -Infinity) return "-Infinity";
+  if (Number.isNaN(value)) return "0 / 0";
+  if (value === 1 / 0) return "Infinity";
+  if (value === -1 / 0) return "-Infinity";
   if (Object.is(value, -0)) return "-0";
   return String(value);
 }
@@ -277,7 +277,7 @@ function wholeBits(left: number, right: number, op: "and" | "or" | "xor", name: 
  */
 function readBack(wrapped: bigint): number {
   const read = Number(wrapped);
-  return Number.isSafeInteger(read) ? read : NaN;
+  return Number.isSafeInteger(read) ? read : 0 / 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -604,7 +604,7 @@ function chainOf(
     return { k: "local", type: value.type, name };
   };
   let acc = seed;
-  for (let bit = Math.floor(Math.log2(count)) - 1; bit >= 0; bit -= 1) {
+  for (let bit = wholeLog2(count) - 1; bit >= 0; bit -= 1) {
     acc = bind(addMod(acc, acc));
     if (((count >> bit) & 1) !== 0) acc = bind(addMod(acc, seed));
   }
@@ -852,21 +852,21 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         }
       }
       // A value against itself is zero, one, or false — and only where the
-      // value is a number, which is the whole of the condition. `NaN - NaN` is
-      // NaN and `NaN / NaN` is NaN, and `0 / 0` and `inf / inf` are both NaN as
-      // well, so a float folded here is a program that computed a NaN and is
+      // value is a number, which is the whole of the condition. `0 / 0 - 0 / 0` is
+      // 0 / 0 and `0 / 0 / 0 / 0` is 0 / 0, and `0 / 0` and `inf / inf` are both 0 / 0 as
+      // well, so a float folded here is a program that computed a 0 / 0 and is
       // handed a zero or a one instead. The comparison folds further down are
       // guarded the same way, for the same reason and in the same words.
       //
       // So the fold is taken where the operand is written out — a literal is a
-      // number the source can see, and a finite one is not a NaN — and over a
-      // whole number, which has no NaN and no infinity to divide by.
+      // number the source can see, and a finite one is not a 0 / 0 — and over a
+      // whole number, which has no 0 / 0 and no infinity to divide by.
       if (valueKey(value.left) === valueKey(value.right)) {
         // `literalOf` answers null for anything that is not written out, and
         // null is not zero: the test this replaces asked `!== 0` of it, so a
         // *variable* against itself satisfied it and every `x / x` the
         // compiler lowered was a one — including the `x / x` of a program that
-        // had found a zero there and was asking for the NaN.
+        // had found a zero there and was asking for the 0 / 0.
         const literal = literalOf(value.left);
         const written = literal !== null && Number.isFinite(literal);
         if (value.op === "sub") {
@@ -893,7 +893,7 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // wrapped the value to nothing at all. `2^32 * x` is zero at `i32` and
       // `x << 32` is `x << 0`, which is `x`.
       if (isInteger(value.type) && value.right.k === "const" && right !== null && right > 0) {
-        const exponent = Number.isInteger(Math.log2(right)) ? Math.log2(right) : null;
+        const exponent = Math.pow(2, wholeLog2(right)) === right ? wholeLog2(right) : null;
         if (exponent !== null && exponent >= 1 && exponent < WIDTH[name]) {
           // A value that cannot be negative divides and shifts alike, and one
           // that can does not: `-7 / 2` is `-3` and `-7 >> 1` is `-4`.
@@ -943,8 +943,8 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // to the truth they already are and the branch goes with them.
         //
         // A float is left as it was written, and that is the one case where the
-        // answer is not obvious: IEEE 754 has every NaN compare unequal to
-        // itself, so `x == x` over a `f64` is a test for a NaN rather than a
+        // answer is not obvious: IEEE 754 has every 0 / 0 compare unequal to
+        // itself, so `x == x` over a `f64` is a test for a 0 / 0 rather than a
         // truth. Folding it to `true` would turn a program that finds its NaNs
         // into one that does not, so only a whole number is folded here.
         //
@@ -964,7 +964,7 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         return null;
       }
       if (FLOAT_TYPES[name] === true && (Number.isNaN(left) || Number.isNaN(right))) {
-        // A comparison with a NaN is false whatever the operator is, except
+        // A comparison with a 0 / 0 is false whatever the operator is, except
         // `ne`, which is true. The backends answer it that way too.
         return { k: "bool", type: BOOL, value: value.op === "ne" };
       }
@@ -3236,7 +3236,7 @@ function maskPlaces(value: SemanticValue, bound: ReadonlyMap<string, SemanticVal
 /** The power of two a number is, or null when it is not one. */
 function powerOfTwo(value: number): number | null {
   if (value < 1 || !Number.isSafeInteger(value)) return null;
-  const places = Math.log2(value);
+  const places = wholeLog2(value);
   return Number.isInteger(places) && 2 ** places === value ? places : null;
 }
 
@@ -3263,7 +3263,21 @@ interface Body {
  * nothing more would be. Comparing the tree against a copy of itself by
  * writing both out as text is the same answer for far more work.
  */
-export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = NO_CALLEES): SemanticFunction {
+/**
+ * The whole number of times a value is halved before it is below two, which is
+ * the base-two logarithm of a power of two and the floor of every other one.
+ */
+function wholeLog2(value: number): number {
+  let count = 0;
+  let held = value;
+  while (held >= 2) {
+    held = held / 2;
+    count += 1;
+  }
+  return count;
+}
+
+export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = new Map()): SemanticFunction {
   // A cycle of bodies is answered before a body's own recursion is, because a
   // body in a cycle may also call itself: the merged loop carries a call of
   // itself as a turn of the loop the same way it carries a call of any other
@@ -3297,7 +3311,7 @@ export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees 
  */
 export function optimizeSemanticEntry(
   entry: SemanticBlock,
-  callees: Callees = NO_CALLEES,
+  callees: Callees = new Map(),
   params: readonly SemanticSlot[] = [],
 ): SemanticBlock {
   optimizeBody({ params, entry }, callees);

@@ -602,13 +602,17 @@ export function nameLiveness(
   // walks front to back is the order it writes them in.
   const ordered: Node[] = [];
   const seen = new Set<Node>();
-  const visit = (node: Node): void => {
-    if (seen.has(node)) return;
+  // The walk is the recursion written as a stack: the last successor is pushed
+  // first, so the order the nodes are reached in is the order the recursion
+  // reached them in, without a closure the frontend would have to box.
+  const pending: Node[] = [root];
+  while (pending.length > 0) {
+    const node = pending.pop() as Node;
+    if (seen.has(node)) continue;
     seen.add(node);
     ordered.push(node);
-    for (const successor of node.successors) visit(successor);
-  };
-  visit(root);
+    for (let at = node.successors.length - 1; at >= 0; at -= 1) pending.push(node.successors[at] as Node);
+  }
 
   const uses = new Map<Node, Set<string>>();
   const defines = new Map<Node, Set<string>>();

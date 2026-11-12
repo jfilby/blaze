@@ -78,6 +78,26 @@ export interface TypeTable {
   reexported: Set<string>;
   /** The classes the module declares, which name a reference. */
   classes: ReadonlySet<string>;
+  /**
+   * The expansions this table has already made, so a declaration of no
+   * parameters is expanded once. It is the table's own state rather than a
+   * module's, because a compiled function owns no module table.
+   */
+  expansions?: ExpansionStore;
+}
+
+/** The expansions one type table keeps, and the link they were read after. */
+interface ExpansionStore {
+  entries: WeakMap<TypeDecl, { generation: number; type: ResolvedType }>;
+  generation: number;
+}
+
+function expansionsOf(table: TypeTable): ExpansionStore {
+  const known = table.expansions;
+  if (known !== undefined) return known;
+  const made: ExpansionStore = { entries: new WeakMap(), generation: 0 };
+  table.expansions = made;
+  return made;
 }
 
 /**
@@ -626,23 +646,23 @@ function resolveTypeText(
  * counts the links that have been made, so a kept expansion is read only by
  * the read that made it.
  */
-const EXPANSIONS = new WeakMap<TypeDecl, { generation: number; type: ResolvedType }>();
-let EXPANSION_GENERATION = 0;
 
 function instantiate(
   decl: TypeDecl,
   args: readonly ResolvedType[],
   seen: Set<TypeDecl>,
+  table: TypeTable,
 ): ResolvedType {
   // A generic declaration is expanded once per list of arguments, and this
   // table does not key that list, so it is expanded where it is asked for.
+  const store = expansionsOf(table);
   const cacheable = seen.size === 0 && decl.params.length === 0;
   if (cacheable) {
-    const kept = EXPANSIONS.get(decl);
-    if (kept !== undefined && kept.generation === EXPANSION_GENERATION) return kept.type;
+    const kept = store.entries.get(decl);
+    if (kept !== undefined && kept.generation === store.generation) return kept.type;
   }
   const built = instantiateUncached(decl, args, seen);
-  if (cacheable) EXPANSIONS.set(decl, { generation: EXPANSION_GENERATION, type: built });
+  if (cacheable) store.entries.set(decl, { generation: store.generation, type: built });
   return built;
 }
 
@@ -746,7 +766,7 @@ function fieldOfTypeSeen(
     // the recursive reference the expansion answers with a `ref` before it has
     // written a field.
     if (decl !== undefined && !seen.has(decl)) {
-      const resolved = instantiate(decl, [], seen);
+      const resolved = instantiate(decl, [], seen, table);
       if (resolved.kind === "record") return resolved.fields.get(field) ?? null;
     }
   }
@@ -821,7 +841,7 @@ export function elementOfType(table: TypeTable, base: ResolvedType): ResolvedTyp
   if (base.kind === "ref" && base.name !== null) {
     const decl = typeDeclared(table, base.name);
     if (decl !== undefined) {
-      const resolved = instantiate(decl, [], new Set());
+      const resolved = instantiate(decl, [], new Set(), table);
       if (resolved.kind === "record" && resolved.index !== null) return resolved.index;
     }
   }
@@ -938,7 +958,7 @@ class TypeText {
     if (member.kind !== "ref" || member.name === null) return member;
     const decl = typeDeclared(this.table, member.name);
     if (decl === undefined || this.seen.has(decl)) return member;
-    const resolved = instantiate(decl, [], this.seen);
+    const resolved = instantiate(decl, [], this.seen, this.table);
     return resolved.kind === "record" ? resolved : member;
   }
 
@@ -1164,7 +1184,7 @@ class TypeText {
     const param = this.params.get(lower);
     if (param !== undefined) return param;
     const decl = typeDeclared(this.table, lower);
-    if (decl !== undefined) return instantiate(decl, args, this.seen);
+    if (decl !== undefined) return instantiate(decl, args, this.seen, this.table);
     if (this.table.classes.has(lower)) return { kind: "ref", name: lower };
     return ANY_TYPE;
   }
@@ -1438,9 +1458,7 @@ export function bindImportedTypes(
   imports: readonly { specifier: string; names: readonly { local: string; imported: string }[] }[],
   targets: ReadonlyMap<string, TypeTable>,
 ): boolean {
-  // A declaration already expanded in this table may name one of these types,
-  // so the expansions made before the link are no longer the table's answer.
-  EXPANSION_GENERATION += 1;
+  expansionsOf(table).generation += 1;
   let added = false;
   for (const entry of imports) {
     const target = targets.get(entry.specifier);

@@ -17,3 +17,6 @@ mode = "debug"
 # to core/platform-node.ts; the self-build links the adapter written in the
 # subset, which answers the same names from the runtime's host ABI.
 "#host/platform" = "core/platform-native.ts"
+# The TOML parser alone: the package entry point also carries the writer, and
+# the writer reads a host global the compiled runtime does not have.
+"#host/toml" = "core/toml.ts"

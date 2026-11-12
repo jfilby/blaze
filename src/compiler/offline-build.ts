@@ -23,7 +23,7 @@
  */
 
 import { mkdir, readFile, writeFile, join, resolve } from "./core/platform.ts";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml } from "#host/toml";
 
 import { frontendFor } from "./semantics/frontend.ts";
 import { runContractPhase } from "./semantics/program.ts";

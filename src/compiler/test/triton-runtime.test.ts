@@ -7,7 +7,7 @@ import {
   usesTritonSource,
 } from "../runtime/triton.ts";
 import { tritonAdapterSource } from "../runtime/triton-build.ts";
-import { isRuntimeSymbol } from "../runtime/abi.ts";
+import { isRuntimeSymbol } from "../runtime/symbols.ts";
 
 test("the Triton ABI declares every entry the API promises", () => {
   const header = tritonHeaderSource();

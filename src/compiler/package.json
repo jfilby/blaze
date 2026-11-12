@@ -31,6 +31,10 @@
   },
   "imports": {
     "#host/model": "./ai/review-node.ts",
-    "#host/platform": "./core/platform-node.ts"
+    "#host/platform": "./core/platform-node.ts",
+    "#host/toml": {
+      "types": "./node_modules/smol-toml/dist/parse.d.ts",
+      "default": "./core/toml-node.ts"
+    }
   }
 }

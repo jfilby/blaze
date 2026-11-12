@@ -72,6 +72,13 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
   "blaze_rt_number_same": { params: [F64, F64], returns: BOOLEAN, arity: 2 },
   "blaze_rt_text_length": { params: [TEXT], returns: F64, arity: 1 },
+  "encodeURIComponent": { params: [TEXT], returns: TEXT, arity: 1 },
+  // The deep copy answers the type of the value it is handed; the resolver
+  // overrides the declaration's unshaped answer with that type.
+  "structuredClone": { params: [ANY], returns: ANY, arity: 1 },
+  "process.execPath": { params: [], returns: TEXT, arity: 0 },
+  "blaze_rt_state_get": { params: [TEXT], returns: F64, arity: 1 },
+  "blaze_rt_state_set": { params: [TEXT, F64], returns: F64, arity: 2 },
   "blaze_rt_as_int_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
   "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
@@ -157,6 +164,9 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   "blaze_rt_dict_key_num_at": { params: [F64, F64], returns: F64, arity: 2 },
   "Math.min": { params: [F64, F64], returns: F64, arity: 2 },
   "Math.sqrt": { params: [F64], returns: F64, arity: 1 },
+  "Math.log": { params: [F64], returns: F64, arity: 1 },
+  "Math.pow": { params: [F64, F64], returns: F64, arity: 2 },
+  "Math.sign": { params: [F64], returns: F64, arity: 1 },
   "Math.abs": { params: [F64], returns: F64, arity: 1 },
   "Math.floor": { params: [F64], returns: F64, arity: 1 },
   /** `Math.fround(x)` is the nearest single precision number to x, read back
@@ -473,6 +483,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * number its text states, a dynamic value is the number it holds, and a
    * reading of text is what `+text` is the sign in front of one. */
   "Number": { params: [ANY], returns: F64, arity: 1 },
+  "BigInt": { params: [F64], returns: U256, arity: 1 },
   /** `http.serve(port)` starts an HTTP server on the port and runs it until the
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */
@@ -539,7 +550,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    *  the failure it may hold becomes the failure a catch arm sees. */
   "Promise.await.nothing": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: ["memory"] },
   /** `Promise.resolve(v)` answers a settled promise carrying `v`. */
-  "Promise.resolve": { params: [F64], returns: ANY, arity: 1, effects: ["memory"] },
+  "Promise.resolve": { params: [F64], returns: ANY, arities: [0, 1], effects: ["memory"] },
   "Promise.resolve.text": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
   "Promise.resolve.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
   "Promise.resolve.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
@@ -568,7 +579,8 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    */
   "posix.dirname": { params: [TEXT], returns: TEXT, arity: 1 },
   "posix.normalize": { params: [TEXT], returns: TEXT, arity: 1 },
-  "posix.join": { params: [TEXT, TEXT], returns: TEXT, arity: 2 },
+  "posix.join": { params: [TEXT, TEXT, TEXT], returns: TEXT, arities: [2, 3] },
+  "posix.extname": { params: [TEXT], returns: TEXT, arity: 1 },
   /** `Promise.reject(message)` answers a promise that has already failed. */
   "Promise.reject": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
   /**
