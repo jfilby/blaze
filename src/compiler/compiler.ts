@@ -1627,14 +1627,16 @@ async function buildProgramHostFor(
   return await buildProgramHost({ mode, program, workDirectory, objectPaths, outputPath });
 }
 
-/** The generation record of one function, with the values it holds. */
-function generationFunctionOf(
-  file: string,
-  selected: string,
-  benchmarkVector: TestVector | null,
-  outcomes: CandidateOutcome[],
-): Record<string, unknown> {
-  return { file, selected, benchmarkVector, outcomes };
+class GenerationFunctionRecord {
+  readonly file: string;
+  readonly selected: string;
+  readonly outcomes: CandidateOutcome[];
+
+  constructor(file: string, selected: string, outcomes: CandidateOutcome[]) {
+    this.file = file;
+    this.selected = selected;
+    this.outcomes = outcomes;
+  }
 }
 
 /** An incremental entry, with the values the build proved for it. */
@@ -2392,7 +2394,7 @@ export async function runBuild(
       const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
       const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
       const selectedEntries: (readonly [string, string])[] = [];
-      const generationFunctions: Record<string, unknown> = {};
+      const generationFunctions: Record<string, GenerationFunctionRecord> = {};
       for (const entry of generated) {
         const entryFields = entry as unknown as Record<string, unknown>;
         const unit = entryFields["unit"] as CompilationUnit;
@@ -2427,10 +2429,9 @@ export async function runBuild(
           throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
         selectedEntries.push([key, String(resultFields["selected"])]);
-        generationFunctions[key] = generationFunctionOf(
+        generationFunctions[key] = new GenerationFunctionRecord(
           String((unit as unknown as Record<string, unknown>)["file"]),
           String(resultFields["selected"]),
-          resultFields["benchmarkVector"] as TestVector | null,
           resultFields["outcomes"] as unknown as CandidateOutcome[],
         );
       }
