@@ -101,36 +101,68 @@ export function parsePrimitiveName(name: string): PrimitiveTypeName {
   return match;
 }
 
+function textTypeExpr(): TypeExpr {
+  return { kind: "text" };
+}
+
+function voidTypeExpr(): TypeExpr {
+  return { kind: "void" };
+}
+
+function sliceTypeExpr(of: TypeExpr): TypeExpr {
+  return { kind: "slice", of };
+}
+
+function ptrTypeExpr(of: TypeExpr): TypeExpr {
+  return { kind: "ptr", of };
+}
+
+function maskTypeExpr(of: TypeExpr): TypeExpr {
+  return { kind: "mask", of };
+}
+
+function primitiveTypeExpr(name: PrimitiveTypeName): TypeExpr {
+  return { kind: "primitive", name };
+}
+
+function refTypeExpr(of: TypeExpr | null, name?: string): TypeExpr {
+  return name === undefined ? { kind: "ref", of } : { kind: "ref", of, name };
+}
+
+function arrayTypeExpr(of: TypeExpr, length: number | null): TypeExpr {
+  return { kind: "array", of, length };
+}
+
 export function parseType(text: string): TypeExpr {
   const source = text.trim();
-  if (source === "text") return { kind: "text" };
-  if (source === "void") return { kind: "void" };
+  if (source === "text") return textTypeExpr();
+  if (source === "void") return voidTypeExpr();
   // `typeText` writes a slice as `[]T` and a pointer as `T*`, and the text the
   // IR is written in is read back by this: the two forms have to name the type
   // they were written from.
-  if (source.startsWith("[]")) return { kind: "slice", of: parseType(source.slice(2)) };
-  if (source.endsWith("[]")) return { kind: "slice", of: parseType(source.slice(0, -2)) };
-  if (source.endsWith("*")) return { kind: "ptr", of: parseType(source.slice(0, -1)) };
+  if (source.startsWith("[]")) return sliceTypeExpr(parseType(source.slice(2)));
+  if (source.endsWith("[]")) return sliceTypeExpr(parseType(source.slice(0, -2)));
+  if (source.endsWith("*")) return ptrTypeExpr(parseType(source.slice(0, -1)));
   const composite = /^([A-Za-z_][A-Za-z0-9_]*)\s*<(.+)>$/.exec(source);
   if (composite === null) {
-    return { kind: "primitive", name: parsePrimitiveName(source) };
+    return primitiveTypeExpr(parsePrimitiveName(source));
   }
 
   const [, head, argument] = composite;
-  if (head === "ptr" || head === "slice" || head === "mask") {
-    return { kind: head, of: parseType(argument) };
-  }
+  if (head === "ptr") return ptrTypeExpr(parseType(argument));
+  if (head === "slice") return sliceTypeExpr(parseType(argument));
+  if (head === "mask") return maskTypeExpr(parseType(argument));
   if (head === "ref") {
     // `ref<any>` is a reference the source left unshaped, and `ref<Object1>`
     // names the object it points at, which is a layout rather than a type.
     const inner = argument.trim();
-    if (inner === "any") return { kind: "ref", of: null };
-    if (/^[A-Z][A-Za-z0-9_]*$/.test(inner)) return { kind: "ref", of: null, name: inner };
-    return { kind: "ref", of: parseType(inner) };
+    if (inner === "any") return refTypeExpr(null);
+    if (/^[A-Z][A-Za-z0-9_]*$/.test(inner)) return refTypeExpr(null, inner);
+    return refTypeExpr(parseType(inner));
   }
   if (head === "array") {
     const parts = argument.split(",");
-    if (parts.length === 1) return { kind: "array", of: parseType(parts[0]), length: null };
+    if (parts.length === 1) return arrayTypeExpr(parseType(parts[0]), null);
     if (parts.length === 2) {
       const length = Number.parseInt(parts[1].trim(), 10);
       // An array of no elements is the array an empty literal is, and a layout
@@ -138,7 +170,7 @@ export function parseType(text: string): TypeExpr {
       if (!Number.isInteger(length) || length < 0) {
         throw new CompilerError("ContractError", "contract", `invalid array length in "${text}"`, "", "", "", "");
       }
-      return { kind: "array", of: parseType(parts[0]), length };
+      return arrayTypeExpr(parseType(parts[0]), length);
     }
   }
   throw new CompilerError("ContractError", "contract", `unsupported type expression "${text}"`, "", "", "", "");
@@ -235,11 +267,18 @@ export type BinaryOp =
   | "*"
   | "/";
 
-type Token =
-  | { kind: "number"; text: string }
-  | { kind: "ident"; text: string }
-  | { kind: "op"; text: string }
-  | { kind: "end" };
+type TokenKind = "number" | "ident" | "op" | "end";
+
+/** One token of a condition, with its kind and the text the source wrote. */
+class Token {
+  readonly kind: TokenKind;
+  readonly text: string;
+
+  constructor(kind: TokenKind, text: string) {
+    this.kind = kind;
+    this.text = text;
+  }
+}
 
 const OPERATORS = [
   "..<",
@@ -280,7 +319,7 @@ function tokenize(source: string): Token[] {
       if (match === null) {
         throw new CompilerError("ContractError", "contract", `bad number in "${source}"`, "", "", "", "");
       }
-      tokens.push({ kind: "number", text: match[0] });
+      tokens.push(new Token("number", match[0]));
       index += match[0].length;
       continue;
     }
@@ -289,7 +328,7 @@ function tokenize(source: string): Token[] {
       if (match === null) {
         throw new CompilerError("ContractError", "contract", `bad identifier in "${source}"`, "", "", "", "");
       }
-      tokens.push({ kind: "ident", text: match[0] });
+      tokens.push(new Token("ident", match[0]));
       index += match[0].length;
       continue;
     }
@@ -297,14 +336,72 @@ function tokenize(source: string): Token[] {
     if (operator === undefined) {
       throw new CompilerError("ContractError", "contract", `unexpected character "${character}" in expression "${source}"`, "", "", "", "");
     }
-    tokens.push({ kind: "op", text: operator });
+    tokens.push(new Token("op", operator));
     index += operator.length;
   }
-  tokens.push({ kind: "end" });
+  tokens.push(new Token("end", ""));
   return tokens;
 }
 
 const COMPARISONS: BinaryOp[] = ["==", "!=", "<", "<=", ">", ">="];
+
+/** A reduced range, with its bounds and body. */
+function reduceExpression(
+  op: ReduceOp,
+  varName: string,
+  from: Expr,
+  to: Expr,
+  exclusive: boolean,
+  body: Expr,
+): Expr {
+  return { t: "reduce", op, varName, from, to, exclusive, body };
+}
+
+/** A call of a contract function, with the arguments it passes. */
+function callExpression(name: string, args: Expr[]): Expr {
+  return { t: "call", name, args };
+}
+
+/** A number, text or name condition, with the value it holds. */
+function floatExpression(value: number): Expr {
+  return { t: "float", value };
+}
+
+function intExpression(value: Whole): Expr {
+  return { t: "int", value };
+}
+
+function boolExpression(value: boolean): Expr {
+  return { t: "bool", value };
+}
+
+function nullExpression(): Expr {
+  return { t: "null" };
+}
+
+function variableExpression(name: string): Expr {
+  return { t: "var", name };
+}
+
+/** A sliced value, with its bounds. */
+function sliceExpression(base: Expr, start: Expr | null, stop: Expr | null, step: Expr | null): Expr {
+  return { t: "slice", base, start, stop, step };
+}
+
+/** An indexed value, with the index it reads. */
+function indexExpression(base: Expr, index: Expr): Expr {
+  return { t: "index", base, index };
+}
+
+/** A unary condition, with the value it reads. */
+function unaryExpression(op: "!" | "-", operand: Expr): Expr {
+  return { t: "unary", op, operand };
+}
+
+/** A binary condition, with the values it joins. */
+function binaryExpression(op: BinaryOp, left: Expr, right: Expr): Expr {
+  return { t: "binary", op, left, right };
+}
 
 class ExpressionParser {
   private readonly tokens: Token[];
@@ -353,13 +450,13 @@ class ExpressionParser {
 
   private parseOr(): Expr {
     let left = this.parseAnd();
-    while (this.acceptOp("||")) left = { t: "binary", op: "||", left, right: this.parseAnd() };
+    while (this.acceptOp("||")) left = binaryExpression("||", left, this.parseAnd());
     return left;
   }
 
   private parseAnd(): Expr {
     let left = this.parseComparison();
-    while (this.acceptOp("&&")) left = { t: "binary", op: "&&", left, right: this.parseComparison() };
+    while (this.acceptOp("&&")) left = binaryExpression("&&", left, this.parseComparison());
     return left;
   }
 
@@ -368,7 +465,7 @@ class ExpressionParser {
     const token = this.peek();
     if (token.kind === "op" && COMPARISONS.includes(token.text as BinaryOp)) {
       this.next();
-      return { t: "binary", op: token.text as BinaryOp, left, right: this.parseAdditive() };
+      return binaryExpression(token.text as BinaryOp, left, this.parseAdditive());
     }
     return left;
   }
@@ -379,7 +476,7 @@ class ExpressionParser {
       const token = this.peek();
       if (token.kind === "op" && (token.text === "+" || token.text === "-")) {
         this.next();
-        left = { t: "binary", op: token.text, left, right: this.parseMultiplicative() };
+        left = binaryExpression(token.text as BinaryOp, left, this.parseMultiplicative());
         continue;
       }
       return left;
@@ -392,7 +489,7 @@ class ExpressionParser {
       const token = this.peek();
       if (token.kind === "op" && (token.text === "*" || token.text === "/")) {
         this.next();
-        left = { t: "binary", op: token.text, left, right: this.parseUnary() };
+        left = binaryExpression(token.text as BinaryOp, left, this.parseUnary());
         continue;
       }
       return left;
@@ -400,8 +497,8 @@ class ExpressionParser {
   }
 
   private parseUnary(): Expr {
-    if (this.acceptOp("!")) return { t: "unary", op: "!", operand: this.parseUnary() };
-    if (this.acceptOp("-")) return { t: "unary", op: "-", operand: this.parseUnary() };
+    if (this.acceptOp("!")) return unaryExpression("!", this.parseUnary());
+    if (this.acceptOp("-")) return unaryExpression("-", this.parseUnary());
     return this.parsePostfix();
   }
 
@@ -430,7 +527,7 @@ class ExpressionParser {
           }
         }
         this.expectOp("]");
-        base = { t: "slice", base, start, stop, step };
+        base = sliceExpression(base, start, stop, step);
       } else {
         const first = this.parseOr();
         if (this.acceptOp(":")) {
@@ -447,10 +544,10 @@ class ExpressionParser {
             }
           }
           this.expectOp("]");
-          base = { t: "slice", base, start, stop, step };
+          base = sliceExpression(base, start, stop, step);
         } else {
           this.expectOp("]");
-          base = { t: "index", base, index: first };
+          base = indexExpression(base, first);
         }
       }
     }
@@ -460,9 +557,8 @@ class ExpressionParser {
   private parsePrimary(): Expr {
     const token = this.next();
     if (token.kind === "number") {
-      return /[.eE]/.test(token.text) && !/^0[xX]/.test(token.text)
-        ? { t: "float", value: Number(token.text) }
-        : { t: "int", value: wholeFromText(token.text) };
+      if (/[.eE]/.test(token.text) && !/^0[xX]/.test(token.text)) return floatExpression(Number(token.text));
+      return intExpression(wholeFromText(token.text));
     }
     if (token.kind === "op" && token.text === "(") {
       const inner = this.parseOr();
@@ -470,10 +566,10 @@ class ExpressionParser {
       return inner;
     }
     if (token.kind === "ident") {
-      if (token.text === "true" || token.text === "false") return { t: "bool", value: token.text === "true" };
-      if (token.text === "null") return { t: "null" };
+      if (token.text === "true" || token.text === "false") return boolExpression(token.text === "true");
+      if (token.text === "null") return nullExpression();
       if (this.acceptOp("(")) return this.parseCall(token.text);
-      return { t: "var", name: token.text };
+      return variableExpression(token.text);
     }
     throw this.error(`unexpected "${token.kind === "end" ? "<end of input>" : token.text}"`);
   }
@@ -492,7 +588,7 @@ class ExpressionParser {
       this.expectOp(",");
       const body = this.parseOr();
       this.expectOp(")");
-      return { t: "reduce", op: name, varName: variable.text, from, to, exclusive, body };
+      return reduceExpression(name, variable.text, from, to, exclusive, body);
     }
 
     const args: Expr[] = [];
@@ -504,7 +600,7 @@ class ExpressionParser {
         break;
       }
     }
-    return { t: "call", name, args };
+    return callExpression(name, args);
   }
 }
 
