@@ -1444,26 +1444,26 @@ class Body {
     // nothing. A wide number is four limbs in the memory and the address of
     // them, so a number cannot be converted into one where it stands — the
     // kernel is what does it.
-    if (isWideType(at) && !isWideType(value.type)) {
+    if (isWideType(at) && !isWideType(fieldOf(value,"type"))) {
       this.widen(value);
       return;
     }
-    switch (value.k) {
+    switch (String(fieldOf(value,"k"))) {
       case "const":
-        this.constant(value.text, value.type, at);
+        this.constant(fieldOf(value,"text"), fieldOf(value,"type"), at);
         return;
       case "bool":
         // A truth and a nothing are a one and a zero, and every carrier holds
         // both exactly, so each is written at the carrier its use reads it in
         // rather than as an `i32` and a conversion to it.
-        this.literal(value.value ? "1" : "0", fieldOf(facts(at),"held"));
+        this.literal(fieldOf(value,"value") ? "1" : "0", fieldOf(facts(at),"held"));
         return;
       case "nothing":
         this.literal("0", fieldOf(facts(at),"held"));
         return;
       case "local": {
-        const local = this.get(value.name);
-        this.convert(local.type, at);
+        const local = this.get(fieldOf(value,"name"));
+        this.convert(fieldOf(local,"type") as SemanticType, at);
         return;
       }
       case "length": {
@@ -1472,77 +1472,80 @@ class Body {
         // pointer sits one before, and the count is read from there. The
         // length of a text and the length of a dynamic array are the
         // runtime's to answer.
-        const held = value.of.type;
+        const held = fieldOf(fieldOf(value,"of"),"type");
         if (isTextType(held)) {
-          this.value(value.of, TEXT);
+          this.value(fieldOf(value,"of"), TEXT);
           this.callService("blaze_rt_text_length");
-          this.convert(value.type, at);
+          this.convert(fieldOf(value,"type"), at);
           return;
         }
-        if (held.kind === "ref" && held.of === null && held.name === undefined) {
-          this.value(value.of, DYNAMIC_TYPE);
+        if (String(fieldOf(held,"kind")) === "ref" && fieldOf(held,"of") === null && fieldOf(held,"name") === undefined) {
+          this.value(fieldOf(value,"of"), DYNAMIC_TYPE);
           this.callService("blaze_rt_array_length");
-          this.convert(value.type, at);
+          this.convert(fieldOf(value,"type"), at);
           return;
         }
-        if (held.kind !== "slice" && held.kind !== "array" && held.kind !== "ptr") {
+        if (String(fieldOf(held,"kind")) !== "slice" && String(fieldOf(held,"kind")) !== "array" && String(fieldOf(held,"kind")) !== "ptr") {
           unreachable("take the length of a value that is not a buffer", this.name, this.candidate);
         }
-        this.value(value.of, ADDRESS);
+        this.value(fieldOf(value,"of"), ADDRESS);
         this.i32(8);
         this.op(fieldOf(BINARY[String(I32)],"sub") as number);
         this.op(0x29);
         this.code.varuint(3);
         this.code.varuint(0);
-        this.convert(value.type, at);
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "element": {
-        const of = value.of.type;
-        if (of.kind === "ref" && of.of === null && of.name === undefined) {
+        const of = fieldOf(fieldOf(value,"of"),"type");
+        if (String(fieldOf(of,"kind")) === "ref" && fieldOf(of,"of") === null && fieldOf(of,"name") === undefined) {
           // An element of a dynamic array is the runtime's to answer. The
           // index is a count and the runtime carries a count as a double, so
           // it is written as one: a count written as a whole number is a
           // module the engine refuses, because the service takes a double.
-          this.value(value.of, DYNAMIC_TYPE);
-          this.value(value.index, F64_TYPE);
+          this.value(fieldOf(value,"of"), DYNAMIC_TYPE);
+          this.value(fieldOf(value,"index"), F64_TYPE);
           this.callService("blaze_rt_array_get");
-          this.convert(value.type, at);
+          this.convert(fieldOf(value,"type"), at);
           return;
         }
-        this.address(value.of, value.index, value.type);
-        const load = fieldOf(facts(value.type),"load");
-        this.op(load.code);
-        this.code.varuint(load.align);
+        this.address(fieldOf(value,"of"), fieldOf(value,"index"), fieldOf(value,"type"));
+        const load = fieldOf(facts(fieldOf(value,"type")),"load");
+        this.op(fieldOf(load,"code"));
+        this.code.varuint(fieldOf(load,"align"));
         this.code.varuint(0);
-        this.convert(value.type, at);
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "loadField": {
-        const layout = this.fn.objects[value.layout];
-        const field = layout?.fields.find((entry) => entry.name === value.field);
+        const objects = fieldOf(this.fn,"objects") as Record<string, { fields: { name: string; offset: number }[] } | undefined>;
+        const layout = objects[String(fieldOf(value,"layout"))];
+        const field = layout === undefined
+          ? undefined
+          : (fieldOf(layout,"fields") as { name: string; offset: number }[]).find((entry) => String(fieldOf(entry,"name")) === String(fieldOf(value,"field")));
         if (field === undefined) {
-          unreachable(`read the field "${value.field}" of the layout "${value.layout}"`, this.name, this.candidate);
+          unreachable(`read the field "${fieldOf(value,"field")}" of the layout "${fieldOf(value,"layout")}"`, this.name, this.candidate);
         }
-        this.value(value.object, ADDRESS);
-        const load = fieldOf(facts(value.type),"load");
-        this.op(load.code);
-        this.code.varuint(load.align);
-        this.code.varuint(field.offset);
-        this.convert(value.type, at);
+        this.value(fieldOf(value,"object"), ADDRESS);
+        const load = fieldOf(facts(fieldOf(value,"type")),"load");
+        this.op(fieldOf(load,"code"));
+        this.code.varuint(fieldOf(load,"align"));
+        this.code.varuint(fieldOf(field,"offset"));
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "buffer": {
         // A typed array is a block the runtime lays out, and the count of its
         // elements is the word the offset sits one before: a module reads the
         // length of a buffer from there.
-        if (value.view !== null) {
+        if (fieldOf(value,"view") !== null) {
           unreachable("take a view of a block of bytes", this.name, this.candidate);
         }
-        const element = value.element;
+        const element = fieldOf(value,"element");
         const size = fieldOf(facts(element),"size");
-        if (value.count !== null) {
-          this.value(value.count, ADDRESS);
+        if (fieldOf(value,"count") !== null) {
+          this.value(fieldOf(value,"count"), ADDRESS);
           this.op(0xad); // `i64.extend_i32_u`
           this.i64(BigInt(size));
           this.callService("blaze_rt_array_new");
@@ -1550,7 +1553,7 @@ class Body {
         }
         // The elements written out are laid down one at a time, at the address
         // the index names.
-        const total = value.values.length;
+        const total = fieldOf(value,"values").length;
         this.i64(BigInt(total));
         this.i64(BigInt(size));
         this.callService("blaze_rt_array_new");
@@ -1565,10 +1568,10 @@ class Body {
             this.op(0x74); // `i32.shl`
           }
           this.op(fieldOf(BINARY[String(I32)],"add") as number);
-          this.value(value.values[index] as SemanticValue, element);
+          this.value(fieldOf(value,"values")[index] as SemanticValue, element);
           const store = fieldOf(facts(element),"store");
-          this.op(store.code);
-          this.code.varuint(store.align);
+          this.op(fieldOf(store,"code"));
+          this.code.varuint(fieldOf(store,"align"));
           this.code.varuint(0);
         }
         this.localAt(pointer);
@@ -1576,31 +1579,32 @@ class Body {
         return;
       }
       case "newObject": {
-        const layout = this.fn.objects[value.layout];
+        const objects = fieldOf(this.fn,"objects") as Record<string, { size: number; align: number; fields: { name: string; offset: number }[] } | undefined>;
+        const layout = objects[String(fieldOf(value,"layout"))];
         if (layout === undefined) {
-          unreachable(`build an object of the layout "${value.layout}"`, this.name, this.candidate);
+          unreachable(`build an object of the layout "${fieldOf(value,"layout")}"`, this.name, this.candidate);
         }
         // The object is a block the runtime lays out, and its fields are
         // written at the offsets the layout gives them.
-        this.i64(BigInt(layout.size));
-        this.i64(BigInt(layout.align));
+        this.i64(BigInt(fieldOf(layout,"size") as number));
+        this.i64(BigInt(fieldOf(layout,"align") as number));
         this.callService("blaze_rt_object_new");
         const pointer = this.borrow(I32);
         this.keep(pointer);
         this.localAt(pointer);
-        this.i32(this.poolText(layout.fields.map((field) => `${field.name}\0`).join("") + "\0"));
+        this.i32(this.poolText((fieldOf(layout,"fields") as { name: string }[]).map((field) => `${String(fieldOf(field,"name"))}\0`).join("") + "\0"));
         this.callService("blaze_rt_object_describe");
-        for (const field of value.fields) {
-          const entry = layout.fields.find((each) => each.name === field.name);
+        for (const field of fieldOf(value,"fields")) {
+          const entry = (fieldOf(layout,"fields") as { name: string; offset: number }[]).find((each) => String(fieldOf(each,"name")) === String(fieldOf(field,"name")));
           if (entry === undefined) {
-            unreachable(`write the field "${field.name}" of the layout "${value.layout}"`, this.name, this.candidate);
+            unreachable(`write the field "${fieldOf(field,"name")}" of the layout "${fieldOf(value,"layout")}"`, this.name, this.candidate);
           }
           this.localAt(pointer);
-          this.value(field.value, field.value.type);
-          const store = fieldOf(facts(field.value.type),"store");
-          this.op(store.code);
-          this.code.varuint(store.align);
-          this.code.varuint(entry.offset);
+          this.value(fieldOf(field,"value"), fieldOf(fieldOf(field,"value"),"type"));
+          const store = fieldOf(facts(fieldOf(fieldOf(field,"value"),"type")),"store");
+          this.op(fieldOf(store,"code"));
+          this.code.varuint(fieldOf(store,"align"));
+          this.code.varuint(fieldOf(entry,"offset"));
         }
         this.localAt(pointer);
         this.release(I32, pointer);
@@ -1612,18 +1616,18 @@ class Body {
         // out of it is converted to the carrier the use asked for. A case that
         // leaves its own type on the stack hands the next operator a value of
         // the wrong width, which the format reads as a type error.
-        const held = fieldOf(facts(value.type),"held");
-        if (value.op === "pos") {
-          this.value(value.operand, at);
+        const held = fieldOf(facts(fieldOf(value,"type")),"held");
+        if (String(fieldOf(value,"op")) === "pos") {
+          this.value(fieldOf(value,"operand"), at);
           return;
         }
-        if (value.op === "not") {
+        if (String(fieldOf(value,"op")) === "not") {
           // The falsity of the operand is the whole of what `!x` is, and each
           // carrier has that in one instruction of its own: `i32.eqz`,
           // `i64.eqz` and `f64.eq 0`. Asking for the truth first and turning
           // it over spent two of them over a 64 bit whole number and over a
           // float, where the falsity was already what `condition` had built.
-          this.negation(value.operand);
+          this.negation(fieldOf(value,"operand"));
           this.convert(TRUTH, at);
           return;
         }
@@ -1641,32 +1645,32 @@ class Body {
         // The constant is a `-1` of the operand's own width, so the exclusive
         // or is the one of that width and the answer is the same number at
         // every width the two's complement of that width gives.
-        if (value.op === "bitNot" && (held === I32 || held === I64)) {
+        if (String(fieldOf(value,"op")) === "bitNot" && (held === I32 || held === I64)) {
           if (held === I64) this.i64(-1n);
           else this.i32(-1);
-          this.value(value.operand, value.type);
+          this.value(fieldOf(value,"operand"), fieldOf(value,"type"));
           this.op(fieldOf(BINARY[String(held)],"xor") as number);
-        } else if (value.op === "bitNot") {
+        } else if (String(fieldOf(value,"op")) === "bitNot") {
           if (held === F64) this.float(0, true);
           else this.float(0, false);
-          this.value(value.operand, value.type);
+          this.value(fieldOf(value,"operand"), fieldOf(value,"type"));
           this.op(fieldOf(BINARY[String(held)],"sub") as number);
           if (held === F64) this.float(1, true);
           else this.float(1, false);
           this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else if (held === I64) {
           this.i64(0n);
-          this.value(value.operand, value.type);
+          this.value(fieldOf(value,"operand"), fieldOf(value,"type"));
           this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else if (held === I32) {
           this.i32(0);
-          this.value(value.operand, value.type);
+          this.value(fieldOf(value,"operand"), fieldOf(value,"type"));
           this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else {
-          this.value(value.operand, value.type);
+          this.value(fieldOf(value,"operand"), fieldOf(value,"type"));
           this.op(held === F32 ? 0x8c : 0x9a);
         }
-        this.convert(value.type, at);
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "isNull":
@@ -1674,30 +1678,30 @@ class Body {
         // against a zero of the operand's own width: an `i64` operand beside
         // an `i32` zero is a module the engine refuses. So the zero is the
         // width the operand is held at, and the operator is that width's.
-        this.value(value.operand, value.operand.type);
-        const width = fieldOf(facts(value.operand.type),"held");
+        this.value(fieldOf(value,"operand"), fieldOf(fieldOf(value,"operand"),"type"));
+        const width = fieldOf(facts(fieldOf(fieldOf(value,"operand"),"type")),"held");
         if (width === I64) this.i64(0n);
         else if (width === F64) this.float(0, true);
         else if (width === F32) this.float(0, false);
         else this.i32(0);
-        this.op(BINARY[String(width)][value.negate ? "ne" : "eq"] as number);
+        this.op(BINARY[String(width)][fieldOf(value,"negate") ? "ne" : "eq"] as number);
         this.convert({ kind: "primitive", name: "i32" }, at);
         return;
       case "select":
         // Two whole numbers are not chosen between by choosing between their
         // addresses — the two addresses are two different places and the answer
         // is whichever place holds it — so the limbs are chosen and written.
-        if (at.kind === "primitive" && isWide(at.name)) {
-          this.wideSelect(value.condition, value.then, value.otherwise);
+        if (String(fieldOf(at,"kind")) === "primitive" && isWide(String(fieldOf(at,"name")) as never)) {
+          this.wideSelect(fieldOf(value,"condition"), fieldOf(value,"then"), fieldOf(value,"otherwise"));
           return;
         }
         // A `select` reads its condition last: it is the top of the stack, and
         // the two arms below it are what it chooses between. Both arms are
         // emitted in the type the use reads the whole in, so what it hands back
         // is already that type.
-        this.value(value.then, at);
-        this.value(value.otherwise, at);
-        this.condition(value.condition);
+        this.value(fieldOf(value,"then"), at);
+        this.value(fieldOf(value,"otherwise"), at);
+        this.condition(fieldOf(value,"condition"));
         this.op(0x1b);
         return;
       case "coalesce": {
@@ -1711,9 +1715,9 @@ class Body {
         // left one says, so `a ?? a[0]` read the first element of an empty
         // buffer — a trap the source language never raises. The left arm is
         // written once here, into the local the answer is read back out of.
-        const held = fieldOf(facts(value.left.type),"held");
+        const held = fieldOf(facts(fieldOf(fieldOf(value,"left"),"type")),"held");
         const answer = this.borrow(held);
-        this.value(value.left, value.left.type);
+        this.value(fieldOf(value,"left"), fieldOf(fieldOf(value,"left"),"type"));
         this.keepAndRead(answer);
         if (held === I64) this.i64(0n);
         else if (held === F64) this.float(0, true);
@@ -1723,12 +1727,12 @@ class Body {
         this.op(0x04);
         this.code.byte(0x40);
         this.push(null);
-        this.value(value.right, value.left.type);
+        this.value(fieldOf(value,"right"), fieldOf(fieldOf(value,"left"),"type"));
         this.keep(answer);
         this.pop();
         this.op(0x0b);
         this.read(answer);
-        this.convert(value.left.type, at);
+        this.convert(fieldOf(fieldOf(value,"left"),"type"), at);
         this.release(held, answer);
         return;
       }
@@ -1743,19 +1747,19 @@ class Body {
         // of that number. The truth is asked of the number itself, which is
         // what the language asks of it: a number that is not a number holds
         // nothing.
-        if (isTextType(at) && isNumber(value.left.type)) {
+        if (isTextType(at) && isNumber(fieldOf(fieldOf(value,"left"),"type"))) {
           const held = fieldOf(facts(at),"held");
           const answer = this.borrow(held);
-          this.asText(value.left, null);
+          this.asText(fieldOf(value,"left"), null);
           this.keep(answer);
-          this.value(value.left, value.left.type);
-          const carrier = fieldOf(facts(value.left.type),"held");
-          if (value.op === "or") this.lie(carrier);
+          this.value(fieldOf(value,"left"), fieldOf(fieldOf(value,"left"),"type"));
+          const carrier = fieldOf(facts(fieldOf(fieldOf(value,"left"),"type")),"held");
+          if (String(fieldOf(value,"op")) === "or") this.lie(carrier);
           else this.truth(carrier);
           this.op(0x04);
           this.code.byte(0x40);
           this.push(null);
-          this.value(value.right, at);
+          this.value(fieldOf(value,"right"), at);
           this.keep(answer);
           this.pop();
           this.op(0x0b);
@@ -1770,7 +1774,7 @@ class Body {
         // out of, and the right one only when the operator calls for it.
         const held = fieldOf(facts(at),"held");
         const answer = this.borrow(held);
-        this.value(value.left, at);
+        this.value(fieldOf(value,"left"), at);
         this.keepAndRead(answer);
         // `&&` takes the right arm when the left one holds and `||` takes it
         // when the left one does not, so the two ask for opposite answers and
@@ -1778,12 +1782,12 @@ class Body {
         // instruction that is depends on the carrier: over a whole number `x`
         // holds when `x` is nonzero and `i64.eqz` is the falsity of it, so
         // `&&` turns that over and `||` takes it as it stands.
-        if (value.op === "or") this.lie(held);
+        if (String(fieldOf(value,"op")) === "or") this.lie(held);
         else this.truth(held);
         this.op(0x04);
         this.code.byte(0x40);
         this.push(null);
-        this.value(value.right, at);
+        this.value(fieldOf(value,"right"), at);
         this.keep(answer);
         this.pop();
         this.op(0x0b);
@@ -1797,7 +1801,7 @@ class Body {
         // not the type it answers with: comparing two doubles as whole numbers
         // loses every fraction of them and answers the other arm than the one
         // the source wrote. An operator's type is the operands' own type.
-        const compared = value.k === "compare" ? value.operand : value.type;
+        const compared = String(fieldOf(value,"k")) === "compare" ? fieldOf(value,"operand") : fieldOf(value,"type");
         // A wide number is carried as the address of its four limbs, and every
         // operation on one has to be written out as limb arithmetic below —
         // there is no instruction for thirty-two bytes and, because a module
@@ -1805,12 +1809,12 @@ class Body {
         // routed to it and everything else stops here rather than reaching the
         // table below, where a four-limb value would be carried out as one
         // `i32` and answer the low thirty-two bits of the number it was given.
-        if (compared.kind === "primitive" && isWide(compared.name)) {
-          if (value.k === "compare") {
-            this.wideCompare(value.op, value.left, value.right);
+        if (String(fieldOf(compared,"kind")) === "primitive" && isWide(String(fieldOf(compared,"name")) as never)) {
+          if (String(fieldOf(value,"k")) === "compare") {
+            this.wideCompare(fieldOf(value,"op"), fieldOf(value,"left"), fieldOf(value,"right"));
             return;
           }
-          this.wideBinary(value.op, value.left, value.right);
+          this.wideBinary(fieldOf(value,"op"), fieldOf(value,"left"), fieldOf(value,"right"));
           return;
         }
         // Two texts are compared by what they say and not by where they are: a
@@ -1820,69 +1824,69 @@ class Body {
         // own, and the answer is a number below zero, zero or a number above
         // zero: the comparison the source wrote is one of the six ways of
         // asking about that.
-        if (value.k === "compare" && isTextType(compared)) {
-          this.value(value.left, TEXT);
-          this.value(value.right, TEXT);
+        if (String(fieldOf(value,"k")) === "compare" && isTextType(compared)) {
+          this.value(fieldOf(value,"left"), TEXT);
+          this.value(fieldOf(value,"right"), TEXT);
           this.callService("blaze_rt_text_compare");
           this.i32(0);
-          this.op(BINARY[String(I32)][value.op] as number);
+          this.op(BINARY[String(I32)][fieldOf(value,"op")] as number);
           this.convert({ kind: "primitive", name: "i32" }, at);
           return;
         }
         // A compound assignment and an arith of `pow` both have no
         // instruction and no runtime here. Refuse it by name rather than emit
         // a byte that does not decode, or nothing at all.
-        if (value.k === "arith" && value.op === "pow") {
+        if (String(fieldOf(value,"k")) === "arith" && String(fieldOf(value,"op")) === "pow") {
           // `pow` is the one arithmetic operation with no instruction of its
           // own; the host provides it through the `env.pow` import.
         }
         // Two texts are joined by the runtime, which owns the result: the join
         // is a service of the host ABI rather than an instruction.
-        if (value.op === "concat") {
-          this.value(value.left, TEXT);
-          this.value(value.right, TEXT);
+        if (String(fieldOf(value,"op")) === "concat") {
+          this.value(fieldOf(value,"left"), TEXT);
+          this.value(fieldOf(value,"right"), TEXT);
           this.callService("blaze_rt_string_append");
           this.convert(TEXT, at);
           return;
         }
-        if (value.op === "arrayConcat") {
-          unreachable("arrayConcat is not written by the wasm backend", "arrayConcat");
+        if (String(fieldOf(value,"op")) === "arrayConcat") {
+          unreachable("arrayConcat is not written by the wasm backend", "arrayConcat", "arrayConcat");
           return;
         }
         const held = fieldOf(facts(compared),"held");
-        this.value(value.left, compared);
-        this.value(value.right, compared);
+        this.value(fieldOf(value,"left"), compared);
+        this.value(fieldOf(value,"right"), compared);
         // A whole number the module holds as unsigned is divided, ordered and
         // shifted as unsigned, because the instruction is named for how the
         // bits read and not for how the value was declared.
-        if (value.op === "pow") {
+        if (String(fieldOf(value,"op")) === "pow") {
           this.op(0x10);
           this.code.varuint(0);
-          this.convert(value.type, at);
+          this.convert(fieldOf(value,"type"), at);
           return;
         }
-        const unsignedOp = fieldOf(facts(compared),"unsigned") ? UNSIGNED_BINARY[String(held)][value.op] : undefined;
-        const op = unsignedOp ?? BINARY[String(held)][value.op];
+        const unsignedOp = fieldOf(facts(compared),"unsigned") ? UNSIGNED_BINARY[String(held)][fieldOf(value,"op")] : undefined;
+        const op = unsignedOp ?? BINARY[String(held)][fieldOf(value,"op")];
         if (op === undefined) {
-          if (value.op === "floorDiv" || value.op === "floorMod") {
+          if (String(fieldOf(value,"op")) === "floorDiv" || String(fieldOf(value,"op")) === "floorMod") {
             // A floor division and a floored remainder are the operations of a
             // language whose division rounds towards zero and whose remainder
             // takes the sign of its left side, and this backend has not written
             // them: the division it has is the truncating one.
             unreachable(
-              `compute ${value.op}: this backend has not written a floor division or a floored remainder`,
+              `compute ${fieldOf(value,"op")}: this backend has not written a floor division or a floored remainder`,
               this.name,
               this.candidate,
             );
           }
-          unreachable(`compute ${value.op}`, this.name, this.candidate);
+          unreachable(`compute ${fieldOf(value,"op")}`, this.name, this.candidate);
         }
         this.op(op);
-        if (value.k === "compare") {
+        if (String(fieldOf(value,"k")) === "compare") {
           this.convert({ kind: "primitive", name: "i32" }, at);
           return;
         }
-        this.convert(value.type, at);
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "call": {
@@ -1891,20 +1895,22 @@ class Body {
         // function of the program, which is a call of the index that function
         // has in the module. Every argument goes down first, in the order the
         // call passes them, and the instruction takes the last one off the top.
-        if (builtinFor(value.call.callee) === null && this.module.function(value.call.callee) === null) {
-          unreachable(`call ${value.call.callee}`, this.name, this.candidate);
+        const callRecord = fieldOf(value,"call");
+        const calleeName = String(fieldOf(callRecord,"callee"));
+        if (builtinFor(calleeName) === null && this.module.function(calleeName) === null) {
+          unreachable(`call ${calleeName}`, this.name, this.candidate);
         }
         // The wide arithmetic is the kernel beside the runtime, and a module
         // calls it the same way the other two backends do.
-        const kernel = WIDE_BUILTINS[value.call.callee];
+        const kernel = WIDE_BUILTINS[calleeName];
         if (kernel !== undefined) {
-          this.wideKernel(kernel, value.call);
+          this.wideKernel(kernel, fieldOf(value,"call"));
           return;
         }
         // The dynamic values and the dynamic arrays are the runtime's own
         // representation, and the runtime is the host: these calls are calls
         // of the services of the host ABI.
-        const answered = this.dynamicCall(value.call);
+        const answered = this.dynamicCall(fieldOf(value,"call"));
         if (answered !== null) {
           this.convert(answered, at);
           return;
@@ -1912,28 +1918,31 @@ class Body {
         // A call of another function of the program is a call of the index that
         // function has in this module: there is no linker and no symbol table,
         // so the index is a lookup in the table the module holds.
-        const callee = this.module.function(value.call.callee);
+        const callee = this.module.function(fieldOf(fieldOf(value,"call"),"callee"));
         if (callee !== null) {
-          this.programCall(value.call, callee, at);
+          this.programCall(fieldOf(value,"call"), callee, at);
           return;
         }
-        for (const [position, argument] of value.call.args.entries()) {
-          this.value(argument, value.call.argTypes[position] ?? argument.type);
+        const callArgs = fieldOf(callRecord,"args") as SemanticValue[];
+        const callArgTypes = fieldOf(callRecord,"argTypes") as SemanticType[];
+        for (let position = 0; position < callArgs.length; position += 1) {
+          const argument = callArgs[position];
+          this.value(argument, callArgTypes[position] ?? fieldOf(argument,"type") as SemanticType);
         }
-        this.builtin(value.call.callee);
-        this.convert(value.type, at);
+        this.builtin(fieldOf(fieldOf(value,"call"),"callee"));
+        this.convert(fieldOf(value,"type"), at);
         return;
       }
       case "argv": {
         // `process.argv.length` and `process.argv(n)` are the same read of the
         // command line, and the host the module runs under is a process of its
         // own: the arguments it reads are the ones the host was given.
-        if (value.index === null) {
+        if (fieldOf(value,"index") === null) {
           this.callService("blaze_rt_argv_count");
           this.convert({ kind: "primitive", name: "usize" }, at);
           return;
         }
-        this.value(value.index, { kind: "primitive", name: "usize" });
+        this.value(fieldOf(value,"index"), { kind: "primitive", name: "usize" });
         this.callService("blaze_rt_argv");
         this.convert(F64_TYPE, at);
         return;
@@ -1943,11 +1952,11 @@ class Body {
         this.convert(TEXT, at);
         return;
       case "toText":
-        this.asText(value.of, value.digits, value.precision === true);
+        this.asText(fieldOf(value,"of"), fieldOf(value,"digits"), fieldOf(value,"precision") === true);
         this.convert(TEXT, at);
         return;
       default:
-        unreachable(`hold a value the IR keeps as "${value.k}"`, this.name, this.candidate);
+        unreachable(`hold a value the IR keeps as "${fieldOf(value,"k")}"`, this.name, this.candidate);
     }
   }
 
@@ -1973,7 +1982,7 @@ class Body {
     // thirty-two bytes. It is laid down once in the module's own data and every
     // use is its address, the same way a pooled float is read out of a global
     // rather than written out again at every place it appears.
-    if (type.kind === "primitive" && isWide(type.name)) {
+    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) {
       this.wideConstant(BigInt(text));
       return;
     }
@@ -2039,10 +2048,10 @@ class Body {
     }
     if (op !== "eq" && op !== "ne") this.wideRefuse(`compare ${op}`);
     const leftAt = this.borrow(I32);
-    this.value(left, left.type);
+    this.value(left, fieldOf(left,"type") as SemanticType);
     this.keep(leftAt);
     const rightAt = this.borrow(I32);
-    this.value(right, right.type);
+    this.value(right, fieldOf(right,"type") as SemanticType);
     this.keep(rightAt);
     const leftLimb = this.borrow(I64);
     const rightLimb = this.borrow(I64);
@@ -2083,10 +2092,10 @@ class Body {
    */
   private wideOrder(left: SemanticValue, right: SemanticValue, orEqual: boolean): void {
     const leftAt = this.borrow(I32);
-    this.value(left, left.type);
+    this.value(left, fieldOf(left,"type") as SemanticType);
     this.keep(leftAt);
     const rightAt = this.borrow(I32);
-    this.value(right, right.type);
+    this.value(right, fieldOf(right,"type") as SemanticType);
     this.keep(rightAt);
     const leftLimb = this.borrow(I64);
     const rightLimb = this.borrow(I64);
@@ -2150,10 +2159,10 @@ class Body {
    */
   private wideSelect(condition: SemanticValue, then: SemanticValue, otherwise: SemanticValue): void {
     const thenAt = this.borrow(I32);
-    this.value(then, then.type);
+    this.value(then, fieldOf(then,"type") as SemanticType);
     this.keep(thenAt);
     const otherAt = this.borrow(I32);
-    this.value(otherwise, otherwise.type);
+    this.value(otherwise, fieldOf(otherwise,"type") as SemanticType);
     this.keep(otherAt);
     const out = this.wideScratch();
     for (let limb = 0; limb < 4; limb += 1) {
@@ -2161,8 +2170,8 @@ class Body {
       // address before its value and the value is what the selection answers —
       // and it is pushed once per limb, because the store consumes it.
       this.atScratch(out);
-      this.loadLimb(thenAt, limb);
-      this.loadLimb(otherAt, limb);
+      this.loadLimb(thenAt, limb, undefined);
+      this.loadLimb(otherAt, limb, undefined);
       this.condition(condition);
       this.op(0x1b); // `select`
       this.storeLimb(limb);
@@ -2183,7 +2192,7 @@ class Body {
    */
   private wideShift(op: "shl" | "shr", value: SemanticValue, count: SemanticValue): void {
     const valueAt = this.borrow(I32);
-    this.value(value, value.type);
+    this.value(value, fieldOf(value,"type") as SemanticType);
     this.keep(valueAt);
     const countAt = this.borrow(I32);
     // The count is a machine number and the machine moves a number by less than
@@ -2234,7 +2243,7 @@ class Body {
     // neighbour of the copy.
     for (let limb = 0; limb < 4; limb += 1) {
       this.i32(padded + 32 + limb * 8);
-      this.loadLimb(valueAt, limb);
+      this.loadLimb(valueAt, limb, undefined);
       this.op(0x37); // `i64.store`
       this.code.varuint(3);
       this.code.varuint(0);
@@ -2360,8 +2369,11 @@ class Body {
   private wideKernel(symbol: string, call: SemanticCall): void {
     const out = this.wideScratch();
     this.i32(out);
-    for (const [position, argument] of call.args.entries()) {
-      this.value(argument, call.argTypes[position] ?? argument.type);
+    const args = fieldOf(call,"args") as SemanticValue[];
+    const argTypes = fieldOf(call,"argTypes") as SemanticType[];
+    for (let position = 0; position < args.length; position += 1) {
+      const argument = args[position];
+      this.value(argument, argTypes[position] ?? fieldOf(argument,"type") as SemanticType);
     }
     this.callService(symbol);
     this.i32(out);
@@ -2398,17 +2410,17 @@ class Body {
     if (op === "mul" || op === "div" || op === "mod") {
       const out = this.wideScratch();
       this.i32(out);
-      this.value(left, left.type);
-      this.value(right, right.type);
+      this.value(left, fieldOf(left,"type") as SemanticType);
+      this.value(right, fieldOf(right,"type") as SemanticType);
       this.callService(`blaze_rt_u256_${op}`);
       this.i32(out);
       return;
     }
     const leftAt = this.borrow(I32);
-    this.value(left, left.type);
+    this.value(left, fieldOf(left,"type") as SemanticType);
     this.keep(leftAt);
     const rightAt = this.borrow(I32);
-    this.value(right, right.type);
+    this.value(right, fieldOf(right,"type") as SemanticType);
     this.keep(rightAt);
     const out = this.wideScratch();
 
@@ -2416,8 +2428,8 @@ class Body {
     if (bitwise !== undefined) {
       for (let limb = 0; limb < 4; limb += 1) {
         this.atScratch(out);
-        this.loadLimb(leftAt, limb);
-        this.loadLimb(rightAt, limb);
+        this.loadLimb(leftAt, limb, undefined);
+        this.loadLimb(rightAt, limb, undefined);
         this.op(bitwise);
         this.storeLimb(limb);
       }
@@ -2634,7 +2646,7 @@ class Body {
       this.asText(value.of, value.digits, value.precision === true);
       return;
     }
-    if (value.k === "const" && isTextType(value.type)) {
+    if (value.k === "const" && isTextType(fieldOf(value,"type") as SemanticType)) {
       this.i32(this.poolText(value.text));
       return;
     }
@@ -2682,7 +2694,7 @@ class Body {
    * joins with another one has to be a text the runtime can measure and copy.
    */
   private asText(value: SemanticValue, digits: number | null, precision = false): void {
-    const type = value.type;
+    const type = fieldOf(value,"type") as SemanticType;
     if (isTextType(type)) {
       this.text(value);
       return;
@@ -2781,7 +2793,7 @@ class Body {
    * on the way out.
    */
   private printNumber(value: SemanticValue, bigint: boolean): void {
-    const type = value.type;
+    const type = fieldOf(value,"type") as SemanticType;
     if (type.kind === "primitive" && isWide(type.name)) {
       this.value(value, type);
       this.callService("blaze_rt_print_u256");
@@ -2800,7 +2812,7 @@ class Body {
 
   /** Keeps a value alive across a release of it, which is the runtime's counting. */
   private retainValue(value: SemanticValue): void {
-    this.value(value, value.type);
+    this.value(value, fieldOf(value,"type") as SemanticType);
     this.callService("blaze_rt_retain");
     this.op(0x1a); // `drop`
   }
@@ -2950,8 +2962,8 @@ class Body {
           this.value(statement.value, element);
         }
         const store = fieldOf(facts(element),"store");
-        this.op(store.code);
-        this.code.varuint(store.align);
+        this.op(fieldOf(store,"code"));
+        this.code.varuint(fieldOf(store,"align"));
         this.code.varuint(0);
         return;
       }
@@ -2966,10 +2978,10 @@ class Body {
         // type, which is the width the store pops. Wrapping the value as well
         // handed `i64.store` and `f64.store` an `i32`.
         this.value(statement.object, ADDRESS);
-        this.value(statement.value, statement.value.type);
-        const store = fieldOf(facts(statement.value.type),"store");
-        this.op(store.code);
-        this.code.varuint(store.align);
+        this.value(statement.value, fieldOf(statement.value,"type") as SemanticType);
+        const store = fieldOf(facts(fieldOf(statement.value,"type") as SemanticType),"store");
+        this.op(fieldOf(store,"code"));
+        this.code.varuint(fieldOf(store,"align"));
         this.code.varuint(field.offset);
         return;
       }
@@ -3044,7 +3056,7 @@ class Body {
           return;
         }
         for (const [position, argument] of statement.call.args.entries()) {
-          this.value(argument, statement.call.argTypes[position] ?? argument.type);
+          this.value(argument, statement.call.argTypes[position] ?? fieldOf(argument,"type") as SemanticType);
         }
         this.builtin(statement.call.callee);
         // Nothing reads the answer, so it is dropped rather than left for the
@@ -3118,8 +3130,8 @@ class Body {
         this.op(fieldOf(BINARY[String(I32)],"add") as number);
         this.value(statement.value, element);
         const store = fieldOf(facts(element),"store");
-        this.op(store.code);
-        this.code.varuint(store.align);
+        this.op(fieldOf(store,"code"));
+        this.code.varuint(fieldOf(store,"align"));
         this.code.varuint(0);
         // The index moves on, at the head of the turn rather than at its foot,
         // so a `continue` does not skip it.
@@ -3323,8 +3335,8 @@ class Body {
         loop.elementType,
       );
       const load = fieldOf(facts(loop.elementType),"load");
-      this.op(load.code);
-      this.code.varuint(load.align);
+      this.op(fieldOf(load,"code"));
+      this.code.varuint(fieldOf(load,"align"));
       this.code.varuint(0);
       this.convert(loop.elementType, loop.elementType);
       this.set(loop.element);
@@ -3529,10 +3541,10 @@ class Body {
         // one first — a raw number is not a handle, and a small one is the
         // index of a value some other part of the program registered.
         const value = argument(0);
-        if (isTextType(value.type)) {
+        if (isTextType(fieldOf(value,"type") as SemanticType)) {
           this.value(value, TEXT);
           this.callService("blaze_rt_box_string");
-        } else if (isNumber(value.type)) {
+        } else if (isNumber(fieldOf(value,"type") as SemanticType)) {
           this.value(value, F64_TYPE);
           this.callService("blaze_rt_box_number");
         } else {
@@ -3737,7 +3749,7 @@ class Body {
         // The number a value is written at: a text is the number its text
         // states, and the runtime reads it out of the box it makes of it.
         const value = argument(0);
-        if (isTextType(value.type)) {
+        if (isTextType(fieldOf(value,"type") as SemanticType)) {
           this.value(value, TEXT);
           this.callService("blaze_rt_box_string");
         } else {
@@ -3849,7 +3861,7 @@ class Body {
    * runtime's own work rather than the module's.
    */
   private dynamicValue(value: SemanticValue): void {
-    const type = value.type;
+    const type = fieldOf(value,"type") as SemanticType;
     if (type.kind === "ref" && type.of === null && type.name === undefined) {
       this.value(value, DYNAMIC_TYPE);
       return;
@@ -3869,7 +3881,7 @@ class Body {
    * nothing is no offset at all: the runtime reads an empty text at it.
    */
   private textArgument(value: SemanticValue): void {
-    if (isTextType(value.type)) {
+    if (isTextType(fieldOf(value,"type") as SemanticType)) {
       this.value(value, TEXT);
       return;
     }
@@ -3880,7 +3892,7 @@ class Body {
     // A value the read could not type is the handle it is held as: the value
     // goes down as that handle and the host reads the text out of the box it
     // names. A value a test narrowed to a text arrives here.
-    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+    if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) {
       this.dynamicValue(value);
       this.callService("blaze_rt_to_text");
       return;
@@ -3980,10 +3992,11 @@ const TYPE_CODES: Record<string, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f6
  */
 function constantOf(value: SemanticValue | null): { text: string; type: SemanticType } | null {
   if (value === null) return null;
-  if (value.k !== "const") return null;
-  if (value.type.kind !== "primitive") return null;
-  if (isWide(value.type.name)) return null;
-  return { text: value.text, type: value.type };
+  if (String(fieldOf(value,"k")) !== "const") return null;
+  const type = fieldOf(value,"type") as SemanticType;
+  if (type.kind !== "primitive") return null;
+  if (isWide(type.name)) return null;
+  return { text: String(fieldOf(value,"text")), type };
 }
 
 /**
