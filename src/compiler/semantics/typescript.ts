@@ -20659,7 +20659,9 @@ class TypeScriptParser {
         const held = written.get(field);
         padded.push(held ?? { name: field, value: this.zeroFor(this.typeExprOfShape(declared.type)) });
       }
-      padded.push({ name: "__arm", value: { k: "literal", text: String(arm) } });
+      const armValue: Expression = { k: "literal", text: String(arm) };
+      this.expressionTypes.set(armValue, NUMBER_RESULT);
+      padded.push({ name: "__arm", value: armValue });
       return { k: "object", fields: padded, written: [...written.keys()] };
     }
     return { k: "object", fields };
