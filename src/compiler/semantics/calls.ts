@@ -35,6 +35,18 @@
 
 import type { CallStrategy, FileContract, FunctionContract } from "../core/types.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function symbolOf(contract: FunctionContract): string {
+  return String(fieldOf(fieldOf(contract, "function"), "symbol"));
+}
+
+function callsOf(contract: FunctionContract): { strategy: string; callee: string }[] {
+  return fieldOf(fieldOf(contract, "definition"), "calls") as { strategy: string; callee: string }[];
+}
+
 /** The functions of the program, by the symbol the link names them by. */
 export type ContractsByName = Map<string, FunctionContract>;
 
@@ -46,7 +58,7 @@ export type ContractsByName = Map<string, FunctionContract>;
  * own, so the program it is part of is the only thing that can check it.
  */
 function isVerified(contract: FunctionContract): boolean {
-  return contract.ensures.length > 0;
+  return (fieldOf(contract, "ensures") as string[]).length > 0;
 }
 
 /**
@@ -72,10 +84,10 @@ export function vectorChecked(contracts: ContractsByName): Set<string> {
   const checked = new Set<string>();
   for (const contract of contracts.values()) {
     if (!isVerified(contract)) continue;
-    const calls = contract.definition.calls.some((edge) => edge.strategy === "call" && contracts.has(edge.callee));
+    const calls = callsOf(contract).some((edge) => String(fieldOf(edge, "strategy")) === "call" && contracts.has(String(fieldOf(edge, "callee"))));
     if (calls) continue;
-    checked.add(contract.function.symbol);
-    for (const body of writtenOut(contracts, contract)) checked.add(body.function.symbol);
+    checked.add(symbolOf(contract));
+    for (const body of writtenOut(contracts, contract)) checked.add(symbolOf(body));
   }
   return checked;
 }
@@ -86,8 +98,8 @@ export function vectorChecked(contracts: ContractsByName): Set<string> {
  * the body rather than from the conditions beside it.
  */
 function isEffectFree(contract: FunctionContract): boolean {
-  const definition = contract.definition;
-  return !definition.allocates && !definition.prints && !definition.readsArgv;
+  const definition = fieldOf(contract, "definition");
+  return fieldOf(definition, "allocates") !== true && fieldOf(definition, "prints") !== true && fieldOf(definition, "readsArgv") !== true;
 }
 
 /**
@@ -98,7 +110,9 @@ function isEffectFree(contract: FunctionContract): boolean {
 export function contractsByName(files: readonly FileContract[]): ContractsByName {
   const contracts: ContractsByName = new Map();
   for (const file of files) {
-    for (const contract of Object.values(file.functions)) contracts.set(contract.function.symbol, contract);
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      contracts.set(symbolOf(contract), contract);
+    }
   }
   return contracts;
 }
@@ -116,13 +130,17 @@ export function contractsByName(files: readonly FileContract[]): ContractsByName
  */
 function terminates(contracts: ContractsByName, caller: string, callee: string): boolean {
   const seen = new Set<string>();
-  const stack = (contracts.get(callee)?.definition.calls ?? []).map((edge) => edge.callee);
+  const calleeContract = contracts.get(callee);
+  const stack = (calleeContract === undefined ? [] : callsOf(calleeContract)).map((edge) => String(fieldOf(edge, "callee")));
   while (stack.length > 0) {
     const name = stack.pop() as string;
     if (name === callee || name === caller) return false;
     if (seen.has(name)) continue;
     seen.add(name);
-    for (const edge of contracts.get(name)?.definition.calls ?? []) stack.push(edge.callee);
+    const reachedContract = contracts.get(name);
+    if (reachedContract !== undefined) {
+      for (const edge of callsOf(reachedContract)) stack.push(String(fieldOf(edge, "callee")));
+    }
   }
   return true;
 }
@@ -148,8 +166,8 @@ export function strategyFor(contracts: ContractsByName, caller: string, callee: 
 export function resolveCalls(files: readonly FileContract[]): void {
   const contracts = contractsByName(files);
   for (const contract of contracts.values()) {
-    for (const edge of contract.definition.calls) {
-      edge.strategy = strategyFor(contracts, contract.function.symbol, edge.callee);
+    for (const edge of callsOf(contract)) {
+      (edge as Record<string, unknown>)["strategy"] = strategyFor(contracts, symbolOf(contract), String(fieldOf(edge, "callee")));
     }
   }
 }
@@ -166,14 +184,14 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
   const stack = [contract];
   while (stack.length > 0) {
     const current = stack.pop() as FunctionContract;
-    const name = current.function.symbol;
+    const name = symbolOf(current);
     if (bodies.has(name)) continue;
     bodies.set(name, current);
-    for (const edge of current.definition.calls) {
+    for (const edge of callsOf(current)) {
       // The edges that are written out form a forest, because `strategyFor`
       // refuses the one whose callee reaches its caller back, so this ends.
-      if (edge.strategy !== "inline") continue;
-      const reached = contracts.get(edge.callee);
+      if (String(fieldOf(edge, "strategy")) !== "inline") continue;
+      const reached = contracts.get(String(fieldOf(edge, "callee")));
       if (reached !== undefined) stack.push(reached);
     }
   }
@@ -194,9 +212,9 @@ export function writtenOut(contracts: ContractsByName, contract: FunctionContrac
 export function callableFrom(contracts: ContractsByName, contract: FunctionContract): FunctionContract[] {
   const reached = new Map<string, FunctionContract>();
   for (const body of writtenOut(contracts, contract)) {
-    for (const edge of body.definition.calls) {
-      const callee = contracts.get(edge.callee);
-      if (callee !== undefined) reached.set(callee.function.symbol, callee);
+    for (const edge of callsOf(body)) {
+      const callee = contracts.get(String(fieldOf(edge, "callee")));
+      if (callee !== undefined) reached.set(symbolOf(callee), callee);
     }
   }
   return [...reached.values()];

@@ -647,6 +647,22 @@ export interface Whole {
 
 export type Value = Whole | bigint | number | boolean | string | null | BufferValue;
 
+function bufferValues(value: Value): Value[] {
+  return (value as unknown as Record<string, unknown>)["values"] as Value[];
+}
+
+function bufferType(value: Value): TypeExpr {
+  return (value as unknown as Record<string, unknown>)["type"] as TypeExpr;
+}
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? String(fieldOf(error, "message")) : String(error);
+}
+
 export function isWhole(value: Value): value is Whole {
   return typeof value === "object" && value !== null && (value as unknown as Record<string, unknown>)["magnitude"] !== undefined;
 }
@@ -666,7 +682,7 @@ export function formatValue(value: Value): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "string") return `"${value}"`;
   if (value === null) return "null";
-  return `[${value.values.map(formatValue).join(", ")}]`;
+  return `[${bufferValues(value).map(formatValue).join(", ")}]`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -993,6 +1009,27 @@ export interface NullType {
 
 export type StaticType = TypeExpr | NullType;
 
+/**
+ * A field of a type value read through its dictionary.
+ *
+ * The type language spells many shapes, and a value typed as `StaticType` has
+ * no one layout: the field a union arm writes is not at a fixed offset across
+ * the arms. Reading the field by its key is what `typeToString` and
+ * `describeType` already do, and it is the read every backend answers for a
+ * value whose layout is not known.
+ */
+function kindOf(type: StaticType): string {
+  return String((type as unknown as Record<string, unknown>)["kind"]);
+}
+
+function nameOf(type: StaticType): PrimitiveTypeName {
+  return (type as unknown as Record<string, unknown>)["name"] as PrimitiveTypeName;
+}
+
+function ofOf(type: StaticType): TypeExpr {
+  return (type as unknown as Record<string, unknown>)["of"] as TypeExpr;
+}
+
 function describeType(type: StaticType): string {
   return String((type as unknown as Record<string, unknown>)["kind"]) === "null" ? "null" : typeToString(type as TypeExpr);
 }
@@ -1048,7 +1085,8 @@ function widerInteger(left: PrimitiveTypeName, right: PrimitiveTypeName): Primit
 
 
 export function typeOf(expression: Expr, env: TypeEnv): StaticType {
-  switch (expression.t) {
+  const e = expression as unknown as Record<string, unknown>;
+  switch (String(e["t"])) {
     case "int":
       return { kind: "primitive", name: "i64" };
     case "float":
@@ -1058,26 +1096,26 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
     case "null":
       return { kind: "null" };
     case "var": {
-      const type = env.get(expression.name);
+      const type = env.get(String(e["name"]));
       if (type === undefined) {
-        throw contractError(`unknown identifier "${expression.name}"`, `known: ${[...env.keys()].join(", ")}`);
+        throw contractError(`unknown identifier "${String(e["name"])}"`, `known: ${[...env.keys()].join(", ")}`);
       }
       return type;
     }
     case "index": {
-      const base = typeOf(expression.base, env);
-      const index = typeOf(expression.index, env);
-      if (base.kind !== "ptr" && base.kind !== "slice" && base.kind !== "array") {
+      const base = typeOf(e["base"] as Expr, env);
+      const index = typeOf(e["index"] as Expr, env);
+      if (kindOf(base) !== "ptr" && kindOf(base) !== "slice" && kindOf(base) !== "array") {
         throw contractError(`cannot index ${describeType(base)}`);
       }
-      if (index.kind !== "primitive" || !isIntegerType(index.name)) {
+      if (kindOf(index) !== "primitive" || !isIntegerType(nameOf(index))) {
         throw contractError(`index must be an integer, got ${describeType(index)}`);
       }
-      return base.of;
+      return ofOf(base);
     }
     case "slice": {
-      const base = typeOf(expression.base, env);
-      if (base.kind !== "ptr" && base.kind !== "slice" && base.kind !== "array") {
+      const base = typeOf(e["base"] as Expr, env);
+      if (kindOf(base) !== "ptr" && kindOf(base) !== "slice" && kindOf(base) !== "array") {
         throw contractError(`cannot slice ${describeType(base)}`);
       }
       // A slice of a buffer is a buffer of the same element type.
@@ -1087,62 +1125,62 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
       // A range runs over the integers i between its bounds, so a bound may be
       // any number: a counted loop in a language whose numbers are doubles
       // needs one. `a..b` includes b, `a..<b` does not.
-      const from = typeOf(expression.from, env);
-      const to = typeOf(expression.to, env);
+      const from = typeOf(e["from"] as Expr, env);
+      const to = typeOf(e["to"] as Expr, env);
       for (const bound of [from, to]) {
-        if (bound.kind !== "primitive" || !isNumericType(bound.name)) {
+        if (kindOf(bound) !== "primitive" || !isNumericType(nameOf(bound))) {
           throw contractError(`reduction bounds must be numbers, got ${describeType(bound)}`);
         }
       }
       const inner = new Map(env);
-      inner.set(expression.varName, { kind: "primitive", name: "usize" });
-      const body = typeOf(expression.body, inner);
-      if (body.kind !== "primitive" || !isNumericType(body.name)) {
+      inner.set(String(e["varName"]), { kind: "primitive", name: "usize" });
+      const body = typeOf(e["body"] as Expr, inner);
+      if (kindOf(body) !== "primitive" || !isNumericType(nameOf(body))) {
         throw contractError(`reduction body must be numeric, got ${describeType(body)}`);
       }
-      if (expression.op === "min" || expression.op === "max") {
+      if (String(e["op"]) === "min" || String(e["op"]) === "max") {
         return body;
       }
-      return expression.op === "sum" ? sumType(body) : productType(body);
+      return String(e["op"]) === "sum" ? sumType(body) : productType(body);
     }
     case "call": {
-      if (expression.name === "len") {
-        if (expression.args.length !== 1) throw contractError("len() takes exactly one argument");
-        const argument = typeOf(expression.args[0], env);
-        if (argument.kind === "null" || argument.kind === "primitive") {
+      if (String(e["name"]) === "len") {
+        if ((e["args"] as Expr[]).length !== 1) throw contractError("len() takes exactly one argument");
+        const argument = typeOf((e["args"] as Expr[])[0], env);
+        if (kindOf(argument) === "null" || kindOf(argument) === "primitive") {
           throw contractError(`len() requires a buffer, got ${describeType(argument)}`);
         }
         return { kind: "primitive", name: "usize" };
       }
-      if ((expression.name === "min" || expression.name === "max") && expression.args.length >= 2) {
-        let type = typeOf(expression.args[0], env);
-        for (const argument of expression.args.slice(1)) {
+      if ((String(e["name"]) === "min" || String(e["name"]) === "max") && (e["args"] as Expr[]).length >= 2) {
+        let type = typeOf((e["args"] as Expr[])[0], env);
+        for (const argument of (e["args"] as Expr[]).slice(1)) {
           type = numericType(type, typeOf(argument, env));
         }
         return type;
       }
-      throw contractError(`unknown function "${expression.name}()"`);
+      throw contractError(`unknown function "${String(e["name"])}()"`);
     }
     case "unary": {
-      const operand = typeOf(expression.operand, env);
-      if (expression.op === "!") {
-        if (operand.kind !== "primitive" || operand.name !== "bool") {
+      const operand = typeOf(e["operand"] as Expr, env);
+      if (String(e["op"]) === "!") {
+        if (kindOf(operand) !== "primitive" || nameOf(operand) !== "bool") {
           throw contractError(`! requires bool, got ${describeType(operand)}`);
         }
         return operand;
       }
-      if (operand.kind !== "primitive" || !isNumericType(operand.name)) {
+      if (kindOf(operand) !== "primitive" || !isNumericType(nameOf(operand))) {
         throw contractError(`unary - requires a number, got ${describeType(operand)}`);
       }
       return operand;
     }
     case "binary": {
-      const left = typeOf(expression.left, env);
-      const right = typeOf(expression.right, env);
-      switch (expression.op) {
+      const left = typeOf(e["left"] as Expr, env);
+      const right = typeOf(e["right"] as Expr, env);
+      switch (String(e["op"])) {
         case "==":
         case "!=":
-          comparable(expression.op, left, right);
+          comparable(String(e["op"]), left, right);
           return { kind: "primitive", name: "bool" };
         case "<":
         case "<=":
@@ -1153,8 +1191,8 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
         }
         case "&&":
         case "||": {
-          if (left.kind !== "primitive" || left.name !== "bool" || right.kind !== "primitive" || right.name !== "bool") {
-            throw contractError(`${expression.op} requires bool operands, got ${describeType(left)} and ${describeType(right)}`);
+          if (kindOf(left) !== "primitive" || nameOf(left) !== "bool" || kindOf(right) !== "primitive" || nameOf(right) !== "bool") {
+            throw contractError(`${String(e["op"])} requires bool operands, got ${describeType(left)} and ${describeType(right)}`);
           }
           return { kind: "primitive", name: "bool" };
         }
@@ -1162,28 +1200,30 @@ export function typeOf(expression: Expr, env: TypeEnv): StaticType {
           return numericType(left, right);
       }
     }
+    default:
+      throw contractError(`unknown expression kind "${String(e["t"])}"`);
   }
 }
 
-function sumType(body: TypeExpr): TypeExpr {
-  if (body.kind !== "primitive" || !isNumericType(body.name)) {
+function sumType(body: StaticType): TypeExpr {
+  if (kindOf(body) !== "primitive" || !isNumericType(nameOf(body))) {
     throw contractError(`sum() body must be numeric, got ${describeType(body)}`);
   }
   // A sum of whole numbers is a whole number, and it is not held at the width
   // of the elements: summing 52 bytes of 5 is 260, not 4.
-  if (isIntegerType(body.name)) return { kind: "primitive", name: isSignedType(body.name) ? "i64" : "u64" };
-  return body;
+  if (isIntegerType(nameOf(body))) return primitiveTypeExpr(isSignedType(nameOf(body)) ? "i64" : "u64");
+  return body as TypeExpr;
 }
 
-function productType(body: TypeExpr): TypeExpr {
-  if (body.kind !== "primitive" || !isNumericType(body.name)) {
+function productType(body: StaticType): TypeExpr {
+  if (kindOf(body) !== "primitive" || !isNumericType(nameOf(body))) {
     throw contractError(`product() body must be numeric, got ${describeType(body)}`);
   }
   // A product of whole numbers is held wider for the same reason a sum is:
   // multiplying 4 bytes of 5 is 625, not 113, and wrapping at the element
   // width made a correct implementation read as a wrong one.
-  if (isIntegerType(body.name)) return { kind: "primitive", name: isSignedType(body.name) ? "i64" : "u64" };
-  return body;
+  if (isIntegerType(nameOf(body))) return primitiveTypeExpr(isSignedType(nameOf(body)) ? "i64" : "u64");
+  return body as TypeExpr;
 }
 
 export interface EvalContext {
@@ -1191,12 +1231,20 @@ export interface EvalContext {
   readonly values: ReadonlyMap<string, Value>;
 }
 
+function valuesOf(context: EvalContext): ReadonlyMap<string, Value> {
+  return (context as unknown as Record<string, unknown>)["values"] as ReadonlyMap<string, Value>;
+}
+
+function envOf(context: EvalContext): TypeEnv {
+  return (context as unknown as Record<string, unknown>)["env"] as TypeEnv;
+}
+
 function wrapInteger(value: Whole, name: PrimitiveTypeName): Whole {
   return wrapWholeBits(wholeBits(value), name);
 }
 
 function roundFloat(value: number, type: StaticType): number {
-  if (type.kind === "primitive" && type.name === "f32") return Math.fround(value);
+  if (kindOf(type) === "primitive" && nameOf(type) === "f32") return Math.fround(value);
   return value;
 }
 
@@ -1246,45 +1294,46 @@ function valuesEqual(left: Value, right: Value): boolean {
 }
 
 export function evaluate(expression: Expr, context: EvalContext): Value {
-  switch (expression.t) {
+  const e = expression as unknown as Record<string, unknown>;
+  switch (String(e["t"])) {
     case "int":
-      return expression.value;
+      return e["value"] as Value;
     case "float":
-      return expression.value;
+      return e["value"] as Value;
     case "bool":
-      return expression.value;
+      return e["value"] as Value;
     case "null":
       return null;
     case "var": {
-      if (!context.values.has(expression.name)) {
-        throw contractError(`unbound identifier "${expression.name}"`);
+      if (!valuesOf(context).has(String(e["name"]))) {
+        throw contractError(`unbound identifier "${String(e["name"])}"`);
       }
-      const held = context.values.get(expression.name) as Value;
+      const held = valuesOf(context).get(String(e["name"])) as Value;
       return typeof held === "bigint" ? wholeOfValue(held) : held;
     }
     case "index": {
-      const base = evaluate(expression.base, context);
+      const base = evaluate(e["base"] as Expr, context);
       if (!isBufferValue(base)) {
         throw contractError(`cannot index ${formatValue(base)}`);
       }
-      const indexValue = evaluate(expression.index, context);
+      const indexValue = evaluate(e["index"] as Expr, context);
       const indexWhole = isWhole(indexValue) ? indexValue : typeof indexValue === "bigint" ? wholeOfValue(indexValue) : null;
       if (indexWhole === null) {
         throw contractError(`index must be an integer, got ${formatValue(indexValue)}`);
       }
-      if (compareWhole(indexWhole, zeroWhole()) < 0 || compareWhole(indexWhole, wholeOfNumber(base.values.length)) >= 0) {
+      if (compareWhole(indexWhole, zeroWhole()) < 0 || compareWhole(indexWhole, wholeOfNumber(bufferValues(base).length)) >= 0) {
         throw contractError(
-          `index ${formatValue(indexWhole)} out of bounds for ${expression.base.t === "var" ? expression.base.name : "expression"} of length ${base.values.length}`,
+          `index ${formatValue(indexWhole)} out of bounds for expression of length ${bufferValues(base).length}`,
         );
       }
-      return base.values[wholeToNumber(indexWhole)];
+      return bufferValues(base)[wholeToNumber(indexWhole)];
     }
     case "slice": {
-      const base = evaluate(expression.base, context);
+      const base = evaluate(e["base"] as Expr, context);
       if (!isBufferValue(base)) {
         throw contractError(`cannot slice ${formatValue(base)}`);
       }
-      const len = base.values.length;
+      const len = bufferValues(base).length;
       const sliceBound = (bound: Expr | null, defaultValue: number): number => {
         if (bound === null) return defaultValue;
         const value = evaluate(bound, context);
@@ -1297,8 +1346,8 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
         return n;
       };
       let step = 1;
-      if (expression.step !== null) {
-        const stepValue = evaluate(expression.step, context);
+      if ((e["step"] as Expr | null) !== null) {
+        const stepValue = evaluate(e["step"] as Expr, context);
         const stepWhole = isWhole(stepValue) ? stepValue : typeof stepValue === "bigint" ? wholeOfValue(stepValue) : null;
         if (stepWhole === null) {
           throw contractError(`slice step must be an integer, got ${formatValue(stepValue)}`);
@@ -1308,50 +1357,50 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       if (step === 0) {
         throw contractError("slice step must not be zero");
       }
-      const start = sliceBound(expression.start, step > 0 ? 0 : len - 1);
-      const stop = sliceBound(expression.stop, step > 0 ? len : -1);
+      const start = sliceBound(e["start"] as Expr | null, step > 0 ? 0 : len - 1);
+      const stop = sliceBound(e["stop"] as Expr | null, step > 0 ? len : -1);
       const sliced: Value[] = [];
       if (step > 0) {
         for (let i = Math.max(0, Math.min(start, len)); i < Math.max(0, Math.min(stop, len)); i += step) {
-          sliced.push(base.values[i]);
+          sliced.push(bufferValues(base)[i]);
         }
       } else {
         for (let i = Math.min(len - 1, Math.max(start, -1)); i > Math.max(-1, Math.min(stop, -1)); i += step) {
-          sliced.push(base.values[i]);
+          sliced.push(bufferValues(base)[i]);
         }
       }
-      return { kind: "buffer", type: base.type, values: sliced } as Value;
+      return { kind: "buffer", type: bufferType(base), values: sliced } as Value;
     }
     case "call": {
-      if (expression.name === "len") {
-        const argument = evaluate(expression.args[0], context);
+      if (String(e["name"]) === "len") {
+        const argument = evaluate((e["args"] as Expr[])[0], context);
         if (!isBufferValue(argument)) {
           throw contractError(`len() requires a buffer, got ${formatValue(argument)}`);
         }
-        return wholeOfNumber(argument.values.length);
+        return wholeOfNumber(bufferValues(argument).length);
       }
-      const values = expression.args.map((argument) => evaluate(argument, context));
-      if (expression.name === "min") {
+      const values = (e["args"] as Expr[]).map((argument) => evaluate(argument, context));
+      if (String(e["name"]) === "min") {
         return values.reduce((best, value) => (compareValues(value, best) < 0 ? value : best));
       }
-      if (expression.name === "max") {
+      if (String(e["name"]) === "max") {
         return values.reduce((best, value) => (compareValues(value, best) > 0 ? value : best));
       }
-      throw contractError(`unknown function "${expression.name}()"`);
+      throw contractError(`unknown function "${String(e["name"])}()"`);
     }
     case "reduce": {
-      const from = evaluate(expression.from, context);
-      const to = evaluate(expression.to, context);
+      const from = evaluate(e["from"] as Expr, context);
+      const to = evaluate(e["to"] as Expr, context);
       const fromWhole = isWhole(from) ? from : typeof from === "bigint" ? wholeOfValue(from) : null;
       if (fromWhole === null) {
         throw contractError("the lower bound of a reduction must be an integer", `got ${formatValue(from)}`);
       }
-      const count = reductionCount(fromWhole, to, expression.exclusive);
-      const innerValues = new Map(context.values);
+      const count = reductionCount(fromWhole, to, e["exclusive"] as boolean);
+      const innerValues = new Map(valuesOf(context));
       let accumulator: Value | null = null;
-      const bodyEnv = new Map(context.env);
-      bodyEnv.set(expression.varName, { kind: "primitive", name: "usize" });
-      const bodyType = typeOf(expression.body, bodyEnv);
+      const bodyEnv = new Map(envOf(context));
+      bodyEnv.set(String(e["varName"]), { kind: "primitive", name: "usize" });
+      const bodyType = typeOf(e["body"] as Expr, bodyEnv);
       if (wholeToNumber(count) > MAXIMUM_REDUCTION_TERMS) {
         throw contractError(
           `reduction over ${count} terms exceeds the limit of ${MAXIMUM_REDUCTION_TERMS}`,
@@ -1360,45 +1409,47 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       }
       for (let term = zeroWhole(); compareWhole(term, count) < 0; term = wholeFromBits(wholeAdd(term, wholeOfNumber(1)))) {
         const index = wholeFromBits(wholeAdd(fromWhole, term));
-        innerValues.set(expression.varName, index);
-        const value = evaluate(expression.body, { env: bodyEnv, values: innerValues });
+        innerValues.set(String(e["varName"]), index);
+        const value = evaluate(e["body"] as Expr, { env: bodyEnv, values: innerValues });
         if (accumulator === null) {
           accumulator = value;
           continue;
         }
-        accumulator = applyReduce(expression.op, accumulator, value, bodyType);
+        accumulator = applyReduce(String(e["op"]) as ReduceOp, accumulator, value, bodyType);
       }
       if (accumulator === null) {
         // An empty reduction yields the identity of the operator. min/max have
         // no identity, so an empty range is a contract error for them.
-        if (bodyType.kind !== "primitive" || !isNumericType(bodyType.name)) {
+        if (kindOf(bodyType) !== "primitive" || !isNumericType(nameOf(bodyType))) {
           throw contractError("empty reduction requires a numeric body");
         }
-        if (expression.op === "min" || expression.op === "max") {
-          throw contractError(`empty ${expression.op}() reduction has no result`);
+        if (String(e["op"]) === "min" || String(e["op"]) === "max") {
+          throw contractError(`empty ${String(e["op"])}() reduction has no result`);
         }
-        const one = expression.op === "sum" ? 0 : 1;
-        accumulator = isIntegerType(bodyType.name) ? wholeOfNumber(one) : roundFloat(one, bodyType);
+        const one = String(e["op"]) === "sum" ? 0 : 1;
+        accumulator = isIntegerType(nameOf(bodyType)) ? wholeOfNumber(one) : roundFloat(one, bodyType);
       }
-      return normalizeReduceResult(accumulator, expression.op, bodyType);
+      return normalizeReduceResult(accumulator, String(e["op"]) as ReduceOp, bodyType);
     }
     case "unary": {
-      const operand = evaluate(expression.operand, context);
-      if (expression.op === "!") {
+      const operand = evaluate(e["operand"] as Expr, context);
+      if (String(e["op"]) === "!") {
         if (typeof operand !== "boolean") throw contractError(`! requires bool, got ${formatValue(operand)}`);
         return !operand;
       }
-      const type = typeOf(expression.operand, context.env);
-      if (type.kind === "primitive" && isIntegerType(type.name)) {
+      const type = typeOf(e["operand"] as Expr, envOf(context));
+      if (kindOf(type) === "primitive" && isIntegerType(nameOf(type))) {
         const whole = isWhole(operand) ? operand : typeof operand === "bigint" ? wholeOfValue(operand) : null;
         if (whole === null) throw contractError(`unary - requires an integer, got ${formatValue(operand)}`);
         const bits = (0n - wholeBits(whole)) & WHOLE_MASK;
-        return wrapInteger(wholeFromBits(bits), type.name);
+        return wrapInteger(wholeFromBits(bits), nameOf(type));
       }
       return roundFloat(-asNumber(operand, type), type);
     }
     case "binary":
       return evaluateBinary(expression, context);
+    default:
+      throw contractError(`unknown expression kind "${String(e["t"])}"`);
   }
 }
 
@@ -1442,35 +1493,39 @@ function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: S
 function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType): Value {
   // The reduction is held at the type it has, which is wider than the elements
   // it sums: a sum of 100 bytes of 5 is 500, and not 244.
-  if (op !== "sum" && op !== "product" || bodyType.kind === "null") return value;
+  if (op !== "sum" && op !== "product" || kindOf(bodyType) === "null") return value;
   const type = op === "sum" ? sumType(bodyType) : productType(bodyType);
-  if (type.kind === "primitive" && isIntegerType(type.name)) {
+  if (kindOf(type) === "primitive" && isIntegerType(nameOf(type))) {
     const whole = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
-    if (whole !== null) return wrapInteger(whole, type.name);
+    if (whole !== null) return wrapInteger(whole, nameOf(type));
   }
-  if (type.kind === "primitive" && type.name === "f32" && typeof value === "number") {
+  if (kindOf(type) === "primitive" && nameOf(type) === "f32" && typeof value === "number") {
     return Math.fround(value);
   }
   return value;
 }
 
 
-function evaluateBinary(expression: Expr & { t: "binary" }, context: EvalContext): Value {
-  if (expression.op === "&&" || expression.op === "||") {
-    const left = evaluate(expression.left, context);
-    if (typeof left !== "boolean") throw contractError(`${expression.op} requires bool operands`);
-    if (expression.op === "&&" && !left) return false;
-    if (expression.op === "||" && left) return true;
-    const right = evaluate(expression.right, context);
-    if (typeof right !== "boolean") throw contractError(`${expression.op} requires bool operands`);
+function evaluateBinary(expression: Expr, context: EvalContext): Value {
+  const e = expression as unknown as Record<string, unknown>;
+  const op = String(e["op"]);
+  const leftExpression = e["left"] as Expr;
+  const rightExpression = e["right"] as Expr;
+  if (op === "&&" || op === "||") {
+    const left = evaluate(leftExpression, context);
+    if (typeof left !== "boolean") throw contractError(`${op} requires bool operands`);
+    if (op === "&&" && !left) return false;
+    if (op === "||" && left) return true;
+    const right = evaluate(rightExpression, context);
+    if (typeof right !== "boolean") throw contractError(`${op} requires bool operands`);
     return right;
   }
 
-  const type = typeOf(expression, context.env);
-  const left = evaluate(expression.left, context);
-  const right = evaluate(expression.right, context);
+  const type = typeOf(expression, envOf(context));
+  const left = evaluate(leftExpression, context);
+  const right = evaluate(rightExpression, context);
 
-  switch (expression.op) {
+  switch (op) {
     case "==":
       return valuesEqual(left, right);
     case "!=":
@@ -1490,29 +1545,29 @@ function evaluateBinary(expression: Expr & { t: "binary" }, context: EvalContext
       break;
   }
 
-  if (type.kind === "null") throw contractError("arithmetic on null");
-  if (type.kind !== "primitive" || !isNumericType(type.name)) {
+  if (kindOf(type) === "null") throw contractError("arithmetic on null");
+  if (kindOf(type) !== "primitive" || !isNumericType(nameOf(type))) {
     throw contractError(`arithmetic requires numeric operands, got ${describeType(type)}`);
   }
 
-  if (isIntegerType(type.name)) {
+  if (isIntegerType(nameOf(type))) {
     const leftWhole = isWhole(left) ? left : typeof left === "bigint" ? wholeOfValue(left) : null;
     const rightWhole = isWhole(right) ? right : typeof right === "bigint" ? wholeOfValue(right) : null;
     if (leftWhole === null || rightWhole === null) {
       throw contractError(`integer arithmetic requires integer operands, got ${formatValue(left)} and ${formatValue(right)}`);
     }
-    if (expression.op === "+") return wrapInteger(wholeFromBits(wholeAdd(leftWhole, rightWhole)), type.name);
-    if (expression.op === "-") return wrapInteger(wholeFromBits(wholeSubtract(leftWhole, rightWhole)), type.name);
-    if (expression.op === "*") return wrapInteger(wholeFromBits(wholeMultiply(leftWhole, rightWhole)), type.name);
+    if (op === "+") return wrapInteger(wholeFromBits(wholeAdd(leftWhole, rightWhole)), nameOf(type));
+    if (op === "-") return wrapInteger(wholeFromBits(wholeSubtract(leftWhole, rightWhole)), nameOf(type));
+    if (op === "*") return wrapInteger(wholeFromBits(wholeMultiply(leftWhole, rightWhole)), nameOf(type));
     if (wholeIsZero(rightWhole)) throw contractError("division by zero");
-    return wrapInteger(wholeDivide(leftWhole, rightWhole), type.name);
+    return wrapInteger(wholeDivide(leftWhole, rightWhole), nameOf(type));
   }
 
   const leftNumber = asNumber(left, type);
   const rightNumber = asNumber(right, type);
-  if (expression.op === "+") return roundFloat(leftNumber + rightNumber, type);
-  if (expression.op === "-") return roundFloat(leftNumber - rightNumber, type);
-  if (expression.op === "*") return roundFloat(leftNumber * rightNumber, type);
+  if (op === "+") return roundFloat(leftNumber + rightNumber, type);
+  if (op === "-") return roundFloat(leftNumber - rightNumber, type);
+  if (op === "*") return roundFloat(leftNumber * rightNumber, type);
   return roundFloat(leftNumber / rightNumber, type);
 }
 
@@ -1553,99 +1608,117 @@ export interface ParsedContract {
  * malformed contract never reaches a model.
  */
 export function parseContract(contract: FunctionContract): ParsedContract {
-  if (contract.version !== "1") {
-    throw contractError(`unsupported contract version "${contract.version}"`);
+  const version = String(fieldOf(contract, "version"));
+  if (version !== "1") {
+    throw contractError(`unsupported contract version "${version}"`);
   }
-  if (contract.function.name === "") throw contractError("contract function needs a name");
-  if (contract.function.returns.trim() === "") throw contractError("contract function needs a return type");
+  const signature = fieldOf(contract, "function");
+  const name = String(fieldOf(signature, "name"));
+  const returns = String(fieldOf(signature, "returns"));
+  if (name === "") throw contractError("contract function needs a name");
+  if (returns.trim() === "") throw contractError("contract function needs a return type");
 
   const env = signatureTypeEnv(contract);
-  parseType(contract.function.returns);
+  parseType(returns);
   // The value a promise carries travels beside the signature, so a contract
   // that states one states a type the contract language reads.
-  if (contract.promise !== undefined) parseType(contract.promise);
+  const promise = fieldOf(contract, "promise");
+  if (promise !== undefined) parseType(promise);
   const seen = new Set<string>();
-  for (const param of contract.function.params) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(param.name)) throw contractError(`invalid parameter name "${param.name}"`);
-    if (seen.has(param.name)) throw contractError(`duplicate parameter "${param.name}"`);
-    seen.add(param.name);
-    if (param.type !== "text") parseType(param.type);
+  for (const param of fieldOf(signature, "params")) {
+    const paramName = String(fieldOf(param, "name"));
+    const paramType = String(fieldOf(param, "type"));
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(paramName)) throw contractError(`invalid parameter name "${paramName}"`);
+    if (seen.has(paramName)) throw contractError(`duplicate parameter "${paramName}"`);
+    seen.add(paramName);
+    if (paramType !== "text") parseType(paramType);
   }
 
-  const requires = contract.requires.map((text) => checkBoolean(text, "requires", env));
-  const ensures = contract.ensures.map((text) => checkBoolean(text, "ensures", env));
+  const requiresText = fieldOf(contract, "requires") as string[];
+  const ensuresText = fieldOf(contract, "ensures") as string[];
+  const requires = requiresText.map((text: string) => checkBoolean(text, "requires", env));
+  const ensures = ensuresText.map((text: string) => checkBoolean(text, "ensures", env));
 
-  for (const objective of [contract.optimize.primary, contract.optimize.secondary]) {
-    if (objective !== undefined && !OBJECTIVES.includes(objective)) {
+  const optimize = fieldOf(contract, "optimize");
+  for (const objective of [fieldOf(optimize, "primary") as string | undefined, fieldOf(optimize, "secondary") as string | undefined]) {
+    if (objective !== undefined && !OBJECTIVES.includes(objective as Objective)) {
       throw contractError(`unknown optimization objective "${objective}"`, `known: ${OBJECTIVES.join(", ")}`);
     }
   }
-  for (const effect of contract.effects) {
-    if (!EFFECTS.includes(effect)) throw contractError(`unknown effect "${effect}"`, `known: ${EFFECTS.join(", ")}`);
+  for (const effect of fieldOf(contract, "effects") as string[]) {
+    if (!EFFECTS.includes(effect as Effect)) throw contractError(`unknown effect "${effect}"`, `known: ${EFFECTS.join(", ")}`);
   }
-  for (const statement of contract.memory.reads) validateRange(statement, env, "memory.reads");
-  for (const statement of contract.memory.writes) validateRange(statement, env, "memory.writes");
-  for (const statement of contract.memory.aliasing) validateAliasing(statement, env);
+  const memory = fieldOf(contract, "memory");
+  for (const statement of fieldOf(memory, "reads") as string[]) validateRange(statement, env, "memory.reads");
+  for (const statement of fieldOf(memory, "writes") as string[]) validateRange(statement, env, "memory.writes");
+  for (const statement of fieldOf(memory, "aliasing") as string[]) validateAliasing(statement, env);
 
   // The body is checked whether or not a postcondition states what the result
   // must equal: it is what the function is, and a postcondition beside it says
   // nothing about whether it can be lowered.
   validateDefinition(contract);
   const definitions = ensures
-    .map((expression, index) => ({ index, right: isResultDefinition(expression) ? expression.right : null }))
-    .filter((entry) => entry.right !== null);
+    .map((expression: Expr, index: number) => ({ index, right: isResultDefinition(expression) ? fieldOf(expression, "right") as Expr : null }))
+    .filter((entry: { right: Expr | null }) => fieldOf(entry, "right") !== null);
   if (definitions.length === 0) return { contract, env, requires, ensures, resultDefinition: null };
-  const distinct = new Set(definitions.map((entry) => contract.ensures[entry.index]));
+  const distinct = new Set(definitions.map((entry: { index: number }) => ensuresText[fieldOf(entry, "index") as number]));
   if (distinct.size > 1) {
     throw contractError("contract defines the result in more than one way", [...distinct].join(" | "));
   }
 
-  return { contract, env, requires, ensures, resultDefinition: definitions[0].right as Expr };
+  return { contract, env, requires, ensures, resultDefinition: fieldOf(definitions[0], "right") as Expr };
 }
 
 /** What the body of a function may not leave out: its statements, and a layout that fits itself. */
 function validateDefinition(contract: FunctionContract): void {
-  const definition = contract.definition;
-  if (definition.statements.length === 0) {
-    throw contractError(`the definition of ${contract.function.name} is empty`, "a function body states what it does");
+  type Field = { name: string; type: string; offset: number };
+  type Layout = { name: string; size: number; align: number; fields: Field[] };
+  const definition = fieldOf(contract, "definition");
+  if (fieldOf(definition, "statements").length === 0) {
+    throw contractError(`the definition of ${fieldOf(fieldOf(contract, "function"), "name")} is empty`, "a function body states what it does");
   }
-  for (const [name, object] of Object.entries(definition.objects)) {
-    if (object.name !== name) {
-      throw contractError(`object ${name} is named "${object.name}"`, "the layout and the field that names it must agree");
+  for (const [name, object] of Object.entries(fieldOf(definition, "objects") as Record<string, Layout>)) {
+    if (String(fieldOf(object, "name")) !== name) {
+      throw contractError(`object ${name} is named "${fieldOf(object, "name") as string}"`, "the layout and the field that names it must agree");
     }
-    if (object.size <= 0 || object.align <= 0) {
-      throw contractError(`object ${name} has no size`, `size ${object.size}, align ${object.align}`);
+    const size = fieldOf(object, "size") as number;
+    const align = fieldOf(object, "align") as number;
+    if (size <= 0 || align <= 0) {
+      throw contractError(`object ${name} has no size`, `size ${size}, align ${align}`);
     }
     const seen = new Set<string>();
     let expected = 0;
-    for (const field of object.fields) {
-      const type = parseType(field.type);
+    for (const field of fieldOf(object, "fields")) {
+      const fieldName = String(fieldOf(field, "name"));
+      const fieldType = String(fieldOf(field, "type"));
+      const fieldOffset = fieldOf(field, "offset") as number;
+      const type = parseType(fieldType);
       // A field name is written into the C and Nim declarations and into the
       // prompt, verbatim, so a name that is not an identifier is refused here
       // rather than emitted as code that cannot compile.
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.name)) {
-        throw contractError(`invalid field name "${field.name}"`, `in ${name}`);
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fieldName)) {
+        throw contractError(`invalid field name "${fieldName}"`, `in ${name}`);
       }
       // A name written twice in a literal is one field to the body, but the
       // layout holds a field per declaration, and a struct that declares the
       // same member twice is code no compiler takes.
-      if (seen.has(field.name)) {
-        throw contractError(`field ${name}.${field.name} is declared twice`, `in ${name}`);
+      if (seen.has(fieldName)) {
+        throw contractError(`field ${name}.${fieldName} is declared twice`, `in ${name}`);
       }
-      seen.add(field.name);
-      if (field.offset < expected) {
+      seen.add(fieldName);
+      if (fieldOffset < expected) {
         throw contractError(
-          `field ${name}.${field.name} overlaps the field before it`,
-          `offset ${field.offset} comes after ${expected}`,
+          `field ${name}.${fieldName} overlaps the field before it`,
+          `offset ${fieldOffset} comes after ${expected}`,
         );
       }
-      expected = field.offset + sizeOfType(type);
-      parseType(field.type);
+      expected = fieldOffset + sizeOfType(type);
+      parseType(fieldType);
     }
-    if (expected > object.size) {
+    if (expected > size) {
       throw contractError(
         `a field of ${name} lies outside the object`,
-        `the last field ends at ${expected}, the object is ${object.size} bytes`,
+        `the last field ends at ${expected}, the object is ${size} bytes`,
       );
     }
   }
@@ -1653,8 +1726,8 @@ function validateDefinition(contract: FunctionContract): void {
 
 /** The bytes one value of a type takes in an object. */
 function sizeOfType(type: TypeExpr): number {
-  if (type.kind !== "primitive") return 8;
-  switch (type.name) {
+  if (kindOf(type) !== "primitive") return 8;
+  switch (nameOf(type)) {
     case "bool":
     case "i8":
     case "u8":
@@ -1674,14 +1747,18 @@ function sizeOfType(type: TypeExpr): number {
 function checkBoolean(text: string, label: string, env: TypeEnv): Expr {
   const expression = parseExpression(text);
   const type = typeOf(expression, env);
-  if (type.kind === "null" || type.kind !== "primitive" || type.name !== "bool") {
+  if (kindOf(type) === "null" || kindOf(type) !== "primitive" || nameOf(type) !== "bool") {
     throw contractError(`${label} entry must be a boolean expression`, `"${text}" is ${describeType(type)}`);
   }
   return expression;
 }
 
 function isResultDefinition(expression: Expr): expression is Expr & { t: "binary"; op: "=="; left: { t: "var"; name: string }; right: Expr } {
-  return expression.t === "binary" && expression.op === "==" && expression.left.t === "var" && expression.left.name === "result";
+  const e = expression as unknown as Record<string, unknown>;
+  if (String(e["t"]) !== "binary" || String(e["op"]) !== "==") return false;
+  const left = e["left"] as Expr;
+  const leftFields = left as unknown as Record<string, unknown>;
+  return String(leftFields["t"]) === "var" && String(leftFields["name"]) === "result";
 }
 
 function validateRange(statement: string, env: TypeEnv, label: string): void {
@@ -1694,7 +1771,7 @@ function validateRange(statement: string, env: TypeEnv, label: string): void {
   // Ranges are half open, so their bounds are numbers rather than indices.
   for (const bound of [from, to]) {
     const boundType = typeOf(parseExpression(bound), env);
-    if (boundType.kind !== "primitive" || !isNumericType(boundType.name)) {
+    if (kindOf(boundType) !== "primitive" || !isNumericType(nameOf(boundType))) {
       throw contractError(`${label} bound "${bound}" must be a number`);
     }
   }
@@ -1724,15 +1801,18 @@ export function isTrue(value: Value): boolean {
 /** Preconditions that the given arguments violate. */
 export function preconditionFailures(parsed: ParsedContract, values: ReadonlyMap<string, Value>): string[] {
   const failures: string[] = [];
-  for (const [index, requirement] of parsed.requires.entries()) {
+  const env = fieldOf(parsed, "env") as TypeEnv;
+  const requirements = fieldOf(parsed, "requires") as Expr[];
+  const contractText = fieldOf(fieldOf(parsed, "contract"), "requires") as string[];
+  for (const [index, requirement] of requirements.entries()) {
     let outcome: Value;
     try {
-      outcome = evaluate(requirement, { env: parsed.env, values });
+      outcome = evaluate(requirement, { env, values });
     } catch (error) {
-      failures.push(`${parsed.contract.requires[index]}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${contractText[index]}: ${messageOf(error)}`);
       continue;
     }
-    if (!isTrue(outcome)) failures.push(parsed.contract.requires[index]);
+    if (!isTrue(outcome)) failures.push(contractText[index]);
   }
   return failures;
 }
@@ -1743,13 +1823,16 @@ export function preconditionFailures(parsed: ParsedContract, values: ReadonlyMap
  * is the program it belongs to that says what it returns.
  */
 export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<string, Value>): Value {
-  if (parsed.resultDefinition === null) {
+  const definition = fieldOf(parsed, "resultDefinition") as Expr | null;
+  if (definition === null) {
+    const contract = fieldOf(parsed, "contract");
+    const signature = fieldOf(contract, "function");
     throw contractError(
-      `${parsed.contract.function.name} states what it does, not what it returns`,
+      `${String(fieldOf(signature, "name"))} states what it does, not what it returns`,
       "a contract with a definition is checked by the program it is part of",
     );
   }
-  const value = evaluate(parsed.resultDefinition, { env: parsed.env, values });
+  const value = evaluate(definition, { env: fieldOf(parsed, "env") as TypeEnv, values });
   // Callers compare this value with the candidate's printed result, which is a
   // host whole number, so a Whole leaves through the boundary as one.
   return isWhole(value) ? wholeToBigInt(value) : value;
@@ -1765,17 +1848,20 @@ function wholeToBigInt(value: Whole): bigint {
 /** Postconditions that the given result violates. */
 export function postconditionFailures(parsed: ParsedContract, values: ReadonlyMap<string, Value>, result: Value): string[] {
   const failures: string[] = [];
+  const env = fieldOf(parsed, "env") as TypeEnv;
+  const conditions = fieldOf(parsed, "ensures") as Expr[];
+  const contractText = fieldOf(fieldOf(parsed, "contract"), "ensures") as string[];
   const bound = new Map(values);
   bound.set("result", result);
-  for (const [index, condition] of parsed.ensures.entries()) {
+  for (const [index, condition] of conditions.entries()) {
     let outcome: Value;
     try {
-      outcome = evaluate(condition, { env: parsed.env, values: bound });
+      outcome = evaluate(condition, { env, values: bound });
     } catch (error) {
-      failures.push(`${parsed.contract.ensures[index]}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${contractText[index]}: ${messageOf(error)}`);
       continue;
     }
-    if (!isTrue(outcome)) failures.push(parsed.contract.ensures[index]);
+    if (!isTrue(outcome)) failures.push(contractText[index]);
   }
   return failures;
 }
@@ -1795,9 +1881,9 @@ const TOLERANCE_CAP: Record<string, number> = { f32: 1e-2, f64: 1e-9 };
  * the number of accumulated terms and stays well below a real semantic error.
  */
 export function comparisonTolerance(returns: TypeExpr, terms: number): number | null {
-  if (returns.kind !== "primitive" || !isFloatType(returns.name)) return null;
-  const epsilon = EPSILON[returns.name];
-  const cap = TOLERANCE_CAP[returns.name];
+  if (kindOf(returns) !== "primitive" || !isFloatType(nameOf(returns))) return null;
+  const epsilon = EPSILON[nameOf(returns)];
+  const cap = TOLERANCE_CAP[nameOf(returns)];
   return Math.min(cap, 8 * Math.max(1, terms) * epsilon);
 }
 
@@ -1831,8 +1917,8 @@ export function valuesMatch(expected: Value, actual: Value, tolerance: number | 
   }
   if (expected === null || actual === null) return expected === actual;
   if (isBufferValue(expected) && isBufferValue(actual)) {
-    if (expected.values.length !== actual.values.length) return false;
-    return expected.values.every((value, index) => valuesMatch(value, actual.values[index] as Value, tolerance));
+    if (bufferValues(expected).length !== bufferValues(actual).length) return false;
+    return bufferValues(expected).every((value, index) => valuesMatch(value, bufferValues(actual)[index] as Value, tolerance));
   }
   return false;
 }
@@ -1854,9 +1940,12 @@ export const DEFAULT_OPTIMIZE: OptimizeSpec = {
 
 export function normalizeNumeric(partial: Partial<NumericContract> | undefined): NumericContract {
   if (partial === undefined) return { ...DEFAULT_NUMERIC };
-  const fastMath = partial.fastMath ?? DEFAULT_NUMERIC.fastMath;
-  if (fastMath !== false && fastMath !== "safe" && fastMath !== "aggressive") {
-    throw contractError(`numeric.fastMath must be false, "safe" or "aggressive"`);
+  const fastMath = fieldOf(partial, "fastMath") ?? fieldOf(DEFAULT_NUMERIC, "fastMath");
+  if (typeof fastMath !== "boolean") {
+    const mode = String(fastMath);
+    if (mode !== "safe" && mode !== "aggressive") {
+      throw contractError(`numeric.fastMath must be false, "safe" or "aggressive"`);
+    }
   }
   return { floatingPoint: "ieee754", rounding: "nearest", fastMath };
 }
@@ -1867,7 +1956,7 @@ export function normalizeOptimize(partial: Partial<OptimizeSpec> | undefined): O
     ...(partial?.secondary === undefined ? {} : { secondary: partial.secondary }),
   };
   for (const objective of [optimize.primary, optimize.secondary]) {
-    if (objective !== undefined && !OBJECTIVES.includes(objective)) {
+    if (objective !== undefined && !OBJECTIVES.includes(objective as Objective)) {
       throw contractError(`unknown optimization objective "${objective}"`, `known: ${OBJECTIVES.join(", ")}`);
     }
   }

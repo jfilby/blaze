@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * The whole-program contract phase.
  *
@@ -23,6 +27,7 @@
  */
 
 import { byName } from "../core/named-record.ts";
+import { freezeValue } from "../core/platform.ts";
 import { parseContract } from "./contract.ts";
 import type { Frontend, ProgramBody } from "./module.ts";
 import { contractPhaseError, offeredValues, readModuleGraph, type ModuleRecord } from "./module-graph.ts";
@@ -95,20 +100,26 @@ export interface ContractPhase {
  * runs them whether or not it exports them.
  */
 function contractFile(request: ContractPhaseRequest, record: ModuleRecord, isProgram: boolean): FileContract {
-  const entries: (readonly [string, FunctionContract])[] = [];
+  const entries = new Map<string, FunctionContract>();
   const declaredNames = new Set<string>();
-  for (const declared of record.analysis.functions) {
-    if (!declared.exported && !isProgram && declared.internal !== true) continue;
-    if (declaredNames.has(declared.name)) {
-      throw contractPhaseError(`${record.path} declares "${declared.name}" more than once`);
+  const filePath = String(fieldOf(record, "path"));
+  const analysis = fieldOf(record, "analysis");
+  const frontend = fieldOf(request, "frontend");
+  const input = fieldOf(request, "input");
+  for (const declared of fieldOf(analysis, "functions") as { name: string; exported: boolean; internal?: boolean }[]) {
+    const declaredName = String(fieldOf(declared, "name"));
+    if (fieldOf(declared, "exported") !== true && !isProgram && fieldOf(declared, "internal") !== true) continue;
+    if (declaredNames.has(declaredName)) {
+      throw contractPhaseError(`${filePath} declares "${declaredName}" more than once`);
     }
     // A malformed contract fails here, before a backend is ever asked for code.
-    const contract = request.frontend.contractFor(record.analysis, declared, request.input);
+    const contract = fieldOf(frontend, "contractFor")(analysis, declared, input) as FunctionContract;
     parseContract(contract);
-    declaredNames.add(declared.name);
-    entries.push([declared.name, contract]);
+    declaredNames.add(declaredName);
+    entries.set(declaredName, contract);
   }
-  return { path: record.path, functions: byName(entries), imports: [...record.resolved] };
+  const imports = fieldOf(record, "resolved") as string[];
+  return { path: filePath, functions: byName(entries), imports };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -138,17 +149,27 @@ function validateImports(
   const analyses: Record<string, string | null> = {};
   const internal: Record<string, Set<string>> = {};
   for (const record of records) {
-    analyses[record.path] = record.analysis.default;
-    internal[record.path] = new Set(record.analysis.functions.filter((entry) => entry.internal === true).map((entry) => entry.name));
+    const recordPath = String(fieldOf(record, "path"));
+    const analysis = fieldOf(record, "analysis");
+    analyses[recordPath] = fieldOf(analysis, "default") as string | null;
+    const functions = fieldOf(analysis, "functions") as { name: string; internal?: boolean }[];
+    internal[recordPath] = new Set(functions.filter((entry) => fieldOf(entry, "internal") === true).map((entry) => String(fieldOf(entry, "name"))));
   }
   const edges: ContractEdge[] = [];
   const bindings: ImportBinding[] = [];
   const offeredValuesByPath = offeredValues(records);
   for (const record of records) {
-    const declaredHere = new Set(record.analysis.functions.filter((entry) => entry.exported).map((entry) => entry.name));
+    const recordPath = String(fieldOf(record, "path"));
+    const analysis = fieldOf(record, "analysis");
+    const functions = fieldOf(analysis, "functions") as { name: string; exported: boolean }[];
+    const declaredHere = new Set(functions.filter((entry) => fieldOf(entry, "exported") === true).map((entry) => String(fieldOf(entry, "name"))));
     const bound = new Map<string, { specifier: string; to: string }>();
-    for (const [index, entry] of record.analysis.imports.entries()) {
-      const to = record.resolved[index];
+    const imports = fieldOf(analysis, "imports") as unknown[];
+    const resolved = fieldOf(record, "resolved") as string[];
+    for (const [index, entry] of imports.entries()) {
+      const to = String(resolved[index] ?? "");
+      const specifier = String(fieldOf(entry, "specifier"));
+      const line = fieldOf(entry, "line") as number;
       // A host module is the boundary the build links against, not a file of
       // the program: it has no contract of its own, and what the name answers
       // is the native adapter's.
@@ -157,33 +178,47 @@ function validateImports(
       // A module offers the functions it exports and the values it declares at
       // the top of the file: a name bound to a value is a name this file may
       // import, and what crosses the link is the value itself.
-      const named = offeredValuesByPath.find((one) => one.path === to);
-      const available = Object.keys(target.functions).filter((name) => internal[to]?.has(name) !== true);
+      const named = offeredValuesByPath.find((one) => String(fieldOf(one, "path")) === to);
+      const targetFunctions = fieldOf(target, "functions") as Record<string, unknown>;
+      const available = Object.keys(targetFunctions).filter((name) => internal[to]?.has(name) !== true);
       // A name the module exports is offered even where its value is not one
       // the read settles in place: the import resolves to the name.
-      const targetRecord = records.find((one) => one.path === to);
-      for (const name of targetRecord?.analysis.exportedNames ?? []) {
-        if (!available.includes(name)) available.push(name);
+      const targetRecord = records.find((one) => String(fieldOf(one, "path")) === to);
+      if (targetRecord !== undefined) {
+        const targetAnalysis = fieldOf(targetRecord, "analysis");
+        for (const name of (fieldOf(targetAnalysis, "exportedNames") as string[] | undefined) ?? []) {
+          if (!available.includes(name)) available.push(name);
+        }
       }
-      available.splice(0, available.length, ...new Set(available));
-      if (named !== undefined) for (const name of named.values.keys()) available.push(name);
+      const unique: string[] = [];
+      for (const name of available) if (!unique.includes(name)) unique.push(name);
+      available.length = 0;
+      for (const name of unique) available.push(name);
+      if (named !== undefined) {
+        for (const name of (fieldOf(named, "values") as Map<string, unknown>).keys()) available.push(name);
+      }
       // A file that re-exports another module's names offers those names: the
       // function is compiled by the module that declares it, and the link
       // reaches it by the name the re-export wrote.
-      const reexporting = records.find((one) => one.path === to);
-      for (const entry of reexporting?.analysis.reexports ?? []) available.push(...entry.names);
+      const reexporting = records.find((one) => String(fieldOf(one, "path")) === to);
+      if (reexporting !== undefined) {
+        const reexportAnalysis = fieldOf(reexporting, "analysis");
+        for (const one of (fieldOf(reexportAnalysis, "reexports") as { names: string[] }[] | undefined) ?? []) {
+          for (const name of fieldOf(one, "names") as string[]) available.push(name);
+        }
+      }
       if (available.length === 0) {
-        throw contractPhaseError(`${record.path} imports "${entry.specifier}" (line ${entry.line}), which exports nothing`);
+        throw contractPhaseError(`${recordPath} imports "${specifier}" (line ${line}), which exports nothing`);
       }
       // A default import names no export of its own: it binds whatever the
       // module it names exports as its default, under the name that function
       // was declared with, because a program of this subset links by name.
-      let names = entry.names ?? available;
-      if (entry.default) {
+      let names = (fieldOf(entry, "names") as string[] | undefined) ?? available;
+      if (fieldOf(entry, "default") === true) {
         const offered = analyses[to] ?? null;
         if (offered === null) {
           throw contractPhaseError(
-            `${record.path} imports the default export of "${entry.specifier}" (line ${entry.line}), which has none`,
+            `${recordPath} imports the default export of "${specifier}" (line ${line}), which has none`,
             `${to} exports: ${available.join(", ")}; write \`export default function ${available[0]}(...)\` to offer one`,
           );
         }
@@ -194,22 +229,26 @@ function validateImports(
       // A rename imports one name and binds another: the module that offers
       // it is asked for the imported name, and the file writes the local one.
       const importedNames = [...names];
+      const renames = (fieldOf(entry, "renames") as { imported: string; local: string }[] | undefined) ?? [];
       const localNames = names.map((name) => {
-        const rename = (entry.renames ?? []).find((one) => one.imported === name);
-        return rename === undefined ? name : rename.local;
+        const rename = renames.find((one) => String(fieldOf(one, "imported")) === name);
+        return rename === undefined ? name : String(fieldOf(rename, "local"));
       });
-      for (const rename of entry.renames ?? []) {
-        if (!localNames.includes(rename.local)) localNames.push(rename.local);
+      for (const rename of renames) {
+        const local = String(fieldOf(rename, "local"));
+        if (!localNames.includes(local)) localNames.push(local);
       }
       // The name a file writes and the name it imports are the same unless a
       // rename binds one to the other; the link needs both.
       const localToImported = new Map<string, string>();
       localNames.forEach((local, at) => localToImported.set(local, importedNames[at] ?? local));
-      for (const rename of entry.renames ?? []) localToImported.set(rename.local, rename.imported);
+      for (const rename of renames) {
+        localToImported.set(String(fieldOf(rename, "local")), String(fieldOf(rename, "imported")));
+      }
       const missing = importedNames.filter((name) => !available.includes(name));
       if (missing.length > 0) {
         throw contractPhaseError(
-          `${record.path} imports ${missing.map((name) => `"${name}"`).join(", ")} from "${entry.specifier}", which does not export ${missing.length === 1 ? "it" : "them"}`,
+          `${recordPath} imports ${missing.map((name) => `"${name}"`).join(", ")} from "${specifier}", which does not export ${missing.length === 1 ? "it" : "them"}`,
           `${to} exports: ${available.join(", ")}`,
         );
       }
@@ -219,17 +258,17 @@ function validateImports(
         // so it is not a collision. Reporting one refused a file that names
         // its imports in more than one statement, or imports a module and
         // includes it.
-        if (first !== undefined && first.to !== to) {
-          throw contractPhaseError(`${record.path} imports "${name}" from both "${first.specifier}" and "${entry.specifier}"`);
+        if (first !== undefined && String(fieldOf(first, "to")) !== to) {
+          throw contractPhaseError(`${recordPath} imports "${name}" from both "${String(fieldOf(first, "specifier"))}" and "${specifier}"`);
         }
         if (declaredHere.has(name)) {
-          throw contractPhaseError(`${record.path} imports "${name}" and declares it itself`);
+          throw contractPhaseError(`${recordPath} imports "${name}" and declares it itself`);
         }
-        bound.set(name, { specifier: entry.specifier, to });
-        bindings.push({ from: record.path, to, imported: localToImported.get(name) ?? name, local: name });
+        bound.set(name, { specifier, to });
+        bindings.push({ from: recordPath, to, imported: localToImported.get(name) ?? name, local: name });
       }
-      if (!edges.some((edge) => edge.from === record.path && edge.to === to)) {
-        edges.push({ from: record.path, to, symbols: importedNames });
+      if (!edges.some((edge) => String(fieldOf(edge, "from")) === recordPath && String(fieldOf(edge, "to")) === to)) {
+        edges.push({ from: recordPath, to, symbols: importedNames });
       }
     }
   }
@@ -271,21 +310,34 @@ function targetFunction(
 ): FunctionContract | null {
   if (seen.has(path)) return null;
   seen.add(path);
-  const direct = contracts.get(path)?.functions[name];
+  const directContract = contracts.get(path);
+  const directFunctions = directContract === undefined
+    ? undefined
+    : fieldOf(directContract, "functions") as Record<string, FunctionContract>;
+  const direct = directFunctions === undefined ? undefined : directFunctions[name];
   if (direct !== undefined) return direct;
   // A value the module holds is linked through the getter the module wrote for
   // it: the value's name is what an importing file writes, and the getter's
   // symbol is what the call becomes.
-  const getterName = records.find((one) => one.path === path)?.analysis.valueGetters?.get(name);
+  const record = records.find((one) => String(fieldOf(one, "path")) === path);
+  if (record === undefined) return null;
+  const analysis = fieldOf(record, "analysis");
+  const getters = fieldOf(analysis, "valueGetters") as Map<string, string> | undefined;
+  const getterName = getters === undefined ? undefined : getters.get(name);
   if (getterName !== undefined) {
-    const getter = contracts.get(path)?.functions[getterName];
+    const getterContract = contracts.get(path);
+    const getterFunctions = getterContract === undefined
+      ? undefined
+      : fieldOf(getterContract, "functions") as Record<string, FunctionContract>;
+    const getter = getterFunctions === undefined ? undefined : getterFunctions[getterName];
     if (getter !== undefined) return getter;
   }
-  const record = records.find((one) => one.path === path);
-  if (record === undefined) return null;
-  for (const [index, entry] of record.analysis.imports.entries()) {
-    if (entry.names != null && !entry.names.includes(name)) continue;
-    const to = record.resolved[index];
+  const imports = fieldOf(analysis, "imports") as unknown[];
+  const resolved = fieldOf(record, "resolved") as string[];
+  for (const [index, entry] of imports.entries()) {
+    const entryNames = fieldOf(entry, "names") as string[] | undefined;
+    if (entryNames != null && !entryNames.includes(name)) continue;
+    const to = String(resolved[index] ?? "");
     if (to === "" || to === path) continue;
     const found = targetFunction(records, contracts, to, name, seen);
     if (found !== null) return found;
@@ -309,27 +361,27 @@ function rewriteCallsIn(node: unknown, names: ReadonlyMap<string, string>): void
   // A function's body writes a call as an expression; a program's statements
   // write one as an invocation. Both name the function by the name the source
   // gave it, and the link needs the symbol it was given here.
-  if (record.k === "call" && typeof record.name === "string") {
-    const symbol = names.get(record.name);
-    if (symbol !== undefined) record.name = symbol;
+  if (record["k"] === "call" && typeof record["name"] === "string") {
+    const symbol = names.get(record["name"]);
+    if (symbol !== undefined) record["name"] = symbol;
   }
   // A program value writes a call of a function by name rather than by callee
   // expression, and the link still needs the symbol.
-  if (record.k === "call" && typeof record.function === "string") {
-    const symbol = names.get(record.function);
-    if (symbol !== undefined) record.function = symbol;
+  if (record["k"] === "call" && typeof record["function"] === "string") {
+    const symbol = names.get(record["function"]);
+    if (symbol !== undefined) record["function"] = symbol;
   }
-  if (record.kind === "invoke" && typeof record.function === "string") {
-    const symbol = names.get(record.function);
-    if (symbol !== undefined) record.function = symbol;
+  if (record["kind"] === "invoke" && typeof record["function"] === "string") {
+    const symbol = names.get(record["function"]);
+    if (symbol !== undefined) record["function"] = symbol;
   }
   // A call written where a value goes is an invocation of a callee expression,
   // and a callee the source named is an identifier.
-  if (record.k === "invoke" && typeof record.callee === "object" && record.callee !== null) {
-    const callee = record.callee as Record<string, unknown>;
-    if (callee.k === "ident" && typeof callee.name === "string") {
-      const symbol = names.get(callee.name);
-      if (symbol !== undefined) callee.name = symbol;
+  if (record["k"] === "invoke" && typeof record["callee"] === "object" && record["callee"] !== null) {
+    const callee = record["callee"] as Record<string, unknown>;
+    if (callee["k"] === "ident" && typeof callee["name"] === "string") {
+      const symbol = names.get(callee["name"]);
+      if (symbol !== undefined) callee["name"] = symbol;
     }
   }
   for (const value of Object.values(record)) rewriteCallsIn(value, names);
@@ -355,42 +407,55 @@ function qualifySymbols(
   bindings: readonly ImportBinding[],
   body: ProgramBody | undefined,
 ): void {
+  const signatureOf = (contract: FunctionContract): unknown => fieldOf(contract, "function");
+  const symbolOf = (contract: FunctionContract): string => String(fieldOf(signatureOf(contract), "symbol"));
   const functions: { path: string; name: string; contract: FunctionContract }[] = [];
   for (const record of records) {
-    const file = contracts.get(record.path);
+    const recordPath = String(fieldOf(record, "path"));
+    const file = contracts.get(recordPath);
     if (file === undefined) continue;
-    for (const [name, contract] of Object.entries(file.functions)) functions.push({ path: record.path, name, contract });
+    for (const [name, contract] of Object.entries(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      functions.push({ path: recordPath, name, contract });
+    }
   }
   const bySymbol = new Map<string, typeof functions>();
   for (const one of functions) {
-    const group = bySymbol.get(one.contract.function.symbol);
-    if (group === undefined) bySymbol.set(one.contract.function.symbol, [one]);
+    const symbol = symbolOf(fieldOf(one, "contract") as FunctionContract);
+    const group = bySymbol.get(symbol);
+    if (group === undefined) bySymbol.set(symbol, [one]);
     else group.push(one);
   }
-  const taken = new Set(functions.map((one) => one.contract.function.symbol));
+  const taken = new Set(functions.map((one) => symbolOf(fieldOf(one, "contract") as FunctionContract)));
   for (const [symbol, group] of bySymbol) {
     if (group.length < 2) continue;
     taken.delete(symbol);
     for (const one of group) {
-      const unique = qualifiedSymbol(one.path, one.name, taken);
+      const unique = qualifiedSymbol(String(fieldOf(one, "path")), String(fieldOf(one, "name")), taken);
       taken.add(unique);
-      one.contract.function.symbol = unique;
+      const signature = fieldOf(fieldOf(one, "contract") as FunctionContract, "function") as Record<string, unknown>;
+      signature["symbol"] = unique;
     }
   }
   for (const record of records) {
-    const file = contracts.get(record.path);
+    const recordPath = String(fieldOf(record, "path"));
+    const file = contracts.get(recordPath);
     if (file === undefined) continue;
     const names = new Map<string, string>();
-    for (const contract of Object.values(file.functions)) {
-      names.set(contract.function.name, contract.function.symbol);
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      const signature = signatureOf(contract);
+      names.set(String(fieldOf(signature, "name")), String(fieldOf(signature, "symbol")));
     }
     for (const binding of bindings) {
-      if (binding.from !== record.path) continue;
-      const target = targetFunction(records, contracts, binding.to, binding.imported);
-      if (target !== null) names.set(binding.local, target.function.symbol);
+      if (String(fieldOf(binding, "from")) !== recordPath) continue;
+      const target = targetFunction(records, contracts, String(fieldOf(binding, "to")), String(fieldOf(binding, "imported")), new Set<string>());
+      if (target !== null) names.set(String(fieldOf(binding, "local")), symbolOf(target));
     }
-    for (const contract of Object.values(file.functions)) rewriteCallsIn(contract.definition.statements, names);
-    if (body !== undefined && body.file === record.path) rewriteCallsIn(body.statements, names);
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      rewriteCallsIn(fieldOf(fieldOf(contract, "definition"), "statements"), names);
+    }
+    if (body !== undefined && String(fieldOf(body, "file")) === recordPath) {
+      rewriteCallsIn(fieldOf(body, "statements"), names);
+    }
   }
 }
 
@@ -413,13 +478,13 @@ function eachGlobalSlot(
   }
   if (typeof node !== "object" || node === null) return;
   const record = node as Record<string, unknown>;
-  if (record.k === "call" && typeof record.name === "string" && GLOBAL_SLOT_CALLS.has(record.name)) {
-    const args = record.args;
+  if (record["k"] === "call" && typeof record["name"] === "string" && GLOBAL_SLOT_CALLS.has(record["name"])) {
+    const args = record["args"];
     const first = Array.isArray(args) ? args[0] : undefined;
     if (typeof first === "object" && first !== null) {
       const literal = first as Record<string, unknown>;
-      if (literal.k === "literal" && typeof literal.text === "string" && /^[0-9]+$/.test(literal.text)) {
-        handle(literal, Number(literal.text));
+      if (literal["k"] === "literal" && typeof literal["text"] === "string" && /^[0-9]+$/.test(literal["text"])) {
+        handle(literal, Number(literal["text"]));
       }
     }
   }
@@ -443,7 +508,11 @@ function shiftGlobalSlots(
 ): void {
   let base = 0;
   for (const record of records) {
-    const file = contracts.get(record.path);
+    const recordPath = String(fieldOf(record, "path"));
+    const file = contracts.get(recordPath);
+    const fileFunctions = file === undefined
+      ? []
+      : Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>);
     let highest = -1;
     const count = (node: unknown): void => {
       eachGlobalSlot(node, (_literal, slot) => {
@@ -451,22 +520,22 @@ function shiftGlobalSlots(
       });
     };
     if (file !== undefined) {
-      for (const contract of Object.values(file.functions)) count(contract.definition.statements);
+      for (const contract of fileFunctions) count(fieldOf(fieldOf(contract, "definition"), "statements"));
     }
-    const ownsBody = body !== undefined && body.file === record.path;
-    if (ownsBody) count(body.statements);
+    const ownsBody = body !== undefined && String(fieldOf(body, "file")) === recordPath;
+    if (ownsBody) count(fieldOf(body, "statements"));
     const cells = highest + 1;
     if (cells > 0) {
       if (file !== undefined) {
-        for (const contract of Object.values(file.functions)) {
-          eachGlobalSlot(contract.definition.statements, (literal, slot) => {
-            literal.text = String(slot + base);
+        for (const contract of fileFunctions) {
+          eachGlobalSlot(fieldOf(fieldOf(contract, "definition"), "statements"), (literal, slot) => {
+            (literal as Record<string, unknown>)["text"] = String(slot + base);
           });
         }
       }
       if (ownsBody) {
-        eachGlobalSlot(body.statements, (literal, slot) => {
-          literal.text = String(slot + base);
+        eachGlobalSlot(fieldOf(body, "statements"), (literal, slot) => {
+          (literal as Record<string, unknown>)["text"] = String(slot + base);
         });
       }
     }
@@ -482,16 +551,17 @@ function shiftGlobalSlots(
 function validateFunctionNames(files: readonly FileContract[]): void {
   const owner = new Map<string, string>();
   for (const file of files) {
-    for (const contract of Object.values(file.functions)) {
-      const symbol = contract.function.symbol;
+    const filePath = String(fieldOf(file, "path"));
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      const symbol = String(fieldOf(fieldOf(contract, "function"), "symbol"));
       const previous = owner.get(symbol);
       if (previous !== undefined) {
         throw contractPhaseError(
-          `"${symbol}" is declared by both ${previous} and ${file.path}`,
+          `"${symbol}" is declared by both ${previous} and ${filePath}`,
           "every function of a program is compiled on its own and linked by its symbol, so one symbol may belong to one function; rename one of them, or import one of them under another name",
         );
       }
-      owner.set(symbol, file.path);
+      owner.set(symbol, filePath);
     }
   }
 }
@@ -503,43 +573,45 @@ function resolveEntry(
   body: ProgramBody | undefined,
   internal: ReadonlySet<string>,
 ): { file: string; function: string | null } {
-  const available = Object.keys(entryFile.functions).filter((name) => !internal.has(name));
-  const requested = input.entry;
+  const functions = fieldOf(entryFile, "functions") as Record<string, FunctionContract>;
+  const entryPath = String(fieldOf(entryFile, "path"));
+  const available = Object.keys(functions).filter((name) => !internal.has(name));
+  const requested = fieldOf(input, "entry") as string | undefined;
   if (body !== undefined) {
-    if (requested !== undefined && requested !== "") {
+    if (requested !== undefined && String(requested) !== "") {
       throw contractPhaseError(
-        `entry "${requested}" names a function, but ${entryFile.path} is a program`,
+        `entry "${requested}" names a function, but ${entryPath} is a program`,
         "a program is the statements of its entry module: drop \"entry\", and every function it calls is compiled",
       );
     }
-    return { file: entryFile.path, function: null };
+    return { file: entryPath, function: null };
   }
   // The entry is resolved the same way whether it was named or taken as the
   // first export. A function that states no postcondition was refused when it
   // was named, and letting the default path past the check delivered an
   // implementation nothing had verified, because in a library build there is
   // no program to check it.
-  const name = requested === undefined || requested === "" ? available[0] : requested;
+  const name = requested === undefined || String(requested) === "" ? available[0] : String(requested);
   if (name === undefined) {
     throw contractPhaseError(
-      `${entryFile.path} exports no function`,
+      `${entryPath} exports no function`,
       "the entry module must export the function to compile, or be a program that calls the functions it does export",
     );
   }
-  const chosen = entryFile.functions[name];
+  const chosen = functions[name];
   if (chosen === undefined) {
     throw contractPhaseError(
-      `entry "${name}" is not an export of ${entryFile.path}`,
+      `entry "${name}" is not an export of ${entryPath}`,
       `exports: ${available.join(", ")}`,
     );
   }
-  if (chosen.ensures.length === 0) {
+  if ((fieldOf(chosen, "ensures") as string[]).length === 0) {
     throw contractPhaseError(
       `${name} is a function whose contract states no postcondition`,
       "nothing can check such a function on its own: build the module as a program, and the program is compared against its own toolchain",
     );
   }
-  return { file: entryFile.path, function: name };
+  return { file: entryPath, function: name };
 }
 
 /**
@@ -549,21 +621,24 @@ function resolveEntry(
 function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | undefined {
   let body: ProgramBody | undefined;
   for (const record of records) {
-    if (record.analysis.body.length === 0) continue;
-    if (record.path !== entryPath) {
+    const recordPath = String(fieldOf(record, "path"));
+    const analysis = fieldOf(record, "analysis");
+    const statements = fieldOf(analysis, "body") as { line: number }[];
+    if (statements.length === 0) continue;
+    if (recordPath !== entryPath) {
       // The guard that names the entry module runs nowhere else, so a module
       // the program merely imports holds nothing that runs: it is a library of
       // functions whatever its guard says.
-      if (record.analysis.entryGuard === true) continue;
+      if (fieldOf(analysis, "entryGuard") === true) continue;
       throw contractPhaseError(
-        `${record.path} runs code at the top level`,
-        `line ${record.analysis.body[0].line}: only the entry module ${entryPath} runs; a file the program imports is a library of functions`,
+        `${recordPath} runs code at the top level`,
+        `line ${fieldOf(statements[0], "line")}: only the entry module ${entryPath} runs; a file the program imports is a library of functions`,
       );
     }
     body = {
-      file: record.path,
-      statements: record.analysis.body,
-      ...(record.analysis.wideBigint === true ? { wideBigint: true } : {}),
+      file: recordPath,
+      statements: statements as ProgramBody["statements"],
+      ...(fieldOf(analysis, "wideBigint") === true ? { wideBigint: true } : {}),
     };
   }
   return body;
@@ -574,33 +649,50 @@ function resolveBody(records: ModuleRecord[], entryPath: string): ProgramBody | 
 /* -------------------------------------------------------------------------- */
 
 export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
-  const records = readModuleGraph({ ...request, modules: request.input.modules });
-  const body = resolveBody(records, request.entry.path);
+  const input = fieldOf(request, "input");
+  const entry = fieldOf(request, "entry") as SourceModule;
+  const records = readModuleGraph({
+    frontend: fieldOf(request, "frontend") as Frontend,
+    entry,
+    read: fieldOf(request, "read") as (path: string) => string | null,
+    host: fieldOf(request, "host") as Readonly<Record<string, string>> | undefined,
+    modules: fieldOf(input, "modules") as Readonly<Record<string, string>> | undefined,
+  });
+  const entryPath = String(fieldOf(entry, "path"));
+  const body = resolveBody(records, entryPath);
   const contracts = new Map<string, FileContract>();
   for (const record of records) {
-    const file = contractFile(request, record, record.path === request.entry.path && body !== undefined);
+    const recordPath = String(fieldOf(record, "path"));
+    const analysis = fieldOf(record, "analysis");
+    const file = contractFile(request, record, recordPath === entryPath && body !== undefined);
     // A file of declarations is a library whether it declares a function, a
     // type or a value. A module that only writes interfaces is reached by the
     // type imports of the files that name them, and a module that only writes
     // constants is reached by the imports that read them: neither offers
     // anything to link, and both offer something to the file that names them.
-    const declaredTypes = record.analysis.types?.declarations.size ?? 0;
-    const offered = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
+    const types = fieldOf(analysis, "types");
+    const declaredTypes = types === undefined ? 0 : (fieldOf(types, "declarations") as Map<string, unknown>).size;
+    const offered = fieldOf(analysis, "constants") as ReadonlyMap<string, unknown> | undefined;
     const declaredValues = offered === undefined ? 0 : offered.size;
     // A file that only re-exports offers the names another module writes: it
     // compiles nothing, and a file that imports one of them reaches the
     // function the other module declared.
-    const declaredReexports = (record.analysis.reexports ?? []).reduce((count, entry) => count + entry.names.length, 0);
+    let declaredReexports = 0;
+    for (const one of (fieldOf(analysis, "reexports") as { names: string[] }[] | undefined) ?? []) {
+      declaredReexports += (fieldOf(one, "names") as string[]).length;
+    }
     // A value the file holds is offered under its name even where what it
     // holds is not a constant the read wrote out.
-    const declaredNames = record.analysis.exportedNames?.length ?? 0;
-    if (Object.keys(file.functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && declaredReexports === 0 && declaredNames === 0 && !(record.path === request.entry.path && body !== undefined)) {
-      throw contractPhaseError(`${record.path} exports no function`, "every file of the program must export what it offers");
+    const exportedNames = fieldOf(analysis, "exportedNames") as string[] | undefined;
+    const declaredNames = exportedNames === undefined ? 0 : exportedNames.length;
+    const functions = fieldOf(file, "functions") as Record<string, unknown>;
+    if (Object.keys(functions).length === 0 && declaredTypes === 0 && declaredValues === 0 && declaredReexports === 0 && declaredNames === 0 && !(recordPath === entryPath && body !== undefined)) {
+      throw contractPhaseError(`${recordPath} exports no function`, "every file of the program must export what it offers");
     }
-    contracts.set(record.path, file);
+    contracts.set(recordPath, file);
   }
   const { edges, bindings } = validateImports(records, contracts);
-  const files = records.map((record) => contracts.get(record.path) as FileContract);
+  const files = records.map((record) => contracts.get(String(fieldOf(record, "path"))) as FileContract);
   // The contract phase names every function and every call before the object
   // pass walks the bodies, because a call is a link edge and a link edge is a
   // symbol.
@@ -616,32 +708,38 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   // The types each module declares are what says what a field of a reference
   // holds: a contract spells a record as the opaque reference, and the layout
   // pass reads the fields through the declaration.
-  const types = new Map<string, TypeTable>();
+  const typeTables = new Map<string, TypeTable>();
   for (const record of records) {
-    if (record.analysis.types !== undefined) types.set(record.path, record.analysis.types);
+    const analysis = fieldOf(record, "analysis");
+    const table = fieldOf(analysis, "types") as TypeTable | undefined;
+    if (table !== undefined) typeTables.set(String(fieldOf(record, "path")), table);
   }
   const objects =
-    resolveObjects(files, body === undefined ? undefined : programShapes(body), types);
+    resolveObjects(files, body === undefined ? undefined : programShapes(body), typeTables);
   const objectNames = objects.names;
   // Which of the calls that pass recorded is written out rather than made is
   // a property of the whole graph, so it is decided here, once the graph is
   // complete and before anything is generated from it.
   resolveCalls(files);
-  const entryRecord = records.find((record) => record.path === request.entry.path);
-  const internalEntry = new Set(
-    (entryRecord?.analysis.functions ?? []).filter((entry) => entry.internal === true).map((entry) => entry.name),
-  );
+  const entryRecord = records.find((record) => String(fieldOf(record, "path")) === entryPath);
+  const internalEntry = new Set<string>();
+  if (entryRecord !== undefined) {
+    const entryAnalysis = fieldOf(entryRecord, "analysis");
+    for (const one of (fieldOf(entryAnalysis, "functions") as { name: string; internal?: boolean }[] | undefined) ?? []) {
+      if (fieldOf(one, "internal") === true) internalEntry.add(String(fieldOf(one, "name")));
+    }
+  }
   const program: ProgramContract = {
     version: "1",
-    language: request.input.language,
-    entry: resolveEntry(request.input, contracts.get(request.entry.path) as FileContract, body, internalEntry),
+    language: String(fieldOf(input, "language")),
+    entry: resolveEntry(input, contracts.get(entryPath) as FileContract, body, internalEntry),
     files,
     edges,
   };
-  freeze(program);
+  freezeValue(program);
   return {
     program,
-    modules: records.map((record) => ({ path: record.path, source: record.source })),
+    modules: records.map((record) => ({ path: String(fieldOf(record, "path")), source: String(fieldOf(record, "source")) })),
     objectNames: Object.fromEntries(objectNames),
     objectLayouts: objects.layouts,
     objectKeys: objects.keys,
@@ -651,29 +749,28 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
 
 /** The contract of the function a build compiles. A program has no such function. */
 export function entryContract(program: ProgramContract): FunctionContract {
-  const file = program.files.find((entry) => entry.path === program.entry.file);
+  const programEntry = fieldOf(program, "entry");
+  const entryFile = String(fieldOf(programEntry, "file"));
+  const files = fieldOf(program, "files") as FileContract[];
+  const file = files.find((entry) => String(fieldOf(entry, "path")) === entryFile);
   if (file === undefined) {
-    throw contractPhaseError(`the program contract has no file ${program.entry.file}`);
+    throw contractPhaseError(`the program contract has no file ${entryFile}`);
   }
-  if (program.entry.function === null) {
+  const entryFunction = fieldOf(programEntry, "function") as string | null;
+  if (entryFunction === null) {
     throw contractPhaseError(
-      `${program.entry.file} is a program, not a function`,
+      `${entryFile} is a program, not a function`,
       "a program compiles every function of the contract graph; ask the build for those, not for an entry",
     );
   }
-  const contract = file.functions[program.entry.function];
+  const functions = fieldOf(file, "functions") as Record<string, FunctionContract>;
+  const contract = functions[entryFunction];
   if (contract === undefined) {
     throw contractPhaseError(
-      `${program.entry.file} exports no "${program.entry.function}"`,
-      `exports: ${Object.keys(file.functions).join(", ")}`,
+      `${entryFile} exports no "${entryFunction}"`,
+      `exports: ${Object.keys(functions).join(", ")}`,
     );
   }
   return contract;
 }
 
-/** Contracts are read by backends, so a backend that writes to one fails. */
-function freeze(value: unknown): void {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return;
-  Object.freeze(value);
-  for (const entry of Object.values(value)) freeze(entry);
-}

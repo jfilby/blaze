@@ -358,6 +358,13 @@ export function hostBoundHeap(command: string, args: readonly string[], bytes: n
   };
 }
 
+/** A value and everything it holds, frozen so a backend cannot rewrite it. */
+export function freezeValue(value: unknown): void {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const entry of Object.values(value as Record<string, unknown>)) freezeValue(entry);
+}
+
 /** The last part of a path. */
 export function basename(path: string): string {
   return nodeBasename(path);

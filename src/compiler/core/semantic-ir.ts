@@ -61,76 +61,93 @@ export const NUMERIC: readonly PrimitiveTypeName[] = [
   "isize",
 ];
 
+function kindOf(type: SemanticType): string {
+  return String((type as unknown as Record<string, unknown>)["kind"]);
+}
+
+function nameOf(type: SemanticType): PrimitiveTypeName {
+  return (type as unknown as Record<string, unknown>)["name"] as PrimitiveTypeName;
+}
+
+function ofOf(type: SemanticType): TypeExpr | null {
+  return (type as unknown as Record<string, unknown>)["of"] as TypeExpr | null;
+}
+
 export function isTextType(type: SemanticType): type is TextType {
-  return type.kind === "text";
+  return kindOf(type) === "text";
 }
 
 export function isNumber(type: SemanticType): type is TypeExpr & { kind: "primitive" } {
-  return type.kind === "primitive" && (NUMERIC as readonly string[]).includes(type.name);
+  return kindOf(type) === "primitive" && (NUMERIC as readonly string[]).includes(nameOf(type));
 }
 
 export function isFloat(type: SemanticType | null): boolean {
-  return type !== null && isNumber(type) && type.name.startsWith("f");
+  return type !== null && isNumber(type) && nameOf(type).startsWith("f");
 }
 
 export function isUnsigned(type: SemanticType): boolean {
-  return isNumber(type) && (type.name.startsWith("u") || type.name === "usize");
+  return isNumber(type) && (nameOf(type).startsWith("u") || nameOf(type) === "usize");
 }
 
 export function isBoolean(type: SemanticType): boolean {
-  return type.kind === "primitive" && type.name === "bool";
+  return kindOf(type) === "primitive" && nameOf(type) === "bool";
 }
 
 /** A type a reference is held as: a pointer to an object, or a slice. */
 export function isReference(type: SemanticType): boolean {
-  return type.kind === "ref" || type.kind === "ptr" || type.kind === "slice";
+  return kindOf(type) === "ref" || kindOf(type) === "ptr" || kindOf(type) === "slice";
 }
 
 /** True for a type this IR knows how to read a length and an element out of. */
 export function isSequence(type: SemanticType): boolean {
-  return type.kind === "array" || type.kind === "slice" || type.kind === "ptr" || type.kind === "mask";
+  return kindOf(type) === "array" || kindOf(type) === "slice" || kindOf(type) === "ptr" || kindOf(type) === "mask";
 }
 
 /** A type as the IR text names it. The contract text is the canonical form. */
 export function typeText(type: SemanticType): string {
-  switch (type.kind) {
+  switch (kindOf(type)) {
     case "primitive":
-      return type.name;
+      return nameOf(type);
     case "text":
       return "text";
     case "ptr":
-      return `${typeText(type.of)}*`;
+      return `${typeText(ofOf(type) as SemanticType)}*`;
     case "slice":
-      return `[]${typeText(type.of)}`;
+      return `[]${typeText(ofOf(type) as SemanticType)}`;
     case "mask":
-      return `mask<${typeText(type.of)}>`;
-    case "array":
-      return type.length === null ? `[${typeText(type.of)}]` : `[${typeText(type.of)}; ${type.length}]`;
+      return `mask<${typeText(ofOf(type) as SemanticType)}>`;
+    case "array": {
+      const length = (type as unknown as Record<string, unknown>)["length"] as number | null;
+      return length === null ? `[${typeText(ofOf(type) as SemanticType)}]` : `[${typeText(ofOf(type) as SemanticType)}; ${length}]`;
+    }
     case "ref":
-      return type.name === undefined ? "ref<any>" : `ref<${type.name}>`;
+      return nameOf(type) === undefined ? "ref<any>" : `ref<${nameOf(type)}>`;
     case "void":
       return "void";
+    default:
+      throw new Error(`unknown type kind ${kindOf(type)}`);
   }
 }
 
 /** Reads a type back out of the text the IR is written in. */
 export function isSemanticType(value: unknown): value is SemanticType {
   if (typeof value !== "object" || value === null) return false;
-  const kind = (value as { kind?: unknown }).kind;
+  const record = value as Record<string, unknown>;
+  const kind = String(record["kind"]);
   switch (kind) {
     case "primitive":
-      return (NUMERIC as readonly string[]).includes((value as { name?: string }).name ?? "") ||
-        (value as { name?: string }).name === "bool";
+      return (NUMERIC as readonly string[]).includes(String(record["name"] ?? "")) ||
+        String(record["name"]) === "bool";
     case "text":
     case "void":
       return true;
     case "ptr":
     case "slice":
-      return isSemanticType((value as { of?: unknown }).of);
+      return isSemanticType(record["of"]);
     case "array":
       return (
-        isSemanticType((value as { of?: unknown }).of) &&
-        ((value as { length?: unknown }).length === null || typeof (value as { length?: unknown }).length === "number")
+        isSemanticType(record["of"]) &&
+        (record["length"] === null || typeof record["length"] === "number")
       );
     case "ref":
       // A reference carries the type it points at under `of`, and the name of
@@ -139,8 +156,8 @@ export function isSemanticType(value: unknown): value is SemanticType {
       // parses and the shape this IR's own text writes — and accepted a
       // `ref` whose name was a number.
       return (
-        ((value as { of?: unknown }).of === null || isSemanticType((value as { of?: unknown }).of)) &&
-        ((value as { name?: unknown }).name === undefined || typeof (value as { name?: unknown }).name === "string")
+        (record["of"] === null || isSemanticType(record["of"])) &&
+        (record["name"] === undefined || typeof record["name"] === "string")
       );
     default:
       return false;
@@ -221,7 +238,7 @@ export function limbsOf(name: PrimitiveTypeName): number | null {
 
 /** True when a type is one of the whole numbers wider than a machine word. */
 export function isWideType(type: SemanticType): boolean {
-  return type.kind === "primitive" && WIDE_LIMBS[type.name] !== undefined;
+  return kindOf(type) === "primitive" && WIDE_LIMBS[nameOf(type)] !== undefined;
 }
 
 /** The number two numbers are computed as, a whole pair included. */
@@ -244,7 +261,7 @@ export function commonNumber(left: SemanticType | null, right: SemanticType | nu
   if (left === null) return right !== null && isNumber(right) ? right : null;
   if (right === null) return isNumber(left) ? left : null;
   if (!isNumber(left) || !isNumber(right)) return null;
-  return left.name === right.name ? left : { kind: "primitive", name: promoted(left.name, right.name) };
+  return nameOf(left) === nameOf(right) ? left : { kind: "primitive", name: promoted(nameOf(left), nameOf(right)) };
 }
 
 /**
@@ -257,7 +274,7 @@ export function isWhole(type: PrimitiveTypeName): boolean {
 
 /** True when a type is a whole number, which is what a shift and a remainder are. */
 export function isInteger(type: SemanticType): boolean {
-  return isNumber(type) && isWhole(type.name);
+  return isNumber(type) && isWhole(nameOf(type));
 }
 
 /**
@@ -309,16 +326,16 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (typeEquals(from, to)) return true;
   // An unshaped reference (`any`) accepts anything the program can hand it:
   // numbers, text, arrays, objects and other dynamic values alike.
-  if (to.kind === "ref" && to.of === null && to.name === undefined) return true;
+  if (kindOf(to) === "ref" && ofOf(to) === null && nameOf(to) === undefined) return true;
   // A value the runtime holds is a string when it holds one, and the runtime
   // renders it as one at the use: a text read of a dynamic value is the
   // reading the language itself answers, which is how a body of a request
   // arrives as the text it is.
-  if (isTextType(to) && from.kind === "ref" && from.of === null && from.name === undefined) return true;
+  if (isTextType(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
   // The other reading of a value the runtime holds: the number it says. It is
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
-  if (isNumber(to) && from.kind === "ref" && from.of === null && from.name === undefined) return true;
+  if (isNumber(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
   if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;
@@ -332,7 +349,7 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
 
 /** The element type of an array, a slice or a pointer, or null if it has none. */
 export function elementTypeOf(type: SemanticType): SemanticType | null {
-  return type.kind === "array" || type.kind === "slice" || type.kind === "ptr" ? type.of : null;
+  return kindOf(type) === "array" || kindOf(type) === "slice" || kindOf(type) === "ptr" ? ofOf(type) : null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -506,8 +523,8 @@ export interface CaptureRef {
  * holds is a number too.
  */
 export function isCarriedAsAddress(type: SemanticType): boolean {
-  if (type.kind === "text") return true;
-  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
+  if (kindOf(type) === "text") return true;
+  return kindOf(type) === "ptr" || kindOf(type) === "slice" || kindOf(type) === "array";
 }
 
 /**
@@ -519,7 +536,7 @@ export function isCarriedAsAddress(type: SemanticType): boolean {
  * carried as one so that it is not rounded on the way into a `double`.
  */
 export function isCarriedAsCaptureAddress(type: SemanticType): boolean {
-  return isCarriedAsAddress(type) || type.kind === "ref";
+  return isCarriedAsAddress(type) || kindOf(type) === "ref";
 }
 
 /** What a value is, as printing and truth read it. */
@@ -531,33 +548,37 @@ export type ValueKind = "text" | "number" | "boolean" | "null" | "reference";
  * for a truth gets one answer for the whole IR.
  */
 export function valueKind(value: SemanticValue): ValueKind {
-  if (value.k === "nothing") return "null";
-  if (isTextType(value.type)) return "text";
-  if (isBoolean(value.type)) return "boolean";
-  if (isReference(value.type)) return "reference";
+  if (String(vf(value,"k")) === "nothing") return "null";
+  if (isTextType(vf(value,"type"))) return "text";
+  if (isBoolean(vf(value,"type"))) return "boolean";
+  if (isReference(vf(value,"type"))) return "reference";
   return "number";
 }
 
 /** Every value a value is made of, the value itself included. */
+function vf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 export function walkValues(value: SemanticValue, visit: (value: SemanticValue) => void): void {
   visit(value);
-  switch (value.k) {
+  switch (String(vf(value,"k"))) {
     case "text":
-      for (const part of value.parts) if (part.k === "value") walkValues(part.value, visit);
+      for (const part of vf(value,"parts")) if (String(vf(part,"k")) === "value") walkValues(vf(part,"value"), visit);
       return;
     case "length":
-      walkValues(value.of, visit);
+      walkValues(vf(value,"of"), visit);
       return;
     case "toText":
-      walkValues(value.of, visit);
+      walkValues(vf(value,"of"), visit);
       return;
     case "isNull":
     case "unary":
-      walkValues(value.operand, visit);
+      walkValues(vf(value,"operand"), visit);
       return;
     case "element":
-      walkValues(value.of, visit);
-      walkValues(value.index, visit);
+      walkValues(vf(value,"of"), visit);
+      walkValues(vf(value,"index"), visit);
       return;
     case "argv":
       // The index of an argument is an expression of its own, and a call
@@ -565,48 +586,48 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       // so does the rule that a left arm is written once. An index the walk
       // does not read makes both answer "nothing here", and the backend writes
       // the call down under the test and again under the value.
-      if (value.index !== null) walkValues(value.index, visit);
+      if (vf(value,"index") !== null) walkValues(vf(value,"index"), visit);
       return;
     case "call":
-      for (const argument of value.call.args) walkValues(argument, visit);
+      for (const argument of vf(vf(value,"call"),"args")) walkValues(argument, visit);
       return;
     case "arith":
     case "compare":
     case "logical":
     case "coalesce":
-      walkValues(value.left, visit);
-      walkValues(value.right, visit);
+      walkValues(vf(value,"left"), visit);
+      walkValues(vf(value,"right"), visit);
       return;
     case "buffer":
-      if (value.count !== null) walkValues(value.count, visit);
-      if (value.view !== null) {
-        walkValues(value.view.of, visit);
-        walkValues(value.view.offset, visit);
+      if (vf(value,"count") !== null) walkValues(vf(value,"count"), visit);
+      if (vf(value,"view") !== null) {
+        walkValues(vf(vf(value,"view"),"of"), visit);
+        walkValues(vf(vf(value,"view"),"offset"), visit);
       }
-      for (const element of value.values) walkValues(element, visit);
+      for (const element of vf(value,"values")) walkValues(element, visit);
       return;
     case "loadField":
-      walkValues(value.object, visit);
+      walkValues(vf(value,"object"), visit);
       return;
     case "newObject":
       // The fields of an object being built are values of their own: a name
       // read in one and a call written into one are both what the body reads
       // and makes, and a rule that walks a value has to see them.
-      for (const field of value.fields) walkValues(field.value, visit);
+      for (const field of vf(value,"fields")) walkValues(vf(field,"value"), visit);
       return;
     case "select":
-      walkValues(value.condition, visit);
-      walkValues(value.then, visit);
-      walkValues(value.otherwise, visit);
+      walkValues(vf(value,"condition"), visit);
+      walkValues(vf(value,"then"), visit);
+      walkValues(vf(value,"otherwise"), visit);
       return;
     case "closure":
       // The captured values are read where the closure is built, so a call
       // written into one is a call the value makes and a name read in one is a
       // name the body reads.
-      for (const capture of value.captures) walkValues(capture, visit);
+      for (const capture of vf(value,"captures")) walkValues(capture, visit);
       return;
     case "capture":
-      walkValues(value.closure, visit);
+      walkValues(vf(value,"closure"), visit);
       return;
     default:
       return;
@@ -649,7 +670,7 @@ export function hasCall(value: SemanticValue): boolean {
 
 /** Whether one value, written on its own, calls anything. */
 function makesCall(value: SemanticValue): boolean {
-  switch (value.k) {
+  switch (String(vf(value,"k"))) {
     case "call":
     case "argv":
     case "toText":
@@ -664,25 +685,28 @@ function makesCall(value: SemanticValue): boolean {
     case "text":
       // A string written out in the source is laid down in the object beside
       // the code; one with anything computed in it is built at run time.
-      return value.parts.some((part) => part.k === "value");
+      for (const part of vf(value,"parts") as unknown[]) {
+        if (String(vf(part,"k")) === "value") return true;
+      }
+      return false;
     case "arith":
       // A power is `pow`, and a multiplication or a division of a whole number
       // wider than a machine word is the runtime kernel — there is no
       // instruction for thirty-two bytes, so it is a call like any other and
       // clobbers every register a call is free to.
-      if (value.op === "pow") return true;
+      if (String(vf(value,"op")) === "pow") return true;
       // A remainder of a whole number wider than a machine word is the kernel
       // as well, for the same reason a product and a quotient are.
-      if (value.op === "mod" && isWideType(value.type)) return true;
+      if (String(vf(value,"op")) === "mod" && isWideType(vf(value,"type"))) return true;
       // Two texts put together are a string built at run time: the runtime
       // measures the two, allocates the answer and copies the parts into it,
       // and each of those is a call. A body whose only call is a concatenation
       // is a body that calls, and a frame that does not know it is a frame
       // whose calls are made off the boundary the convention wants them on.
-      if (value.op === "concat" || value.op === "arrayConcat") return true;
-      return (value.op === "mul" || value.op === "div") && isWideType(value.type);
+      if (String(vf(value,"op")) === "concat" || String(vf(value,"op")) === "arrayConcat") return true;
+      return (String(vf(value,"op")) === "mul" || String(vf(value,"op")) === "div") && isWideType(vf(value,"type"));
     case "compare":
-      return isTextType(value.operand);
+      return isTextType(vf(value,"operand"));
     default:
       return false;
   }
@@ -692,7 +716,7 @@ function makesCall(value: SemanticValue): boolean {
 export function localNames(value: SemanticValue): string[] {
   const names: string[] = [];
   walkValues(value, (inner) => {
-    if (inner.k === "local") names.push(inner.name);
+    if (String(vf(inner,"k")) === "local") names.push(vf(inner,"name"));
   });
   return names;
 }
@@ -766,24 +790,33 @@ export type SemanticSlot =
 
 /** The type a slot is declared and read as. */
 export function slotType(slot: SemanticSlot): SemanticType {
-  switch (slot.kind) {
+  switch (String(vf(slot,"kind"))) {
     case "value":
     case "object":
-      return slot.type;
+      return vf(slot,"type") as SemanticType;
     case "text":
       return TEXT;
     case "buffer":
-      return { kind: "array", of: slot.element, length: slot.length };
+      return { kind: "array", of: vf(slot,"element") as TypeExpr, length: vf(slot,"length") as number | null };
+    default:
+      throw new Error(`unknown slot kind ${String(vf(slot,"kind"))}`);
   }
 }
 
 /** Every block of a statement that is a block of its own. */
 export function statementBlocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
-  switch (statement.k) {
-    case "if": return [statement.then, statement.otherwise].filter((one): one is SemanticBlock => one !== null);
-    case "loop": return [statement.loop.body];
-    case "block": return [statement.body];
-    default: return [];
+  switch (String(vf(statement,"k"))) {
+    case "if": {
+      const otherwise = vf(statement,"otherwise") as SemanticBlock | null;
+      const then = vf(statement,"then") as SemanticBlock;
+      return otherwise === null ? [then] : [then, otherwise];
+    }
+    case "loop":
+      return [vf(vf(statement,"loop"),"body") as SemanticBlock];
+    case "block":
+      return [vf(statement,"body") as SemanticBlock];
+    default:
+      return [];
   }
 }
 
@@ -807,25 +840,43 @@ export function statementBlocksOf(statement: SemanticStatement): readonly Semant
  * never declared.
  */
 export function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
-  switch (statement.k) {
+  switch (String(vf(statement,"k"))) {
     case "let":
     case "set":
     case "printText":
     case "printNumber":
-    case "retain": return [statement.value];
-    case "storeField": return [statement.object, statement.value];
-    case "step": return [];
-    case "fill": return [statement.value];
-    case "setElement": return [statement.index, statement.value];
-    case "if": return [statement.condition];
-    case "raise": return [statement.message];
-    case "call": return [{ k: "call", type: statement.call.returns, call: statement.call }];
-    case "loop": {
-      const loop = statement.loop;
-      if (loop.kind === "counted") return [loop.from, loop.to, ...(loop.step === null ? [] : [loop.step])];
-      return loop.kind === "each" ? [loop.length] : [loop.condition];
+    case "retain":
+      return [vf(statement,"value") as SemanticValue];
+    case "storeField":
+      return [vf(statement,"object") as SemanticValue, vf(statement,"value") as SemanticValue];
+    case "step":
+      return [];
+    case "fill":
+      return [vf(statement,"value") as SemanticValue];
+    case "setElement":
+      return [vf(statement,"index") as SemanticValue, vf(statement,"value") as SemanticValue];
+    case "if":
+      return [vf(statement,"condition") as SemanticValue];
+    case "raise":
+      return [vf(statement,"message") as SemanticValue];
+    case "call": {
+      const call = vf(statement,"call");
+      return [{ k: "call", type: vf(call,"returns"), call }];
     }
-    default: return [];
+    case "loop": {
+      const loop = vf(statement,"loop");
+      const kind = String(vf(loop,"kind"));
+      if (kind === "counted") {
+        const step: SemanticValue[] = [];
+        if (vf(loop,"step") !== null) step.push(vf(loop,"step") as SemanticValue);
+        return [vf(loop,"from") as SemanticValue, vf(loop,"to") as SemanticValue, ...step];
+      }
+      return kind === "each"
+        ? [vf(loop,"length") as SemanticValue]
+        : [vf(loop,"condition") as SemanticValue];
+    }
+    default:
+      return [];
   }
 }
 
@@ -1085,7 +1136,7 @@ export function compoundAsBinary(
  */
 export function roundedBound(bound: SemanticValue, ceiling: boolean): SemanticValue {
   const number: SemanticType = { kind: "primitive", name: "f64" };
-  const type = bound.type;
+  const type = vf(bound,"type") as SemanticType;
   // A ceiling is the floor of the negated bound, negated again: `-floor(-x)`.
   const argument: SemanticValue = ceiling ? { k: "unary", type, op: "neg", operand: bound } : bound;
   const floor: SemanticValue = {

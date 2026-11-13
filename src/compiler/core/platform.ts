@@ -127,6 +127,7 @@ export {
   existsSync,
   extname,
   fileURLToPath,
+  freezeValue,
   hostArchitecture,
   hostArguments,
   hostAsk,

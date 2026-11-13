@@ -106,6 +106,14 @@ export function dirname(path: string): string {
   return normalized.slice(0, cut);
 }
 
+/**
+ * A compiled program has no freeze state: a contract value is the program's
+ * own, and the backends that read it do not rewrite it.
+ */
+export function freezeValue(value: unknown): void {
+  if (value === null) return;
+}
+
 /** The last part of a path. */
 export function basename(path: string): string {
   const normalized = normalizePath(path);
