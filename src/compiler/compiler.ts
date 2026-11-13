@@ -416,8 +416,11 @@ async function storedPaths(store: JsonStore, root: string, project: string): Pro
   const written: [string, number][] = await Promise.all(
     found.map(async (entry) => {
       const paths = projectPaths(project, entry);
-      const build = (await storeExists(store, paths.build)) ? await storeRead<BuildStatus>(store, paths.build) : undefined;
-      return [entry, Date.parse(build?.updatedAt ?? "") || 0] as [string, number];
+      const pathFields = paths as unknown as Record<string, unknown>;
+      const recordPath = String(pathFields["build"]);
+      const build = (await storeExists(store, recordPath)) ? await storeRead<BuildStatus>(store, recordPath) : undefined;
+      const buildFields = build as unknown as Record<string, unknown> | undefined;
+      return [entry, Date.parse(buildFields === undefined ? "" : String(buildFields["updatedAt"] ?? "")) || 0] as [string, number];
     }),
   );
   written.sort((left, right) => right[1] - left[1]);
@@ -730,8 +733,13 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
   };
 }
 
-async function writeBuildRecord(store: JsonStore, paths: ProjectPaths, build: BuildStatus): Promise<void> {
-  await storeWrite(store, paths.build, build);
+async function writeBuildRecord(store: JsonStore, buildPath: string, build: BuildStatus): Promise<void> {
+  await storeWrite(store, buildPath, build);
+}
+
+/** The path a project's build record is written to. */
+function buildPathOf(paths: ProjectPaths): string {
+  return String((paths as unknown as Record<string, unknown>)["build"]);
 }
 
 /**
@@ -797,10 +805,13 @@ async function recordRejected(
   } catch {
     toolchain = previous?.toolchain;
   }
-  await writeBuildRecord(store, paths, {
+  const pathFields = paths as unknown as Record<string, unknown>;
+  const inputStorePath = String(pathFields["input"]);
+  const contractPath = String(pathFields["contract"]);
+  await writeBuildRecord(store, buildPathOf(paths), {
     id,
-    input: paths.input,
-    contract: paths.contract,
+    input: inputStorePath,
+    contract: contractPath,
     target: recordTarget,
     status: "failed",
     outputKind: previous?.outputKind ?? "machine",
@@ -948,8 +959,18 @@ interface UnitGeneration {
  * exports, because every one of them is something the program may call; a
  * library entry compiles the one function the project named.
  */
+/** The contract a stored unit holds, at the type the evaluator reads it as. */
+function storedContractOf(unit: unknown): FunctionContract {
+  return unitContract(unit) as unknown as FunctionContract;
+}
+
+/** The parsed contract a stored unit holds, at the type the evaluator reads. */
+function storedParsedOf(unit: unknown): ParsedContract {
+  return (unit as unknown as Record<string, unknown>)["parsed"] as ParsedContract;
+}
+
 /** The contract a compilation unit holds, as the record its layout stores. */
-function unitContract(unit: CompilationUnit): Record<string, unknown> {
+function unitContract(unit: unknown): Record<string, unknown> {
   return (unit as unknown as Record<string, unknown>)["contract"] as Record<string, unknown>;
 }
 
@@ -959,7 +980,7 @@ function contractFunction(contract: Record<string, unknown>): Record<string, unk
 }
 
 /** The key a function's artifacts are held under: its symbol, which is unique. */
-function unitKey(unit: CompilationUnit): string {
+function unitKey(unit: unknown): string {
   return String(contractFunction(unitContract(unit))["symbol"]);
 }
 
@@ -969,7 +990,7 @@ function unitKey(unit: CompilationUnit): string {
  * a reader opens names the function the source named; the symbols behind it are
  * the link's, not the source's.
  */
-function unitNameKey(unit: CompilationUnit, units: readonly CompilationUnit[]): string {
+function unitNameKey(unit: unknown, units: readonly CompilationUnit[]): string {
   const name = String(contractFunction(unitContract(unit))["name"]);
   let count = 0;
   for (const other of units) {
@@ -1449,6 +1470,66 @@ async function buildProgramModuleRunner(
   return (result as unknown as Record<string, unknown>)["runner"] as Runner;
 }
 
+/** The generation record a build writes, with the values it holds. */
+function generationRecordOf(
+  selected: Record<string, string>,
+  outcomes: Record<string, CandidateOutcome[]>,
+  modelDurationNs: string,
+): Record<string, unknown> {
+  return { selected, outcomes, modelDurationNs };
+}
+
+/** The outcome a build answers, with the values it holds. */
+function buildOutcomeOf(
+  project: string,
+  build: BuildStatus,
+  contracts: Record<string, FunctionContract>,
+  program: ProgramContract,
+  body: ProgramBody | undefined,
+  candidates: Record<string, Candidate[]>,
+  verification: Record<string, VerificationResult[]>,
+  benchmark: Record<string, BenchmarkResult[]>,
+  generation: Record<string, unknown>,
+  outputKind: OutputKind,
+  outputPath: string | null,
+  outputAssemblyPath: string | null,
+): BuildOutcome {
+  return {
+    project,
+    build,
+    contracts,
+    program,
+    ...(body === undefined ? {} : { body }),
+    candidates,
+    verification,
+    benchmark,
+    generation,
+    outputKind,
+    outputPath,
+    outputAssemblyPath,
+  };
+}
+
+/** Copies a delivered file beside its target and renames it over. */
+async function copyDelivered(from: string, to: string): Promise<void> {
+  const beside = `${to}.delivered`;
+  await copyFile(from, beside);
+  await rename(beside, to);
+}
+
+/** Delivers one file into the store and records it. */
+async function deliverStored(
+  store: JsonStore,
+  base: string,
+  delivered: string[],
+  from: string,
+  to: string,
+): Promise<void> {
+  const target = storeResolve(store, to);
+  await copyDelivered(join(base, from), target);
+  delivered.push(target);
+}
+
 /** A runner value at the type the caller holds it as. */
 function runnerOf(value: Runner): Runner {
   return value;
@@ -1543,6 +1624,14 @@ export async function runBuild(
   const absoluteInput = resolve(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id, projectStoreId(absoluteInput));
+  const pathFields = paths as unknown as Record<string, unknown>;
+  const workPath = String(pathFields["work"]);
+  const buildRecordPath = String(pathFields["build"]);
+  const inputStorePath = String(pathFields["input"]);
+  const candidatesPath = String(pathFields["candidates"]);
+  const verificationPath = String(pathFields["verification"]);
+  const benchmarkPath = String(pathFields["benchmark"]);
+  const generationPath = String(pathFields["generation"]);
 
   // These read the project and reject it before there is a build record to
   // reject it in, so a project that no longer names a build that can run used
@@ -1553,7 +1642,7 @@ export async function runBuild(
   // build, and a project that failed on a corrupt record had no way back short
   // of deleting the file by hand. A record that cannot be read is a different
   // thing, and is a fault: going on to build would overwrite it.
-  const previousBuild = await storeReadIfValid<BuildStatus>(store, paths.build);
+  const previousBuild = await storeReadIfValid<BuildStatus>(store, buildRecordPath);
   let project: ProjectInput;
   let target: TargetSpec;
   let targetForRecord: TargetSpec | undefined;
@@ -1679,20 +1768,20 @@ export async function runBuild(
   const discardStored = (fields["recompile"] as boolean | undefined) === true || (engineChanged && (fields["reuse"] as boolean) !== true);
 
   await storeMkdirp(store, paths.root);
-  await storeMkdirp(store, paths.work);
+  await storeMkdirp(store, workPath);
   if ((fields["recompile"] as boolean | undefined) === true) {
-    try { await storeRemove(store, join(paths.work, "program.c")); } catch {}
+    try { await storeRemove(store, join(workPath, "program.c")); } catch {}
   }
   await storeMkdirp(store, paths.output);
   // The project is stored as the record the rest of the compiler reads, which
   // is JSON whatever the project file is, so `blaze test` and `blaze benchmark`
   // re-run a build against the project it was given.
-  await storeWrite(store, paths.input, input);
+  await storeWrite(store, inputStorePath, input);
 
   const createdAt = new Date().toISOString();
   const build: BuildStatus = {
     id,
-    input: paths.input,
+    input: inputPath,
     contract: paths.contract,
     target,
     status: "building",
@@ -1713,7 +1802,7 @@ export async function runBuild(
     // change that forced one is already visible as the stamp, which moved.
     ...((fields["recompile"] as boolean | undefined) === true ? { recompiled: true } : {}),
   };
-  await writeBuildRecord(store, paths, build);
+  await writeBuildRecord(store, buildPathOf(paths), build);
 
   /**
    * The model is resolved on first use rather than up front: a build that
@@ -1834,7 +1923,7 @@ export async function runBuild(
         for (const note of (bodyLowering as unknown as Record<string, unknown>)["notes"] as string[]) reporter("assemble", "info", note);
       }
     }
-    await writeBuildRecord(store, paths, build);
+    await writeBuildRecord(store, buildPathOf(paths), build);
 
     assertAssemblerSupportsArch(target);
     if (body !== undefined) assertProgramOutput(outputKind, String((projectFields["entry"] as Record<string, unknown>)["source"]));
@@ -1848,7 +1937,7 @@ export async function runBuild(
     const incremental = discardStored
       ? (Object.create(null) as IncrementalRecord)
       : await readIncremental(store, paths.incremental);
-    const base = storeResolve(store, paths.work);
+    const base = storeResolve(store, workPath);
     // What every function of this build was compiled against, so nothing is
     // reused across a change of contract, target, options or model.
     const test = testConfigFor(input, options);
@@ -1986,9 +2075,10 @@ export async function runBuild(
     const generateUnit = async (unit: CompilationUnit, mismatch: ProgramMismatch | undefined): Promise<void> => {
       const key = unitNameKey(unit, units);
       const artifactKey = unitKey(unit);
-      const functionName = unit.contract.function.name;
+      const functionName = String(contractFunction(unitContract(unit))["name"]);
+      const unitContractValue = unitContract(unit) as unknown as FunctionContract;
       const previous = mismatch === undefined ? undefined : implementationOf(key);
-      if (mismatch !== undefined && (unit.contract.ensures.length > 0 || previous === undefined)) return;
+      if (mismatch !== undefined && (((unitContractValue as unknown as Record<string, unknown>)["ensures"] as string[]).length > 0 || previous === undefined)) return;
       const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
       await mkdir(workspace.workDirectory, { recursive: true });
       const keys = keyOf(unit);
@@ -2001,7 +2091,7 @@ export async function runBuild(
         lowering: backendKind,
         linksObjects: checksProgram,
         program,
-        callable: callableSymbols(unit.contract, contracts),
+        callable: callableSymbols(storedContractOf(unit), contracts),
         required: fields["reuse"] as boolean,
         id,
       });
@@ -2082,7 +2172,7 @@ export async function runBuild(
         benchmark: benchmarkConfig,
         prepareRuntime,
         workspace,
-        callable: callableSymbols(unit.contract, contracts),
+        callable: callableSymbols(unitContractValue, contracts),
         machine: machines,
         // A repair round asks the model again, so what an earlier build stored
         // is not what it starts from. Otherwise the stored implementation is
@@ -2238,8 +2328,8 @@ export async function runBuild(
       const verification = byName(verificationEntries);
       const benchmark = byName(benchmarkEntries);
       const selected = byName(selectedEntries);
-      await storeWrite(store, paths.candidates, candidates);
-      await storeWrite(store, paths.generation, {
+      await storeWrite(store, candidatesPath, candidates);
+      await storeWrite(store, generationPath, {
         model: build.model,
         modelConfig: build.modelConfig,
         compilerVersion: COMPILER_VERSION,
@@ -2248,8 +2338,8 @@ export async function runBuild(
           generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
         ),
       });
-      await storeWrite(store, paths.verification, verification);
-      await storeWrite(store, paths.benchmark, benchmark);
+      await storeWrite(store, verificationPath, verification);
+      await storeWrite(store, benchmarkPath, benchmark);
       return selected;
     };
 
@@ -2331,6 +2421,9 @@ export async function runBuild(
         }
       }
       const isHttp = runtimeKind === "facil" || mentionsHttpModule(String((projectFields["entry"] as Record<string, unknown>)["source"]));
+      let runtimeObjectPath: string | undefined;
+      if (runtime !== undefined) runtimeObjectPath = String((runtime as unknown as Record<string, unknown>)["objectPath"]);
+      const sharedBodyNames: string[] = bodyLowering === undefined ? [] : (bodyLowering as unknown as Record<string, unknown>)["visible"] as string[];
       let runner: Runner;
       if (backendKind === "wasm") {
         runner = await buildProgramModuleRunner(
@@ -2341,23 +2434,40 @@ export async function runBuild(
           String(inputFields["language"]),
         );
       } else if (isHttp || runtimeKind === "none") {
+        const driverObjective: Objective = String(normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary) as Objective;
+        const driverMode: BuildMode = buildMode;
+        const driverTarget: TargetSpec = target;
+        const driverProgram: SemanticProgram = driver as SemanticProgram;
+        const driverWork: string = base;
+        const driverObjects: string[] = objectPaths;
+        const driverLowered: string[] = loweredBodies;
+        const driverShared: string[] = sharedBodyNames;
+        const driverRuntime: string | undefined = runtimeObjectPath;
+        const driverHttp: boolean = runtimeKind === "facil";
+        const driverBackend: BackendKind = backendKind;
+        const driverSqlite: boolean = usesSqlite;
+        const driverTls: boolean = (http as unknown as Record<string, unknown>)["tls"] as boolean;
+        const runtimeLibraryValues = runtime === undefined ? undefined : (runtime as unknown as Record<string, unknown>)["libraryObjects"] as Record<string, unknown>[] | undefined;
+        const driverLibraries: string[] = (runtimeLibraryValues ?? []).map((library) => String(library["objectPath"]));
+        const driverThreads: Threading[] = threads;
+        const driverOutput: string = programPath;
         runner = runnerOf(await buildProgramDriverFor(
-          normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary,
-          buildMode,
-          target,
-          driver as SemanticProgram,
-          base,
-          objectPaths,
-          loweredBodies,
-          bodyLowering === undefined ? [] : (bodyLowering as unknown as Record<string, unknown>)["visible"] as string[],
-          runtime === undefined ? undefined : String((runtime as unknown as Record<string, unknown>)["objectPath"]),
-          runtimeKind === "facil",
-          backendKind,
-          usesSqlite,
-          (http as unknown as Record<string, unknown>)["tls"] as boolean,
-          ((runtime === undefined ? undefined : (runtime as unknown as Record<string, unknown>)["libraryObjects"]) as Record<string, unknown>[] | undefined ?? []).map((library) => String(library["objectPath"])),
-          threads,
-          programPath,
+          driverObjective,
+          driverMode,
+          driverTarget,
+          driverProgram,
+          driverWork,
+          driverObjects,
+          driverLowered,
+          driverShared,
+          driverRuntime,
+          driverHttp,
+          driverBackend,
+          driverSqlite,
+          driverTls,
+          driverLibraries,
+          driverThreads,
+          driverOutput,
         ));
       } else {
         runner = await buildProgramHostFor(
@@ -2474,7 +2584,7 @@ export async function runBuild(
       reporter(
         "benchmark",
         "ok",
-        `Benchmark completed for ${functionName} (${benchmarkFields === undefined ? 0 : String(benchmarkFields["iterations"])} iterations, ${benchmarkFields === undefined ? 0 : String(benchmarkFields["durationNs"])} ns)`,
+        `Benchmark completed for ${functionName} (${benchmarkFields === undefined ? "0" : String(benchmarkFields["iterations"])} iterations, ${benchmarkFields === undefined ? "0" : String(benchmarkFields["durationNs"])} ns)`,
       );
     }
     const candidates = byName(candidateEntries);
@@ -2491,15 +2601,6 @@ export async function runBuild(
       // and the file of a running program cannot be written. The copy is made
       // beside its target and renamed over it, and a rename replaces the name
       // the running program is held by rather than the program itself.
-      const replace = async (from: string, to: string) => {
-        const beside = `${to}.delivered`;
-        await copyFile(from, beside);
-        await rename(beside, to);
-      };
-      const deliver = async (from: string, to: string) => {
-        await replace(join(base, from), storeResolve(store, to));
-        delivered.push(storeResolve(store, to));
-      };
       if (body !== undefined) {
         // The program was linked and run above, by the round that agreed with
         // the source, so what is delivered is what was checked.
@@ -2508,8 +2609,8 @@ export async function runBuild(
           // module holds every function of the program and the body it runs,
           // and the host is the runtime it runs under. A module nobody can run
           // is not a deliverable, so the host is delivered beside it.
-          await deliver("program.wasm", paths.outputModule);
-          await deliver("program.host.mjs", paths.outputHost);
+          await deliverStored(store, base, delivered, "program.wasm", paths.outputModule);
+          await deliverStored(store, base, delivered, "program.host.mjs", paths.outputHost);
           outputPath = storeResolve(store, paths.outputModule);
         } else {
           //
@@ -2518,17 +2619,19 @@ export async function runBuild(
           // symbol table, a build id and the unwind tables of a program with no
           // exceptions are 10-20% of a small binary for nothing. The store's copy
           // is made before the strip, so it keeps them.
-          await deliver(programBinary, paths.outputBinary);
+          await deliverStored(store, base, delivered, programBinary, paths.outputBinary);
           run("strip", ["--strip-unneeded", programPath]);
-          await replace(programPath, deliveredProgram);
-          await deliver(runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
+          await copyDelivered(programPath, deliveredProgram);
+          await deliverStored(store, base, delivered, runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
           delivered.push(deliveredProgram);
           outputPath = storeResolve(store, paths.outputBinary);
         }
       } else {
-        const key = unitNameKey(units[0], units);
-        const artifactKey = unitKey(units[0]);
-        const functionName = units[0].contract.function.name;
+        const firstUnit = units[0] as CompilationUnit;
+        const firstContract = unitContract(firstUnit) as unknown as FunctionContract;
+        const key = unitNameKey(firstUnit, units);
+        const artifactKey = unitKey(firstUnit);
+        const functionName = String(contractFunction(unitContract(firstUnit))["name"]);
         const winner = selected[key];
         // A candidate that calls another function of the program is linked only
         // into that program, so the backend never writes a binary of its own for
@@ -2538,43 +2641,43 @@ export async function runBuild(
         // read is answered as one that calls out: the copy fails inside the
         // build rather than a binary that was never written being delivered.
         const implementation = await readFile(join(base, `${artifactKey}/${winner}.ir`), "utf8");
-        const standalone = !callsOutOfProgram(implementation, program, callableSymbols(units[0].contract, contracts));
+        const standalone = !callsOutOfProgram(implementation, program, callableSymbols(firstContract, contracts));
         // What the build delivers is the target the lowering produced, beside
         // the IR it was lowered from, which is the text a model wrote and the
         // one a later repair round is shown. Every kind answers in the IR, so
         // what differs is only the file the compiler wrote.
-        await deliver(`${functionName}/${winner}.ir`, paths.outputIr);
+        await deliverStored(store, base, delivered, `${functionName}/${winner}.ir`, paths.outputIr);
         if (outputKind === "wasm") {
-          await deliver(`${functionName}/${winner}.wasm`, paths.outputModule);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.wasm`, paths.outputModule);
           // The host is the runtime a module runs under, and a module nobody
           // can run is not a deliverable: the host is delivered beside it.
-          await deliver(`${functionName}/${winner}.host.mjs`, paths.outputHost);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.host.mjs`, paths.outputHost);
           outputPath = storeResolve(store, paths.outputModule);
         } else if (outputKind === "ir") {
           if (standalone) {
-            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = storeResolve(store, paths.outputBinary);
           }
         } else if (backendKind === "machine") {
           // The object is the artifact the compiler wrote, so it is what the
           // build delivers beside the IR it was written from. A `machine`
           // build also delivers the executable, which is what a person runs.
-          await deliver(`${functionName}/${winner}.o`, paths.outputObject);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.o`, paths.outputObject);
           outputAssemblyPath = storeResolve(store, paths.outputObject);
           outputPath = storeResolve(store, paths.outputObject);
           if (outputKind === "machine" && standalone) {
-            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = storeResolve(store, paths.outputBinary);
           }
         } else {
           // The delivered text is the one the object was built from, so it can
           // be fed straight back to the toolchain that reads it.
           const target = outputKind === "c" ? paths.outputSource : paths.outputAssembly;
-          await deliver(`${functionName}/${winner}.${outputKind === "c" ? "c" : "s"}`, target);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.${outputKind === "c" ? "c" : "s"}`, target);
           outputAssemblyPath = storeResolve(store, target);
           outputPath = storeResolve(store, target);
           if (outputKind === "machine" && standalone) {
-            await deliver(`${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
             outputPath = storeResolve(store, paths.outputBinary);
           }
         }
@@ -2597,31 +2700,32 @@ export async function runBuild(
     // assembly pointed automation at a file that was never written.
     if (outputPath !== null) build.output = relative(store.root, outputPath);
     build.updatedAt = new Date().toISOString();
-    await writeBuildRecord(store, paths, build);
+    await writeBuildRecord(store, buildPathOf(paths), build);
 
-    return {
-      project: id,
+    const generationRecord = generationRecordOf(
+      selected,
+      outcomes,
+      String(
+        generated.reduce((total, entry) => {
+          const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
+          return total + Number(resultFields["modelDurationNs"]);
+        }, 0),
+      ),
+    );
+    return buildOutcomeOf(
+      id,
       build,
-      contracts: Object.fromEntries(units.map((unit) => [unitNameKey(unit, units), unit.contract])),
+      Object.fromEntries(units.map((unit) => [unitNameKey(unit, units), unitContract(unit) as unknown as FunctionContract])),
       program,
-      ...(body === undefined ? {} : { body: body as ProgramBody }),
+      body,
       candidates,
       verification,
       benchmark,
-      generation: {
-        selected,
-        outcomes,
-        modelDurationNs: String(
-          generated.reduce((total, entry) => {
-            const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
-            return total + Number(resultFields["modelDurationNs"]);
-          }, 0),
-        ),
-      },
+      generationRecord,
       outputKind,
       outputPath,
       outputAssemblyPath,
-    };
+    );
   } catch (cause) {
     // The project is known from here on, so the CLI can point at the record.
     const failure = toCompilerError(cause, "AiReviewError", mode, "", "", "", "", "");
@@ -2629,7 +2733,7 @@ export async function runBuild(
     build.status = "failed";
     build.error = error.toJSON();
     build.updatedAt = new Date().toISOString();
-    await writeBuildRecord(store, paths, build);
+    await writeBuildRecord(store, buildPathOf(paths), build);
     throw error;
   }
 }
@@ -2650,17 +2754,21 @@ async function loadStored(
   project: string,
 ): Promise<{ paths: ProjectPaths; program: ProgramContract; units: CompilationUnit[] }> {
   const paths = await storedPaths(store, root, project);
-  if (!(await storeExists(store, paths.contract))) {
-    throw new CompilerError("StorageError", "load", `unknown project "${project}"`, `no contract at ${paths.contract}`, "", "", "");
+  const pathsFields = paths as unknown as Record<string, unknown>;
+  const contractPath = String(pathsFields["contract"]);
+  const buildPath = String(pathsFields["build"]);
+  if (!(await storeExists(store, contractPath))) {
+    throw new CompilerError("StorageError", "load", `unknown project "${project}"`, `no contract at ${contractPath}`, "", "", "");
   }
-  const program = await storeRead<ProgramContract>(store, paths.contract);
+  const program = await storeRead<ProgramContract>(store, contractPath);
   const programFields = program as unknown as Record<string, unknown>;
   const entry = programFields["entry"] as Record<string, unknown>;
   // A stored program records which functions it compiled, so `blaze test` and
   // `blaze benchmark` work on every one of them rather than on an entry the
   // program does not have.
-  const build = (await storeExists(store, paths.build)) ? await storeRead<BuildStatus>(store, paths.build) : undefined;
-  const compiled = build?.selectedCandidates === undefined ? {} : build.selectedCandidates;
+  const build = (await storeExists(store, buildPath)) ? await storeRead<BuildStatus>(store, buildPath) : undefined;
+  const buildFields = build as unknown as Record<string, unknown> | undefined;
+  const compiled = buildFields === undefined || buildFields["selectedCandidates"] === undefined ? {} : buildFields["selectedCandidates"] as Record<string, string>;
   const all = compilationUnits(program, entry["function"] === null);
   const units = all.filter(
     (unit) => Object.keys(compiled).length === 0 || compiled[unitNameKey(unit, all)] !== undefined,
@@ -2677,25 +2785,40 @@ export async function runStored(
   const fields = options as unknown as Record<string, unknown>;
   const root = join(String(fields["cwd"]), STATE_DIRECTORY);
   const store = createJsonStore(root);
-  const { paths, program, units } = await loadStored(store, root, project);
+  const loaded = await loadStored(store, root, project);
+  const loadedFields = loaded as unknown as Record<string, unknown>;
+  const paths = loadedFields["paths"] as ProjectPaths;
+  const program = loadedFields["program"] as ProgramContract;
+  const units = loadedFields["units"] as CompilationUnit[];
   const programFields = program as unknown as Record<string, unknown>;
   const files = programFields["files"] as FileContract[];
   const entry = programFields["entry"] as Record<string, unknown>;
+  const pathFields = paths as unknown as Record<string, unknown>;
+  const candidatesPath = String(pathFields["candidates"]);
+  const inputPath = String(pathFields["input"]);
+  const buildRecordPath = String(pathFields["build"]);
+  const workPath = String(pathFields["work"]);
+  const verificationPath = String(pathFields["verification"]);
+  const benchmarkPath = String(pathFields["benchmark"]);
   if (units.length === 0) {
     throw new CompilerError("StorageError", action, `project "${project}" compiled no function`, "run blaze build first", "", "", "");
   }
-  if (!(await storeExists(store, paths.candidates))) {
+  if (!(await storeExists(store, candidatesPath))) {
     throw new CompilerError("StorageError", action, `project "${project}" has no stored candidates`, "run blaze build first", "", "", "");
   }
-  const input = await storeExists(store, paths.input) ? await storeRead<SourceInput>(store, paths.input) : ({} as SourceInput);
-  const build = await storeReadIfValid<BuildStatus>(store, paths.build);
+  const input = await storeExists(store, inputPath) ? await storeRead<SourceInput>(store, inputPath) : ({} as SourceInput);
+  const inputFields = input as unknown as Record<string, unknown>;
+  const build = await storeReadIfValid<BuildStatus>(store, buildRecordPath);
   // A build that failed selected nothing, so there is no candidate here that
   // is the project's. Falling back to the last one stored would re-measure an
   // implementation that was never delivered and write that measurement into
   // the record as the project's own.
-  if (build !== undefined && build.status !== "success") {
+  const buildFields = build as unknown as Record<string, unknown> | undefined;
+  const buildStatus = buildFields === undefined ? undefined : String(buildFields["status"]);
+  if (build !== undefined && buildStatus !== "success") {
+    const errorFields = buildFields === undefined ? undefined : buildFields["error"] as Record<string, unknown> | undefined;
     throw new CompilerError("StorageError", action, `project "${project}" has no successful build to ${action}`, [
-        `the last build of this project ${build.status === "building" ? "never finished" : "failed"}: ${build.error?.message ?? "no diagnostic is recorded"}`,
+        `the last build of this project ${buildStatus === "building" ? "never finished" : "failed"}: ${errorFields === undefined ? "no diagnostic is recorded" : String(errorFields["message"] ?? "no diagnostic is recorded")}`,
         `run ${STATE_DIRECTORY} > projects > ${project} > build.json for the whole of it, then build again`,
       ].join("\n"), "", "", "");
   }
@@ -2707,23 +2830,23 @@ export async function runStored(
   // missing the one function it kept. A record with no prototype holds what
   // it holds and nothing else.
   const stored = Object.create(null) as Record<string, Candidate[]>;
-  const candidatesByName = await storeRead<Record<string, Candidate[]>>(store, paths.candidates);
+  const candidatesByName = await storeRead<Record<string, Candidate[]>>(store, candidatesPath);
   for (const name of Object.keys(candidatesByName)) {
     const candidates = candidatesByName[name];
     if (Array.isArray(candidates)) stored[name] = candidates;
   }
 
-  reporter("model", "info", `Model: ${build?.model ?? "unknown"}`);
-  const output = build?.outputKind ?? "machine";
-  const lowering = build?.backend ?? impliedBackend(output);
-  const mode = build?.mode ?? "debug";
+  reporter("model", "info", `Model: ${buildFields === undefined || buildFields["model"] === undefined ? "unknown" : String(buildFields["model"])}`);
+  const output = (buildFields === undefined ? undefined : buildFields["outputKind"] as OutputKind | undefined) ?? "machine";
+  const lowering = (buildFields === undefined ? undefined : buildFields["backend"] as BackendKind | undefined) ?? impliedBackend(output);
+  const mode = (buildFields === undefined ? undefined : buildFields["mode"] as BuildMode | undefined) ?? "debug";
   // The contract names no target, so the one the build ran for is what the
   // stored candidate is tested and measured against.
-  const target = build?.target ?? normalizeTarget(input.target);
-  const runtime = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? build?.runtime ?? input.runtime, output);
+  const target = (buildFields === undefined ? undefined : buildFields["target"] as TargetSpec | undefined) ?? normalizeTarget(inputFields["target"] as Partial<TargetSpec> | undefined);
+  const runtime = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? (buildFields === undefined ? undefined : buildFields["runtime"] as RuntimeKind | undefined) ?? inputFields["runtime"] as RuntimeKind | undefined, output);
   assertRuntimeSupported(target, runtime);
-  const libraries = libraryKindsFor(input.source, target);
-  const base = storeResolve(store, paths.work);
+  const libraries = libraryKindsFor(String(inputFields["source"]), target);
+  const base = storeResolve(store, workPath);
   const prepareRuntime = runtimePreparer({
     lowering,
     mode,
@@ -2735,7 +2858,7 @@ export async function runStored(
     // it is built for the same program the build built it for: the source of
     // the project is what says what its server holds and whether it speaks
     // TLS.
-    http: httpRuntimeNeeds(undefined, [input.source]),
+    http: httpRuntimeNeeds(undefined, [String(inputFields["source"])]),
   });
   // A stored candidate is given the same symbols the build that stored it was
   // given, which is what its own recorded calls say rather than what the build
@@ -2749,7 +2872,10 @@ export async function runStored(
   // it may inline are resolved here exactly as the build resolved them. The
   // object layouts are a property of the contracted files and nothing else, so
   // the same program answers the same names without the phase being run again.
-  const functions = semanticFunctions(program, Object.fromEntries(resolveObjects(program.files).names), undefined, {}, new Map());
+  const objectNamesResult = resolveObjects(files);
+  const objectNameFields = objectNamesResult as unknown as Record<string, unknown>;
+  const names = objectNameFields["names"] as Map<string, string>;
+  const functions = semanticFunctions(program, Object.fromEntries(names), undefined, {}, new Map());
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -2759,9 +2885,9 @@ export async function runStored(
   for (const unit of units) {
     const key = unitNameKey(unit, units);
     const artifactKey = unitKey(unit);
-    const functionName = unit.contract.function.name;
+    const functionName = String(contractFunction(unitContract(unit))["name"]);
     const candidates = stored[key] ?? [];
-    const chosen = build?.selectedCandidates?.[key];
+    const chosen = ((buildFields === undefined ? undefined : buildFields["selectedCandidates"]) as Record<string, string> | undefined)?.[key];
     const candidate = candidates.find((entry) => entry.id === chosen);
     if (candidate === undefined) {
       throw new CompilerError("StorageError", action, `project "${project}" has no candidate to ${action} for ${functionName}`, "", "", "", "");
@@ -2769,8 +2895,8 @@ export async function runStored(
     const workspace = { workDirectory: `${base}/${artifactKey}`, functionName };
     const result = await evaluateStoredCandidate({
       mode,
-      contract: unit.contract,
-      parsed: unit.parsed,
+      contract: storedContractOf(unit),
+      parsed: storedParsedOf(unit),
       program,
       functions,
       // A program is one module, so the functions a candidate calls are in
@@ -2789,20 +2915,23 @@ export async function runStored(
       test: testConfigFor(input, options),
       benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
     });
+    const resultFields = result as unknown as Record<string, unknown>;
+    const resultVerification = resultFields["verification"] as VerificationResult | undefined;
+    const resultBenchmark = resultFields["benchmark"] as BenchmarkResult | undefined;
     functionEntries.push([
       key,
       {
-        candidate: candidate.id,
-        ...(result.verification === undefined ? {} : { verification: result.verification }),
-        ...(result.benchmark === undefined ? {} : { benchmark: result.benchmark }),
+        candidate: String((candidate as unknown as Record<string, unknown>)["id"]),
+        ...(resultVerification === undefined ? {} : { verification: resultVerification }),
+        ...(resultBenchmark === undefined ? {} : { benchmark: resultBenchmark }),
       },
     ]);
-    verificationEntries.push([key, result.verification === undefined ? [] : [result.verification]]);
-    benchmarkEntries.push([key, result.benchmark === undefined ? [] : [result.benchmark]]);
+    verificationEntries.push([key, resultVerification === undefined ? [] : [resultVerification]]);
+    benchmarkEntries.push([key, resultBenchmark === undefined ? [] : [resultBenchmark]]);
 
     // A function that states no postcondition has no vector to run, so there is
     // nothing to report for it here.
-    if (result.verification === undefined && result.benchmark === undefined) {
+    if (resultVerification === undefined && resultBenchmark === undefined) {
       reporter(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
       continue;
     }
@@ -2822,8 +2951,8 @@ export async function runStored(
   }
   // A record a re-measure rewrites whole, so it never keeps a function this
   // program no longer compiles, and a name any source may use is a key of it.
-  await storeWrite(store, paths.verification, byName(verificationEntries));
-  await storeWrite(store, paths.benchmark, byName(benchmarkEntries));
+  await storeWrite(store, verificationPath, byName(verificationEntries));
+  await storeWrite(store, benchmarkPath, byName(benchmarkEntries));
   return { project, functions: byName(functionEntries) };
 }
 
@@ -2897,10 +3026,12 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
   const root = join(cwd, STATE_DIRECTORY);
   const store = createJsonStore(root);
   const paths = await storedPaths(store, root, project);
-  if (!(await storeExists(store, paths.build))) {
-    throw new CompilerError("StorageError", "inspect", `unknown project "${project}"`, `no build record at ${paths.build}`, "", "", "");
+  const pathFields = paths as unknown as Record<string, unknown>;
+  const buildRecordPath = String(pathFields["build"]);
+  if (!(await storeExists(store, buildRecordPath))) {
+    throw new CompilerError("StorageError", "inspect", `unknown project "${project}"`, `no build record at ${buildRecordPath}`, "", "", "");
   }
-  return storeRead<BuildStatus>(store, paths.build);
+  return storeRead<BuildStatus>(store, buildRecordPath);
 }
 
 export async function listProjects(cwd: string): Promise<string[]> {
