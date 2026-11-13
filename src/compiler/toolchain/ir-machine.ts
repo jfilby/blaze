@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Lowering a function's semantic IR to machine code.
  *
@@ -60,7 +64,7 @@ import {
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
-import type { FunctionContract, ObjectLayout, TargetSpec } from "../core/types.ts";
+import type { FunctionContract, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
 import { nameLiveness, overlaps } from "../semantics/liveness.ts";
 import { isSafeToCompute, substituteLocals, valueKey } from "../semantics/repair.ts";
 import { turnIsTooCheap } from "../semantics/parallel.ts";
@@ -1173,7 +1177,7 @@ class Census {
       case "const":
         // A literal is the same number in both lanes, which is what a pair of
         // copies of it is.
-        return isFloatType(value.type);
+        return isFloatType(fieldOf(value, "type") as SemanticType);
       case "local":
         // The counter is the pair itself. Any other name is loop-invariant,
         // because a counted loop here writes nothing but its counter and the
@@ -1184,7 +1188,7 @@ class Census {
         // is not a double. What a name is read *as* is settled where it is
         // used, by the sides of the operation around it having to be at that
         // operation's own type.
-        return value.name !== this.accumulator;
+        return String(fieldOf(value, "name")) !== this.accumulator;
       case "element":
         return this.fitsElement(value);
       case "arith":
@@ -1266,20 +1270,24 @@ class Census {
     // A double, and one of the four operations a double pair has. Every packed
     // instruction written below reads its lanes as doubles, so a lane of any
     // other type is a lane carrying a different number than the one written.
-    if (!isFloatType(value.type)) return false;
-    if (value.op !== "add" && value.op !== "sub" && value.op !== "mul" && value.op !== "div") return false;
+    const type = fieldOf(value, "type") as SemanticType;
+    if (!isFloatType(type)) return false;
+    const op = String(fieldOf(value, "op"));
+    if (op !== "add" && op !== "sub" && op !== "mul" && op !== "div") return false;
     // Every side at the type of the answer, so that a lane is one value of that
     // type rather than one of some other width the pair load did not bring. This
     // is also what refuses a whole number read where a double is: the two sides
     // are not at the answer's type, and reading one is the conversion the rule
     // above refuses.
-    if (!typeEquals(value.left.type, value.type)) return false;
-    if (!typeEquals(value.right.type, value.type)) return false;
+    const left = fieldOf(value, "left") as SemanticValue;
+    const right = fieldOf(value, "right") as SemanticValue;
+    if (!typeEquals(fieldOf(left, "type") as SemanticType, type)) return false;
+    if (!typeEquals(fieldOf(right, "type") as SemanticType, type)) return false;
     // The right side is built with the register the left side is standing in as
     // its third, which is why its height is bounded and the left side's is not:
     // the left is finished with before the right begins, so nothing is lost by
     // the right writing over it, while the right is built across it.
-    return shallow(value.right);
+    return shallow(right, PACKED_RIGHT_DEPTH);
   }
 }
 
@@ -2318,6 +2326,17 @@ interface Held {
   register: number | null;
 }
 
+function heldWithRegister(held: Held, register: number | null): Held {
+  return {
+    id: fieldOf(held, "id") as number,
+    offset: fieldOf(held, "offset") as number,
+    type: fieldOf(held, "type") as SemanticType,
+    index: fieldOf(held, "index") as number | null,
+    constant: fieldOf(held, "constant") as bigint | null,
+    register,
+  };
+}
+
 class Machine {
   readonly code = new Encoder();
   readonly rodata: number[] = [];
@@ -2399,7 +2418,11 @@ class Machine {
     const at = this.mintedLabels++;
     const header = `Lhead${at}`;
     const exit = `Lexit${at}`;
-    return { header, exit, names: { header: loop.header, exit: loop.exit } };
+    return {
+      header,
+      exit,
+      names: { header: String(fieldOf(loop, "header")), exit: String(fieldOf(loop, "exit")) },
+    };
   }
   private used = 0;
   private temporaries = 0;
@@ -2489,8 +2512,8 @@ class Machine {
    * functions would pay for a change that helps only the few that allocate.
    */
   private fillsObjects(): boolean {
-    for (const block of everyBlock(this.fn.entry)) {
-      for (const value of everyValue(block)) {
+    for (const block of everyBlock(fieldOf(this.fn, "entry") as SemanticBlock, [])) {
+      for (const value of everyValue(block, [])) {
         if (value.k === "newObject" || value.k === "buffer") return true;
       }
     }
@@ -2532,25 +2555,45 @@ class Machine {
   constructor(fn: SemanticFunction, contract: FunctionContract | undefined, rounds = false, powerOfTwoParams: ReadonlySet<number> = new Set(), target: TargetSpec = { arch: "x86_64", os: "linux", abi: "sysv", cpu: "", features: [] }, callable: ReadonlySet<string> = new Set(), foreign: ReadonlySet<string> = new Set()) {
     this.callable = callable;
     this.foreign = foreign;
+    const params = fieldOf(fn, "params") as readonly SemanticSlot[];
     const augmented: SemanticSlot[] = [];
-    for (const param of fn.params) {
+    for (const param of params) {
       augmented.push(param);
       const type = slotType(param);
       if (isSequence(type)) {
-        const lengthName = `${param.name}_length`;
-        this.arrayParamLengths.set(param.name, lengthName);
+        const name = String(fieldOf(param, "name"));
+        const lengthName = `${name}_length`;
+        this.arrayParamLengths.set(name, lengthName);
         augmented.push({ kind: "value", name: lengthName, mutable: false, type: USIZE } as SemanticSlot);
       }
     }
-    this.fn = augmented.length === fn.params.length ? fn : { ...fn, params: augmented };
+    const widened: SemanticFunction = {
+      name: String(fieldOf(fn, "name")),
+      symbol: String(fieldOf(fn, "symbol")),
+      params: augmented,
+      returns: fieldOf(fn, "returns") as SemanticType,
+      requires: fieldOf(fn, "requires") as SemanticFunction["requires"],
+      ensures: fieldOf(fn, "ensures") as SemanticFunction["ensures"],
+      effects: fieldOf(fn, "effects") as SemanticFunction["effects"],
+      allocates: fieldOf(fn, "allocates") as boolean,
+      prints: fieldOf(fn, "prints") as boolean,
+      readsArgv: fieldOf(fn, "readsArgv") as boolean,
+      objects: fieldOf(fn, "objects") as SemanticFunction["objects"],
+      calls: fieldOf(fn, "calls") as SemanticFunction["calls"],
+      entry: fieldOf(fn, "entry") as SemanticBlock,
+    };
+    this.fn = augmented.length === params.length ? fn : widened;
     this.rounds = rounds;
     this.poTParams = powerOfTwoParams;
     this.target = target;
     // A layout the program lays out is in the function; one only the contract
     // states is the contract's, and both are the same struct to every reader.
-    this.layouts = { ...(contract?.definition.objects ?? {}), ...fn.objects };
-    for (const parameter of fn.params) {
-      if (parameter.kind === "text" && (parameter as { boxed?: boolean }).boxed === true) this.boxedTexts.add(parameter.name);
+    const stated = contract === undefined ? {} : (fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>);
+    this.layouts = { ...stated, ...(fieldOf(fn, "objects") as Record<string, ObjectLayout>) };
+    for (const parameter of params) {
+      if (String(fieldOf(parameter, "kind")) === "text" && String(fieldOf(parameter, "boxed")) === "true") {
+        this.boxedTexts.add(String(fieldOf(parameter, "name")));
+      }
     }
     // A bound label is a place control reaches from somewhere other than the
     // instruction in front of it, so what the accumulator held before one is a
@@ -2729,9 +2772,11 @@ class Machine {
    * a memory operand, which is one instruction as well.
    */
   private holdsBound(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
-    if (!isFloatType(loop.type)) return false;
-    if (this.literalOf(loop.to, loop.type) !== null) return false;
-    return !this.reread(loop, loop.to);
+    const type = fieldOf(loop, "type") as SemanticType;
+    const to = fieldOf(loop, "to") as SemanticValue;
+    if (!isFloatType(type)) return false;
+    if (this.literalOf(to, type) !== null) return false;
+    return !this.reread(loop, to);
   }
 
   /**
@@ -2827,7 +2872,7 @@ class Machine {
     // three read the register.
     const offset = register === null ? this.reserve(frameBytes(type)) : 0;
     this.heldCount += 1;
-    const held: Held = { id: this.heldCount, offset, type, register, index, constant: null };
+    const held: Held = { id: this.heldCount, offset, type, index, constant: null, register };
     this.slots.set(emitted, held);
     return held;
   }
@@ -2855,7 +2900,7 @@ class Machine {
    * than four, which is a byte on every instruction that reads one.
    */
   private hold(type: SemanticType, prefix: string): Held {
-    const held = this.reserveSlot(type, prefix, true);
+    const held = this.reserveSlot(type, prefix, true, null, undefined);
     this.borrowed.push(held);
     return held;
   }
@@ -2867,7 +2912,7 @@ class Machine {
    * read, and the value `Math.round` keeps beside what it rounds.
    */
   private holdSlot(type: SemanticType, prefix: string): Held {
-    const held = this.reserveSlot(type, prefix, false);
+    const held = this.reserveSlot(type, prefix, false, null, undefined);
     this.borrowed.push(held);
     return held;
   }
@@ -2881,7 +2926,7 @@ class Machine {
    * the loop is.
    */
   private holdAcross(type: SemanticType, prefix: string): Held {
-    return this.reserveSlot(type, prefix, false);
+    return this.reserveSlot(type, prefix, false, null, undefined);
   }
 
   private reserveSlot(
@@ -2907,9 +2952,9 @@ class Machine {
     const need = Math.max(frameBytes(type), 8);
     const spare = where === null ? this.spareSlots.findIndex((slot) => slot.bytes >= need) : -1;
     const offset =
-      where !== null ? 0 : spare >= 0 ? (this.spareSlots.splice(spare, 1)[0] as { offset: number }).offset : this.reserve(need);
+      where !== null ? 0 : spare >= 0 ? (fieldOf(this.spareSlots.splice(spare, 1)[0], "offset") as number) : this.reserve(need);
     this.heldCount += 1;
-    const held: Held = { id: this.heldCount, offset, type, register: where, index: null, constant: null };
+    const held: Held = { id: this.heldCount, offset, type, index: null, constant: null, register: where };
     this.slots.set(name, held);
     return held;
   }
@@ -2922,8 +2967,14 @@ class Machine {
    * what the next statement that wants a frame slot will take.
    */
   private freeSlot(held: Held): void {
-    if (held.register === null) this.spareSlots.push({ offset: held.offset, bytes: Math.max(frameBytes(held.type), 8) });
-    else this.giveSpareVector(held.register);
+    const register = fieldOf(held, "register");
+    if (String(register) === "null") {
+      const offset = fieldOf(held, "offset") as number;
+      const type = fieldOf(held, "type") as SemanticType;
+      this.spareSlots.push({ offset, bytes: Math.max(frameBytes(type), 8) });
+    } else {
+      this.giveSpareVector(register as number);
+    }
   }
 
   /**
@@ -2932,11 +2983,7 @@ class Machine {
    * so the ones nearest the top of it are handed out again first.
    */
   private freeSlotsSince(mark: number): void {
-    for (let at = this.borrowed.length - 1; at >= mark; at -= 1) {
-      const held = this.borrowed[at];
-      if (held.register === null) this.spareSlots.push({ offset: held.offset, bytes: Math.max(frameBytes(held.type), 8) });
-      else this.giveSpareVector(held.register);
-    }
+    for (let at = this.borrowed.length - 1; at >= mark; at -= 1) this.freeSlot(this.borrowed[at]);
     this.borrowed.length = mark;
     // A slot handed back here goes to whatever needs one next, and no
     // instruction written says so. It used to be that this had to take the note
@@ -2989,9 +3036,12 @@ class Machine {
       }
       return null;
     }
-    if (value.length !== null) return BigInt(value.length);
-    if (value.count !== null) return this.heldElements(value.count);
-    return value.values.length === 0 ? null : BigInt(value.values.length);
+    const length = fieldOf(value, "length");
+    if (String(length) !== "null") return BigInt(length as number);
+    const count = fieldOf(value, "count");
+    if (String(count) !== "null") return this.heldElements(count as SemanticValue);
+    const values = fieldOf(value, "values") as readonly unknown[];
+    return values.length === 0 ? null : BigInt(values.length);
   }
 
   /** The count a name is bound with, kept against the name the target reads it as. */
@@ -3003,8 +3053,10 @@ class Machine {
 
   /** Whether a value is a window of another block, and not a block of its own. */
   private isView(value: SemanticValue): boolean {
-    if (value.k === "buffer") return value.view !== null;
-    if (value.k === "local" && isSequence(value.type)) return this.views.has(this.names.read(value.name));
+    if (value.k === "buffer") return String(fieldOf(value, "view")) !== "null";
+    if (value.k === "local" && isSequence(fieldOf(value, "type") as SemanticType)) {
+      return this.views.has(this.names.read(String(fieldOf(value, "name"))));
+    }
     return false;
   }
 
@@ -3099,8 +3151,9 @@ class Machine {
     this.code.jmp(test);
     const body = this.code.label("Lfill");
     this.code.bind(body);
-    if (buffer.register === null) this.code.movRegMem(RCX, frame(buffer.offset));
-    else this.code.movRegReg(RCX, buffer.register);
+    const bufferRegister = fieldOf(buffer, "register");
+    if (String(bufferRegister) === "null") this.code.movRegMem(RCX, frame(fieldOf(buffer, "offset") as number));
+    else this.code.movRegReg(RCX, bufferRegister as number);
     this.load(index);
     this.code.lea(RCX, indexed(RCX, RAX, widthOf(element)));
     this.load(written);
@@ -3117,10 +3170,10 @@ class Machine {
     if (typeof count === "bigint") {
       this.code.movRegImm(RCX, count);
       this.code.alu("cmp", RAX, RCX);
-    } else if (count.register === null) {
-      this.code.aluRegMem("cmp", RAX, frame(count.offset), true);
+    } else if (String(fieldOf(count, "register")) === "null") {
+      this.code.aluRegMem("cmp", RAX, frame(fieldOf(count, "offset") as number), true);
     } else {
-      this.code.alu("cmp", RAX, count.register);
+      this.code.alu("cmp", RAX, fieldOf(count, "register") as number);
     }
     this.code.jcc("b", body);
     this.freeSlot(index);
@@ -3138,7 +3191,7 @@ class Machine {
     const register = this.spareBounds.pop() ?? null;
     if (register === null) return null;
     this.at(value, type);
-    const held = this.reserveSlot(type, "blaze_to", false, register);
+    const held = this.reserveSlot(type, "blaze_to", false, register, undefined);
     this.store(held);
     return held;
   }
@@ -3183,8 +3236,8 @@ class Machine {
   private allocateRegisters(): void {
     const reads = new Map<string, number>();
     const writes = new Map<string, number>();
-    const declared: { name: string; type: SemanticType }[] = this.fn.params.map((parameter) => ({
-      name: parameter.name,
+    const declared: { name: string; type: SemanticType }[] = (fieldOf(this.fn, "params") as readonly SemanticSlot[]).map((parameter) => ({
+      name: String(fieldOf(parameter, "name")),
       type: slotType(parameter),
     }));
     const write = (name: string, weight: number): void => {
@@ -3199,34 +3252,44 @@ class Machine {
     // in a function that calls nothing. `checksum` reads its one parameter
     // three times, which is below the threshold on a straight line and above
     // it in the function that is called once per node of the tree it walks.
-    const recursed = this.fn.calls.some((edge) => edge.callee === this.fn.name) ? 1 : 0;
-    for (const { block, depth } of everyBlockAtDepth(this.fn.entry)) {
+    const calls = fieldOf(this.fn, "calls") as readonly SemanticFunction["calls"][number][];
+    const fnName = String(fieldOf(this.fn, "name"));
+    const recursed = calls.some((edge) => String(fieldOf(edge, "callee")) === fnName) ? 1 : 0;
+    for (const entry of everyBlockAtDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0, [])) {
+      const block = fieldOf(entry, "block") as SemanticBlock;
+      const depth = fieldOf(entry, "depth") as number;
       const weight = READ_WEIGHT[Math.min(depth + recursed, READ_WEIGHT.length - 1)];
-      for (const statement of block.statements) {
-        if (statement.k === "set" || statement.k === "step") write(statement.name, weight);
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+        const statementName = String(fieldOf(statement, "name"));
+        if (statement.k === "set" || statement.k === "step") write(statementName, weight);
         // A compound assignment reads what the name holds as well as writing
         // what it is given, and the read is a read of the name: an accumulator
         // that is added to on every turn of a loop is reached for as often as
         // anything else there, and the frame round trip of keeping it there is
         // a load and a store on every turn.
-        if (statement.k === "set" && statement.op !== "=") read(statement.name, weight);
-        if (statement.k === "step") read(statement.name, weight);
+        if (statement.k === "set" && String(fieldOf(statement, "op")) !== "=") read(statementName, weight);
+        if (statement.k === "step") read(statementName, weight);
         if (statement.k === "setElement") {
           // The buffer of a write is named rather than valued, so a census of
           // the values the body computes never sees it read. Writing an element
           // changes what the pointer reaches and not the pointer itself, so it
           // is a read of the name rather than a write of it.
-          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
+          const buffer = String(fieldOf(statement, "buffer"));
+          reads.set(buffer, (reads.get(buffer) ?? 0) + weight);
         }
         if (statement.k === "fill") {
           // A fill is every element written at once, and the pointer it writes
           // through is read on every turn of the walk it is, which is a read
           // the census counts here the way a write of one element counts it.
-          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
+          const buffer = String(fieldOf(statement, "buffer"));
+          reads.set(buffer, (reads.get(buffer) ?? 0) + weight);
         }
       }
-      for (const value of everyValue(block)) {
-        if (value.k === "local") reads.set(value.name, (reads.get(value.name) ?? 0) + weight);
+      for (const value of everyValue(block, [])) {
+        if (value.k === "local") {
+          const name = String(fieldOf(value, "name"));
+          reads.set(name, (reads.get(name) ?? 0) + weight);
+        }
       }
     }
     // Every name the body declares, and how many declarations spell it. A name
@@ -3240,20 +3303,26 @@ class Machine {
     const declare = (name: string): void => {
       declarationCount.set(name, (declarationCount.get(name) ?? 0) + 1);
     };
-    for (const parameter of this.fn.params) declare(parameter.name);
-    for (const { block } of everyBlockAtDepth(this.fn.entry)) {
-      for (const statement of block.statements) {
-        if (statement.k === "let") declare(statement.slot.name);
-        else if (statement.k === "loop") {
-          const loop = statement.loop;
-          if (loop.kind === "counted") {
-            declare(loop.variable);
-            loopDeclared.add(loop.variable);
-          } else if (loop.kind === "each") {
-            declare(loop.index);
-            declare(loop.element);
-            loopDeclared.add(loop.index);
-            loopDeclared.add(loop.element);
+    for (const parameter of fieldOf(this.fn, "params") as readonly SemanticSlot[]) declare(String(fieldOf(parameter, "name")));
+    for (const entry of everyBlockAtDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0, [])) {
+      const block = fieldOf(entry, "block") as SemanticBlock;
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+        if (statement.k === "let") {
+          declare(String(fieldOf(fieldOf(statement, "slot"), "name")));
+        } else if (statement.k === "loop") {
+          const loop = fieldOf(statement, "loop") as SemanticLoop;
+          const kind = String(fieldOf(loop, "kind"));
+          if (kind === "counted") {
+            const variable = String(fieldOf(loop, "variable"));
+            declare(variable);
+            loopDeclared.add(variable);
+          } else if (kind === "each") {
+            const index = String(fieldOf(loop, "index"));
+            const element = String(fieldOf(loop, "element"));
+            declare(index);
+            declare(element);
+            loopDeclared.add(index);
+            loopDeclared.add(element);
           }
         }
       }
@@ -3263,10 +3332,14 @@ class Machine {
     // `let sum = 0` written inside a loop and added to on every turn of it is
     // the commonest one there is, and it was left in the frame because only the
     // top of the body was looked at.
-    for (const { block } of everyBlockAtDepth(this.fn.entry)) {
-      for (const statement of block.statements) {
-        if (statement.k !== "let" || loopDeclared.has(statement.slot.name)) continue;
-        declared.push({ name: statement.slot.name, type: slotType(statement.slot) });
+    for (const entry of everyBlockAtDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0, [])) {
+      const block = fieldOf(entry, "block") as SemanticBlock;
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+        if (statement.k !== "let") continue;
+        const slot = fieldOf(statement, "slot") as SemanticSlot;
+        const name = String(fieldOf(slot, "name"));
+        if (loopDeclared.has(name)) continue;
+        declared.push({ name, type: slotType(slot) });
       }
     }
     // What a name is worth a register for is what it costs the frame: every
@@ -3296,12 +3369,15 @@ class Machine {
     // both are calls. The graph is told which statements those are rather than
     // left to read the loop as a loop, which is what it would otherwise see.
     const liveness = nameLiveness(
-      this.fn.entry,
-      this.fn.params.map((parameter) => parameter.name),
-      (statement) =>
-        statement.k === "loop" &&
-        (statement.loop.kind === "counted" || statement.loop.kind === "each") &&
-        (this.teamed.has(statement.loop) || statement.loop.region === true),
+      fieldOf(this.fn, "entry") as SemanticBlock,
+      (fieldOf(this.fn, "params") as readonly SemanticSlot[]).map((parameter) => String(fieldOf(parameter, "name"))),
+      (statement) => {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        const kind = String(fieldOf(loop, "kind"));
+        return statement.k === "loop" &&
+          (kind === "counted" || kind === "each") &&
+          (this.teamed.has(loop) || String(fieldOf(loop, "region")) === "true");
+      },
       // A rounding is written here as instructions rather than as a call, so a
       // name live across one of them is live across arithmetic and not across
       // a callee writing over the registers the convention does not preserve.
@@ -3317,14 +3393,17 @@ class Machine {
     const arrivals = this.arrivals();
     const arrivalOf = new Map<string, number | null>();
     const laterArrivals = new Map<string, Set<number>>();
-    for (const [at, parameter] of this.fn.params.entries()) {
-      arrivalOf.set(parameter.name, arrivals[at]?.register ?? null);
+    for (const [at, parameter] of (fieldOf(this.fn, "params") as readonly SemanticSlot[]).entries()) {
+      const parameterName = String(fieldOf(parameter, "name"));
+      const arrival = arrivals[at];
+      arrivalOf.set(parameterName, arrival === undefined ? null : fieldOf(arrival, "register") as number | null);
       const after = new Set<number>();
       for (let later = at + 1; later < arrivals.length; later += 1) {
-        const register = arrivals[later]?.register ?? null;
-        if (register !== null) after.add(register);
+        const laterArrival = arrivals[later];
+        const register = laterArrival === undefined ? null : fieldOf(laterArrival, "register") as number | null;
+        if (String(register) !== "null") after.add(register as number);
       }
-      laterArrivals.set(parameter.name, after);
+      laterArrivals.set(parameterName, after);
     }
     const taken = new Map<number, (readonly [number, number])[]>();
     const claim = (register: number, live: readonly (readonly [number, number])[]): void => {
@@ -3613,10 +3692,14 @@ class Machine {
     // The registers this function keeps values in are saved twice: once by the
     // prologue, which gives the caller's value back, and once beside every
     // foreign call, which writes down what this function holds now.
-    const pinned = new Set(this.pinnedVectors.map((saved) => saved.register));
-    for (const saved of this.pinnedVectors) {
-      saved.offset = this.reserve(8, 8);
-      this.callSaves.push({ register: saved.register, offset: this.reserve(8, 8), single: saved.single });
+    const pinned = new Set(this.pinnedVectors.map((saved) => fieldOf(saved, "register") as number));
+    for (let at = 0; at < this.pinnedVectors.length; at += 1) {
+      const saved = this.pinnedVectors[at];
+      const register = fieldOf(saved, "register") as number;
+      const single = fieldOf(saved, "single") as boolean;
+      const offset = this.reserve(8, 8);
+      this.pinnedVectors[at] = { register, offset, single };
+      this.callSaves.push({ register, offset: this.reserve(8, 8), single });
     }
     // A call this backend did not build may write every vector register, not
     // only the ones this body uses. The registers it does not use are not
@@ -3645,9 +3728,11 @@ class Machine {
    * nothing has nothing to keep straight.
    */
   private callsAnything(): boolean {
-    if (this.fn.allocates || this.fn.prints || this.fn.readsArgv) return true;
-    for (const block of everyBlock(this.fn.entry)) {
-      for (const value of everyValue(block)) {
+    if (String(fieldOf(this.fn, "allocates")) === "true" ||
+        String(fieldOf(this.fn, "prints")) === "true" ||
+        String(fieldOf(this.fn, "readsArgv")) === "true") return true;
+    for (const block of everyBlock(fieldOf(this.fn, "entry") as SemanticBlock, [])) {
+      for (const value of everyValue(block, [])) {
         if (hasCall(value)) return true;
       }
     }
@@ -3662,12 +3747,14 @@ class Machine {
    * functions is one it can, and that function gives back the registers it uses.
    */
   private makesForeignCall(): boolean {
-    if (this.fn.allocates || this.fn.prints || this.fn.readsArgv) return true;
-    for (const block of everyBlock(this.fn.entry)) {
-      for (const value of everyValue(block)) {
+    if (String(fieldOf(this.fn, "allocates")) === "true" ||
+        String(fieldOf(this.fn, "prints")) === "true" ||
+        String(fieldOf(this.fn, "readsArgv")) === "true") return true;
+    for (const block of everyBlock(fieldOf(this.fn, "entry") as SemanticBlock, [])) {
+      for (const value of everyValue(block, [])) {
         if (value.k !== "call") continue;
-        const call = value.call;
-        if (call.builtin || !this.callable.has(call.callee)) return true;
+        const call = fieldOf(value, "call") as SemanticCall;
+        if (String(fieldOf(call, "builtin")) === "true" || !this.callable.has(String(fieldOf(call, "callee")))) return true;
       }
     }
     return false;
@@ -3728,22 +3815,25 @@ class Machine {
    * which is the same program and what this backend already wrote.
    */
   private teamFor(loop: SemanticLoop): TeamedLoop | null {
-    if (loop.kind !== "counted" && loop.kind !== "each") return null;
-    if (loop.parallel !== true) return null;
-    if (turnIsTooCheap(loop.body)) return null;
+    const kind = String(fieldOf(loop, "kind"));
+    if (kind !== "counted" && kind !== "each") return null;
+    if (String(fieldOf(loop, "parallel")) !== "true") return null;
+    const body = fieldOf(loop, "body") as SemanticBlock;
+    if (turnIsTooCheap(body)) return null;
     // An accumulator the turns combine is one number every turn writes, and
     // combining it wants a slot per thread and a pass over them afterwards.
     // The loops that reduce are the ones this backend already writes a whole
     // vector at a time, so those are left to that.
-    if ((loop.reductions ?? []).length > 0) return null;
+    if (((fieldOf(loop, "reductions") as readonly unknown[] | undefined) ?? []).length > 0) return null;
     // A turn that returns leaves the function from inside a thread of the
     // team, which is not what returning from the function means.
-    if (returnsFromItsBody(loop.body)) return null;
+    if (returnsFromItsBody(body)) return null;
     // The turn counts in halves a runtime hands it as whole numbers, so a
     // counter narrower than that would be asked to compare a bound it cannot
     // hold.
-    if (loop.kind === "counted" && (!isInteger(loop.type) || widthOf(loop.type) !== 8)) return null;
-    return loop;
+    const type = fieldOf(loop, "type") as SemanticType;
+    if (kind === "counted" && (!isInteger(type) || widthOf(type) !== 8)) return null;
+    return loop as TeamedLoop;
   }
 
   emit(): Uint8Array {
@@ -3761,7 +3851,13 @@ class Machine {
     // A vector register has no push and is spilled into the frame, which is
     // written after the frame is taken because that is the stack pointer the
     // slot's address is written against.
-    for (const saved of this.pinnedVectors) this.code.saveVector(saved.register, saved.offset, saved.single);
+    for (const saved of this.pinnedVectors) {
+      this.code.saveVector(
+        fieldOf(saved, "register") as number,
+        fieldOf(saved, "offset") as number,
+        fieldOf(saved, "single") as boolean,
+      );
+    }
     this.parameters();
     // The body opens a scope of its own, and the parameters are read in it, so
     // they are declared one scope further out.
@@ -3779,7 +3875,10 @@ class Machine {
     // pointer it is is a function of a frame nothing had read when the address
     // was written, so it is filled in now the frame is settled.
     for (const argument of this.incoming) {
-      this.code.patchDisp(argument.index, bytes + this.pinnedRegisters.length * 8 + argument.at);
+      this.code.patchDisp(
+        fieldOf(argument, "index") as number,
+        bytes + this.pinnedRegisters.length * 8 + (fieldOf(argument, "at") as number),
+      );
     }
     if (bytes > 0) this.code.patchWord(frameAt, bytes);
     // A function the body turned out to give no frame to writes no `sub` for
@@ -3804,8 +3903,8 @@ class Machine {
   private returnWide(): void {
     if (this.wideResult === null || this.wideSret === null) return;
     this.wideLoad(this.wideResult);
-    this.code.movRegMemSized(RCX, frame(this.wideSret.offset), 8, false);
-    for (let limb = 0; limb < this.limbsOf(this.fn.returns); limb += 1) {
+    this.code.movRegMemSized(RCX, frame(fieldOf(this.wideSret, "offset") as number), 8, false);
+    for (let limb = 0; limb < this.limbsOf(fieldOf(this.fn, "returns") as SemanticType); limb += 1) {
       this.code.movMemRegSized(mem(RCX, limb * LIMB_BYTES), [8, 9, 10, 11][limb], 8);
     }
   }
@@ -3873,7 +3972,7 @@ class Machine {
     // the two put every argument after a wide number on the stack, where the
     // convention hands those in registers exactly as it otherwise would.
     let exhausted = false;
-    return this.fn.params.map((parameter) => {
+    return (fieldOf(this.fn, "params") as readonly SemanticSlot[]).map((parameter) => {
       const type = slotType(parameter);
       // A wide number is thirty-two bytes, which is more than the register file
       // has to spare for one argument, and the convention's answer to a value of
@@ -3909,66 +4008,70 @@ class Machine {
     // A wide answer is returned through memory, and the pointer to where it goes
     // arrives in `rdi` ahead of every other argument, so it is taken out of the
     // register the body is about to use for something else.
-    if (isWideType(this.fn.returns)) {
-      this.wideResult = this.reserveSlot(this.fn.returns, "blaze_wide_result", false);
-      this.wideSret = this.reserveSlot(POINTER, "blaze_wide_sret", false);
-      this.code.movMemRegSized(frame(this.wideSret.offset), RDI, 8);
+    if (isWideType(fieldOf(this.fn, "returns") as SemanticType)) {
+      this.wideResult = this.reserveSlot(fieldOf(this.fn, "returns") as SemanticType, "blaze_wide_result", false, null, undefined);
+      this.wideSret = this.reserveSlot(POINTER, "blaze_wide_sret", false, null, undefined);
+      this.code.movMemRegSized(frame(fieldOf(this.wideSret, "offset") as number), RDI, 8);
     }
     const arrivals = this.arrivals();
-    for (const [at, parameter] of this.fn.params.entries()) {
+    for (const [at, parameter] of (fieldOf(this.fn, "params") as readonly SemanticSlot[]).entries()) {
       const arrival = arrivals[at];
       if (arrival === undefined) {
-        throw machineError(`${this.fn.symbol} has an argument the convention hands in nowhere`);
+        throw machineError(`${String(fieldOf(this.fn, "symbol"))} has an argument the convention hands in nowhere`);
       }
       const type = slotType(parameter);
-      const held = this.bind(parameter.name, type);
-      const offset = held.offset;
-      const register = arrival.register;
-      if (held.register !== null) {
+      const held = this.bind(String(fieldOf(parameter, "name")), type);
+      const offset = fieldOf(held, "offset") as number;
+      const heldRegister = fieldOf(held, "register") as number | null;
+      const heldId = fieldOf(held, "id") as number;
+      const register = fieldOf(arrival, "register") as number | null;
+      const stack = fieldOf(arrival, "stack") as number;
+      const limbs = fieldOf(arrival, "limbs") as number;
+      if (String(heldRegister) !== "null") {
         // A parameter that is pinned is in a register from here on, so the frame
         // copy it would otherwise be written to is not made. It arrives in an
         // argument register or on the stack, and either is one move into the
         // register it is pinned to — which is no move at all where it was given
         // the register it arrived in, which is what it is given whenever that
         // register is one the allocation was free to use.
-        if (register === null) {
-          const argument = this.stackArgument(8 + arrival.stack * 8);
-          if (isFloatType(type)) this.code.movsLoad(held.register, argument, widthOf(type) === 4);
-          else this.code.movRegMem(held.register, argument);
+        if (String(register) === "null") {
+          const argument = this.stackArgument(8 + stack * 8);
+          if (isFloatType(type)) this.code.movsLoad(heldRegister as number, argument, widthOf(type) === 4);
+          else this.code.movRegMem(heldRegister as number, argument);
           continue;
         }
-        if (held.register === register) continue;
-        if (isFloatType(type)) this.code.movsMove(held.register, register, widthOf(type) === 4);
-        else this.code.movRegReg(held.register, register);
+        if (String(heldRegister) === String(register)) continue;
+        if (isFloatType(type)) this.code.movsMove(heldRegister as number, register as number, widthOf(type) === 4);
+        else this.code.movRegReg(heldRegister as number, register as number);
         continue;
       }
-      if (register === null && isWideType(type)) {
+      if (String(register) === "null" && isWideType(type)) {
         // A wide argument arrives as four consecutive words above the return
         // address, and each of them is copied into the limb of the slot that
         // reads at that place. The words are read one at a time through the
         // accumulator rather than as one copy, because the slot is thirty-two
         // bytes and there is no instruction that moves thirty-two bytes from one
         // place to another.
-        for (let limb = 0; limb < arrival.limbs; limb += 1) {
-          this.code.movRegMemSized(RAX, this.stackArgument(8 + (arrival.stack + limb) * 8), 8, false);
+        for (let limb = 0; limb < limbs; limb += 1) {
+          this.code.movRegMemSized(RAX, this.stackArgument(8 + (stack + limb) * 8), 8, false);
           this.code.movMemRegSized(this.limbOf(offset, limb), RAX, 8);
         }
         continue;
       }
-      if (register === null) {
+      if (String(register) === "null") {
         // An argument of a class that has run out of registers is on the stack
         // above the return address, and so is every argument after it.
-        this.code.movRegMem(RAX, this.stackArgument(8 + arrival.stack * 8));
+        this.code.movRegMem(RAX, this.stackArgument(8 + stack * 8));
         this.code.movMemRegSized(frame(offset), RAX, widthOf(type));
         continue;
       }
-      this.code.movMemRegSized(frame(offset), register, widthOf(type));
+      this.code.movMemRegSized(frame(offset), register as number, widthOf(type));
       // The first float argument arrives in the accumulator itself, so writing
       // it down leaves the accumulator holding what the slot holds — which is
       // what the first read of that parameter is answered by.
       if (isFloatType(type)) {
-        this.code.movsStore(frame(offset), register, widthOf(type) === 4);
-        if (register === XMM0) this.accumulator = { id: held.id, at: this.code.written };
+        this.code.movsStore(frame(offset), register as number, widthOf(type) === 4);
+        if (register === XMM0) this.accumulator = { id: heldId, at: this.code.written };
       }
     }
   }
@@ -3992,20 +4095,26 @@ class Machine {
    * code cannot be read at a later one.
    */
   private load(held: Held): void {
-    if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
-    if (held.register !== null) {
-      if (isFloatType(held.type)) this.code.movsMove(XMM0, held.register, widthOf(held.type) === 4);
-      else this.code.movRegReg(RAX, held.register);
-      this.accumulator = { id: held.id, at: this.code.written };
+    const id = fieldOf(held, "id") as number;
+    const register = fieldOf(held, "register") as number | null;
+    const type = fieldOf(held, "type") as SemanticType;
+    const offset = fieldOf(held, "offset") as number;
+    const accumulator = this.accumulator;
+    if (accumulator !== null &&
+        (fieldOf(accumulator, "id") as number) === id &&
+        (fieldOf(accumulator, "at") as number) === this.code.written) return;
+    if (String(register) !== "null") {
+      if (isFloatType(type)) this.code.movsMove(XMM0, register as number, widthOf(type) === 4);
+      else this.code.movRegReg(RAX, register as number);
+      this.accumulator = { id, at: this.code.written };
       return;
     }
-    if (this.accumulator?.id === held.id && this.accumulator.at === this.code.written) return;
-    if (isFloatType(held.type)) {
-      this.code.movsLoad(XMM0, frame(held.offset), widthOf(held.type) === 4);
+    if (isFloatType(type)) {
+      this.code.movsLoad(XMM0, frame(offset), widthOf(type) === 4);
     } else {
-      this.code.movRegMemSized(RAX, frame(held.offset), widthOf(held.type), signedOf(held.type));
+      this.code.movRegMemSized(RAX, frame(offset), widthOf(type), signedOf(type));
     }
-    this.accumulator = { id: held.id, at: this.code.written };
+    this.accumulator = { id, at: this.code.written };
   }
 
   /**
@@ -4049,18 +4158,21 @@ class Machine {
    */
   private shiftInPlace(value: SemanticValue, target: Held): boolean {
     if (value.k !== "arith") return false;
-    if (value.op !== "shl" && value.op !== "shr" && value.op !== "ushr") return false;
-    const type = target.type;
+    const op = String(fieldOf(value, "op"));
+    if (op !== "shl" && op !== "shr" && op !== "ushr") return false;
+    const type = fieldOf(target, "type") as SemanticType;
     if (isFloatType(type) || isWideType(type)) return false;
-    if (value.left.k !== "local") return false;
-    const places = this.immediateOf(value.right, type);
+    const left = fieldOf(value, "left") as SemanticValue;
+    if (left.k !== "local") return false;
+    const places = this.immediateOf(fieldOf(value, "right") as SemanticValue, type);
     if (places === null) return false;
-    const held = this.slot(value.left.name);
-    if (held.register === null) return false;
-    if (widthOf(held.type) !== widthOf(type)) return false;
+    const held = this.slot(String(fieldOf(left, "name")));
+    const register = fieldOf(held, "register");
+    if (String(register) === "null") return false;
+    if (widthOf(fieldOf(held, "type") as SemanticType) !== widthOf(type)) return false;
     const wide = operationWidth(type) === 8;
-    this.code.shiftImm(shiftOf(value.op, type), held.register, places & (wide ? 63 : 31), wide);
-    this.storeFrom(target, held.register);
+    this.code.shiftImm(shiftOf(op, type), register as number, places & (wide ? 63 : 31), wide);
+    this.storeFrom(target, register as number);
     return true;
   }
 
@@ -4072,16 +4184,20 @@ class Machine {
    * be answered rather than written.
    */
   private store(held: Held): void {
-    if (held.register !== null) {
-      if (isFloatType(held.type)) this.code.movsMove(held.register, XMM0, widthOf(held.type) === 4);
-      else this.code.movRegReg(held.register, RAX);
-      this.accumulator = { id: held.id, at: this.code.written };
+    const register = fieldOf(held, "register") as number | null;
+    const type = fieldOf(held, "type") as SemanticType;
+    const offset = fieldOf(held, "offset") as number;
+    const id = fieldOf(held, "id") as number;
+    if (String(register) !== "null") {
+      if (isFloatType(type)) this.code.movsMove(register as number, XMM0, widthOf(type) === 4);
+      else this.code.movRegReg(register as number, RAX);
+      this.accumulator = { id, at: this.code.written };
       return;
     }
-    if (isFloatType(held.type)) {
-      this.code.movsStore(frame(held.offset), XMM0, widthOf(held.type) === 4);
+    if (isFloatType(type)) {
+      this.code.movsStore(frame(offset), XMM0, widthOf(type) === 4);
     } else {
-      this.code.movMemRegSized(frame(held.offset), RAX, widthOf(held.type));
+      this.code.movMemRegSized(frame(offset), RAX, widthOf(type));
     }
     // Writing the accumulator down does not take it away, so what it holds is
     // still what it held — which is what lets the load of that same slot after
@@ -4091,8 +4207,8 @@ class Machine {
     // accumulator has. A slot narrower than the accumulator holds the low half
     // of it, and reading it back would widen it again, so the accumulator after
     // the read is not the accumulator before it.
-    if (widthOf(held.type) === 8 && !isWideType(held.type)) {
-      this.accumulator = { id: held.id, at: this.code.written };
+    if (widthOf(type) === 8 && !isWideType(type)) {
+      this.accumulator = { id, at: this.code.written };
     }
   }
 
@@ -4112,14 +4228,17 @@ class Machine {
    * register, and `load` reads it out of there whatever the note says.
    */
   private storeFrom(held: Held, register: number): void {
-    if (held.register !== null) {
-      if (held.register === register) return;
-      if (isFloatType(held.type)) this.code.movsMove(held.register, register, widthOf(held.type) === 4);
-      else this.code.movRegReg(held.register, register);
+    const heldRegister = fieldOf(held, "register") as number | null;
+    const type = fieldOf(held, "type") as SemanticType;
+    const offset = fieldOf(held, "offset") as number;
+    if (String(heldRegister) !== "null") {
+      if (heldRegister === register) return;
+      if (isFloatType(type)) this.code.movsMove(heldRegister as number, register, widthOf(type) === 4);
+      else this.code.movRegReg(heldRegister as number, register);
       return;
     }
-    if (isFloatType(held.type)) this.code.movsStore(frame(held.offset), register, widthOf(held.type) === 4);
-    else this.code.movMemRegSized(frame(held.offset), register, widthOf(held.type));
+    if (isFloatType(type)) this.code.movsStore(frame(offset), register, widthOf(type) === 4);
+    else this.code.movMemRegSized(frame(offset), register, widthOf(type));
     this.accumulator = null;
   }
 
@@ -4192,16 +4311,19 @@ class Machine {
    * every operation the value itself is made of.
    */
   private scratchFrom(held: Held): void {
-    if (held.register !== null) {
-      if (isFloatType(held.type)) this.code.movsMove(XMM1, held.register, widthOf(held.type) === 4);
-      else this.code.movRegReg(RCX, held.register);
+    const register = fieldOf(held, "register") as number | null;
+    const type = fieldOf(held, "type") as SemanticType;
+    const offset = fieldOf(held, "offset") as number;
+    if (String(register) !== "null") {
+      if (isFloatType(type)) this.code.movsMove(XMM1, register as number, widthOf(type) === 4);
+      else this.code.movRegReg(RCX, register as number);
       return;
     }
-    if (isFloatType(held.type)) {
-      this.code.movsLoad(XMM1, frame(held.offset), widthOf(held.type) === 4);
+    if (isFloatType(type)) {
+      this.code.movsLoad(XMM1, frame(offset), widthOf(type) === 4);
       return;
     }
-    this.code.movRegMem(RCX, frame(held.offset));
+    this.code.movRegMem(RCX, frame(offset));
   }
 
   /* ---------------------------------------------------------------------- */
@@ -4214,9 +4336,10 @@ class Machine {
     // holding the few of them that are live at once rather than the sum of
     // every one the function ever bound.
     const mark = this.borrowed.length;
-    for (let at = 0; at < block.statements.length; at += 1) {
-      const statement = block.statements[at];
-      const next = block.statements[at + 1];
+    const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+    for (let at = 0; at < statements.length; at += 1) {
+      const statement = statements[at];
+      const next = statements[at + 1];
       // A `let chunk = Math.floor(X / powers[idx])` followed by an `if` that
       // tests whether `chunk` is odd is just "bit `idx` of `X` is set" when
       // `powers` is a power-of-two array: a shift replaces the divide and its
@@ -4228,12 +4351,13 @@ class Machine {
       this.statement(statement);
     }
     this.freeSlotsSince(mark);
-    for (const name of block.releases) this.release(name);
-    this.terminator(block.terminator);
+    for (const name of fieldOf(block, "releases") as readonly string[]) this.release(name);
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    this.terminator(terminator);
     // A block that leaves for another one has written the jump that does it,
     // and that jump is not one the lowering laid out to reach whatever comes
     // next here.
-    if (block.terminator.k === "jump") this.code.sealJump();
+    if (terminator.k === "jump") this.code.sealJump();
     this.names.leave();
   }
 
@@ -4245,17 +4369,26 @@ class Machine {
   private powerOfTwoDivFloor(
     value: SemanticValue,
   ): { readonly value: SemanticValue; readonly index: SemanticValue & { k: "local" }; readonly paramName: string } | null {
-    if (value.k !== "call" || value.call.callee !== "Math.floor") return null;
-    const args = value.call.args;
+    if (value.k !== "call") return null;
+    const call = fieldOf(value, "call") as SemanticCall;
+    if (String(fieldOf(call, "callee")) !== "Math.floor") return null;
+    const args = fieldOf(call, "args") as readonly SemanticValue[];
     if (args.length !== 1) return null;
     const div = args[0];
-    if (div.k !== "arith" || div.op !== "div") return null;
+    if (div.k !== "arith" || String(fieldOf(div, "op")) !== "div") return null;
     // Division is not commutative: the divisor is the element read from the
     // power-of-two array, and the dividend is everything else.
-    if (div.right.k !== "element") return null;
-    const element = div.right;
-    if (element.of.k !== "local" || element.index.k !== "local") return null;
-    return { value: div.left, index: element.index, paramName: element.of.name };
+    const right = fieldOf(div, "right") as SemanticValue;
+    if (right.k !== "element") return null;
+    const element = right;
+    const of = fieldOf(element, "of") as SemanticValue;
+    const index = fieldOf(element, "index") as SemanticValue;
+    if (of.k !== "local" || index.k !== "local") return null;
+    return {
+      value: fieldOf(div, "left") as SemanticValue,
+      index: index as SemanticValue & { k: "local" },
+      paramName: String(fieldOf(of, "name")),
+    };
   }
 
   /**
@@ -4264,27 +4397,35 @@ class Machine {
    * side of the subtraction.
    */
   private ifTestsOddness(condition: SemanticValue, chunk: string): boolean {
-    if (condition.k !== "compare" || condition.op !== "eq") return false;
-    const { left, right } = condition;
-    if (right.k !== "const" || Number(right.text) !== 1) return false;
-    if (left.k !== "arith" || left.op !== "sub") return false;
-    if (left.left.k !== "local" || left.left.name !== chunk) return false;
-    const mul = left.right;
-    if (mul.k !== "arith" || mul.op !== "mul") return false;
-    const floorDiv = mul.left.k === "call" ? mul.left : mul.right.k === "call" ? mul.right : null;
-    if (floorDiv === null || floorDiv.k !== "call" || floorDiv.call.callee !== "Math.floor") return false;
-    const floorArgs = floorDiv.call.args;
+    if (condition.k !== "compare" || String(fieldOf(condition, "op")) !== "eq") return false;
+    const left = fieldOf(condition, "left") as SemanticValue;
+    const right = fieldOf(condition, "right") as SemanticValue;
+    if (right.k !== "const" || Number(fieldOf(right, "text")) !== 1) return false;
+    if (left.k !== "arith" || String(fieldOf(left, "op")) !== "sub") return false;
+    const leftLeft = fieldOf(left, "left") as SemanticValue;
+    if (leftLeft.k !== "local" || String(fieldOf(leftLeft, "name")) !== chunk) return false;
+    const mul = fieldOf(left, "right") as SemanticValue;
+    if (mul.k !== "arith" || String(fieldOf(mul, "op")) !== "mul") return false;
+    const mulLeft = fieldOf(mul, "left") as SemanticValue;
+    const mulRight = fieldOf(mul, "right") as SemanticValue;
+    const floorDiv = mulLeft.k === "call" ? mulLeft : mulRight.k === "call" ? mulRight : null;
+    if (floorDiv === null || floorDiv.k !== "call") return false;
+    const call = fieldOf(floorDiv, "call") as SemanticCall;
+    if (String(fieldOf(call, "callee")) !== "Math.floor") return false;
+    const floorArgs = fieldOf(call, "args") as readonly SemanticValue[];
     if (floorArgs.length !== 1) return false;
     const innerDiv = floorArgs[0];
-    if (innerDiv.k !== "arith" || innerDiv.op !== "div") return false;
-    const innerLeft = innerDiv.left.k === "local" ? innerDiv.left : null;
-    const innerRight = innerDiv.right.k === "local" ? innerDiv.right : null;
-    const chunkRead = innerLeft !== null && innerLeft.name === chunk ? innerLeft : innerRight;
-    if (chunkRead === null || chunkRead.name !== chunk) return false;
-    const two = innerLeft === chunkRead ? innerDiv.right : innerDiv.left;
-    if (two.k !== "const" || Number(two.text) !== 2) return false;
-    const other = mul.left === floorDiv ? mul.right : mul.left;
-    if (other.k !== "const" || Number(other.text) !== 2) return false;
+    if (innerDiv.k !== "arith" || String(fieldOf(innerDiv, "op")) !== "div") return false;
+    const innerDivLeft = fieldOf(innerDiv, "left") as SemanticValue;
+    const innerDivRight = fieldOf(innerDiv, "right") as SemanticValue;
+    const innerLeft = innerDivLeft.k === "local" ? innerDivLeft : null;
+    const innerRight = innerDivRight.k === "local" ? innerDivRight : null;
+    const chunkRead = innerLeft !== null && String(fieldOf(innerLeft, "name")) === chunk ? innerLeft : innerRight;
+    if (chunkRead === null || String(fieldOf(chunkRead, "name")) !== chunk) return false;
+    const two = innerLeft === chunkRead ? innerDivRight : innerDivLeft;
+    if (two.k !== "const" || Number(fieldOf(two, "text")) !== 2) return false;
+    const other = mulLeft === floorDiv ? mulRight : mulLeft;
+    if (other.k !== "const" || Number(fieldOf(other, "text")) !== 2) return false;
     return true;
   }
 
@@ -4327,17 +4468,20 @@ class Machine {
     if (statement.k !== "let" || next.k !== "if") return false;
     const div = this.powerOfTwoDivFloor(statement.value);
     if (div === null) return false;
-    const param = this.fn.params.find(
-      (p, position) => p.kind === "value" && p.name === div.paramName && this.poTParams.has(position),
+    const param = (fieldOf(this.fn, "params") as readonly SemanticSlot[]).find(
+      (p, position) => String(fieldOf(p, "kind")) === "value" &&
+        String(fieldOf(p, "name")) === div.paramName &&
+        this.poTParams.has(position),
     );
     if (param === undefined) return false;
     // The shift count has to be a whole-number counter this function keeps in
     // a register of its own; a counter held as a double in the frame cannot be
     // used as a shift count here.
-    const shift = this.counterRegisters.get(div.index.name);
+    const shift = this.counterRegisters.get(String(fieldOf(div.index, "name")));
     if (shift === undefined) return false;
-    const chunk = statement.slot.name;
-    if (!this.ifTestsOddness(next.condition, chunk)) return false;
+    const chunk = String(fieldOf(fieldOf(statement, "slot"), "name"));
+    const nextCondition = fieldOf(next, "condition") as SemanticValue;
+    if (!this.ifTestsOddness(nextCondition, chunk)) return false;
     // `chunk` may only be read inside this condition: the strength reduction
     // never writes `chunk` as a number anywhere, so any other read would
     // observe a value that was never computed.
@@ -4352,14 +4496,17 @@ class Machine {
     this.code.testImm(RDX, 1, true);
     // Bit clear means the condition is false: leave for the `otherwise` arm, or
     // for the end of the statement when there is no other arm.
-    this.code.jcc("e", next.otherwise === null ? end : otherwise);
+    const nextThen = fieldOf(next, "then") as SemanticBlock;
+    const nextOtherwise = fieldOf(next, "otherwise") as SemanticBlock | null;
+    this.code.jcc("e", String(nextOtherwise) === "null" ? end : otherwise);
     // The accumulator no longer holds anything meaningful past the test.
     this.accumulator = null;
-    this.block(next.then);
-    if (next.otherwise !== null) {
-      if (next.then.terminator.k === "next") this.code.jmp(end);
+    this.block(nextThen);
+    if (String(nextOtherwise) !== "null") {
+      const otherwiseBlock = nextOtherwise as SemanticBlock;
+      if (String(fieldOf(fieldOf(nextThen, "terminator"), "k")) === "next") this.code.jmp(end);
       this.code.bind(otherwise);
-      this.block(next.otherwise);
+      this.block(otherwiseBlock);
     }
     this.code.bind(end);
     return true;
@@ -4378,13 +4525,16 @@ class Machine {
   private writeStatement(statement: SemanticStatement): void {
     switch (statement.k) {
       case "let": {
-        const type = slotType(statement.slot);
-        const boxed = statement.slot.kind === "text" && (statement.slot as { boxed?: boolean }).boxed === true;
-        if (boxed) this.boxedTexts.add(statement.slot.name);
+        const slot = fieldOf(statement, "slot") as SemanticSlot;
+        const value = fieldOf(statement, "value") as SemanticValue;
+        const name = String(fieldOf(slot, "name"));
+        const type = slotType(slot);
+        const boxed = String(fieldOf(slot, "kind")) === "text" && String(fieldOf(slot, "boxed")) === "true";
+        if (boxed) this.boxedTexts.add(name);
         if (boxed) {
           // Allocate a shared cell holding the text pointer, store the initial
           // value into it, and bind the local to the cell pointer.
-          this.at(statement.value, type);
+          this.at(value, type);
           const valueSlot = this.hold(type, "blaze_boxed_value");
           this.store(valueSlot);
           this.code.movRegImm(RDI, 8n);
@@ -4392,99 +4542,107 @@ class Machine {
           const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
           this.store(cellSlot);
           this.load(valueSlot);
-          this.code.movRegMem(RCX, frame(cellSlot.offset));
+          this.code.movRegMem(RCX, frame(fieldOf(cellSlot, "offset") as number));
           this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
-          const held = this.bind(statement.slot.name, type);
+          const held = this.bind(name, type);
           this.load(cellSlot);
           this.store(held);
           this.freeSlot(valueSlot);
           this.freeSlot(cellSlot);
           return;
         }
-        if (statement.slot.kind === "buffer") {
+        if (String(fieldOf(slot, "kind")) === "buffer") {
           // The count a name holds is read out of the value the name is bound
           // with, before the pointer is: a fill of the name is written over
           // the count it was bound with, and reading it after the pointer
           // would still be the same number. The C driver writes both in this
           // order too.
-          const count = this.boundElementsOf(statement.value);
-          this.value(statement.value);
-          const bound = this.bind(statement.slot.name, type);
+          const count = this.boundElementsOf(value);
+          this.value(value);
+          const bound = this.bind(name, type);
           this.store(bound);
-          this.rememberElements(statement.slot.name, count);
-          this.rememberView(statement.slot.name, statement.value);
+          this.rememberElements(name, count);
+          this.rememberView(name, value);
           return;
         }
         // A wide number is not in the accumulator, so it is written down from
         // the working registers rather than from `rax`.
         if (isWideType(type)) {
-          const name = statement.slot.name;
           // A binding whose value reads the name it is about to declare — a
           // `let x = x` that shadows an outer x — is written before the name
           // is declared, because the read is the outer one. Every other
           // binding is declared first, which is what lets the kernel write its
           // answer into the slot rather than into a temporary.
-          if (this.reads(statement.value, name)) {
-            this.wideValue(statement.value);
+          if (this.reads(value, name)) {
+            this.wideValue(value);
             this.wideStore(this.bind(name, type));
             return;
           }
-          this.wideBind(name, this.bind(name, type), statement.value);
+          this.wideBind(name, this.bind(name, type), value);
           return;
         }
-        this.at(statement.value, type);
-        const held = this.bind(statement.slot.name, type);
-        if (statement.slot.name.startsWith("blaze_limb_")) {
-          this.accumulator = { id: held.id, at: this.code.written };
+        this.at(value, type);
+        const held = this.bind(name, type);
+        if (name.startsWith("blaze_limb_")) {
+          this.accumulator = { id: fieldOf(held, "id") as number, at: this.code.written };
           return;
         }
         this.store(held);
-        if (isSequence(type)) this.rememberView(statement.slot.name, statement.value);
+        if (isSequence(type)) this.rememberView(name, value);
         return;
       }
-      case "set":
-        const held = this.slot(statement.name);
+      case "set": {
+        const name = String(fieldOf(statement, "name"));
+        const op = String(fieldOf(statement, "op"));
+        const value = fieldOf(statement, "value") as SemanticValue;
+        const held = this.slot(name);
+        const type = fieldOf(held, "type") as SemanticType;
         // A name that holds an array and is bound again is bound with the
         // count the new value holds — the same question a binding asks,
         // because a fill written after this one walks the array as it is now.
-        if (isSequence(held.type)) {
+        if (isSequence(type)) {
           this.rememberElements(
-            statement.name,
-            statement.op === "=" ? this.boundElementsOf(statement.value) : null,
+            name,
+            op === "=" ? this.boundElementsOf(value) : null,
           );
-          if (statement.op === "=") this.rememberView(statement.name, statement.value);
-          else this.views.delete(this.names.read(statement.name));
+          if (op === "=") this.rememberView(name, value);
+          else this.views.delete(this.names.read(name));
         }
-        if (isWideType(held.type)) {
-          this.wideBind(statement.name, held, statement.value);
+        if (isWideType(type)) {
+          this.wideBind(name, held, value);
           return;
         }
-        this.assign(statement.name, statement.op, statement.value);
+        this.assign(name, op, value);
         return;
+      }
       case "setElement": {
-        const buffer = this.slot(statement.buffer);
-        const isDynamic = buffer.type.kind === "ref" && buffer.type.of === null;
+        const value = fieldOf(statement, "value") as SemanticValue;
+        const index = fieldOf(statement, "index") as SemanticValue;
+        const op = String(fieldOf(statement, "op"));
+        const buffer = this.slot(String(fieldOf(statement, "buffer")));
+        const bufferType = fieldOf(buffer, "type") as SemanticType;
+        const isDynamic = bufferType.kind === "ref" && bufferType.of === null;
         if (isDynamic) {
-          this.value(statement.value);
+          this.value(value);
           this.code.movsMove(XMM2, XMM0, false);
-          this.at(statement.index, USIZE);
+          this.at(index, USIZE);
           this.code.movRegReg(RDI, RAX);
-          this.code.movMemRegSized(frame(buffer.offset), RSI, 8);
+          this.code.movMemRegSized(frame(fieldOf(buffer, "offset") as number), RSI, 8);
           // value in XMM2 -> move to XMM1 (second double arg) ... actually convention: first arg XMM0, second XMM1
           this.code.movsMove(XMM1, XMM2, false);
-          this.code.movsLoad(XMM0, frame(buffer.offset), false);
+          this.code.movsLoad(XMM0, frame(fieldOf(buffer, "offset") as number), false);
           this.runtime("_array_set");
           return;
         }
-        const element = elementTypeOf(buffer.type) ?? statement.value.type;
+        const element = elementTypeOf(bufferType) ?? (fieldOf(value, "type") as SemanticType);
         // A write of a value the program computed is the one write whose value
         // is finished before its address is needed, so the two can be written in
         // that order and the address can be the pair the write itself carries.
         // A compound write reads what the element holds first, which is the
         // other order, so it keeps the general form below.
-        if (statement.op === "=") {
-          this.at(statement.value, element);
-          const where = this.elementAddress(statement.buffer, statement.index, element);
+        if (op === "=") {
+          this.at(value, element);
+          const where = this.elementAddress(String(fieldOf(statement, "buffer")), index, element);
           if (where !== null) {
             this.storeAt(element, where);
             return;
@@ -4494,32 +4652,32 @@ class Machine {
           // The address is left in the accumulator and written down, because
           // the value it is for is in a slot the loading of it takes the
           // accumulator back from.
-          this.addressOf(statement.buffer, statement.index, element);
+          this.addressOf(String(fieldOf(statement, "buffer")), index, element);
           const place = this.hold(POINTER, "blaze_place");
           this.store(place);
           this.load(written);
-          this.code.movRegMem(RCX, frame(place.offset));
+          this.code.movRegMem(RCX, frame(fieldOf(place, "offset") as number));
           this.storeInto(element, RCX);
           return;
         }
         const place = this.hold(POINTER, "blaze_place");
-        this.at(statement.value, element);
+        this.at(value, element);
         const written = this.hold(element, "blaze_element");
         this.store(written);
         // The address is read twice here — once for what the element holds and
         // once for the write — so it is put together in the accumulator and
         // written down rather than carried by the instruction that reads it.
-        this.builtAddress(statement.buffer, statement.index, element);
+        this.builtAddress(String(fieldOf(statement, "buffer")), index, element);
         this.store(place);
         // The element is read *through* the address the write goes to, not out
         // of the slot the address is kept in: the slot holds the address, and
         // reading it as the element read the address as the old value, so
         // `a[i] += 1` wrote the one and not the sum.
-        this.code.movRegMem(RAX, frame(place.offset));
+        this.code.movRegMem(RAX, frame(fieldOf(place, "offset") as number));
         this.readAt(element);
         const read = this.hold(element, "blaze_read");
         this.store(read);
-        if (statement.op === "**=") {
+        if (op === "**=") {
           // The old value is in `read` and the new one is in `written`: a
           // power is the libm call the two sides of an arith of it take,
           // spelled out exactly as the binary form is.
@@ -4530,16 +4688,16 @@ class Machine {
           this.scratchFrom(right);
           this.library("pow");
           this.normalizeArithmetic(element);
-          this.code.movRegMem(RCX, frame(place.offset));
+          this.code.movRegMem(RCX, frame(fieldOf(place, "offset") as number));
           this.storeInto(element, RCX);
           return;
         }
         this.load(written);
         this.toScratch(element);
         this.load(read);
-        this.apply(COMPOUND[statement.op.slice(0, -1)], element);
+        this.apply(COMPOUND[op.slice(0, -1)], element);
         this.normalizeArithmetic(element);
-        this.code.movRegMem(RCX, frame(place.offset));
+        this.code.movRegMem(RCX, frame(fieldOf(place, "offset") as number));
         this.storeInto(element, RCX);
         return;
       }
@@ -4548,32 +4706,34 @@ class Machine {
         // the way a counted loop steps its counter. Copying it through the
         // accumulator to add one and write it back is two instructions that
         // produce the same register.
-        const target = this.slot(statement.name);
-        const register = target.register;
-        if (register === null) this.load(target);
-        this.one(target.type, statement.op === "++" ? "add" : "sub", register ?? RAX);
-        this.normalizeArithmetic(target.type, register ?? RAX);
-        if (register === null) this.store(target);
+        const target = this.slot(String(fieldOf(statement, "name")));
+        const targetType = fieldOf(target, "type") as SemanticType;
+        const register = fieldOf(target, "register") as number | null;
+        if (String(register) === "null") this.load(target);
+        this.one(targetType, String(fieldOf(statement, "op")) === "++" ? "add" : "sub", register ?? RAX);
+        this.normalizeArithmetic(targetType, register ?? RAX);
+        if (String(register) === "null") this.store(target);
         return;
       }
       case "printText":
         this.printText(statement.value);
         return;
       case "printNumber": {
+        const value = fieldOf(statement, "value") as SemanticValue;
         // A whole number is printed from the integer it is. The formatter the
         // floating numbers use takes a double, and a double holds every whole
         // number only up to 2^53 — so the bigint literal 9007199254740993 came
         // out as 9007199254740992. The C backend already wrote the digits of an
         // integer rather than handing it over; this is the same answer here.
-        const type = statement.value.type;
+        const type = fieldOf(value, "type") as SemanticType;
         if (isWideType(type)) {
           // A wide number is printed in hexadecimal, most significant limb
           // first, by the runtime's u256 hex formatter. The limbs are spilled
           // to a slot and its address is passed.
-          this.wideValue(statement.value);
+          this.wideValue(value);
           const slot = this.hold(type, "blaze_print_wide");
           this.wideStore(slot);
-          this.code.leaMemReg(mem(RSP, slot.offset), RDI);
+          this.code.leaMemReg(mem(RSP, fieldOf(slot, "offset") as number), RDI);
           this.library("blaze_rt_print_u256_hex");
           this.freeSlot(slot);
           return;
@@ -4581,13 +4741,13 @@ class Machine {
         if (isNumber(type) && isInteger(type)) {
           // A whole number narrower than a word is widened to one first, which
           // is exact and leaves the digits it always had.
-          this.at(statement.value, widthOf(type) === 8 ? type : I64);
+          this.at(value, widthOf(type) === 8 ? type : I64);
           this.code.movRegReg(RDI, RAX);
-          this.code.movRegImm(RSI, statement.bigint ? 1n : 0n);
+          this.code.movRegImm(RSI, String(fieldOf(statement, "bigint")) === "true" ? 1n : 0n);
           this.runtime("_print_whole");
           return;
         }
-        this.at(statement.value, NUMBER);
+        this.at(value, NUMBER);
         this.runtime("_print_number");
         return;
       }
@@ -4595,24 +4755,31 @@ class Machine {
         this.runtime("_print_newline");
         return;
       case "retain":
-        this.value(statement.value);
+        this.value(fieldOf(statement, "value") as SemanticValue);
         this.code.movRegReg(RDI, RAX);
         this.runtime("_retain");
         return;
       case "raise":
-        this.value(statement.message);
+        this.value(fieldOf(statement, "message") as SemanticValue);
         this.code.movRegReg(RDI, RAX);
         this.runtime("_raise");
         return;
-      case "call":
-        if (statement.call.callee === "http.serve") {
-          this.httpServe(statement.call);
+      case "call": {
+        const call = fieldOf(statement, "call") as SemanticCall;
+        if (String(fieldOf(call, "callee")) === "http.serve") {
+          this.httpServe(call);
           return;
         }
-        this.callValue(statement.call, null);
+        this.callValue(call, null);
         return;
+      }
       case "storeField":
-        this.storeField(statement.object, statement.layout, statement.field, statement.value);
+        this.storeField(
+          fieldOf(statement, "object") as SemanticValue,
+          String(fieldOf(statement, "layout")),
+          String(fieldOf(statement, "field")),
+          fieldOf(statement, "value") as SemanticValue,
+        );
         return;
       case "if": {
         const otherwise = this.code.label("Lelse");
@@ -4621,24 +4788,27 @@ class Machine {
         // that is not taken is the end of the statement itself, so the branch
         // goes there and no jump over the other arm is written at all. What
         // that jump used to be was five bytes moving zero.
-        this.truthBranch(statement.condition, false, statement.otherwise === null ? end : otherwise);
-        this.block(statement.then);
-        if (statement.otherwise !== null) {
+        const condition = fieldOf(statement, "condition") as SemanticValue;
+        const thenBlock = fieldOf(statement, "then") as SemanticBlock;
+        const otherwiseBlock = fieldOf(statement, "otherwise") as SemanticBlock | null;
+        this.truthBranch(condition, false, String(otherwiseBlock) === "null" ? end : otherwise);
+        this.block(thenBlock);
+        if (String(otherwiseBlock) !== "null") {
           // An arm that returns or leaves for another block never comes back
           // here, so the jump over the other arm is written only when the arm
           // does fall out of the end of it.
-          if (statement.then.terminator.k === "next") this.code.jmp(end);
+          if (String(fieldOf(fieldOf(thenBlock, "terminator"), "k")) === "next") this.code.jmp(end);
           this.code.bind(otherwise);
-          this.block(statement.otherwise);
+          this.block(otherwiseBlock as SemanticBlock);
         }
         this.code.bind(end);
         return;
       }
       case "block":
-        this.block(statement.body);
+        this.block(fieldOf(statement, "body") as SemanticBlock);
         return;
       case "loop":
-        this.loop(statement.loop);
+        this.loop(fieldOf(statement, "loop") as SemanticLoop);
         return;
       case "fill":
         this.fill(statement);
@@ -4649,19 +4819,21 @@ class Machine {
   /** A name given a value, or one changed by the operator it was written with. */
   private assign(name: string, op: string, value: SemanticValue): void {
     const target = this.slot(name);
-    const boxed = isTextType(target.type) && this.boxedTexts.has(name);
+    const targetType = fieldOf(target, "type") as SemanticType;
+    const targetRegister = fieldOf(target, "register") as number | null;
+    const boxed = isTextType(targetType) && this.boxedTexts.has(name);
     // A string grows: `+=` is a new value rather than an addition in place, and
     // two addresses added together are not a string.
-    if (op === "+=" && isTextType(target.type)) {
-      this.concat({ k: "local", type: TEXT, name }, value, target.type);
+    if (op === "+=" && isTextType(targetType)) {
+      this.concat({ k: "local", type: TEXT, name }, value, targetType);
       if (boxed) {
-        const valueSlot = this.hold(target.type, "blaze_boxed_value");
+        const valueSlot = this.hold(targetType, "blaze_boxed_value");
         this.store(valueSlot);
         const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
         this.load(target);
         this.store(cellSlot);
         this.load(valueSlot);
-        this.code.movRegMem(RCX, frame(cellSlot.offset));
+        this.code.movRegMem(RCX, frame(fieldOf(cellSlot, "offset") as number));
         this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
         this.freeSlot(valueSlot);
         this.freeSlot(cellSlot);
@@ -4671,14 +4843,14 @@ class Machine {
       return;
     }
     if (op === "=" && boxed) {
-      this.at(value, target.type);
-      const valueSlot = this.hold(target.type, "blaze_boxed_value");
+      this.at(value, targetType);
+      const valueSlot = this.hold(targetType, "blaze_boxed_value");
       this.store(valueSlot);
       const cellSlot = this.hold(POINTER, "blaze_boxed_cell");
       this.load(target);
       this.store(cellSlot);
       this.load(valueSlot);
-      this.code.movRegMem(RCX, frame(cellSlot.offset));
+      this.code.movRegMem(RCX, frame(fieldOf(cellSlot, "offset") as number));
       this.code.movMemRegSized(mem(RCX, 0), RAX, 8);
       this.freeSlot(valueSlot);
       this.freeSlot(cellSlot);
@@ -4691,8 +4863,8 @@ class Machine {
       // than the pair. A name the build gave a register of its own is a value
       // read on every turn of a loop as often as anything else — `borrow` is
       // one, and the eleven limbs of a modular subtraction assign it twice each.
-      if (value.k === "const" && isFloatType(target.type) && target.register !== null && !isWideType(target.type)) {
-        this.floatConstant(Number(decimalText(value.text)), target.type, target.register);
+      if (value.k === "const" && isFloatType(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
+        this.floatConstant(Number(decimalText(value.text)), targetType, targetRegister as number);
         return;
       }
       // The same is true of an integer written out: a constant already fits in
@@ -4700,10 +4872,10 @@ class Machine {
       // directly rather than through the accumulator and a move. A name the
       // build gave a register of its own is the one both sides read equally,
       // and the eleven limbs of a field arithmetic assign one several times.
-      if (value.k === "const" && isInteger(target.type) && target.register !== null && !isWideType(target.type)) {
+      if (value.k === "const" && isInteger(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
         const whole = integerText(value.text);
-        this.code.movRegImm(target.register, whole);
-        if (!this.writtenWhole(whole, target.type)) this.normalizeArithmetic(target.type, target.register);
+        this.code.movRegImm(targetRegister as number, whole);
+        if (!this.writtenWhole(whole, targetType)) this.normalizeArithmetic(targetType, targetRegister as number);
         return;
       }
       // A shift over a value the build gave a register of its own is written in
@@ -4711,7 +4883,7 @@ class Machine {
       // moved back: the carry a limb arithmetic hands the next limb is one long
       // run of exactly that.
       if (this.shiftInPlace(value, target)) return;
-      this.at(value, target.type);
+      this.at(value, targetType);
       this.store(target);
       return;
     }
@@ -4729,8 +4901,8 @@ class Machine {
       // A power is a libm call, and the answer it hands back is the value the
       // name is to hold: one arith of the old value and the one it was given.
       this.at(
-        { k: "arith", type: target.type, op: "pow", left: { k: "local", type: target.type, name }, right: value },
-        target.type,
+        { k: "arith", type: targetType, op: "pow", left: { k: "local", type: targetType, name }, right: value },
+        targetType,
       );
       this.store(target);
       return;
@@ -4739,17 +4911,17 @@ class Machine {
     // A number written out, added to a name that has a register of its own, is
     // the one instruction that carries the number: the value does not have to
     // be built in the accumulator first.
-    if (target.register !== null && value.k === "const" && isInteger(target.type) && !isWideType(target.type)) {
+    if (String(targetRegister) !== "null" && value.k === "const" && isInteger(targetType) && !isWideType(targetType)) {
       const whole = integerText(value.text);
       const carried =
         whole >= -0x8000_0000n &&
         whole <= 0x7fff_ffffn &&
         (operation === "add" || operation === "sub" || operation === "mul");
       if (carried) {
-        const wide = operationWidth(target.type) === 8;
-        if (operation === "mul") this.code.imulImm(target.register, Number(whole), wide);
-        else this.code.aluImm(operation, target.register, Number(whole), wide);
-        if (!this.writtenWhole(whole, target.type)) this.normalizeArithmetic(target.type, target.register);
+        const wide = operationWidth(targetType) === 8;
+        if (operation === "mul") this.code.imulImm(targetRegister as number, Number(whole), wide);
+        else this.code.aluImm(operation, targetRegister as number, Number(whole), wide);
+        if (!this.writtenWhole(whole, targetType)) this.normalizeArithmetic(targetType, targetRegister as number);
         return;
       }
     }
@@ -4761,34 +4933,34 @@ class Machine {
     // before left in the accumulator, which is usually the quotient of its own
     // division.
     if (
-      target.register !== null &&
-      isFloatType(target.type) &&
-      !isWideType(target.type) &&
-      this.operatesOnRegister(operation, target.type) &&
+      String(targetRegister) !== "null" &&
+      isFloatType(targetType) &&
+      !isWideType(targetType) &&
+      this.operatesOnRegister(operation, targetType) &&
       this.compoundWithFloat(operation, target, value)
     ) {
       return;
     }
-    this.at(value, target.type);
+    this.at(value, targetType);
     // A name the build gave a register of its own is written in that register:
     // the value the name is given is in the accumulator and the name's own value
     // is where it lies, so the operation is the one instruction that takes the
     // accumulator as its operand and writes the register. The general form below
     // writes the value down, reads the name out and reads the value back out
     // again — four instructions where this is one.
-    if (target.register !== null && this.operatesOnRegister(operation, target.type)) {
+    if (String(targetRegister) !== "null" && this.operatesOnRegister(operation, targetType)) {
       this.compoundAtRegister(operation, target);
       return;
     }
     if (operation === "add" || operation === "mul") {
-      if (this.floatOverFrame(operation, target.type, target)) {
-        this.normalizeArithmetic(target.type);
+      if (this.floatOverFrame(operation, targetType, target)) {
+        this.normalizeArithmetic(targetType);
         this.store(target);
         return;
       }
       this.scratchFrom(target);
-      this.apply(operation, target.type);
-      this.normalizeArithmetic(target.type);
+      this.apply(operation, targetType);
+      this.normalizeArithmetic(targetType);
       this.store(target);
       return;
     }
@@ -4797,14 +4969,14 @@ class Machine {
     // read rather than after, so an expression that writes the name as a side
     // of its own evaluation still reads the same thing it would have: the order
     // is the one the addition above has.
-    const right = this.hold(target.type, "blaze_right");
+    const right = this.hold(targetType, "blaze_right");
     this.store(right);
     this.load(target);
-    if (isFloatType(target.type)) {
+    if (isFloatType(targetType)) {
       this.scratchFrom(right);
     } else this.readInto(right, RCX);
-    this.apply(operation, target.type);
-    this.normalizeArithmetic(target.type);
+    this.apply(operation, targetType);
+    this.normalizeArithmetic(targetType);
     this.store(target);
   }
 
@@ -4847,8 +5019,8 @@ class Machine {
    * afterwards.
    */
   private compoundAtRegister(operation: Arithmetic, target: Held): void {
-    const register = target.register as number;
-    const type = target.type;
+    const register = fieldOf(target, "register") as number;
+    const type = fieldOf(target, "type") as SemanticType;
     if (isFloatType(type)) {
       this.code.sse(operation as "add" | "sub" | "mul", register, XMM0, widthOf(type) === 4);
     } else {
@@ -4877,19 +5049,23 @@ class Machine {
    * operand and is left to the general form.
    */
   private compoundWithFloat(operation: Arithmetic, target: Held, value: SemanticValue): boolean {
-    const register = target.register as number;
-    const single = widthOf(target.type) === 4;
+    const targetType = fieldOf(target, "type") as SemanticType;
+    const register = fieldOf(target, "register") as number;
+    const single = widthOf(targetType) === 4;
     if (value.k === "local") {
-      const held = this.slot(value.name);
-      if (held.register === null || isWideType(held.type) || !typeEquals(held.type, target.type)) return false;
-      this.code.sse(operation as "add" | "sub" | "mul", register, held.register, single);
-    } else if (value.k === "const" && isFloatType(value.type) && widthOf(value.type) === widthOf(target.type)) {
-      const label = this.floatLiteral(floatBits(Number(decimalText(value.text)), single));
+      const held = this.slot(String(fieldOf(value, "name")));
+      const heldRegister = fieldOf(held, "register") as number | null;
+      const heldType = fieldOf(held, "type") as SemanticType;
+      if (String(heldRegister) === "null" || isWideType(heldType) || !typeEquals(heldType, targetType)) return false;
+      this.code.sse(operation as "add" | "sub" | "mul", register, heldRegister as number, single);
+    } else if (value.k === "const" && isFloatType(fieldOf(value, "type") as SemanticType) &&
+               widthOf(fieldOf(value, "type") as SemanticType) === widthOf(targetType)) {
+      const label = this.floatLiteral(floatBits(Number(decimalText(String(fieldOf(value, "text")))), single));
       this.code.sseMemLabel(operation as "add" | "sub" | "mul", register, label, single);
     } else {
       return false;
     }
-    this.normalizeArithmetic(target.type, register);
+    this.normalizeArithmetic(targetType, register);
     // The answer went into the register the name is kept in, so nothing the
     // accumulator was noted as holding at the turn of this statement is what it
     // holds now.
@@ -4915,17 +5091,28 @@ class Machine {
    */
   private copyBetween(value: SemanticValue, target: Held): boolean {
     if (value.k !== "local") return false;
-    const source = this.slot(value.name);
-    if (!typeEquals(source.type, target.type)) return false;
-    if (source.register === null) return false;
-    const narrow = widthOf(target.type) === 4;
-    if (target.register !== null) {
-      if (isFloatType(target.type)) this.code.movsMove(target.register, source.register, narrow);
-      else this.code.movRegReg(target.register, source.register);
+    const source = this.slot(String(fieldOf(value, "name")));
+    const sourceType = fieldOf(source, "type") as SemanticType;
+    const targetType = fieldOf(target, "type") as SemanticType;
+    if (!typeEquals(sourceType, targetType)) return false;
+    const sourceRegister = fieldOf(source, "register") as number | null;
+    if (String(sourceRegister) === "null") return false;
+    const narrow = widthOf(targetType) === 4;
+    const targetRegister = fieldOf(target, "register") as number | null;
+    if (String(targetRegister) !== "null") {
+      if (isFloatType(targetType)) this.code.movsMove(targetRegister as number, sourceRegister as number, narrow);
+      else this.code.movRegReg(targetRegister as number, sourceRegister as number);
       return true;
     }
-    if (isFloatType(target.type)) this.code.movsStore(frame(target.offset), source.register, narrow);
-    else this.code.movMemRegSized(frame(target.offset), source.register, widthOf(target.type));
+    if (isFloatType(targetType)) {
+      this.code.movsStore(frame(fieldOf(target, "offset") as number), sourceRegister as number, narrow);
+    } else {
+      this.code.movMemRegSized(
+        frame(fieldOf(target, "offset") as number),
+        sourceRegister as number,
+        widthOf(targetType),
+      );
+    }
     return true;
   }
 
@@ -4944,27 +5131,32 @@ class Machine {
    */
   private floatOverFrame(operation: Arithmetic, type: SemanticType, other: Held): boolean {
     if (!isFloatType(type) || (operation !== "add" && operation !== "mul")) return false;
-    if (other.register !== null) return false;
-    this.code.sseMem(operation, XMM0, frame(other.offset), widthOf(type) === 4);
+    if (String(fieldOf(other, "register")) !== "null") return false;
+    this.code.sseMem(operation, XMM0, frame(fieldOf(other, "offset") as number), widthOf(type) === 4);
     return true;
   }
 
   private storeField(object: SemanticValue, layoutName: string, name: string, value: SemanticValue): void {
     const found = this.field(layoutName, name);
-    const type = parseType(found.type);
+    const type = parseType(String(fieldOf(found, "type")));
+    const foundOffset = fieldOf(found, "offset") as number;
     // An object the build gave a register of its own is written through that
     // register: the address of the field is one `lea` against it, where the
     // general form copies the object into the accumulator first. The address is
     // taken before the value is written, and the value does not take the
     // scratch, so nothing moves it in between.
-    const held = object.k === "local" ? this.slot(object.name) : null;
-    const register = held !== null && held.register !== null && isReference(held.type) ? held.register : null;
+    const held = object.k === "local" ? this.slot(String(fieldOf(object, "name"))) : null;
+    const heldRegister = held === null ? null : fieldOf(held, "register") as number | null;
+    const heldType = held === null ? null : fieldOf(held, "type") as SemanticType;
+    const register = held !== null && String(heldRegister) !== "null" && heldType !== null && isReference(heldType)
+      ? heldRegister as number
+      : null;
     if (register !== null && this.keepsScratch(value)) {
       // Neither side writes the scratch, so the address is taken first and the
       // value is written straight through it. The other order has to write the
       // value to the frame and read it back, because taking the address of the
       // object is what takes the scratch.
-      this.code.lea(RCX, mem(register, found.offset));
+      this.code.lea(RCX, mem(register, foundOffset));
       this.at(value, type);
       this.storeInto(type, RCX);
       return;
@@ -4975,7 +5167,7 @@ class Machine {
       // value to the frame and read it back, because taking the address of the
       // object is what takes the scratch.
       this.value(object);
-      this.code.lea(RCX, mem(RAX, found.offset));
+      this.code.lea(RCX, mem(RAX, foundOffset));
       this.at(value, type);
       this.storeInto(type, RCX);
       return;
@@ -4989,9 +5181,9 @@ class Machine {
     // The object is read here and not before the value was written, because a
     // value that calls something may have taken the register it was in.
     this.value(object);
-    this.code.lea(RCX, mem(RAX, found.offset));
+    this.code.lea(RCX, mem(RAX, foundOffset));
     this.load(written);
-    this.storeInto(written.type, RCX);
+    this.storeInto(fieldOf(written, "type") as SemanticType, RCX);
   }
 
   /**
@@ -5040,12 +5232,21 @@ class Machine {
   private fanOut(loop: TeamedLoop): void {
     const label = this.code.label("Lturn");
     this.turns.push({ label, loop });
-    const from = this.heldAt(USIZE, "blaze_from", loop.kind === "counted" ? loop.from : { k: "const", type: USIZE, text: "0" });
-    const to = this.heldAt(USIZE, "blaze_to", loop.kind === "counted" ? loop.to : loop.length);
+    const kind = String(fieldOf(loop, "kind"));
+    const from = this.heldAt(
+      USIZE,
+      "blaze_from",
+      kind === "counted" ? fieldOf(loop, "from") as SemanticValue : { k: "const", type: USIZE, text: "0" },
+    );
+    const to = this.heldAt(
+      USIZE,
+      "blaze_to",
+      kind === "counted" ? fieldOf(loop, "to") as SemanticValue : fieldOf(loop, "length") as SemanticValue,
+    );
     // The runtime is handed a count of turns and cuts that into as many parts
     // as there are processors. A counter the loop stops at with `<=` stops one
     // past the value it stopped at, and that is the end the range runs to.
-    if (loop.kind === "counted" && loop.inclusive) {
+    if (kind === "counted" && String(fieldOf(loop, "inclusive")) === "true") {
       this.load(to);
       this.one(USIZE, "add");
       this.store(to);
@@ -5112,31 +5313,31 @@ class Machine {
       this.spareSlots.length = 0;
       this.borrowed.length = 0;
       this.accumulator = null;
-      this.code.bind(turn.label);
+      this.code.bind(String(fieldOf(turn, "label")));
       // The names the turn reads out of the frame, hot enough that a register
       // of its own is worth having: the turn reads the frame it copied, so the
       // value is one load away, and a name read on every element of a loop the
       // turn runs pays that load every time. The turn's own counter is among
       // them when the body reads it as a value, and it is given a register the
       // loop binds it into rather than one established here.
-      const cached = this.cacheTurnReads(turn.loop);
+      const cached = this.cacheTurnReads(fieldOf(turn, "loop") as TeamedLoop);
       const established = [...cached].filter(([, held]) => held.established);
       // The registers the convention asks a callee to leave as it found them.
       // A turn is called by the runtime rather than by this function, and it
       // writes as many of them as the body it was written out of does, so it
       // hands back exactly what it was given.
       for (const register of this.pinnedRegisters) this.code.push(register);
-      for (const [, held] of cached) this.code.push(held.register);
+      for (const [, held] of cached) this.code.push(fieldOf(held, "register") as number);
       const frameAt = this.code.subRegImmLater(RSP);
       // The three arguments, written into slots of the turn's own before the
       // copy, because the copy is what writes over the slots the caller's
       // frame held and these are read again on the far side of it.
       const handed = this.bind("blaze_handed", USIZE);
-      this.code.movMemRegSized(frame(handed.offset), RDI, 8);
+      this.code.movMemRegSized(frame(fieldOf(handed, "offset") as number), RDI, 8);
       const begin = this.bind("blaze_begin", USIZE);
-      this.code.movMemRegSized(frame(begin.offset), RSI, 8);
+      this.code.movMemRegSized(frame(fieldOf(begin, "offset") as number), RSI, 8);
       const end = this.bind("blaze_end", USIZE);
-      this.code.movMemRegSized(frame(end.offset), RDX, 8);
+      this.code.movMemRegSized(frame(fieldOf(end, "offset") as number), RDX, 8);
       // `rep movsb` reads the frame handed in and writes the turn's own, so
       // `rsi` is where it reads and `rdi` is where it writes — the two are the
       // other way round from what the instruction reads like.
@@ -5149,9 +5350,16 @@ class Machine {
       // in is at the distance from the stack pointer the outer body laid it
       // out at, and the copy put the caller's value there.
       for (const [name, held] of established) {
-        this.code.movRegMemSized(held.register, frame(this.slot(name).offset), widthOf(this.slot(name).type), signedOf(this.slot(name).type));
+        const slot = this.slot(name);
+        const slotTypeOf = fieldOf(slot, "type") as SemanticType;
+        this.code.movRegMemSized(
+          fieldOf(held, "register") as number,
+          frame(fieldOf(slot, "offset") as number),
+          widthOf(slotTypeOf),
+          signedOf(slotTypeOf),
+        );
       }
-      this.writeTurn(turn.loop);
+      this.writeTurn(fieldOf(turn, "loop") as TeamedLoop);
       const bytes = this.frameBytes();
       if (bytes > 0) this.code.patchWord(frameAt, bytes);
       else this.code.unwriteSub(frameAt);
@@ -5160,10 +5368,19 @@ class Machine {
       // they were pushed on, and a return. The vector registers are not read
       // back, because the slots they were spilled into belong to the frame the
       // turn copied and are gone with it.
-      this.code.epilogue([...this.pinnedRegisters, ...[...cached.values()].map((one) => one.register)], [], bytes);
+      this.code.epilogue(
+        [...this.pinnedRegisters, ...[...cached.values()].map((one) => fieldOf(one, "register") as number)],
+        [],
+        bytes,
+      );
       for (const [name, held] of cached) {
-        if (held.established) (this.slots.get(this.names.read(name)) as Held).register = null;
-        else this.pinned.delete(name);
+        if (String(fieldOf(held, "established")) === "true") {
+          const emitted = this.names.read(name);
+          const slot = this.slots.get(emitted);
+          if (slot !== undefined) this.slots.set(emitted, heldWithRegister(slot, null));
+        } else {
+          this.pinned.delete(name);
+        }
       }
       this.used = outer;
       this.spareSlots.length = spares;
@@ -5192,16 +5409,22 @@ class Machine {
    */
   private cacheTurnReads(loop: TeamedLoop): Map<string, { register: number; established: boolean }> {
     const reads = new Map<string, number>();
-    for (const { block, depth } of everyBlockAtDepth(loop.body)) {
+    for (const entry of everyBlockAtDepth(fieldOf(loop, "body") as SemanticBlock, 0, [])) {
+      const block = fieldOf(entry, "block") as SemanticBlock;
+      const depth = fieldOf(entry, "depth") as number;
       const weight = READ_WEIGHT[Math.min(depth, READ_WEIGHT.length - 1)];
-      for (const statement of block.statements) {
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         for (const value of statementValues(statement)) {
           walkValues(value, (inner) => {
-            if (inner.k === "local") reads.set(inner.name, (reads.get(inner.name) ?? 0) + weight);
+            if (inner.k === "local") {
+              const name = String(fieldOf(inner, "name"));
+              reads.set(name, (reads.get(name) ?? 0) + weight);
+            }
           });
         }
         if (statement.k === "setElement") {
-          reads.set(statement.buffer, (reads.get(statement.buffer) ?? 0) + weight);
+          const buffer = String(fieldOf(statement, "buffer"));
+          reads.set(buffer, (reads.get(buffer) ?? 0) + weight);
         }
       }
     }
@@ -5222,11 +5445,13 @@ class Machine {
     // own first value, so nothing here reads for it. The loop writes its
     // counter by definition, which is why this is asked before the writes
     // below refuse one.
-    if (loop.kind === "counted" && reads.get(loop.variable) !== undefined) {
+    const kind = String(fieldOf(loop, "kind"));
+    const variable = String(fieldOf(loop, "variable"));
+    if (kind === "counted" && reads.get(variable) !== undefined) {
       const register = pool.pop();
       if (register !== undefined) {
-        this.pinned.set(loop.variable, register);
-        cached.set(loop.variable, { register, established: false });
+        this.pinned.set(variable, register);
+        cached.set(variable, { register, established: false });
       }
     }
     const ordered = [...reads.entries()].sort((left, right) => right[1] - left[1]);
@@ -5236,9 +5461,10 @@ class Machine {
       if (!this.turnNames.has(name)) continue;
       if (pool.length === 0) break;
       const register = pool.pop() as number;
-      const held = this.slots.get(this.names.read(name));
-      if (held === undefined || held.register !== null) continue;
-      held.register = register;
+      const emitted = this.names.read(name);
+      const held = this.slots.get(emitted);
+      if (held === undefined || String(fieldOf(held, "register")) !== "null") continue;
+      this.slots.set(emitted, heldWithRegister(held, register));
       cached.set(name, { register, established: true });
     }
     return cached;
@@ -5255,18 +5481,36 @@ class Machine {
    * threads over a slice of the counters between them.
    */
   private writeTurn(loop: TeamedLoop): void {
-    const type = loop.kind === "counted" ? loop.type : USIZE;
-    const inner: SemanticLoop =
-      loop.kind === "counted"
-        ? {
-            ...loop,
-            from: { k: "local", type, name: "blaze_begin" },
-            to: { k: "local", type, name: "blaze_end" },
-            inclusive: false,
-            parallel: undefined,
-            reductions: undefined,
-          }
-        : { ...loop, length: { k: "local", type: USIZE, name: "blaze_end" }, parallel: undefined, reductions: undefined };
+    const kind = String(fieldOf(loop, "kind"));
+    const type = kind === "counted" ? fieldOf(loop, "type") as SemanticType : USIZE;
+    const region = String(fieldOf(loop, "region")) === "true" ? true : undefined;
+    const inner: SemanticLoop = kind === "counted"
+      ? {
+          kind: "counted",
+          variable: String(fieldOf(loop, "variable")),
+          type,
+          from: { k: "local", type, name: "blaze_begin" },
+          to: { k: "local", type, name: "blaze_end" },
+          inclusive: false,
+          down: String(fieldOf(loop, "down")) === "true",
+          step: fieldOf(loop, "step") as SemanticValue | null,
+          header: String(fieldOf(loop, "header")),
+          exit: String(fieldOf(loop, "exit")),
+          body: fieldOf(loop, "body") as SemanticBlock,
+          region,
+        }
+      : {
+          kind: "each",
+          index: String(fieldOf(loop, "index")),
+          element: String(fieldOf(loop, "element")),
+          elementType: fieldOf(loop, "elementType") as TypeExpr,
+          of: String(fieldOf(loop, "of")),
+          length: { k: "local", type: USIZE, name: "blaze_end" },
+          header: String(fieldOf(loop, "header")),
+          exit: String(fieldOf(loop, "exit")),
+          body: fieldOf(loop, "body") as SemanticBlock,
+          region,
+        };
     // A walk's range is its index, so a turn's walk starts where its half of
     // the counters starts rather than at the first element — which is the one
     // thing that would otherwise leave every thread walking the elements ahead
@@ -5283,18 +5527,20 @@ class Machine {
    * which is why the end is written whether the body ended by jumping out or not.
    */
   private turn(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>, labels: LoopLabels): void {
-    if (loop.region !== true) {
-      this.block(loop.body);
-      if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    const body = fieldOf(loop, "body") as SemanticBlock;
+    const header = String(fieldOf(labels, "header"));
+    if (String(fieldOf(loop, "region")) !== "true") {
+      this.block(body);
+      if (String(fieldOf(fieldOf(body, "terminator"), "k")) === "next") this.code.jmp(header);
       return;
     }
     this.runtime("_region_enter");
     const opened = this.region;
-    this.region = { header: labels.header };
-    this.block(loop.body);
+    this.region = { header };
+    this.block(body);
     this.runtime("_region_leave");
     this.region = opened;
-    if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+    if (String(fieldOf(fieldOf(body, "terminator"), "k")) === "next") this.code.jmp(header);
   }
 
   private loop(loop: SemanticLoop, start: SemanticValue | null = null): void {
@@ -8212,7 +8458,7 @@ class Machine {
       // is a move out of the accumulator and not a write through the frame —
       // and the instruction that reads it back reads a register, which a store
       // and a load of the same eight bytes never answered as quickly.
-      const memory = this.reserveSlot(type, commutative ? "blaze_left" : "blaze_right", true);
+      const memory = this.reserveSlot(type, commutative ? "blaze_left" : "blaze_right", true, null, undefined);
       this.borrowed.push(memory);
       if (memory.register !== null) {
         this.code.movsMove(memory.register, XMM0, widthOf(type) === 4);

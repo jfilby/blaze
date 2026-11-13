@@ -2602,6 +2602,18 @@ class FunctionBody {
         if (layout.fields.map((field) => field.name).slice().sort().join(",") === literalNames) return name;
       }
     }
+    if (found.length === 0 && shape !== undefined) {
+      // A shape the object pass folded into another can be asked for under the
+      // key it had before the fold. The layouts that hold the same fields are
+      // the object it was folded into, and a literal writes the same offsets
+      // whichever name the pass kept.
+      const literalNames = shape.fields.map((field) => field.name).slice().sort().join(",");
+      for (const [name, layout] of Object.entries(this.objects)) {
+        if (layout.fields.map((field) => field.name).slice().sort().join(",") !== literalNames) continue;
+        this.layouts.set(key, name);
+        return name;
+      }
+    }
     if (found.length > 1) {
       console.log(`LAYOUT3 ${key} exact=${this.context.objectNames[key] ?? "none"} found=${found.join(",")}`);
       throw this.error(
