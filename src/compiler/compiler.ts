@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -1627,17 +1627,7 @@ async function buildProgramHostFor(
   return await buildProgramHost({ mode, program, workDirectory, objectPaths, outputPath });
 }
 
-class GenerationFunctionRecord {
-  readonly file: string;
-  readonly selected: string;
-  readonly outcomes: CandidateOutcome[];
 
-  constructor(file: string, selected: string, outcomes: CandidateOutcome[]) {
-    this.file = file;
-    this.selected = selected;
-    this.outcomes = outcomes;
-  }
-}
 
 /** An incremental entry, with the values the build proved for it. */
 function incrementalEntryOf(
@@ -2390,11 +2380,11 @@ export async function runBuild(
       // from entries rather than assigned into: a function called `__proto__`
       // would otherwise replace the prototype of the record instead of adding
       // an entry, and the record this build writes out would be missing it.
-      const candidateEntries: (readonly [string, Candidate[]])[] = [];
-      const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
-      const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
-      const selectedEntries: (readonly [string, string])[] = [];
-      const generationFunctions: Record<string, GenerationFunctionRecord> = {};
+      const candidateValues: Record<string, Candidate[]> = Object.create(null) as Record<string, Candidate[]>;
+      const verificationValues: Record<string, VerificationResult[]> = Object.create(null) as Record<string, VerificationResult[]>;
+      const benchmarkValues: Record<string, BenchmarkResult[]> = Object.create(null) as Record<string, BenchmarkResult[]>;
+      const selectedValues: Record<string, string> = Object.create(null) as Record<string, string>;
+      const generationFunctions: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
       for (const entry of generated) {
         const entryFields = entry as unknown as Record<string, unknown>;
         const unit = entryFields["unit"] as CompilationUnit;
@@ -2402,15 +2392,9 @@ export async function runBuild(
         const functionName = String(contractFunction(unitContract(unit))["name"]);
         const key = unitNameKey(unit, units);
         const outcomes = resultFields["outcomes"] as Record<string, unknown>[];
-        candidateEntries.push([key, resultFields["candidates"] as Candidate[]]);
-        verificationEntries.push([
-          key,
-          outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined),
-        ]);
-        benchmarkEntries.push([
-          key,
-          outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined),
-        ]);
+        candidateValues[key] = resultFields["candidates"] as Candidate[];
+        verificationValues[key] = outcomes.map((outcome) => outcome["verification"]).filter((verification): verification is VerificationResult => verification !== undefined);
+        benchmarkValues[key] = outcomes.map((outcome) => outcome["benchmark"]).filter((benchmark): benchmark is BenchmarkResult => benchmark !== undefined);
         const valid = outcomes.filter((outcome) => outcome["valid"] as boolean).length;
         reporter(
           "review",
@@ -2428,23 +2412,24 @@ export async function runBuild(
             .join("\n");
           throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
-        selectedEntries.push([key, String(resultFields["selected"])]);
-        generationFunctions[key] = new GenerationFunctionRecord(
-          String((unit as unknown as Record<string, unknown>)["file"]),
-          String(resultFields["selected"]),
-          resultFields["outcomes"] as unknown as CandidateOutcome[],
-        );
+        selectedValues[key] = String(resultFields["selected"]);
+        const generationValue: Record<string, unknown> = {};
+        for (const name of Object.keys(resultFields)) {
+          const value = resultFields[name];
+          generationValue[name] = typeof value === "bigint" ? String(value) : value;
+        }
+        generationFunctions[key] = generationValue;
       }
-      const candidates = byName(candidateEntries);
-      const verification = byName(verificationEntries);
-      const benchmark = byName(benchmarkEntries);
-      const selected = byName(selectedEntries);
+      const candidates = Object.fromEntries(Object.entries(candidateValues));
+      const verification = Object.fromEntries(Object.entries(verificationValues));
+      const benchmark = Object.fromEntries(Object.entries(benchmarkValues));
+      const selected = Object.fromEntries(Object.entries(selectedValues));
       await storeWrite(store, candidatesPath, candidates);
       await storeWrite(store, generationPath, {
         model: String((build as unknown as Record<string, unknown>)["model"]),
         modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
         compilerVersion: COMPILER_VERSION,
-        functions: generationFunctions,
+        functions: Object.fromEntries(Object.entries(generationFunctions)),
         modelDurationNs: String(
           generated.reduce((total, entry) => {
             const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
@@ -2482,9 +2467,12 @@ export async function runBuild(
       selected = await record();
       if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
       const runtime = await (prepareRuntime as unknown as (capture: undefined) => Promise<PreparedRuntime | undefined>)(undefined);
-      const objectPaths = unitsGenerated().map((entry) =>
-        join(join(base, unitKey(entry.unit)), `${entry.result.selected as string}.o`),
-      );
+      const objectPaths = unitsGenerated().map((entry) => {
+        const entryFields = entry as unknown as Record<string, unknown>;
+        const unit = entryFields["unit"] as CompilationUnit;
+        const result = entryFields["result"] as Record<string, unknown>;
+        return join(join(base, unitKey(unit)), `${String(result["selected"])}.o`);
+      });
       // `-fopenmp` is asked for when an object of the program carries a loop the
       // compiler proved its turns independent: the C backend writes that loop as
       // a pragma and only the OpenMP runtime serves it, so an object with one in
@@ -3002,7 +2990,7 @@ export async function runStored(
     const functionName = String(contractFunction(unitContract(unit))["name"]);
     const candidates = stored[key] ?? [];
     const chosen = ((buildFields === undefined ? undefined : buildFields["selectedCandidates"]) as Record<string, string> | undefined)?.[key];
-    const candidate = candidates.find((entry) => entry.id === chosen);
+    const candidate = candidates.find((entry) => String((entry as unknown as Record<string, unknown>)["id"]) === chosen);
     if (candidate === undefined) {
       throw new CompilerError("StorageError", action, `project "${project}" has no candidate to ${action} for ${functionName}`, "", "", "", "");
     }
@@ -3114,7 +3102,10 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   if (fields["function"] !== undefined || (fields["all"] as boolean | undefined) === true) {
     if (fields["function"] === undefined) {
       return contract.files
-        .map((file) => printSemanticModule(resolveModule(file.path, file.functions, functionContext(phase))))
+        .map((file) => {
+          const fileFields = file as unknown as Record<string, unknown>;
+          return printSemanticModule(resolveModule(String(fileFields["path"]), fileFields["functions"] as Record<string, FunctionContract>, functionContext(phase)));
+        })
         .join("\n");
     }
     const wanted = Object.values(semantics).find((fn) => String((fn as unknown as Record<string, unknown>)["name"]) === String(fields["function"]));
@@ -3158,9 +3149,11 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
 }
 
 export async function listProjects(cwd: string): Promise<string[]> {
-  const store = createJsonStore(join(cwd, STATE_DIRECTORY));
-  const entries = await readdirEntries(storeResolve(store, "projects")).catch(() => []);
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  const root = join(cwd, STATE_DIRECTORY);
+  const projectsRoot = join(root, "projects");
+  const entries = await readdirEntries(projectsRoot).catch(() => []);
+  const names = entries.map((entry) => String((entry as unknown as Record<string, unknown>)["name"]));
+  return names.filter((name) => isDirectoryPath(join(projectsRoot, name)));
 }
 
 /** One line of `blaze projects`: the project and the build it last had. */
@@ -3178,5 +3171,5 @@ export async function projectStateLine(project: string, cwd: string): Promise<st
 
 /** How many functions the program contract covers, for the build report. */
 function contractedFunctionCount(program: ProgramContract): number {
-  return program.files.reduce((total, file) => total + Object.keys(file.functions).length, 0);
+  return program.files.reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
 }
