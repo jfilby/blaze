@@ -125,8 +125,12 @@ function primitiveTypeExpr(name: PrimitiveTypeName): TypeExpr {
   return { kind: "primitive", name };
 }
 
-function refTypeExpr(of: TypeExpr | null, name?: string): TypeExpr {
-  return name === undefined ? { kind: "ref", of } : { kind: "ref", of, name };
+function refTypeExpr(of: TypeExpr | null): TypeExpr {
+  return { kind: "ref", of };
+}
+
+function namedRefTypeExpr(of: TypeExpr | null, name: string): TypeExpr {
+  return { kind: "ref", of, name };
 }
 
 function arrayTypeExpr(of: TypeExpr, length: number | null): TypeExpr {
@@ -157,7 +161,7 @@ export function parseType(text: string): TypeExpr {
     // names the object it points at, which is a layout rather than a type.
     const inner = argument.trim();
     if (inner === "any") return refTypeExpr(null);
-    if (/^[A-Z][A-Za-z0-9_]*$/.test(inner)) return refTypeExpr(null, inner);
+    if (/^[A-Z][A-Za-z0-9_]*$/.test(inner)) return namedRefTypeExpr(null, inner);
     return refTypeExpr(parseType(inner));
   }
   if (head === "array") {
@@ -177,27 +181,28 @@ export function parseType(text: string): TypeExpr {
 }
 
 export function typeToString(type: TypeExpr): string {
-  switch (type.kind) {
-    case "primitive":
-      return type.name;
-    case "ptr":
-    case "slice":
-    case "mask":
-      return `${type.kind}<${typeToString(type.of)}>`;
-    case "array":
-      return type.length === null ? `array<${typeToString(type.of)}>` : `array<${typeToString(type.of)},${type.length}>`;
-    case "ref":
-      // The text codecs are compile-time markers: the frontend tracks one by a
-      // name no contract can hold, and the value that crosses as one is the
-      // zero the name holds.
-      if (type.name === "__TextEncoder" || type.name === "__TextDecoder") return "f64";
-      if (type.name !== undefined) return `ref<${type.name}>`;
-      return type.of === null ? "ref<any>" : `ref<${typeToString(type.of)}>`;
-    case "text":
-      return "text";
-    case "void":
-      return "void";
+  const fields = type as unknown as Record<string, unknown>;
+  const kind = String(fields["kind"]);
+  const of = fields["of"] as TypeExpr | null | undefined;
+  const name = fields["name"] as string | undefined;
+  const nameText = name === undefined ? undefined : String(name);
+  const length = fields["length"] as number | null | undefined;
+  if (kind === "primitive") return String(name);
+  if (kind === "ptr" || kind === "slice" || kind === "mask") return `${kind}<${typeToString(of as TypeExpr)}>`;
+  if (kind === "array") {
+    const element = typeToString(of as TypeExpr);
+    return length === null || length === undefined ? `array<${element}>` : `array<${element},${length}>`;
   }
+  if (kind === "ref") {
+    // The text codecs are compile-time markers: the frontend tracks one by a
+    // name no contract can hold, and the value that crosses as one is the
+    // zero the name holds.
+    if (nameText === "__TextEncoder" || nameText === "__TextDecoder") return "f64";
+    if (nameText !== undefined) return `ref<${nameText}>`;
+    return of === null || of === undefined ? "ref<any>" : `ref<${typeToString(of)}>`;
+  }
+  if (kind === "text") return "text";
+  return "void";
 }
 
 /**
@@ -207,30 +212,36 @@ export function typeToString(type: TypeExpr): string {
  * writes the same type as a slice and the contract as the pointer it is.
  */
 export function contractText(type: SemanticType): string {
-  if (type.kind === "primitive") return type.name;
-  if (type.kind === "text") return "text";
-  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "mask" || type.kind === "array") {
-    const of = contractText(type.of);
-    return type.kind === "array" && type.length !== null ? `array<${of},${type.length}>` : `${type.kind}<${of}>`;
+  const fields = type as unknown as Record<string, unknown>;
+  const kind = String(fields["kind"]);
+  const name = fields["name"] as string | undefined;
+  const nameText = name === undefined ? undefined : String(name);
+  if (kind === "primitive") return nameText === undefined ? "" : nameText;
+  if (kind === "text") return "text";
+  if (kind === "ptr" || kind === "slice" || kind === "mask" || kind === "array") {
+    const of = contractText(fields["of"] as SemanticType);
+    const length = fields["length"] as number | null | undefined;
+    return kind === "array" && length !== null && length !== undefined ? `array<${of},${length}>` : `${kind}<${of}>`;
   }
-  if (type.kind === "ref") return type.name === undefined ? "ref<any>" : `ref<${type.name}>`;
+  if (kind === "ref") return nameText === undefined ? "ref<any>" : `ref<${nameText}>`;
   return "void";
 }
 
 export type BufferType = Extract<TypeExpr, { kind: "ptr" | "slice" | "array" | "mask" }>;
 
 export function isBufferType(type: TypeExpr): type is BufferType {
-  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array" || type.kind === "mask";
+  const kind = String((type as unknown as Record<string, unknown>)["kind"]);
+  return kind === "ptr" || kind === "slice" || kind === "array" || kind === "mask";
 }
 
 /** Element type of a buffer type, or null for anything else. */
 export function elementType(type: TypeExpr): TypeExpr | null {
-  return isBufferType(type) ? type.of : null;
+  return isBufferType(type) ? (type as unknown as Record<string, unknown>)["of"] as TypeExpr : null;
 }
 
 /** The element type of a buffer type, refusing a type that is not one. */
 export function bufferElement(type: TypeExpr): TypeExpr {
-  if (isBufferType(type)) return type.of;
+  if (isBufferType(type)) return (type as unknown as Record<string, unknown>)["of"] as TypeExpr;
   throw contractError(`${typeToString(type)} is not a buffer`);
 }
 
@@ -309,7 +320,7 @@ function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   while (index < source.length) {
-    const character = source[index];
+    const character = String(source[index]);
     if (/\s/.test(character)) {
       index += 1;
       continue;
@@ -637,11 +648,11 @@ export interface Whole {
 export type Value = Whole | bigint | number | boolean | string | null | BufferValue;
 
 export function isWhole(value: Value): value is Whole {
-  return typeof value === "object" && value !== null && "magnitude" in value;
+  return typeof value === "object" && value !== null && (value as unknown as Record<string, unknown>)["magnitude"] !== undefined;
 }
 
 export function isBufferValue(value: Value): value is BufferValue {
-  return typeof value === "object" && value !== null && "values" in value && !isWhole(value);
+  return typeof value === "object" && value !== null && (value as unknown as Record<string, unknown>)["values"] !== undefined && !isWhole(value);
 }
 
 export function formatValue(value: Value): string {
@@ -666,18 +677,23 @@ export type TypeEnv = ReadonlyMap<string, TypeExpr>;
 
 /** The name a contract's object exports, which is its name unless it is renamed. */
 export function symbolOf(contract: FunctionContract): string {
-  return contract.function.symbol ?? contract.function.name;
+  const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
+  const symbol = fn["symbol"];
+  return symbol === undefined || symbol === null ? String(fn["name"]) : String(symbol);
 }
 
 export function signatureTypeEnv(contract: FunctionContract): TypeEnv {
   const env = new Map<string, TypeExpr>();
-  for (const param of contract.function.params) {
-    env.set(param.name, param.type === "text" ? { kind: "primitive", name: "usize" } : parseType(param.type));
+  const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
+  for (const param of fn["params"] as Record<string, unknown>[]) {
+    const name = String(param["name"]);
+    const type = String(param["type"]);
+    env.set(name, type === "text" ? primitiveTypeExpr("usize") : parseType(type));
   }
   // The contract expression language has no string: a text is a number the
   // contract cannot say anything about, so it is the number a string is stored
   // as.
-  env.set("result", contract.function.returns === "text" ? { kind: "primitive", name: "usize" } : parseType(contract.function.returns));
+  env.set("result", String(fn["returns"]) === "text" ? primitiveTypeExpr("usize") : parseType(String(fn["returns"])));
   return env;
 }
 
@@ -711,7 +727,7 @@ function wholeOfNumber(value: number): Whole {
   const magnitude = Math.abs(Math.trunc(value));
   if (magnitude >= WHOLE_LIMIT) return { negative, magnitude: WHOLE_MASK };
   const text = `${magnitude}`;
-  return { negative, magnitude: wholeFromDecimal(text).magnitude };
+  return { negative, magnitude: wholeToBigInt(wholeFromDecimal(text)) };
 }
 
 /** The whole number represented by a run of decimal digits. */
@@ -719,7 +735,7 @@ function wholeFromDecimal(text: string): Whole {
   let magnitude = 0n;
   let at = 0;
   while (at < text.length) {
-    const digit = digitOf(text[at]);
+    const digit = digitOf(String(text[at]));
     at += 1;
     if (digit === NO_DIGIT) throw contractError(`"${text}" is not a number`);
     if (digit >= 10n) throw contractError(`"${text}" is not a decimal number`);
@@ -774,22 +790,22 @@ function digitText(digit: bigint): string {
 function wholeFromText(text: string): Whole {
   let at = 0;
   let negative = false;
-  if (text[at] === "-") {
+  if (String(text[at]) === "-") {
     negative = true;
     at += 1;
-  } else if (text[at] === "+") {
+  } else if (String(text[at]) === "+") {
     at += 1;
   }
   let base = 10n;
   let baseNumber = 10;
-  if (text[at] === "0" && (text[at + 1] === "x" || text[at + 1] === "X")) {
+  if (String(text[at]) === "0" && (String(text[at + 1]) === "x" || String(text[at + 1]) === "X")) {
     base = 16n;
     baseNumber = 16;
     at += 2;
   }
   let magnitude = 0n;
   while (at < text.length) {
-    const character = text[at];
+    const character = String(text[at]);
     at += 1;
     if (character === "_") continue;
     const digit = digitOf(character);
@@ -803,15 +819,17 @@ function wholeFromText(text: string): Whole {
 
 /** A whole number as the digits it is, with a minus in front of a negative. */
 function formatWhole(value: Whole): string {
-  if (value.magnitude === 0n) return "0";
-  let magnitude = value.magnitude;
+  const fields = value as unknown as Record<string, unknown>;
+  const negative = fields["negative"] as boolean;
+  let magnitude = fields["magnitude"] as bigint;
+  if (magnitude === 0n) return "0";
   let text = "";
   while (magnitude > 0n) {
     const digit = magnitude % 10n;
     text = digitText(digit) + text;
     magnitude = magnitude / 10n;
   }
-  return value.negative ? `-${text}` : text;
+  return negative ? `-${text}` : text;
 }
 
 /** A whole number as a double, through the decimal the C library reads. */
@@ -821,8 +839,11 @@ function wholeToNumber(value: Whole): number {
 
 /** The two's-complement bits a whole number is, at 256 bits. */
 function wholeBits(value: Whole): bigint {
-  if (!value.negative) return value.magnitude & WHOLE_MASK;
-  return ((WHOLE_MASK - value.magnitude) + 1n) & WHOLE_MASK;
+  const fields = value as unknown as Record<string, unknown>;
+  const negative = fields["negative"] as boolean;
+  const magnitude = fields["magnitude"] as bigint;
+  if (!negative) return magnitude & WHOLE_MASK;
+  return ((WHOLE_MASK - magnitude) + 1n) & WHOLE_MASK;
 }
 
 /** The whole number a 256-bit two's-complement value names. */
@@ -885,16 +906,22 @@ function wholeOfValue(value: bigint | Whole): Whole {
 
 /** Left compared with right, as the mathematical values they are. */
 function compareWhole(left: Whole, right: Whole): number {
-  if (left.negative !== right.negative) return left.negative ? -1 : 1;
-  if (left.magnitude === right.magnitude) return 0;
-  const less = left.magnitude < right.magnitude;
-  if (left.negative) return less ? 1 : -1;
+  const leftFields = left as unknown as Record<string, unknown>;
+  const rightFields = right as unknown as Record<string, unknown>;
+  const leftNegative = leftFields["negative"] as boolean;
+  const rightNegative = rightFields["negative"] as boolean;
+  const leftMagnitude = leftFields["magnitude"] as bigint;
+  const rightMagnitude = rightFields["magnitude"] as bigint;
+  if (leftNegative !== rightNegative) return leftNegative ? -1 : 1;
+  if (leftMagnitude === rightMagnitude) return 0;
+  const less = leftMagnitude < rightMagnitude;
+  if (leftNegative) return less ? 1 : -1;
   return less ? -1 : 1;
 }
 
 /** Whether a whole number is the zero. */
 function wholeIsZero(value: Whole): boolean {
-  return value.magnitude === 0n;
+  return (value as unknown as Record<string, unknown>)["magnitude"] === 0n;
 }
 
 /** The bits the sum, difference or product of two whole numbers has. */
@@ -913,8 +940,10 @@ function wholeMultiply(left: Whole, right: Whole): bigint {
 /** The quotient two whole numbers have, truncating toward zero as the language does. */
 function wholeDivide(left: Whole, right: Whole): Whole {
   if (wholeIsZero(right)) throw contractError("division by zero");
-  const magnitude = left.magnitude / right.magnitude;
-  const negative = magnitude !== 0n && left.negative !== right.negative;
+  const leftFields = left as unknown as Record<string, unknown>;
+  const rightFields = right as unknown as Record<string, unknown>;
+  const magnitude = (leftFields["magnitude"] as bigint) / (rightFields["magnitude"] as bigint);
+  const negative = magnitude !== 0n && leftFields["negative"] !== rightFields["negative"];
   return { negative, magnitude };
 }
 
@@ -965,17 +994,23 @@ export interface NullType {
 export type StaticType = TypeExpr | NullType;
 
 function describeType(type: StaticType): string {
-  return type.kind === "null" ? "null" : typeToString(type);
+  return String((type as unknown as Record<string, unknown>)["kind"]) === "null" ? "null" : typeToString(type as TypeExpr);
 }
 
 function numericType(left: StaticType, right: StaticType): TypeExpr {
-  if (left.kind !== "primitive" || !isNumericType(left.name) || right.kind !== "primitive" || !isNumericType(right.name)) {
+  const leftFields = left as unknown as Record<string, unknown>;
+  const rightFields = right as unknown as Record<string, unknown>;
+  const leftKind = String(leftFields["kind"]);
+  const rightKind = String(rightFields["kind"]);
+  const leftName = leftFields["name"] as PrimitiveTypeName;
+  const rightName = rightFields["name"] as PrimitiveTypeName;
+  if (leftKind !== "primitive" || !isNumericType(leftName) || rightKind !== "primitive" || !isNumericType(rightName)) {
     throw contractError(`arithmetic requires numeric operands, got ${describeType(left)} and ${describeType(right)}`);
   }
-  if (isFloatType(left.name) || isFloatType(right.name)) {
-    return { kind: "primitive", name: isFloatType(left.name) ? left.name : (right.name as "f32" | "f64") };
+  if (isFloatType(leftName) || isFloatType(rightName)) {
+    return primitiveTypeExpr(isFloatType(leftName) ? leftName : (rightName as "f32" | "f64"));
   }
-  return { kind: "primitive", name: widerInteger(left.name, right.name) };
+  return primitiveTypeExpr(widerInteger(leftName, rightName));
 }
 
 /**
@@ -985,17 +1020,20 @@ function numericType(left: StaticType, right: StaticType): TypeExpr {
  * the evaluator said nothing useful about what it meant.
  */
 function comparable(op: string, left: StaticType, right: StaticType): void {
-  if (left.kind === "text" && right.kind === "text") return;
-  if (left.kind === "primitive" && right.kind === "primitive") {
-    if (isNumericType(left.name) && isNumericType(right.name)) return;
-    if (left.name === "bool" && right.name === "bool") return;
-  } else if (left.kind === "null" && right.kind === "null") {
+  const leftFields = left as unknown as Record<string, unknown>;
+  const rightFields = right as unknown as Record<string, unknown>;
+  const leftKind = String(leftFields["kind"]);
+  const rightKind = String(rightFields["kind"]);
+  if (leftKind === "text" && rightKind === "text") return;
+  if (leftKind === "primitive" && rightKind === "primitive") {
+    if (isNumericType(leftFields["name"] as PrimitiveTypeName) && isNumericType(rightFields["name"] as PrimitiveTypeName)) return;
+    if (String(leftFields["name"]) === "bool" && String(rightFields["name"]) === "bool") return;
+  } else if (leftKind === "null" && rightKind === "null") {
     return;
-  } else if (left.kind === "null" || right.kind === "null") {
-    const other = left.kind === "null" ? right : left;
-    if (other.kind === "ptr" || other.kind === "slice" || other.kind === "array" || other.kind === "ref") return;
+  } else if (leftKind === "null" || rightKind === "null") {
+    const otherKind = leftKind === "null" ? rightKind : leftKind;
+    if (otherKind === "ptr" || otherKind === "slice" || otherKind === "array" || otherKind === "ref") return;
   }
-  
   throw contractError(`${op} requires comparable operands, got ${describeType(left)} and ${describeType(right)}`);
 }
 /**
@@ -1719,7 +1757,9 @@ export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<stri
 
 /** The host form of a whole number: its sign and its magnitude. */
 function wholeToBigInt(value: Whole): bigint {
-  return value.negative ? -value.magnitude : value.magnitude;
+  const fields = value as unknown as Record<string, unknown>;
+  const magnitude = fields["magnitude"] as bigint;
+  return fields["negative"] === true ? -magnitude : magnitude;
 }
 
 /** Postconditions that the given result violates. */

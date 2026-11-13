@@ -171,6 +171,14 @@ interface Literal {
 /** A reference to an object whose fields the source left unshaped. */
 const REF_NULL: TypeExpr = { kind: "ref", of: null };
 
+/** A source literal that is a number, rather than a text. */
+const NUMBER_TEXT = /^(?:0[xX][0-9a-fA-F]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)$/;
+
+/** The inferred type of a source literal that is text. */
+function textInferred(): Inferred {
+  return { kind: "type", type: { kind: "text" } };
+}
+
 /** A number written in the source, which is a double. */
 const DOUBLE: Inferred = { kind: "type", type: { kind: "primitive", name: "f64" } };
 
@@ -2337,6 +2345,22 @@ class FunctionBody {
     // that spelled this one differently would name a layout nothing lays out.
     const typed = fields.map((field) => {
       const value = this.typed(field.value, null, line);
+      const written = value.value;
+      // A text the source wrote is the text it is. The shape key has to say
+      // text where the layout pass says text, or the literal is filed under a
+      // key no layout names.
+      if (written.k === "text") {
+        value.inferred = textInferred();
+      } else if (
+        written.k === "const" &&
+        written.type.kind === "primitive" &&
+        written.type.name === "f64" &&
+        field.value.k === "literal" &&
+        field.value.boolean !== true &&
+        !NUMBER_TEXT.test(written.text)
+      ) {
+        value.inferred = textInferred();
+      }
       return { name: field.name, value: { ...value, inferred: asField(value.inferred) } };
     });
     // The key is a function of the shape alone, and the shape is written as
@@ -2398,6 +2422,7 @@ class FunctionBody {
       if (found.every((name) => shapeSignature(name) === first)) return found[0];
     }
     if (found.length > 1) {
+      console.log(`LAYOUT3 ${key} exact=${this.context.objectNames[key] ?? "none"} found=${found.join(",")}`);
       throw this.error(
         `writes an object ${found.join(" and ")} could each be`,
         line,

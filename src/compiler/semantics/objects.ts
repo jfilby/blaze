@@ -648,8 +648,11 @@ class BodyTypes {
    */
   renameObjects(remapped: ReadonlyMap<string, string>): void {
     const key = (was: string): string => remapped.get(was) ?? was;
-    const value = (inferred: Inferred): Inferred =>
-      inferred.kind === "object" ? { kind: "object", key: key(inferred.key) } : inferred;
+    const value = (inferred: Inferred): Inferred => {
+      const fields = inferred as unknown as Record<string, unknown>;
+      if (String(fields["kind"]) !== "object") return inferred;
+      return { kind: "object", key: key(String(fields["key"])) };
+    };
     const shapes = new Map<string, Shape>();
     for (const [was, shape] of this.registered) {
       shapes.set(key(was), {
