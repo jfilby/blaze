@@ -1864,7 +1864,15 @@ class FunctionBody {
     // shift of a double is a shift no target has: the C backend writes
     // `double >> double`, which is not C at all.
     const converting = op === ">>>";
-    const left = this.typed(expression.left, converting ? asType(U32) : null, line);
+    // A text written beside a value is the type of the comparison: the field
+    // the other side reads is a text field, not a number that happens to share
+    // its name.
+    const compareText = expression.right.k === "text" ||
+      (expression.right.k === "literal" &&
+        expression.right.boolean !== true &&
+        expression.right.text !== undefined &&
+        !NUMBER_TEXT.test(expression.right.text));
+    const left = this.typed(expression.left, converting ? asType(U32) : compareText ? asType(TEXT) : null, line);
     // The count of a shift is a machine word, whatever the number being shifted
     // is: the kernel every backend shifts with takes one word of count, and a
     // count typed at the width of a wide number is the low half of the number
