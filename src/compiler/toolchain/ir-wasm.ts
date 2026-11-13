@@ -858,7 +858,9 @@ class Module {
    * the constant goes and the next one after it.
    */
   dataBytes(bytes: number[]): number {
-    const at = this.offset + this.data.reduce((whole, each) => whole + each.length, 0);
+    let size = 0;
+    for (const chunk of this.data) size += chunk.length;
+    const at = this.offset + size;
     this.data.push(bytes);
     return at;
   }

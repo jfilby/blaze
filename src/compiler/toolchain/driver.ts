@@ -38,7 +38,7 @@ import {
 } from "../core/semantic-ir.ts";
 import type { BackendKind, BuildMode, FunctionSignature, Objective, Runner, TargetSpec } from "../core/types.ts";
 import { cTargetOptions, type Threading } from "../core/target.ts";
-import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainFor } from "../core/toolchain.ts";
+import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainForTarget } from "../core/toolchain.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 
 import { C_KEYWORDS, cEscape, cHeaderNames, cLiteral, cMemberName, cOperator, cStringLiteral, cSymbolLabel, cSymbolName } from "./c-names.ts";
@@ -342,11 +342,11 @@ function driverError(message: string, detail?: string): CompilerError {
  * driver may write it out as a literal rather than build it.
  */
 function writtenTextOf(value: SemanticValue): string | null {
-  if (value.k !== "text") return null;
+  if (String(fieldOf(value,"k")) !== "text") return null;
   let text = "";
-  for (const part of value.parts) {
-    if (part.k !== "text") return null;
-    text += part.value;
+  for (const part of fieldOf(value,"parts") as { k?: string; value?: string }[]) {
+    if (String(fieldOf(part,"k")) !== "text") return null;
+    text += String(fieldOf(part,"value"));
   }
   return text;
 }
@@ -501,16 +501,18 @@ class CDriver implements ProgramTarget {
     for (const body of bodies) symbols.push(String(fieldOf(body,"symbol")));
     this.own = new Set(symbols);
     const functions = fieldOf(program,"functions") as { symbol: string }[];
+    const own = this.own;
     const declarations = functions
-      .filter((signature) => !this.own.has(String(fieldOf(signature,"symbol"))))
+      .filter((signature) => !own.has(String(fieldOf(signature,"symbol"))))
       .map((signature) => this.declaration(signature as never))
       .join("\n");
     // A body the machine backend lowered is linked beside this file, so what
     // the driver holds of it is the declaration a call needs: the lowering
     // that wrote the object took its signature from the IR, and the call the
     // driver makes is the one the convention answers.
+    const loweredElsewhere = this.loweredElsewhere;
     const lowered = bodies
-      .filter((body) => this.loweredElsewhere.has(String(fieldOf(body,"symbol"))))
+      .filter((body) => loweredElsewhere.has(String(fieldOf(body,"symbol"))))
       .map((body) => {
         const params: { name: string; type: string }[] = [];
         for (const param of fieldOf(body,"params") as { name: string }[]) {
@@ -859,7 +861,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // instead writes the arms of such a conditional as control flow and joins
     // them on a name, which is the same program with more lines.
     const name = `blaze_object_${(this.builds += 1)}`;
-    const written = fields.map((one) => `((struct ${layout}*)${name})->${cMemberName(one.field)} = ${one.value};`);
+    const written = fields.map((one: { field: string; value: string }) => `((struct ${layout}*)${name})->${cMemberName(String(fieldOf(one,"field")))} = ${fieldOf(one,"value")};`);
     return `({ struct ${layout}* ${name} = (struct ${layout}*)${RUNTIME_NAME}_object_new(sizeof(struct ${layout}), _Alignof(struct ${layout})); ${written.join(" ")} ${name}; })`;
   }
 
@@ -957,7 +959,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    */
   parallelDirective(reductions: readonly SemanticReduction[]): string[] {
     if (reductions.length === 0) return ["#pragma omp parallel for"];
-    const clauses = reductions.map((reduction) => `reduction(${reduction.op}:${reduction.name})`);
+    const clauses = reductions.map((reduction: { op: string; name: string }) => `reduction(${String(fieldOf(reduction,"op"))}:${String(fieldOf(reduction,"name"))})`);
     return [`#pragma omp parallel for ${clauses.join(" ")}`];
   }
 
@@ -1790,31 +1792,34 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * with the response once req.end has sent the request.
    */
   private bufferedRequest(call: SemanticCall, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
-    const options = call.args[1];
-    if (options.k !== "newObject") {
+    const callArgs = fieldOf(call,"args") as SemanticValue[];
+    const options = callArgs[1];
+    if (String(fieldOf(options,"k")) !== "newObject") {
       throw driverError(
         "http.request is given the request an object literal asks for",
         "as in http.request(url, { method: \"POST\", headers: { ... } }, (res) => { ... })",
       );
     }
-    const method = options.fields.find((field) => field.name === "method");
-    const headers = options.fields.find((field) => field.name === "headers");
+    const optionsFields = fieldOf(options,"fields") as { name: string; value: SemanticValue }[];
+    const method = optionsFields.find((field) => String(fieldOf(field,"name")) === "method");
+    const headers = optionsFields.find((field) => String(fieldOf(field,"name")) === "headers");
     const lines: string[] = [
-      `void *blaze_http_req = blaze_http_client_open(${this.requestBody(call.args[0], expression)});`,
-      method === undefined ? "void" : `blaze_http_client_method(blaze_http_req, ${this.requestBody(method.value, expression)});`,
+      `void *blaze_http_req = blaze_http_client_open(${this.requestBody(callArgs[0], expression)});`,
+      method === undefined ? "void" : `blaze_http_client_method(blaze_http_req, ${this.requestBody(fieldOf(method,"value") as SemanticValue, expression)});`,
     ];
     if (headers !== undefined) {
-      if (headers.value.k !== "newObject") {
+      const headerValue = fieldOf(headers,"value") as SemanticValue;
+      if (String(fieldOf(headerValue,"k")) !== "newObject") {
         throw driverError(
           "http.request is given the headers it asks for as an object literal",
           "as in { method: \"POST\", headers: { \"content-type\": \"application/json\" } }",
         );
       }
-      for (const field of headers.value.fields) {
-        lines.push(`blaze_http_client_header(blaze_http_req, ${this.headerLine(field.name, field.value, expression)});`);
+      for (const field of fieldOf(headerValue,"fields") as { name: string; value: SemanticValue }[]) {
+        lines.push(`blaze_http_client_header(blaze_http_req, ${this.headerLine(String(fieldOf(field,"name")), fieldOf(field,"value") as SemanticValue, expression)});`);
       }
     }
-    const bound = this.callbackRef(call.args[2], "a response, the one the callback of the request it opens reads");
+    const bound = this.callbackRef(callArgs[2], "a response, the one the callback of the request it opens reads");
     lines.push(`${bound.bundle.declaration}`);
     lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.bundle.name}, ${bound.bundle.bytes});`);
     lines.push("(double)(uintptr_t)blaze_http_req;");
@@ -1827,17 +1832,21 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * is rendered by the runtime first.
    */
   private requestBody(value: SemanticValue, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
-    const text = expression(value, value.type);
-    if (value.k === "const" || value.k === "text" || isTextType(value.type)) return text;
+    const valueType = fieldOf(value,"type") as SemanticType;
+    const kind = String(fieldOf(value,"k"));
+    const text = expression(value, valueType);
+    if (kind === "const" || kind === "text" || isTextType(valueType)) return text;
     // A value the runtime holds is rendered by the runtime, and a number the
     // program holds is written as the language writes it: the runtime's
     // handles are small numbers, and a number the program holds is one of them.
-    return this.toText(text, value.type, null, this.style);
+    return this.toText(text, valueType, null, this.style);
   }
 
   /** One header line an options object named, as `name: value`. */
   private headerLine(name: string, value: SemanticValue, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
-    if (value.k !== "const" && value.k !== "text" && !isTextType(value.type)) {
+    const valueType = fieldOf(value,"type") as SemanticType;
+    const kind = String(fieldOf(value,"k"));
+    if (kind !== "const" && kind !== "text" && !isTextType(valueType)) {
       throw driverError(
         `the header "${name}" is not a string the compiler can read`,
         "an options object carries the headers a request is written with as strings",
@@ -1850,7 +1859,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // a concatenation of two of them.
     const written = writtenTextOf(value);
     if (written !== null) return this.stringLiteral(prefix + written);
-    return this.stringConcat(this.stringLiteral(prefix), expression(value, value.type));
+    return this.stringConcat(this.stringLiteral(prefix), expression(value, valueType));
   }
 
   /**
@@ -1859,16 +1868,19 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * as text, which is what the runtime answers an object stringify with.
    */
   private objectJson(object: SemanticValue & { k: "newObject" }, expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
-    const fields = object.fields.map((field) => {
-      const value = field.value;
+    const rendered: string[] = [];
+    for (const field of fieldOf(object,"fields") as { name: string; value: SemanticValue }[]) {
+      const value = fieldOf(field,"value") as SemanticValue;
+      const valueType = fieldOf(value,"type") as SemanticType;
+      const kind = String(fieldOf(value,"k"));
       let text: string;
-      if (value.k === "text" || (value.k === "const" && isTextType(value.type)) || isTextType(value.type)) {
-        text = expression(value, value.type);
-      } else if (isNumber(value.type)) {
-        text = this.toText(expression(value, value.type), value.type, null, this.style);
+      if (kind === "text" || (kind === "const" && isTextType(valueType)) || isTextType(valueType)) {
+        text = expression(value, valueType);
+      } else if (isNumber(valueType)) {
+        text = this.toText(expression(value, valueType), valueType, null, this.style);
       } else {
         throw driverError(
-          `the field "${field.name}" of an object stringify is not a number or a string on its own`,
+          `the field "${String(fieldOf(field,"name"))}" of an object stringify is not a number or a string on its own`,
           "JSON.stringify of an object literal renders the values the fields name as text",
         );
       }
@@ -1876,11 +1888,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // string the JSON reader takes carries. The quotes are the JSON's own,
       // so the name is written as it is and the escaping is left to the
       // literal it is written into.
-      const key = JSON.stringify(field.name);
-      return this.stringConcat(this.stringLiteral(`${key}:`), text);
-    });
+      const key = JSON.stringify(String(fieldOf(field,"name")));
+      rendered.push(this.stringConcat(this.stringLiteral(`${key}:`), text));
+    }
     let json: string | null = null;
-    for (const field of fields) {
+    for (const field of rendered) {
       json = json === null ? field : this.stringConcat(this.stringConcat(json, this.stringLiteral(",")), field);
     }
     return json === null
@@ -1898,14 +1910,17 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     value: SemanticValue,
     what: string,
   ): { trampoline: string; bundle: { declaration: string; name: string; bytes: string } } {
-    if (value === undefined || value.k !== "functionRef" || typeof value.name !== "string" || !value.name.startsWith("__arrow_")) {
+    const valueKind = String(fieldOf(value,"k"));
+    const valueName = String(fieldOf(value,"name"));
+    if (value === undefined || valueKind !== "functionRef" || typeof fieldOf(value,"name") !== "string" || !valueName.startsWith("__arrow_")) {
       throw driverError(
         `http requests hand ${what} an arrow written where the call is made`,
         "the callback of an http.request, or the listener an event is given, is a function the program lowered",
       );
     }
-    const trampoline = `__arrow_trampoline_${value.name.slice("__arrow_".length)}`;
-    const captures = Array.isArray(value.captures) ? value.captures : [];
+    const trampoline = `__arrow_trampoline_${valueName.slice("__arrow_".length)}`;
+    const rawCaptures = fieldOf(value,"captures");
+    const captures = Array.isArray(rawCaptures) ? rawCaptures as CaptureRef[] : [];
     const bundle = this.captureBundle(captures);
     return { trampoline: `(void *)${trampoline}`, bundle };
   }
@@ -1934,22 +1949,25 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * number carried as an address was rounded to a whole number on the way.
    */
   private captureEntry(capture: CaptureRef): string {
-    if (isCarriedAsAddress(capture.type)) {
+    const captureType = fieldOf(capture,"type") as SemanticType;
+    const captureName = String(fieldOf(capture,"name"));
+    if (isCarriedAsAddress(captureType)) {
       // A buffer is carried as the address of its first element, and it also
       // carries its length in the number beside it: an array parameter of a
       // compiled function is handed its length as the argument after the
       // pointer, and the trampoline that calls the function reads it from here.
-      const carriesLength =
-        capture.type.kind === "slice" || capture.type.kind === "array" || capture.type.kind === "ptr";
-      const length = carriesLength ? `(double)(${capture.name}_length)` : "0.0";
-      return `(blaze_capture_t){ .pointer = (void *)(uintptr_t)(${capture.name}), .number = ${length} }`;
+      const captureKind = String(fieldOf(captureType,"kind"));
+      const carriesLength = captureKind === "slice" || captureKind === "array" || captureKind === "ptr";
+      const length = carriesLength ? `(double)(${captureName}_length)` : "0.0";
+      return `(blaze_capture_t){ .pointer = (void *)(uintptr_t)(${captureName}), .number = ${length} }`;
     }
-    return `(blaze_capture_t){ .pointer = NULL, .number = (double)(${capture.name}) }`;
+    return `(blaze_capture_t){ .pointer = NULL, .number = (double)(${captureName}) }`;
   }
 
   argument(type: SemanticType, expression: string): string {
-    if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
-      return `(${cDeclarationType(type.of)}*)(${expression})`;
+    const kind = String(fieldOf(type,"kind"));
+    if (kind === "ptr" || kind === "slice" || kind === "array") {
+      return `(${cDeclarationType(fieldOf(type,"of") as SemanticType)}*)(${expression})`;
     }
     return expression;
   }
@@ -2013,16 +2031,16 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // A reference to nothing has no number of its own, and the word for it is
     // what the language prints: casting it to a number hands out the zero the
     // source never printed.
-    if (type.kind === "void") {
+    if (String(fieldOf(type,"kind")) === "void") {
       // Nothing has no number of its own, and the word for it is what the
       // language prints: casting it to a number hands out the zero the source
       // never printed.
       return `"${style === "python" ? "None" : "null"}"`;
     }
-    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+    if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
       return `${RUNTIME_NAME}_to_text(${value})`;
     }
-    if (type.kind === "ref" && type.of === null) {
+    if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null) {
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;
     }
     if (isBoolean(type)) {
@@ -2121,7 +2139,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // rather than as four limbs a kernel would take a pointer to.
     const counted = op === "shl" || op === "shr";
     const second = `blaze_wide_${counted ? "count" : "right"}_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     const declared = counted ? `const unsigned ${second} = (unsigned)(${right});` : `const ${wide} ${second} = ${right};`;
     const given = counted ? second : `&${second}`;
@@ -2138,7 +2156,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const first = `blaze_wide_left_${this.builds}`;
     const second = `blaze_wide_right_${(this.builds += 1)}`;
     const mod = `blaze_wide_mod_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_mul_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
   }
@@ -2148,7 +2166,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const first = `blaze_wide_left_${this.builds}`;
     const second = `blaze_wide_right_${(this.builds += 1)}`;
     const mod = `blaze_wide_mod_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_add_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
   }
@@ -2158,7 +2176,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const first = `blaze_wide_left_${this.builds}`;
     const second = `blaze_wide_right_${(this.builds += 1)}`;
     const mod = `blaze_wide_mod_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     return `({ ${wide} ${out}; const ${wide} ${first} = ${left}; const ${wide} ${second} = ${right}; const ${wide} ${mod} = ${modulus}; ${RUNTIME_NAME}_u256_sub_mod(&${out}, &${first}, &${second}, &${mod}); ${out}; })`;
   }
@@ -2170,7 +2188,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // the signed wide number sign-extends; widening into the unsigned one
     // zero-extends.
     const out = `blaze_wide_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     return `({ ${signed ? "blaze_i256" : "blaze_u256"} ${out}; ${RUNTIME_NAME}_${signed ? "i256_from_i64" : "u256_from_u64"}(&${out}, (${signed ? "int64_t" : "uint64_t"})(${value})); ${out}; })`;
   }
 
@@ -2181,7 +2199,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const kernel = op === "eq" || op === "ne" ? "equal" : "less";
     const first = `blaze_wide_left_${(this.builds += 1)}`;
     const second = `blaze_wide_right_${(this.builds += 1)}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     const test = `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${first}, &${second})`;
     // `gt` and `le` swap the operands: `a > b` is `b < a`, `a <= b` is `!(b < a)`.
@@ -2205,7 +2223,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     }
     const out = `blaze_wide_${(this.builds += 1)}`;
     const moved = `blaze_wide_moved_${this.builds}`;
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     return (
       `({ ${wide} ${out}; const ${wide} ${moved} = ${operand}; ` +
@@ -2241,7 +2259,7 @@ export function generateProgramDriver(
       includeHttpHeader,
       lowering,
       includeSqliteHeader,
-      rulesFor(program.language).style,
+      rulesFor(String(fieldOf(program,"language"))).style,
       loweredElsewhere,
       sharedWithObjects,
     ),
@@ -2314,24 +2332,34 @@ export interface ProgramDriverRequest {
 
 /** Writes and links the C driver. What it links is what the build verified. */
 export async function buildProgramDriver(request: ProgramDriverRequest): Promise<Runner> {
-  const driverPath = `${request.workDirectory}/program.c`;
+  const workDirectory = String(fieldOf(request,"workDirectory"));
+  const outputPath = String(fieldOf(request,"outputPath"));
+  const program = fieldOf(request,"program");
+  const target = fieldOf(request,"target") as TargetSpec;
+  const driverPath = `${workDirectory}/program.c`;
+  const lowered = new Set<string>();
+  for (const body of (fieldOf(request,"loweredBodies") as string[] | undefined) ?? []) lowered.add(body);
+  const shared = new Set<string>();
+  for (const body of (fieldOf(request,"sharedBodies") as string[] | undefined) ?? []) shared.add(body);
   await writeFile(
     driverPath,
     generateProgramDriver(
-      request.program,
-      request.includeHttpHeader ?? false,
-      request.lowering ?? "c",
-      request.includeSqliteHeader ?? false,
-      new Set(request.loweredBodies ?? []),
-      new Set(request.sharedBodies ?? []),
+      program as never,
+      fieldOf(request,"includeHttpHeader") === true,
+      String(fieldOf(request,"lowering") ?? "c") as BackendKind,
+      fieldOf(request,"includeSqliteHeader") === true,
+      lowered,
+      shared,
     ),
     "utf8",
   );
-  const inputs = [driverPath, ...request.objectPaths];
-  if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
+  const inputs: string[] = [driverPath];
+  for (const objectPath of fieldOf(request,"objectPaths") as string[]) inputs.push(objectPath);
+  const runtimeObjectPath = fieldOf(request,"runtimeObjectPath") as string | undefined;
+  if (runtimeObjectPath !== undefined) inputs.push(runtimeObjectPath);
   // A library the program uses is linked beside the runtime: it is a library
   // the program links, not a host the program runs on.
-  inputs.push(...(request.libraryObjectPaths ?? []));
+  for (const objectPath of (fieldOf(request,"libraryObjectPaths") as string[] | undefined) ?? []) inputs.push(objectPath);
   // A program computes with the maths library, so the driver links it.
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
@@ -2340,28 +2368,30 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The TLS libraries are linked only for a runtime that speaks TLS: a
   // program that serves plain HTTP carries no TLS library, so it neither
   // loads one before it runs nor carries one in its binary.
-  const tlsLibraries = request.tls === true ? ["-lssl", "-lcrypto"] : [];
+  const tlsLibraries = fieldOf(request,"tls") === true ? ["-lssl", "-lcrypto"] : [];
   // QNX keeps its socket calls in libsocket. Only the HTTP runtime asks for
   // them; a program without a server links no socket library.
-  const socketLibraries = request.includeHttpHeader === true && request.target.os === "qnx" ? ["-lsocket"] : [];
-  const toolchain = toolchainFor(request.target);
-  const command = compileCommand(toolchain, [
-    "-std=c11",
-    ...linkOptionsFor(toolchain, request.mode, request.objective),
-    ...cTargetOptions(request.target),
-    ...threadingOptionsFor(toolchain, request.threads ?? []),
-    "-o",
-    request.outputPath,
-    ...inputs,
-    "-lm",
-    ...(request.runtimeObjectPath !== undefined ? ["-pthread", ...tlsLibraries, ...socketLibraries] : []),
-  ]);
+  const socketLibraries = fieldOf(request,"includeHttpHeader") === true && String(fieldOf(target,"os")) === "qnx" ? ["-lsocket"] : [];
+  const toolchain = toolchainForTarget(target);
+  const linkOptions: string[] = ["-std=c11"];
+  for (const option of linkOptionsFor(toolchain, String(fieldOf(request,"mode")) as never, fieldOf(request,"objective") as never)) linkOptions.push(option);
+  for (const option of cTargetOptions(target)) linkOptions.push(option);
+  for (const option of threadingOptionsFor(toolchain, ((fieldOf(request,"threads") as string[] | undefined) ?? []) as never)) linkOptions.push(option);
+  linkOptions.push("-o", outputPath);
+  for (const input of inputs) linkOptions.push(input);
+  linkOptions.push("-lm");
+  if (runtimeObjectPath !== undefined) {
+    linkOptions.push("-pthread");
+    for (const library of tlsLibraries) linkOptions.push(library);
+    for (const library of socketLibraries) linkOptions.push(library);
+  }
+  const command = compileCommand(toolchain, linkOptions);
   const result = run(command.command, command.args, { timeoutMs: 120_000 });
-  if (result.spawnError !== undefined) {
-    throw driverError("the C compiler is not available", result.spawnError);
+  if (fieldOf(result,"spawnError") !== undefined) {
+    throw driverError("the C compiler is not available", String(fieldOf(result,"spawnError")));
   }
-  if (result.code !== 0) {
-    throw driverError("the program driver did not link", `${result.command}\n${result.stderr.trim()}`);
+  if (fieldOf(result,"code") !== 0) {
+    throw driverError("the program driver did not link", `${fieldOf(result,"command")}\n${String(fieldOf(result,"stderr")).trim()}`);
   }
-  return { command: request.outputPath, args: [] };
+  return { command: outputPath, args: [] };
 }
