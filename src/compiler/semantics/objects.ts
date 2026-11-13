@@ -1440,6 +1440,7 @@ export function resolveObjects(
   // changed.
   const bodies = new Map<string, BodyTypes>();
   const names = new Map<string, string>();
+  const foldedKeys = new Map<string, string>();
   let remapped = new Map<string, string>();
   const walk = (): void => {
     bodies.clear();
@@ -1478,6 +1479,9 @@ export function resolveObjects(
     // bound the value to, and a traversal that reads a field through a name bound
     // before the fold would look the old key up and find nothing.
     remapped = uniteShapes(shapes);
+    for (const [key, root] of remapped) {
+      if (key !== root) foldedKeys.set(key, root);
+    }
     if ([...remapped].some(([key, root]) => key !== root)) {
       const folded = new Map<string, Shape>();
       for (const [key, root] of remapped) {
@@ -1603,10 +1607,13 @@ export function resolveObjects(
 
   // A shape that was folded into another is still the key a literal body
   // writes under: the IR asks for the name of the shape it saw, and the layout
-  // it ended up in is the root's. Name every folded key as its root.
-  for (const [key, root] of remapped) {
-    if (key === root) continue;
-    const name = names.get(root);
+  // it ended up in is the root's. Follow the folds to the name that survived.
+  for (const [key, root] of foldedKeys) {
+    let at = root;
+    for (let rounds = 0; rounds < foldedKeys.size && foldedKeys.has(at); rounds += 1) {
+      at = foldedKeys.get(at) as string;
+    }
+    const name = names.get(at);
     if (name !== undefined) names.set(key, name);
   }
   return { names, layouts: written, keys: literalKeys };
