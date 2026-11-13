@@ -317,6 +317,6 @@ contract phase of every module in order, and these slices have landed:
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the
 verifier reads its run results the same way. The self-build has moved into
-`toolchain/ir-wasm.ts` and stops in `Body.open`, whose block record is the next
-keyed read; the wasm module's function lookup and the body's parameters,
-scopes and carriers already build. Fixed point is not reached yet.
+`toolchain/ir-wasm.ts`: the module's function lookup, the body's scopes,
+parameters, program calls, locals and carrier facts build, and the remaining
+work is the body's value emitter. Fixed point is not reached yet.
