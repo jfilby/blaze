@@ -372,7 +372,7 @@ class FunctionBody {
 
   private readonly frames: BlockFrame[] = [];
   private readonly scopes: Map<string, Held>[] = [new Map()];
-  private readonly narrowings: Map<string, { field: string; value: string; negated?: boolean }>[] = [new Map()];
+  private readonly narrowings: Map<string, { field: string; value: string; negated?: boolean }[]>[] = [new Map()];
   /** The name a switch discriminant was copied from. */
   private readonly tagAliases = new Map<string, { base: string; field: string }>();
   /** The names the body holds, so a generated one is not one of them. */
@@ -565,7 +565,13 @@ class FunctionBody {
 
   /** The name and field a tag test reads, including a switch temporary. */
   private tagSubject(expression: Expression): { name: string; field: string } | null {
-    if (String(fieldOfValue(expression, "k")) !== "ident") return null;
+    const kind = String(fieldOfValue(expression, "k"));
+    if (kind === "member") {
+      const base = fieldOfValue(expression, "base") as Expression;
+      if (String(fieldOfValue(base, "k")) !== "ident") return null;
+      return { name: String(fieldOfValue(base, "name")), field: String(fieldOfValue(expression, "field")) };
+    }
+    if (kind !== "ident") return null;
     let name = String(fieldOfValue(expression, "name"));
     let field: string | null = null;
     for (let at = 0; at < 4; at += 1) {
@@ -595,12 +601,14 @@ class FunctionBody {
   }
 
   /** The arm a name is known to hold where the body is written. */
-  private narrowingFor(name: string): { field: string; value: string; negated?: boolean } | null {
+  private narrowingFor(name: string): { field: string; value: string; negated?: boolean }[] | null {
+    const found: { field: string; value: string; negated?: boolean }[] = [];
     for (let at = this.narrowings.length - 1; at >= 0; at -= 1) {
       const held = this.narrowings[at].get(name);
-      if (held !== undefined) return held;
+      if (held === undefined) continue;
+      for (const constraint of held) found.push(constraint);
     }
-    return null;
+    return found.length === 0 ? null : found;
   }
 
   private frame(): BlockFrame {
@@ -637,11 +645,13 @@ class FunctionBody {
     this.enter(block, loop, ofLoop);
     this.open();
     if (settled !== null) {
-      this.narrowings[this.narrowings.length - 1].set(settled.name, {
-        field: settled.field,
-        value: settled.value,
-        negated: settled.negated === true,
-      });
+      const scope = this.narrowings[this.narrowings.length - 1];
+      let held = scope.get(settled.name);
+      if (held === undefined) {
+        held = [];
+        scope.set(settled.name, held);
+      }
+      held.push({ field: settled.field, value: settled.value, negated: settled.negated === true });
     }
     this.statements(body);
     this.close();
@@ -1352,8 +1362,13 @@ class FunctionBody {
       }
       case "text": {
         const parts: SemanticTextPart[] = [];
-        for (const part of expression.parts) {
-          parts.push(part.k === "text" ? { k: "text", value: part.value } : { k: "value", value: this.asText(this.typed(part.value, null, line).value) });
+        for (const part of fieldOfValue(expression, "parts") as readonly Expression[]) {
+          const partValue = fieldOfValue(part, "value") as Expression;
+          if (String(fieldOfValue(part, "k")) === "text") {
+            parts.push({ k: "text", value: String(fieldOfValue(part, "value")) });
+          } else {
+            parts.push({ k: "value", value: this.asText(this.typed(partValue, null, line).value) });
+          }
         }
         return { value: { k: "text", type: TEXT, parts }, inferred: DOUBLE };
       }
@@ -1579,7 +1594,7 @@ class FunctionBody {
     field: string,
     use: Inferred,
     line: number,
-    settled: { field: string; value: string; negated?: boolean } | null = null,
+    settled: readonly { field: string; value: string; negated?: boolean }[] | null = null,
   ): string[] {
     if (inferred.kind === "object") return [this.layoutFor(inferred.key, line)];
     // A reference that names the layout it points at is that layout: the
@@ -1604,9 +1619,10 @@ class FunctionBody {
     }
     let considered = candidates;
     if (settled !== null && this.definition.tagLayouts !== undefined) {
-      const listed = this.definition.tagLayouts[settled.field]?.[settled.value];
-      if (listed !== undefined) {
-        const narrowed = candidates.filter((one) => listed.includes(one.name) !== (settled.negated === true));
+      for (const constraint of settled) {
+        const listed = this.definition.tagLayouts[constraint.field]?.[constraint.value];
+        if (listed === undefined) continue;
+        const narrowed = considered.filter((one) => listed.includes(one.name) !== (constraint.negated === true));
         if (narrowed.length > 0) considered = narrowed;
       }
     }
@@ -2171,12 +2187,17 @@ class FunctionBody {
    * runtime that has no such call. */
   private bigIntCall(expression: Expression & { k: "call" }): Typed | null {
     if (expression.args.length !== 1) return null;
-    const argument = expression.args[0] as Expression;
-    const text = argument.k === "literal"
-      ? argument.text
-      : argument.k === "text" && argument.parts.length === 1 && argument.parts[0].k === "text"
-        ? argument.parts[0].value
-        : null;
+    const argument = (fieldOfValue(expression, "args") as Expression[])[0];
+    const kind = String(fieldOfValue(argument, "k"));
+    let text: string | null = null;
+    if (kind === "literal") {
+      text = String(fieldOfValue(argument, "text"));
+    } else if (kind === "text") {
+      const parts = fieldOfValue(argument, "parts") as readonly Expression[];
+      if (parts.length === 1 && String(fieldOfValue(parts[0], "k")) === "text") {
+        text = String(fieldOfValue(parts[0], "value"));
+      }
+    }
     if (text === null) return null;
     const value = wholeText(text);
     if (value === null) return null;
