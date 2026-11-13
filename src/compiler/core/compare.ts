@@ -27,9 +27,13 @@ function comparable(build: BuildStatus): Json {
   // A rejected build names the project in its diagnostic; the project is a
   // path, not a decision, so the comparison is of the diagnostic itself.
   const error = copy.error;
-  if (error !== null && typeof error === "object" && !Array.isArray(error)) {
-    const { project: _project, ...rest } = error as Record<string, Json>;
-    copy.error = rest;
+  if (error !== null) {
+    if (typeof error === "object") {
+      if (!Array.isArray(error)) {
+        const { project: _project, ...rest } = error as Record<string, Json>;
+        copy.error = rest;
+      }
+    }
   }
   return copy;
 }
@@ -47,8 +51,18 @@ function walk(left: Json | undefined, right: Json | undefined, path: string, dif
     }
     return;
   }
-  const leftObject = left !== null && typeof left === "object" && !Array.isArray(left);
-  const rightObject = right !== null && typeof right === "object" && !Array.isArray(right);
+  let leftObject: boolean = false;
+  if (left !== null) {
+    if (typeof left === "object") {
+      if (!Array.isArray(left)) leftObject = true;
+    }
+  }
+  let rightObject: boolean = false;
+  if (right !== null) {
+    if (typeof right === "object") {
+      if (!Array.isArray(right)) rightObject = true;
+    }
+  }
   if (leftObject || rightObject) {
     const leftRecord = leftObject ? (left as { [key: string]: Json }) : {};
     const rightRecord = rightObject ? (right as { [key: string]: Json }) : {};
@@ -106,18 +120,20 @@ async function compareSelectedCandidates(
     const leftId = leftBuild.selectedCandidates?.[functionName];
     const rightId = rightBuild.selectedCandidates?.[functionName];
     if (leftId === undefined || rightId === undefined || leftId !== rightId) continue;
-    const leftCandidate = (left[functionName] ?? []).find((candidate) => candidate.id === leftId);
-    const rightCandidate = (right[functionName] ?? []).find((candidate) => candidate.id === rightId);
+    const leftCandidate = (left[functionName] ?? []).find((candidate) => String((candidate as unknown as Record<string, unknown>)["id"]) === leftId);
+    const rightCandidate = (right[functionName] ?? []).find((candidate) => String((candidate as unknown as Record<string, unknown>)["id"]) === rightId);
     const path = `candidates.${functionName}.${leftId}`;
     if (leftCandidate === undefined || rightCandidate === undefined) {
       differences.push(`${path}: selected candidate is ${leftCandidate === undefined ? "missing on the left" : "missing on the right"}`);
       continue;
     }
-    if (leftCandidate.text !== rightCandidate.text) differences.push(`${path}.text: the selected IR differs`);
-    if (JSON.stringify(leftCandidate.proposals) !== JSON.stringify(rightCandidate.proposals)) {
+    const leftFields = leftCandidate as unknown as Record<string, unknown>;
+    const rightFields = rightCandidate as unknown as Record<string, unknown>;
+    if (String(leftFields["text"]) !== String(rightFields["text"])) differences.push(`${path}.text: the selected IR differs`);
+    if (JSON.stringify(leftFields["proposals"]) !== JSON.stringify(rightFields["proposals"])) {
       differences.push(`${path}.proposals: the applied proposals differ`);
     }
-    if (JSON.stringify(leftCandidate.feedback) !== JSON.stringify(rightCandidate.feedback)) {
+    if (JSON.stringify(leftFields["feedback"]) !== JSON.stringify(rightFields["feedback"])) {
       differences.push(`${path}.feedback: the recorded diagnostics differ`);
     }
   }
@@ -138,9 +154,8 @@ export async function compareProjectStates(leftRoot: string, rightRoot: string):
   const rightBuild = JSON.parse(await readFile(join(rightRoot, "build.json"), "utf8")) as BuildStatus;
   const leftContract = JSON.parse(await readFile(join(leftRoot, "contract.json"), "utf8")) as unknown;
   const rightContract = JSON.parse(await readFile(join(rightRoot, "contract.json"), "utf8")) as unknown;
-  return [
-    ...compareBuildRecords(leftBuild, rightBuild),
-    ...compareJson(leftContract, rightContract, "contract"),
-    ...(await compareSelectedCandidates(leftRoot, rightRoot, leftBuild, rightBuild)),
-  ];
+  const differences = compareBuildRecords(leftBuild, rightBuild);
+  for (const entry of compareJson(leftContract, rightContract, "contract")) differences.push(entry);
+  for (const entry of await compareSelectedCandidates(leftRoot, rightRoot, leftBuild, rightBuild)) differences.push(entry);
+  return differences;
 }

@@ -85,10 +85,15 @@ export function join(first: string, second: string): string {
 }
 
 /** A path made absolute against the directory the process runs in. */
-export function resolve(path: string, second?: string): string {
-  const first = path.startsWith(sep) ? normalizePath(path) : normalizePath(join(cwdPath(), path));
-  if (second === undefined) return first;
-  return second.startsWith(sep) ? normalizePath(second) : normalizePath(join(first, second));
+export function resolve(path: string): string {
+  return path.startsWith(sep) ? normalizePath(path) : normalizePath(join(cwdPath(), path));
+}
+
+/** A path made absolute against a directory rather than the process's. */
+export function resolveFrom(base: string, path: string): string {
+  if (path.startsWith(sep)) return normalizePath(path);
+  const root = base.startsWith(sep) ? normalizePath(base) : normalizePath(join(cwdPath(), base));
+  return normalizePath(join(root, path));
 }
 
 /** The directory part of a path. */
@@ -168,7 +173,7 @@ export async function readFile(path: string, _mode?: string): Promise<string> {
 
 /** A file written with the text, replacing what it held. */
 export async function writeFile(path: string, text: string, _mode?: string): Promise<void> {
-  writeFileSync(path, text);
+  writeFileSync(path, text, "utf8");
 }
 
 /** A file appended to, making it where it is not there yet. */
@@ -195,7 +200,7 @@ export function existsSync(path: string): boolean {
 export async function readdir(path: string): Promise<string[]> {
   const entries = await readdirEntries(path);
   const names: string[] = [];
-  for (const entry of entries) names.push(entry.name);
+  for (const entry of entries) names.push(String((entry as unknown as Record<string, unknown>)["name"]));
   return names;
 }
 
@@ -262,8 +267,8 @@ export async function rename(from: string, to: string): Promise<void> {
 }
 
 /** A file or directory removed. */
-export async function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
-  fs.rmSync(path, options?.recursive === true ? 1 : 0);
+export async function rm(path: string, recursive: boolean, _force: boolean): Promise<void> {
+  fs.rmSync(path, recursive ? 1 : 0);
 }
 
 /**
@@ -456,7 +461,7 @@ export interface CommandResult {
   signal: string | null;
   stdout: string;
   stderr: string;
-  error?: { code?: string; message?: string };
+  error: { code?: string; message?: string } | null;
 }
 
 /** The environment a command is started with, as the pairs the runtime sets. */
@@ -470,42 +475,58 @@ function applyEnvironment(handle: number, environment: Readonly<Record<string, s
 }
 
 /** One command run to completion, in the shape `core/process.ts` reads. */
+/** One command result, with the values it holds. */
+function commandResultOf(
+  status: number | null,
+  signal: string | null,
+  stdout: string,
+  stderr: string,
+  errorCode: string,
+  errorMessage: string,
+): CommandResult {
+  return {
+    status,
+    signal,
+    stdout,
+    stderr,
+    error: errorCode === "" ? null : { code: errorCode, message: errorMessage },
+  };
+}
+
 export function spawnSync(
   command: string,
   args: readonly string[],
-  options?: {
-    cwd?: string;
-    env?: Readonly<Record<string, string | undefined>>;
-    input?: string;
-    encoding?: string;
-    timeout?: number;
-    killSignal?: string;
-    maxBuffer?: number;
-  },
+  cwd: string | undefined,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  input: string | undefined,
+  timeoutMs: number | undefined,
+  _killSignal: string,
+  _maxBufferBytes: number,
 ): CommandResult {
   const handle = exec.new();
   exec.arg(handle, command);
   for (const argument of args) exec.arg(handle, argument);
-  if (options?.cwd !== undefined) exec.cwd(handle, options.cwd);
-  applyEnvironment(handle, options?.env);
-  if (options?.input !== undefined) exec.input(handle, options.input);
-  const timeout = options?.timeout === undefined ? 0 : options.timeout;
+  if (cwd !== undefined) exec.cwd(handle, cwd);
+  applyEnvironment(handle, env);
+  if (input !== undefined) exec.input(handle, input);
+  const timeout = timeoutMs === undefined ? 0 : timeoutMs;
   const code = exec.run(handle, timeout);
   const stdout = exec.stdout(handle);
   const stderr = exec.stderr(handle);
   const errnum = exec.errno(handle);
+  const timedOut = exec.timedOut(handle) !== 0;
   const timedOut = exec.timedOut(handle) !== 0;
   const signalNumber = exec.signal(handle);
   exec.free(handle);
   const signal = signalNumber === 0 ? null : `${signalNumber}`;
   const status = code < 0 ? null : code;
   if (timedOut) {
-    return { status: null, signal, stdout, stderr, error: { code: "ETIMEDOUT", message: "the command was stopped at its deadline" } };
+    return commandResultOf(null, signal, stdout, stderr, "ETIMEDOUT", "the command was stopped at its deadline");
   }
   if (errnum !== 0) {
-    return { status: null, signal, stdout, stderr, error: { code: "ENOENT", message: "the command could not be started" } };
+    return commandResultOf(null, signal, stdout, stderr, "ENOENT", "the command could not be started");
   }
-  return { status, signal, stdout, stderr };
+  return commandResultOf(status, signal, stdout, stderr, "", "");
 }
 
 /** The command that runs a program with a bounded heap. */
@@ -609,15 +630,13 @@ export interface ParsedArguments {
  * a short option is `-h`. The first positional and everything after it are the
  * command and its arguments, and `--` ends the options.
  */
-export function parseArgs(configuration: {
-  args: readonly string[];
-  allowPositionals?: boolean;
-  options?: Record<string, OptionSpec>;
-}): ParsedArguments {
+export function parseArgs(
+  args: readonly string[],
+  optionTable: Record<string, OptionSpec> | undefined,
+): ParsedArguments {
   const values: Record<string, string | boolean> = {};
   const positionals: string[] = [];
-  const options = configuration.options ?? {};
-  const args = configuration.args;
+  const options = optionTable ?? {};
   let at = 0;
   while (at < args.length) {
     const argument = args[at] as string;
@@ -642,16 +661,16 @@ export function parseArgs(configuration: {
     let spec = options[key];
     if (spec === undefined && !long) {
       for (const candidate of Object.keys(options)) {
-        const declared = options[candidate];
-        if (declared !== undefined && declared.short === name) {
+        const declared = options[candidate] as unknown as Record<string, unknown> | undefined;
+        if (declared !== undefined && String(declared["short"]) === name) {
           key = candidate;
-          spec = declared;
+          spec = declared as unknown as OptionSpec;
           break;
         }
       }
     }
     if (spec === undefined) continue;
-    if (spec.type === "boolean") {
+    if (String((spec as unknown as Record<string, unknown>)["type"]) === "boolean") {
       values[key] = true;
       continue;
     }

@@ -61,7 +61,7 @@ test("a label cannot drive the terminal", () => {
 test("the animation writes each frame once and settles on the outcome", () => {
   const written: string[] = [];
   const { ticker, advance, cancelled } = manualTicker();
-  const animation = startBuildTitle("hello_world", { sink: (title) => written.push(title), ticker });
+  const animation = startBuildTitle("hello_world", BRAND, (title) => written.push(title), ticker);
 
   assert.deepEqual(written, [`${BRAND} ${SPINNER_FRAMES[0]} hello_world`]);
   advance();
@@ -72,12 +72,12 @@ test("the animation writes each frame once and settles on the outcome", () => {
     `${BRAND} ${SPINNER_FRAMES[2]} hello_world`,
   ]);
 
-  animation.stop("ok");
+  animation("ok");
   assert.equal(written.at(-1), `${BRAND} ✓ hello_world`);
   assert.equal(cancelled(), true);
 
   // Stopping twice, and a frame after, must not repaint a finished title.
-  animation.stop("fail");
+  animation("fail");
   advance();
   assert.equal(written.at(-1), `${BRAND} ✓ hello_world`);
 });
@@ -85,7 +85,7 @@ test("the animation writes each frame once and settles on the outcome", () => {
 test("a build that dies still settles the title", () => {
   const written: string[] = [];
   const { ticker } = manualTicker();
-  startBuildTitle("hello_world", { sink: (title) => written.push(title), ticker });
+  startBuildTitle("hello_world", BRAND, (title) => written.push(title), ticker);
   // The process exits with the animation running, which is what a build that
   // throws, or a Ctrl-C, does.
   process.emit("exit", 1);
@@ -107,6 +107,6 @@ test("a stream that is not a terminal never receives a title", () => {
 });
 
 test("the no-op animation settles nothing", () => {
-  NO_TITLE_ANIMATION.stop("ok");
-  NO_TITLE_ANIMATION.stop("fail");
+  NO_TITLE_ANIMATION("ok");
+  NO_TITLE_ANIMATION("fail");
 });

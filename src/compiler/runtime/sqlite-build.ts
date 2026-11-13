@@ -12,7 +12,7 @@
  * library as one translation unit, which is what makes it one file to compile.
  */
 
-import { createHash, readFileSync, rename, rm, stat, writeFile, compilerDataRoot, processId, resolve } from "../core/platform.ts";
+import { createHash, readFileSync, rename, rm, stat, writeFile, compilerDataRoot, processId, resolveFrom } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { cTargetOptions, targetSummary } from "../core/target.ts";
@@ -28,7 +28,7 @@ import { identifyCompiler } from "./standalone.ts";
 
 /** The vendored SQLite amalgamation, pinned to `SQLITE_VERSION`. */
 export function vendoredSqliteDir(): string {
-  return resolve(compilerDataRoot(), "deps/sqlite3");
+  return resolveFrom(compilerDataRoot(), "deps/sqlite3");
 }
 
 /**
@@ -527,11 +527,11 @@ export async function buildSqliteLibrary(
     const command = compileCommand(toolchain, [...flags, "-c", "-o", building, amalgamation]);
     const compiled = run(command.command, command.args, { timeoutMs: 600_000 });
     if (compiled.spawnError !== undefined) {
-      await rm(building, { force: true }).catch(() => undefined);
+      await rm(building, false, true).catch(() => undefined);
       throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
     }
     if (compiled.code !== 0) {
-      await rm(building, { force: true }).catch(() => undefined);
+      await rm(building, false, true).catch(() => undefined);
       throw new CompilerError("LinkError", "compile", "the SQLite amalgamation did not build", `${amalgamation}\n${compiled.stderr.trim()}`, "", "", "");
     }
     // Two builds of one project can miss the same key at once, so the rename
@@ -542,7 +542,7 @@ export async function buildSqliteLibrary(
       (reason: unknown) => reason,
     );
     if (renameFailure !== undefined) {
-      await rm(building, { force: true }).catch(() => undefined);
+      await rm(building, false, true).catch(() => undefined);
       if (!(await sqliteObjectUsable(sqliteObject))) throw renameFailure;
     }
   }

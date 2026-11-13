@@ -17,7 +17,7 @@ import { generateText, type LanguageModel, type LanguageModelUsage } from "ai";
 import { createCommandCode } from "./commandcode.ts";
 import { sleep } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
-import { parseReview, type Review } from "../core/proposal.ts";
+import { parseReview, reviewOrUnusable, type Review } from "../core/proposal.ts";
 import { DEFAULT_GENERATION } from "../core/types.ts";
 import type { ModelConfiguration } from "./model.ts";
 import { buildRetryPrompt, buildSystemPrompt, buildIrReviewPrompt, buildTargetReviewPrompt, type ReviewRequest } from "./review.ts";
@@ -191,22 +191,22 @@ export class VercelAiBackend implements AiBackend {
           system,
           answers.length === 0 ? user : buildRetryPrompt(user, answers.map((entry) => entry.reason)),
         );
-        const parsed = parseReview(answer.text);
-        if ("unusable" in parsed) {
+        const parsed = reviewOrUnusable(parseReview(answer.text));
+        if (parsed.unusable !== null) {
           // The reason the answer could not be read is told to the model, how
           // the request ended and what the model wrote are told to the build: a
           // reply the provider cut short is a different failure from one the
           // model finished, only the provider knows which it was, and the reply
           // is the only place a refusal like "a second reason" can be read.
           throw new UnusableAnswer(
-            parsed.unusable,
+            String(parsed.unusable),
             true,
             reviewError("the model did not answer with a review the compiler could read"),
             answer.stop,
             answer.text,
           );
         }
-        review = parsed.review;
+        review = parsed.review as Review;
         break;
       } catch (cause) {
         if (!(cause instanceof UnusableAnswer)) throw cause;

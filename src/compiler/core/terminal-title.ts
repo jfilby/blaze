@@ -43,23 +43,18 @@ export type BuildOutcome = "ok" | "fail";
 export type TitleSink = (title: string) => void;
 
 /** Starts a repeating call and returns its cancel, injected for the same reason. */
-export type Ticker = (tick: () => void, ms: number) => () => void;
+export type Ticker = (tick: () => void) => () => void;
 
-export interface TitleAnimation {
-  /**
-   * Settle the title on the outcome and release everything the animation
-   * holds. Idempotent, so an exit handler and the command can both call it.
-   */
-  stop(outcome: BuildOutcome): void;
-}
+/** Settles the title on the outcome and releases what the animation holds. */
+export type TitleAnimation = (outcome: BuildOutcome) => void;
 
 /** Settles a title at the outcome the command reached. */
 export function stopTitleAnimation(animation: TitleAnimation, outcome: BuildOutcome): void {
-  animation.stop(outcome);
+  animation(outcome);
 }
 
 /** The animation for a command that must not touch the terminal. */
-export const NO_TITLE_ANIMATION: TitleAnimation = { stop: () => {} };
+export const NO_TITLE_ANIMATION: TitleAnimation = () => {};
 
 /**
  * A title part with nothing a terminal can be made to run in it: control
@@ -114,18 +109,19 @@ export function settledTitle(...args: any[]): string {
   let label: string;
   let outcome: BuildOutcome;
   if (args.length >= 3) {
-    if (args[1] === "ok" || args[1] === "fail") {
-      label = args[0];
-      outcome = args[1];
-      resolvedBrand = args[2] ?? BRAND;
+    const second = String(args[1]);
+    if (second === "ok" || second === "fail") {
+      label = String(args[0]);
+      outcome = second;
+      resolvedBrand = String(args[2] ?? BRAND);
     } else {
-      resolvedBrand = args[0] ?? BRAND;
-      label = args[1];
-      outcome = args[2];
+      resolvedBrand = String(args[0] ?? BRAND);
+      label = String(args[1]);
+      outcome = String(args[2]) as BuildOutcome;
     }
   } else {
-    label = args[0];
-    outcome = args[1];
+    label = String(args[0]);
+    outcome = String(args[1]) as BuildOutcome;
   }
   const mark = outcome === "ok" ? "✓" : "✗";
   return label === "" ? `${resolvedBrand} ${mark}` : `${resolvedBrand} ${mark} ${label}`;
@@ -144,8 +140,8 @@ export function streamTitleSink(stream: { write(text: string): unknown; isTTY?: 
   };
 }
 
-function intervalTicker(tick: () => void, ms: number): () => void {
-  const timer = setInterval(tick, ms);
+function intervalTicker(tick: () => void): () => void {
+  const timer = setInterval(tick, SPINNER_FRAME_MS);
   return () => clearInterval(timer);
 }
 
@@ -159,29 +155,14 @@ function intervalTicker(tick: () => void, ms: number): () => void {
  */
 export function startBuildTitle(
   label: string,
-  dependencies?: { sink?: TitleSink; ticker?: Ticker; brand?: string },
-): TitleAnimation;
-export function startBuildTitle(
-  label: string,
-  brand: string,
-  dependencies?: { sink?: TitleSink; ticker?: Ticker },
-): TitleAnimation;
-export function startBuildTitle(...args: any[]): TitleAnimation {
-  let label: string;
-  let dependencies: { sink?: TitleSink; ticker?: Ticker; brand?: string } = {};
-  let resolvedBrand = BRAND;
-  if (args.length >= 2 && typeof args[1] === "string") {
-    label = args[0];
-    resolvedBrand = args[1] ?? BRAND;
-    dependencies = args[2] ?? {};
-  } else {
-    label = args[0];
-    dependencies = args[1] ?? {};
-    resolvedBrand = dependencies.brand ?? BRAND;
-  }
+  brand: string = BRAND,
+  sink?: TitleSink,
+  ticker?: Ticker,
+): TitleAnimation {
   const name = sanitizeTitlePart(label);
-  const sink = dependencies.sink ?? streamTitleSink({ write: hostWriteOut, isTTY: hostStdoutIsTTY() });
-  const ticker = dependencies.ticker ?? intervalTicker;
+  const resolvedBrand = brand;
+  const resolvedSink: TitleSink = sink ?? streamTitleSink({ write: hostWriteOut, isTTY: hostStdoutIsTTY() });
+  const resolvedTicker: Ticker = ticker ?? intervalTicker;
   let frame = 0;
   let cancel: (() => void) | undefined;
   let stopped = false;
@@ -192,7 +173,7 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
     // quieter for it.
     if (title === last) return;
     last = title;
-    sink(title);
+    resolvedSink(title);
   };
 
   let detachExit: () => void = () => {};
@@ -208,7 +189,10 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
   const settle = (outcome: BuildOutcome): void => {
     if (stopped) return;
     stopped = true;
-    cancel?.();
+    if (cancel !== undefined) {
+      const stopTicking = cancel as unknown as (capture: undefined) => void;
+      stopTicking(undefined);
+    }
     emit(settledTitle(name, outcome, resolvedBrand));
     detach();
   };
@@ -228,10 +212,10 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
   }
 
   emit(workingTitle(name, frame, resolvedBrand));
-  cancel = ticker(() => {
+  cancel = resolvedTicker(() => {
     frame += 1;
     emit(workingTitle(name, frame, resolvedBrand));
-  }, SPINNER_FRAME_MS);
+  });
   // A host that cannot register a handler still shows the working title; it
   // simply cannot settle it from a signal, and the process's own exit ends
   // the animation with it.
@@ -239,5 +223,5 @@ export function startBuildTitle(...args: any[]): TitleAnimation {
   detachInterrupt = hostOnSignal("SIGINT", onInterrupt);
   detachTerminate = hostOnSignal("SIGTERM", onTerminate);
 
-  return { stop: settle };
+  return settle;
 }

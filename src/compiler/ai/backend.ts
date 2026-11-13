@@ -31,7 +31,7 @@ import { readFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { ModelConfiguration } from "./model.ts";
 import type { ReviewRequest } from "./review.ts";
-import { parseReview, type Review } from "../core/proposal.ts";
+import { parseReview, reviewOrUnusable, type Review } from "../core/proposal.ts";
 
 export interface AiBackend {
   /** Recorded in build records. */
@@ -234,12 +234,12 @@ export class ReplayBackend implements AiBackend {
 
   constructor(configuration: ModelConfiguration) {
     this.configuration = configuration;
-    this.id = configuration.id;
+    this.id = String((configuration as unknown as Record<string, unknown>)["id"]);
   }
 
   private async load(): Promise<string[]> {
     if (this.entries !== null) return this.entries;
-    const file = this.configuration.replayFile as string;
+    const file = String((this.configuration as unknown as Record<string, unknown>)["replayFile"]);
     let text: string;
     try {
       text = await readFile(file, "utf8");
@@ -291,15 +291,15 @@ export class ReplayBackend implements AiBackend {
     // are reviewed at the same time, and a cursor would hand them out in
     // whatever order they happened to reach the backend.
     const entry = entries[Math.min(sequence - 1, entries.length - 1)];
-    const parsed = parseReview(entry);
-    if ("unusable" in parsed) {
+    const parsed = reviewOrUnusable(parseReview(entry));
+    if (parsed.unusable !== null) {
       const at = Math.min(sequence - 1, entries.length - 1) + 1;
       throw reviewError(
         `replay entry ${at} is not a review of the ${request.stage} of ${request.contract.function.name}: ${parsed.unusable}`,
-        `recorded in ${String(this.configuration.replayFile)}`,
+        `recorded in ${String((this.configuration as unknown as Record<string, unknown>)["replayFile"])}`,
       );
     }
-    return parsed.review;
+    return parsed.review as Review;
   }
 }
 

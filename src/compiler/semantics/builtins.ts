@@ -118,7 +118,7 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
   /** `Array.isArray(value)` over a value the read does not type: the runtime
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
-  "blaze_rt_is_array": { params: [ANY], returns: F64, arity: 1 },
+  "blaze_rt_is_array": { params: [ANY], returns: BOOLEAN, arity: 1 },
   /** The fields of a value the read cannot name, read by position: the key is
    *  the text one field holds and the value is the handle beside it. */
   /** How many entries a dynamic array or object holds: an object's count is

@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -520,7 +520,7 @@ function readInput(path: string): ProjectInput {
     if (typeof sourceFile !== "string" || String(sourceFile).length === 0) {
       throw new CompilerError("InputError", "input", `${path} has an empty "sourceFile"`, "", "", "", "");
     }
-    const sourcePath = resolve(directory, String(sourceFile));
+    const sourcePath = resolveFrom(directory, String(sourceFile));
     try {
       entryPath = relative(directory, sourcePath);
       (input as Record<string, unknown>)["source"] = readFileSync(sourcePath, "utf8");
@@ -557,7 +557,7 @@ function readInput(path: string): ProjectInput {
 /** Reads a module the program imports, by the path its importer used. */
 function moduleReader(directory: string): (path: string) => string | null {
   return (path) => {
-    const full = resolve(directory, path);
+    const full = resolveFrom(directory, path);
     return existsSync(full) ? readFileSync(full, "utf8") : null;
   };
 }
@@ -1454,7 +1454,7 @@ async function programSource(
   const projectFields = project as unknown as Record<string, unknown>;
   const file = String(bodyFields["file"]);
   if (file !== INLINE_MODULE) {
-    return { path: resolve(String(projectFields["directory"]), file) };
+    return { path: resolveFrom(String(projectFields["directory"]), file) };
   }
   // The source is written under the name its own toolchain runs it by: a
   // Python source is run by python3, which reads a file of any name, and the
@@ -1689,7 +1689,7 @@ export async function runBuild(
 ): Promise<BuildOutcome> {
   const fields = options as unknown as Record<string, unknown>;
   const store = createJsonStore(join(String(fields["cwd"]), STATE_DIRECTORY));
-  const absoluteInput = resolve(String(fields["cwd"]), inputPath);
+  const absoluteInput = resolveFrom(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id, projectStoreId(absoluteInput));
   const pathFields = paths as unknown as Record<string, unknown>;

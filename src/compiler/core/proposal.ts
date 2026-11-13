@@ -72,6 +72,14 @@ export interface Review {
 
 export type ParsedReview = { readonly review: Review } | { readonly unusable: string };
 
+/** The review or the reason it could not be read, as two named values. */
+export function reviewOrUnusable(parsed: ParsedReview): { review: Review | null; unusable: string | null } {
+  const fields = parsed as unknown as Record<string, unknown>;
+  const review = fields["review"] as Review | undefined;
+  const unusable = fields["unusable"] as string | undefined;
+  return { review: review === undefined ? null : review, unusable: unusable === undefined ? null : unusable };
+}
+
 /** Fences are stripped before a reply is read: a reply is often wrapped in one. */
 const FENCE = /^\s*```/;
 

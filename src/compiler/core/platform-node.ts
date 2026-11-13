@@ -22,7 +22,7 @@ import {
   readFile,
   readdir as nodeReaddir,
   rename,
-  rm,
+  rm as nodeRm,
   stat as nodeStat,
   writeFile,
 } from "node:fs/promises";
@@ -44,8 +44,8 @@ import { availableParallelism, cpus, tmpdir } from "node:os";
 import { clearInterval as nodeClearInterval, clearTimeout, setInterval as nodeSetInterval } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
-import { parseArgs } from "node:util";
-import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
+import { parseArgs as nodeParseArgs } from "node:util";
+import { spawn, spawnSync as nodeSpawnSync, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export {
@@ -59,18 +59,16 @@ export {
   fileURLToPath,
   mkdir,
   mkdtemp,
-  parseArgs,
   posix,
   randomUUID,
   readFile,
   readFileSync,
   nodeReaddir as readdir,
   rename,
-  rm,
+  rm as nodeRm,
   sleep,
   sleep as setTimeout,
   spawn,
-  spawnSync,
   tmpdir,
   writeFile,
   writeFileSync,
@@ -123,6 +121,44 @@ export function isDirectoryPath(path: string): boolean {
   }
 }
 
+/** The compiler's command line, parsed from the arguments it was given. */
+export function parseArgs(
+  args: readonly string[],
+  options: Record<string, { type: "string" | "boolean"; short?: string }> | undefined,
+): { values: Record<string, string | boolean>; positionals: string[] } {
+  return nodeParseArgs({ args: [...args], options, allowPositionals: true }) as unknown as {
+    values: Record<string, string | boolean>;
+    positionals: string[];
+  };
+}
+
+/** A command run to completion, with the values it was given. */
+export function spawnSync(
+  command: string,
+  args: readonly string[],
+  cwd: string | undefined,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  input: string | undefined,
+  timeoutMs: number | undefined,
+  _killSignal: string,
+  _maxBufferBytes: number,
+): { status: number | null; signal: string | null; stdout: string; stderr: string; error?: { code?: string; message?: string } } {
+  return nodeSpawnSync(command, args, {
+    cwd,
+    env,
+    input,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    killSignal: _killSignal as NodeJS.Signals,
+    maxBuffer: _maxBufferBytes,
+  }) as unknown as { status: number | null; signal: string | null; stdout: string; stderr: string; error?: { code?: string; message?: string } };
+}
+
+/** A file or directory removed, with the depth and force it asks for. */
+export async function rm(path: string, recursive: boolean, force: boolean): Promise<void> {
+  await nodeRm(path, { recursive, force });
+}
+
 /** Whether a path names a file rather than a directory. */
 export function isFilePath(path: string): boolean {
   try {
@@ -170,7 +206,7 @@ export async function open(path: string, mode: string): Promise<FileHandle> {
  * runtime computes from its own module URL.
  */
 export function compilerDataRoot(): string {
-  return resolve(nodeDirname(fileURLToPath(import.meta.url)), "../../..");
+  return resolveFrom(nodeDirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
 /**
@@ -183,7 +219,7 @@ export function compilerDataRoot(): string {
  * build is.
  */
 export function compilerSourceRoot(): string {
-  return resolve(nodeDirname(fileURLToPath(import.meta.url)), "..");
+  return resolveFrom(nodeDirname(fileURLToPath(import.meta.url)), "..");
 }
 
 /** The operating system this compiler is running on. */
@@ -351,8 +387,13 @@ export const sep: string = nodeSep;
  * A second part is resolved after the first, which is how the compiler names a
  * file inside a directory.
  */
-export function resolve(path: string, second?: string): string {
-  return second === undefined ? nodeResolve(path) : nodeResolve(path, second);
+export function resolve(path: string): string {
+  return nodeResolve(path);
+}
+
+/** A path made absolute against a directory rather than the process's. */
+export function resolveFrom(base: string, path: string): string {
+  return nodeResolve(base, path);
 }
 
 /** The directory part of a path. */

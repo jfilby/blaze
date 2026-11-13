@@ -84,15 +84,17 @@ export function run(command: string, args: readonly string[], options: RunOption
   const spawned: BoundedCommand = options.heapBytes === undefined
     ? { command, args: [...args] }
     : hostBoundHeap(command, args, options.heapBytes);
-  const result = spawnSync(spawned.command, spawned.args, {
-    cwd: options.cwd,
-    env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
-    input: options.input,
-    encoding: "utf8",
-    timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    killSignal: KILL_SIGNAL,
-    maxBuffer: options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
-  });
+  const environment = options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment();
+  const result = spawnSync(
+    spawned.command,
+    spawned.args,
+    options.cwd,
+    environment,
+    options.input,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    KILL_SIGNAL,
+    options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
+  );
   const durationNs = monotonicTimeNs() - started;
   const spawnFailure = result.error as NodeJS.ErrnoException | undefined;
   const stderr = result.stderr ?? "";

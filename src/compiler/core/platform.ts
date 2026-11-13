@@ -163,6 +163,7 @@ export {
   relative,
   rename,
   resolve,
+  resolveFrom,
   rm,
   sep,
   setInterval,

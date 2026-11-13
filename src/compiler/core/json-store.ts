@@ -11,7 +11,7 @@
  * apart when the same field name lives in more than one layout.
  */
 
-import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, sep, writeFile, dirname } from "./platform.ts";
+import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, resolveFrom, sep, writeFile, dirname } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
 
 export interface JsonStore {
@@ -71,7 +71,7 @@ export function storeResolve(store: JsonStore, relativePath: string): string {
   if (isAbsolute(relativePath)) {
     throw new CompilerError("StorageError", "storage", `store paths must be relative: ${relativePath}`, "", "", "", "");
   }
-  const target = resolve(store.root, normalize(relativePath));
+  const target = resolveFrom(store.root, normalize(relativePath));
   const rel = relative(store.root, target);
   if (rel.startsWith("..") || rel.split(sep).includes("..")) {
     throw new CompilerError("StorageError", "storage", `store path escapes root: ${relativePath}`, "", "", "", "");
@@ -129,7 +129,7 @@ export async function storeWrite<T>(store: JsonStore, relativePath: string, valu
     await rename(temporary, file);
     await syncPath(dirname(file));
   } catch (cause) {
-    await rm(temporary, { force: true });
+    await rm(temporary, false, true);
     throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, String(cause), "", "", "");
   }
 }
@@ -166,13 +166,13 @@ export async function storeWriteText(store: JsonStore, relativePath: string, con
     await rename(temporary, file);
     await syncPath(dirname(file));
   } catch (cause) {
-    await rm(temporary, { force: true });
+    await rm(temporary, false, true);
     throw new CompilerError("StorageError", "storage", `cannot write ${relativePath}`, String(cause), "", "", "");
   }
 }
 
 export async function storeRemove(store: JsonStore, relativePath: string): Promise<void> {
-  await rm(storeResolve(store, relativePath), { force: true, recursive: true });
+  await rm(storeResolve(store, relativePath), true, true);
 }
 
 export async function storeMkdirp(store: JsonStore, relativePath: string): Promise<void> {

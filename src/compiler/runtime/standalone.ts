@@ -190,7 +190,7 @@ export async function compileRuntimeSource(request: {
 
 /** Removes a file a failed build left behind, and does not report a failure to. */
 async function discard(path: string): Promise<void> {
-  await rm(path, { force: true }).catch(() => undefined);
+  await rm(path, false, true).catch(() => undefined);
 }
 
 /**

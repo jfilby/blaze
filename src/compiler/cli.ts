@@ -14,7 +14,7 @@
  * configuration comes from --model or AI_MODEL; see model.ts.
  */
 
-import { existsSync, writeFileSync, readFile, resolve, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
+import { existsSync, writeFileSync, readFile, resolveFrom, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
 import { CompilerError, isCompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
@@ -43,7 +43,7 @@ import {
   type VerificationMode,
   type RuntimeKind,
 } from "./core/types.ts";
-import { NO_TITLE_ANIMATION, startBuildTitle, stopTitleAnimation, type TitleAnimation } from "./core/terminal-title.ts";
+import { BRAND, NO_TITLE_ANIMATION, startBuildTitle, stopTitleAnimation, type TitleAnimation } from "./core/terminal-title.ts";
 
 /**
  * The tab title of a command that is working. A command that answers at once
@@ -51,7 +51,7 @@ import { NO_TITLE_ANIMATION, startBuildTitle, stopTitleAnimation, type TitleAnim
  */
 function titleAnimation(label: string): TitleAnimation {
   if (!hostStdoutIsTTY()) return NO_TITLE_ANIMATION;
-  return startBuildTitle(label);
+  return startBuildTitle(label, BRAND, undefined, undefined);
 }
 
 /** The file that describes a project, and the default input of `blaze build`. */
@@ -146,7 +146,7 @@ function consoleReporter(): Reporter {
 
 /** The project `blaze build` builds when no path is given. */
 function defaultProjectFile(): string {
-  const candidate = resolve(hostCwd(), PROJECT_FILE);
+  const candidate = resolveFrom(hostCwd(), PROJECT_FILE);
   if (!existsSync(candidate)) {
     throw new CompilerError("InputError", "input", `no ${PROJECT_FILE} in ${hostCwd()}`, "run from a project directory, or name the input: blaze build <input.toml>", "", "", "");
   }
@@ -181,7 +181,7 @@ backend = "machine"
  * by the same name would read the new one and never the old.
  */
 function initProject(): void {
-  const path = resolve(hostCwd(), PROJECT_FILE);
+  const path = resolveFrom(hostCwd(), PROJECT_FILE);
   if (existsSync(path)) {
     throw new CompilerError("InputError", "input", `${path} already exists`, "blaze init writes a new project file; edit the one that is there, or remove it and run this again", "", "", "");
   }
@@ -339,10 +339,7 @@ function reportError(
 }
 
 async function main(argv: readonly string[]): Promise<number> {
-  const parsed = parseArgs({
-    args: [...argv],
-    allowPositionals: true,
-    options: {
+  const parsed = parseArgs([...argv], {
       model: { type: "string" },
       reuse: { type: "boolean" },
       recompile: { type: "boolean" },
@@ -363,7 +360,6 @@ async function main(argv: readonly string[]): Promise<number> {
       from: { type: "string" },
       function: { type: "string" },
       all: { type: "boolean" },
-    },
   });
   const values = parsed.values as unknown as Record<string, unknown>;
   const [command, argument, ...rest] = parsed.positionals;
@@ -380,7 +376,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case "generate": {
       // With no argument, build the project described by ./blaze.toml.
       const input = argument ?? defaultProjectFile();
-      const title = titleAnimation(projectIdFor(resolve(input, ".")));
+      const title = titleAnimation(projectIdFor(resolveFrom(input, ".")));
       try {
         await runBuild(input, options, consoleReporter(), command);
         if (command === "generate") {
