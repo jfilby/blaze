@@ -32,7 +32,7 @@ import { hostServiceBySymbol } from "./wasm-host-runtime.ts";
 import type { Runner } from "../core/types.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import { rulesFor } from "../semantics/language.ts";
-import type { FunctionContract } from "../core/types.ts";
+import type { FunctionContract, ObjectLayout } from "../core/types.ts";
 import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
   isWide,
@@ -2634,23 +2634,29 @@ class Body {
    * runtime joins each onto the one before it.
    */
   private text(value: SemanticValue): void {
-    if (value.k === "text") {
-      if (value.parts.every((part) => part.k === "text")) {
-        this.i32(this.poolText(value.parts.map((part) => (part as { k: "text"; value: string }).value).join("")));
+    const kind = String(fieldOf(value, "k"));
+    if (kind === "text") {
+      const parts = fieldOf(value, "parts") as readonly SemanticTextPart[];
+      let allText = true;
+      for (const part of parts) if (String(fieldOf(part, "k")) !== "text") allText = false;
+      if (allText) {
+        let written = "";
+        for (const part of parts) written = written + String(fieldOf(part, "value"));
+        this.i32(this.poolText(written));
         return;
       }
-      this.joinedText(value.parts);
+      this.joinedText(parts);
       return;
     }
-    if (value.k === "toText") {
-      this.asText(value.of, value.digits, value.precision === true);
+    if (kind === "toText") {
+      this.asText(fieldOf(value, "of") as SemanticValue, fieldOf(value, "digits") as number | null, fieldOf(value, "precision") === true);
       return;
     }
-    if (value.k === "const" && isTextType(fieldOf(value,"type") as SemanticType)) {
-      this.i32(this.poolText(value.text));
+    if (kind === "const" && isTextType(fieldOf(value, "type") as SemanticType)) {
+      this.i32(this.poolText(String(fieldOf(value, "text"))));
       return;
     }
-    if (value.k === "nothing") {
+    if (kind === "nothing") {
       // Nothing is the absence of a text, which is the zero the runtime reads
       // as nothing.
       this.i32(0);
@@ -2769,17 +2775,22 @@ class Body {
    * interpolated into it is written as the runtime writes that value.
    */
   private printText(value: SemanticValue): void {
-    if (value.k === "text" && !value.parts.every((part) => part.k === "text")) {
-      for (const part of value.parts) {
-        if (part.k === "text") {
-          this.i32(this.poolText(part.value));
+    if (String(fieldOf(value, "k")) === "text") {
+      const parts = fieldOf(value, "parts") as readonly SemanticTextPart[];
+      let allText = true;
+      for (const part of parts) if (String(fieldOf(part, "k")) !== "text") allText = false;
+      if (!allText) {
+        for (const part of parts) {
+          if (String(fieldOf(part, "k")) === "text") {
+            this.i32(this.poolText(String(fieldOf(part, "value"))));
+            this.callService("blaze_rt_print_text");
+            continue;
+          }
+          this.asText(fieldOf(part, "value") as SemanticValue, null);
           this.callService("blaze_rt_print_text");
-          continue;
         }
-        this.asText(part.value, null);
-        this.callService("blaze_rt_print_text");
+        return;
       }
-      return;
     }
     this.text(value);
     this.callService("blaze_rt_print_text");
@@ -2825,72 +2836,77 @@ class Body {
   }
 
   private terminator(terminator: SemanticTerminator): void {
-    if (terminator.k === "next") return;
+    const kind = String(fieldOf(terminator, "k"));
+    if (kind === "next") return;
     // A jump leaves the blocks it is written in, and frees what they owned on
     // the way out. A function allocates no array, and an object it builds
     // belongs to its caller, so there is normally nothing to free here.
-    if (terminator.k === "jump") {
-      for (const name of terminator.releases) this.releaseName(name);
+    if (kind === "jump") {
+      for (const name of fieldOf(terminator, "releases") as readonly string[]) this.releaseName(name);
     }
     // A block nothing arrives at is the one instruction WebAssembly has for it:
     // `unreachable` traps if control ever gets here, which is the honest answer
     // for a path the program does not take.
-    if (terminator.k === "unreachable") {
+    if (kind === "unreachable") {
       this.op(0x00);
       return;
     }
-    if (terminator.k === "return") {
-      if (terminator.value !== null) this.value(terminator.value, this.returns);
-      else if (this.returns.kind !== "void") this.answer();
+    if (kind === "return") {
+      const returned = fieldOf(terminator, "value") as SemanticValue | null;
+      if (returned !== null) this.value(returned, this.returns);
+      else if (String(fieldOf(this.returns, "kind")) !== "void") this.answer();
       this.op(0x0f);
       return;
     }
     this.op(0x0c);
-    this.code.varuint(this.depth(terminator.target));
+    this.code.varuint(this.depth(String(fieldOf(terminator, "target"))));
   }
 
   private statement(statement: SemanticStatement): void {
-    switch (statement.k) {
-      case "let":
+    switch (String(fieldOf(statement, "k"))) {
+      case "let": {
         // The name is declared before its value is emitted: the value is
         // emitted inside the block that declares the name, and a name that
         // block has not declared yet is not one its value can read.
-        this.holdLocal(statement.slot.name, slotType(statement.slot));
-        this.value(statement.value, slotType(statement.slot));
-        this.set(statement.slot.name);
+        const slot = fieldOf(statement, "slot");
+        const slotName = String(fieldOf(slot, "name"));
+        this.holdLocal(slotName, slotType(slot as any));
+        this.value(fieldOf(statement, "value") as SemanticValue, slotType(slot as any));
+        this.set(slotName);
         return;
+      }
       case "set": {
-        const type = this.resolve(statement.name).type;
+        const type = this.resolve(String(fieldOf(statement, "name"))).type;
         const held = fieldOf(facts(type),"held");
         // A plain `=` computes nothing from what the slot holds, so the old
         // value is never pushed. Pushing it and emitting no operator left it
         // on the stack, and every block this backend opens is void-typed, so
         // the leftover failed the `end` check of the arm it was in.
-        if (statement.op === "=") {
-          this.value(statement.value, type);
-          this.set(statement.name);
+        if (String(fieldOf(statement, "op")) === "=") {
+          this.value((fieldOf(statement, "value") as SemanticValue), type);
+          this.set(String(fieldOf(statement, "name")));
           return;
         }
-        if (statement.op === "**=") {
+        if (String(fieldOf(statement, "op")) === "**=") {
           // The power is the host's own, and it takes two doubles and answers
           // one: the operands are converted to doubles before the call and the
           // answer is converted back to the slot's own type after it. A slot of
           // a whole number is otherwise handed to the call at its own width,
           // and the engine refuses the module for it.
-          this.get(statement.name);
+          this.get(String(fieldOf(statement, "name")));
           this.convert(type, F64_TYPE);
-          this.value(statement.value, type);
+          this.value((fieldOf(statement, "value") as SemanticValue), type);
           this.convert(type, F64_TYPE);
           this.op(0x10);
           this.code.varuint(0);
           this.convert(F64_TYPE, type);
-          this.set(statement.name);
+          this.set(String(fieldOf(statement, "name")));
           return;
         }
-        this.get(statement.name);
-        this.value(statement.value, type);
-        this.op(compoundCode(held, type, statement.op));
-        this.set(statement.name);
+        this.get(String(fieldOf(statement, "name")));
+        this.value((fieldOf(statement, "value") as SemanticValue), type);
+        this.op(compoundCode(held, type, String(fieldOf(statement, "op"))));
+        this.set(String(fieldOf(statement, "name")));
         return;
       }
       case "step": {
@@ -2898,14 +2914,14 @@ class Body {
         // `tee` pushes the new value again, and in a body that falls through
         // to the turn of the loop — a do-while, or the last statement of a
         // block — that value is a module the engine refuses.
-        const held = fieldOf(facts(fieldOf(this.resolve(statement.name),"type") as SemanticType),"held");
-        this.get(statement.name);
+        const held = fieldOf(facts(fieldOf(this.resolve(String(fieldOf(statement, "name"))),"type") as SemanticType),"held");
+        this.get(String(fieldOf(statement, "name")));
         if (held === I64) this.i64(1n);
         else if (held === F64) this.float(1, true);
         else if (held === F32) this.float(1, false);
         else this.i32(1);
-        this.op(statement.op === "++" ? (fieldOf(BINARY[String(held)],"add") as number) : (fieldOf(BINARY[String(held)],"sub") as number));
-        this.set(statement.name);
+        this.op(String(fieldOf(statement, "op")) === "++" ? (fieldOf(BINARY[String(held)],"add") as number) : (fieldOf(BINARY[String(held)],"sub") as number));
+        this.set(String(fieldOf(statement, "name")));
         return;
       }
       case "setElement": {
@@ -2913,12 +2929,12 @@ class Body {
         // the type out of that, and it is the element the address is counted in
         // and the value written at — a name's own type is a reference, and a
         // reference has no width.
-        const buffer = this.resolve(statement.buffer);
+        const buffer = this.resolve(String(fieldOf(statement, "buffer")));
         const element = elementTypeOf(buffer.type);
         if (element === null) {
-          unreachable(`write an element of "${statement.buffer}"`, this.name, this.candidate);
+          unreachable(`write an element of "${String(fieldOf(statement, "buffer"))}"`, this.name, this.candidate);
         }
-        this.address({ k: "local", type: buffer.type, name: statement.buffer }, statement.index, element);
+        this.address({ k: "local", type: buffer.type, name: String(fieldOf(statement, "buffer")) }, (fieldOf(statement, "index") as SemanticValue), element);
         // A compound operator takes the old element and the new value, while
         // the store that follows takes the address first and the value on top
         // of it. Pushing the address and then the new value and emitting the
@@ -2929,7 +2945,7 @@ class Body {
         // are read back in the order the store takes them. The load and the
         // store are at the width the element is written at, which is the width
         // the operator works in.
-        if (statement.op !== "=") {
+        if (String(fieldOf(statement, "op")) !== "=") {
           const held = fieldOf(facts(element),"held");
           const address = this.borrow(I32);
           this.keep(address);
@@ -2938,19 +2954,19 @@ class Body {
           this.op(old.code);
           this.code.varuint(0);
           this.code.varuint(0);
-          if (statement.op === "**=") {
+          if (String(fieldOf(statement, "op")) === "**=") {
             // The power is the host's own, and it takes two doubles: the old
             // element and the new value are converted to doubles before the
             // call and the answer is converted back to the element's own width.
             this.convert(element, F64_TYPE);
-            this.value(statement.value, element);
+            this.value((fieldOf(statement, "value") as SemanticValue), element);
             this.convert(element, F64_TYPE);
             this.op(0x10);
             this.code.varuint(0);
             this.convert(F64_TYPE, element);
           } else {
-            this.value(statement.value, element);
-            this.op(compoundCode(held, element, statement.op));
+            this.value((fieldOf(statement, "value") as SemanticValue), element);
+            this.op(compoundCode(held, element, String(fieldOf(statement, "op"))));
           }
           const sum = this.borrow(held);
           this.keep(sum);
@@ -2959,7 +2975,7 @@ class Body {
           this.release(held, sum);
           this.release(I32, address);
         } else {
-          this.value(statement.value, element);
+          this.value((fieldOf(statement, "value") as SemanticValue), element);
         }
         const store = fieldOf(facts(element),"store");
         this.op(fieldOf(store,"code"));
@@ -2968,21 +2984,23 @@ class Body {
         return;
       }
       case "storeField": {
-        const layout = this.fn.objects[statement.layout];
-        const field = layout?.fields.find((entry) => entry.name === statement.field);
+        const layouts = fieldOf(this.fn, "objects") as Record<string, ObjectLayout>;
+        const layout = layouts[String(fieldOf(statement, "layout"))];
+        const fields = layout === undefined ? [] : (fieldOf(layout, "fields") as readonly { name: string; type: string; offset: number }[]);
+        const field = fields.find((entry) => String(fieldOf(entry, "name")) === String(fieldOf(statement, "field")));
         if (field === undefined) {
-          unreachable(`write the field "${statement.field}" of the layout "${statement.layout}"`, this.name, this.candidate);
+          unreachable(`write the field "${String(fieldOf(statement, "field"))}" of the layout "${String(fieldOf(statement, "layout"))}"`, this.name, this.candidate);
         }
         // The address is the only thing narrowed to the 32 bits the format
         // indexes memory with; the value goes down at the width of its own
         // type, which is the width the store pops. Wrapping the value as well
         // handed `i64.store` and `f64.store` an `i32`.
-        this.value(statement.object, ADDRESS);
-        this.value(statement.value, fieldOf(statement.value,"type") as SemanticType);
-        const store = fieldOf(facts(fieldOf(statement.value,"type") as SemanticType),"store");
+        this.value((fieldOf(statement, "object") as SemanticValue), ADDRESS);
+        this.value((fieldOf(statement, "value") as SemanticValue), fieldOf((fieldOf(statement, "value") as SemanticValue),"type") as SemanticType);
+        const store = fieldOf(facts(fieldOf((fieldOf(statement, "value") as SemanticValue),"type") as SemanticType),"store");
         this.op(fieldOf(store,"code"));
         this.code.varuint(fieldOf(store,"align"));
-        this.code.varuint(field.offset);
+        this.code.varuint(Number(fieldOf(field,"offset")));
         return;
       }
       case "if": {
@@ -2993,23 +3011,24 @@ class Body {
         // instruction left for one to be the depth of: the arm is emitted as
         // the block of its own that an `if` arm is, and a jump out of it is
         // the same depth it was before the arm existed.
-        const known = this.known(statement.condition);
+        const known = this.known((fieldOf(statement, "condition") as SemanticValue));
         if (known !== null) {
-          const taken = known ? statement.then : statement.otherwise;
+          const taken = known ? (fieldOf(statement, "then") as SemanticBlock | null) : (fieldOf(statement, "otherwise") as SemanticBlock | null);
           if (taken !== null) this.block(taken, null);
           return;
         }
         // An `if` opens a label the format counts when a branch reaches for one,
         // so it is a frame like a loop's — a jump out of an arm is a depth from
         // here, and a depth that forgets the arm is a jump to the wrong place.
-        this.condition(statement.condition);
+        this.condition((fieldOf(statement, "condition") as SemanticValue));
         this.op(0x04);
         this.code.byte(0x40);
         this.push(null);
-        this.block(statement.then, null);
-        if (statement.otherwise !== null) {
+        this.block((fieldOf(statement, "then") as SemanticBlock), null);
+        const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+        if (otherwise !== null) {
           this.op(0x05);
-          this.block(statement.otherwise, null);
+          this.block(otherwise, null);
         }
         this.pop();
         this.op(0x0b);
@@ -3024,22 +3043,24 @@ class Body {
         // no jump can name and every branch out of it is a depth deeper than
         // it has to be. Emitting nothing takes the nesting off every scoped
         // block in the function.
-        this.block(statement.body, null);
+        this.block((fieldOf(statement, "body") as SemanticBlock), null);
         return;
       case "loop":
-        this.loop(statement.loop);
+        this.loop((fieldOf(statement, "loop") as SemanticLoop));
         return;
-      case "call":
+      case "call": {
         // A call written for its effect is the same instruction as a call read
         // for its value, so it takes the same arguments off the stack: a maths
         // builtin is an instruction over its argument, and emitted without one
         // it is an instruction that pops a value nobody pushed.
-        if (builtinFor(statement.call.callee) === null && this.module.function(statement.call.callee) === null) {
-          unreachable(`call ${statement.call.callee}`, this.name, this.candidate);
+        const call = fieldOf(statement, "call") as SemanticCall;
+        const calleeName = String(fieldOf(call, "callee"));
+        if (builtinFor(calleeName) === null && this.module.function(calleeName) === null) {
+          unreachable(`call ${calleeName}`, this.name, this.candidate);
         }
         // The dynamic values and the dynamic arrays are the runtime's own, and
         // the runtime is the host.
-        if (this.dynamicCall(statement.call) !== null) {
+        if (this.dynamicCall(call) !== null) {
           // Nothing reads the answer, so it is dropped rather than left for
           // the statement after it to take as one of its own operands.
           this.op(0x1a);
@@ -3047,33 +3068,37 @@ class Body {
         }
         // A call of another function of the program is a call of the index that
         // function has in this module.
-        const callee = this.module.function(statement.call.callee);
+        const callee = this.module.function(calleeName);
         if (callee !== null) {
-          this.programCall(statement.call, callee, null);
+          this.programCall(call, callee, null);
           // Nothing reads the answer, so it is dropped rather than left for the
           // statement after it to take as one of its own operands.
           if (callee.result !== null) this.op(0x1a);
           return;
         }
-        for (const [position, argument] of statement.call.args.entries()) {
-          this.value(argument, statement.call.argTypes[position] ?? fieldOf(argument,"type") as SemanticType);
+        const args = fieldOf(call, "args") as readonly SemanticValue[];
+        const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+        for (let position = 0; position < args.length; position += 1) {
+          const argument = args[position];
+          this.value(argument, argTypes[position] ?? fieldOf(argument,"type") as SemanticType);
         }
-        this.builtin(statement.call.callee);
+        this.builtin(calleeName);
         // Nothing reads the answer, so it is dropped rather than left for the
         // statement after this one to take as one of its own operands.
         this.op(0x1a);
         return;
+      }
       case "printText":
-        this.printText(statement.value);
+        this.printText((fieldOf(statement, "value") as SemanticValue));
         return;
       case "printNumber":
-        this.printNumber(statement.value, statement.bigint);
+        this.printNumber((fieldOf(statement, "value") as SemanticValue), (fieldOf(statement, "bigint") as boolean));
         return;
       case "printNewline":
         this.callService("blaze_rt_print_newline");
         return;
       case "retain":
-        this.retainValue(statement.value);
+        this.retainValue((fieldOf(statement, "value") as SemanticValue));
         return;
       case "raise": {
         // A raise never comes back: the host throws where the C runtime does
@@ -3082,7 +3107,7 @@ class Body {
         // the lowering says it itself: the instruction after the call is an
         // `unreachable`, the same one the IR's own `unreachable` terminator
         // emits, which traps if control ever reaches it.
-        this.text(statement.message);
+        this.text((fieldOf(statement, "message") as SemanticValue));
         this.callService("blaze_rt_raise");
         this.op(0x00);
         return;
@@ -3091,8 +3116,8 @@ class Body {
         // Every element of an array written as one value, as `a.fill(x)` is.
         // The index is a name of the compiler's own, and the count is the
         // length of the buffer, which is the word the offset sits one before.
-        const buffer = this.resolve(statement.buffer);
-        const element = statement.type;
+        const buffer = this.resolve(String(fieldOf(statement, "buffer")));
+        const element = (fieldOf(statement, "type") as SemanticType);
         const index = this.borrow(I32);
         const count = this.borrow(I32);
         this.localAt(buffer.index);
@@ -3128,7 +3153,7 @@ class Body {
           this.op(0x74); // `i32.shl`
         }
         this.op(fieldOf(BINARY[String(I32)],"add") as number);
-        this.value(statement.value, element);
+        this.value((fieldOf(statement, "value") as SemanticValue), element);
         const store = fieldOf(facts(element),"store");
         this.op(fieldOf(store,"code"));
         this.code.varuint(fieldOf(store,"align"));
@@ -3173,7 +3198,7 @@ class Body {
     // The body block is entered again below to emit its statements, and the
     // second entry finds these names already declared rather than a second set
     // of locals for them.
-    this.open(loop.body);
+    this.open((fieldOf(loop, "body") as SemanticBlock));
     // A counted loop's bound and its step are read once, before the loop: the
     // head of the turn needs both of them on every pass, and a value tree the
     // source wrote inside the header is the same number on every one of them.
@@ -3191,43 +3216,43 @@ class Body {
      * and the read is the same size either way.
      */
     let stepConstant: { text: string; type: SemanticType } | null = null;
-    if (loop.kind === "counted") {
-      const held = fieldOf(facts(loop.type),"held");
+    if (String(fieldOf(loop, "kind")) === "counted") {
+      const held = fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held");
       // The bound, the step and the index it starts at are read before the index
       // is declared, because after it the name resolves to the loop's own
       // declaration: a loop counting from `for (let limit = limit; ...)` reads
       // the `limit` around it, and a local declared and not yet written is a
       // zero. The C backend reads them in this order for the same reason.
       bound = this.borrow(held);
-      this.value(loop.to, loop.type);
+      this.value((fieldOf(loop, "to") as SemanticValue), (fieldOf(loop, "type") as SemanticType));
       this.keep(bound);
-      stepConstant = this.optimize ? countedStepOf(loop) : null;
+      stepConstant = this.optimize ? countedStepOf(loop as Extract<SemanticLoop, { kind: "counted" }>) : null;
       step = stepConstant === null ? this.borrow(held) : -1;
       if (stepConstant === null) {
-        this.countedStep(loop);
+        this.countedStep(loop as Extract<SemanticLoop, { kind: "counted" }>);
         this.keep(step);
       }
-      const startConstant = this.optimize ? constantOf(loop.from) : null;
+      const startConstant = this.optimize ? constantOf((fieldOf(loop, "from") as SemanticValue)) : null;
       const start = startConstant === null ? this.borrow(held) : -1;
       if (startConstant === null) {
-        this.value(loop.from, loop.type);
+        this.value((fieldOf(loop, "from") as SemanticValue), (fieldOf(loop, "type") as SemanticType));
         this.keep(start);
       }
-      this.holdLocal(loop.variable, loop.type);
+      this.holdLocal(String(fieldOf(loop, "variable")), (fieldOf(loop, "type") as SemanticType));
       // A counted loop moves its index at the head of the turn rather than at
       // the foot, because a `continue` branches to the head: a step at the foot
       // is a step a `continue` skips, and a loop whose index never moves is a
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
       if (startConstant === null) this.read(start);
-      else this.constant(startConstant.text, startConstant.type, loop.type);
+      else this.constant(startConstant.text, startConstant.type, (fieldOf(loop, "type") as SemanticType));
       if (stepConstant === null) this.read(step);
-      else this.constant(stepConstant.text, stepConstant.type, loop.type);
+      else this.constant(stepConstant.text, stepConstant.type, (fieldOf(loop, "type") as SemanticType));
       this.op(fieldOf(BINARY[String(held)],"sub") as number);
-      this.set(loop.variable);
+      this.set(String(fieldOf(loop, "variable")));
       if (start !== -1) this.release(held, start);
     }
-    if (loop.kind === "each") {
+    if (String(fieldOf(loop, "kind")) === "each") {
       // A for-of walks a buffer by a cursor: the index of the element the turn
       // is on, and the count the walk stops at. Both are read out of the same
       // memory the addresses are, so both are 32 bit numbers, and the head of
@@ -3243,17 +3268,17 @@ class Body {
       // against is read out of the same memory the addresses are, so the two
       // are 32 bit numbers either way. A use that reads it wider is converted
       // where it is read, which widens the very same count.
-      this.holdLocal(loop.index, ADDRESS);
-      this.holdLocal(loop.element, loop.elementType);
+      this.holdLocal(String(fieldOf(loop, "index")), ADDRESS);
+      this.holdLocal(String(fieldOf(loop, "element")), (fieldOf(loop, "elementType") as SemanticType));
       this.i32(-1);
-      this.set(loop.index);
+      this.set(String(fieldOf(loop, "index")));
       end = this.borrow(I32);
-      this.value(loop.length, ADDRESS);
+      this.value((fieldOf(loop, "length") as SemanticValue), ADDRESS);
       this.keep(end);
     }
     this.op(0x02);
     this.code.byte(0x40);
-    this.push(loop.exit);
+    this.push(String(fieldOf(loop, "exit")));
     this.op(0x03);
     this.code.byte(0x40);
     // A do-while's `continue` branches to the head of the loop, and for it the
@@ -3263,55 +3288,55 @@ class Body {
     // to a block runs to its end — which is where the test is. The loop the
     // back edge returns to is a frame of its own, since the header names the
     // block the continue reaches.
-    this.push(loop.kind === "doWhile" ? null : loop.header);
-    if (loop.kind === "while") {
+    this.push(String(fieldOf(loop, "kind")) === "doWhile" ? null : String(fieldOf(loop, "header")));
+    if (String(fieldOf(loop, "kind")) === "while") {
       // The exit is tested against the falsity of the condition, and `br_if`
       // branches on a nonzero value, so what it takes is the falsity rather
       // than the truth turned over again. Over a 64 bit whole number that is
       // `i64.eqz` on its own, where the truth followed by an `i32.eqz` spent
       // two instructions to ask the same question.
-      this.negation(loop.condition);
+      this.negation((fieldOf(loop, "condition") as SemanticValue));
       this.exitTest();
-      this.block(loop.body, null);
+      this.block((fieldOf(loop, "body") as SemanticBlock), null);
       this.backToHeader();
-    } else if (loop.kind === "doWhile") {
+    } else if (String(fieldOf(loop, "kind")) === "doWhile") {
       this.op(0x02);
       this.code.byte(0x40);
-      this.push(loop.header);
-      this.block(loop.body, null);
+      this.push(String(fieldOf(loop, "header")));
+      this.block((fieldOf(loop, "body") as SemanticBlock), null);
       this.pop();
       this.op(0x0b);
-      this.condition(loop.condition);
+      this.condition((fieldOf(loop, "condition") as SemanticValue));
       this.op(0x0d);
       this.code.varuint(0);
-    } else if (loop.kind === "counted") {
-      const counter = this.get(loop.variable);
+    } else if (String(fieldOf(loop, "kind")) === "counted") {
+      const counter = this.get(String(fieldOf(loop, "variable")));
       if (stepConstant === null) this.read(step);
-      else this.constant(stepConstant.text, stepConstant.type, loop.type);
+      else this.constant(stepConstant.text, stepConstant.type, (fieldOf(loop, "type") as SemanticType));
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
-      this.op(fieldOf(BINARY[String(fieldOf(facts(loop.type),"held"))],"add") as number);
+      this.op(fieldOf(BINARY[String(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"))],"add") as number);
       // The value the counter moves to is the value the test below reads, so
       // it is written down and left on the stack: a `local.tee` is one
       // instruction where a write and a read are two.
       if (this.optimize) this.tee(counter.index);
       else {
-        this.set(loop.variable);
-        this.get(loop.variable);
+        this.set(String(fieldOf(loop, "variable")));
+        this.get(String(fieldOf(loop, "variable")));
       }
       this.read(bound);
-      const stop = loop.down ? (loop.inclusive ? "ge" : "gt") : loop.inclusive ? "le" : "lt";
+      const stop = (fieldOf(loop, "down") as boolean) ? ((fieldOf(loop, "inclusive") as boolean) ? "ge" : "gt") : (fieldOf(loop, "inclusive") as boolean) ? "le" : "lt";
       // The counter is ordered the way it was declared, which is what the
       // `each` walk below does: a loop counting up to a `u32` bound past the
       // signed range ends before it begins under the signed comparison, because
       // the same bits are a negative number.
-      const unsignedStop = fieldOf(facts(loop.type),"unsigned") ? UNSIGNED_BINARY[String(fieldOf(facts(loop.type),"held"))][stop] : undefined;
-      this.op((unsignedStop ?? BINARY[String(fieldOf(facts(loop.type),"held"))][stop]) as number);
+      const unsignedStop = fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"unsigned") ? UNSIGNED_BINARY[String(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"))][stop] : undefined;
+      this.op((unsignedStop ?? BINARY[String(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"))][stop]) as number);
       // The exit is tested against the falsity of the comparison, for the
       // reason the `while` above gives.
       this.op(0x45);
       this.exitTest();
-      this.block(loop.body, null);
+      this.block((fieldOf(loop, "body") as SemanticBlock), null);
       this.backToHeader();
     } else {
       // A for-of walks a buffer by a cursor: the index moves on by one, and
@@ -3319,7 +3344,7 @@ class Body {
       // before the loop. It counts elements rather than moving the buffer,
       // because the buffer is a name the body reads elsewhere and the walk
       // does not change what it holds.
-      const index = this.get(loop.index);
+      const index = this.get(String(fieldOf(loop, "index")));
       this.i32(1);
       this.op(fieldOf(BINARY[String(I32)],"add") as number);
       this.keepAndRead(index.index);
@@ -3330,17 +3355,17 @@ class Body {
       this.op(fieldOf(UNSIGNED_BINARY[String(I32)],"ge") as number);
       this.exitTest();
       this.address(
-        { k: "local", type: this.resolve(loop.of).type, name: loop.of },
-        { k: "local", type: ADDRESS, name: loop.index },
-        loop.elementType,
+        { k: "local", type: this.resolve(String(fieldOf(loop, "of"))).type, name: String(fieldOf(loop, "of")) },
+        { k: "local", type: ADDRESS, name: String(fieldOf(loop, "index")) },
+        (fieldOf(loop, "elementType") as SemanticType),
       );
-      const load = fieldOf(facts(loop.elementType),"load");
+      const load = fieldOf(facts((fieldOf(loop, "elementType") as SemanticType)),"load");
       this.op(fieldOf(load,"code"));
       this.code.varuint(fieldOf(load,"align"));
       this.code.varuint(0);
-      this.convert(loop.elementType, loop.elementType);
-      this.set(loop.element);
-      this.block(loop.body, null);
+      this.convert((fieldOf(loop, "elementType") as SemanticType), (fieldOf(loop, "elementType") as SemanticType));
+      this.set(String(fieldOf(loop, "element")));
+      this.block((fieldOf(loop, "body") as SemanticBlock), null);
       this.backToHeader();
     }
     this.op(0x0b);
@@ -3351,11 +3376,11 @@ class Body {
     // taken, which is the order a stack discipline hands the same local out
     // again: a loop inside this one borrows the same carriers and is finished
     // with them by now.
-    if (loop.kind === "counted") {
-      if (step !== -1) this.release(fieldOf(facts(loop.type),"held"), step);
-      this.release(fieldOf(facts(loop.type),"held"), bound);
+    if (String(fieldOf(loop, "kind")) === "counted") {
+      if (step !== -1) this.release(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"), step);
+      this.release(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"), bound);
     }
-    if (loop.kind === "each") this.release(I32, end);
+    if (String(fieldOf(loop, "kind")) === "each") this.release(I32, end);
     this.close();
   }
 
@@ -3366,11 +3391,13 @@ class Body {
    * for ever and the loop never ends.
    */
   private countedStep(loop: Extract<SemanticLoop, { kind: "counted" }>): void {
-    if (loop.step !== null) {
-      this.value(loop.step, loop.type);
+    const step = fieldOf(loop, "step") as SemanticValue | null;
+    const type = fieldOf(loop, "type") as SemanticType;
+    if (step !== null) {
+      this.value(step, type);
       return;
     }
-    this.value({ k: "const", type: loop.type, text: loop.down ? "-1" : "1" }, loop.type);
+    this.value({ k: "const", type, text: (fieldOf(loop, "down") as boolean) ? "-1" : "1" }, type);
   }
 
   /** Leaves the loop for its exit, which is the block the loop sits in. */
@@ -3489,8 +3516,9 @@ class Body {
    * the runtime's own.
    */
   private dynamicCall(call: SemanticCall): SemanticType | null {
-    const argument = (position: number): SemanticValue => call.args[position] as SemanticValue;
-    switch (call.callee) {
+    const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+    const argument = (position: number): SemanticValue => callArgs[position];
+    switch (String(fieldOf(call, "callee"))) {
       case "array.new":
       case "blaze_rt_dyn_array_new":
         // An empty dynamic array, which is the runtime's own and is carried in
@@ -3796,7 +3824,7 @@ class Body {
         // to the end, which the service reads as a stop it can never reach.
         this.textArgument(argument(0));
         this.value(argument(1), F64_TYPE);
-        if (call.args.length > 2) this.value(argument(2), F64_TYPE);
+        if (callArgs.length > 2) this.value(argument(2), F64_TYPE);
         else this.float(Number.MAX_SAFE_INTEGER, true);
         this.callService("blaze_rt_text_slice");
         return TEXT;
@@ -3913,7 +3941,7 @@ class Body {
    */
   localGroups(): number[] {
     const types: number[] = [];
-    for (let position = this.fn.params.length; position < this.declared.length; position += 1) {
+    for (let position = (fieldOf(this.fn, "params") as readonly unknown[]).length; position < this.declared.length; position += 1) {
       types.push(this.declared[position] as number);
     }
     const groups: number[] = [];
@@ -4007,8 +4035,9 @@ function constantOf(value: SemanticValue | null): { text: string; type: Semantic
  * less when it counts down, and that is a number like any other.
  */
 function countedStepOf(loop: Extract<SemanticLoop, { kind: "counted" }>): { text: string; type: SemanticType } | null {
-  if (loop.step !== null) return constantOf(loop.step);
-  return { text: loop.down ? "-1" : "1", type: loop.type };
+  const step = fieldOf(loop, "step") as SemanticValue | null;
+  if (step !== null) return constantOf(step);
+  return { text: (fieldOf(loop, "down") as boolean) ? "-1" : "1", type: fieldOf(loop, "type") as SemanticType };
 }
 
 /**
@@ -4021,27 +4050,33 @@ function countedStepOf(loop: Extract<SemanticLoop, { kind: "counted" }>): { text
  * it, so a body with such a jump needs the value after all.
  */
 function alwaysReturns(fn: SemanticFunction): boolean {
-  const entry = fn.entry;
-  if (entry.terminator.k !== "return" && entry.terminator.k !== "unreachable") return false;
-  return !blocksOf(entry).some(
-    (block) => block.terminator.k === "jump" && block.terminator.target === entry.id,
-  );
+  const entry = fieldOf(fn, "entry") as SemanticBlock;
+  const entryTerm = fieldOf(entry, "terminator");
+  const entryKind = String(fieldOf(entryTerm, "k"));
+  if (entryKind !== "return" && entryKind !== "unreachable") return false;
+  return !blocksOf(entry).some((block) => {
+    const term = fieldOf(block, "terminator");
+    return String(fieldOf(term, "k")) === "jump" && String(fieldOf(term, "target")) === String(fieldOf(entry, "id"));
+  });
 }
 
 /** Every block of a body, the one it starts with and the ones inside it. */
 function blocksOf(block: SemanticBlock): SemanticBlock[] {
   const blocks: SemanticBlock[] = [block];
-  for (const statement of block.statements) {
-    if (statement.k === "if") {
-      blocks.push(...blocksOf(statement.then));
-      if (statement.otherwise !== null) blocks.push(...blocksOf(statement.otherwise));
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    const kind = String(fieldOf(statement, "k"));
+    if (kind === "if") {
+      blocks.push(...blocksOf(fieldOf(statement, "then") as SemanticBlock));
+      const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+      if (otherwise !== null) blocks.push(...blocksOf(otherwise));
       continue;
     }
-    if (statement.k === "loop") {
-      blocks.push(...blocksOf(statement.loop.body));
+    if (kind === "loop") {
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      blocks.push(...blocksOf(fieldOf(loop, "body") as SemanticBlock));
       continue;
     }
-    if (statement.k === "block") blocks.push(...blocksOf(statement.body));
+    if (kind === "block") blocks.push(...blocksOf(fieldOf(statement, "body") as SemanticBlock));
   }
   return blocks;
 }
@@ -4152,7 +4187,7 @@ export function moduleBytes(
 ): Uint8Array {
   return programModuleBytes(
     { functions: [{ fn, contract }] },
-    { candidate, style, optimize: options.optimize ?? true },
+    { candidate, style, optimize: (fieldOf(options, "optimize") as boolean | undefined) ?? true },
   );
 }
 
@@ -4173,20 +4208,23 @@ export function moduleBytes(
  * scratch the first pass measured.
  */
 export function programModuleBytes(program: ProgramModule, options: ModuleOptions = {}): Uint8Array {
-  const optimize = options.optimize ?? true;
-  const style = options.style ?? 0;
-  const candidate = options.candidate;
+  const optimize = (fieldOf(options, "optimize") as boolean | undefined) ?? true;
+  const style = (fieldOf(options, "style") as number | undefined) ?? 0;
+  const candidate = fieldOf(options, "candidate") as string | undefined;
 
   /** The functions the module holds, with the entry among them. */
   const functions: { fn: SemanticFunction; name: string; export: string }[] = [];
-  for (const one of program.functions) {
-    const named = one.export ?? one.fn.symbol;
-    functions.push({ fn: one.fn, name: named, export: named });
+  for (const one of fieldOf(program, "functions") as readonly { fn: SemanticFunction; export?: string }[]) {
+    const fn = fieldOf(one, "fn") as SemanticFunction;
+    const exported = fieldOf(one, "export") as string | undefined;
+    const named = exported ?? String(fieldOf(fn, "symbol"));
+    functions.push({ fn, name: named, export: named });
   }
-  if (program.entry !== undefined) {
+  const entry = fieldOf(program, "entry") as SemanticBlock | undefined;
+  if (entry !== undefined) {
     // The entry is the body of the program, and a refusal in it names the body
     // rather than the symbol the module exports it by.
-    functions.push({ fn: entryFunction(program.entry), name: "the body of the program", export: ENTRY_EXPORT });
+    functions.push({ fn: entryFunction(entry), name: "the body of the program", export: ENTRY_EXPORT });
   }
   if (functions.length === 0) {
     throw new CompilerError("TargetError", "compile", "a WebAssembly module holds no function", "the module of a program holds every function of the program and the body it runs", "", candidate, "");
@@ -4195,7 +4233,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   // The first pass: what the module imports, and how much scratch each of its
   // functions needs for the whole numbers in flight.
   const probe = new Module();
-  for (const one of functions) probe.held.push(heldOf(one.fn, one.export));
+  for (const one of functions) probe.held.push(heldOf(fieldOf(one, "fn") as SemanticFunction, String(fieldOf(one, "export"))));
   const scratch: number[] = [];
   for (const one of functions) {
     scratch.push(lower(probe, one, 0, candidate, style, optimize).scratch);
@@ -4224,7 +4262,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   const module = new Module();
   module.base = base;
   module.offset = offset;
-  for (const one of functions) module.held.push(heldOf(one.fn, one.export));
+  for (const one of functions) module.held.push(heldOf(fieldOf(one, "fn") as SemanticFunction, String(fieldOf(one, "export"))));
   const codes: Bytes[] = [];
   for (const [index, one] of functions.entries()) {
     codes.push(lower(module, one, regions[index] as number, candidate, style, optimize).code);
@@ -4243,7 +4281,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   // The types are the module's own functions first, then the power, then the
   // services: the import section names the power's type and the services' types
   // by their index, and the function section names each function's type.
-  const functionTypes = functions.map((one) => signatureOf(one.fn));
+  const functionTypes = functions.map((one) => signatureOf(fieldOf(one, "fn") as SemanticFunction));
   out.section(1, (types) =>
     types.counted(1 + functionTypes.length + signatures.length, (one) => {
       for (const type of functionTypes) writeType(one, type);
@@ -4324,7 +4362,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   out.section(7, (exports) => {
     const body = new Bytes();
     for (const [index, one] of functions.entries()) {
-      body.name(one.export);
+      body.name(String(fieldOf(one, "export")));
       body.byte(0x00);
       // The functions of the module come after the imports: the power and the
       // services the module reached for.
@@ -4375,8 +4413,9 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
  * carrier of what it answers.
  */
 function signatureOf(fn: SemanticFunction): { parameters: number[]; result: number | undefined } {
-  const parameters = fn.params.map((param) => facts(slotType(param)).held);
-  const result = fn.returns.kind === "void" ? undefined : fieldOf(facts(fn.returns),"held");
+  const parameters = (fieldOf(fn, "params") as readonly any[]).map((param) => facts(slotType(param)).held);
+  const returns = fieldOf(fn, "returns") as SemanticType;
+  const result = String(fieldOf(returns, "kind")) === "void" ? undefined : fieldOf(facts(returns),"held");
   return { parameters, result };
 }
 
@@ -4394,11 +4433,12 @@ function writeType(
 
 /** What the module holds of one function, and what a call of it needs to know. */
 function heldOf(fn: SemanticFunction, named: string): HeldFunction {
+  const returns = fieldOf(fn, "returns") as SemanticType;
   return {
     fn,
     export: named,
-    params: fn.params.map((param) => slotType(param)),
-    result: fn.returns.kind === "void" ? null : fn.returns,
+    params: (fieldOf(fn, "params") as readonly any[]).map((param) => slotType(param)),
+    result: String(fieldOf(returns, "kind")) === "void" ? null : returns,
   };
 }
 
@@ -4443,10 +4483,11 @@ function lower(
   style: number,
   optimize: boolean,
 ): { code: Bytes; scratch: number } {
-  const fn = one.fn;
-  const body = new Body(module, fn, one.name, fn.returns, candidate, style, optimize, scratch);
+  const fn = fieldOf(one, "fn") as SemanticFunction;
+  const returns = fieldOf(fn, "returns") as SemanticType;
+  const body = new Body(module, fn, String(fieldOf(one, "name")), returns, candidate, style, optimize, scratch);
   const signature = signatureOf(fn);
-  body.block(fn.entry, null);
+  body.block(fieldOf(fn, "entry") as SemanticBlock, null);
   // The value a body that falls out of its own end leaves behind is written
   // before the body's bytes are taken, because `answer` appends to the buffer
   // the body is written into: an `answer` after they were read appends to a
@@ -4476,8 +4517,9 @@ function lower(
  * pooled, in that order.
  */
 function dataBase(module: Module): number {
-  const pooled = module.data.reduce((whole, bytes) => whole + bytes.length, 0);
-  return module.offset + pooled;
+  let pooled = 0;
+  for (const bytes of fieldOf(module, "data") as readonly Uint8Array[]) pooled += bytes.length;
+  return Number(fieldOf(module, "offset")) + pooled;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4598,14 +4640,16 @@ function readTypes(body: Uint8Array | undefined): string[] {
   const types: string[] = [];
   const count = readVaruint(body, 0, 32);
   let at = count.next;
-  for (let index = 0; index < count.value && at < body.length; index += 1) {
+  for (let index = 0; index < count.value; index += 1) {
+    if (at >= body.length) break;
     const form = body[at];
     at += 1;
     if (form !== 0x60) break;
     const parameters = readVaruint(body, at, 32);
     const names: string[] = [];
     let cursor = parameters.next;
-    for (let position = 0; position < parameters.value && cursor < body.length; position += 1) {
+    for (let position = 0; position < parameters.value; position += 1) {
+      if (cursor >= body.length) break;
       names.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
     }
@@ -4613,7 +4657,8 @@ function readTypes(body: Uint8Array | undefined): string[] {
     const results = readVaruint(body, at, 32);
     const answers: string[] = [];
     cursor = results.next;
-    for (let position = 0; position < results.value && cursor < body.length; position += 1) {
+    for (let position = 0; position < results.value; position += 1) {
+      if (cursor >= body.length) break;
       answers.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
     }
@@ -4629,7 +4674,8 @@ function readImports(body: Uint8Array | undefined): string[] {
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
   let at = count.next;
-  for (let index = 0; index < count.value && at < body.length; index += 1) {
+  for (let index = 0; index < count.value; index += 1) {
+    if (at >= body.length) break;
     const module = readVaruint(body, at, 32);
     const field = readVaruint(body, module.next + module.value, 32);
     const kind = body[field.next + field.value] ?? 0;
@@ -4660,7 +4706,8 @@ function readGlobals(body: Uint8Array | undefined): string[] {
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
   let at = count.next;
-  for (let index = 0; index < count.value && at < body.length; index += 1) {
+  for (let index = 0; index < count.value; index += 1) {
+    if (at >= body.length) break;
     const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
     const mutable = (body[at + 1] ?? 0) !== 0;
     at += 2;
@@ -4679,7 +4726,8 @@ function readExports(body: Uint8Array | undefined): string[] {
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
   let at = count.next;
-  for (let index = 0; index < count.value && at < body.length; index += 1) {
+  for (let index = 0; index < count.value; index += 1) {
+    if (at >= body.length) break;
     const name = readVaruint(body, at, 32);
     const kind = kinds[body[name.next + name.value] ?? 0] ?? "unknown";
     const target = readVaruint(body, name.next + name.value + 1, 32);
@@ -4700,7 +4748,8 @@ function readCode(body: Uint8Array): string[][] {
   const functions: string[][] = [];
   const count = readVaruint(body, 0, 32);
   let at = count.next;
-  for (let index = 0; index < count.value && at < body.length; index += 1) {
+  for (let index = 0; index < count.value; index += 1) {
+    if (at >= body.length) break;
     const size = readVaruint(body, at, 32);
     at = size.next;
     functions.push(readFunction(body.subarray(at, at + size.value)));
@@ -4715,7 +4764,8 @@ function readFunction(body: Uint8Array): string[] {
   const locals = readVaruint(body, 0, 32);
   let at = locals.next;
   let local = 0;
-  for (let index = 0; index < locals.value && at < body.length; index += 1) {
+  for (let index = 0; index < locals.value; index += 1) {
+    if (at >= body.length) break;
     const count = readVaruint(body, at, 32);
     at = count.next;
     const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
@@ -4782,7 +4832,8 @@ function readImmediate(body: Uint8Array, at: number, kind: string): { text: stri
       const count = readVaruint(body, at, 32);
       const targets: number[] = [];
       let cursor = count.next;
-      for (let index = 0; index < count.value && cursor < body.length; index += 1) {
+      for (let index = 0; index < count.value; index += 1) {
+        if (cursor >= body.length) break;
         const target = readVaruint(body, cursor, 32);
         targets.push(target.value);
         cursor = target.next;
