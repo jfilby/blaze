@@ -2379,10 +2379,23 @@ class FunctionBody {
     // spelled it with the one the source declared. The object is the same
     // object: the fields it holds are the fields it is laid out as.
     const shape = this.shapes.get(key);
-    const found: string[] = shape === undefined ? [] : this.knownLayouts(key, shape);
+    const candidates: string[] = shape === undefined ? [] : this.knownLayouts(key, shape);
+    const found = [...new Set(candidates)];
     if (found.length === 1) {
       this.layouts.set(key, found[0]);
       return found[0];
+    }
+    if (found.length > 1 && shape !== undefined) {
+      const shapeSignature = (name: string): string => {
+        const layout = this.objects[name];
+        if (layout === undefined) return "";
+        return JSON.stringify(shape.fields.map((field) => {
+          const declared = layout.fields.find((entry) => entry.name === field.name);
+          return declared === undefined ? [field.name] : [field.name, declared.offset, declared.type];
+        }));
+      };
+      const first = shapeSignature(found[0]);
+      if (found.every((name) => shapeSignature(name) === first)) return found[0];
     }
     if (found.length > 1) {
       throw this.error(

@@ -1574,6 +1574,17 @@ export function resolveObjects(
   }
 
   const written: Record<string, ObjectLayout> = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
+  // Every literal a body registered is one object the body writes: a shape
+  // that no round kept still needs the layout its literal was built at.
+  const reads = programReads(bodies);
+  for (const body of bodies.values()) {
+    for (const [key, shape] of body.registered) {
+      if (names.has(key)) continue;
+      const name = `Object${names.size + 1}`;
+      names.set(key, name);
+      written[name] = layOut(name, shape, names, reads);
+    }
+  }
   for (const [alias, layout] of aliases) {
     const target = written[layout];
     if (target !== undefined) written[alias] = { ...target, name: alias };
@@ -1590,6 +1601,14 @@ export function resolveObjects(
     definition.calls = body.called.map((callee) => ({ callee, strategy: "call" }));
   }
 
+  // A shape that was folded into another is still the key a literal body
+  // writes under: the IR asks for the name of the shape it saw, and the layout
+  // it ended up in is the root's. Name every folded key as its root.
+  for (const [key, root] of remapped) {
+    if (key === root) continue;
+    const name = names.get(root);
+    if (name !== undefined) names.set(key, name);
+  }
   return { names, layouts: written, keys: literalKeys };
 }
 
