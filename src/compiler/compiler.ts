@@ -37,7 +37,7 @@
  */
 
 import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolve } from "./core/platform.ts";
-import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump } from "./ai/backend.ts";
+import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
 import { INLINE_MODULE, runContractPhase, type ContractPhase } from "./semantics/program.ts";
@@ -55,6 +55,7 @@ import type {
 import { slotType, statementBlocksOf, statementValues, walkValues } from "./core/semantic-ir.ts";
 import { resolveObjects } from "./semantics/objects.ts";
 import { verifyProgram, type ProgramVerification } from "./toolchain/verify-program.ts";
+import type { TestVector } from "./toolchain/verifier.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
 import { buildProgramModule, type ModuleFunction } from "./toolchain/ir-wasm.ts";
 import { buildObject as buildMachineObject, machineRefusal, type MachineResult } from "./toolchain/ir-machine.ts";
@@ -957,6 +958,11 @@ interface UnitGeneration {
   result: CodegenResult;
 }
 
+/** A unit and what it generated, with the fields they are held by. */
+function unitGenerationOf(unit: CompilationUnit, result: CodegenResult): UnitGeneration {
+  return { unit, result };
+}
+
 /**
  * The functions a build compiles. A program compiles every function the program
  * exports, because every one of them is something the program may call; a
@@ -1621,6 +1627,40 @@ async function buildProgramHostFor(
   return await buildProgramHost({ mode, program, workDirectory, objectPaths, outputPath });
 }
 
+/** The generation record of one function, with the values it holds. */
+function generationFunctionOf(
+  file: string,
+  selected: string,
+  benchmarkVector: TestVector | null,
+  outcomes: CandidateOutcome[],
+): Record<string, unknown> {
+  return { file, selected, benchmarkVector, outcomes };
+}
+
+/** An incremental entry, with the values the build proved for it. */
+function incrementalEntryOf(
+  reviewKey: string,
+  objectKey: string,
+  file: string,
+  selected: string,
+  candidates: Candidate[],
+  outcomes: CandidateOutcome[],
+  benchmarkVector: TestVector | null,
+): IncrementalEntry {
+  return { reviewKey, objectKey, file, selected, candidates, outcomes, benchmarkVector };
+}
+
+/** The answer a retry notice describes, at the type the printer reads. */
+function answerDumpOf(
+  stage: AnswerDump["stage"],
+  candidate: number,
+  attempt: number,
+  retry: number,
+  answer: string,
+): AnswerDump {
+  return { stage, candidate, attempt, retry, answer };
+}
+
 /** The verification of a program, called with the values the build holds. */
 function verifyProgramFor(
   language: string,
@@ -2145,32 +2185,37 @@ export async function runBuild(
         id,
       });
       const sequenceStart = written.get(key) ?? 0;
+      const reuseFields = reuse as unknown as Record<string, unknown>;
+      const reuseLevel = reuseFields["level"] === null ? null : String(reuseFields["level"]);
+      const reuseEntry = reuseFields["entry"] as Record<string, unknown> | undefined;
+      const reuseMissing = reuseFields["missing"] as string[];
 
-      if (mismatch === undefined && reuse.level === "object" && reuse.entry !== undefined) {
-        const result = reusedResult(reuse.entry);
+      if (mismatch === undefined && reuseLevel === "object" && reuseEntry !== undefined) {
+        const result = reusedResult(reuseEntry as unknown as IncrementalEntry);
+        const resultFields = result as unknown as Record<string, unknown>;
         // A repair round generates after the stored candidates, so it never
         // writes over the object this build is about to link.
-        written.set(functionName, sequenceStart + result.candidates.length);
-        reusedByFunction.set(key, reuse.entry.selected);
-        generatedByFunction.set(artifactKey, { unit, result });
+        written.set(functionName, sequenceStart + (resultFields["candidates"] as Candidate[]).length);
+        reusedByFunction.set(key, String(reuseEntry["selected"]));
+        generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, result as CodegenResult));
         return;
       }
 
-      if (reuse.level === "assembly" && reuse.missing.length > 0) {
+      if (reuseLevel === "assembly" && reuseMissing.length > 0) {
         reporter(
           "reuse",
           "info",
-          `${functionName} is rebuilt from its stored implementation: ${reuse.missing.map((file) => basename(file)).join(", ")} ${reuse.missing.length === 1 ? "is" : "are"} gone`,
+          `${functionName} is rebuilt from its stored implementation: ${reuseMissing.map((file) => basename(file)).join(", ")} ${reuseMissing.length === 1 ? "is" : "are"} gone`,
         );
       }
 
       const result = await reviewCandidates({
         mode: buildMode,
-        contract: unit.contract,
-        unitFile: unit.file,
-        parsed: unit.parsed,
+        contract: storedContractOf(unit),
+        unitFile: String((unit as unknown as Record<string, unknown>)["file"]),
+        parsed: storedParsedOf(unit),
         program,
-        base: semantics[unit.contract.function.symbol] as SemanticFunction,
+        base: semantics[String(contractFunction(storedContractOf(unit) as unknown as Record<string, unknown>)["symbol"])] as SemanticFunction,
         functions: semantics,
         // A program is one module, so the functions a candidate calls are in
         // the module beside it. A build that compiles one function on its own
@@ -2190,14 +2235,23 @@ export async function runBuild(
                 }
                 return createBackend(requireModel(), {
                   timeoutMs: requestTimeoutMs(input),
-                  retries: generation.maxRetries,
-                  onRetry: ({ stage, candidate, attempt, retry, retries, reason, stop, answer }) => {
+                  retries: (generation as unknown as Record<string, unknown>)["maxRetries"] as number,
+                  onRetry: (notice) => {
+                    const noticeFields = notice as unknown as Record<string, unknown>;
+                    const stage = String(noticeFields["stage"]);
+                    const candidate = String(noticeFields["candidate"]);
+                    const attempt = Number(noticeFields["attempt"]);
+                    const retry = Number(noticeFields["retry"]);
+                    const retries = Number(noticeFields["retries"]);
+                    const reason = String(noticeFields["reason"]);
+                    const stop = noticeFields["stop"];
+                    const answer = noticeFields["answer"];
                     // An answer that could not be read is also told how its request
                     // ended and what the request cost: one cut short by the output
                     // limit, one a content filter took and one the model finished on
                     // its own are not the same failure to wait out, and a gateway
                     // that reports the tokens is the only place they are counted.
-                    const finish = stop === undefined ? "" : `, ${describeProviderStop(stop)}`;
+                    const finish = stop === undefined ? "" : `, ${describeProviderStop(stop as ProviderStop)}`;
                     reporter(
                       "review",
                       "info",
@@ -2208,7 +2262,7 @@ export async function runBuild(
                     // refusal is about. It is printed beside the prompt, under the
                     // same `--debug`.
                     if ((fields["debug"] as boolean | undefined) === true && answer !== undefined) {
-                      printAnswer({ stage, candidate, attempt, retry, answer });
+                      printAnswer(answerDumpOf(stage as AnswerDump["stage"], Number(candidate), attempt, retry, String(answer)));
                     }
                   },
                   ...((fields["debug"] as boolean | undefined) === true ? { onPrompt: printPrompt } : {}),
@@ -2227,7 +2281,7 @@ export async function runBuild(
         // is not what it starts from. Otherwise the stored implementation is
         // tried first, and a model is asked only when it does not satisfy the
         // contract.
-        existing: mismatch === undefined && reuse.level !== null ? (reuse.entry?.candidates ?? []) : [],
+        existing: mismatch === undefined && reuseLevel !== null ? ((reuseEntry === undefined ? undefined : reuseEntry["candidates"]) as Candidate[] ?? []) : [],
         sequenceStart,
         ...(mismatch === undefined || previous === undefined
           ? {}
@@ -2235,7 +2289,13 @@ export async function runBuild(
         onNote: (note) => {
           reporter("review", "info", `${functionName}: ${note}`);
         },
-        onReview: ({ stage, candidate, candidates, attempt, attempts }) => {
+        onReview: (notice) => {
+          const noticeFields = notice as unknown as Record<string, unknown>;
+          const stage = String(noticeFields["stage"]);
+          const candidate = String(noticeFields["candidate"]);
+          const candidates = String(noticeFields["candidates"]);
+          const attempt = String(noticeFields["attempt"]);
+          const attempts = String(noticeFields["attempts"]);
           reporter(
             "review",
             "info",
@@ -2243,24 +2303,27 @@ export async function runBuild(
           );
         },
       });
-      written.set(functionName, sequenceStart + result.candidates.length);
+      written.set(functionName, sequenceStart + ((result as unknown as Record<string, unknown>)["candidates"] as Candidate[]).length);
       reusedByFunction.delete(key);
-      generatedByFunction.set(artifactKey, { unit, result });
+      generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, result as CodegenResult));
 
       // A function is proved by its own vectors, or by the program it is
       // part of, so an entry is only written once something has said so.
-      const selected = result.selected;
-      if (selected === null) return;
-      const entry: IncrementalEntry = {
-        reviewKey: keys.review,
-        objectKey: keys.object,
-        file: unit.file,
-        selected,
-        candidates: result.candidates,
-        outcomes: result.outcomes,
-        benchmarkVector: result.benchmarkVector,
-      };
-      const verified = result.outcomes.find((outcome) => outcome.candidate === selected)?.verification !== undefined;
+      const resultFields = result as unknown as Record<string, unknown>;
+      const selected = resultFields["selected"];
+      if (selected === null || selected === undefined) return;
+      const resultOutcomes = resultFields["outcomes"] as Record<string, unknown>[];
+      const entry = incrementalEntryOf(
+        String((keys as unknown as Record<string, unknown>)["review"]),
+        String((keys as unknown as Record<string, unknown>)["object"]),
+        String((unit as unknown as Record<string, unknown>)["file"]),
+        String(selected),
+        resultFields["candidates"] as Candidate[],
+        resultOutcomes as unknown as CandidateOutcome[],
+        resultFields["benchmarkVector"] as TestVector | null,
+      );
+      const selectedOutcome = resultOutcomes.find((outcome) => String(outcome["candidate"]) === String(selected));
+      const verified = selectedOutcome !== undefined && selectedOutcome["verification"] !== undefined;
       if (verified) {
         incremental[key] = entry;
         // The record is a whole file that every function adds itself to, so
@@ -2307,14 +2370,15 @@ export async function runBuild(
           await generateUnit(units[index], mismatch);
         }
       };
-      const workers = Math.max(1, Math.min(generation.functionConcurrency, units.length));
+      const workers = Math.max(1, Math.min((generation as unknown as Record<string, unknown>)["functionConcurrency"] as number, units.length));
       // A function that fails outright fails the build, so every worker is
       // allowed to settle before the first failure is reported: a function
       // still being generated must not go on writing work files after the
       // build has given up on it.
       const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()));
-      const failure = settled.find((entry) => entry.status === "rejected");
-      if (failure !== undefined && failure.status === "rejected") throw failure.reason;
+      const settledFields = settled as unknown as Record<string, unknown>[];
+      const failure = settledFields.find((entry) => String(entry["status"]) === "rejected");
+      if (failure !== undefined && String(failure["status"]) === "rejected") throw failure["reason"];
     };
 
     /** What every unit generated so far, as the build records it. */
@@ -2328,7 +2392,7 @@ export async function runBuild(
       const verificationEntries: (readonly [string, VerificationResult[]])[] = [];
       const benchmarkEntries: (readonly [string, BenchmarkResult[]])[] = [];
       const selectedEntries: (readonly [string, string])[] = [];
-      const generationEntries: (readonly [string, Record<string, unknown>])[] = [];
+      const generationFunctions: Record<string, unknown> = {};
       for (const entry of generated) {
         const entryFields = entry as unknown as Record<string, unknown>;
         const unit = entryFields["unit"] as CompilationUnit;
@@ -2363,15 +2427,12 @@ export async function runBuild(
           throw new CompilerError("VerificationError", "verify", `no candidate for ${functionName} satisfied the contract`, detail.trim(), functionName, "", "");
         }
         selectedEntries.push([key, String(resultFields["selected"])]);
-        generationEntries.push([
-          key,
-          {
-            file: String((unit as unknown as Record<string, unknown>)["file"]),
-            selected: resultFields["selected"],
-            benchmarkVector: resultFields["benchmarkVector"],
-            outcomes: resultFields["outcomes"],
-          },
-        ]);
+        generationFunctions[key] = generationFunctionOf(
+          String((unit as unknown as Record<string, unknown>)["file"]),
+          String(resultFields["selected"]),
+          resultFields["benchmarkVector"] as TestVector | null,
+          resultFields["outcomes"] as unknown as CandidateOutcome[],
+        );
       }
       const candidates = byName(candidateEntries);
       const verification = byName(verificationEntries);
@@ -2379,12 +2440,15 @@ export async function runBuild(
       const selected = byName(selectedEntries);
       await storeWrite(store, candidatesPath, candidates);
       await storeWrite(store, generationPath, {
-        model: build.model,
-        modelConfig: build.modelConfig,
+        model: String((build as unknown as Record<string, unknown>)["model"]),
+        modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
         compilerVersion: COMPILER_VERSION,
-        functions: Object.fromEntries(generationEntries),
+        functions: generationFunctions,
         modelDurationNs: String(
-          generated.reduce((total, entry) => total + entry.result.modelDurationNs, 0n),
+          generated.reduce((total, entry) => {
+            const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
+            return total + Number(resultFields["modelDurationNs"]);
+          }, 0),
         ),
       });
       await storeWrite(store, verificationPath, verification);
