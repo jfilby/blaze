@@ -155,6 +155,17 @@ export function toolchainFor(
   return qcc(target);
 }
 
+/**
+ * The toolchain of a target on the host the compiler runs on.
+ *
+ * The optional host and architecture parameters are for a caller that knows
+ * both; a compiled caller must pass every argument the signature names, so the
+ * defaulted path is this wrapper rather than a short call.
+ */
+export function toolchainForTarget(target: TargetSpec): Toolchain {
+  return toolchainFor(target, hostPlatform(), defaultHostArchitecture());
+}
+
 /** The driver and its arguments, before the work arguments. */
 export function compileCommand(
   toolchain: Toolchain,

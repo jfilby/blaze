@@ -112,7 +112,7 @@ import {
   programVerificationFor,
 } from "./core/target.ts";
 import { run } from "./core/process.ts";
-import { toolchainFor } from "./core/toolchain.ts";
+import { toolchainForTarget } from "./core/toolchain.ts";
 
 import { COMPILER_VERSION, engineStamp, toolchainFingerprints } from "./core/version.ts";
 import {
@@ -805,7 +805,7 @@ async function recordRejected(
   // diagnostic.
   let toolchain: string | undefined;
   try {
-    toolchain = toolchainFor(recordTarget).id;
+    toolchain = toolchainForTarget(recordTarget).id;
   } catch {
     toolchain = previous?.toolchain;
   }
@@ -1731,7 +1731,7 @@ export async function runBuild(
     assertGenerationInput(absoluteInput, input);
     target = assertBuildableTarget(normalizeTarget(inputFields["target"] as Partial<TargetSpec> | undefined), inputFields["entry"] as string | undefined);
     targetForRecord = target;
-    toolchainId = String((toolchainFor(target) as unknown as Record<string, unknown>)["id"]);
+    toolchainId = String((toolchainForTarget(target) as unknown as Record<string, unknown>)["id"]);
     outputKind = resolveOutputKind((fields["output"] as OutputKind | undefined) ?? (inputFields["output"] as OutputKind | undefined));
     runtimeKind = resolveRuntimeKind((fields["runtime"] as RuntimeKind | undefined) ?? (inputFields["runtime"] as RuntimeKind | undefined), outputKind);
     assertRuntimeSupported(target, runtimeKind);

@@ -20,6 +20,14 @@
 
 import { readFileSync, mkdtemp, writeFile, tmpdir, join } from "../core/platform.ts";
 import { formatCommand, run, GENERATED_HEAP_BYTES, type RunResult } from "../core/process.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function runField(result: RunResult, key: string): any {
+  return (result as unknown as Record<string, unknown>)[key];
+}
 import { CompilerError } from "../core/errors.ts";
 import { usesSqliteSource } from "../runtime/sqlite.ts";
 import { mentionsHttpModule } from "../runtime/http-needs.ts";
@@ -53,12 +61,19 @@ export function servesHttp(source: string): boolean {
  * by node with the flags node needs to run TypeScript at all, and a Python
  * source is run by python3 with none.
  */
-const TOOLCHAIN: Record<string, { command: string; flags: string[] }> = {
-  typescript: { command: "node", flags: ["--experimental-transform-types"] },
-  ts: { command: "node", flags: ["--experimental-transform-types"] },
-  python: { command: "python3", flags: [] },
-  py: { command: "python3", flags: [] },
-};
+const TOOLCHAIN_NAMES: readonly string[] = ["typescript", "ts", "python", "py"];
+
+function toolchainRecord(command: string, flags: string[]): { command: string; flags: string[] } {
+  return { command, flags };
+}
+
+function toolchainFor(language: string): { command: string; flags: string[] } | undefined {
+  if (language === "typescript" || language === "ts") {
+    return toolchainRecord("node", ["--experimental-transform-types"]);
+  }
+  if (language === "python" || language === "py") return toolchainRecord("python3", []);
+  return undefined;
+}
 
 /**
  * The command line Deno hands a program, for a source written for Deno and run
@@ -366,11 +381,11 @@ function stopFailure(binary: RunResult): string | null {
   // wrong output would hand a program that never executed to the model as a
   // verified implementation, and reporting it as a clean exit would say it
   // verified against itself.
-  if (binary.spawnError !== undefined) return `the delivered program did not run: ${binary.spawnError}`;
-  if (binary.timedOut) return "the delivered program did not finish";
-  if (binary.signal !== null) return `the delivered program was terminated by ${binary.signal}`;
-  if (binary.code === null) return "the delivered program did not report an exit status";
-  if (binary.code !== 0) return `the delivered program exited with status ${binary.code}`;
+  if (runField(binary,"spawnError") !== undefined) return `the delivered program did not run: ${runField(binary,"spawnError")}`;
+  if (runField(binary,"timedOut")) return "the delivered program did not finish";
+  if (runField(binary,"signal") !== null) return `the delivered program was terminated by ${runField(binary,"signal")}`;
+  if (runField(binary,"code") === null) return "the delivered program did not report an exit status";
+  if (runField(binary,"code") !== 0) return `the delivered program exited with status ${runField(binary,"code")}`;
   return null;
 }
 
@@ -399,34 +414,37 @@ function stoppedMismatch(failure: string, expectedOutput: string, actualOutput: 
  * when every function in it satisfies its contract.
  */
 export async function verifyProgram(request: ProgramVerificationRequest): Promise<ProgramVerification> {
-  const toolchain = TOOLCHAIN[request.language.toLowerCase()];
+  const language = String(fieldOf(request,"language"));
+  const toolchain = toolchainFor(language.toLowerCase());
   if (toolchain === undefined) {
-    throw new CompilerError("VerificationError", "verify", `a program in ${request.language} cannot be checked`, `checked against: ${Object.keys(TOOLCHAIN).join(", ")}; a program is checked against the toolchain that runs its source`, "", "", "");
+    throw new CompilerError("VerificationError", "verify", `a program in ${language} cannot be checked`, `checked against: ${TOOLCHAIN_NAMES.join(", ")}; a program is checked against the toolchain that runs its source`, "", "", "");
   }
 
   // A program reads the arguments it is given, so both runs get the same ones.
-  const arguments_ = [...(request.arguments ?? [])];
+  const arguments_ = [...((fieldOf(request,"arguments") as string[] | undefined) ?? [])];
   // A source written for Deno is run with the command line Deno hands a
   // program, so that the oracle is the source as it was written rather than a
   // source that cannot run at all. The preludes are the ones a TypeScript
   // source needs: a source of another language is run as it is.
-  const deno = readFileSync(request.sourcePath, "utf8");
+  const sourcePath = String(fieldOf(request,"sourcePath"));
+  const deno = readFileSync(sourcePath, "utf8");
   const httpSource = servesHttp(deno);
   const sqliteSource = usesSqliteSource(deno);
   // The preludes are the ones node needs, and a source of another language is
   // run as it is.
-  const before = [...toolchain.flags];
-  if (toolchain.command === "node") {
+  const before: string[] = [];
+  for (const flag of fieldOf(toolchain,"flags") as string[]) before.push(flag);
+  if (String(fieldOf(toolchain,"command")) === "node") {
     if (readsDenoArgs(deno)) before.push("--import", DENO_PRELUDE);
     if (httpSource) before.push("--import", HTTP_PRELUDE_URL);
     if (sqliteSource) before.push("--import", await sqlitePreludePath());
   }
-  const source = run(toolchain.command, [...before, request.sourcePath, ...arguments_], { cwd: request.directory, timeoutMs: 120_000 });
-  if (source.spawnError !== undefined) {
-    throw new CompilerError("VerificationError", "verify", `${toolchain.command} is not available, so the program cannot be checked`, `${source.spawnError}\ninstall ${toolchain.command}, or build this project as a function entry`, "", "", "");
+  const source = run(String(fieldOf(toolchain,"command")), [...before, sourcePath, ...arguments_], { cwd: String(fieldOf(request,"directory")), timeoutMs: 120_000 });
+  if (runField(source,"spawnError") !== undefined) {
+    throw new CompilerError("VerificationError", "verify", `${toolchain.command} is not available, so the program cannot be checked`, `${runField(source,"spawnError")}\ninstall ${toolchain.command}, or build this project as a function entry`, "", "", "");
   }
-  if (source.code !== 0) {
-    throw new CompilerError("VerificationError", "verify", "the program source does not run", `${formatCommand(toolchain.command, [...before, request.sourcePath, ...arguments_])}\n${source.stderr.trim()}`, "", "", "");
+  if (runField(source,"code") !== 0) {
+    throw new CompilerError("VerificationError", "verify", "the program source does not run", `${formatCommand(String(fieldOf(toolchain,"command")), [...before, sourcePath, ...arguments_])}\n${String(runField(source,"stderr")).trim()}`, "", "", "");
   }
 
   // The delivered program is given a heap of its own: one that allocates
@@ -436,36 +454,40 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   // A server may run until it is stopped, so its deadline is the short one a
   // server is given; everything else gets the deadline a computation is given.
   const binaryTimeout = httpSource ? 5_000 : 120_000;
-  const binary = run(request.runner.command, [...request.runner.args, ...arguments_], {
-    cwd: request.directory,
+  const runner = fieldOf(request,"runner");
+  const runnerArgs: string[] = [];
+  for (const argument of fieldOf(runner,"args") as string[]) runnerArgs.push(argument);
+  for (const argument of arguments_) runnerArgs.push(argument);
+  const binary = run(String(fieldOf(runner,"command")), runnerArgs, {
+    cwd: String(fieldOf(request,"directory")),
     timeoutMs: binaryTimeout,
-    heapBytes: request.heapBytes ?? GENERATED_HEAP_BYTES,
+    heapBytes: (fieldOf(request,"heapBytes") as number | undefined) ?? GENERATED_HEAP_BYTES,
   });
-  const printed = binary.stdout.trim();
+  const printed = String(runField(binary,"stdout")).trim();
   const stopped = stopFailure(binary);
   if (stopped !== null) {
     // An HTTP server may run until it is stopped by a timeout; if it has
     // already printed everything its source prints, that is a successful
     // verification rather than a failure.
-    if (binary.timedOut && printed === source.stdout.trim()) {
-      return { passed: true, expected: source.stdout, actual: binary.stdout };
+    if (runField(binary,"timedOut") && printed === String(runField(source,"stdout")).trim()) {
+      return { passed: true, expected: String(runField(source,"stdout")), actual: String(runField(binary,"stdout")) };
     }
     // A program that stopped is a verdict, not the end of the build: the
     // functions the program is the only oracle for are regenerated with why it
     // stopped and with what it managed to print before it did.
     return {
       passed: false,
-      expected: source.stdout,
+      expected: String(runField(source,"stdout")),
       actual: printed,
-      difference: stoppedMismatch(stopped, source.stdout, printed, binary.stderr.trim()),
+      difference: stoppedMismatch(stopped, String(runField(source,"stdout")), printed, String(runField(binary,"stderr")).trim()),
     };
   }
 
-  const difference = firstDifference(source.stdout, binary.stdout);
+  const difference = firstDifference(String(runField(source,"stdout")), String(runField(binary,"stdout")));
   return {
     passed: difference === null,
-    expected: source.stdout,
-    actual: binary.stdout,
+    expected: String(runField(source,"stdout")),
+    actual: String(runField(binary,"stdout")),
     ...(difference === null ? {} : { difference }),
   };
 }

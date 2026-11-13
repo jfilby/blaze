@@ -428,6 +428,10 @@ function hostCall(name: string, argument: (index: number) => string): string | n
   return null;
 }
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 class CDriver implements ProgramTarget {
   /** The objects built so far, so each one built as a value is named apart. */
   private builds = 0;
@@ -488,29 +492,37 @@ class CDriver implements ProgramTarget {
     this.style = style;
   }
   prelude(program: SemanticProgram): string {
-    const objects = cObjectDeclarations(program.objects);
+    const objects = cObjectDeclarations(fieldOf(program,"objects"));
     // The functions the program declares for itself are written out in this
     // file, so they are not declared here: what is declared is what the program
     // calls of the objects the build linked beside it.
-    this.own = new Set(program.bodies.map((body) => body.symbol));
-    const declarations = program.functions
-      .filter((signature) => !this.own.has(signature.symbol))
-      .map((signature) => this.declaration(signature))
+    const bodies = fieldOf(program,"bodies") as { symbol: string; name: string; params: unknown[]; returns: unknown }[];
+    const symbols: string[] = [];
+    for (const body of bodies) symbols.push(String(fieldOf(body,"symbol")));
+    this.own = new Set(symbols);
+    const functions = fieldOf(program,"functions") as { symbol: string }[];
+    const declarations = functions
+      .filter((signature) => !this.own.has(String(fieldOf(signature,"symbol"))))
+      .map((signature) => this.declaration(signature as never))
       .join("\n");
     // A body the machine backend lowered is linked beside this file, so what
     // the driver holds of it is the declaration a call needs: the lowering
     // that wrote the object took its signature from the IR, and the call the
     // driver makes is the one the convention answers.
-    const lowered = program.bodies
-      .filter((body) => this.loweredElsewhere.has(body.symbol))
-      .map((body) =>
-        this.declaration({
-          name: body.name,
-          symbol: body.symbol,
-          params: body.params.map((param) => ({ name: param.name, type: contractText(slotType(param)) })),
-          returns: contractText(body.returns),
-        }),
-      )
+    const lowered = bodies
+      .filter((body) => this.loweredElsewhere.has(String(fieldOf(body,"symbol"))))
+      .map((body) => {
+        const params: { name: string; type: string }[] = [];
+        for (const param of fieldOf(body,"params") as { name: string }[]) {
+          params.push({ name: String(fieldOf(param,"name")), type: contractText(slotType(param as never)) });
+        }
+        return this.declaration({
+          name: String(fieldOf(body,"name")),
+          symbol: String(fieldOf(body,"symbol")),
+          params,
+          returns: contractText(fieldOf(body,"returns") as never),
+        });
+      })
       .join("\n");
     const httpHeader = this.includeHttpHeader ? '#include "blaze_http.h"\n' : "";
     const httpDefault = this.includeHttpHeader ? "extern void blaze_http_default_handler(void *, void *);\nextern void blaze_http_server_start_background(void *);\nextern void *blaze_http_server_held(void);\nextern void blaze_http_server_join(void);\n" : "";
@@ -532,24 +544,25 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * that compiled the handler carries a reference.
    */
   private bridges(program: SemanticProgram): string {
-    const handlers = program.httpHandlers ?? [];
+    const handlers = (fieldOf(program,"httpHandlers") as string[] | undefined) ?? [];
     if (handlers.length === 0) return "";
     const lines: string[] = [];
     for (const symbol of handlers) {
-      const signature = program.functions.find((one) => one.symbol === symbol);
+      const functions = fieldOf(program,"functions") as { symbol: string; params: { name: string; type: string }[] }[];
+      const signature = functions.find((one) => String(fieldOf(one,"symbol")) === symbol);
       if (signature === undefined) continue;
-      if (signature.params.length !== 2) {
+      if ((fieldOf(signature,"params") as unknown[]).length !== 2) {
         throw driverError(
           `${symbol} is registered as an HTTP handler`,
-          `a handler is called with the request and the response, and ${symbol} takes ${signature.params.length} argument(s)`,
+          `a handler is called with the request and the response, and ${symbol} takes ${(fieldOf(signature,"params") as unknown[]).length} argument(s)`,
         );
       }
-      for (const param of signature.params) {
-        const type = parseType(param.type);
-        if (type.kind !== "ref") {
+      for (const param of fieldOf(signature,"params") as { name: string; type: string }[]) {
+        const type = parseType(String(fieldOf(param,"type")));
+        if (String(fieldOf(type,"kind")) !== "ref") {
           throw driverError(
             `${symbol} is registered as an HTTP handler`,
-            `a handler is given the request and the response as references, and ${param.name} is a ${typeToString(type)}`,
+            `a handler is given the request and the response as references, and ${String(fieldOf(param,"name"))} is a ${typeToString(type)}`,
           );
         }
       }
@@ -582,10 +595,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // the declaration is the same, and what a program cannot do is carry the
     // length of the array it answers, which is refused where such a call is
     // written rather than where every call of every function is declared.
-    const returns = parseType(signature.returns);
+    const returns = parseType(String(fieldOf(signature,"returns")));
     // The machine backend hands every reference back in a register as the
     // pointer it is; the C backend hands an unshaped one back as a double.
-    const returnType = this.lowering === "machine" && returns.kind === "ref" ? "void*" : cDeclarationType(returns);
+    const returnType = this.lowering === "machine" && String(fieldOf(returns,"kind")) === "ref" ? "void*" : cDeclarationType(returns);
     // A parameter name is source text that has to survive being a C
     // identifier, and a program is free to call a parameter `double`. An
     // extern declaration only needs the names to be well formed, so they are
@@ -595,7 +608,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // either a double or a pointer depending on how the body reads it. An
     // empty parameter list leaves the call to the definition, so the link does
     // not depend on a type the driver has to guess.
-    return `extern ${returnType} ${cSymbolName(signature.symbol)}()${cSymbolLabel(signature.symbol)};`;
+    return `extern ${returnType} ${cSymbolName(String(fieldOf(signature,"symbol")))}()${cSymbolLabel(String(fieldOf(signature,"symbol")))};`;
   }
 
   openFunction(signature: FunctionSignature, parameters: { name: string; type: string }[]): string[] {
@@ -607,18 +620,20 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // of no other: the name the source gave it is a name nothing else in the
     // program holds, so a program may call a function `send` and the C library
     // may have one of that name.
-    const returns = cDeclarationType(parseType(signature.returns));
+    const returns = cDeclarationType(parseType(String(fieldOf(signature,"returns"))));
     const given = parameters
       .map((param) => {
         // A string the program passes by value is a C string, and a string it
         // writes through is the cell that holds it.
-        if (param.type === "boxedtext") return `char ** ${param.name}`;
-        if (param.type === "text") return `const char * ${param.name}`;
-        return `${cDeclarationType(parseType(param.type))} ${param.name}`;
+        const paramType = String(fieldOf(param,"type"));
+        const paramName = String(fieldOf(param,"name"));
+        if (paramType === "boxedtext") return `char ** ${paramName}`;
+        if (paramType === "text") return `const char * ${paramName}`;
+        return `${cDeclarationType(parseType(paramType))} ${paramName}`;
       })
       .join(", ");
-    const own = this.own.has(signature.symbol) && !this.sharedWithObjects.has(signature.symbol) ? "static " : "";
-    return [`${own}${returns} ${cSymbolName(signature.symbol)}(${given || "void"})${cSymbolLabel(signature.symbol)} {`];
+    const own = this.own.has(String(fieldOf(signature,"symbol"))) && !this.sharedWithObjects.has(String(fieldOf(signature,"symbol"))) ? "static " : "";
+    return [`${own}${returns} ${cSymbolName(String(fieldOf(signature,"symbol")))}(${given || "void"})${cSymbolLabel(String(fieldOf(signature,"symbol")))} {`];
   }
 
   closeFunction(releases: readonly string[], returned: boolean): string[] {
@@ -790,7 +805,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // A value the runtime holds (`ref<any>`) is a handle rather than an
       // object the program laid out: nothing releases it, and a promise is a
       // handle the runtime owns for the life of the run.
-      if (type.kind === "ref" && type.of === null && type.name === undefined) return `${name} = ${value};`;
+      if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) return `${name} = ${value};`;
       const old = `blaze_old_${this.builds += 1}`;
       return `{ void* ${old} = ${name}; ${name} = ${value}; ${RUNTIME_NAME}_release(${old}); }`;
     }
@@ -857,7 +872,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     // there at all: an empty string is false, as it is in the language.
     if (kind === "text") return `(${expression})[0] != '\\0'`;
     if (kind === "reference") {
-      if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
+      if (type !== null && String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
         return `((${expression}) == (${expression}) && (${expression}) != 0)`;
       }
       return `(${expression}) != NULL`;
@@ -1015,16 +1030,18 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
   }
 
   call(call: SemanticCall, argumentsText: string[]): string {
-    return `${cSymbolName(call.signature.symbol)}(${argumentsText.join(", ")})`;
+    return `${cSymbolName(String(fieldOf(fieldOf(call,"signature"),"symbol")))}(${argumentsText.join(", ")})`;
   }
 
   builtin(call: SemanticCall, argumentsText: string[], expression: (value: SemanticValue, as?: SemanticType | null) => string): string {
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
     // The host services the compiler's adapter asks for: the name is the
     // builtin the frontend writes and the call is the runtime entry it names.
-    const host = hostCall(call.callee, argument);
+    const callee = String(fieldOf(call,"callee"));
+    const callArgs = fieldOf(call,"args") as any[];
+    const host = hostCall(callee, argument);
     if (host !== null) return host;
-    switch (call.callee) {
+    switch (callee) {
       case "Math.abs":
         return `fabs(${argument(0)})`;
       case "Math.sqrt":
@@ -1093,17 +1110,20 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // an intermediate the width cannot hold. A program body writes one where
       // the IR fused a wide `%` over an operation.
       case "u256_add_mod":
-        return this.wideAddMod(argument(0), argument(1), argument(2), call.returns);
+        return this.wideAddMod(argument(0), argument(1), argument(2), fieldOf(call,"returns") as SemanticType);
       case "u256_sub_mod":
-        return this.wideSubMod(argument(0), argument(1), argument(2), call.returns);
+        return this.wideSubMod(argument(0), argument(1), argument(2), fieldOf(call,"returns") as SemanticType);
       case "u256_mul_mod":
-        return this.wideMulMod(argument(0), argument(1), argument(2), call.returns);
+        return this.wideMulMod(argument(0), argument(1), argument(2), fieldOf(call,"returns") as SemanticType);
       case "parseInt": {
         // A text argument is the number its text states, so the runtime boxes
         // the pointer it carries and reads the number out of it; a dynamic
         // value is already the number it holds, and a number is itself.
         const raw = argument(0);
-        const value = isTextType(call.args[0]?.type) ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
+        const callArgs = fieldOf(call,"args") as { type: SemanticType }[];
+        const firstArgument = callArgs[0];
+        const textArgument = firstArgument !== undefined && isTextType(fieldOf(firstArgument,"type") as SemanticType);
+        const value = textArgument ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
         return `${RUNTIME_NAME}_to_number(${value})`;
       }
       case "Number.parseInt": {
@@ -1119,17 +1139,24 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const raw = argument(0);
         // A text value is the pointer to the bytes it names, and the runtime
         // reads the number out of a box; a dynamic value is already a box.
-        const value = isTextType(call.args[0]?.type) ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
+        const numberArgs = fieldOf(call,"args") as { type: SemanticType }[];
+        const numberFirst = numberArgs[0];
+        const numberText = numberFirst !== undefined && isTextType(fieldOf(numberFirst,"type") as SemanticType);
+        const value = numberText ? `${RUNTIME_NAME}_box_string(${raw})` : raw;
         return `${RUNTIME_NAME}_to_number(${value})`;
       }
       // A text value crosses the dynamic wall as the pointer it is, written
       // into a double, because the ABI carries a double there: the runtime
       // reads the raw string out of it again. A dynamic value is already the
       // double it is handed over as.
-      case "JSON.parse":
-        return isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
+      case "JSON.parse": {
+        const jsonArgument = callArgs[0] as { type: SemanticType; k?: string } | undefined;
+        const jsonText = jsonArgument !== undefined &&
+          (isTextType(fieldOf(jsonArgument,"type") as SemanticType) || String(fieldOf(jsonArgument,"k")) === "text");
+        return jsonText
           ? `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${argument(0)}))`
           : `${RUNTIME_NAME}_json_parse(${argument(0)})`;
+      }
       // One field of a dynamic object, by its name. The object is the handle
       // it is carried in, and the field is the text it is spelled with.
       case "JSON.get":
@@ -1146,14 +1173,16 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // are the source's and the values are rendered as text one by one, so no
         // object the program laid out is boxed into a dynamic value first. That
         // text is the answer itself, because the answer is a text.
-        if (call.args[0]?.k === "newObject") {
-          return this.objectJson(call.args[0], expression);
+        const stringifyArgument = callArgs[0] as { type: SemanticType; k?: string } | undefined;
+        if (stringifyArgument !== undefined && String(fieldOf(stringifyArgument,"k")) === "newObject") {
+          return this.objectJson(stringifyArgument as never, expression);
         }
         // The runtime answers the JSON as the dynamic string it holds, and the
         // text it says is what the source wrote `JSON.stringify` to get.
-        const rendered = isTextType(call.args[0]?.type) || call.args[0]?.k === "text"
+        const stringifyType = stringifyArgument === undefined ? null : fieldOf(stringifyArgument,"type") as SemanticType;
+        const rendered = stringifyType !== null && isTextType(stringifyType) || stringifyArgument !== undefined && String(fieldOf(stringifyArgument,"k")) === "text"
           ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_string(${argument(0)}))`
-          : call.args[0] !== undefined && isNumber(call.args[0].type)
+          : stringifyType !== null && isNumber(stringifyType)
             ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_number(${argument(0)}))`
             : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
         return `${RUNTIME_NAME}_to_text(${rendered})`;
@@ -1173,7 +1202,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // A slice written with one index runs to the end, which the runtime
         // reads as a stop it can never reach: a stop below zero counts back
         // from the end, so the end itself is the number a stop stops at.
-        const stop = call.args.length > 2 ? `(long long)(${argument(2)})` : "9223372036854775807LL";
+        const stop = callArgs.length > 2 ? `(long long)(${argument(2)})` : "9223372036854775807LL";
         return `${RUNTIME_NAME}_text_slice(${argument(0)}, (long long)(${argument(1)}), ${stop})`;
       }
       case "text.trim":
@@ -1320,27 +1349,31 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "http.serveTls":
         return `({ void *blaze_http_srv = blaze_http_server_new_tls(NULL, (uint16_t)${argument(0)}, ${argument(1)}, ${argument(2)}); blaze_http_route_register(blaze_http_srv, "*", "*", blaze_http_default_handler); blaze_http_server_run(blaze_http_srv); })`;
       case "http.createServer": {
-        const cb = call.args[0];
+        const cb = callArgs[0];
         let trampoline = "0.0";
-        if (cb !== undefined && cb.k === "functionRef" && cb.symbol !== undefined) {
+        const cbKind = cb === undefined ? "" : String(fieldOf(cb,"k"));
+        const cbSymbol = cb === undefined ? undefined : fieldOf(cb,"symbol");
+        const cbName = cb === undefined ? "" : String(fieldOf(cb,"name"));
+        if (cb !== undefined && cbKind === "functionRef" && cbSymbol !== undefined) {
           // A handler of another file of the program: the driver links it and
           // hands the runtime the bridge it wrote for it, which is what the
           // runtime calls.
-          trampoline = `(double)(uintptr_t) ${this.bridgeName(cb.symbol)}`;
-        } else if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string") {
+          trampoline = `(double)(uintptr_t) ${this.bridgeName(String(cbSymbol))}`;
+        } else if (cb !== undefined && cbKind === "functionRef" && typeof fieldOf(cb,"name") === "string") {
           // A handler the program wrote where the call is made is an arrow, and
           // one it named is called through a trampoline of its own: what calls
           // it is not a program, and passes it two values.
-          trampoline = cb.name.startsWith("__arrow_")
-            ? `(double)(uintptr_t)__arrow_trampoline_${cb.name.slice("__arrow_".length)}`
-            : `(double)(uintptr_t)__callback_${cb.name}`;
+          trampoline = cbName.startsWith("__arrow_")
+            ? `(double)(uintptr_t)__arrow_trampoline_${cbName.slice("__arrow_".length)}`
+            : `(double)(uintptr_t)__callback_${cbName}`;
           // The runtime calls the handler with the request and the response
           // and nothing else, so the names the handler captured are left where
           // the trampoline reads them from.
-          const captures = Array.isArray(cb.captures) ? cb.captures : [];
+          const rawCaptures = cb === undefined ? undefined : fieldOf(cb,"captures");
+          const captures = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
           if (captures.length > 0) {
             const held = captures.map(
-              (capture, index) => `blaze_capture_${cb.name}_${index} = ${this.captureEntry(capture)}`,
+              (capture: any, index: number) => `blaze_capture_${cbName}_${index} = ${this.captureEntry(capture)}`,
             );
             trampoline = `(${held.join(", ")}, ${trampoline})`;
           }
@@ -1348,15 +1381,17 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return trampoline;
       }
       case "res.writeHead": {
-        const status = call.args[1];
-        const statusText = status.k === "const" ? status.text : argument(1);
+        const status = callArgs[1] as { k?: string; text?: string } | undefined;
+        const statusText = status !== undefined && String(fieldOf(status,"k")) === "const"
+          ? String(fieldOf(status,"text"))
+          : argument(1);
         return `(blaze_http_resp_status((void*) (uintptr_t) ${argument(0)}, (uint16_t) ${statusText}), 0.0)`;
       }
       case "res.setHeader": {
         /* The name and the value are text: a header is written out as the two
            lines it is, and a program that writes one writes text. */
-        const name = this.requestBody(call.args[1], expression);
-        const value = this.requestBody(call.args[2], expression);
+        const name = this.requestBody(callArgs[1], expression);
+        const value = this.requestBody(callArgs[2], expression);
         return `(blaze_http_resp_header((void*) (uintptr_t) ${argument(0)}, (const char *) ${name}, (const char *) ${value}), 0.0)`;
       }
       case "req.path":
@@ -1364,7 +1399,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         /* The path and the method are borrowed from the request, so they are
            copied into a managed string: the program holds the copy, and the
            request keeps its own. */
-        const which = call.callee === "req.path" ? "blaze_http_req_path" : "blaze_http_req_method";
+        const which = callee === "req.path" ? "blaze_http_req_path" : "blaze_http_req_method";
         return `({ const char *blaze_http_request_text = ${which}((void*) (uintptr_t) ${argument(0)});` +
           ` (double)(uintptr_t)${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
       }
@@ -1378,7 +1413,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         /* The event is held in a temporary: it is passed to the runtime and
            measured there, and an expression that is computed twice is computed
            twice. */
-        const text = this.requestBody(call.args[0], expression);
+        const text = this.requestBody(callArgs[0], expression);
         return `({ const char *blaze_http_sse_text = (const char *) ${text};` +
           ` (double)blaze_http_sse_publish(blaze_http_sse_text, strlen(blaze_http_sse_text)); })`;
       }
@@ -1397,22 +1432,22 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "sqlite.open": {
         /* The path is text, so a number written where a path belongs is the
            text of that number and not a number the library cannot read. */
-        const path = this.requestBody(call.args[0], expression);
+        const path = this.requestBody(callArgs[0], expression);
         return `blaze_sqlite_open(${path})`;
       }
       case "sqlite.close": {
         return `(blaze_sqlite_close(${argument(0)}), 0.0)`;
       }
       case "sqlite.exec": {
-        const sql = this.requestBody(call.args[1], expression);
+        const sql = this.requestBody(callArgs[1], expression);
         return `blaze_sqlite_exec(${argument(0)}, ${sql})`;
       }
       case "sqlite.prepare": {
-        const sql = this.requestBody(call.args[1], expression);
+        const sql = this.requestBody(callArgs[1], expression);
         return `blaze_sqlite_prepare(${argument(0)}, ${sql})`;
       }
       case "sqlite.bindText": {
-        const value = this.requestBody(call.args[2], expression);
+        const value = this.requestBody(callArgs[2], expression);
         return `(blaze_sqlite_bind_text(${argument(0)}, ${argument(1)}, ${value}), 0.0)`;
       }
       case "sqlite.bindNumber": {
@@ -1453,7 +1488,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `({ const char *blaze_sqlite_message = blaze_sqlite_error(${argument(0)}); (double)(uintptr_t)blaze_sqlite_message; })`;
       }
       case "res.end": {
-        const body = call.args[1];
+        const body = callArgs[1];
         // `res.end()` ends the response with no body at all, which is how a
         // 204 is answered. The text the runtime is handed is the empty one,
         // not the zero argument a missing call argument would be read as.
@@ -1463,11 +1498,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
            A number is written as the language writes it, and only a value the
            runtime holds is rendered by the runtime: a number the program holds
            is not a handle the runtime knows. */
-        const bodyPtr = body === undefined
+        const bodyType = body === undefined ? null : fieldOf(body,"type") as SemanticType;
+        const bodyPtr = body === undefined || bodyType === null
           ? bodyExpr
-          : (body.type.kind === "ptr" || body.type.kind === "text")
+          : (String(fieldOf(bodyType,"kind")) === "ptr" || String(fieldOf(bodyType,"kind")) === "text")
             ? bodyExpr
-            : this.toText(bodyExpr, body.type, null, this.style);
+            : this.toText(bodyExpr, bodyType, null, this.style);
         /* Hold the body pointer in a temporary so it is evaluated once: it is
            both passed to blaze_http_resp_body and measured with strlen, and a
            complex expression (such as program_number_text) would otherwise be
@@ -1486,10 +1522,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `(blaze_http_server_stop(blaze_http_server_held()), 0.0)`;
       }
       case "server.listen": {
-        const cb = call.args[3];
+        const cb = callArgs[3];
         let invoke = `${argument(3)}()`;
-        if (cb !== undefined && cb.k === "functionRef" && Array.isArray(cb.captures) && cb.captures.length > 0) {
-          invoke = `${argument(3)}(${cb.captures.map((capture) => capture.name).join(", ")})`;
+        const rawCaptures = cb === undefined ? undefined : fieldOf(cb,"captures");
+        if (cb !== undefined && String(fieldOf(cb,"k")) === "functionRef" && Array.isArray(rawCaptures) && rawCaptures.length > 0) {
+          const captures = rawCaptures as any[];
+          invoke = `${argument(3)}(${captures.map((capture: any) => String(fieldOf(capture,"name"))).join(", ")})`;
         }
         const handler = `((void(*)(void*, void*)) (uintptr_t) ${argument(0)})`;
         /* blaze_http_server_new binds the listening socket before it returns, so
@@ -1503,12 +1541,13 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `({ void *blaze_http_srv = blaze_http_server_new(${argument(2)}, (uint16_t)${argument(1)}); blaze_http_route_register(blaze_http_srv, "*", "*", ${handler} == 0 ? blaze_http_default_handler : ${handler}); blaze_http_server_start_background(blaze_http_srv); ${invoke}; blaze_http_server_join(); 0.0; })`;
       }
       case "Promise": {
-        const cb = call.args[0];
+        const cb = callArgs[0];
         let invoke = `${argument(0)}()`;
-        if (cb !== undefined && cb.k === "functionRef") {
-          const name = cb.name;
-          const captures = Array.isArray(cb.captures) ? cb.captures : [];
-          invoke = `${name}(${captures.map((capture) => capture.name).join(", ")})`;
+        if (cb !== undefined && String(fieldOf(cb,"k")) === "functionRef") {
+          const name = String(fieldOf(cb,"name"));
+          const rawCaptures = fieldOf(cb,"captures");
+          const captures = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
+          invoke = `${name}(${captures.map((capture: any) => String(fieldOf(capture,"name"))).join(", ")})`;
         }
         return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
       }
@@ -1522,21 +1561,21 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // program made is settled by the time it is read. The callee the
         // resolver chose says which value is read out of it: a string, a
         // truth, a number, a value the runtime holds, or nothing at all.
-        if (call.callee === "Promise.await.text") return `blaze_promise_await_text((void*)(uintptr_t)${argument(0)})`;
-        if (call.callee === "Promise.await.whole") return `(long long)blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
-        if (call.callee === "Promise.await.bool") return `(blaze_promise_await((void*)(uintptr_t)${argument(0)}) != 0.0)`;
-        if (call.callee === "Promise.await.value") return `blaze_promise_await_value((void*)(uintptr_t)${argument(0)})`;
-        if (call.callee === "Promise.await.nothing") return `(blaze_promise_await_nothing((void*)(uintptr_t)${argument(0)}), 0.0)`;
+        if (callee === "Promise.await.text") return `blaze_promise_await_text((void*)(uintptr_t)${argument(0)})`;
+        if (callee === "Promise.await.whole") return `(long long)blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
+        if (callee === "Promise.await.bool") return `(blaze_promise_await((void*)(uintptr_t)${argument(0)}) != 0.0)`;
+        if (callee === "Promise.await.value") return `blaze_promise_await_value((void*)(uintptr_t)${argument(0)})`;
+        if (callee === "Promise.await.nothing") return `(blaze_promise_await_nothing((void*)(uintptr_t)${argument(0)}), 0.0)`;
         // A value that is not a promise is the value itself: awaiting a number
         // is the number, and awaiting a function that hands back nothing is
         // nothing.
-        const awaited = call.args[0];
+        const awaited = callArgs[0];
         const kind = awaited === undefined
           ? null
-          : awaited.k === "call"
-            ? awaited.call.returns
-            : awaited.type;
-        if (kind !== null && kind.kind === "void") {
+          : String(fieldOf(awaited,"k")) === "call"
+            ? fieldOf(fieldOf(awaited,"call"),"returns") as SemanticType
+            : fieldOf(awaited,"type") as SemanticType;
+        if (kind !== null && String(fieldOf(kind,"kind")) === "void") {
           // What is awaited is a call that hands back nothing: the call still
           // runs, and what the statement answers is nothing.
           return `(${argument(0)}, 0.0)`;
@@ -1569,37 +1608,43 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "Promise.message":
         return `({ const char* blaze_message = blaze_promise_message((void*)(uintptr_t)${argument(0)}); blaze_error_clear(); blaze_message; })`;
       case "Promise.reject": {
-        const arg = call.args[0];
-        const text = arg === undefined
+        const arg = callArgs[0];
+        const argType = arg === undefined ? null : fieldOf(arg,"type") as SemanticType;
+        const argKind = arg === undefined ? "" : String(fieldOf(arg,"k"));
+        const text = arg === undefined || argType === null
           ? `""`
-          : (arg.k === "text" || arg.k === "const" || isTextType(arg.type))
+          : (argKind === "text" || argKind === "const" || isTextType(argType))
             ? argument(0)
-            : this.toText(argument(0), arg.type, null, this.style);
+            : this.toText(argument(0), argType, null, this.style);
         return `(double)(uintptr_t)blaze_promise_rejected(${text})`;
       }
       case "resolve":
       case "onFulfilled": {
-        const arg = call.args[0];
-        if (arg !== undefined && isTextType(arg.type)) {
+        const arg = callArgs[0] as { type?: SemanticType; k?: string } | undefined;
+        const argType = arg === undefined ? null : fieldOf(arg,"type") as SemanticType;
+        const argKind = arg === undefined ? "" : String(fieldOf(arg,"k"));
+        if (argType !== null && isTextType(argType)) {
           return `(blaze_promise_resolve_current_text(${argument(0)}), 0.0)`;
         }
-        if (arg !== undefined && arg.k === "nothing") {
+        if (arg !== undefined && argKind === "nothing") {
           return `(blaze_promise_resolve_current_null(), 0.0)`;
         }
-        if (arg !== undefined && arg.type.kind === "ref") {
+        if (argType !== null && String(fieldOf(argType,"kind")) === "ref") {
           return `(blaze_promise_resolve_current_value(${argument(0)}), 0.0)`;
         }
         return `(blaze_promise_resolve_current(${argument(0)}), 0.0)`;
       }
       case "reject":
       case "onRejected": {
-        const arg = call.args[0];
+        const arg = callArgs[0] as { type?: SemanticType; k?: string } | undefined;
+        const argType = arg === undefined ? null : fieldOf(arg,"type") as SemanticType;
+        const argKind = arg === undefined ? "" : String(fieldOf(arg,"k"));
         // The message of a failure is the text of what was handed to it: a
         // string is the text it is, and a number the program holds is written
         // as the language writes it rather than read as a handle.
-        const text = (arg.k === "text" || arg.k === "const" || isTextType(arg.type))
+        const text = argType === null || argKind === "text" || argKind === "const" || isTextType(argType)
           ? argument(0)
-          : this.toText(argument(0), arg.type, null, this.style);
+          : this.toText(argument(0), argType, null, this.style);
         return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
       }
       case "require":
@@ -1612,27 +1657,33 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const owner = argument(0);
         /* A client response is the request handle itself: the response the
            callback is given reads the buffered body through the handle. */
-        const clientResponse = call.callee === "res.on";
-        const event = call.args[1];
-        const eventName =
-          event.k === "const"
-            ? String(event.text).replace(/^"|"$/g, "")
-            : event.k === "text" && Array.isArray(event.parts) && event.parts.length === 1 && event.parts[0].k === "text"
-              ? String(event.parts[0].value)
-              : "";
+        const clientResponse = callee === "res.on";
+        const event = callArgs[1] as { k?: string; text?: string; parts?: unknown[] } | undefined;
+        const eventKind = event === undefined ? "" : String(fieldOf(event,"k"));
+        const eventParts = event === undefined ? [] as unknown[] : fieldOf(event,"parts") as unknown[];
+        let eventName = "";
+        if (eventKind === "const") {
+          eventName = String(fieldOf(event,"text")).replace(/^"|"$/g, "");
+        } else if (eventKind === "text" && eventParts.length === 1 &&
+                   String(fieldOf(eventParts[0],"k")) === "text") {
+          eventName = String(fieldOf(eventParts[0],"value"));
+        }
         /* The "error" event of a buffered client request happens at req.end,
            when the request cannot be made, so the handler is bound to the
            request when it is written and the adapter calls it there; nothing
            fires here. */
         if (eventName === "error") {
-          const bound = this.callbackRef(call.args[2], "an event the request carries a listener for");
+          const bound = this.callbackRef(callArgs[2], "an event the request carries a listener for");
           return `({ ${bound.bundle.declaration} blaze_http_client_watch((void *)(uintptr_t)${owner}, 1, ${bound.trampoline}, ${bound.bundle.name}, ${bound.bundle.bytes}); 1.0; })`;
         }
-        const cb = call.args[2];
+        const cb = callArgs[2];
         let invoke = "0.0";
-        if (cb !== undefined && cb.k === "functionRef" && typeof cb.name === "string" && cb.name.startsWith("__arrow_")) {
-          const trampoline = `__arrow_trampoline_${cb.name.slice("__arrow_".length)}`;
-          const captures = Array.isArray(cb.captures) ? cb.captures : [];
+        const cbKind = cb === undefined ? "" : String(fieldOf(cb,"k"));
+        const cbName = cb === undefined ? "" : String(fieldOf(cb,"name"));
+        const rawCaptures = cb === undefined ? undefined : fieldOf(cb,"captures");
+        if (cb !== undefined && cbKind === "functionRef" && typeof fieldOf(cb,"name") === "string" && cbName.startsWith("__arrow_")) {
+          const trampoline = `__arrow_trampoline_${cbName.slice("__arrow_".length)}`;
+          const captures = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
           /* The request and response bodies are already buffered by the facil.io
              adapter, so "data" and "end" fire where they are written. Pass the
              value the callback's first parameter names (the chunk for "data"),
@@ -1675,7 +1726,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
            on the wire. The value is copied into a managed string, the way
            req.path is: the request keeps its own, and the program holds the
            copy it read. */
-        const name = this.requestBody(call.args[1], expression);
+        const name = this.requestBody(callArgs[1], expression);
         return `({ const char *blaze_http_request_text = blaze_http_req_header((void *)(uintptr_t)${argument(0)}, ${name});` +
           ` (double)(uintptr_t)${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
       }
@@ -1690,7 +1741,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
            req.on and req.text instead. The body is bound to a name of its own
            because one statement expression cannot be written out twice: the
            value a call computes is built once and read twice. */
-        const body = `const char *blaze_http_body = ${this.requestBody(call.args[1], expression)};`;
+        const body = `const char *blaze_http_body = ${this.requestBody(callArgs[1], expression)};`;
         return `({ ${body} blaze_http_client_write((void *)(uintptr_t)${argument(0)}, (const unsigned char *)blaze_http_body, strlen(blaze_http_body)); 1.0; })`;
       }
       case "tasks.push":
@@ -1700,21 +1751,31 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // `http.request(url, method, headers, body)` performs one request here;
         // `http.request(url, options, callback)` opens a buffered request whose
         // handlers the callback registers fire when req.end sends it.
-        if (call.args.length === 3) return this.bufferedRequest(call, expression);
+        if (callArgs.length === 3) return this.bufferedRequest(call, expression);
         const urlArg = argument(0);
         const methodArg = argument(1);
         const headersArg = argument(2);
         const bodyArg = argument(3);
         const isRaw = (k: string) => k === "ptr" || k === "text";
-        const urlExpr = isRaw(call.args[0].type.kind) ? (call.args[0].type.kind === "ptr" ? `(const char*)(uintptr_t)${urlArg}` : urlArg) : `blaze_rt_to_text(${urlArg})`;
-        const methodExpr = isRaw(call.args[1].type.kind) ? (call.args[1].type.kind === "ptr" ? `(const char*)(uintptr_t)${methodArg}` : methodArg) : `blaze_rt_to_text(${methodArg})`;
-        const headersExpr = isRaw(call.args[2].type.kind) ? (call.args[2].type.kind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(${headersArg})`;
-        const bodyExpr = isRaw(call.args[3].type.kind) ? (call.args[3].type.kind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(${bodyArg})`;
+        const argumentKind = (index: number): string => {
+          const value = callArgs[index] as { type?: SemanticType } | undefined;
+          if (value === undefined) return "";
+          const type = fieldOf(value,"type") as SemanticType | undefined;
+          return type === undefined ? "" : String(fieldOf(type,"kind"));
+        };
+        const urlKind = argumentKind(0);
+        const methodKind = argumentKind(1);
+        const headersKind = argumentKind(2);
+        const bodyKind = argumentKind(3);
+        const urlExpr = isRaw(urlKind) ? (urlKind === "ptr" ? `(const char*)(uintptr_t)${urlArg}` : urlArg) : `blaze_rt_to_text(${urlArg})`;
+        const methodExpr = isRaw(methodKind) ? (methodKind === "ptr" ? `(const char*)(uintptr_t)${methodArg}` : methodArg) : `blaze_rt_to_text(${methodArg})`;
+        const headersExpr = isRaw(headersKind) ? (headersKind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(${headersArg})`;
+        const bodyExpr = isRaw(bodyKind) ? (bodyKind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(${bodyArg})`;
         const bodyLen = `strlen(${bodyExpr})`;
         return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_body, blaze_http_len); })`;
       }
       default:
-        throw driverError(`the driver cannot write down ${call.callee}`);
+        throw driverError(`the driver cannot write down ${callee}`);
     }
   }
 
