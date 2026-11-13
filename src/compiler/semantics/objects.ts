@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Objects: what a function allocates, and where every field of it sits.
  *
@@ -211,21 +215,21 @@ class BodyTypes {
     this.callees = callees;
     this.table = table;
     this.layoutField = layoutField;
-    for (const param of params) this.environment.set(param.name, { kind: "type", type: param.type });
+    for (const param of params) this.environment.set(fieldOf(param,"name"), { kind: "type", type: fieldOf(param,"type") });
   }
 
   /** The type a field of the reference a value is held at declares. */
   private declaredField(base: Inferred, name: string): TypeExpr | null {
-    if (this.table === null || base.kind !== "type") return null;
-    if (base.type.kind !== "ref" || base.type.name === undefined) return null;
+    if (this.table === null || String(fieldOf(base,"kind")) !== "type") return null;
+    if (String(fieldOf(fieldOf(base,"type"),"kind")) !== "ref" || fieldOf(fieldOf(base,"type"),"name") === undefined) return null;
     let resolved: ResolvedType;
     try {
-      resolved = resolveTypeName(this.table, base.type.name);
+      resolved = resolveTypeName(this.table, fieldOf(fieldOf(base,"type"),"name"));
     } catch {
       return null;
     }
     const field = fieldOfType(this.table, resolved, name);
-    return field === null ? null : contractTypeOf(field.type);
+    return field === null ? null : contractTypeOf(fieldOf(field,"type"));
   }
 
   /** The type every return of the function gives, when they agree. */
@@ -241,47 +245,53 @@ class BodyTypes {
   }
 
   private statement(statement: Statement): void {
-    switch (statement.kind) {
+    switch (String(fieldOf(statement,"kind"))) {
       case "declare": {
-        const value = this.expression(statement.init);
+        const value = this.expression(fieldOf(statement,"init"));
         // An object literal is what the body stores, and an annotation does
         // not narrow that. Binding the name as the annotated type left
         // `o.field = ...` with nowhere to record what it wrote, so the field
         // was missing from the layout and the body wrote past the end of the
         // object it had allocated.
-        const annotated: Inferred = statement.type === null ? value : { kind: "type", type: statement.type };
-        this.environment.set(statement.name, value.kind === "object" ? value : annotated);
+        const annotation = fieldOf(statement,"type") as TypeExpr | null;
+        const annotated: Inferred = annotation === null ? value : { kind: "type", type: annotation };
+        this.environment.set(String(fieldOf(statement,"name")), String(fieldOf(value,"kind")) === "object" ? value : annotated);
         return;
       }
       case "assign": {
-        const value = this.expression(statement.value);
+        const value = this.expression(fieldOf(statement,"value"));
         // A plain assignment changes what the name holds, and the layout is
         // built from what the body stores. A compound one adds to what was
         // there, so the type it had still holds.
-        if (statement.op === "=" || !this.environment.has(statement.target)) {
-          this.environment.set(statement.target, value);
+        const target = String(fieldOf(statement,"target"));
+        if (String(fieldOf(statement,"op")) === "=" || !this.environment.has(target)) {
+          this.environment.set(target, value);
         }
         return;
       }
       case "memberAssign": {
-        const value = this.expression(statement.value);
-        const base = this.environment.get(statement.base);
-        if (base !== undefined && base.kind === "object") this.write(base.key, statement.field, value);
+        const value = this.expression(fieldOf(statement,"value"));
+        const base = this.environment.get(String(fieldOf(statement,"base")));
+        if (base !== undefined && String(fieldOf(base,"kind")) === "object") {
+          this.write(String(fieldOf(base,"key")), String(fieldOf(statement,"field")), value);
+        }
         return;
       }
       case "indexAssign":
-        this.expression(statement.index);
-        this.expression(statement.value);
+        this.expression(fieldOf(statement,"index"));
+        this.expression(fieldOf(statement,"value"));
         return;
       case "update":
         return;
       case "print":
       case "expression":
-        this.expression(statement.value);
+        this.expression(fieldOf(statement,"value"));
         return;
-      case "result":
-        if (statement.value !== null) this.results.push(this.expression(statement.value));
+      case "result": {
+        const value = fieldOf(statement,"value");
+        if (value !== null) this.results.push(this.expression(value));
         return;
+      }
       case "loop": {
         // The index is what the loop counts with, which is the value it starts
         // at and the value it moves by. Typing it `usize` whatever it was
@@ -289,31 +299,36 @@ class BodyTypes {
         // type from the same field written from a written number, and an
         // object two functions build the same way is one object to the
         // program, so the build was refused over a counter.
-        const from = this.expression(statement.from);
-        this.expression(statement.to);
-        const step = statement.step === null ? null : this.expression(statement.step);
-        const counted = from.kind === "type" ? (step === null || step.kind !== "type" ? from.type : numeric(from, step)) : null;
+        const from = this.expression(fieldOf(statement,"from"));
+        this.expression(fieldOf(statement,"to"));
+        const stepExpression = fieldOf(statement,"step");
+        const step = stepExpression === null ? null : this.expression(stepExpression);
+        const counted = String(fieldOf(from,"kind")) === "type"
+          ? (step === null || String(fieldOf(step,"kind")) !== "type" ? fieldOf(from,"type") : numeric(from, step))
+          : null;
         // A loop body is a scope, as an `if` arm is: a name declared in it is
         // not in scope after it, and the index is not in scope before it.
-        this.branch(statement.body, statement.variable, { kind: "type", type: counted ?? USIZE });
+        this.branch(fieldOf(statement,"body"), String(fieldOf(statement,"variable")), { kind: "type", type: counted ?? USIZE });
         return;
       }
       case "if":
-        this.expression(statement.condition);
-        this.branch(statement.then);
-        this.branch(statement.otherwise);
+        this.expression(fieldOf(statement,"condition"));
+        this.branch(fieldOf(statement,"then"), undefined, undefined);
+        this.branch(fieldOf(statement,"otherwise"), undefined, undefined);
         return;
       case "while":
       case "doWhile":
-        this.expression(statement.condition);
-        this.branch(statement.body);
+        this.expression(fieldOf(statement,"condition"));
+        this.branch(fieldOf(statement,"body"), undefined, undefined);
         return;
       case "forOf":
         // The loop walks a name it is given, so its variable is one element of it.
-        this.branch(statement.body, statement.variable, { kind: "type", type: this.element(statement.of) });
+        this.branch(fieldOf(statement,"body"), String(fieldOf(statement,"variable")), { kind: "type", type: this.element(fieldOf(statement,"of")) });
         return;
       case "break":
       case "continue":
+        return;
+      default:
         return;
     }
   }
