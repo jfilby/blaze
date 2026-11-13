@@ -49,11 +49,14 @@ const U256: TypeExpr = { kind: "primitive", name: "u256" };
  */
 function bigIntInferred(argument: Expression | undefined): TypeExpr | null {
   if (argument === undefined) return null;
-  const text = argument.k === "literal"
-    ? argument.text
-    : argument.k === "text" && argument.parts.length === 1 && argument.parts[0].k === "text"
-      ? argument.parts[0].value
-      : null;
+  const kind = String(fieldOf(argument,"k"));
+  let text: string | null = null;
+  if (kind === "literal") {
+    text = String(fieldOf(argument,"text"));
+  } else if (kind === "text") {
+    const parts = fieldOf(argument,"parts") as unknown[];
+    if (parts.length === 1 && String(fieldOf(parts[0],"k")) === "text") text = String(fieldOf(parts[0],"value"));
+  }
   if (text === null) return null;
   const value = wholeText(text);
   if (value === null) return null;
@@ -93,10 +96,10 @@ export interface Shape {
  * pushes to a field whose type still said the length the literal had.
  */
 export function asField(value: Inferred): Inferred {
-  if (value.kind !== "type") return value;
-  const type = value.type;
-  if (type.kind !== "array" || type.length === null) return value;
-  return { kind: "type", type: { kind: "slice", of: type.of } };
+  if (String(fieldOf(value,"kind")) !== "type") return value;
+  const type = fieldOf(value,"type") as TypeExpr;
+  if (String(fieldOf(type,"kind")) !== "array" || fieldOf(type,"length") === null) return value;
+  return { kind: "type", type: { kind: "slice", of: fieldOf(type,"of") as TypeExpr } };
 }
 
 function objectsError(message: string, detail?: string): CompilerError {
@@ -120,10 +123,11 @@ function objectsError(message: string, detail?: string): CompilerError {
  * that most of it is addressable memory nothing was ever written to.
  */
 function fieldLayout(type: TypeExpr): { size: number; align: number } {
-  if (type.kind !== "primitive") return { size: POINTER_SIZE, align: POINTER_SIZE };
-  const limbs = limbsOf(type.name);
+  if (String(fieldOf(type,"kind")) !== "primitive") return { size: POINTER_SIZE, align: POINTER_SIZE };
+  const name = fieldOf(type,"name") as PrimitiveTypeName;
+  const limbs = limbsOf(name);
   if (limbs !== null) return { size: limbs * LIMB_BYTES, align: LIMB_BYTES };
-  const size = scalarSize(type.name);
+  const size = scalarSize(name);
   return { size, align: size };
 }
 
@@ -135,15 +139,17 @@ function fieldLayout(type: TypeExpr): { size: number; align: number } {
  * field read is held at.
  */
 function contractTypeOf(type: ResolvedType): TypeExpr {
-  switch (type.kind) {
+  switch (String(fieldOf(type,"kind"))) {
     case "primitive":
-      return { kind: "primitive", name: type.name };
+      return { kind: "primitive", name: fieldOf(type,"name") as PrimitiveTypeName };
     case "text":
       return { kind: "text" };
     case "list":
-      return { kind: "slice", of: contractTypeOf(type.of) };
-    case "ref":
-      return type.name === null ? ANY_REF : { kind: "ref", of: null, name: type.name };
+      return { kind: "slice", of: contractTypeOf(fieldOf(type,"of") as ResolvedType) };
+    case "ref": {
+      const name = fieldOf(type,"name") as string | null;
+      return name === null ? ANY_REF : { kind: "ref", of: null, name };
+    }
     default:
       return ANY_REF;
   }
@@ -221,7 +227,7 @@ class BodyTypes {
   /** The type a field of the reference a value is held at declares. */
   private declaredField(base: Inferred, name: string): TypeExpr | null {
     if (this.table === null || String(fieldOf(base,"kind")) !== "type") return null;
-    if (String(fieldOf(fieldOf(base,"type"),"kind")) !== "ref" || fieldOf(fieldOf(base,"type"),"name") === undefined) return null;
+    if (String(String(fieldOf(fieldOf(base,"type"),"kind"))) !== "ref" || fieldOf(fieldOf(base,"type"),"name") === undefined) return null;
     let resolved: ResolvedType;
     try {
       resolved = resolveTypeName(this.table, fieldOf(fieldOf(base,"type"),"name"));
@@ -353,11 +359,11 @@ class BodyTypes {
   }
 
   private expression(expression: Expression): Inferred {
-    switch (expression.k) {
+    switch (String(String(String(fieldOf(expression,"k"))))) {
       case "literal":
-        return { kind: "type", type: expression.boolean === true ? BOOL : F64 };
+        return { kind: "type", type: fieldOf(expression,"boolean") === true ? BOOL : F64 };
       case "bigint": {
-        const trimmed = expression.text.trim();
+        const trimmed = fieldOf(expression,"text").trim();
         let literal: bigint | null = null;
         try { literal = BigInt(trimmed); } catch { literal = null; }
         const outOfRange = literal === null || literal > 9223372036854775807n || literal < -9223372036854775808n;
@@ -366,86 +372,87 @@ class BodyTypes {
       case "null":
         return { kind: "type", type: ANY_REF };
       case "ident": {
-        const bound = this.environment.get(expression.name);
+        const bound = this.environment.get(String(fieldOf(expression,"name")));
         if (bound !== undefined) return bound;
         throw objectsError(
-          `${this.path}: ${this.functionName} uses "${expression.name}" before it is declared`,
+          `${this.path}: ${this.functionName} uses "${String(fieldOf(expression,"name"))}" before it is declared`,
           "a compiled function declares every name it uses before it uses it",
         );
       }
       case "argv":
-        if (expression.index !== null) this.expression(expression.index);
-        return { kind: "type", type: expression.index === null ? USIZE : F64 };
+        if (fieldOf(expression,"index") !== null) this.expression(fieldOf(expression,"index"));
+        return { kind: "type", type: fieldOf(expression,"index") === null ? USIZE : F64 };
       case "length":
         return { kind: "type", type: USIZE };
       case "lengthOf":
         // The value the length is of is walked: a call written there is a call
         // the body makes, and the contract states the calls the body makes.
-        this.expression(expression.of);
+        this.expression(fieldOf(expression,"of"));
         return { kind: "type", type: USIZE };
       case "index": {
-        const base = this.expression(expression.base);
-        this.expression(expression.index);
-        return { kind: "type", type: base.kind === "object" ? ANY_REF : elementOf(base) };
+        const base = this.expression(fieldOf(expression,"base"));
+        this.expression(fieldOf(expression,"index"));
+        return { kind: "type", type: String(fieldOf(base,"kind")) === "object" ? ANY_REF : elementOf(base) };
       }
       case "slice": {
-        const base = this.expression(expression.base);
-        if (expression.start !== null) this.expression(expression.start);
-        if (expression.stop !== null) this.expression(expression.stop);
-        if (expression.step !== null) this.expression(expression.step);
-        return { kind: "type", type: base.kind === "object" ? ANY_REF : (base.kind === "type" && base.type.kind === "array" ? base.type : { kind: "array", of: elementOf(base), length: null }) };
+        const base = this.expression(fieldOf(expression,"base"));
+        if (fieldOf(expression,"start") !== null) this.expression(fieldOf(expression,"start"));
+        if (fieldOf(expression,"stop") !== null) this.expression(fieldOf(expression,"stop"));
+        if (fieldOf(expression,"step") !== null) this.expression(fieldOf(expression,"step"));
+        return { kind: "type", type: String(fieldOf(base,"kind")) === "object" ? ANY_REF : (String(fieldOf(base,"kind")) === "type" && String(fieldOf(fieldOf(base,"type"),"kind")) === "array" ? fieldOf(base,"type") : { kind: "array", of: elementOf(base), length: null }) };
       }
       case "member": {
-        const base = this.expression(expression.base);
-        if (base.kind === "object") return this.field(base.key, expression.field);
+        const base = this.expression(fieldOf(expression,"base"));
+        if (String(fieldOf(base,"kind")) === "object") return this.field(fieldOf(base,"key"), fieldOf(expression,"field"));
         // The field of a reference the type table names is the type the
         // declaration gives it: `info(n).steps` is a number because `Info`
         // says its `steps` is one, and an object literal that writes the field
         // through the reference has the same shape the declaration has.
-        const declared = this.declaredField(base, expression.field);
+        const declared = this.declaredField(base, fieldOf(expression,"field"));
         if (declared !== null) return { kind: "type", type: declared };
-        if (base.kind === "type" && base.type.kind === "ref" && base.type.name !== undefined) {
-          const laid = this.layoutField?.(base.type.name, expression.field) ?? null;
+        if (String(fieldOf(base,"kind")) === "type" && String(fieldOf(fieldOf(base,"type"),"kind")) === "ref" && fieldOf(fieldOf(base,"type"),"name") !== undefined) {
+          const laid = this.layoutField?.(fieldOf(fieldOf(base,"type"),"name"), fieldOf(expression,"field")) ?? null;
           if (laid !== null) return laid;
         }
         return { kind: "type", type: ANY_REF };
       }
       case "call": {
-        const walked = expression.args.map((argument) => this.expression(argument));
+        const walked: Inferred[] = [];
+        for (const argument of fieldOf(expression,"args") as Expression[]) walked.push(this.expression(argument));
         // `BigInt(x)` of a value written out is the whole number it names, and
         // the builder that lowers the body folds it to the literal. What the
         // layout pass needs is the type it is held at, which is the type of the
         // literal the fold produces.
-        if (expression.name === "BigInt") {
-          const inferred = bigIntInferred(expression.args[0]);
+        if (String(fieldOf(expression,"name")) === "BigInt") {
+          const inferred = bigIntInferred(fieldOf(expression,"args")[0]);
           if (inferred !== null) return { kind: "type", type: inferred };
         }
         // A value the read could not settle: it is a reference here, and the
         // resolver refuses the name with the line it is written on.
-        if (expression.name.startsWith("__refused_")) {
+        if (String(fieldOf(expression,"name")).startsWith("__refused_")) {
           return { kind: "type", type: ANY_REF };
         }
         // A function the program compiles is the name the source bound; a
         // builtin of the same name is the fallback for a name it did not.
-        const directOverload = `${expression.name}__${expression.args.length}`;
-        const direct = this.callees.get(directOverload) ?? this.callees.get(expression.name);
+        const directOverload = `${String(fieldOf(expression,"name"))}__${fieldOf(expression,"args").length}`;
+        const direct = this.callees.get(directOverload) ?? this.callees.get(String(fieldOf(expression,"name")));
         if (direct !== undefined) {
-          this.call(this.callees.get(directOverload) !== undefined ? directOverload : expression.name);
+          this.call(this.callees.get(directOverload) !== undefined ? directOverload : String(fieldOf(expression,"name")));
           return { kind: "type", type: direct };
         }
         // The deep copy answers the type of the value it copies, so the layout
         // of a copied value is the layout the source wrote.
-        if (expression.name === "structuredClone" && walked.length === 1) {
+        if (String(fieldOf(expression,"name")) === "structuredClone" && walked.length === 1) {
           const held = walked[0] as { kind: "type"; type: TypeExpr } | { kind: "object"; key: unknown };
-          return held.kind === "type" ? { kind: "type", type: held.type } : { kind: "type", type: ANY_REF };
+          return String(fieldOf(held,"kind")) === "type" ? { kind: "type", type: fieldOf(held,"type") } : { kind: "type", type: ANY_REF };
         }
-        const builtin = builtinFor(expression.name);
+        const builtin = builtinFor(String(fieldOf(expression,"name")));
         if (builtin !== null) {
-          const allowed = builtin.arities ?? [builtin.arity ?? builtin.params.length];
-          if (!allowed.includes(expression.args.length)) {
+          const allowed = (fieldOf(builtin,"arities") as number[] | undefined) ?? [(fieldOf(builtin,"arity") as number | undefined) ?? (fieldOf(builtin,"params") as unknown[]).length];
+          if (!allowed.includes(fieldOf(expression,"args").length)) {
             throw objectsError(
-              `${expression.name} takes ${allowed.join(" or ")} argument${allowed.length === 1 && allowed[0] === 1 ? "" : "s"}`,
-              `${this.path}: ${this.functionName} calls it with ${expression.args.length}`,
+              `${String(fieldOf(expression,"name"))} takes ${allowed.join(" or ")} argument${allowed.length === 1 && allowed[0] === 1 ? "" : "s"}`,
+              `${this.path}: ${this.functionName} calls it with ${fieldOf(expression,"args").length}`,
             );
           }
           // A call that answers a string lays the field out as the text it is:
@@ -453,89 +460,89 @@ class BodyTypes {
           // the unshaped reference would read back as an `any` when the source
           // asked for the string the call answered. A comparison of two texts
           // is a comparison of two texts, not one of a reference and a text.
-          const answer = expression.returns ?? builtin.returns;
+          const answer = fieldOf(expression,"returns") ?? fieldOf(builtin,"returns");
           return { kind: "type", type: answer };
         }
         // A function with default parameters is callable at a shorter arity
         // through the overload the module declares for it, which is the name
         // with the count the call is written with.
-        const overloadName = `${expression.name}__${expression.args.length}`;
+        const overloadName = `${String(fieldOf(expression,"name"))}__${fieldOf(expression,"args").length}`;
         const overload = this.callees.get(overloadName);
-        const returns = overload ?? this.callees.get(expression.name);
+        const returns = overload ?? this.callees.get(String(fieldOf(expression,"name")));
         if (returns === undefined) {
           throw objectsError(
-            `${this.path}: ${this.functionName} calls "${expression.name}", which the program does not compile`,
+            `${this.path}: ${this.functionName} calls "${String(fieldOf(expression,"name"))}", which the program does not compile`,
             "a function may only call the functions of the program it is part of",
           );
         }
-        this.call(overload !== undefined ? overloadName : expression.name);
+        this.call(overload !== undefined ? overloadName : String(fieldOf(expression,"name")));
         return { kind: "type", type: returns };
       }
       case "object":
-        return { kind: "object", key: this.object(expression.fields) };
+        return { kind: "object", key: this.object(fieldOf(expression,"fields")) };
       case "fixed":
         // The number is read to write it out, so the value it is written of is
         // walked: a name it reads is a name the body has to have declared.
-        this.expression(expression.of);
+        this.expression(fieldOf(expression,"of"));
         return { kind: "type", type: F64 };
       case "sized":
         // The count is read to size the block, and the elements are the names
         // the body reaches through the array afterwards, so both are walked: a
         // count that reads an object the body has not declared yet is the same
         // fault here as anywhere else.
-        this.expression(expression.count);
-        return { kind: "type", type: { kind: "array", of: parseType(expression.element), length: null } };
+        this.expression(fieldOf(expression,"count"));
+        return { kind: "type", type: { kind: "array", of: parseType(fieldOf(expression,"element")), length: null } };
       case "buffer":
-        if (expression.view !== undefined) {
+        if (fieldOf(expression,"view") !== undefined) {
           // A window of a block another value holds is a list of the elements
           // it reaches, and the count is read from the values it was taken of.
-          this.expression(expression.view.of);
-          this.expression(expression.view.offset);
-          this.expression(expression.view.count);
-          return { kind: "type", type: { kind: "slice", of: parseType(expression.element) } };
+          this.expression(fieldOf(fieldOf(expression,"view"),"of"));
+          this.expression(fieldOf(fieldOf(expression,"view"),"offset"));
+          this.expression(fieldOf(fieldOf(expression,"view"),"count"));
+          return { kind: "type", type: { kind: "slice", of: parseType(fieldOf(expression,"element")) } };
         }
-        for (const value of expression.values) this.expression(value);
+        for (const value of fieldOf(expression,"values")) this.expression(value);
         return {
           kind: "type",
-          type: { kind: "array", of: parseType(expression.element), length: expression.values.length },
+          type: { kind: "array", of: parseType(fieldOf(expression,"element")), length: fieldOf(expression,"values").length },
         };
       case "text":
-        for (const part of expression.parts) {
-          if (part.k === "value") this.expression(part.value);
+        for (const part of fieldOf(expression,"parts")) {
+          if (String(fieldOf(part,"k")) === "value") this.expression(fieldOf(part,"value"));
         }
         return { kind: "type", type: TEXT };
       case "binary": {
-        const left = this.expression(expression.left);
-        const right = this.expression(expression.right);
-        if (COMPARISONS[expression.op] === true || LOGICAL[expression.op] === true) return { kind: "type", type: BOOL };
+        const left = this.expression(fieldOf(expression,"left"));
+        const right = this.expression(fieldOf(expression,"right"));
+        if (COMPARISONS[String(fieldOf(expression,"op"))] === true || LOGICAL[String(fieldOf(expression,"op"))] === true) return { kind: "type", type: BOOL };
         // `??` is neither a comparison nor a short circuit: it hands back one
         // of its operands, so a reference stays a reference instead of
         // becoming the double every other operator is.
-        if (expression.op === "??") return coalesce(left, right);
+        if (String(fieldOf(expression,"op")) === "??") return coalesce(left, right);
         // A list added to a list is one list, not a number: the layout a field
         // written from a list is given has to hold the array, and reading the
         // two sides as numbers shaped the field as a double.
         const sequence = (one: Inferred): boolean =>
-          one.kind === "type" && (one.type.kind === "slice" || one.type.kind === "array" || one.type.kind === "ptr");
-        if (expression.op === "+" && sequence(left) && sequence(right)) return left;
+          String(fieldOf(one,"kind")) === "type" && (String(fieldOf(fieldOf(one,"type"),"kind")) === "slice" || String(fieldOf(fieldOf(one,"type"),"kind")) === "array" || String(fieldOf(fieldOf(one,"type"),"kind")) === "ptr");
+        if (String(fieldOf(expression,"op")) === "+" && sequence(left) && sequence(right)) return left;
         return { kind: "type", type: numeric(left, right) };
       }
       case "unary": {
         // The operand is walked even for `!`, so a name it uses and an object
         // it allocates are found the way any other operand's are.
-        const operand = this.expression(expression.operand);
-        return expression.op === "!" ? { kind: "type", type: BOOL } : operand;
+        const operand = this.expression(fieldOf(expression,"operand"));
+        return String(fieldOf(expression,"op")) === "!" ? { kind: "type", type: BOOL } : operand;
       }
       case "conditional": {
-        this.expression(expression.condition);
+        this.expression(fieldOf(expression,"condition"));
         // Both branches are walked so both objects are laid out, but a choice
         // returns whichever branch it takes: the two name the same thing or
         // the function returns no one object. Reading the type off the branch
         // the source wrote last narrowed the return to an object the other
         // branch never returns, and the code reading it went past the end of
         // a smaller one.
-        const first = this.expression(expression.then);
-        const second = this.expression(expression.otherwise);
+        const first = this.expression(fieldOf(expression,"then"));
+        const second = this.expression(fieldOf(expression,"otherwise"));
         if (describe(first) === describe(second)) return first;
         // A null is the absence of a reference, and a choice of one and a
         // shaped reference is the shaped reference: the field holds a `Box*`
@@ -543,52 +550,57 @@ class BodyTypes {
         // it as the unshaped one laid the field out as a `double` and the C
         // compiler refused to put a `Box*` in it.
         const shaped = (value: Inferred): boolean =>
-          value.kind === "type" && value.type.kind === "ref" && value.type.name !== undefined;
-        if (expression.then.k === "null" && shaped(second)) return second;
-        if (expression.otherwise.k === "null" && shaped(first)) return first;
+          String(fieldOf(value,"kind")) === "type" && String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"name") !== undefined;
+        if (String(fieldOf(fieldOf(expression,"then"),"k")) === "null" && shaped(second)) return second;
+        if (String(fieldOf(fieldOf(expression,"otherwise"),"k")) === "null" && shaped(first)) return first;
         // A choice of two lists is one list: the block a name holds is a slice
         // and one written out is an array of its length, and the field that
         // holds either holds a list of the element they share. Reading it as
         // the unshaped reference laid the field out as a handle and the list
         // the other arm holds could not be stored in it.
         const sequenceArm = (value: Inferred): Extract<TypeExpr, { kind: "array" | "slice" | "ptr" }> | null =>
-          value.kind === "type" && (value.type.kind === "array" || value.type.kind === "slice" || value.type.kind === "ptr")
-            ? value.type
+          String(fieldOf(value,"kind")) === "type" && (String(fieldOf(fieldOf(value,"type"),"kind")) === "array" || String(fieldOf(fieldOf(value,"type"),"kind")) === "slice" || String(fieldOf(fieldOf(value,"type"),"kind")) === "ptr")
+            ? fieldOf(value,"type")
             : null;
         const firstList = sequenceArm(first);
         const secondList = sequenceArm(second);
-        if (firstList !== null && secondList !== null && typeToString(firstList.of) === typeToString(secondList.of)) {
-          return { kind: "type", type: { kind: "slice", of: firstList.of } };
+        if (firstList !== null && secondList !== null && typeToString(fieldOf(firstList,"of")) === typeToString(fieldOf(secondList,"of"))) {
+          return { kind: "type", type: { kind: "slice", of: fieldOf(firstList,"of") } };
         }
         return { kind: "type", type: ANY_REF };
       }
       case "update":
-        return this.environment.get(expression.name) ?? { kind: "type", type: F64 };
+        return this.environment.get(String(fieldOf(expression,"name"))) ?? { kind: "type", type: F64 };
       case "arrow":
         // An arrow is lifted into a function of the file and called by the name
         // it is bound to, so what it is laid out as is the reference every other
         // value the layout pass does not shape is. Read as a value it is a
         // closure, and the function that enters it is one this body reaches:
         // the body cannot be built without it, so it is a call the body makes.
-        if (expression.code !== undefined) this.call(expression.code);
+        if (fieldOf(expression,"code") !== undefined) this.call(fieldOf(expression,"code"));
         return { kind: "type", type: ANY_REF };
       case "capture":
         // One of the values a closure carries, read at the type the arrow that
         // captured it reads it at.
-        this.expression(expression.closure);
-        return { kind: "type", type: expression.type };
+        this.expression(fieldOf(expression,"closure"));
+        return { kind: "type", type: fieldOf(expression,"type") };
       case "invoke":
         // A call of a value: the closure is read and the arguments are read,
         // and neither names a function of the program.
-        this.expression(expression.callee);
-        for (const argument of expression.args) this.expression(argument);
-        return { kind: "type", type: expression.returns };
+        this.expression(fieldOf(expression,"callee"));
+        for (const argument of fieldOf(expression,"args")) this.expression(argument);
+        return { kind: "type", type: fieldOf(expression,"returns") };
       case "append":
         // A push or a pop is a statement, and a statement of the body is walked
         // as the write it became. Reaching here is a value nobody wrote.
         throw objectsError(
-          `${this.path}: ${this.functionName} reads the array a ${expression.op} answers`,
+          `${this.path}: ${this.functionName} reads the array a ${String(fieldOf(expression,"op"))} answers`,
           "a push and a pop change the array a name holds, and are written as statements",
+        );
+      default:
+        throw objectsError(
+          `${this.path}: ${this.functionName} has an expression of no known kind`,
+          "the layout pass walks the expressions the frontend reads",
         );
     }
   }
@@ -625,13 +637,14 @@ class BodyTypes {
    */
   private field(key: string, name: string): Inferred {
     const shape = this.registered.get(key);
-    const field = shape?.fields.find((entry) => entry.name === name);
+    const fields = shape === undefined ? [] : fieldOf(shape,"fields") as { name: string; value: Inferred }[];
+    const field = fields.find((entry) => String(fieldOf(entry,"name")) === name);
     if (field !== undefined) {
       const read = this.reads.get(key);
       if (read === undefined) this.reads.set(key, new Map([[name, 1]]));
       else read.set(name, (read.get(name) ?? 0) + 1);
     }
-    return field?.value ?? { kind: "type", type: ANY_REF };
+    return field === undefined ? { kind: "type", type: ANY_REF } : fieldOf(field,"value") as Inferred;
   }
 
   /** How often each field of each object this body reads was read. */
@@ -646,9 +659,10 @@ class BodyTypes {
   private write(key: string, name: string, value: Inferred): void {
     const shape = this.registered.get(key);
     if (shape === undefined) return;
-    const field = shape.fields.find((entry) => entry.name === name);
-    if (field === undefined) shape.fields.push({ name, value });
-    else field.value = value;
+    const fields = fieldOf(shape,"fields") as { name: string; value: Inferred }[];
+    const field = fields.find((entry) => String(fieldOf(entry,"name")) === name);
+    if (field === undefined) fields.push({ name, value });
+    else (field as Record<string, unknown>)["value"] = value;
   }
 
   /** Every object this function wrote, for the program to name. */
@@ -670,10 +684,11 @@ class BodyTypes {
     };
     const shapes = new Map<string, Shape>();
     for (const [was, shape] of this.registered) {
-      shapes.set(key(was), {
-        key: key(was),
-        fields: shape.fields.map((field) => ({ name: field.name, value: value(field.value) })),
-      });
+      const fields: { name: string; value: Inferred }[] = [];
+      for (const field of fieldOf(shape,"fields") as { name: string; value: Inferred }[]) {
+        fields.push({ name: String(fieldOf(field,"name")), value: value(fieldOf(field,"value") as Inferred) });
+      }
+      shapes.set(key(was), { key: key(was), fields });
     }
     this.registered.clear();
     for (const [at, shape] of shapes) this.registered.set(at, shape);
@@ -699,17 +714,19 @@ function wildcardShape(key: string): string {
 }
 
 export function describe(value: Inferred): string {
-  return value.kind === "object" ? `object(${value.key})` : typeToString(value.type);
+  return String(fieldOf(value,"kind")) === "object" ? `object(${String(fieldOf(value,"key"))})` : typeToString(fieldOf(value,"type") as TypeExpr);
 }
 
 export function elementOf(value: Inferred): TypeExpr {
-  if (value.kind === "object") return ANY_REF;
-  return value.type.kind === "primitive" ? value.type : elementOfType(value.type);
+  if (String(fieldOf(value,"kind")) === "object") return ANY_REF;
+  const type = fieldOf(value,"type") as TypeExpr;
+  return String(fieldOf(type,"kind")) === "primitive" ? type : elementOfType(type);
 }
 
 function elementOfType(type: TypeExpr): TypeExpr {
-  if (type.kind === "primitive" || type.kind === "ref" || type.kind === "void" || type.kind === "text") return F64;
-  return type.of ?? F64;
+  const kind = String(fieldOf(type,"kind"));
+  if (kind === "primitive" || kind === "ref" || kind === "void" || kind === "text") return F64;
+  return (fieldOf(type,"of") as TypeExpr | null) ?? F64;
 }
 
 /**
@@ -752,9 +769,14 @@ export function isWholeNumberText(text: string): boolean {
  * `f64` counter in the other, for one line of source.
  */
 export function countsWholeNumber(expression: Expression, inferred: Inferred): boolean {
-  if (expression.k === "literal") return isWholeNumberText(expression.text);
-  if (expression.k === "unary" && expression.op === "+") return countsWholeNumber(expression.operand, inferred);
-  return inferred.kind === "type" && inferred.type.kind === "primitive" && isWhole(inferred.type.name);
+  const kind = String(fieldOf(expression,"k"));
+  if (kind === "literal") return isWholeNumberText(String(fieldOf(expression,"text")));
+  if (kind === "unary" && String(fieldOf(expression,"op")) === "+") {
+    return countsWholeNumber(fieldOf(expression,"operand") as Expression, inferred);
+  }
+  const type = fieldOf(inferred,"type") as TypeExpr | undefined;
+  return String(fieldOf(inferred,"kind")) === "type" && type !== undefined &&
+    String(fieldOf(type,"kind")) === "primitive" && isWhole(fieldOf(type,"name") as PrimitiveTypeName);
 }
 
 /**
@@ -780,39 +802,39 @@ export function countsWholeNumber(expression: Expression, inferred: Inferred): b
  */
 export function bodyIsWhole(body: readonly Statement[], counter: string, whole: ReadonlySet<string>): boolean {
   for (const statement of body) {
-    switch (statement.kind) {
+    switch (String(fieldOf(statement,"kind"))) {
       case "declare":
-        if (!whole.has(statement.name) && !expressionIsWhole(statement.init, counter, whole)) return false;
+        if (!whole.has(fieldOf(statement,"name")) && !expressionIsWhole(fieldOf(statement,"init"), counter, whole)) return false;
         break;
       case "loop":
-        if (!expressionIsWhole(statement.from, counter, whole) || !expressionIsWhole(statement.to, counter, whole)) return false;
-        if (statement.step !== null && !expressionIsWhole(statement.step, counter, whole)) return false;
-        if (!bodyIsWhole(statement.body, statement.variable, whole)) return false;
+        if (!expressionIsWhole(fieldOf(statement,"from"), counter, whole) || !expressionIsWhole(fieldOf(statement,"to"), counter, whole)) return false;
+        if (fieldOf(statement,"step") !== null && !expressionIsWhole(fieldOf(statement,"step"), counter, whole)) return false;
+        if (!bodyIsWhole(fieldOf(statement,"body"), fieldOf(statement,"variable"), whole)) return false;
         break;
       case "assign":
       case "memberAssign":
-        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        if (!expressionIsWhole(fieldOf(statement,"value"), counter, whole)) return false;
         break;
       case "update":
-        if (!whole.has(statement.name)) return false;
+        if (!whole.has(fieldOf(statement,"name"))) return false;
         break;
       case "result":
-        if (statement.value !== null && !expressionIsWhole(statement.value, counter, whole)) return false;
+        if (fieldOf(statement,"value") !== null && !expressionIsWhole(fieldOf(statement,"value"), counter, whole)) return false;
         break;
       case "if":
-        if (!expressionIsWhole(statement.condition, counter, whole)) return false;
-        if (!bodyIsWhole(statement.then, counter, whole) || !bodyIsWhole(statement.otherwise, counter, whole)) return false;
+        if (!expressionIsWhole(fieldOf(statement,"condition"), counter, whole)) return false;
+        if (!bodyIsWhole(fieldOf(statement,"then"), counter, whole) || !bodyIsWhole(fieldOf(statement,"otherwise"), counter, whole)) return false;
         break;
       case "while":
       case "doWhile":
-        if (!expressionIsWhole(statement.condition, counter, whole)) return false;
-        if (!bodyIsWhole(statement.body, counter, whole)) return false;
+        if (!expressionIsWhole(fieldOf(statement,"condition"), counter, whole)) return false;
+        if (!bodyIsWhole(fieldOf(statement,"body"), counter, whole)) return false;
         break;
       case "forOf":
-        if (!bodyIsWhole(statement.body, statement.variable, whole)) return false;
+        if (!bodyIsWhole(fieldOf(statement,"body"), fieldOf(statement,"variable"), whole)) return false;
         break;
       case "print":
-        if (!expressionIsWhole(statement.value, counter, whole)) return false;
+        if (!expressionIsWhole(fieldOf(statement,"value"), counter, whole)) return false;
         break;
       default:
         break;
@@ -843,29 +865,29 @@ export function bodyIsWhole(body: readonly Statement[], counter: string, whole: 
  */
 export function bodyIgnoresCounter(body: readonly Statement[], counter: string, shadowed = false): boolean {
   for (const statement of body) {
-    switch (statement.kind) {
+    switch (String(fieldOf(statement,"kind"))) {
       case "loop": {
-        const hides = shadowed || statement.variable === counter;
-        if (expressionReads(statement.from, counter) || expressionReads(statement.to, counter)) return false;
-        if (statement.step !== null && expressionReads(statement.step, counter)) return false;
-        if (!bodyIgnoresCounter(statement.body, counter, hides)) return false;
+        const hides = shadowed || String(fieldOf(statement,"variable")) === counter;
+        if (expressionReads(fieldOf(statement,"from"), counter) || expressionReads(fieldOf(statement,"to"), counter)) return false;
+        if (fieldOf(statement,"step") !== null && expressionReads(fieldOf(statement,"step"), counter)) return false;
+        if (!bodyIgnoresCounter(fieldOf(statement,"body"), counter, hides)) return false;
         break;
       }
       case "forOf": {
-        const hides = shadowed || statement.variable === counter;
-        if (!bodyIgnoresCounter(statement.body, counter, hides)) return false;
+        const hides = shadowed || String(fieldOf(statement,"variable")) === counter;
+        if (!bodyIgnoresCounter(fieldOf(statement,"body"), counter, hides)) return false;
         break;
       }
       case "if": {
-        if (!shadowed && expressionReads(statement.condition, counter)) return false;
-        if (!bodyIgnoresCounter(statement.then, counter, shadowed)) return false;
-        if (!bodyIgnoresCounter(statement.otherwise, counter, shadowed)) return false;
+        if (!shadowed && expressionReads(fieldOf(statement,"condition"), counter)) return false;
+        if (!bodyIgnoresCounter(fieldOf(statement,"then"), counter, shadowed)) return false;
+        if (!bodyIgnoresCounter(fieldOf(statement,"otherwise"), counter, shadowed)) return false;
         break;
       }
       case "while":
       case "doWhile":
-        if (!shadowed && expressionReads(statement.condition, counter)) return false;
-        if (!bodyIgnoresCounter(statement.body, counter, shadowed)) return false;
+        if (!shadowed && expressionReads(fieldOf(statement,"condition"), counter)) return false;
+        if (!bodyIgnoresCounter(fieldOf(statement,"body"), counter, shadowed)) return false;
         break;
       case "declare":
       case "assign":
@@ -885,26 +907,26 @@ export function bodyIgnoresCounter(body: readonly Statement[], counter: string, 
 function statementIgnoresCounter(statement: Statement, counter: string, shadowed: boolean): boolean {
   if (shadowed) return true;
   const values: Expression[] = [];
-  switch (statement.kind) {
+  switch (String(fieldOf(statement,"kind"))) {
     case "declare":
-      values.push(statement.init);
+      values.push(fieldOf(statement,"init"));
       break;
     case "assign":
     case "memberAssign":
-      values.push(statement.value);
+      values.push(fieldOf(statement,"value"));
       break;
     case "result":
-      if (statement.value !== null) values.push(statement.value);
+      if (fieldOf(statement,"value") !== null) values.push(fieldOf(statement,"value"));
       break;
     case "print":
-      values.push(statement.value);
+      values.push(fieldOf(statement,"value"));
       break;
     default:
       break;
   }
   // A read of the counter is a name in one of these, and a read of the name the
   // statement writes is not one: `total = i` reads it, `i = 2` does not.
-  if (statement.kind === "assign" && statement.target === counter) {
+  if (String(fieldOf(statement,"kind")) === "assign" && String(fieldOf(statement,"target")) === counter) {
     values.length = 0;
   }
   for (const value of values) {
@@ -936,46 +958,46 @@ function statementIgnoresCounter(statement: Statement, counter: string, shadowed
  */
 export function bodyIndexesCounter(body: readonly Statement[], counter: string, shadowed = false): boolean {
   for (const statement of body) {
-    switch (statement.kind) {
+    switch (String(fieldOf(statement,"kind"))) {
       case "loop": {
-        const hides = shadowed || statement.variable === counter;
-        if (expressionReadsOutsideIndex(statement.from, counter)) return false;
-        if (expressionReadsOutsideIndex(statement.to, counter)) return false;
-        if (statement.step !== null && expressionReadsOutsideIndex(statement.step, counter)) return false;
-        if (!bodyIndexesCounter(statement.body, counter, hides)) return false;
+        const hides = shadowed || String(fieldOf(statement,"variable")) === counter;
+        if (expressionReadsOutsideIndex(fieldOf(statement,"from"), counter)) return false;
+        if (expressionReadsOutsideIndex(fieldOf(statement,"to"), counter)) return false;
+        if (fieldOf(statement,"step") !== null && expressionReadsOutsideIndex(fieldOf(statement,"step"), counter)) return false;
+        if (!bodyIndexesCounter(fieldOf(statement,"body"), counter, hides)) return false;
         break;
       }
       case "forOf": {
-        const hides = shadowed || statement.variable === counter;
-        if (!bodyIndexesCounter(statement.body, counter, hides)) return false;
+        const hides = shadowed || String(fieldOf(statement,"variable")) === counter;
+        if (!bodyIndexesCounter(fieldOf(statement,"body"), counter, hides)) return false;
         break;
       }
       case "if": {
-        if (!shadowed && expressionReadsOutsideIndex(statement.condition, counter)) return false;
-        if (!bodyIndexesCounter(statement.then, counter, shadowed)) return false;
-        if (!bodyIndexesCounter(statement.otherwise, counter, shadowed)) return false;
+        if (!shadowed && expressionReadsOutsideIndex(fieldOf(statement,"condition"), counter)) return false;
+        if (!bodyIndexesCounter(fieldOf(statement,"then"), counter, shadowed)) return false;
+        if (!bodyIndexesCounter(fieldOf(statement,"otherwise"), counter, shadowed)) return false;
         break;
       }
       case "while":
       case "doWhile":
-        if (!shadowed && expressionReadsOutsideIndex(statement.condition, counter)) return false;
-        if (!bodyIndexesCounter(statement.body, counter, shadowed)) return false;
+        if (!shadowed && expressionReadsOutsideIndex(fieldOf(statement,"condition"), counter)) return false;
+        if (!bodyIndexesCounter(fieldOf(statement,"body"), counter, shadowed)) return false;
         break;
       case "indexAssign": {
         // The counter may be the index the element is written at. The buffer it
         // is written into is a name and not a read of the counter, and the value
         // written is an ordinary value.
         if (!shadowed) {
-          const at = statement.index;
-          if (!(at.k === "ident" && at.name === counter) && expressionReads(at, counter)) return false;
-          if (expressionReadsOutsideIndex(statement.value, counter)) return false;
+          const at = fieldOf(statement,"index") as Expression;
+          if (!(String(fieldOf(at,"k")) === "ident" && String(fieldOf(at,"name")) === counter) && expressionReads(at, counter)) return false;
+          if (expressionReadsOutsideIndex(fieldOf(statement,"value"), counter)) return false;
         }
         break;
       }
       case "try": {
-        if (!bodyIndexesCounter(statement.body, counter, shadowed)) return false;
-        if (statement.catchBody !== null && !bodyIndexesCounter(statement.catchBody, counter, shadowed)) return false;
-        if (statement.finallyBody !== null && !bodyIndexesCounter(statement.finallyBody, counter, shadowed)) return false;
+        if (!bodyIndexesCounter(fieldOf(statement,"body"), counter, shadowed)) return false;
+        if (fieldOf(statement,"catchBody") !== null && !bodyIndexesCounter(fieldOf(statement,"catchBody"), counter, shadowed)) return false;
+        if (fieldOf(statement,"finallyBody") !== null && !bodyIndexesCounter(fieldOf(statement,"finallyBody"), counter, shadowed)) return false;
         break;
       }
       case "declare":
@@ -998,20 +1020,20 @@ export function bodyIndexesCounter(body: readonly Statement[], counter: string, 
 function statementIndexesCounter(statement: Statement, counter: string, shadowed: boolean): boolean {
   if (shadowed) return true;
   const values: Expression[] = [];
-  switch (statement.kind) {
+  switch (String(fieldOf(statement,"kind"))) {
     case "declare":
-      values.push(statement.init);
+      values.push(fieldOf(statement,"init"));
       break;
     case "assign":
     case "memberAssign":
-      values.push(statement.value);
+      values.push(fieldOf(statement,"value"));
       break;
     case "result":
-      if (statement.value !== null) values.push(statement.value);
+      if (fieldOf(statement,"value") !== null) values.push(fieldOf(statement,"value"));
       break;
     case "print":
     case "expression":
-      values.push(statement.value);
+      values.push(fieldOf(statement,"value"));
       break;
     default:
       break;
@@ -1022,8 +1044,8 @@ function statementIndexesCounter(statement: Statement, counter: string, shadowed
   // A statement that writes the counter writes a number of the width the
   // counter is counted in, and a whole number written into a double counter is
   // a number the source never wrote.
-  if (statement.kind === "assign" && statement.target === counter) return false;
-  if (statement.kind === "update" && statement.name === counter) return false;
+  if (String(fieldOf(statement,"kind")) === "assign" && String(fieldOf(statement,"target")) === counter) return false;
+  if (String(fieldOf(statement,"kind")) === "update" && String(fieldOf(statement,"name")) === counter) return false;
   return true;
 }
 
@@ -1035,37 +1057,43 @@ function statementIndexesCounter(statement: Statement, counter: string, shadowed
  * a value.
  */
 function expressionReadsOutsideIndex(expression: Expression, counter: string): boolean {
-  switch (expression.k) {
+  switch (String(fieldOf(expression,"k"))) {
     case "ident":
-      return expression.name === counter;
+      return String(fieldOf(expression,"name")) === counter;
     case "update":
-      return expression.name === counter;
+      return String(fieldOf(expression,"name")) === counter;
     case "index": {
-      if (expression.index.k === "ident" && expression.index.name === counter) {
-        return expressionReadsOutsideIndex(expression.base, counter);
+      if (String(fieldOf(fieldOf(expression,"index"),"k")) === "ident" && String(fieldOf(fieldOf(expression,"index"),"name")) === counter) {
+        return expressionReadsOutsideIndex(fieldOf(expression,"base"), counter);
       }
-      return expressionReads(expression.base, counter) || expressionReads(expression.index, counter);
+      return expressionReads(fieldOf(expression,"base"), counter) || expressionReads(fieldOf(expression,"index"), counter);
     }
     case "unary":
-      return expressionReadsOutsideIndex(expression.operand, counter);
+      return expressionReadsOutsideIndex(fieldOf(expression,"operand"), counter);
     case "binary":
       return (
-        expressionReadsOutsideIndex(expression.left, counter) || expressionReadsOutsideIndex(expression.right, counter)
+        expressionReadsOutsideIndex(fieldOf(expression,"left"), counter) || expressionReadsOutsideIndex(fieldOf(expression,"right"), counter)
       );
     case "conditional":
       return (
-        expressionReadsOutsideIndex(expression.condition, counter) ||
-        expressionReadsOutsideIndex(expression.then, counter) ||
-        expressionReadsOutsideIndex(expression.otherwise, counter)
+        expressionReadsOutsideIndex(fieldOf(expression,"condition"), counter) ||
+        expressionReadsOutsideIndex(fieldOf(expression,"then"), counter) ||
+        expressionReadsOutsideIndex(fieldOf(expression,"otherwise"), counter)
       );
     case "member":
-      return expressionReadsOutsideIndex(expression.base, counter);
+      return expressionReadsOutsideIndex(fieldOf(expression,"base"), counter);
     case "call":
-      return expression.args.some((argument) => expressionReadsOutsideIndex(argument, counter));
+      for (const argument of fieldOf(expression,"args") as Expression[]) {
+        if (expressionReadsOutsideIndex(argument, counter)) return true;
+      }
+      return false;
     case "argv":
-      return expression.index === null ? false : expressionReadsOutsideIndex(expression.index, counter);
+      return fieldOf(expression,"index") === null ? false : expressionReadsOutsideIndex(fieldOf(expression,"index"), counter);
     case "object":
-      return expression.fields.some((field) => expressionReadsOutsideIndex(field.value, counter));
+      for (const field of fieldOf(expression,"fields") as { value: Expression }[]) {
+        if (expressionReadsOutsideIndex(fieldOf(field,"value") as Expression, counter)) return true;
+      }
+      return false;
     default:
       return false;
   }
@@ -1073,36 +1101,42 @@ function expressionReadsOutsideIndex(expression: Expression, counter: string): b
 
 /** Whether an expression reads a name, wherever in it the name appears. */
 function expressionReads(expression: Expression, counter: string): boolean {
-  switch (expression.k) {
+  switch (String(fieldOf(expression,"k"))) {
     case "ident":
-      return expression.name === counter;
+      return String(fieldOf(expression,"name")) === counter;
     case "unary":
-      return expressionReads(expression.operand, counter);
+      return expressionReads(fieldOf(expression,"operand"), counter);
     case "binary":
-      return expressionReads(expression.left, counter) || expressionReads(expression.right, counter);
+      return expressionReads(fieldOf(expression,"left"), counter) || expressionReads(fieldOf(expression,"right"), counter);
     case "conditional":
       return (
-        expressionReads(expression.condition, counter) ||
-        expressionReads(expression.then, counter) ||
-        expressionReads(expression.otherwise, counter)
+        expressionReads(fieldOf(expression,"condition"), counter) ||
+        expressionReads(fieldOf(expression,"then"), counter) ||
+        expressionReads(fieldOf(expression,"otherwise"), counter)
       );
     case "index":
-      return expressionReads(expression.base, counter) || expressionReads(expression.index, counter);
+      return expressionReads(fieldOf(expression,"base"), counter) || expressionReads(fieldOf(expression,"index"), counter);
     case "slice":
       return (
-        expressionReads(expression.base, counter) ||
-        (expression.start !== null && expressionReads(expression.start, counter)) ||
-        (expression.stop !== null && expressionReads(expression.stop, counter)) ||
-        (expression.step !== null && expressionReads(expression.step, counter))
+        expressionReads(fieldOf(expression,"base"), counter) ||
+        (fieldOf(expression,"start") !== null && expressionReads(fieldOf(expression,"start"), counter)) ||
+        (fieldOf(expression,"stop") !== null && expressionReads(fieldOf(expression,"stop"), counter)) ||
+        (fieldOf(expression,"step") !== null && expressionReads(fieldOf(expression,"step"), counter))
       );
     case "member":
-      return expressionReads(expression.base, counter);
+      return expressionReads(fieldOf(expression,"base"), counter);
     case "call":
-      return expression.args.some((argument) => expressionReads(argument, counter));
+      for (const argument of fieldOf(expression,"args") as Expression[]) {
+        if (expressionReads(argument, counter)) return true;
+      }
+      return false;
     case "argv":
-      return expression.index === null ? false : expressionReads(expression.index, counter);
+      return fieldOf(expression,"index") === null ? false : expressionReads(fieldOf(expression,"index"), counter);
     case "object":
-      return expression.fields.some((field) => expressionReads(field.value, counter));
+      for (const field of fieldOf(expression,"fields") as { value: Expression }[]) {
+        if (expressionReads(fieldOf(field,"value") as Expression, counter)) return true;
+      }
+      return false;
     default:
       return false;
   }
@@ -1110,40 +1144,40 @@ function expressionReads(expression: Expression, counter: string): boolean {
 
 /** Whether an expression is written entirely in whole numbers. */
 function expressionIsWhole(expression: Expression, counter: string, whole: ReadonlySet<string>): boolean {
-  switch (expression.k) {
+  switch (String(fieldOf(expression,"k"))) {
     case "literal":
-      return isWholeNumberText(expression.text);
+      return isWholeNumberText(fieldOf(expression,"text"));
     case "bigint":
       return true;
     case "ident":
-      return expression.name === counter || whole.has(expression.name);
+      return String(fieldOf(expression,"name")) === counter || whole.has(fieldOf(expression,"name"));
     case "unary":
-      return expressionIsWhole(expression.operand, counter, whole);
+      return expressionIsWhole(fieldOf(expression,"operand"), counter, whole);
     case "conditional":
       return (
-        expressionIsWhole(expression.condition, counter, whole) &&
-        expressionIsWhole(expression.then, counter, whole) &&
-        expressionIsWhole(expression.otherwise, counter, whole)
+        expressionIsWhole(fieldOf(expression,"condition"), counter, whole) &&
+        expressionIsWhole(fieldOf(expression,"then"), counter, whole) &&
+        expressionIsWhole(fieldOf(expression,"otherwise"), counter, whole)
       );
     case "binary":
       // A division and a power over whole numbers are not whole numbers: `100
       // / i` is a double whatever both sides are, and it is read as one, so a
       // body that divides is not a body written entirely in whole numbers.
-      if (expression.op === "/" || expression.op === "%" || expression.op === "**") return false;
-      return expressionIsWhole(expression.left, counter, whole) && expressionIsWhole(expression.right, counter, whole);
+      if (String(fieldOf(expression,"op")) === "/" || String(fieldOf(expression,"op")) === "%" || String(fieldOf(expression,"op")) === "**") return false;
+      return expressionIsWhole(fieldOf(expression,"left"), counter, whole) && expressionIsWhole(fieldOf(expression,"right"), counter, whole);
     case "index":
-      return expressionIsWhole(expression.base, counter, whole) && expressionIsWhole(expression.index, counter, whole);
+      return expressionIsWhole(fieldOf(expression,"base"), counter, whole) && expressionIsWhole(fieldOf(expression,"index"), counter, whole);
     case "slice":
       return (
-        expressionIsWhole(expression.base, counter, whole) &&
-        (expression.start === null || expressionIsWhole(expression.start, counter, whole)) &&
-        (expression.stop === null || expressionIsWhole(expression.stop, counter, whole)) &&
-        (expression.step === null || expressionIsWhole(expression.step, counter, whole))
+        expressionIsWhole(fieldOf(expression,"base"), counter, whole) &&
+        (fieldOf(expression,"start") === null || expressionIsWhole(fieldOf(expression,"start"), counter, whole)) &&
+        (fieldOf(expression,"stop") === null || expressionIsWhole(fieldOf(expression,"stop"), counter, whole)) &&
+        (fieldOf(expression,"step") === null || expressionIsWhole(fieldOf(expression,"step"), counter, whole))
       );
     case "member":
-      return expressionIsWhole(expression.base, counter, whole);
+      return expressionIsWhole(fieldOf(expression,"base"), counter, whole);
     case "argv":
-      return expression.index === null || expressionIsWhole(expression.index, counter, whole);
+      return fieldOf(expression,"index") === null || expressionIsWhole(fieldOf(expression,"index"), counter, whole);
     default:
       // A call hands back whatever it returns and an object and a string are
       // not numbers at all, so a body that has one is not a body written
@@ -1159,14 +1193,24 @@ function expressionIsWhole(expression: Expression, counter: string, whole: Reado
  * target multiplies two single-precision values in single precision. Anything
  * else is a double, which is what a number is until a use fixes it.
  */
+function inferredType(value: Inferred): TypeExpr | null {
+  return String(fieldOf(value,"kind")) === "type" ? fieldOf(value,"type") as TypeExpr : null;
+}
+
 export function numeric(left: Inferred, right: Inferred): TypeExpr {
   // A wide number keeps its width, for the same reason a machine word does
   // below it: the rule this function ends on is a double because a double holds
   // every value a program counts with, and a value wider than a machine word is
   // not one of them. Narrowing here would drop every limb above the first
   // before a backend is handed the expression at all.
-  if (left.kind === "type" && left.type.kind === "primitive" && isWide(left.type.name)) return left.type;
-  if (right.kind === "type" && right.type.kind === "primitive" && isWide(right.type.name)) return right.type;
+  const leftType = inferredType(left);
+  const rightType = inferredType(right);
+  const leftKind = leftType === null ? "" : String(fieldOf(leftType,"kind"));
+  const rightKind = rightType === null ? "" : String(fieldOf(rightType,"kind"));
+  const leftName = leftType === null ? "" : String(fieldOf(leftType,"name"));
+  const rightName = rightType === null ? "" : String(fieldOf(rightType,"name"));
+  if (leftKind === "primitive" && isWide(leftName as PrimitiveTypeName)) return leftType as TypeExpr;
+  if (rightKind === "primitive" && isWide(rightName as PrimitiveTypeName)) return rightType as TypeExpr;
   // An `i64` is kept beside another whole number, which is the `i64` a bigint
   // is: `2n * 3n` is computed at sixty-four bits because both of its sides
   // are. It is not kept beside a double, because an `i64` is not only a
@@ -1174,14 +1218,14 @@ export function numeric(left: Inferred, right: Inferred): TypeExpr {
   // the resolver cannot type more precisely is an `i64`. So `i + 0.5` inside a
   // loop was answered at sixty-four bits, and the half was dropped before any
   // backend saw it: the array it was written into held `i`.
-  const leftWhole = left.kind === "type" && left.type.kind === "primitive" && left.type.name === "i64";
-  const rightWhole = right.kind === "type" && right.type.kind === "primitive" && right.type.name === "i64";
-  const leftFloat = left.kind === "type" && left.type.kind === "primitive" && isFloatType(left.type.name);
-  const rightFloat = right.kind === "type" && right.type.kind === "primitive" && isFloatType(right.type.name);
+  const leftWhole = leftKind === "primitive" && leftName === "i64";
+  const rightWhole = rightKind === "primitive" && rightName === "i64";
+  const leftFloat = leftKind === "primitive" && isFloatType(leftName as PrimitiveTypeName);
+  const rightFloat = rightKind === "primitive" && isFloatType(rightName as PrimitiveTypeName);
   if (leftWhole && !rightFloat) return I64;
   if (rightWhole && !leftFloat) return I64;
-  if (left.kind === "type" && left.type.kind === "primitive" && right.kind === "type" && right.type.kind === "primitive") {
-    if (isFloatType(left.type.name) && left.type.name === right.type.name) return left.type;
+  if (leftKind === "primitive" && rightKind === "primitive") {
+    if (isFloatType(leftName as PrimitiveTypeName) && leftName === rightName) return leftType as TypeExpr;
   }
   return F64;
 }
@@ -1192,7 +1236,7 @@ export function numeric(left: Inferred, right: Inferred): TypeExpr {
  * and the `any` the source declared — says nothing, and takes the right.
  */
 export function coalesce(left: Inferred, right: Inferred): Inferred {
-  if (left.kind === "object") return left;
+  if (String(fieldOf(left,"kind")) === "object") return left;
   if (saysNothing(left)) return right;
   return left;
 }
@@ -1203,12 +1247,16 @@ export function coalesce(left: Inferred, right: Inferred): Inferred {
  * reference names an object, so it says something.
  */
 export function saysNothing(value: Inferred): boolean {
-  return value.kind === "type" && value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+  const type = fieldOf(value,"type") as TypeExpr | undefined;
+  return String(fieldOf(value,"kind")) === "type" && type !== undefined &&
+    String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined;
 }
 
 /** A reference that says nothing about what it points at: `null`, or an `any`. */
 function unshapedReference(value: Inferred): boolean {
-  return value.kind === "type" && value.type.kind === "ref" && value.type.of === null;
+  const type = fieldOf(value,"type") as TypeExpr | undefined;
+  return String(fieldOf(value,"kind")) === "type" && type !== undefined &&
+    String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null;
 }
 
 /**
@@ -1229,23 +1277,40 @@ function unshapedReference(value: Inferred): boolean {
  * give one field a type that describes a layout neither of the two has.
  */
 function sameShape(left: Shape, right: Shape): boolean {
-  if (left.fields.length !== right.fields.length) return false;
+  const leftFields = fieldOf(left,"fields") as { name: string; value: Inferred }[];
+  const rightFields = fieldOf(right,"fields") as { name: string; value: Inferred }[];
+  if (leftFields.length !== rightFields.length) return false;
   // A pair record is a generated shape with exactly two fields. Its two sides
   // are two values of their own kinds: an unknown reference on one side is the
   // shaped reference the other literal wrote, but it is not a number or a
   // list, so pairs with different field kinds stay apart.
-  const pair = left.fields.length === 2 &&
-    left.fields.some((field) => field.name === "first") &&
-    left.fields.some((field) => field.name === "second");
-  return left.fields.every((field) => {
-    const known = right.fields.find((entry) => entry.name === field.name);
+  const pair = leftFields.length === 2 &&
+    leftFields.some((field) => String(fieldOf(field,"name")) === "first") &&
+    leftFields.some((field) => String(fieldOf(field,"name")) === "second");
+  for (const field of leftFields) {
+    const fieldName = String(fieldOf(field,"name"));
+    const known = rightFields.find((entry) => String(fieldOf(entry,"name")) === fieldName);
     if (known === undefined) return false;
-    if (describe(known.value) === describe(field.value)) return true;
-    if (!pair) return unshapedReference(known.value) || unshapedReference(field.value);
-    if (unshapedReference(known.value)) return field.value.kind === "type" && field.value.type.kind === "ref";
-    if (unshapedReference(field.value)) return known.value.kind === "type" && known.value.type.kind === "ref";
+    const fieldValue = fieldOf(field,"value") as Inferred;
+    const knownValue = fieldOf(known,"value") as Inferred;
+    if (describe(knownValue) === describe(fieldValue)) continue;
+    if (!pair) {
+      if (unshapedReference(knownValue) || unshapedReference(fieldValue)) continue;
+      return false;
+    }
+    if (unshapedReference(knownValue)) {
+      const type = fieldOf(fieldValue,"type") as TypeExpr | undefined;
+      if (String(fieldOf(fieldValue,"kind")) === "type" && type !== undefined && String(fieldOf(type,"kind")) === "ref") continue;
+      return false;
+    }
+    if (unshapedReference(fieldValue)) {
+      const type = fieldOf(knownValue,"type") as TypeExpr | undefined;
+      if (String(fieldOf(knownValue,"kind")) === "type" && type !== undefined && String(fieldOf(type,"kind")) === "ref") continue;
+      return false;
+    }
     return false;
-  });
+  }
+  return true;
 }
 
 /**
@@ -1262,8 +1327,12 @@ function sameShape(left: Shape, right: Shape): boolean {
  */
 function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
   const keys = [...shapes.keys()];
-  const parent = new Map<string, string>(keys.map((key) => [key, key]));
-  const members = new Map<string, string[]>(keys.map((key) => [key, [key]]));
+  const parent = new Map<string, string>();
+  const members = new Map<string, string[]>();
+  for (const key of keys) {
+    parent.set(key, key);
+    members.set(key, [key]);
+  }
   const find = (key: string): string => {
     let root = key;
     while (parent.get(root) !== root) root = parent.get(root) as string;
@@ -1286,8 +1355,8 @@ function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
       // group answers to, so a field that is a reference in one literal and a
       // null in the other is a reference afterwards: a null is a value any
       // reference can hold, so reading it as the reference says nothing false.
-      const firstShaped = first.fields.some((field) => !unshapedReference(field.value));
-      const secondShaped = second.fields.some((field) => !unshapedReference(field.value));
+      const firstShaped = (fieldOf(first,"fields") as { value: Inferred }[]).some((field) => !unshapedReference(fieldOf(field,"value") as Inferred));
+      const secondShaped = (fieldOf(second,"fields") as { value: Inferred }[]).some((field) => !unshapedReference(fieldOf(field,"value") as Inferred));
       // The relation is not transitive: a shape that says nothing about a
       // reference is the same as either of two shaped ones, and the shaped
       // ones are not the same as each other. A union is made only where every
@@ -1317,7 +1386,9 @@ function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
       members.delete(gone);
     }
   }
-  return new Map(keys.map((key) => [key, find(key)]));
+  const result = new Map<string, string>();
+  for (const key of keys) result.set(key, find(key));
+  return result;
 }
 
 /**
@@ -1327,6 +1398,14 @@ function uniteShapes(shapes: Map<string, Shape>): Map<string, string> {
  * body built and read its fields at the offsets it contracted — and a field
  * the two give different types is a layout this cannot state.
  */
+function shapeField(name: string, value: Inferred): { name: string; value: Inferred } {
+  return { name, value };
+}
+
+function shapeFields(shape: Shape): { name: string; value: Inferred }[] {
+  return fieldOf(shape,"fields") as { name: string; value: Inferred }[];
+}
+
 function mergeProgramShapes(
   shapes: Map<string, Shape>,
   owners: Map<string, string>,
@@ -1334,20 +1413,27 @@ function mergeProgramShapes(
 ): void {
   for (const [key, shape] of programShapes) {
     const existing = shapes.get(key);
+    const incoming = shapeFields(shape);
     if (existing === undefined) {
-      shapes.set(key, { key, fields: shape.fields.map((field) => ({ ...field })) });
+      const fields: { name: string; value: Inferred }[] = [];
+      for (const field of incoming) fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
+      shapes.set(key, { key, fields });
       owners.set(key, "the program body");
       continue;
     }
-    for (const field of shape.fields) {
-      const known = existing.fields.find((entry) => entry.name === field.name);
+    const existingFields = shapeFields(existing);
+    for (const field of incoming) {
+      const fieldName = String(fieldOf(field,"name"));
+      const fieldValue = fieldOf(field,"value") as Inferred;
+      const known = existingFields.find((entry) => String(fieldOf(entry,"name")) === fieldName);
       if (known === undefined) {
-        existing.fields.push({ name: field.name, value: field.value });
+        existingFields.push(shapeField(fieldName, fieldValue));
         continue;
       }
-      if (describe(known.value) === describe(field.value)) continue;
+      const knownValue = fieldOf(known,"value") as Inferred;
+      if (describe(knownValue) === describe(fieldValue)) continue;
       throw objectsError(
-        `the program body writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,
+        `the program body writes "${fieldName}" as ${describe(fieldValue)}, which ${owners.get(key)} has it as ${describe(knownValue)}`,
         "an object is one object to the program, so one field holds one type; write the field in the literal so the two objects have different shapes",
       );
     }
@@ -1367,38 +1453,49 @@ function mergeProgramShapes(
 function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, body: BodyTypes): void {
   for (const [key, shape] of body.registered) {
     const existing = shapes.get(key);
+    const incoming = shapeFields(shape);
     if (existing === undefined) {
-      shapes.set(key, { key, fields: shape.fields.map((field) => ({ ...field })) });
+      const fields: { name: string; value: Inferred }[] = [];
+      for (const field of incoming) {
+        fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
+      }
+      shapes.set(key, { key, fields });
       owners.set(key, body.functionName);
       continue;
     }
-    for (const field of shape.fields) {
-      const known = existing.fields.find((entry) => entry.name === field.name);
+    const existingFields = shapeFields(existing);
+    for (const field of incoming) {
+      const fieldName = String(fieldOf(field,"name"));
+      const fieldValue = fieldOf(field,"value") as Inferred;
+      const known = existingFields.find((entry) => String(fieldOf(entry,"name")) === fieldName);
       if (known === undefined) {
-        existing.fields.push({ name: field.name, value: field.value });
+        existingFields.push(shapeField(fieldName, fieldValue));
         continue;
       }
-      if (describe(known.value) === describe(field.value)) continue;
+      const knownValue = fieldOf(known,"value") as Inferred;
+      if (describe(knownValue) === describe(fieldValue)) continue;
       // A shape the fold has already unified with one that says what its
       // reference points at holds the shaped field, and the unshaped reference
       // the key was written from is the same reference: a body read again in a
       // later round writes the key it wrote before.
-      if (unshapedReference(field.value)) continue;
-      if (unshapedReference(known.value)) {
-        known.value = field.value;
+      if (unshapedReference(fieldValue)) continue;
+      if (unshapedReference(knownValue)) {
+        (known as Record<string, unknown>)["value"] = fieldValue;
         continue;
       }
       // A nested object that differs only where one of its own fields says
       // nothing about the reference it points at is the same object: keep the
       // nested type that names the layout.
-      if (field.value.kind === "object" && known.value.kind === "object") {
-        if (wildcardShape(field.value.key) === wildcardShape(known.value.key)) {
-          if (known.value.key.includes("ref<any>")) known.value = field.value;
+      if (String(fieldOf(fieldValue,"kind")) === "object" && String(fieldOf(knownValue,"kind")) === "object") {
+        const fieldKey = String(fieldOf(fieldValue,"key"));
+        const knownKey = String(fieldOf(knownValue,"key"));
+        if (wildcardShape(fieldKey) === wildcardShape(knownKey)) {
+          if (knownKey.includes("ref<any>")) (known as Record<string, unknown>)["value"] = fieldValue;
           continue;
         }
       }
       throw objectsError(
-        `${body.path}: ${body.functionName} writes "${field.name}" as ${describe(field.value)}, which ${owners.get(key)} has it as ${describe(known.value)}`,
+        `${body.path}: ${body.functionName} writes "${fieldName}" as ${describe(fieldValue)}, which ${owners.get(key)} has it as ${describe(knownValue)}`,
         "an object is one object to the program, so one field holds one type; write the field in the literal so the two objects have different shapes",
       );
     }
