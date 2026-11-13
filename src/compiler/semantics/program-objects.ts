@@ -20,7 +20,7 @@
  */
 import type { ProgramBody, ProgramStatement, ProgramValue } from "./module.ts";
 import type { Inferred, Shape } from "./objects.ts";
-import { ANY_REF, BOOL, F64, I64, describe } from "./objects.ts";
+import { ANY_REF, BOOL, F64, I64, addShapeTags, describe } from "./objects.ts";
 
 /** Every object literal the pass could read, and the key it was filed under. */
 export type LiteralKeys = ReadonlyMap<ProgramValue & { k: "object" }, string>;
@@ -46,6 +46,12 @@ export type HeldType = (name: string) => Inferred | null;
  * left out, and the read of its layout is refused where the body writes it,
  * which is where a missing name can be said rather than commented about.
  */
+/** The text a program literal writes into a field, where it is written out. */
+function writtenTag(value: ProgramValue): string | null {
+  if (value.k !== "text" || value.parts.length !== 1 || value.parts[0].k !== "text") return null;
+  return value.parts[0].value;
+}
+
 function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred | null {
   switch (value.k) {
     case "number":
@@ -72,7 +78,7 @@ function fieldType(value: ProgramValue, held: HeldType, name?: string): Inferred
     // is how the backends carry one: the field is a reference to the text, and
     // the reader of the literal handles the value it points at.
     case "text":
-      return { kind: "type", type: ANY_REF };
+      return { kind: "type", type: { kind: "text" } };
     // A name is a field of whatever the name holds, which is its own
     // declaration's answer: a literal is the shape it was written at, and a
     // reference nothing was written from is a reference of no shape — the same
@@ -358,14 +364,19 @@ class Walk {
 
   private shapeOf(value: ProgramValue & { k: "object" }): Shape | null {
     const fields: { name: string; value: Inferred }[] = [];
+    const tags: Record<string, string> = {};
     for (const field of expandedFields(value)) {
       const inferred = this.fieldOf(field.value, field.name);
       if (inferred === null) {
         return null;
       }
       fields.push({ name: field.name, value: inferred });
+      const tag = writtenTag(field.value);
+      if (tag !== null) tags[field.name] = tag;
     }
-    return { key: this.keyOf(value), fields };
+    const shape: Shape = { key: this.keyOf(value), fields };
+    if (Object.keys(tags).length > 0) addShapeTags(shape, tags);
+    return shape;
   }
 
   /** What one field of a literal holds, read with the names in scope. */

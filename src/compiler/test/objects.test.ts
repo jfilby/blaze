@@ -872,6 +872,40 @@ test("two layouts that hold a field differently are refused by name", () => {
   assert.match(message, /reads or writes "ref<any>\.left", which Object1 and Object2 could each be a field of/);
 });
 
+test("a field read in a tag branch is the arm's layout", () => {
+  // A union of records is discriminated by the tag it writes. The branch that
+  // tests the tag reads a field only its arm has, and the layout that arm
+  // writes is the one the read names: the branch around it narrowed the union.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "1.ts": [
+        "interface Text { kind: `text`; parts: string[] }",
+        "interface Block { kind: `block`; values: number[] }",
+        "function read(value: Text | Block): number {",
+        "  switch (value.kind) {",
+        "    case `text`: return value.parts.length;",
+        "    default: return value.values.length;",
+        "  }",
+        "}",
+        "console.log(read({ kind: `text`, parts: [] }));",
+        "console.log(read({ kind: `block`, values: [] }));",
+        "",
+      ].join("\n"),
+    },
+    "1.ts",
+  );
+  const contract = phase.program.files[0]?.functions["read"];
+  assert.ok(contract !== undefined);
+  const resolved = resolveFunction(contract, {
+    objectNames: phase.objectNames,
+    functions: phase.program.files[0]?.functions ?? {},
+  });
+  const text = printSemanticFunction(resolved);
+  assert.match(text, /load_field\[\[\]f64\] local\[ref<any>\] value Object1 parts/);
+  assert.match(text, /load_field\[\[\]f64\] local\[ref<any>\] value Object2 values/);
+});
+
 test("a field no layout holds still answers the reference itself", () => {
   // Nothing the program lays out says what is behind the reference, so the
   // only value the IR can name is the reference — which is what a body that

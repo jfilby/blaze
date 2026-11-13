@@ -111,6 +111,11 @@ import {
   VOID,
 } from "../core/semantic-ir.ts";
 
+/** One field of a value read by its name, where the type names no shape. */
+function fieldOfValue(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /* -------------------------------------------------------------------------- */
 /* What a function body needs from the program around it                       */
 /* -------------------------------------------------------------------------- */
@@ -339,6 +344,14 @@ interface BlockFrame {
   body: boolean;
 }
 
+/** The arm of a discriminated union a tag test settles a name to. */
+interface Narrowing {
+  name: string;
+  field: string;
+  value: string;
+  negated?: boolean;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The body                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -359,6 +372,9 @@ class FunctionBody {
 
   private readonly frames: BlockFrame[] = [];
   private readonly scopes: Map<string, Held>[] = [new Map()];
+  private readonly narrowings: Map<string, { field: string; value: string; negated?: boolean }>[] = [new Map()];
+  /** The name a switch discriminant was copied from. */
+  private readonly tagAliases = new Map<string, { base: string; field: string }>();
   /** The names the body holds, so a generated one is not one of them. */
   private readonly used: Set<string>;
   /** Every object the body wrote, as the layout pass knows them. */
@@ -459,10 +475,12 @@ class FunctionBody {
 
   private open(): void {
     this.scopes.push(new Map());
+    this.narrowings.push(new Map());
   }
 
   private close(): void {
     this.scopes.pop();
+    this.narrowings.pop();
   }
 
   /**
@@ -527,6 +545,64 @@ class FunctionBody {
     this.pending = [];
   }
 
+  /** The arm a tag test settles a name to in the branch that holds. */
+  private tagTest(condition: Expression): Narrowing | null {
+    if (String(fieldOfValue(condition, "k")) !== "binary") return null;
+    const op = String(fieldOfValue(condition, "op"));
+    if (op !== "===" && op !== "==" && op !== "!==" && op !== "!=") return null;
+    let subject = fieldOfValue(condition, "left") as Expression;
+    let test = fieldOfValue(condition, "right") as Expression;
+    if (this.tagSubject(subject) === null) {
+      subject = fieldOfValue(condition, "right") as Expression;
+      test = fieldOfValue(condition, "left") as Expression;
+    }
+    const tag = this.tagSubject(subject);
+    if (tag === null) return null;
+    const literal = this.tagLiteral(test);
+    if (literal === null) return null;
+    return { name: tag.name, field: tag.field, value: literal, negated: op === "!==" || op === "!=" };
+  }
+
+  /** The name and field a tag test reads, including a switch temporary. */
+  private tagSubject(expression: Expression): { name: string; field: string } | null {
+    if (String(fieldOfValue(expression, "k")) !== "ident") return null;
+    let name = String(fieldOfValue(expression, "name"));
+    let field: string | null = null;
+    for (let at = 0; at < 4; at += 1) {
+      const alias = this.tagAliases.get(name);
+      if (alias === undefined) break;
+      name = alias.base;
+      field = alias.field;
+    }
+    return field === null ? null : { name, field };
+  }
+
+  /** The text a tag is compared with, where the source wrote it out. */
+  private tagLiteral(expression: Expression): string | null {
+    const kind = String(fieldOfValue(expression, "k"));
+    if (kind === "text") {
+      const parts = fieldOfValue(expression, "parts") as readonly Expression[];
+      if (parts.length !== 1) return null;
+      const part = parts[0];
+      if (String(fieldOfValue(part, "k")) !== "text") return null;
+      return String(fieldOfValue(part, "value"));
+    }
+    if (kind === "literal") {
+      const text = String(fieldOfValue(expression, "text"));
+      if (!NUMBER_TEXT.test(text)) return text;
+    }
+    return null;
+  }
+
+  /** The arm a name is known to hold where the body is written. */
+  private narrowingFor(name: string): { field: string; value: string; negated?: boolean } | null {
+    for (let at = this.narrowings.length - 1; at >= 0; at -= 1) {
+      const held = this.narrowings[at].get(name);
+      if (held !== undefined) return held;
+    }
+    return null;
+  }
+
   private frame(): BlockFrame {
     return this.frames[this.frames.length - 1];
   }
@@ -551,10 +627,22 @@ class FunctionBody {
    * the block's own declaration rather than the one around it — two variables
    * sharing one IR name, and the outer one read at the inner one's type.
    */
-  private arm(body: readonly Statement[], loop: LoopTarget | null, ofLoop = false): SemanticBlock {
+  private arm(
+    body: readonly Statement[],
+    loop: LoopTarget | null,
+    ofLoop = false,
+    settled: Narrowing | null = null,
+  ): SemanticBlock {
     const block: SemanticBlock = { id: this.blockId(), statements: [], releases: [], terminator: { k: "next" } };
     this.enter(block, loop, ofLoop);
     this.open();
+    if (settled !== null) {
+      this.narrowings[this.narrowings.length - 1].set(settled.name, {
+        field: settled.field,
+        value: settled.value,
+        negated: settled.negated === true,
+      });
+    }
     this.statements(body);
     this.close();
     this.leave();
@@ -755,8 +843,12 @@ class FunctionBody {
       }
       case "if": {
         const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
-        const then = this.arm(statement.then, this.frame().loop);
-        const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop);
+        const settled = this.tagTest(statement.condition);
+        const then = this.arm(statement.then, this.frame().loop, false, settled);
+        const opposite = settled === null
+          ? null
+          : { name: settled.name, field: settled.field, value: settled.value, negated: settled.negated !== true };
+        const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop, false, opposite);
         this.write({ k: "if", condition, then, otherwise, line: statement.line });
         // An `if` with an arm on each side, each of which leaves, is a statement
         // nothing after it can be reached from. The block says so, rather than
@@ -915,6 +1007,9 @@ class FunctionBody {
     const value = this.typed(statement.init, annotation, statement.line);
     const slot = this.slot(statement.name, value, annotation, statement.line);
     this.bind(statement.name, { name: statement.name, inferred: bound(value.inferred, annotation), slot });
+    if (statement.init.k === "member" && statement.init.base.k === "ident" && statement.name.slice(0, 8) === "__switch") {
+      this.tagAliases.set(statement.name, { base: statement.init.base.name, field: statement.init.field });
+    }
     this.write({ k: "let", slot, value: value.value, line: statement.line });
   }
 
@@ -1438,7 +1533,9 @@ class FunctionBody {
         inferred: this.fieldOf(base.inferred.key, expression.field),
       };
     }
-    const layouts = this.layoutsWith(base.inferred, describe(base.inferred), expression.field, expect ?? ANY, line);
+    const baseName = expression.base.k === "ident" ? expression.base.name : null;
+    const settled = baseName === null ? null : this.narrowingFor(baseName);
+    const layouts = this.layoutsWith(base.inferred, describe(base.inferred), expression.field, expect ?? ANY, line, settled);
     // The program lays out no object with that field at all, so it says
     // nothing about what is behind the reference. The reference is then the
     // only value of the object the IR can name, and it is the one every body
@@ -1476,7 +1573,14 @@ class FunctionBody {
    * same eight bytes in both. Only the layouts that disagree are a choice a
    * backend cannot make, and those are a refusal naming them.
    */
-  private layoutsWith(inferred: Inferred, what: string, field: string, use: Inferred, line: number): string[] {
+  private layoutsWith(
+    inferred: Inferred,
+    what: string,
+    field: string,
+    use: Inferred,
+    line: number,
+    settled: { field: string; value: string; negated?: boolean } | null = null,
+  ): string[] {
     if (inferred.kind === "object") return [this.layoutFor(inferred.key, line)];
     // A reference that names the layout it points at is that layout: the
     // program wrote the name, so a field read through it is that layout's
@@ -1498,10 +1602,49 @@ class FunctionBody {
       if (!unshaped && !holds(declared.type, use)) continue;
       candidates.push({ name: layout.name, read: `${declared.type} at ${declared.offset}` });
     }
-    const [first] = candidates;
+    let considered = candidates;
+    if (settled !== null && this.definition.tagLayouts !== undefined) {
+      const listed = this.definition.tagLayouts[settled.field]?.[settled.value];
+      if (listed !== undefined) {
+        const narrowed = candidates.filter((one) => listed.includes(one.name) !== (settled.negated === true));
+        if (narrowed.length > 0) considered = narrowed;
+      }
+    }
+    let [first] = considered;
     if (first === undefined) return [];
-    const disagreeing = candidates.filter((one) => one.read !== first.read).map((one) => one.name);
-    if (disagreeing.length === 0) return candidates.map((one) => one.name);
+    let disagreeing = considered.filter((one) => one.read !== first.read).map((one) => one.name);
+    if (disagreeing.length > 0 && this.definition.tagLayouts !== undefined) {
+      const taggedNames = new Set<string>();
+      const byValue = this.definition.tagLayouts[field];
+      if (byValue !== undefined) {
+        for (const value of Object.keys(byValue)) {
+          for (const name of byValue[value]) taggedNames.add(name);
+        }
+      }
+      const tagged = considered.filter((one) => taggedNames.has(one.name));
+      if (tagged.length > 0) {
+        let lowest = 0 / 0;
+        for (const one of tagged) {
+          const at = Number(one.read.slice(one.read.lastIndexOf(" at ") + 4));
+          if (Number.isNaN(lowest) || at < lowest) lowest = at;
+        }
+        const sameOffset = tagged.filter((one) => Number(one.read.slice(one.read.lastIndexOf(" at ") + 4)) === lowest);
+        if (sameOffset.length > 0) considered = sameOffset;
+        else considered = tagged;
+        first = considered[0];
+        disagreeing = considered.filter((one) => one.read !== first.read).map((one) => one.name);
+      }
+    }
+    if (disagreeing.length > 0 && use.kind === "type" && use.type.kind === "ref" && use.type.of === null) {
+      const text = considered.filter((one) => parseType(one.read.slice(0, one.read.lastIndexOf(" at "))).kind === "text");
+      const [tag] = text;
+      if (tag !== undefined && text.every((one) => one.read === tag.read)) {
+        first = tag;
+        disagreeing = [];
+        considered = text;
+      }
+    }
+    if (disagreeing.length === 0) return considered.map((one) => one.name);
     throw this.error(
       `reads or writes "${what}.${field}", which ${[first.name, ...disagreeing].join(" and ")} could each be a field of`,
       line,
@@ -1511,7 +1654,8 @@ class FunctionBody {
 
   /** The layout a field the body writes belongs to, or a refusal where there is none. */
   private layoutForWrite(base: Held, field: string, use: Inferred, line: number): string {
-    const layouts = this.layoutsWith(base.inferred, base.name, field, use, line);
+    const settled = this.narrowingFor(base.name);
+    const layouts = this.layoutsWith(base.inferred, base.name, field, use, line, settled);
     if (layouts.length > 0) return layouts[0];
     throw this.error(
       `writes "${base.name}.${field}", which no layout the program lays out holds`,
@@ -2430,6 +2574,12 @@ class FunctionBody {
       };
       const first = shapeSignature(found[0]);
       if (found.every((name) => shapeSignature(name) === first)) return found[0];
+      const literalNames = shape.fields.map((field) => field.name).slice().sort().join(",");
+      for (const name of found) {
+        const layout = this.objects[name];
+        if (layout === undefined) continue;
+        if (layout.fields.map((field) => field.name).slice().sort().join(",") === literalNames) return name;
+      }
     }
     if (found.length > 1) {
       console.log(`LAYOUT3 ${key} exact=${this.context.objectNames[key] ?? "none"} found=${found.join(",")}`);

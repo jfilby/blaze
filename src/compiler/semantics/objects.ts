@@ -2,6 +2,44 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** The literal text a field is written with, where the source wrote one. */
+function writtenText(expression: Expression): string | null {
+  if (String(fieldOf(expression, "k")) !== "text") return null;
+  const parts = fieldOf(expression, "parts") as readonly Expression[];
+  if (parts.length !== 1) return null;
+  const part = parts[0];
+  if (String(fieldOf(part, "k")) !== "text") return null;
+  return String(fieldOf(part, "value"));
+}
+
+const shapeTags = new Map<Shape, Map<string, Set<string>>>();
+
+/** Adds the literal tags one literal writes to the shape it was filed under. */
+export function addShapeTags(shape: Shape, tags: Record<string, string>): void {
+  let fields = shapeTags.get(shape);
+  if (fields === undefined) {
+    fields = new Map();
+    shapeTags.set(shape, fields);
+  }
+  for (const [field, value] of Object.entries(tags)) {
+    let values = fields.get(field);
+    if (values === undefined) {
+      values = new Set();
+      fields.set(field, values);
+    }
+    values.add(value);
+  }
+}
+
+/** Merges the tags of one shape into another that stands for it. */
+function mergeShapeTags(source: Shape, into: Shape): void {
+  const tags = shapeTags.get(source);
+  if (tags === undefined) return;
+  for (const [field, values] of tags) {
+    for (const value of values) addShapeTags(into, { [field]: value });
+  }
+}
+
 /**
  * Objects: what a function allocates, and where every field of it sits.
  *
@@ -631,6 +669,12 @@ class BodyTypes {
     // joining the names and their types with a separator gave both one.
     const key = JSON.stringify(pairs);
     if (!this.registered.has(key)) this.registered.set(key, { key, fields: typed });
+    const tags: Record<string, string> = {};
+    for (const field of fields) {
+      const written = writtenText(field.value);
+      if (written !== null) tags[field.name] = written;
+    }
+    if (Object.keys(tags).length > 0) addShapeTags(this.registered.get(key) as Shape, tags);
     return key;
   }
 
@@ -692,10 +736,12 @@ class BodyTypes {
     const shapes = new Map<string, Shape>();
     for (const [was, shape] of this.registered) {
       const fields: { name: string; value: Inferred }[] = [];
-      for (const field of fieldOf(shape,"fields") as { name: string; value: Inferred }[]) {
-        fields.push({ name: String(fieldOf(field,"name")), value: value(fieldOf(field,"value") as Inferred) });
+      for (const field of shapeFields(shape)) {
+        fields.push(shapeField(String(fieldOf(field,"name")), value(fieldOf(field,"value") as Inferred)));
       }
-      shapes.set(key(was), { key: key(was), fields });
+      const copied = { key: key(was), fields };
+      shapes.set(key(was), copied);
+      mergeShapeTags(shape, copied);
     }
     this.registered.clear();
     for (const [at, shape] of shapes) this.registered.set(at, shape);
@@ -1423,11 +1469,16 @@ function mergeProgramShapes(
     const incoming = shapeFields(shape);
     if (existing === undefined) {
       const fields: { name: string; value: Inferred }[] = [];
-      for (const field of incoming) fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
-      shapes.set(key, { key, fields });
+      for (const field of incoming) {
+        fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
+      }
+      const copied = { key, fields };
+      shapes.set(key, copied);
+      mergeShapeTags(shape, copied);
       owners.set(key, "the program body");
       continue;
     }
+    mergeShapeTags(shape, existing);
     const existingFields = shapeFields(existing);
     for (const field of incoming) {
       const fieldName = String(fieldOf(field,"name"));
@@ -1466,7 +1517,9 @@ function mergeShape(shapes: Map<string, Shape>, owners: Map<string, string>, bod
       for (const field of incoming) {
         fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
       }
-      shapes.set(key, { key, fields });
+      const copied = { key, fields };
+      shapes.set(key, copied);
+      mergeShapeTags(shape, copied);
       owners.set(key, body.functionName);
       continue;
     }
@@ -1636,9 +1689,12 @@ export function resolveObjects(
           for (const field of shapeFields(shape)) {
             fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
           }
-          folded.set(String(root), { key: String(root), fields });
+          const foldedShape = { key: String(root), fields };
+          folded.set(String(root), foldedShape);
+          mergeShapeTags(shape, foldedShape);
           continue;
         }
+        mergeShapeTags(shape, held);
         const heldFields = shapeFields(held);
         for (const field of shapeFields(shape)) {
           const fieldName = String(fieldOf(field,"name"));
@@ -1738,6 +1794,38 @@ export function resolveObjects(
 
   const written: Record<string, ObjectLayout> = {};
   for (const [name, shape] of layouts) written[name] = shape;
+  const tagLayouts: Record<string, Record<string, string[]>> = Object.create(null);
+  const addLayoutTags = (name: string, shape: Shape): void => {
+    const tags = shapeTags.get(shape);
+    if (tags === undefined) return;
+    for (const [field, values] of tags) {
+      let byValue = tagLayouts[field];
+      if (byValue === undefined) {
+        byValue = Object.create(null);
+        tagLayouts[field] = byValue;
+      }
+      for (const value of values) {
+        let listed: string[] | undefined = byValue[value];
+        if (listed === undefined) {
+          listed = [];
+          byValue[value] = listed;
+        }
+        let known = false;
+        for (const one of listed) if (one === name) known = true;
+        if (!known) listed[listed.length] = name;
+      }
+    }
+  };
+  const addTagsFrom = (key: string, shape: Shape): void => {
+    const root = remapped.get(key) ?? key;
+    const name = names.get(root);
+    if (name !== undefined) addLayoutTags(name, shape);
+  };
+  for (const shape of ordered) addTagsFrom(shape.key, shape);
+  for (const body of bodies.values()) {
+    for (const [key, shape] of body.registered) addTagsFrom(key, shape);
+  }
+  for (const [key, shape] of programShapes) addTagsFrom(key, shape);
   // Every literal a body registered is one object the body writes: a shape
   // that no round kept still needs the layout its literal was built at.
   const reads = programReads(bodies);
@@ -1747,6 +1835,7 @@ export function resolveObjects(
       const name = `Object${names.size + 1}`;
       names.set(key, name);
       written[name] = layOut(name, shape, names, reads);
+      addLayoutTags(name, shape);
     }
   }
   for (const [alias, layout] of aliases) {
@@ -1758,6 +1847,18 @@ export function resolveObjects(
         align: fieldOf(target,"align") as number,
         fields: fieldOf(target,"fields") as { name: string; type: string; offset: number }[],
       };
+      for (const field of Object.keys(tagLayouts)) {
+        const byValue = tagLayouts[field];
+        for (const value of Object.keys(byValue)) {
+          const listed: string[] = byValue[value];
+          let targetListed = false;
+          for (const one of listed) if (one === layout) targetListed = true;
+          if (!targetListed) continue;
+          let aliasListed = false;
+          for (const one of listed) if (one === alias) aliasListed = true;
+          if (!aliasListed) listed[listed.length] = alias;
+        }
+      }
     }
   }
   for (const caller of callers.values()) {
@@ -1766,6 +1867,7 @@ export function resolveObjects(
     const body = bodies.get(String(fieldOf(caller,"name")));
     if (body === undefined) continue;
     definition["objects"] = written;
+    if (Object.keys(tagLayouts).length > 0) definition["tagLayouts"] = tagLayouts;
     // The call graph of the whole program, recorded by the one pass that walks
     // every body. Which of these calls is written out rather than made is not
     // decided here: it is a property of the whole graph, and `resolveCalls`
@@ -1791,7 +1893,6 @@ export function resolveObjects(
   }
   return { names, layouts: written, keys: literalKeys };
 }
-
 
 /**
  * How often the program reads each field of each object, counted over every

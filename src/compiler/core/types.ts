@@ -211,6 +211,14 @@ export interface ObjectLayout {
 export interface FunctionDefinition {
   statements: Statement[];
   objects: Record<string, ObjectLayout>;
+  /**
+   * The layout names that belong to each discriminated union arm.
+   *
+   * The first key is the tag field, the second the literal that names the
+   * arm. A layout is shared by every literal with the same fields, so the
+   * table is what says which shared layouts are arms of which tag value.
+   */
+  tagLayouts?: Record<string, Record<string, string[]>>;
   /** The function allocates an object. */
   allocates: boolean;
   /** The function prints. */
