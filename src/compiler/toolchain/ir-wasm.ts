@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Lowering a function's semantic IR to a WebAssembly module.
  *
@@ -868,7 +872,7 @@ class Module {
   /** The function a symbol names, or null where the module holds no such function. */
   function(symbol: string): HeldFunction | null {
     for (const held of this.held) {
-      if (held.export === symbol) return held;
+      if (String(fieldOf(held,"export")) === symbol) return held;
     }
     return null;
   }
@@ -876,7 +880,7 @@ class Module {
   /** The index of the function a symbol names, or -1 where the module holds no such function. */
   functionIndex(symbol: string): number {
     for (let index = 0; index < this.held.length; index += 1) {
-      if ((this.held[index] as HeldFunction).export === symbol) return this.base + index;
+      if (String(fieldOf(this.held[index],"export")) === symbol) return this.base + index;
     }
     return -1;
   }
@@ -977,12 +981,12 @@ class Body {
     // function's type is written in that order, and it is never handed back
     // to the pool: the host filled it before the body ran and every `local`
     // in the body reads it.
-    this.open(fn.entry);
-    for (const param of fn.params) {
+    this.open(fieldOf(fn,"entry") as SemanticBlock);
+    for (const param of fieldOf(fn,"params") as any[]) {
       const type = slotType(param);
       const scope = this.scopes[this.scopes.length - 1] as Scope;
-      scope.names.set(param.name, { index: this.declared.length, type });
-      this.declared.push(facts(type).held);
+      (fieldOf(scope,"names") as Map<string, Local>).set(String(fieldOf(param,"name")), { index: this.declared.length, type });
+      this.declared.push(fieldOf(facts(type),"held"));
     }
   }
 
