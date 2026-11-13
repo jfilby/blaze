@@ -1344,7 +1344,7 @@ class Body {
       return;
     }
     this.float(0, held === F64);
-    this.op(BINARY[String(held)].ne as number);
+    this.op(fieldOf(BINARY[String(held)],"ne") as number);
   }
 
   /** The falsity of what is on the stack, at the carrier it is held in. */
@@ -1358,7 +1358,7 @@ class Body {
       return;
     }
     this.float(0, held === F64);
-    this.op(BINARY[String(held)].eq as number);
+    this.op(fieldOf(BINARY[String(held)],"eq") as number);
   }
 
   /**
@@ -1378,13 +1378,16 @@ class Body {
    * time like any other value's.
    */
   private known(value: SemanticValue): boolean | null {
-    if (value.k === "bool") return value.value;
-    if (value.k !== "const") return null;
-    if (value.type.kind === "primitive" && isWide(value.type.name)) return null;
-    const held = fieldOf(facts(value.type),"held");
-    if (held === I32) return (Number(BigInt(value.text)) | 0) !== 0;
-    if (held === I64) return BigInt(value.text) !== 0n;
-    return Number(value.text) !== 0;
+    const kind = String(fieldOf(value,"k"));
+    if (kind === "bool") return fieldOf(value,"value") as boolean;
+    if (kind !== "const") return null;
+    const type = fieldOf(value,"type") as SemanticType;
+    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) return null;
+    const held = fieldOf(facts(type),"held");
+    const text = String(fieldOf(value,"text"));
+    if (held === I32) return (Number(BigInt(text)) | 0) !== 0;
+    if (held === I64) return BigInt(text) !== 0n;
+    return Number(text) !== 0;
   }
 
   /**
@@ -1401,12 +1404,12 @@ class Body {
   private address(of: SemanticValue, index: SemanticValue, type: SemanticType): void {
     this.value(of, ADDRESS);
     this.value(index, ADDRESS);
-    const shift = facts(type).shift;
+    const shift = fieldOf(facts(type),"shift");
     if (shift > 0) {
       this.i32(shift);
       this.op(0x74);
     }
-    this.op(BINARY[String(I32)].add as number);
+    this.op(fieldOf(BINARY[String(I32)],"add") as number);
   }
 
   /**
@@ -1418,7 +1421,8 @@ class Body {
    * memory, and the address of them.
    */
   private widen(value: SemanticValue): void {
-    if (value.type.kind !== "primitive" || !isWholeNumber(value.type.name)) {
+    const type = fieldOf(value,"type") as SemanticType;
+    if (String(fieldOf(type,"kind")) !== "primitive" || !isWholeNumber(String(fieldOf(type,"name")) as never)) {
       unreachable("widen something that is not a whole number into a wide number", this.name, this.candidate);
     }
     const out = this.wideScratch();
@@ -1486,7 +1490,7 @@ class Body {
         }
         this.value(value.of, ADDRESS);
         this.i32(8);
-        this.op(BINARY[String(I32)].sub as number);
+        this.op(fieldOf(BINARY[String(I32)],"sub") as number);
         this.op(0x29);
         this.code.varuint(3);
         this.code.varuint(0);
@@ -1507,7 +1511,7 @@ class Body {
           return;
         }
         this.address(value.of, value.index, value.type);
-        const load = facts(value.type).load;
+        const load = fieldOf(facts(value.type),"load");
         this.op(load.code);
         this.code.varuint(load.align);
         this.code.varuint(0);
@@ -1521,7 +1525,7 @@ class Body {
           unreachable(`read the field "${value.field}" of the layout "${value.layout}"`, this.name, this.candidate);
         }
         this.value(value.object, ADDRESS);
-        const load = facts(value.type).load;
+        const load = fieldOf(facts(value.type),"load");
         this.op(load.code);
         this.code.varuint(load.align);
         this.code.varuint(field.offset);
@@ -1536,7 +1540,7 @@ class Body {
           unreachable("take a view of a block of bytes", this.name, this.candidate);
         }
         const element = value.element;
-        const size = facts(element).size;
+        const size = fieldOf(facts(element),"size");
         if (value.count !== null) {
           this.value(value.count, ADDRESS);
           this.op(0xad); // `i64.extend_i32_u`
@@ -1555,14 +1559,14 @@ class Body {
         for (let index = 0; index < total; index += 1) {
           this.localAt(pointer);
           this.i32(index);
-          const shift = facts(element).shift;
+          const shift = fieldOf(facts(element),"shift");
           if (shift > 0) {
             this.i32(shift);
             this.op(0x74); // `i32.shl`
           }
-          this.op(BINARY[String(I32)].add as number);
+          this.op(fieldOf(BINARY[String(I32)],"add") as number);
           this.value(value.values[index] as SemanticValue, element);
-          const store = facts(element).store;
+          const store = fieldOf(facts(element),"store");
           this.op(store.code);
           this.code.varuint(store.align);
           this.code.varuint(0);
@@ -1593,7 +1597,7 @@ class Body {
           }
           this.localAt(pointer);
           this.value(field.value, field.value.type);
-          const store = facts(field.value.type).store;
+          const store = fieldOf(facts(field.value.type),"store");
           this.op(store.code);
           this.code.varuint(store.align);
           this.code.varuint(entry.offset);
@@ -1641,23 +1645,23 @@ class Body {
           if (held === I64) this.i64(-1n);
           else this.i32(-1);
           this.value(value.operand, value.type);
-          this.op(BINARY[String(held)].xor as number);
+          this.op(fieldOf(BINARY[String(held)],"xor") as number);
         } else if (value.op === "bitNot") {
           if (held === F64) this.float(0, true);
           else this.float(0, false);
           this.value(value.operand, value.type);
-          this.op(BINARY[String(held)].sub as number);
+          this.op(fieldOf(BINARY[String(held)],"sub") as number);
           if (held === F64) this.float(1, true);
           else this.float(1, false);
-          this.op(BINARY[String(held)].sub as number);
+          this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else if (held === I64) {
           this.i64(0n);
           this.value(value.operand, value.type);
-          this.op(BINARY[String(held)].sub as number);
+          this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else if (held === I32) {
           this.i32(0);
           this.value(value.operand, value.type);
-          this.op(BINARY[String(held)].sub as number);
+          this.op(fieldOf(BINARY[String(held)],"sub") as number);
         } else {
           this.value(value.operand, value.type);
           this.op(held === F32 ? 0x8c : 0x9a);
@@ -1715,7 +1719,7 @@ class Body {
         else if (held === F64) this.float(0, true);
         else if (held === F32) this.float(0, false);
         else this.i32(0);
-        this.op(BINARY[String(held)].eq as number);
+        this.op(fieldOf(BINARY[String(held)],"eq") as number);
         this.op(0x04);
         this.code.byte(0x40);
         this.push(null);
@@ -2882,13 +2886,13 @@ class Body {
         // `tee` pushes the new value again, and in a body that falls through
         // to the turn of the loop — a do-while, or the last statement of a
         // block — that value is a module the engine refuses.
-        const held = facts(this.resolve(statement.name).type).held;
+        const held = fieldOf(facts(fieldOf(this.resolve(statement.name),"type") as SemanticType),"held");
         this.get(statement.name);
         if (held === I64) this.i64(1n);
         else if (held === F64) this.float(1, true);
         else if (held === F32) this.float(1, false);
         else this.i32(1);
-        this.op(statement.op === "++" ? (BINARY[String(held)].add as number) : (BINARY[String(held)].sub as number));
+        this.op(statement.op === "++" ? (fieldOf(BINARY[String(held)],"add") as number) : (fieldOf(BINARY[String(held)],"sub") as number));
         this.set(statement.name);
         return;
       }
@@ -2918,7 +2922,7 @@ class Body {
           const address = this.borrow(I32);
           this.keep(address);
           this.read(address);
-          const old = facts(element).load;
+          const old = fieldOf(facts(element),"load");
           this.op(old.code);
           this.code.varuint(0);
           this.code.varuint(0);
@@ -2945,7 +2949,7 @@ class Body {
         } else {
           this.value(statement.value, element);
         }
-        const store = facts(element).store;
+        const store = fieldOf(facts(element),"store");
         this.op(store.code);
         this.code.varuint(store.align);
         this.code.varuint(0);
@@ -2963,7 +2967,7 @@ class Body {
         // handed `i64.store` and `f64.store` an `i32`.
         this.value(statement.object, ADDRESS);
         this.value(statement.value, statement.value.type);
-        const store = facts(statement.value.type).store;
+        const store = fieldOf(facts(statement.value.type),"store");
         this.op(store.code);
         this.code.varuint(store.align);
         this.code.varuint(field.offset);
@@ -3081,7 +3085,7 @@ class Body {
         const count = this.borrow(I32);
         this.localAt(buffer.index);
         this.i32(8);
-        this.op(BINARY[String(I32)].sub as number);
+        this.op(fieldOf(BINARY[String(I32)],"sub") as number);
         this.op(0x29); // `i64.load`
         this.code.varuint(3);
         this.code.varuint(0);
@@ -3100,20 +3104,20 @@ class Body {
         // The turn is done when the index has reached the count.
         this.localAt(index);
         this.localAt(count);
-        this.op(UNSIGNED_BINARY[String(I32)].ge as number);
+        this.op(fieldOf(UNSIGNED_BINARY[String(I32)],"ge") as number);
         this.op(0x0d); // `br_if`
         this.code.varuint(1);
         // The element is written at the address the index names.
         this.localAt(buffer.index);
         this.localAt(index);
-        const shift = facts(element).shift;
+        const shift = fieldOf(facts(element),"shift");
         if (shift > 0) {
           this.i32(shift);
           this.op(0x74); // `i32.shl`
         }
-        this.op(BINARY[String(I32)].add as number);
+        this.op(fieldOf(BINARY[String(I32)],"add") as number);
         this.value(statement.value, element);
-        const store = facts(element).store;
+        const store = fieldOf(facts(element),"store");
         this.op(store.code);
         this.code.varuint(store.align);
         this.code.varuint(0);
@@ -3121,7 +3125,7 @@ class Body {
         // so a `continue` does not skip it.
         this.localAt(index);
         this.i32(1);
-        this.op(BINARY[String(I32)].add as number);
+        this.op(fieldOf(BINARY[String(I32)],"add") as number);
         this.keep(index);
         this.op(0x0c); // `br`
         this.code.varuint(0);
@@ -3207,7 +3211,7 @@ class Body {
       else this.constant(startConstant.text, startConstant.type, loop.type);
       if (stepConstant === null) this.read(step);
       else this.constant(stepConstant.text, stepConstant.type, loop.type);
-      this.op(BINARY[String(held)].sub as number);
+      this.op(fieldOf(BINARY[String(held)],"sub") as number);
       this.set(loop.variable);
       if (start !== -1) this.release(held, start);
     }
@@ -3274,7 +3278,7 @@ class Body {
       else this.constant(stepConstant.text, stepConstant.type, loop.type);
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
-      this.op(BINARY[String(fieldOf(facts(loop.type),"held"))].add as number);
+      this.op(fieldOf(BINARY[String(fieldOf(facts(loop.type),"held"))],"add") as number);
       // The value the counter moves to is the value the test below reads, so
       // it is written down and left on the stack: a `local.tee` is one
       // instruction where a write and a read are two.
@@ -3305,20 +3309,20 @@ class Body {
       // does not change what it holds.
       const index = this.get(loop.index);
       this.i32(1);
-      this.op(BINARY[String(I32)].add as number);
+      this.op(fieldOf(BINARY[String(I32)],"add") as number);
       this.keepAndRead(index.index);
       this.read(end);
       // The count is read out of the host's memory as a whole number, so it is
       // ordered as one: a count past the signed range is a count, not a
       // negative number the walk has already passed.
-      this.op(UNSIGNED_BINARY[String(I32)].ge as number);
+      this.op(fieldOf(UNSIGNED_BINARY[String(I32)],"ge") as number);
       this.exitTest();
       this.address(
         { k: "local", type: this.resolve(loop.of).type, name: loop.of },
         { k: "local", type: ADDRESS, name: loop.index },
         loop.elementType,
       );
-      const load = facts(loop.elementType).load;
+      const load = fieldOf(facts(loop.elementType),"load");
       this.op(load.code);
       this.code.varuint(load.align);
       this.code.varuint(0);
@@ -3398,10 +3402,10 @@ class Body {
       this.keep(at);
       this.i64(0n);
       this.localAt(at);
-      this.op(BINARY[String(I64)].sub as number);
+      this.op(fieldOf(BINARY[String(I64)],"sub") as number);
       this.localAt(at);
       this.localAt(at);
-      this.op(BINARY[String(I64)].lt as number);
+      this.op(fieldOf(BINARY[String(I64)],"lt") as number);
       this.op(0x1b); // `select`
       this.release(I64, at);
       return;
@@ -3440,15 +3444,15 @@ class Body {
       this.tee(local);
       this.read(local);
       this.float(0.5, true);
-      this.op(BINARY[String(F64)].add as number);
+      this.op(fieldOf(BINARY[String(F64)],"add") as number);
       this.op(0x9c); // floor
       this.read(local);
       this.float(0.5, true);
-      this.op(BINARY[String(F64)].sub as number);
+      this.op(fieldOf(BINARY[String(F64)],"sub") as number);
       this.op(0x9b); // ceil
       this.read(local);
       this.float(0, true);
-      this.op(BINARY[String(F64)].ge as number);
+      this.op(fieldOf(BINARY[String(F64)],"ge") as number);
       this.op(0x1b); // select
       this.release(F64, local);
       return;
