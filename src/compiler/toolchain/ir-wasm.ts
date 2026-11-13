@@ -681,7 +681,7 @@ function compoundCode(held: number, type: SemanticType, op: string): number {
     throw new CompilerError("AssemblyError", "wasm", "this backend has not written a pow", "WebAssembly has no instruction for a power, and no runtime to call one of: a program that raises is written C or run as machine code", "", "", "");
   }
   const name = COMPOUND[op] as string;
-  const code = facts(type).unsigned ? UNSIGNED_BINARY[String(held)][name] : undefined;
+  const code = fieldOf(facts(type),"unsigned") ? UNSIGNED_BINARY[String(held)][name] : undefined;
   return (code ?? BINARY[String(held)][name]) as number;
 }
 
@@ -703,12 +703,6 @@ interface Local {
  * once for the statements — and the second entry reuses the first's names
  * rather than declaring a second set of locals for them.
  */
-interface Scope {
-  id: string;
-  names: Map<string, Local>;
-  allocated: number[] | null;
-}
-
 /**
  * One function the module holds, and what a call of it has to know.
  *
@@ -917,7 +911,8 @@ class Body {
   /** The names each block that has been entered declares. */
   private readonly byBlock = new Map<string, Map<string, Local>>();
   /** The blocks the body is inside, outermost first. */
-  private readonly scopes: Scope[] = [];
+  private readonly scopeIds: string[] = [];
+  private readonly scopeAllocated: (number[] | null)[] = [];
   /** The labels the body has opened that a jump names, and where each is. */
   private readonly frames: string[] = [];
   private readonly labelAt = new Map<string, number>();
@@ -984,8 +979,8 @@ class Body {
     this.open(fieldOf(fn,"entry") as SemanticBlock);
     for (const param of fieldOf(fn,"params") as any[]) {
       const type = slotType(param);
-      const scope = this.scopes[this.scopes.length - 1] as Scope;
-      (fieldOf(scope,"names") as Map<string, Local>).set(String(fieldOf(param,"name")), { index: this.declared.length, type });
+      const scopeId = this.scopeIds[this.scopeIds.length - 1];
+      (this.byBlock.get(scopeId) as Map<string, Local>).set(String(fieldOf(param,"name")), { index: this.declared.length, type });
       this.declared.push(fieldOf(facts(type),"held"));
     }
   }
@@ -996,9 +991,12 @@ class Body {
    * second set of locals, which is what a loop's header and its body are.
    */
   private open(block: SemanticBlock): void {
-    const known = this.byBlock.get(block.id);
-    this.byBlock.set(block.id, known ?? new Map());
-    this.scopes.push({ id: block.id, names: known ?? this.byBlock.get(block.id) as Map<string, Local>, allocated: known === undefined ? [] : null });
+    const blockId = String(fieldOf(block,"id"));
+    const known = this.byBlock.get(blockId);
+    this.byBlock.set(blockId, known ?? new Map());
+    this.scopeIds.push(blockId);
+    const allocated: number[] | null = known === undefined ? [] : null;
+    this.scopeAllocated.push(allocated);
   }
 
   /**
@@ -1009,10 +1007,11 @@ class Body {
    * the same name of the same carrier takes it.
    */
   private close(): void {
-    const scope = this.scopes.pop();
-    if (scope === undefined || scope.allocated === null) return;
-    for (const index of scope.allocated) this.release(this.declared[index] as number, index);
-    this.byBlock.delete(scope.id);
+    const scopeId = this.scopeIds.pop();
+    const allocated = this.scopeAllocated.pop();
+    if (scopeId === undefined || allocated === undefined || allocated === null) return;
+    for (const index of allocated) this.release(this.declared[index] as number, index);
+    this.byBlock.delete(scopeId);
   }
 
   /**
@@ -1021,15 +1020,16 @@ class Body {
    * block hands it back.
    */
   private holdLocal(name: string, type: SemanticType): Local {
-    const held = facts(type).held;
+    const held = fieldOf(facts(type),"held") as number;
     const reused = this.spare.get(held)?.pop();
     const local: Local = { index: reused ?? this.declared.length, type };
     if (reused === undefined) this.declared.push(held);
-    const scope = this.scopes[this.scopes.length - 1] as Scope;
-    scope.names.set(name, local);
+    const scopeId = this.scopeIds[this.scopeIds.length - 1];
+    (this.byBlock.get(scopeId) as Map<string, Local>).set(name, local);
     // A push written as a statement of its own: the optional chain is the
     // question, and the push is only there when the answer is yes.
-    if (scope.allocated !== null) scope.allocated.push(local.index);
+    const allocated = this.scopeAllocated[this.scopeAllocated.length - 1];
+    if (allocated !== null) allocated.push(fieldOf(local,"index") as number);
     return local;
   }
 
@@ -1109,22 +1109,27 @@ class Body {
    * written for its effect and nothing reads the answer.
    */
   private programCall(call: SemanticCall, callee: HeldFunction, at: SemanticType | null): void {
-    for (const [position, argument] of call.args.entries()) {
-      const given = call.argTypes[position] ?? argument.type;
+    const args = fieldOf(call,"args") as SemanticValue[];
+    const argTypes = fieldOf(call,"argTypes") as SemanticType[];
+    const params = fieldOf(callee,"params") as SemanticType[];
+    for (let position = 0; position < args.length; position += 1) {
+      const argument = args[position];
+      const given = argTypes[position] ?? fieldOf(argument,"type") as SemanticType;
       this.value(argument, given);
-      const wanted = callee.params[position];
+      const wanted = params[position];
       // The signature the call was written against and the body the module
       // holds are the same function, so the types agree; where they do not,
       // the argument is converted into the one the callee takes.
       if (wanted !== undefined) this.convert(given, wanted);
     }
     this.op(0x10);
-    this.code.varuint(this.module.functionIndex(call.callee));
+    this.code.varuint(this.module.functionIndex(String(fieldOf(call,"callee"))));
     if (at === null) return;
-    if (callee.result === null) {
-      unreachable(`call ${call.callee} for its value`, this.name, this.candidate);
+    const result = fieldOf(callee,"result") as SemanticType | null;
+    if (result === null) {
+      unreachable(`call ${String(fieldOf(call,"callee"))} for its value`, this.name, this.candidate);
     }
-    this.convert(callee.result, at);
+    this.convert(result, at);
   }
 
   /**
@@ -1199,8 +1204,9 @@ class Body {
    * it, so the block the body is emitting is what says which of them a use is.
    */
   private resolve(name: string): Local {
-    for (let position = this.scopes.length - 1; position >= 0; position -= 1) {
-      const local = (this.scopes[position] as Scope).names.get(name);
+    for (let position = this.scopeIds.length - 1; position >= 0; position -= 1) {
+      const names = this.byBlock.get(this.scopeIds[position]) as Map<string, Local> | undefined;
+      const local = names === undefined ? undefined : names.get(name);
       if (local !== undefined) return local;
     }
     throw new CompilerError("SemanticIrError", "semantic-ir", `the body of ${this.name} reads "${name}", which it declares nowhere`, "", "", "", "");
@@ -1216,8 +1222,8 @@ class Body {
     // it first leaves a position of no instruction at all, and a statement that
     // reads a name into itself then truncates the body behind it.
     this.readAt = this.code.length - 1;
-    this.code.varuint(local.index);
-    this.readLocal = local.index;
+    this.code.varuint(fieldOf(local,"index") as number);
+    this.readLocal = fieldOf(local,"index") as number;
     return local;
   }
 
@@ -1227,14 +1233,14 @@ class Body {
     // same local reads nothing: the value is on the stack for the write and
     // the write puts back what it took off. Both go, which is one instruction
     // and one index less wherever a statement reads a name into itself.
-    if (this.readLocal === local.index) {
+    if (this.readLocal === fieldOf(local,"index") as number) {
       this.code.truncate(this.readAt);
       this.readLocal = -1;
       this.readAt = -1;
       return;
     }
     this.op(0x21);
-    this.code.varuint(local.index);
+    this.code.varuint(fieldOf(local,"index") as number);
   }
 
   /** The relative depth a labelled frame is reached by from where the body is. */
@@ -1266,11 +1272,11 @@ class Body {
 
   /** Converts what is on the stack into the type a use reads it in. */
   private convert(from: SemanticType, to: SemanticType): void {
-    const held = facts(from).held;
-    const wanted = facts(to).held;
+    const held = fieldOf(facts(from),"held");
+    const wanted = fieldOf(facts(to),"held");
     if (held === wanted) return;
     if (held === I32 && wanted === I64) {
-      this.op(facts(from).unsigned ? 0xad : 0xac);
+      this.op(fieldOf(facts(from),"unsigned") ? 0xad : 0xac);
       return;
     }
     if (held === I64 && wanted === I32) {
@@ -1294,7 +1300,7 @@ class Body {
     if (pair === null) {
       unreachable("convert between carriers", this.name, this.candidate);
     }
-    this.op(whole ? (facts(from).unsigned ? pair.unsigned : pair.signed) : facts(to).unsigned ? pair.unsigned : pair.signed);
+    this.op(whole ? (fieldOf(facts(from),"unsigned") ? fieldOf(pair,"unsigned") : fieldOf(pair,"signed")) : fieldOf(facts(to),"unsigned") ? fieldOf(pair,"unsigned") : fieldOf(pair,"signed"));
   }
 
   /**
@@ -1315,14 +1321,15 @@ class Body {
    * asking for the truth first and turning it over again spent two.
    */
   private condition(value: SemanticValue): void {
-    this.value(value, value.type);
-    this.truth(facts(value.type).held);
+    this.value(value, fieldOf(value,"type") as SemanticType);
+    this.truth(fieldOf(facts(fieldOf(value,"type") as SemanticType),"held") as number);
   }
 
   /** The falsity of a value on the stack, as an i32 nonzero where the value does not hold. */
   private negation(value: SemanticValue): void {
-    this.value(value, value.type);
-    this.lie(facts(value.type).held);
+    const type = fieldOf(value,"type") as SemanticType;
+    this.value(value, type);
+    this.lie(fieldOf(facts(type),"held") as number);
   }
 
   /** The truth of what is on the stack, at the carrier it is held in. */
@@ -1374,7 +1381,7 @@ class Body {
     if (value.k === "bool") return value.value;
     if (value.k !== "const") return null;
     if (value.type.kind === "primitive" && isWide(value.type.name)) return null;
-    const held = facts(value.type).held;
+    const held = fieldOf(facts(value.type),"held");
     if (held === I32) return (Number(BigInt(value.text)) | 0) !== 0;
     if (held === I64) return BigInt(value.text) !== 0n;
     return Number(value.text) !== 0;
@@ -1445,10 +1452,10 @@ class Body {
         // A truth and a nothing are a one and a zero, and every carrier holds
         // both exactly, so each is written at the carrier its use reads it in
         // rather than as an `i32` and a conversion to it.
-        this.literal(value.value ? "1" : "0", facts(at).held);
+        this.literal(value.value ? "1" : "0", fieldOf(facts(at),"held"));
         return;
       case "nothing":
-        this.literal("0", facts(at).held);
+        this.literal("0", fieldOf(facts(at),"held"));
         return;
       case "local": {
         const local = this.get(value.name);
@@ -1601,7 +1608,7 @@ class Body {
         // out of it is converted to the carrier the use asked for. A case that
         // leaves its own type on the stack hands the next operator a value of
         // the wrong width, which the format reads as a type error.
-        const held = facts(value.type).held;
+        const held = fieldOf(facts(value.type),"held");
         if (value.op === "pos") {
           this.value(value.operand, at);
           return;
@@ -1664,7 +1671,7 @@ class Body {
         // an `i32` zero is a module the engine refuses. So the zero is the
         // width the operand is held at, and the operator is that width's.
         this.value(value.operand, value.operand.type);
-        const width = facts(value.operand.type).held;
+        const width = fieldOf(facts(value.operand.type),"held");
         if (width === I64) this.i64(0n);
         else if (width === F64) this.float(0, true);
         else if (width === F32) this.float(0, false);
@@ -1700,7 +1707,7 @@ class Body {
         // left one says, so `a ?? a[0]` read the first element of an empty
         // buffer — a trap the source language never raises. The left arm is
         // written once here, into the local the answer is read back out of.
-        const held = facts(value.left.type).held;
+        const held = fieldOf(facts(value.left.type),"held");
         const answer = this.borrow(held);
         this.value(value.left, value.left.type);
         this.keepAndRead(answer);
@@ -1733,12 +1740,12 @@ class Body {
         // what the language asks of it: a number that is not a number holds
         // nothing.
         if (isTextType(at) && isNumber(value.left.type)) {
-          const held = facts(at).held;
+          const held = fieldOf(facts(at),"held");
           const answer = this.borrow(held);
           this.asText(value.left, null);
           this.keep(answer);
           this.value(value.left, value.left.type);
-          const carrier = facts(value.left.type).held;
+          const carrier = fieldOf(facts(value.left.type),"held");
           if (value.op === "or") this.lie(carrier);
           else this.truth(carrier);
           this.op(0x04);
@@ -1757,7 +1764,7 @@ class Body {
         // left one says, and writes the left one down twice to do it. The left
         // arm is written once here, into the local the answer is read back
         // out of, and the right one only when the operator calls for it.
-        const held = facts(at).held;
+        const held = fieldOf(facts(at),"held");
         const answer = this.borrow(held);
         this.value(value.left, at);
         this.keepAndRead(answer);
@@ -1838,7 +1845,7 @@ class Body {
           unreachable("arrayConcat is not written by the wasm backend", "arrayConcat");
           return;
         }
-        const held = facts(compared).held;
+        const held = fieldOf(facts(compared),"held");
         this.value(value.left, compared);
         this.value(value.right, compared);
         // A whole number the module holds as unsigned is divided, ordered and
@@ -1850,7 +1857,7 @@ class Body {
           this.convert(value.type, at);
           return;
         }
-        const unsignedOp = facts(compared).unsigned ? UNSIGNED_BINARY[String(held)][value.op] : undefined;
+        const unsignedOp = fieldOf(facts(compared),"unsigned") ? UNSIGNED_BINARY[String(held)][value.op] : undefined;
         const op = unsignedOp ?? BINARY[String(held)][value.op];
         if (op === undefined) {
           if (value.op === "floorDiv" || value.op === "floorMod") {
@@ -1972,8 +1979,8 @@ class Body {
       this.i32(this.poolText(text));
       return;
     }
-    const held = facts(type).held;
-    const wanted = facts(at).held;
+    const held = fieldOf(facts(type),"held");
+    const wanted = fieldOf(facts(at),"held");
     // The number the literal's own carrier holds is what a conversion would
     // have been applied to, so it is the number whose exactness at the
     // destination decides whether that carrier can hold it as it stands.
@@ -2797,7 +2804,7 @@ class Body {
   /** Drops a reference the runtime owns, which is the runtime's own counting. */
   private releaseName(name: string): void {
     const local = this.resolve(name);
-    this.localAt(local.index);
+    this.localAt(fieldOf(local,"index") as number);
     this.callService("blaze_rt_release");
   }
 
@@ -2838,7 +2845,7 @@ class Body {
         return;
       case "set": {
         const type = this.resolve(statement.name).type;
-        const held = facts(type).held;
+        const held = fieldOf(facts(type),"held");
         // A plain `=` computes nothing from what the slot holds, so the old
         // value is never pushed. Pushing it and emitting no operator left it
         // on the stack, and every block this backend opens is void-typed, so
@@ -2907,7 +2914,7 @@ class Body {
         // store are at the width the element is written at, which is the width
         // the operator works in.
         if (statement.op !== "=") {
-          const held = facts(element).held;
+          const held = fieldOf(facts(element),"held");
           const address = this.borrow(I32);
           this.keep(address);
           this.read(address);
@@ -3169,7 +3176,7 @@ class Body {
      */
     let stepConstant: { text: string; type: SemanticType } | null = null;
     if (loop.kind === "counted") {
-      const held = facts(loop.type).held;
+      const held = fieldOf(facts(loop.type),"held");
       // The bound, the step and the index it starts at are read before the index
       // is declared, because after it the name resolves to the loop's own
       // declaration: a loop counting from `for (let limit = limit; ...)` reads
@@ -3267,7 +3274,7 @@ class Body {
       else this.constant(stepConstant.text, stepConstant.type, loop.type);
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
-      this.op(BINARY[String(facts(loop.type).held)].add as number);
+      this.op(BINARY[String(fieldOf(facts(loop.type),"held"))].add as number);
       // The value the counter moves to is the value the test below reads, so
       // it is written down and left on the stack: a `local.tee` is one
       // instruction where a write and a read are two.
@@ -3282,8 +3289,8 @@ class Body {
       // `each` walk below does: a loop counting up to a `u32` bound past the
       // signed range ends before it begins under the signed comparison, because
       // the same bits are a negative number.
-      const unsignedStop = facts(loop.type).unsigned ? UNSIGNED_BINARY[String(facts(loop.type).held)][stop] : undefined;
-      this.op((unsignedStop ?? BINARY[String(facts(loop.type).held)][stop]) as number);
+      const unsignedStop = fieldOf(facts(loop.type),"unsigned") ? UNSIGNED_BINARY[String(fieldOf(facts(loop.type),"held"))][stop] : undefined;
+      this.op((unsignedStop ?? BINARY[String(fieldOf(facts(loop.type),"held"))][stop]) as number);
       // The exit is tested against the falsity of the comparison, for the
       // reason the `while` above gives.
       this.op(0x45);
@@ -3329,8 +3336,8 @@ class Body {
     // again: a loop inside this one borrows the same carriers and is finished
     // with them by now.
     if (loop.kind === "counted") {
-      if (step !== -1) this.release(facts(loop.type).held, step);
-      this.release(facts(loop.type).held, bound);
+      if (step !== -1) this.release(fieldOf(facts(loop.type),"held"), step);
+      this.release(fieldOf(facts(loop.type),"held"), bound);
     }
     if (loop.kind === "each") this.release(I32, end);
     this.close();
@@ -3922,7 +3929,7 @@ class Body {
       this.float(0, false);
       return;
     }
-    if (facts(this.returns).held === I64) {
+    if (fieldOf(facts(this.returns),"held") === I64) {
       this.i64(0n);
       return;
     }
@@ -4352,7 +4359,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
  */
 function signatureOf(fn: SemanticFunction): { parameters: number[]; result: number | undefined } {
   const parameters = fn.params.map((param) => facts(slotType(param)).held);
-  const result = fn.returns.kind === "void" ? undefined : facts(fn.returns).held;
+  const result = fn.returns.kind === "void" ? undefined : fieldOf(facts(fn.returns),"held");
   return { parameters, result };
 }
 
