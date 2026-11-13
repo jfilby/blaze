@@ -612,17 +612,24 @@ class BodyTypes {
 
   /** Registers the object a literal writes, and returns its key. */
   private object(fields: readonly { name: string; value: Expression }[]): string {
-    const typed = fields.map((field) => ({
-      name: field.name,
-      value: field.name === "__arm"
-        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "f64" as const } }
-        : asField(this.expression(field.value)),
-    }));
+    const typed: { name: string; value: Inferred }[] = [];
+    const pairs: string[][] = [];
+    for (const field of fields) {
+      const fieldName = String(fieldOf(field,"name"));
+      const fieldValue: Inferred = fieldName === "__arm"
+        ? { kind: "type", type: { kind: "primitive", name: "f64" } }
+        : asField(this.expression(fieldOf(field,"value") as Expression));
+      typed.push(shapeField(fieldName, fieldValue));
+      const pair: string[] = [];
+      pair.push(fieldName);
+      pair.push(describe(fieldValue));
+      pairs.push(pair);
+    }
     // The key is a function of the shape alone, and the shape is written as
     // JSON so that a field name cannot read like the key of another shape:
     // `{ a: 1, b: 2 }` and `{ "a:f64,b": 2 }` hold different fields, and
     // joining the names and their types with a separator gave both one.
-    const key = JSON.stringify(typed.map((field) => [field.name, describe(field.value)]));
+    const key = JSON.stringify(pairs);
     if (!this.registered.has(key)) this.registered.set(key, { key, fields: typed });
     return key;
   }
@@ -1518,7 +1525,7 @@ export function resolveObjects(
   programBody: { shapes: ReadonlyMap<string, Shape>; keys: LiteralKeys } = { shapes: new Map(), keys: new Map() },
   types: ReadonlyMap<string, TypeTable> = new Map(),
 ): { names: Map<string, string>; layouts: Record<string, ObjectLayout>; keys: Map<ProgramValue & { k: "object" }, string> } {
-  const programShapes = programBody.shapes;
+  const programShapes = fieldOf(programBody,"shapes") as ReadonlyMap<string, Shape>;
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
   // Every function the program compiles is callable, and every one of them has
@@ -1528,11 +1535,12 @@ export function resolveObjects(
   const callees = new Map<string, TypeExpr>();
   const callers = new Map<string, { file: FileContract; name: string; contract: FunctionContract }>();
   for (const file of files) {
-    for (const contract of Object.values(file.functions)) {
+    for (const contract of Object.values(fieldOf(file,"functions") as Record<string, FunctionContract>)) {
       // A body calls a function by the symbol the link names it by, which is
       // the source name unless another file's function already owns it.
-      const symbol = contract.function.symbol;
-      callees.set(symbol, parseType(contract.function.returns));
+      const signature = fieldOf(contract,"function");
+      const symbol = String(fieldOf(signature,"symbol"));
+      callees.set(symbol, parseType(String(fieldOf(signature,"returns"))));
       callers.set(symbol, { file, name: symbol, contract });
     }
   }
@@ -1543,13 +1551,16 @@ export function resolveObjects(
   if (callers.size === 0) {
     mergeProgramShapes(shapes, owners, programShapes);
     const names = new Map<string, string>();
-    [...shapes.values()].forEach((shape, index) => names.set(shape.key, `Object${index + 1}`));
+    const allShapes = [...shapes.values()];
+    for (let index = 0; index < allShapes.length; index += 1) {
+      names.set(String(fieldOf(allShapes[index],"key")), `Object${index + 1}`);
+    }
     const layouts: Record<string, ObjectLayout> = {};
     for (const shape of shapes.values()) {
-      const name = names.get(shape.key) as string;
+      const name = names.get(String(fieldOf(shape,"key"))) as string;
       layouts[name] = layOut(name, shape, names, new Map());
     }
-    return { names, layouts, keys: new Map(programBody.keys) };
+    return { names, layouts, keys: new Map(fieldOf(programBody,"keys") as Map<ProgramValue & { k: "object" }, string>) };
   }
 
   // A body is walked once for the objects it writes, and again when a function
@@ -1565,26 +1576,38 @@ export function resolveObjects(
   const walk = (): void => {
     bodies.clear();
     callees.clear();
-    for (const [name, caller] of callers) callees.set(name, parseType(caller.contract.function.returns));
+    for (const [name, caller] of callers) callees.set(name, parseType(String(fieldOf(fieldOf(fieldOf(caller,"contract"),"function"),"returns"))));
     for (const caller of callers.values()) {
-      const definition = caller.contract.definition;
+      const callerName = String(fieldOf(caller,"name"));
+      const callerFile = fieldOf(caller,"file");
+      const callerPath = String(fieldOf(callerFile,"path"));
+      const contract = fieldOf(caller,"contract");
+      const definition = fieldOf(contract,"definition");
+      const signature = fieldOf(contract,"function");
+      const params: { name: string; type: TypeExpr }[] = [];
+      for (const param of fieldOf(signature,"params") as { name: string; type: string }[]) {
+        params.push({ name: String(fieldOf(param,"name")), type: parseType(String(fieldOf(param,"type"))) });
+      }
       const body = new BodyTypes(
-        caller.file.path,
-        caller.name,
-        caller.contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) })),
+        callerPath,
+        callerName,
+        params,
         callees,
-        types.get(caller.file.path) ?? null,
+        types.get(callerPath) ?? null,
         (layout, field) => {
           for (const [key, name] of names) {
             if (name !== layout) continue;
             const shape = shapes.get(key);
-            return shape?.fields.find((entry) => entry.name === field)?.value ?? null;
+            if (shape === undefined) return null;
+            const known = shapeFields(shape).find((entry) => String(fieldOf(entry,"name")) === field);
+            return known === undefined ? null : fieldOf(known,"value") as Inferred;
           }
           return null;
         },
       );
-      body.statements(definition.statements);
-      bodies.set(caller.name, body);
+      const statements = fieldOf(definition,"statements") as Statement[];
+      body.statements(statements);
+      bodies.set(callerName, body);
       mergeShape(shapes, owners, body);
     }
     // The objects a program body writes are merged after the function bodies, so
@@ -1609,19 +1632,27 @@ export function resolveObjects(
         if (shape === undefined) continue;
         const held = folded.get(root);
         if (held === undefined) {
-          folded.set(root, { key: root, fields: shape.fields.map((field) => ({ ...field })) });
+          const fields: { name: string; value: Inferred }[] = [];
+          for (const field of shapeFields(shape)) {
+            fields.push(shapeField(String(fieldOf(field,"name")), fieldOf(field,"value") as Inferred));
+          }
+          folded.set(String(root), { key: String(root), fields });
           continue;
         }
-        for (const field of shape.fields) {
-          const known = held.fields.find((entry) => entry.name === field.name);
+        const heldFields = shapeFields(held);
+        for (const field of shapeFields(shape)) {
+          const fieldName = String(fieldOf(field,"name"));
+          const fieldValue = fieldOf(field,"value") as Inferred;
+          const known = heldFields.find((entry) => String(fieldOf(entry,"name")) === fieldName);
           if (known === undefined) {
-            held.fields.push({ name: field.name, value: field.value });
+            heldFields.push(shapeField(fieldName, fieldValue));
             continue;
           }
           // A field one literal wrote as a reference and another as a null is a
           // reference: the null is a value the reference can hold.
-          if (unshapedReference(known.value)) known.value = field.value;
-
+          if (unshapedReference(fieldOf(known,"value") as Inferred)) {
+            (known as Record<string, unknown>)["value"] = fieldValue;
+          }
         }
       }
       shapes.clear();
@@ -1642,16 +1673,21 @@ export function resolveObjects(
     walk();
     changed = false;
     for (const caller of callers.values()) {
-      const body = bodies.get(caller.name);
+      const callerName = String(fieldOf(caller,"name"));
+      const body = bodies.get(callerName);
       if (body === undefined) continue;
       const result = body.result();
-      if (result === null || result.kind !== "object") continue;
+      if (result === null || String(fieldOf(result,"kind")) !== "object") continue;
       // `any` said a reference without saying to what; the body says which.
-      const declared = parseType(caller.contract.function.returns);
-      const key = remapped.get(result.key) ?? result.key;
+      const contract = fieldOf(caller,"contract");
+      const signature = fieldOf(contract,"function");
+      const declared = parseType(String(fieldOf(signature,"returns")));
+      const resultKey = String(fieldOf(result,"key"));
+      const key = remapped.get(resultKey) ?? resultKey;
       const layout = names.get(key);
-      if (declared.kind === "ref" && declared.of === null && declared.name === undefined && layout !== undefined) {
-        caller.contract.function.returns = `ref<${layout}>`;
+      if (String(fieldOf(declared,"kind")) === "ref" && fieldOf(declared,"of") === null &&
+          fieldOf(declared,"name") === undefined && layout !== undefined) {
+        (signature as Record<string, unknown>)["returns"] = `ref<${layout}>`;
         changed = true;
       }
     }
@@ -1670,14 +1706,14 @@ export function resolveObjects(
   // fold moved a shape that unified with another onto the kept key, and a literal
   // is laid out under the key of the shape it ended up in.
   const literalKeys = new Map<ProgramValue & { k: "object" }, string>();
-  for (const [literal, key] of programBody.keys) {
+  for (const [literal, key] of fieldOf(programBody,"keys") as Map<ProgramValue & { k: "object" }, string>) {
     literalKeys.set(literal, remapped.get(key) ?? key);
   }
 
   const ordered = [...shapes.values()];
   const layouts = new Map<string, ObjectLayout>();
   for (const shape of ordered) {
-    const name = names.get(shape.key) as string;
+    const name = names.get(String(fieldOf(shape,"key"))) as string;
     layouts.set(name, layOut(name, shape, names, programReads(bodies)));
   }
 
@@ -1688,16 +1724,20 @@ export function resolveObjects(
   // names, and a field read through either is the field at the same offset.
   const aliases = new Map<string, string>();
   for (const caller of callers.values()) {
-    const declared = parseType(caller.contract.function.returns);
-    if (declared.kind !== "ref" || declared.of !== null || declared.name === undefined) continue;
-    if (!callers.has(declared.name) || aliases.has(declared.name)) continue;
-    const result = bodies.get(declared.name)?.result();
-    if (result === undefined || result === null || result.kind !== "object") continue;
-    const layout = names.get(remapped.get(result.key) ?? result.key);
-    if (layout !== undefined) aliases.set(declared.name, layout);
+    const declared = parseType(String(fieldOf(fieldOf(fieldOf(caller,"contract"),"function"),"returns")));
+    const declaredName = fieldOf(declared,"name") as string | undefined;
+    if (String(fieldOf(declared,"kind")) !== "ref" || fieldOf(declared,"of") !== null || declaredName === undefined) continue;
+    if (!callers.has(declaredName) || aliases.has(declaredName)) continue;
+    const aliasBody = bodies.get(declaredName);
+    const result = aliasBody === undefined ? undefined : aliasBody.result();
+    if (result === undefined || result === null || String(fieldOf(result,"kind")) !== "object") continue;
+    const resultKey = String(fieldOf(result,"key"));
+    const layout = names.get(remapped.get(resultKey) ?? resultKey);
+    if (layout !== undefined) aliases.set(declaredName, layout);
   }
 
-  const written: Record<string, ObjectLayout> = Object.fromEntries([...layouts.entries()].map(([name, shape]) => [name, shape]));
+  const written: Record<string, ObjectLayout> = {};
+  for (const [name, shape] of layouts) written[name] = shape;
   // Every literal a body registered is one object the body writes: a shape
   // that no round kept still needs the layout its literal was built at.
   const reads = programReads(bodies);
@@ -1711,30 +1751,43 @@ export function resolveObjects(
   }
   for (const [alias, layout] of aliases) {
     const target = written[layout];
-    if (target !== undefined) written[alias] = { ...target, name: alias };
+    if (target !== undefined) {
+      written[alias] = {
+        name: alias,
+        size: fieldOf(target,"size") as number,
+        align: fieldOf(target,"align") as number,
+        fields: fieldOf(target,"fields") as { name: string; type: string; offset: number }[],
+      };
+    }
   }
   for (const caller of callers.values()) {
-    const definition = caller.contract.definition;
-    const body = bodies.get(caller.name);
+    const contract = fieldOf(caller,"contract");
+    const definition = fieldOf(contract,"definition") as Record<string, unknown>;
+    const body = bodies.get(String(fieldOf(caller,"name")));
     if (body === undefined) continue;
-    definition.objects = written;
+    definition["objects"] = written;
     // The call graph of the whole program, recorded by the one pass that walks
     // every body. Which of these calls is written out rather than made is not
     // decided here: it is a property of the whole graph, and `resolveCalls`
     // decides it immediately after this pass runs.
-    definition.calls = body.called.map((callee) => ({ callee, strategy: "call" }));
+    const calls: { callee: string; strategy: string }[] = [];
+    for (const callee of fieldOf(body,"called") as string[]) calls.push({ callee, strategy: "call" });
+    definition["calls"] = calls;
   }
 
   // A shape that was folded into another is still the key a literal body
   // writes under: the IR asks for the name of the shape it saw, and the layout
   // it ended up in is the root's. Follow the folds to the name that survived.
   for (const [key, root] of foldedKeys) {
-    let at = root;
-    for (let rounds = 0; rounds < foldedKeys.size && foldedKeys.has(at); rounds += 1) {
-      at = foldedKeys.get(at) as string;
+    let at: string = String(root);
+    let rounds = 0;
+    while (rounds < foldedKeys.size) {
+      if (!foldedKeys.has(at)) break;
+      at = String(foldedKeys.get(at));
+      rounds += 1;
     }
     const name = names.get(at);
-    if (name !== undefined) names.set(key, name);
+    if (name !== undefined) names.set(String(key), name);
   }
   return { names, layouts: written, keys: literalKeys };
 }
@@ -1784,21 +1837,30 @@ export function layOut(
   names: Map<string, string>,
   reads: Map<string, Map<string, number>>,
 ): ObjectLayout {
-  const counts = reads.get(shape.key) ?? new Map<string, number>();
-  const ordered = shape.fields
-    .map((field, at) => ({ field, at, count: counts.get(field.name) ?? 0 }))
-    .sort((left, right) => right.count - left.count || left.at - right.at)
-    .map((entry) => entry.field);
+  const counts = reads.get(String(fieldOf(shape,"key"))) ?? new Map<string, number>();
+  const counted: { field: { name: string; value: Inferred }; at: number; count: number }[] = [];
+  const shapeFieldList = shapeFields(shape);
+  for (let at = 0; at < shapeFieldList.length; at += 1) {
+    const one = shapeFieldList[at];
+    counted.push({ field: one, at, count: counts.get(String(fieldOf(one,"name"))) ?? 0 });
+  }
+  counted.sort((left, right) => {
+    const byCount = (fieldOf(right,"count") as number) - (fieldOf(left,"count") as number);
+    return byCount !== 0 ? byCount : (fieldOf(left,"at") as number) - (fieldOf(right,"at") as number);
+  });
   const fields: { name: string; type: string; offset: number }[] = [];
   let offset = 0;
   let align = 1;
-  for (const field of ordered) {
-    const type: TypeExpr =
-      field.value.kind === "object" ? { kind: "ref", of: null, name: names.get(field.value.key) } : field.value.type;
+  for (const entry of counted) {
+    const field = fieldOf(entry,"field") as { name: string; value: Inferred };
+    const fieldValue = fieldOf(field,"value") as Inferred;
+    const type: TypeExpr = String(fieldOf(fieldValue,"kind")) === "object"
+      ? { kind: "ref", of: null, name: names.get(String(fieldOf(fieldValue,"key"))) }
+      : fieldOf(fieldValue,"type") as TypeExpr;
     const { size, align: fieldAlign } = fieldLayout(type);
     align = Math.max(align, fieldAlign);
     offset = alignUp(offset, fieldAlign);
-    fields.push({ name: field.name, type: typeToString(type), offset });
+    fields.push({ name: String(fieldOf(field,"name")), type: typeToString(type), offset });
     offset += size;
   }
   return { name, size: alignUp(offset, align), align, fields };
