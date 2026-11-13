@@ -585,7 +585,12 @@ class BodyTypes {
 
   /** Registers the object a literal writes, and returns its key. */
   private object(fields: readonly { name: string; value: Expression }[]): string {
-    const typed = fields.map((field) => ({ name: field.name, value: asField(this.expression(field.value)) }));
+    const typed = fields.map((field) => ({
+      name: field.name,
+      value: field.name === "__arm"
+        ? { kind: "type" as const, type: { kind: "primitive" as const, name: "f64" as const } }
+        : asField(this.expression(field.value)),
+    }));
     // The key is a function of the shape alone, and the shape is written as
     // JSON so that a field name cannot read like the key of another shape:
     // `{ a: 1, b: 2 }` and `{ "a:f64,b": 2 }` hold different fields, and
