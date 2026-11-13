@@ -54,6 +54,7 @@ import {
   typeText,
   valueKind,
   type CompareOp,
+  type SemanticAssignOp,
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
@@ -2335,6 +2336,49 @@ function heldWithRegister(held: Held, register: number | null): Held {
     constant: fieldOf(held, "constant") as bigint | null,
     register,
   };
+}
+
+function setStatementWithValue(statement: SemanticStatement, value: SemanticValue): SemanticStatement {
+  return {
+    k: "set",
+    name: String(fieldOf(statement, "name")),
+    op: String(fieldOf(statement, "op")) as SemanticAssignOp,
+    value,
+    line: fieldOf(statement, "line") as number,
+  };
+}
+
+function blockWithStatements(block: SemanticBlock, statements: SemanticStatement[]): SemanticBlock {
+  return {
+    id: String(fieldOf(block, "id")),
+    statements,
+    releases: fieldOf(block, "releases") as string[],
+    terminator: fieldOf(block, "terminator") as SemanticTerminator,
+  };
+}
+
+function countedWithBody(
+  loop: Extract<SemanticLoop, { kind: "counted" }>,
+  body: SemanticBlock,
+): Extract<SemanticLoop, { kind: "counted" }> {
+  const next: Extract<SemanticLoop, { kind: "counted" }> = {
+    kind: "counted",
+    variable: String(fieldOf(loop, "variable")),
+    type: fieldOf(loop, "type") as SemanticType,
+    from: fieldOf(loop, "from") as SemanticValue,
+    to: fieldOf(loop, "to") as SemanticValue,
+    inclusive: String(fieldOf(loop, "inclusive")) === "true",
+    down: String(fieldOf(loop, "down")) === "true",
+    step: fieldOf(loop, "step") as SemanticValue | null,
+    header: String(fieldOf(loop, "header")),
+    exit: String(fieldOf(loop, "exit")),
+    body,
+  };
+  if (String(fieldOf(loop, "parallel")) === "true") next.parallel = true;
+  if (String(fieldOf(loop, "region")) === "true") next.region = true;
+  const reductions = fieldOf(loop, "reductions");
+  if (String(reductions) !== "undefined") next.reductions = reductions as typeof next.reductions;
+  return next;
 }
 
 class Machine {
@@ -5544,41 +5588,43 @@ class Machine {
   }
 
   private loop(loop: SemanticLoop, start: SemanticValue | null = null): void {
+    const kind = String(fieldOf(loop, "kind"));
     // A loop written as a team of threads is written as a call that starts
     // one, and the turns it runs are written out elsewhere; see `fanOut`. Every
     // other loop — a marked one this backend refused, and every loop the rule
     // never marked — is written as the loop it is, which is the same program.
-    if ((loop.kind === "counted" || loop.kind === "each") && this.teamed.has(loop)) {
-      this.fanOut(loop);
+    if ((kind === "counted" || kind === "each") && this.teamed.has(loop)) {
+      this.fanOut(loop as TeamedLoop);
       return;
     }
     this.names.enter();
     const labels = this.loopLabels(loop);
-    this.loops.push({ header: labels.header, exit: labels.exit, names: { header: loop.header, exit: loop.exit } });
-    switch (loop.kind) {
-      case "while": {
+    this.loops.push({
+      header: labels.header,
+      exit: labels.exit,
+      names: { header: String(fieldOf(loop, "header")), exit: String(fieldOf(loop, "exit")) },
+    });
+    if (kind === "while" || kind === "doWhile") {
+      const condition = fieldOf(loop, "condition") as SemanticValue;
+      const body = fieldOf(loop, "body") as SemanticBlock;
+      if (kind === "while") {
         this.code.bind(labels.header);
-        this.truthBranch(loop.condition, false, labels.exit);
-        this.block(loop.body);
+        this.truthBranch(condition, false, labels.exit);
+        this.block(body);
         // The same, for the edge back to the header: a body that returns or
         // breaks never reaches the test again, so the jump is not written.
-        if (loop.body.terminator.k === "next") this.code.jmp(labels.header);
+        if (String(fieldOf(fieldOf(body, "terminator"), "k")) === "next") this.code.jmp(labels.header);
         this.code.bind(labels.exit);
-        break;
-      }
-      case "doWhile": {
+      } else {
         this.code.bind(labels.header);
-        this.block(loop.body);
-        this.truthBranch(loop.condition, true, labels.header);
+        this.block(body);
+        this.truthBranch(condition, true, labels.header);
         this.code.bind(labels.exit);
-        break;
       }
-      case "counted":
-        this.counted(loop, labels);
-        break;
-      case "each":
-        this.each(loop, labels, start);
-        break;
+    } else if (kind === "counted") {
+      this.counted(loop as Extract<SemanticLoop, { kind: "counted" }>, labels);
+    } else {
+      this.each(loop as Extract<SemanticLoop, { kind: "each" }>, labels, start);
     }
     this.loops.pop();
     this.names.leave();
@@ -5591,27 +5637,34 @@ class Machine {
    */
   private loopWrites(loop: SemanticLoop): Set<string> {
     const written = new Set<string>();
-    if (loop.kind === "counted") written.add(loop.variable);
-    else if (loop.kind === "each") {
-      written.add(loop.index);
-      written.add(loop.element);
+    const kind = String(fieldOf(loop, "kind"));
+    if (kind === "counted") written.add(String(fieldOf(loop, "variable")));
+    else if (kind === "each") {
+      written.add(String(fieldOf(loop, "index")));
+      written.add(String(fieldOf(loop, "element")));
     }
     const visit = (block: SemanticBlock): void => {
-      for (const statement of block.statements) {
-        if (statement.k === "set" || statement.k === "step") written.add(statement.name);
-        else if (statement.k === "setElement") written.add(statement.buffer);
-        else if (statement.k === "let") written.add(statement.slot.name);
-        else if (statement.k === "loop") {
-          for (const name of this.loopWrites(statement.loop)) written.add(name);
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+        if (statement.k === "set" || statement.k === "step") {
+          written.add(String(fieldOf(statement, "name")));
+        } else if (statement.k === "setElement") {
+          written.add(String(fieldOf(statement, "buffer")));
+        } else if (statement.k === "let") {
+          written.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+        } else if (statement.k === "loop") {
+          const inner = fieldOf(statement, "loop") as SemanticLoop;
+          for (const name of this.loopWrites(inner)) written.add(name);
+          visit(fieldOf(inner, "body") as SemanticBlock);
+        } else if (statement.k === "if") {
+          visit(fieldOf(statement, "then") as SemanticBlock);
+          const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+          if (String(otherwise) !== "null") visit(otherwise as SemanticBlock);
+        } else if (statement.k === "block") {
+          visit(fieldOf(statement, "body") as SemanticBlock);
         }
-        if (statement.k === "loop") visit(statement.loop.body);
-        else if (statement.k === "if") {
-          visit(statement.then);
-          if (statement.otherwise !== null) visit(statement.otherwise);
-        } else if (statement.k === "block") visit(statement.body);
       }
     };
-    visit(loop.body);
+    visit(fieldOf(loop, "body") as SemanticBlock);
     return written;
   }
 
@@ -5624,7 +5677,7 @@ class Machine {
     const written = this.loopWrites(loop);
     let seen = false;
     walkValues(value, (one) => {
-      if (one.k === "local" && written.has(one.name)) seen = true;
+      if (one.k === "local" && written.has(String(fieldOf(one, "name")))) seen = true;
     });
     return seen;
   }
@@ -5688,23 +5741,23 @@ class Machine {
 
     // The counter is declared before anything is written, because the scalar tail
     // at the end reads it as the index the leftover element is at.
-    const variable = this.bind(dot.counter, type);
-    const to = this.heldAt(type, "blaze_bound", dot.bound);
+    const variable = this.bind(String(fieldOf(dot, "counter")), type);
+    const to = this.heldAt(type, "blaze_bound", fieldOf(dot, "bound") as SemanticValue);
     const limit = this.holdAcross(whole, "blaze_limit");
 
     // Where the pairs stop: the bound as a byte offset, less the sixteen bytes
     // one pair is. A bound under two elements leaves this negative, which is what
     // the signed comparison in the loop reads as "no pairs at all".
-    this.at(dot.bound, type);
+    this.at(fieldOf(dot, "bound") as SemanticValue, type);
     this.code.cvtFloatToInt(RAX, XMM0, false, true);
     this.code.shiftImm("shl", RAX, 3, true);
     this.code.aluImm("sub", RAX, 16, true);
-    this.code.movMemRegSized(frame(limit.offset), RAX, 8);
+    this.code.movMemRegSized(frame(fieldOf(limit, "offset") as number), RAX, 8);
 
-    this.readInto(this.slot(dot.left), left);
-    this.readInto(this.slot(dot.right), right);
-    this.code.movRegImm(cursor, BigInt(dot.from * 8));
-    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(dot.from, false)), false);
+    this.readInto(this.slot(String(fieldOf(dot, "left"))), left);
+    this.readInto(this.slot(String(fieldOf(dot, "right"))), right);
+    this.code.movRegImm(cursor, BigInt((fieldOf(dot, "from") as number) * 8));
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(fieldOf(dot, "from") as number, false)), false);
     this.store(variable);
 
     // `total += a[i] * b[i]` adds to what the name already held, so the vector
@@ -5716,13 +5769,13 @@ class Machine {
     //
     // Seeded after the counter is stored rather than before, because the store
     // above writes through XMM0 and the accumulator this borrows may be XMM0.
-    const accumulator = this.slot(dot.accumulator);
-    if (accumulator.register !== null) this.code.movsMove(sum, accumulator.register, false);
-    else this.code.movsLoad(sum, frame(accumulator.offset), false);
+    const accumulator = this.slot(String(fieldOf(dot, "accumulator")));
+    if (String(fieldOf(accumulator, "register")) !== "null") this.code.movsMove(sum, fieldOf(accumulator, "register") as number, false);
+    else this.code.movsLoad(sum, frame(fieldOf(accumulator, "offset") as number), false);
 
     const paired = this.code.label("Lpaired");
-    this.code.bind(labels.header);
-    this.code.movRegMemSized(RAX, frame(limit.offset), 8, true);
+    this.code.bind(String(fieldOf(labels, "header")));
+    this.code.movRegMemSized(RAX, frame(fieldOf(limit, "offset") as number), 8, true);
     this.code.alu("cmp", RAX, cursor, true);
     this.code.jcc("l", paired);
     // The cursor is a count of bytes and not of elements, so the address it
@@ -5732,7 +5785,7 @@ class Machine {
     this.code.packedMem("mul", lane, indexed(right, cursor, 1));
     this.code.packed("add", sum, lane);
     this.code.aluImm("add", cursor, 16, true);
-    this.code.jmp(labels.header);
+    this.code.jmp(String(fieldOf(labels, "header")));
     this.code.bind(paired);
 
     // The sum of a vector of two is one number, and it is its halves added to
@@ -5741,8 +5794,10 @@ class Machine {
     this.code.packedMove(spare, sum);
     this.code.unpackHigh(spare, sum);
     this.code.packed("add", sum, spare);
-    if (accumulator.register !== null) this.code.movsMove(accumulator.register, sum, false);
-    else this.code.movsStore(frame(accumulator.offset), sum, false);
+    if (String(fieldOf(accumulator, "register")) !== "null") {
+      this.code.movsMove(fieldOf(accumulator, "register") as number, sum, false);
+    }
+    else this.code.movsStore(frame(fieldOf(accumulator, "offset") as number), sum, false);
 
     // The counter where the pairs left it, which is where a scalar loop stepping
     // by one per turn would have left it too.
@@ -5758,13 +5813,13 @@ class Machine {
     // with, at the counter the pairs reached, and the counter is stepped past it
     // so that the value left behind is the one a scalar loop leaves.
     this.load(variable);
-    this.comparedBranch(type, "lt", to, false, labels.exit);
-    this.block(loop.body);
+    this.comparedBranch(type, "lt", to, false, String(fieldOf(labels, "exit")));
+    this.block(fieldOf(loop, "body") as SemanticBlock);
     this.load(variable);
     this.one(type, "add");
     this.store(variable);
 
-    this.code.bind(labels.exit);
+    this.code.bind(String(fieldOf(labels, "exit")));
     this.freeSlot(to);
     this.freeSlot(limit);
     return true;
@@ -5810,12 +5865,12 @@ class Machine {
     // is. Both are asked for before the counter is bound, because binding is
     // what declares a name: a refusal here has to leave the names the scalar
     // loop is about to declare alone.
-    const counter = this.pinned.get(this.names.read(sum.counter));
-    const accumulator = this.slot(sum.accumulator);
+    const counter = this.pinned.get(this.names.read(String(fieldOf(sum, "counter"))));
+    const accumulator = this.slot(String(fieldOf(sum, "accumulator")));
     // The additions below are a double added into a double, so an accumulator of
     // another type is not one this can make at all.
-    if (counter === undefined || accumulator.register === null || !isFloatType(accumulator.type)) return false;
-    const total = accumulator.register;
+    if (counter === undefined || String(fieldOf(accumulator, "register")) === "null" || !isFloatType(fieldOf(accumulator, "type") as SemanticType)) return false;
+    const total = fieldOf(accumulator, "register") as number;
     // Three more: where a turn's value lands, the one its other side is built
     // in, and the one the other side borrows in turn. None of them is the
     // accumulator's, which the build gave a name this loop adds into a register
@@ -5826,31 +5881,31 @@ class Machine {
     // displacement, so two arrays cannot share one register however little they
     // are read. A value reading more arrays than there are registers free is left
     // to be written the way every other loop is.
-    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 1 + sum.arrays.length);
+    const registers = this.borrow([RDI, RSI, R8, R9, R10, R11], 1 + (fieldOf(sum, "arrays") as readonly string[]).length);
     if (vectors === null || registers === null) return false;
     const [result, other, third] = vectors;
     const [cursor, ...bases] = registers;
 
     // What one turn is written with, gathered once so that every value under the
     // addition is written against the same registers.
-    const turn: PackedTurn = { counter, counterName: sum.counter, cursor, arrays: sum.arrays, bases };
+    const turn: PackedTurn = { counter, counterName: String(fieldOf(sum, "counter")), cursor, arrays: fieldOf(sum, "arrays") as readonly string[], bases };
 
     // Declared before anything is written, because the scalar tail at the end
     // reads the counter as the index the leftover turn is at. It is the one
     // register the work below never writes through, because every read of a
     // counter is a move out of it.
-    const variable = this.bind(sum.counter, type);
-    const to = this.heldAt(type, "blaze_bound", sum.bound);
+    const variable = this.bind(String(fieldOf(sum, "counter")), type);
+    const to = this.heldAt(type, "blaze_bound", fieldOf(sum, "bound") as SemanticValue);
     const limit = this.holdAcross(whole, "blaze_limit");
 
     // Where the pairs stop: the bound as a byte offset, less the sixteen bytes
     // one pair is. A bound under two elements leaves this negative, which is what
     // the signed comparison in the loop reads as "no pairs at all".
-    this.at(sum.bound, type);
+    this.at(fieldOf(sum, "bound") as SemanticValue, type);
     this.code.cvtFloatToInt(RAX, XMM0, false, true);
     this.code.shiftImm("shl", RAX, 3, true);
     this.code.aluImm("sub", RAX, 16, true);
-    this.code.movMemRegSized(frame(limit.offset), RAX, 8);
+    this.code.movMemRegSized(frame(fieldOf(limit, "offset") as number), RAX, 8);
 
     // The counter as the pair of counters one turn answers for: this one and the
     // next. Laying one literal over the other puts them in the two lanes, and
@@ -5860,16 +5915,16 @@ class Machine {
     // accumulator is holding at this point. It is loaded into the accumulator
     // for that reason rather than into the counter: the pair is laid over it
     // afterwards, and a counter written first would have its low half replaced.
-    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(sum.from, false)), false);
+    this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(fieldOf(sum, "from") as number, false)), false);
     this.store(variable);
-    this.code.movsLoadLabel(other, this.floatLiteral(floatBits(sum.from + 1, false)), false);
+    this.code.movsLoadLabel(other, this.floatLiteral(floatBits((fieldOf(sum, "from") as number) + 1, false)), false);
     this.code.unpackLow(counter, other);
 
     // Each array's first element, read once for the whole loop: a pair of turns
     // reads a pair of elements that stand beside each other in every one of them,
     // so the base of each is the same on every turn.
-    for (const [at, name] of sum.arrays.entries()) this.readInto(this.slot(name), bases[at]);
-    this.code.movRegImm(cursor, BigInt(sum.from * 8));
+    for (const [at, name] of (fieldOf(sum, "arrays") as readonly string[]).entries()) this.readInto(this.slot(name), bases[at]);
+    this.code.movRegImm(cursor, BigInt((fieldOf(sum, "from") as number) * 8));
     // `total += ...` adds to what the name already held, and the register the
     // build gave that name is still holding it: the zeroing that stood here
     // discarded it, so a loop seeded with anything but zero answered the sum of
@@ -5880,11 +5935,11 @@ class Machine {
     this.code.movsMove(total, total, false);
 
     const paired = this.code.label("Lsummed");
-    this.code.bind(labels.header);
-    this.code.movRegMemSized(RAX, frame(limit.offset), 8, true);
+    this.code.bind(String(fieldOf(labels, "header")));
+    this.code.movRegMemSized(RAX, frame(fieldOf(limit, "offset") as number), 8, true);
     this.code.alu("cmp", RAX, cursor, true);
     this.code.jcc("l", paired);
-    this.packedValue(sum.added, result, other, third, turn);
+    this.packedValue(fieldOf(sum, "added") as SemanticValue, result, other, third, turn);
     // The low lane is this turn and the high lane is the next, and they are
     // added in that order because that is the order the scalar loop added in.
     // Nothing under the addition is a vector addition, so the only pair of turns
@@ -5901,7 +5956,7 @@ class Machine {
     // them on reads them from there.
     this.code.packedMemLabel("add", counter, this.floatPair(floatBits(2, false)));
     this.code.aluImm("add", cursor, 16, true);
-    this.code.jmp(labels.header);
+    this.code.jmp(String(fieldOf(labels, "header")));
     this.code.bind(paired);
 
     // The counter where the pairs left it, which is where a scalar loop stepping
@@ -5922,13 +5977,13 @@ class Machine {
     // with, at the counter the pairs reached, and the counter is stepped past it
     // so that the value left behind is the one a scalar loop leaves.
     this.load(variable);
-    this.comparedBranch(type, "lt", to, false, labels.exit);
-    this.block(loop.body);
+    this.comparedBranch(type, "lt", to, false, String(fieldOf(labels, "exit")));
+    this.block(fieldOf(loop, "body") as SemanticBlock);
     this.load(variable);
     this.one(type, "add");
     this.store(variable);
 
-    this.code.bind(labels.exit);
+    this.code.bind(String(fieldOf(labels, "exit")));
     this.freeSlot(to);
     this.freeSlot(limit);
     return true;
@@ -5943,8 +5998,11 @@ class Machine {
    * maintained weight, step and accumulator in and out of the packed loop.
    */
   private loadFloat(held: Held, into: number): void {
-    if (held.register !== null) this.code.movsMove(into, held.register, false);
-    else this.code.movsLoad(into, frame(held.offset), false);
+    if (String(fieldOf(held, "register")) !== "null") {
+      this.code.movsMove(into, fieldOf(held, "register") as number, false);
+    } else {
+      this.code.movsLoad(into, frame(fieldOf(held, "offset") as number), false);
+    }
   }
 
   /**
@@ -5970,14 +6028,14 @@ class Machine {
   ): boolean {
     const packed = packedWeightedOf(loop);
     if (packed === null) return false;
-    const weight = this.slot(packed.weight);
-    const step = this.slot(packed.step);
-    const accumulator = this.slot(packed.accumulator);
-    const array = this.slot(packed.array);
+    const weight = this.slot(String(fieldOf(packed, "weight")));
+    const step = this.slot(String(fieldOf(packed, "step")));
+    const accumulator = this.slot(String(fieldOf(packed, "accumulator")));
+    const array = this.slot(String(fieldOf(packed, "array")));
     // The registers names the rest of the function relies on are spoken for,
     // and so is the low half of every register the prologue spilled: a 512-bit
     // write through one of them is a write to that name's value too.
-    const spoken = new Set<number>([...this.pinned.values(), ...this.pinnedVectors.map((saved) => saved.register)]);
+    const spoken = new Set<number>([...this.pinned.values(), ...this.pinnedVectors.map((saved) => fieldOf(saved, "register") as number)]);
     const free = (register: number): boolean => !spoken.has(register);
     // The scratch the weight and step the slots are advanced with are written
     // through, which must be free too.
@@ -5986,7 +6044,7 @@ class Machine {
     // when the build pinned it to one, and three more for the array's base, the
     // bound and the address a constant vector is read through.
     const integerFree = [RDI, RSI, R8, R9, R10, R11].filter(free);
-    const pinnedCounter = this.pinned.get(this.names.read(loop.variable)) ?? null;
+    const pinnedCounter = this.pinned.get(this.names.read(String(fieldOf(loop, "variable")))) ?? null;
     const counter = pinnedCounter ?? (integerFree.shift() ?? null);
     if (counter === null) return false;
     const [baseRegister, boundRegister, addressRegister] = integerFree;
@@ -5994,13 +6052,14 @@ class Machine {
     // The running sum is kept in a register of its own: the pinned one when the
     // build gave the accumulator one, and a free one otherwise.
     const accumulatorRegister =
-      accumulator.register !== null ? accumulator.register : ([0, 1, 2, 3, 4, 5, 6, 7].find(free) ?? null);
+      String(fieldOf(accumulator, "register")) !== "null" ? fieldOf(accumulator, "register") as number : ([0, 1, 2, 3, 4, 5, 6, 7].find(free) ?? null);
     if (accumulatorRegister === null) return false;
     spoken.add(accumulatorRegister);
     // Four vector registers: where the eight quotients land, where the eight
     // divisors are built, and the weight and step broadcast to every lane.
     const vectors: number[] = [];
-    for (let register = 0; register <= 15 && vectors.length < 4; register += 1) {
+    for (let register = 0; register <= 15; register += 1) {
+      if (vectors.length >= 4) break;
       if (free(register)) vectors.push(register);
     }
     if (vectors.length < 4) return false;
@@ -6037,25 +6096,25 @@ class Machine {
     this.loadFloat(step, XMM0);
     this.code.movsStore(frame(stepSlot), XMM0, false);
     // The array's base pointer and the bound the counter is tested against.
-    if (array.register !== null) this.code.movRegReg(baseRegister, array.register);
-    else this.code.movRegMemSized(baseRegister, frame(array.offset), 8, false);
-    if (loop.to.k === "local") {
-      const bound = this.slot(loop.to.name);
-      if (bound.register !== null) this.code.movRegReg(boundRegister, bound.register);
-      else this.code.movRegMemSized(boundRegister, frame(bound.offset), 8, false);
+    if (String(fieldOf(array, "register")) !== "null") this.code.movRegReg(baseRegister, fieldOf(array, "register") as number);
+    else this.code.movRegMemSized(baseRegister, frame(fieldOf(array, "offset") as number), 8, false);
+    if ((fieldOf(loop, "to") as SemanticValue).k === "local") {
+      const bound = this.slot(String(fieldOf(fieldOf(loop, "to"), "name")));
+      if (String(fieldOf(bound, "register")) !== "null") this.code.movRegReg(boundRegister, fieldOf(bound, "register") as number);
+      else this.code.movRegMemSized(boundRegister, frame(fieldOf(bound, "offset") as number), 8, false);
     } else {
-      this.code.movRegImm(boundRegister, BigInt(wholeLiteral(loop.to) as number));
+      this.code.movRegImm(boundRegister, BigInt(wholeLiteral(fieldOf(loop, "to") as SemanticValue) as number));
     }
     // The running sum, read into the register the packed loop adds into. Where
     // the build gave the accumulator a register of its own, it is already
     // holding the value.
-    if (accumulator.register === null) this.code.movsLoad(accumulatorRegister, frame(accumulator.offset), false);
+    if (String(fieldOf(accumulator, "register")) === "null") this.code.movsLoad(accumulatorRegister, frame(fieldOf(accumulator, "offset") as number), false);
     // The counter starts at the loop's first value.
-    this.code.movRegImm(counter, BigInt(wholeLiteral(loop.from) as number));
+    this.code.movRegImm(counter, BigInt(wholeLiteral(fieldOf(loop, "from") as SemanticValue) as number));
 
     const packedHeader = this.code.label("Lpacked");
     const tail = this.code.label("Ltail");
-    this.code.bind(labels.header);
+    this.code.bind(String(fieldOf(labels, "header")));
     this.code.bind(packedHeader);
     // Fewer than eight elements left: write them the scalar way.
     this.code.lea(addressRegister, mem(counter, 8));
@@ -6097,7 +6156,7 @@ class Machine {
     // The scalar tail: one turn at a time, stepping weight and step as the
     // scalar loop does.
     this.code.alu("cmp", counter, boundRegister, true);
-    this.code.jcc("ge", labels.exit);
+    this.code.jcc("ge", String(fieldOf(labels, "exit")));
     this.code.movsLoad(XMM0, frame(weightSlot), false);
     this.code.movsLoad(XMM1, indexed(baseRegister, counter, 8), false);
     this.code.sse("div", XMM1, XMM0, false);
@@ -6110,9 +6169,9 @@ class Machine {
     this.code.movsStore(frame(stepSlot), XMM0, false);
     this.code.aluImm("add", counter, 1, true);
     this.code.jmp(tail);
-    this.code.bind(labels.exit);
+    this.code.bind(String(fieldOf(labels, "exit")));
     // The running sum is written back where the accumulator reads it.
-    if (accumulator.register === null) this.code.movsStore(frame(accumulator.offset), accumulatorRegister, false);
+    if (String(fieldOf(accumulator, "register")) === "null") this.code.movsStore(frame(fieldOf(accumulator, "offset") as number), accumulatorRegister, false);
     return true;
   }
 
@@ -6142,21 +6201,21 @@ class Machine {
         // The number in both halves is read out of the read-only data in one
         // instruction, where the general form loads it and then interleaves it
         // with itself — two instructions on every turn of the loop.
-        this.code.packedLoadLabel(into, this.floatPair(floatBits(Number(decimalText(value.text)), false)));
+        this.code.packedLoadLabel(into, this.floatPair(floatBits(Number(decimalText(String(fieldOf(value, "text")))), false)));
         return;
       }
       case "local": {
-        if (value.name === turn.counterName) {
-          this.code.packedMove(into, turn.counter);
+        if (String(fieldOf(value, "name")) === String(fieldOf(turn, "counterName"))) {
+          this.code.packedMove(into, fieldOf(turn, "counter") as number);
           return;
         }
         // A name the build gave a register of its own is in it, and its frame
         // offset is the first slot's own address rather than a slot of its own,
         // so it is read out of that register. Read from the frame instead it is
         // the first slot's value, which is whatever the body last left there.
-        const held = this.slot(value.name);
-        if (held.register !== null) this.code.movsMove(into, held.register, false);
-        else this.code.movsLoad(into, frame(held.offset), false);
+        const held = this.slot(String(fieldOf(value, "name")));
+        if (String(fieldOf(held, "register")) !== "null") this.code.movsMove(into, fieldOf(held, "register") as number, false);
+        else this.code.movsLoad(into, frame(fieldOf(held, "offset") as number), false);
         this.code.unpackLow(into, into);
         return;
       }
@@ -6164,11 +6223,12 @@ class Machine {
         // Two turns read two doubles that stand beside each other, which is one
         // load of sixteen bytes: the base of the array the read names and the
         // cursor of the pairs, both of which are in registers for the whole loop.
-        const of = value.of.k === "local" ? value.of.name : "";
-        const at = turn.arrays.indexOf(of);
-        const base = turn.bases[at];
+        const of = fieldOf(value, "of") as SemanticValue;
+        const ofName = of.k === "local" ? String(fieldOf(of, "name")) : "";
+        const at = (fieldOf(turn, "arrays") as readonly string[]).indexOf(ofName);
+        const base = (fieldOf(turn, "bases") as readonly number[])[at];
         if (base === undefined) throw machineError("a pair load was written for an array no base register was read for");
-        this.code.packedLoad(into, indexed(base, turn.cursor, 1));
+        this.code.packedLoad(into, indexed(base, fieldOf(turn, "cursor") as number, 1));
         return;
       }
       case "arith": {
@@ -6176,9 +6236,9 @@ class Machine {
         // is built with the register it is standing in as its third and writes
         // over it, and the answer is the instruction that joins the two. That is
         // what a census bounds the height of the right side for.
-        this.packedValue(value.left, into, other, third, turn);
-        this.packedValue(value.right, other, third, into, turn);
-        this.code.packed(value.op as "add" | "sub" | "mul" | "div", into, other);
+        this.packedValue(fieldOf(value, "left") as SemanticValue, into, other, third, turn);
+        this.packedValue(fieldOf(value, "right") as SemanticValue, other, third, into, turn);
+        this.code.packed(String(fieldOf(value, "op")) as "add" | "sub" | "mul" | "div", into, other);
         return;
       }
       default:
@@ -6218,23 +6278,28 @@ class Machine {
     // The counter has to be a whole number, and the progression a whole number
     // of steps, for the arithmetic of the turn and the counter to be the same
     // number.
-    const type = loop.type;
+    const type = fieldOf(loop, "type") as SemanticType;
     if (type.kind !== "primitive" || type.name !== "i64") return null;
-    if (loop.body.statements.length !== 1) return null;
-    if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
-    const statement = loop.body.statements[0];
-    if (statement.k !== "set" || statement.op !== "+=") return null;
-    if (statement.name === loop.variable) return null;
+    const loopBody = fieldOf(loop, "body") as SemanticBlock;
+    const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
+    if (statements.length !== 1) return null;
+    if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
+        String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
+    const statement = statements[0];
+    const variable = String(fieldOf(loop, "variable"));
+    if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+    if (String(fieldOf(statement, "name")) === variable) return null;
     // The ends of the loop have to be known, because the arithmetic of the turn
     // has to be exact over the whole of the range the counter takes, and the
     // range is the one the ends say.
-    const from = wholeLiteral(loop.from);
-    const to = wholeLiteral(loop.to);
-    const step = loop.step === null ? (loop.down ? -1 : 1) : wholeLiteral(loop.step);
+    const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
+    const to = wholeLiteral(fieldOf(loop, "to") as SemanticValue);
+    const step = String(fieldOf(loop, "step")) === "null" ? (String(fieldOf(loop, "down")) === "true" ? -1 : 1) : wholeLiteral(fieldOf(loop, "step") as SemanticValue);
     if (from === null || to === null || step === null) return null;
-    const affine = this.progressionOf(statement.value, loop.variable);
+    const affine = this.progressionOf(fieldOf(statement, "value") as SemanticValue, variable);
     if (affine === null) return null;
-    const { k, c } = affine;
+    const k = fieldOf(affine, "k") as number;
+    const c = fieldOf(affine, "c") as number;
     // A step of no progression is no progression, and a negative one would
     // count the loop the other way round. A progression that is the counter
     // itself is the loop as it was.
@@ -6246,8 +6311,8 @@ class Machine {
     // single up to two to the twenty-fourth, and a whole number of sixty-four
     // bits up to two to the sixty-second, and the product of the counter and the
     // step of the progression has to stay under the one that goes with it.
-    const limit = isFloatType(statement.value.type)
-      ? widthOf(statement.value.type) === 4
+    const limit = isFloatType(fieldOf(statement, "value") as never as SemanticType)
+      ? widthOf(fieldOf(fieldOf(statement, "value"), "type") as SemanticType) === 4
         ? 1n << 24n
         : 1n << 53n
       : 1n << 62n;
@@ -6256,25 +6321,35 @@ class Machine {
       if (absolute(BigInt(k) * end + BigInt(c)) >= limit) return null;
     }
     const number = (value: number): SemanticValue => ({ k: "const", type, text: String(value) });
+    const replaced: SemanticStatement = {
+      k: "set",
+      name: String(fieldOf(statement, "name")),
+      op: String(fieldOf(statement, "op")) as SemanticAssignOp,
+      value: { k: "local", type, name: variable },
+      line: fieldOf(statement, "line") as number,
+    };
     const counted: Extract<SemanticLoop, { kind: "counted" }> = {
       kind: "counted",
-      variable: loop.variable,
+      variable,
       type,
       from: number(k * from + c),
       to: number(k * to + c),
-      inclusive: loop.inclusive,
-      down: loop.down,
+      inclusive: String(fieldOf(loop, "inclusive")) === "true",
+      down: String(fieldOf(loop, "down")) === "true",
       step: number(k * step),
-      header: loop.header,
-      exit: loop.exit,
+      header: String(fieldOf(loop, "header")),
+      exit: String(fieldOf(loop, "exit")),
       body: {
-        ...loop.body,
-        statements: [{ ...statement, value: { k: "local", type, name: loop.variable } }],
+        id: String(fieldOf(loopBody, "id")),
+        statements: [replaced],
+        releases: fieldOf(loopBody, "releases") as string[],
+        terminator: fieldOf(loopBody, "terminator") as SemanticTerminator,
       },
     };
-    if (loop.parallel === true) counted.parallel = true;
-    if (loop.region === true) counted.region = true;
-    if (loop.reductions !== undefined) counted.reductions = loop.reductions;
+    if (String(fieldOf(loop, "parallel")) === "true") counted.parallel = true;
+    if (String(fieldOf(loop, "region")) === "true") counted.region = true;
+    const reductions = fieldOf(loop, "reductions");
+    if (String(reductions) !== "undefined") counted.reductions = reductions as Extract<SemanticLoop, { kind: "counted" }>["reductions"];
     return counted;
   }
 
@@ -6283,27 +6358,31 @@ class Machine {
    * where the expression is not of that shape.
    */
   private progressionOf(value: SemanticValue, counter: string): { k: number; c: number } | null {
-    if (value.k === "local") return value.name === counter ? { k: 1, c: 0 } : null;
+    if (value.k === "local") return String(fieldOf(value, "name")) === counter ? { k: 1, c: 0 } : null;
     if (value.k === "const") {
       const whole = wholeLiteral(value);
       return whole === null ? null : { k: 0, c: whole };
     }
     if (value.k !== "arith") return null;
-    if (value.op === "mul") {
+    if (String(fieldOf(value, "op")) === "mul") {
       const scaled = this.scaledOf(value, counter);
       return scaled === null ? null : { k: scaled, c: 0 };
     }
-    if (value.op !== "add" && value.op !== "sub") return null;
-    const left = this.progressionOf(value.left, counter);
-    const right = this.progressionOf(value.right, counter);
+    if (String(fieldOf(value, "op")) !== "add" && String(fieldOf(value, "op")) !== "sub") return null;
+    const left = this.progressionOf(fieldOf(value, "left") as SemanticValue, counter);
+    const right = this.progressionOf(fieldOf(value, "right") as SemanticValue, counter);
     if (left === null || right === null) return null;
-    if (value.op === "add") {
-      if (left.k === 0) return { k: right.k, c: left.c + right.c };
-      if (right.k === 0) return { k: left.k, c: left.c + right.c };
+    const leftK = Number(fieldOf(left, "k"));
+    const leftC = Number(fieldOf(left, "c"));
+    const rightK = Number(fieldOf(right, "k"));
+    const rightC = Number(fieldOf(right, "c"));
+    if (String(fieldOf(value, "op")) === "add") {
+      if (leftK === 0) return { k: rightK, c: leftC + rightC };
+      if (rightK === 0) return { k: leftK, c: leftC + rightC };
       return null;
     }
-    if (left.k === 0) return { k: -right.k, c: left.c - right.c };
-    if (right.k === 0) return { k: left.k, c: left.c - right.c };
+    if (leftK === 0) return { k: -rightK, c: leftC - rightC };
+    if (rightK === 0) return { k: leftK, c: leftC - rightC };
     return null;
   }
 
@@ -6312,16 +6391,16 @@ class Machine {
    * not the counter multiplied by one.
    */
   private scaledOf(value: SemanticValue, counter: string): number | null {
-    if (value.k === "local") return value.name === counter ? 1 : null;
-    if (value.k !== "arith" || value.op !== "mul") return null;
-    const left = this.scaledOf(value.left, counter);
-    const right = this.scaledOf(value.right, counter);
+    if (value.k === "local") return String(fieldOf(value, "name")) === counter ? 1 : null;
+    if (value.k !== "arith" || String(fieldOf(value, "op")) !== "mul") return null;
+    const left = this.scaledOf(fieldOf(value, "left") as SemanticValue, counter);
+    const right = this.scaledOf(fieldOf(value, "right") as SemanticValue, counter);
     if (left !== null && right === null) {
-      const whole = wholeLiteral(value.right);
+      const whole = wholeLiteral(fieldOf(value, "right") as SemanticValue);
       return whole === null ? null : left * whole;
     }
     if (right !== null && left === null) {
-      const whole = wholeLiteral(value.left);
+      const whole = wholeLiteral(fieldOf(value, "left") as SemanticValue);
       return whole === null ? null : right * whole;
     }
     return null;
@@ -6344,55 +6423,64 @@ class Machine {
     select: Extract<SemanticValue, { k: "select" }>;
     otherwise: SemanticValue;
   } | null {
-    const type = loop.type;
+    const type = fieldOf(loop, "type") as SemanticType;
     if (type.kind !== "primitive" || type.name !== "i64") return null;
-    if (loop.down) return null;
-    if (loop.step !== null) {
-      const written = wholeLiteral(loop.step);
+    if (String(fieldOf(loop, "down")) === "true") return null;
+    const stepValue = fieldOf(loop, "step");
+    if (String(stepValue) !== "null") {
+      const written = wholeLiteral(stepValue as SemanticValue);
       if (written === null || written !== 1) return null;
     }
-    const from = wholeLiteral(loop.from);
+    const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
     if (from === null || from < 0) return null;
-    if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
+        const loopBody = fieldOf(loop, "body") as SemanticBlock;
+    if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
+        String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
     // The turn is one accumulation of a quotient; the declarations before it
     // are computable where they stand, which is what lets the weight read them.
-    const statements = loop.body.statements;
+    const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
     const accumulation = statements.findIndex((statement) => statement.k === "set");
     if (accumulation < 0 || accumulation !== statements.length - 1) return null;
     for (const statement of statements) {
       if (statement.k === "set") {
-        if (statement.op !== "+=") return null;
-        if (statement.name === loop.variable) return null;
+        if (String(fieldOf(statement, "op")) !== "+=") return null;
+        if (String(fieldOf(statement, "name")) === String(fieldOf(loop, "variable"))) return null;
         continue;
       }
-      if (statement.k !== "let" || statement.slot.kind !== "value" || statement.slot.mutable) return null;
-      if (!isSafeToCompute(statement.value)) return null;
+      const slot = fieldOf(statement, "slot") as SemanticSlot;
+      if (statement.k !== "let" || String(fieldOf(slot, "kind")) !== "value" || String(fieldOf(slot, "mutable")) === "true") return null;
+      if (!isSafeToCompute(fieldOf(statement, "value") as SemanticValue)) return null;
     }
     const statement = statements[accumulation] as Extract<SemanticStatement, { k: "set" }>;
     // The select appears once, and where it stands is where the weight goes.
-    const select = soleSelect(statement.value);
+    const select = soleSelect(fieldOf(statement, "value") as SemanticValue);
     if (select === null) return null;
-    if (select.type.kind !== "primitive" || select.type.name !== "f64") return null;
+    const selectType = fieldOf(select, "type") as SemanticType;
+    if (selectType.kind !== "primitive" || selectType.name !== "f64") return null;
     // A turn this pass has already weighted is the one whose fast arm is the
     // weight itself, and weighting it again would hold a second value under the
     // name the first turn's steps keep moving. The arm the weight replaced is a
     // name this pass reserved, so a select whose fast arm is that name is the
     // turn again, and the loop is left as the rewrite left it.
-    if (select.then.k === "local" && select.then.name.startsWith("blaze_triangular")) return null;
+    const selectThen = fieldOf(select, "then") as SemanticValue;
+    if (selectThen.k === "local" && String(fieldOf(selectThen, "name")).startsWith("blaze_triangular")) return null;
     // The arm that answers when the test holds is the whole-number weight,
     // and the progression of it is what the step of the weight is. The names
     // the arm reads are the declarations the body made of its own values,
     // which the arm lives among and the weight may read where they stand.
     const lets = new Map<string, SemanticValue>();
     for (const entry of statements.slice(0, accumulation)) {
-      if (entry.k === "let" && entry.slot.kind === "value") lets.set(entry.slot.name, entry.value);
+      const slot = fieldOf(entry, "slot") as SemanticSlot;
+      if (entry.k === "let" && String(fieldOf(slot, "kind")) === "value") {
+        lets.set(String(fieldOf(slot, "name")), fieldOf(entry, "value") as SemanticValue);
+      }
     }
     const counted = triangularOf(
-      select.then,
-      loop.variable,
-      loop.from,
+      selectThen,
+      String(fieldOf(loop, "variable")),
+      fieldOf(loop, "from") as SemanticValue,
       lets,
-      (name) => writesCounter(loop.body, name),
+      (name) => writesCounter(loopBody, name),
     );
     if (counted === null) return null;
     // The arm the test refuses is the computation the source wrote, and it
@@ -6401,8 +6489,9 @@ class Machine {
     // carried into it: the declaration a slow arm alone reads is computed
     // where the arm runs, and not on the turns the fast arm answers, which
     // used to convert the counter's sum to a double on every one of them.
-    let otherwise = structuredClone(select.otherwise);
-    for (let round = 0; round < 8 && lets.size > 0; round += 1) {
+    let otherwise = structuredClone(fieldOf(select, "otherwise") as SemanticValue);
+    for (let round = 0; round < 8; round += 1) {
+      if (lets.size === 0) break;
       otherwise = substituteLocals(otherwise, lets);
     }
     return { statement, lets, statements, accumulation, counted, select, otherwise };
@@ -6434,7 +6523,13 @@ class Machine {
   } | null {
     const plan = this.weightedPlan(loop);
     if (plan === null) return null;
-    const { statement, statements, accumulation, counted, select, otherwise } = plan;
+    const statement = fieldOf(plan, "statement") as Extract<SemanticStatement, { k: "set" }>;
+    const statements = fieldOf(plan, "statements") as readonly SemanticStatement[];
+    const accumulation = fieldOf(plan, "accumulation") as number;
+    const counted = fieldOf(plan, "counted") as NonNullable<ReturnType<typeof triangularOf>>;
+    const select = fieldOf(plan, "select") as Extract<SemanticValue, { k: "select" }>;
+    const otherwise = fieldOf(plan, "otherwise") as SemanticValue;
+    const loopBody = fieldOf(loop, "body") as SemanticBlock;
     // The weight is named once, held across the loop, and stepped after the
     // turn has divided by it. The name is the slot's own: the IR below reads
     // it as a value of its own, and nothing else of the body ever declares it.
@@ -6461,14 +6556,14 @@ class Machine {
       type: TRUTH,
       op: "le",
       operand: U64,
-      left: counted.slope,
+      left: fieldOf(counted, "slope") as SemanticValue,
       right: { k: "const", type: U64, text: String(TRIANGULAR_REACH) },
     } as SemanticValue;
     const guarded = {
       k: "logical",
-      type: select.condition.type,
+      type: (fieldOf(fieldOf(select, "condition"), "type") as SemanticType),
       op: "and",
-      left: select.condition,
+      left: fieldOf(select, "condition") as SemanticValue,
       right: reach,
     } as SemanticValue;
     // The test is a run of comparisons the counter carries, and every one of
@@ -6478,9 +6573,9 @@ class Machine {
     // turns branch on the answer instead of computing the tests again on
     // every one of them; see `hoistableGuard`.
     const hoisted = this.hoistableGuard(guarded, loop);
-    const with_weight = replaceOnce(statement.value, select, {
+    const with_weight = replaceOnce((fieldOf(statement, "value") as SemanticValue), select, {
       k: "select",
-      type: select.type,
+      type: fieldOf(select, "type") as SemanticType,
       condition: guarded,
       then: { k: "local", type: NUMBER, name: weightName },
       otherwise,
@@ -6490,18 +6585,18 @@ class Machine {
     // select and the tests under it are the guarded loop's to carry.
     const with_weight_alone = hoisted === null
       ? null
-      : (replaceOnce(statement.value, select, {
+      : (replaceOnce((fieldOf(statement, "value") as SemanticValue), select, {
           k: "local",
-          type: select.type,
+          type: fieldOf(select, "type") as SemanticType,
           name: weightName,
         }) as SemanticValue);
     // The first weight: the fast path at the loop's own first value, and the
     // step beside it that the turns move the weight by.
     const slopeAtStart = substituteLocals(
-      structuredClone(counted.slope),
-      new Map([[loop.variable, structuredClone(loop.from)] as [string, SemanticValue]]),
+      structuredClone(fieldOf(counted, "slope") as SemanticValue),
+      new Map([[String(fieldOf(loop, "variable")), structuredClone(fieldOf(loop, "from") as SemanticValue)] as [string, SemanticValue]]),
     );
-    this.at(counted.from, NUMBER);
+    this.at(fieldOf(counted, "from") as SemanticValue, NUMBER);
     this.store(weight);
     this.at(
       {
@@ -6509,7 +6604,7 @@ class Machine {
         type: NUMBER,
         op: "add",
         left: slopeAtStart,
-        right: { k: "const", type: NUMBER, text: String(1 + counted.offset) },
+        right: { k: "const", type: NUMBER, text: String(1 + fieldOf(counted, "offset") as number) },
       },
       NUMBER,
     );
@@ -6523,32 +6618,29 @@ class Machine {
     let alive = [...statements.slice(0, accumulation)];
     let guardedBody: SemanticBlock;
     for (;;) {
-      guardedBody = {
-        ...loop.body,
-        statements: [
+      guardedBody = blockWithStatements(loopBody, [
           ...alive,
-          { ...statement, value: with_weight },
+          setStatementWithValue(statement, with_weight),
           {
             k: "set",
             name: weightName,
             op: "+=",
             value: { k: "local", type: NUMBER, name: stepName },
-            line: statement.line,
+            line: (fieldOf(statement, "line") as number),
           },
           {
             k: "set",
             name: stepName,
             op: "+=",
             value: { k: "const", type: NUMBER, text: "1" },
-            line: statement.line,
+            line: (fieldOf(statement, "line") as number),
           },
-        ],
-      };
+        ]);
       const dead = alive.filter(
         (entry) =>
           entry.k === "let" &&
-          entry.slot.kind === "value" &&
-          !everyValue(guardedBody).some((value) => readsLocal(value, entry.slot.name)),
+          String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
+          !everyValue(guardedBody).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
       );
       if (dead.length === 0) break;
       const gone = new Set(dead);
@@ -6562,32 +6654,29 @@ class Machine {
     let aliveLean = [...alive];
     if (with_weight_alone !== null) {
       for (;;) {
-        const tryBody = {
-          ...loop.body,
-          statements: [
+        const tryBody = blockWithStatements(loopBody, [
             ...aliveLean,
-            { ...statement, value: with_weight_alone },
+            setStatementWithValue(statement, with_weight_alone),
             {
               k: "set" as const,
               name: weightName,
               op: "+=" as const,
               value: { k: "local" as const, type: NUMBER, name: stepName },
-              line: statement.line,
+              line: (fieldOf(statement, "line") as number),
             },
             {
               k: "set" as const,
               name: stepName,
               op: "+=" as const,
               value: { k: "const" as const, type: NUMBER, text: "1" },
-              line: statement.line,
+              line: (fieldOf(statement, "line") as number),
             },
-          ],
-        } as SemanticBlock;
+          ]);
         const dead = aliveLean.filter(
           (entry) =>
             entry.k === "let" &&
-            entry.slot.kind === "value" &&
-            !everyValue(tryBody).some((value) => readsLocal(value, entry.slot.name)),
+            String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
+            !everyValue(tryBody).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
         );
         if (dead.length === 0) break;
         const gone = new Set(dead);
@@ -6596,30 +6685,27 @@ class Machine {
     }
     const leanBody = with_weight_alone === null
       ? null
-      : ({
-          ...loop.body,
-          statements: [
+      : blockWithStatements(loopBody, [
             ...aliveLean,
-            { ...statement, value: with_weight_alone },
+            setStatementWithValue(statement, with_weight_alone),
             {
               k: "set",
               name: weightName,
               op: "+=",
               value: { k: "local", type: NUMBER, name: stepName },
-              line: statement.line,
+              line: (fieldOf(statement, "line") as number),
             },
             {
               k: "set",
               name: stepName,
               op: "+=",
               value: { k: "const", type: NUMBER, text: "1" },
-              line: statement.line,
+              line: (fieldOf(statement, "line") as number),
             },
-          ],
-        } as SemanticBlock);
+          ]);
     return {
-      guarded: { ...loop, body: guardedBody },
-      lean: leanBody === null ? null : { ...loop, body: leanBody },
+      guarded: countedWithBody(loop, guardedBody),
+      lean: leanBody === null ? null : countedWithBody(loop, leanBody),
       hoisted,
     };
   }
@@ -6652,16 +6738,24 @@ class Machine {
     condition: SemanticValue,
     loop: Extract<SemanticLoop, { kind: "counted" }>,
   ): SemanticValue | null {
-    if (!isBoolean(condition.type)) return null;
+    if (!isBoolean(fieldOf(condition, "type") as SemanticType)) return null;
+    const to = fieldOf(loop, "to") as SemanticValue;
     // A bound the body writes is read again at the header, and the turns could
     // run past the value the test at the end was asked of.
-    if (this.reread(loop, loop.to)) return null;
+    if (this.reread(loop, to)) return null;
     const leaves = conjunctsOf(condition);
     if (leaves === null) return null;
-    const written = (name: string): boolean => writesCounter(loop.body, name);
+    const body = fieldOf(loop, "body") as SemanticBlock;
+    const written = (name: string): boolean => writesCounter(body, name);
     const parts: SemanticValue[] = [];
     for (const leaf of leaves) {
-      const hoisted = hoistableLeaf(leaf, loop.variable, written, loop.from, loop.to);
+      const hoisted = hoistableLeaf(
+        leaf,
+        String(fieldOf(loop, "variable")),
+        written,
+        fieldOf(loop, "from") as SemanticValue,
+        to,
+      );
       if (hoisted === null) return null;
       parts.push(hoisted);
     }
@@ -6673,7 +6767,16 @@ class Machine {
   }
 
   private counted(loop: Extract<SemanticLoop, { kind: "counted" }>, labels: LoopLabels): void {
-    const type = loop.type;
+    const type = fieldOf(loop, "type") as SemanticType;
+    const body = fieldOf(loop, "body") as SemanticBlock;
+    const variableName = String(fieldOf(loop, "variable"));
+    const fromValue = fieldOf(loop, "from") as SemanticValue;
+    const toValue = fieldOf(loop, "to") as SemanticValue;
+    const stepValue = fieldOf(loop, "step") as SemanticValue | null;
+    const inclusive = String(fieldOf(loop, "inclusive")) === "true";
+    const down = String(fieldOf(loop, "down")) === "true";
+    const headerLabel = String(fieldOf(labels, "header"));
+    const exitLabel = String(fieldOf(labels, "exit"));
     // With AVX-512, a loop whose turn divides by a weight the counter maintains
     // can divide eight elements at a time with a single packed division. The
     // weight is an arithmetic progression whose step steps by one per turn, so
@@ -6718,15 +6821,15 @@ class Machine {
       // wrote.
       const after = this.code.label("Lweighted");
       const guarded = this.code.label("Lguarded");
-      this.truthBranch(weighted.hoisted as SemanticValue, false, guarded);
-      this.loop(weighted.lean);
+      this.truthBranch(fieldOf(weighted, "hoisted") as SemanticValue, false, guarded);
+      this.loop(fieldOf(weighted, "lean") as Extract<SemanticLoop, { kind: "counted" }>);
       this.code.jmp(after);
       this.code.bind(guarded);
-      this.loop(weighted.guarded);
+      this.loop(fieldOf(weighted, "guarded") as Extract<SemanticLoop, { kind: "counted" }>);
       this.code.bind(after);
       return;
     }
-    if (weighted !== null) loop = weighted.guarded;
+    if (weighted !== null) loop = fieldOf(weighted, "guarded") as Extract<SemanticLoop, { kind: "counted" }>;
     // A loop whose turns are known before the first of them is written out as
     // the turns it is, each with the counter at the value that turn has.
     const plan = unrollPlan(loop);
@@ -6740,18 +6843,18 @@ class Machine {
     // a counter read as an index is converted on every element it reaches. Where
     // one is to hand, the loop keeps the same number in a register of its own and
     // steps it beside the double: the conversion is done once for the loop.
-    const writtenName = (value: SemanticValue): boolean => value.k === "local" && writesCounter(loop.body, value.name);
+    const writtenName = (value: SemanticValue): boolean => value.k === "local" && writesCounter(body, value.name);
     const shadow =
       isFloatType(type) &&
       this.spareIndexes.length > 0 &&
-      wholeLiteral(loop.from) !== null &&
-      (loop.step === null || wholeLiteral(loop.step) !== null) &&
-      !writtenName(loop.to) &&
-      (loop.step === null || !writtenName(loop.step)) &&
-      !writesCounter(loop.body, loop.variable)
+      wholeLiteral(fromValue) !== null &&
+      (stepValue === null || wholeLiteral(stepValue) !== null) &&
+      !writtenName(toValue) &&
+      (stepValue === null || !writtenName(stepValue)) &&
+      !writesCounter(body, variableName)
         ? this.spareIndexes.pop() ?? null
         : null;
-    const variable = this.bind(loop.variable, type, shadow);
+    const variable = this.bind(variableName, type, shadow);
     // A counter nothing reads as a number is counted in whole numbers, which is
     // what an index is and what the shadow register holds. The double beside it
     // is then written and stepped and tested for nothing: the body reaches the
@@ -6767,19 +6870,19 @@ class Machine {
     // its step — is already known to be one, which is what the shadow register
     // was reserved for.
     const wholeCounter =
-      shadow !== null && wholeCountable(loop) && !readsCounterAsValue(loop.body, loop.variable);
+      shadow !== null && wholeCountable(loop) && !readsCounterAsValue(body, variableName);
     if (wholeCounter) {
       this.wholeCounted(loop, labels, shadow as number);
       this.spareIndexes.push(shadow as number);
       return;
     }
     let from: Held | null = null;
-    if (variable.register === null) {
-      this.at(loop.from, type);
+    if (String(fieldOf(variable, "register")) === "null") {
+      this.at(fromValue, type);
       from = this.holdAcross(type, "blaze_from");
       this.store(from);
     } else {
-      this.at(loop.from, type);
+      this.at(fromValue, type);
       this.store(variable);
     }
     // A bound and a step are read once and held, which is what a `for` costs
@@ -6788,27 +6891,27 @@ class Machine {
     // `for (i = 0; i < limit; i++) { limit = 9; }` reads a different bound on
     // the second turn, so a value the body writes is read again at the header
     // instead of being held for the whole loop.
-    const boundReread = this.reread(loop, loop.to);
-    const stepReread = loop.step !== null && this.reread(loop, loop.step);
-    const writtenTo = boundReread ? null : this.literalOf(loop.to, type);
+    const boundReread = this.reread(loop, toValue);
+    const stepReread = stepValue !== null && this.reread(loop, stepValue);
+    const writtenTo = boundReread ? null : this.literalOf(toValue, type);
     // A bound of doubles is held in a register of its own, because the test of
     // the loop needs it in one: the instruction that compares two doubles takes
     // one of them as its destination and the other as its source, and the
     // condition that answers "less than" without the parity bit needs the
     // larger side in the destination. A bound in the frame is read into the
     // scratch first, which is a second instruction on every turn.
-    const held = writtenTo === null ? this.heldBound(type, loop.to) : null;
-    const to: Held | number = writtenTo ?? held ?? this.heldAt(type, "blaze_to", loop.to);
+    const held = writtenTo === null ? this.heldBound(type, toValue) : null;
+    const to: Held | number = writtenTo ?? held ?? this.heldAt(type, "blaze_to", toValue);
     let step: Held | number | null = null;
-    if (loop.step !== null) {
+    if (stepValue !== null) {
       // A step the program wrote out is the same number on every turn, so it
       // is carried by the instruction that adds it rather than by a slot it is
       // read out of on each of them.
-      const number = stepReread ? null : this.immediateOf(loop.step, type);
+      const number = stepReread ? null : this.immediateOf(stepValue, type);
       if (number !== null) {
         step = number;
       } else {
-        this.at(loop.step, type);
+        this.at(stepValue, type);
         step = this.holdAcross(type, "blaze_step");
         this.store(step);
       }
@@ -6817,7 +6920,7 @@ class Machine {
     // was written to, which the step and the bound above were evaluated after
     // and would otherwise have taken the accumulator away from. A counter in a
     // register was already given it above and needs nothing here.
-    if (variable.register === null && from !== null) {
+    if (String(fieldOf(variable, "register")) === "null" && from !== null) {
       this.load(from);
       this.store(variable);
     }
@@ -6827,16 +6930,16 @@ class Machine {
     if (variable.index !== null) this.startIndex(variable, type, variable.index);
     const test = this.code.label("Ltest");
     this.code.jmp(test);
-    this.code.bind(labels.header);
+    this.code.bind(headerLabel);
     // A bound the body writes is read again here, before the test reads it, so
     // the turn after the write compares against the value that was written.
     if (boundReread && typeof to !== "number") {
-      this.at(loop.to, type);
+      this.at(toValue, type);
       this.store(to);
     }
     const stepSlot = step !== null && typeof step !== "number" ? step : null;
-    if (stepReread && loop.step !== null && stepSlot !== null) {
-      this.at(loop.step, type);
+    if (stepReread && stepValue !== null && stepSlot !== null) {
+      this.at(stepValue, type);
       this.store(stepSlot);
     }
     // The counter is stepped once per turn and then tested, and both of those
@@ -6844,19 +6947,19 @@ class Machine {
     // register of its own when the loop was given one. A counter in a
     // register is stepped and compared where it lies, so a turn costs no
     // traffic through the frame at all.
-    const counter = variable.register ?? RAX;
+    const counter = fieldOf(variable, "register") as number ?? RAX;
     if (step === null) {
       // No step written out is one turn's worth in the direction the loop
       // counts, which is the only place `down` decides the arithmetic.
-      if (variable.register === null) this.load(variable);
-      this.one(type, loop.down ? "sub" : "add", counter);
-      if (variable.index !== null) this.code.aluImm("add", variable.index, loop.down ? -1 : 1, true);
+      if (String(fieldOf(variable, "register")) === "null") this.load(variable);
+      this.one(type, down ? "sub" : "add", counter);
+      if (variable.index !== null) this.code.aluImm("add", variable.index, down ? -1 : 1, true);
     } else if (typeof step === "number") {
       // A step that is written down is the signed amount the index moves by,
       // so it is added whatever its sign is: the direction is already in it,
       // and subtracting a step of minus one moved the index the other way and
       // ran a descending loop for ever.
-      if (variable.register === null) this.load(variable);
+      if (String(fieldOf(variable, "register")) === "null") this.load(variable);
       if (isFloatType(type)) {
         // A float has no add-with-the-amount-inside form, so the step is written
         // into the scratch and the counter is advanced in the register it lies in.
@@ -6866,38 +6969,38 @@ class Machine {
       } else this.code.aluImm("add", counter, step, operationWidth(type) === 8);
     } else {
       this.scratchFrom(step);
-      if (variable.register === null) this.load(variable);
-      else if (isFloatType(type)) this.code.movsMove(XMM0, variable.register, widthOf(type) === 4);
-      else this.code.movRegReg(RAX, variable.register);
+      if (String(fieldOf(variable, "register")) === "null") this.load(variable);
+      else if (isFloatType(type)) this.code.movsMove(XMM0, fieldOf(variable, "register") as number, widthOf(type) === 4);
+      else this.code.movRegReg(RAX, fieldOf(variable, "register") as number);
       this.apply("add", type);
       // A step that had to be read leaves the sum in the accumulator rather than
       // in the register the counter is in, because the scratch the step was read
       // into is the other side of the addition and the counter cannot be both.
       // The counter is read back out of the accumulator here, which is what a
       // counter in the frame gets from the store below instead.
-      if (variable.register !== null) {
-        if (isFloatType(type)) this.code.movsMove(variable.register, XMM0, widthOf(type) === 4);
-        else this.code.movRegReg(variable.register, RAX);
+      if (fieldOf(variable, "register") as number !== null) {
+        if (isFloatType(type)) this.code.movsMove(fieldOf(variable, "register") as number, XMM0, widthOf(type) === 4);
+        else this.code.movRegReg(fieldOf(variable, "register") as number, RAX);
       }
     }
     this.normalizeArithmetic(type, counter);
     // A counter stepped where it lies is not stored: writing the accumulator
     // into it would step it with whatever the step left behind.
-    if (variable.register === null) this.store(variable);
+    if (String(fieldOf(variable, "register")) === "null") this.store(variable);
     this.code.bind(test);
     // Nothing is written between the store above and the test, so the counter
     // is still in the accumulator and reading the slot it was just written to
     // would be loading a value that is already there.
     this.comparedBranch(
       type,
-      loop.inclusive ? (loop.down ? "ge" : "le") : loop.down ? "gt" : "lt",
+      inclusive ? (down ? "ge" : "le") : down ? "gt" : "lt",
       to,
       false,
-      labels.exit,
+      exitLabel,
       counter,
     );
     this.turn(loop, labels);
-    this.code.bind(labels.exit);
+    this.code.bind(exitLabel);
     // The slots the header was read into are dead now the loop is written, and
     // whatever the statement after this one binds takes them.
     if (from !== null) this.freeSlot(from);
@@ -6906,8 +7009,9 @@ class Machine {
     // the body borrow theirs from: the bound is held for the length of the
     // loop, and the body had no use of it.
     if (typeof to !== "number") {
-      if (to.register === null) this.freeSlot(to);
-      else this.spareBounds.push(to.register);
+      const toRegister = fieldOf(to, "register") as number | null;
+      if (String(toRegister) === "null") this.freeSlot(to);
+      else this.spareBounds.push(toRegister as number);
     }
     if (typeof step !== "number" && step !== null) this.freeSlot(step);
     // The register the counter was read as an index out of goes back too, and
@@ -6941,13 +7045,15 @@ class Machine {
     // A counter whole-counted is stepped in a register of its own, and that
     // register is what a shift count is read out of when the loop divides by a
     // power of two.
-    this.counterRegisters.set(loop.variable, counter);
-    const from = wholeLiteral(loop.from) as number;
-    const to = wholeLiteral(loop.to) as number;
+    this.counterRegisters.set(String(fieldOf(loop, "variable")), counter);
+    const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue) as number;
+    const to = wholeLiteral(fieldOf(loop, "to") as SemanticValue) as number;
     // The step is the signed amount the counter moves by, whatever the direction
     // the loop counts in: `down` says which way the trip runs and the step says
     // how far each turn goes, and a descending loop's step is already negative.
-    const step = loop.step === null ? (loop.down ? -1 : 1) : (wholeLiteral(loop.step) as number);
+    const stepValue = fieldOf(loop, "step");
+    const down = String(fieldOf(loop, "down")) === "true";
+    const step = String(stepValue) === "null" ? (down ? -1 : 1) : (wholeLiteral(stepValue as SemanticValue) as number);
     // The counter is compared as a signed number because the value it was
     // holding is a double, and the order of two whole numbers as signed numbers
     // is the order the same two doubles have. The unsigned conditions would
@@ -6957,17 +7063,17 @@ class Machine {
     // counts up to a bound without reaching it leaves the loop once the counter
     // has reached it, which is the comparison the general form negates because
     // it branches on the truth of the comparison it was given.
-    const past = loop.inclusive ? (loop.down ? "lt" : "gt") : loop.down ? "le" : "ge";
+    const past = String(fieldOf(loop, "inclusive")) === "true" ? (down ? "lt" : "gt") : down ? "le" : "ge";
     this.code.movRegImm(counter, BigInt(from));
     const test = this.code.label("Ltest");
     this.code.jmp(test);
-    this.code.bind(labels.header);
+    this.code.bind(String(fieldOf(labels, "header")));
     this.code.aluImm("add", counter, step, true);
     this.code.bind(test);
     this.code.aluImm("cmp", counter, to, true);
-    this.code.jcc(COMPARISON.signed[past], labels.exit);
+    this.code.jcc(COMPARISON.signed[past], String(fieldOf(labels, "exit")));
     this.turn(loop, labels);
-    this.code.bind(labels.exit);
+    this.code.bind(String(fieldOf(labels, "exit")));
   }
 
   /**
