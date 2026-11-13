@@ -1282,7 +1282,9 @@ function callsWithin(program: SemanticProgram): { caller: string; callee: string
 /** Every function name a body or the program's own statements call directly. */
 function directCalleesOf(block: SemanticBlock): string[] {
   const names: string[] = [];
-  const visit = (visited: SemanticBlock): void => {
+  const blocks: SemanticBlock[] = [block];
+  while (blocks.length > 0) {
+    const visited = blocks.pop() as SemanticBlock;
     const visitedFields = visited as unknown as Record<string, unknown>;
     for (const statement of visitedFields["statements"] as Record<string, unknown>[]) {
       for (const value of statementValues(statement as unknown as SemanticStatement)) {
@@ -1300,7 +1302,7 @@ function directCalleesOf(block: SemanticBlock): string[] {
         const call = statement["call"] as Record<string, unknown>;
         names.push(String(call["callee"]));
       }
-      for (const inner of statementBlocksOf(statement as unknown as SemanticStatement)) visit(inner);
+      for (const inner of statementBlocksOf(statement as unknown as SemanticStatement)) blocks.push(inner);
     }
     const terminator = visitedFields["terminator"] as Record<string, unknown>;
     if (String(terminator["k"]) === "return" && terminator["value"] !== null) {
@@ -1314,8 +1316,7 @@ function directCalleesOf(block: SemanticBlock): string[] {
         if (kind === "functionRef") names.push(String(fields["name"]));
       });
     }
-  };
-  visit(block);
+  }
   return [...new Set(names)];
 }
 
@@ -1766,6 +1767,7 @@ export async function runBuild(
   // The engine is read before anything is written, because a build that is
   // going to stop must stop without having touched the record of the last one.
   const toolchain = await toolchainFingerprints();
+  const toolchainFields = toolchain as unknown as Record<string, unknown>;
   const engine = engineStamp(toolchain);
   // A record written by a different engine is a proof about a compiler that
   // no longer exists, and every function in it has to be asked for again, so
@@ -1849,8 +1851,9 @@ export async function runBuild(
   const requireModel = (): ModelConfiguration => {
     if (resolvedModel === undefined) {
       resolvedModel = resolveModel(requested);
-      build.model = resolvedModel.id;
-      build.modelConfig = resolvedModel.id;
+      const modelFields = resolvedModel as unknown as Record<string, unknown>;
+      (build as unknown as Record<string, unknown>)["model"] = String(modelFields["id"]);
+      (build as unknown as Record<string, unknown>)["modelConfig"] = String(modelFields["id"]);
     }
     return resolvedModel;
   };
@@ -1883,9 +1886,12 @@ export async function runBuild(
     reporter(
       "ir",
       "ok",
-      `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + fn.ensures.length, 0)} postcondition(s) to check them against`,
+      `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + ((fn as unknown as Record<string, unknown>)["ensures"] as string[]).length, 0)} postcondition(s) to check them against`,
     );
-    const sourceHash = hashValue(modules.map((module) => [module.path, module.source]));
+    const sourceHash = hashValue(modules.map((module) => {
+      const moduleFields = module as unknown as Record<string, unknown>;
+      return [String(moduleFields["path"]), String(moduleFields["source"])];
+    }));
     build.sourceHash = sourceHash;
     build.contractHash = hashValue(program);
     await storeWrite(store, paths.contract, program);
@@ -2001,8 +2007,8 @@ export async function runBuild(
     const generation = generationConfigFor(input, options);
     const keyOf = (unit: CompilationUnit): UnitKeys =>
       unitKeys({
-        contract: unit.contract,
-        file: unit.file,
+        contract: storedContractOf(unit),
+        file: String((unit as unknown as Record<string, unknown>)["file"]),
         program,
         target,
         output: outputKind,
@@ -2014,14 +2020,17 @@ export async function runBuild(
         generation,
         model: modelKey,
         compilerVersion: COMPILER_VERSION,
-        review: toolchain.review,
-        lowering: toolchain.lowering,
+        review: String(toolchainFields["review"]),
+        lowering: String(toolchainFields["lowering"]),
       });
     // One runtime for the whole build: every candidate of every function links
     // the same one, and the driver that runs the program links it too. The
     // HTTP runtime is built for the program that is being built: how many
     // connections its server may hold, and whether it speaks TLS.
-    const http = httpRuntimeNeeds(body, [...modules.map((module) => module.source), String(entry["source"])]);
+    const http = httpRuntimeNeeds(body, [
+      ...modules.map((module) => String((module as unknown as Record<string, unknown>)["source"])),
+      String(entry["source"]),
+    ]);
     const prepareRuntime = runtimePreparer({
       lowering: backendKind,
       mode: buildMode,
@@ -2094,9 +2103,14 @@ export async function runBuild(
     /** The implementation a unit contributed to the program that mismatched. */
     const implementationOf = (key: string): string | undefined => {
       const entry = generatedByFunction.get(key);
-      const selected = entry?.result.selected;
-      if (entry === undefined || selected === null || selected === undefined) return undefined;
-      return entry.result.candidates.find((candidate) => candidate.id === selected)?.text;
+      if (entry === undefined) return undefined;
+      const entryFields = entry as unknown as Record<string, unknown>;
+      const result = entryFields["result"] as Record<string, unknown>;
+      const selected = result["selected"];
+      if (selected === null || selected === undefined) return undefined;
+      const candidates = result["candidates"] as Record<string, unknown>[];
+      const chosen = candidates.find((candidate) => String(candidate["id"]) === String(selected));
+      return chosen === undefined ? undefined : String(chosen["text"]);
     };
 
     /**
