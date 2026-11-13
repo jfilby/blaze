@@ -314,9 +314,9 @@ contract phase of every module in order, and these slices have landed:
   adapter keeps contracts immutable and a compiled binary, which has no freeze
   state, treats the call as a no-op.
 
-The object layout pass now builds: its statement, expression, shape, counter
-and layout walks read every union field through the record the value is held
-as. The self-build has moved past `semantics/objects.ts` and stops in
-`toolchain/verify-program.ts` at `stopFailure`, whose `RunResult` fields
-(`signal` and its neighbours) are the next keyed read. Fixed point is not
-reached yet.
+The object layout pass and the C driver build: both read their statements,
+shapes, calls, callbacks and request records through keyed reads, and the
+verifier reads its run results the same way. The self-build has moved into
+`toolchain/ir-wasm.ts` and stops in `Body.open`, whose block record is the next
+keyed read; the wasm module's function lookup and the body's parameters,
+scopes and carriers already build. Fixed point is not reached yet.
