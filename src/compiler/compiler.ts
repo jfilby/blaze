@@ -2420,16 +2420,16 @@ export async function runBuild(
         }
         generationFunctions[key] = generationValue;
       }
-      const candidates = Object.fromEntries(Object.entries(candidateValues));
-      const verification = Object.fromEntries(Object.entries(verificationValues));
-      const benchmark = Object.fromEntries(Object.entries(benchmarkValues));
-      const selected = Object.fromEntries(Object.entries(selectedValues));
+      const candidates = JSON.parse(JSON.stringify(candidateValues)) as Record<string, Candidate[]>;
+      const verification = JSON.parse(JSON.stringify(verificationValues)) as Record<string, VerificationResult[]>;
+      const benchmark = JSON.parse(JSON.stringify(benchmarkValues)) as Record<string, BenchmarkResult[]>;
+      const selected = JSON.parse(JSON.stringify(selectedValues)) as Record<string, string>;
       await storeWrite(store, candidatesPath, candidates);
       await storeWrite(store, generationPath, {
         model: String((build as unknown as Record<string, unknown>)["model"]),
         modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
         compilerVersion: COMPILER_VERSION,
-        functions: Object.fromEntries(Object.entries(generationFunctions)),
+        functions: JSON.parse(JSON.stringify(generationFunctions)),
         modelDurationNs: String(
           generated.reduce((total, entry) => {
             const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
