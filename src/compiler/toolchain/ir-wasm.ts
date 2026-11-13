@@ -4284,15 +4284,17 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   const functionTypes = functions.map((one) => signatureOf(fieldOf(one, "fn") as SemanticFunction));
   out.section(1, (types) =>
     types.counted(1 + functionTypes.length + signatures.length, (one) => {
-      for (const type of functionTypes) writeType(one, type);
+      for (const type of functionTypes) writeType(one, fieldOf(type, "parameters") as number[], fieldOf(type, "result") as number | undefined);
       one.byte(0x60);
       one.counted(2, (values) => { values.byte(0x7c); values.byte(0x7c); });
       one.counted(1, (results) => results.byte(0x7c));
       for (const service of signatures) {
-        writeType(one, {
-          parameters: service.params.map((type) => TYPE_CODES[type] as number),
-          result: service.result === null ? undefined : (TYPE_CODES[service.result] as number),
-        });
+        const parameters = fieldOf(service, "params") as readonly string[];
+        writeType(
+          one,
+          parameters.map((type) => TYPE_CODES[type] as number),
+          TYPE_CODES[String(fieldOf(service, "result"))] as number | undefined,
+        );
       }
     }),
   );
@@ -4341,15 +4343,15 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   // so it says so, and a host that allocated below it would write a vector over
   // the limbs of a wide number in flight.
   out.section(6, (globals) =>
-    globals.counted(module.floats.length + 1, (each) => {
-      for (const pooled of module.floats) {
+    globals.counted((fieldOf(module, "floats") as readonly any[]).length + 1, (each) => {
+      for (const pooled of fieldOf(module, "floats") as readonly any[]) {
         // A global is its value type, a mutability byte and a constant expression
         // that initialises it. The expression is the constant itself followed by
         // `end`, and the mutability is immutable because nothing here can write one.
-        each.byte(pooled.type);
+        each.byte(fieldOf(pooled, "type") as number);
         each.byte(0x00);
-        each.byte(pooled.opcode);
-        each.raw(pooled.bytes);
+        each.byte(fieldOf(pooled, "opcode") as number);
+        each.raw(fieldOf(pooled, "bytes") as Uint8Array);
         each.byte(0x0b);
       }
       each.byte(I32);
@@ -4413,21 +4415,18 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
  * carrier of what it answers.
  */
 function signatureOf(fn: SemanticFunction): { parameters: number[]; result: number | undefined } {
-  const parameters = (fieldOf(fn, "params") as readonly any[]).map((param) => facts(slotType(param)).held);
+  const parameters = (fieldOf(fn, "params") as readonly any[]).map((param) => fieldOf(facts(slotType(param)), "held") as number);
   const returns = fieldOf(fn, "returns") as SemanticType;
-  const result = String(fieldOf(returns, "kind")) === "void" ? undefined : fieldOf(facts(returns),"held");
+  const result = String(fieldOf(returns, "kind")) === "void" ? undefined : fieldOf(facts(returns),"held") as number;
   return { parameters, result };
 }
 
 /** Writes one type into the type section. */
-function writeType(
-  one: Bytes,
-  type: { parameters: number[]; result: number | undefined },
-): void {
+function writeType(one: Bytes, parameters: number[], result: number | undefined): void {
   one.byte(0x60);
-  one.counted(type.parameters.length, (values) => type.parameters.forEach((code) => values.byte(code)));
-  one.counted(type.result === undefined ? 0 : 1, (results) => {
-    if (type.result !== undefined) results.byte(type.result);
+  one.counted(parameters.length, (values) => parameters.forEach((code) => values.byte(code)));
+  one.counted(result === undefined ? 0 : 1, (results) => {
+    if (result !== undefined) results.byte(result);
   });
 }
 
@@ -4800,20 +4799,20 @@ function readImmediate(body: Uint8Array, at: number, kind: string): { text: stri
   switch (kind) {
     case "index": {
       const value = readVaruint(body, at, 32);
-      return { text: String(value.value), next: value.next };
+      return { text: String((fieldOf(value, "value"))), next: (fieldOf(value, "next") as number) };
     }
     case "memarg": {
       const align = readVaruint(body, at, 32);
-      const offset = readVaruint(body, align.next, 32);
-      return { text: `align=${align.value} offset=${offset.value}`, next: offset.next };
+      const offset = readVaruint(body, (fieldOf(align, "next") as number), 32);
+      return { text: `align=${(fieldOf(align, "value"))} offset=${(fieldOf(offset, "value"))}`, next: (fieldOf(offset, "next") as number) };
     }
     case "i32": {
       const value = readVarint(body, at);
-      return { text: String(value.value), next: value.next };
+      return { text: String((fieldOf(value, "value"))), next: (fieldOf(value, "next") as number) };
     }
     case "i64": {
       const value = readVarint64(body, at);
-      return { text: String(value.value), next: value.next };
+      return { text: String((fieldOf(value, "value"))), next: (fieldOf(value, "next") as number) };
     }
     case "f32": {
       const view = new DataView(body.buffer, body.byteOffset + at, 4);
@@ -4831,24 +4830,24 @@ function readImmediate(body: Uint8Array, at: number, kind: string): { text: stri
     case "br_table": {
       const count = readVaruint(body, at, 32);
       const targets: number[] = [];
-      let cursor = count.next;
-      for (let index = 0; index < count.value; index += 1) {
+      let cursor = (fieldOf(count, "next") as number);
+      for (let index = 0; index < (fieldOf(count, "value")); index += 1) {
         if (cursor >= body.length) break;
         const target = readVaruint(body, cursor, 32);
-        targets.push(target.value);
-        cursor = target.next;
+        targets.push((fieldOf(target, "value")));
+        cursor = (fieldOf(target, "next") as number);
       }
       const fallback = readVaruint(body, cursor, 32);
-      return { text: `${targets.join(" ")} ${fallback.value}`, next: fallback.next };
+      return { text: `${targets.join(" ")} ${(fieldOf(fallback, "value"))}`, next: (fieldOf(fallback, "next") as number) };
     }
     case "call_indirect": {
       const type = readVaruint(body, at, 32);
-      const table = readVaruint(body, type.next, 32);
-      return { text: `${type.value} ${table.value}`, next: table.next };
+      const table = readVaruint(body, (fieldOf(type, "next") as number), 32);
+      return { text: `${(fieldOf(type, "value"))} ${(fieldOf(table, "value"))}`, next: (fieldOf(table, "next") as number) };
     }
     case "select": {
       const count = readVaruint(body, at, 32);
-      return { text: String(count.value), next: count.next };
+      return { text: String((fieldOf(count, "value"))), next: (fieldOf(count, "next") as number) };
     }
     default:
       return { text: "", next: at };
@@ -4857,16 +4856,13 @@ function readImmediate(body: Uint8Array, at: number, kind: string): { text: stri
 
 /** Reads a signed integer the format writes in LEB128. */
 function readVarint(bytes: Uint8Array, at: number): { value: number; next: number } {
-  let value = 0;
-  let shift = 0;
+  let value = 0n;
+  let shift = 0n;
   for (let index = at; index < bytes.length; index += 1) {
     const byte = bytes[index] ?? 0;
-    value |= (byte & 0x7f) << shift;
-    shift += 7;
-    if ((byte & 0x80) === 0) {
-      const signed = shift < 32 ? value << (32 - shift) >> (32 - shift) : value;
-      return { value: signed, next: index + 1 };
-    }
+    value |= BigInt(byte & 0x7f) << shift;
+    shift += 7n;
+    if ((byte & 0x80) === 0) return { value: Number(BigInt.asIntN(32, value)), next: index + 1 };
   }
   return { value: 0, next: bytes.length };
 }
@@ -5089,34 +5085,40 @@ const INSTRUCTIONS: Record<string, [string, string]> = {
  * against the contract before this, and the module is the compiler's own.
  */
 export async function buildModule(request: ModuleRequest): Promise<ModuleResult> {
-  const functionName = symbolOf(request.contract);
-  const style = rulesFor(request.language).style === "python" ? 1 : 0;
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const fn = fieldOf(request, "fn") as SemanticFunction;
+  const modulePath = String(fieldOf(request, "modulePath"));
+  const hostPath = String(fieldOf(request, "hostPath"));
+  const candidate = fieldOf(request, "candidate") as string | undefined;
+  const functionName = symbolOf(contract);
+  const style = String(fieldOf(rulesFor(String(fieldOf(request, "language"))), "style")) === "python" ? 1 : 0;
+  const extras = (fieldOf(request, "functions") as readonly SemanticFunction[] | undefined) ?? [];
   const bytes = programModuleBytes(
     {
       functions: [
-        { fn: request.fn, contract: request.contract },
-        ...(request.functions ?? []).map((fn) => ({ fn })),
+        { fn, contract },
+        ...extras.map((extra) => ({ fn: extra })),
       ],
     },
-    { candidate: request.candidate, style, optimize: request.optimize ?? true },
+    { candidate, style, optimize: (fieldOf(request, "optimize") as boolean | undefined) ?? true },
   );
-  const detail = await inspect(request.modulePath, functionName, bytes);
+  const detail = await inspect(modulePath, functionName, bytes);
   if (detail !== null) {
-    throw new CompilerError("TargetError", "compile", `the WebAssembly module for ${functionName} violates the contract`, detail.slice(0, 2000), functionName, request.candidate, "");
+    throw new CompilerError("TargetError", "compile", `the WebAssembly module for ${functionName} violates the contract`, detail.slice(0, 2000), functionName, candidate, "");
   }
-  await writeFile(request.modulePath, bytes);
+  await writeFile(modulePath, bytes, "utf8");
   // The host is the runtime: it carries the implementations of the services the
   // module reached for, and nothing else, over the memory the module reads.
   await writeFile(
-    request.hostPath,
-    generateWasmHost(request.contract, { services: moduleServices(bytes), style }),
+    hostPath,
+    generateWasmHost(contract, { services: moduleServices(bytes), style }),
     "utf8",
   );
   return {
-    runner: { command: process.execPath, args: [request.hostPath, request.modulePath] },
-    modulePath: request.modulePath,
-    hostPath: request.hostPath,
-    moduleSizeBytes: (await stat(request.modulePath)).size,
+    runner: { command: process.execPath, args: [hostPath, modulePath] },
+    modulePath,
+    hostPath,
+    moduleSizeBytes: (await stat(modulePath)).size,
   };
 }
 
@@ -5129,28 +5131,32 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
  * own function here.
  */
 export async function buildProgramModule(request: ProgramModuleRequest): Promise<ModuleResult> {
-  const style = rulesFor(request.language).style === "python" ? 1 : 0;
+  const modulePath = String(fieldOf(request, "modulePath"));
+  const hostPath = String(fieldOf(request, "hostPath"));
+  const candidate = fieldOf(request, "candidate") as string | undefined;
+  const entry = fieldOf(request, "entry") as SemanticBlock | undefined;
+  const style = String(fieldOf(rulesFor(String(fieldOf(request, "language"))), "style")) === "python" ? 1 : 0;
   const bytes = programModuleBytes(
-    { functions: request.functions, entry: request.entry },
-    { candidate: request.candidate, style, optimize: request.optimize ?? true },
+    { functions: fieldOf(request, "functions") as readonly { fn: SemanticFunction; export?: string }[], entry },
+    { candidate, style, optimize: (fieldOf(request, "optimize") as boolean | undefined) ?? true },
   );
-  const detail = await inspect(request.modulePath, request.entry === undefined ? undefined : ENTRY_EXPORT, bytes);
+  const detail = await inspect(modulePath, entry === undefined ? undefined : ENTRY_EXPORT, bytes);
   if (detail !== null) {
-    throw new CompilerError("TargetError", "compile", "the WebAssembly module of the program violates the contract", detail.slice(0, 2000), "", request.candidate, "");
+    throw new CompilerError("TargetError", "compile", "the WebAssembly module of the program violates the contract", detail.slice(0, 2000), "", candidate, "");
   }
-  await writeFile(request.modulePath, bytes);
+  await writeFile(modulePath, bytes, "utf8");
   // The host is the runtime: it carries the implementations of the services the
   // module reached for, and nothing else, over the memory the module reads.
   await writeFile(
-    request.hostPath,
+    hostPath,
     generateWasmProgramHost({ services: moduleServices(bytes), style, entry: ENTRY_EXPORT }),
     "utf8",
   );
   return {
-    runner: { command: process.execPath, args: [request.hostPath, request.modulePath] },
-    modulePath: request.modulePath,
-    hostPath: request.hostPath,
-    moduleSizeBytes: (await stat(request.modulePath)).size,
+    runner: { command: process.execPath, args: [hostPath, modulePath] },
+    modulePath,
+    hostPath,
+    moduleSizeBytes: (await stat(modulePath)).size,
   };
 }
 
@@ -5168,7 +5174,7 @@ export async function buildProgramModule(request: ProgramModuleRequest): Promise
 async function inspect(path: string, expected: string | undefined, bytes: Uint8Array): Promise<string | null> {
   const problems = boundaryProblems(bytes, expected);
   if (problems === null) {
-    await writeFile(path, bytes);
+    await writeFile(path, bytes, "utf8");
     const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected ?? ""], { timeoutMs: 60_000 });
     if (inspection.code === 0) return null;
     return (inspection.stderr.trim() || inspection.stdout.trim()).slice(0, 2000);
