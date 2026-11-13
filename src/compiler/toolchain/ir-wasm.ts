@@ -2605,9 +2605,9 @@ class Body {
     // stack for its statements and for the value its terminator hands back:
     // a name two blocks both give is a different local in each of them.
     this.open(block);
-    for (const statement of block.statements) this.statement(statement);
-    for (const name of block.releases) this.releaseName(name);
-    this.terminator(block.terminator);
+    for (const statement of fieldOf(block,"statements") as SemanticStatement[]) this.statement(statement);
+    for (const name of fieldOf(block,"releases") as string[]) this.releaseName(name);
+    this.terminator(fieldOf(block,"terminator") as SemanticTerminator);
     this.close();
     if (label !== null) this.pop();
   }
