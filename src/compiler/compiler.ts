@@ -48,6 +48,8 @@ import type {
   SemanticFunction,
   SemanticProgram,
   SemanticSlot,
+  SemanticStatement,
+  SemanticValue,
   SemanticType,
 } from "./core/semantic-ir.ts";
 import { slotType, statementBlocksOf, statementValues, walkValues } from "./core/semantic-ir.ts";
@@ -406,7 +408,8 @@ const STORE_HASH_LENGTH = 12;
 async function storedPaths(store: JsonStore, root: string, project: string): Promise<ProjectPaths> {
   const prefix = `${project}-`;
   const entries = await readdirEntries(join(root, "projects")).catch(() => []);
-  const found = entries.map((entry) => entry.name).filter(
+  const names = entries.map((entry) => String((entry as unknown as Record<string, unknown>)["name"]));
+  const found = names.filter(
     (entry) => entry.startsWith(prefix) && entry.length === prefix.length + STORE_HASH_LENGTH,
   );
   if (found.length === 0) return projectPaths(project, project);
@@ -959,6 +962,27 @@ interface UnitGeneration {
  * exports, because every one of them is something the program may call; a
  * library entry compiles the one function the project named.
  */
+/** One stored function's outcome, with the fields it was given. */
+function storedFunctionOf(
+  candidateId: string,
+  verification: VerificationResult | undefined,
+  benchmark: BenchmarkResult | undefined,
+): StoredCommandOutcome["functions"][string] {
+  const entry: StoredCommandOutcome["functions"][string] = { candidate: candidateId };
+  if (verification !== undefined) entry.verification = verification;
+  if (benchmark !== undefined) entry.benchmark = benchmark;
+  return entry;
+}
+
+/** The iterations a stored project's benchmark asks for. */
+function benchmarkIterationsOf(input: SourceInput): number {
+  const inputFields = input as unknown as Record<string, unknown>;
+  const benchmark = inputFields["benchmark"] as Record<string, unknown> | undefined;
+  if (benchmark === undefined) return DEFAULT_BENCHMARK.iterations;
+  const iterations = benchmark["iterations"] as number | undefined;
+  return iterations === undefined ? DEFAULT_BENCHMARK.iterations : iterations;
+}
+
 /** The contract a stored unit holds, at the type the evaluator reads it as. */
 function storedContractOf(unit: unknown): FunctionContract {
   return unitContract(unit) as unknown as FunctionContract;
@@ -1259,24 +1283,35 @@ function callsWithin(program: SemanticProgram): { caller: string; callee: string
 function directCalleesOf(block: SemanticBlock): string[] {
   const names: string[] = [];
   const visit = (visited: SemanticBlock): void => {
-    for (const statement of visited.statements) {
-      for (const value of statementValues(statement)) {
+    const visitedFields = visited as unknown as Record<string, unknown>;
+    for (const statement of visitedFields["statements"] as Record<string, unknown>[]) {
+      for (const value of statementValues(statement as unknown as SemanticStatement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "call") names.push(inner.call.callee);
-          if (inner.k === "functionRef") names.push(inner.name);
+          const fields = inner as unknown as Record<string, unknown>;
+          const kind = String(fields["k"]);
+          if (kind === "call") {
+            const call = fields["call"] as Record<string, unknown>;
+            names.push(String(call["callee"]));
+          }
+          if (kind === "functionRef") names.push(String(fields["name"]));
         });
       }
-      if (statement.k === "call") names.push(statement.call.callee);
-      for (const inner of statementBlocksOf(statement)) visit(inner);
+      if (String(statement["k"]) === "call") {
+        const call = statement["call"] as Record<string, unknown>;
+        names.push(String(call["callee"]));
+      }
+      for (const inner of statementBlocksOf(statement as unknown as SemanticStatement)) visit(inner);
     }
-    // A block ends in a terminator, and the value a return hands back is a value
-    // the block computes: the call of a closure a body ends with is the call a
-    // boundary between the backends has to be read from, so the walk of a block
-    // reaches it the way it reaches every statement's values.
-    if (visited.terminator.k === "return" && visited.terminator.value !== null) {
-      walkValues(visited.terminator.value, (inner) => {
-        if (inner.k === "call") names.push(inner.call.callee);
-        if (inner.k === "functionRef") names.push(inner.name);
+    const terminator = visitedFields["terminator"] as Record<string, unknown>;
+    if (String(terminator["k"]) === "return" && terminator["value"] !== null) {
+      walkValues(terminator["value"] as SemanticValue, (inner) => {
+        const fields = inner as unknown as Record<string, unknown>;
+        const kind = String(fields["k"]);
+        if (kind === "call") {
+          const call = fields["call"] as Record<string, unknown>;
+          names.push(String(call["callee"]));
+        }
+        if (kind === "functionRef") names.push(String(fields["name"]));
       });
     }
   };
@@ -2909,22 +2944,22 @@ export async function runStored(
       runtime,
       candidate,
       workspace,
-      callable: callableSymbols(unit.contract, contracts),
+      callable: callableSymbols(storedContractOf(unit), contracts),
       prepareRuntime,
       machine: machines,
       test: testConfigFor(input, options),
-      benchmark: { iterations: input.benchmark?.iterations ?? DEFAULT_BENCHMARK.iterations },
+      benchmark: { iterations: benchmarkIterationsOf(input) },
     });
     const resultFields = result as unknown as Record<string, unknown>;
     const resultVerification = resultFields["verification"] as VerificationResult | undefined;
     const resultBenchmark = resultFields["benchmark"] as BenchmarkResult | undefined;
     functionEntries.push([
       key,
-      {
-        candidate: String((candidate as unknown as Record<string, unknown>)["id"]),
-        ...(resultVerification === undefined ? {} : { verification: resultVerification }),
-        ...(resultBenchmark === undefined ? {} : { benchmark: resultBenchmark }),
-      },
+      storedFunctionOf(
+        String((candidate as unknown as Record<string, unknown>)["id"]),
+        resultVerification,
+        resultBenchmark,
+      ),
     ]);
     verificationEntries.push([key, resultVerification === undefined ? [] : [resultVerification]]);
     benchmarkEntries.push([key, resultBenchmark === undefined ? [] : [resultBenchmark]]);
@@ -2935,17 +2970,19 @@ export async function runStored(
       reporter(action, "info", `${functionName} has no vectors to run, so the program it is part of is what checks it`);
       continue;
     }
-    if (action === "test") {
+    if (String(action) === "test") {
+      const verificationFields = resultVerification as unknown as Record<string, unknown>;
       reporter(
         "verify",
-        result.verification?.passed === true ? "ok" : "fail",
-        `Correctness verified for ${functionName} (${result.verification?.cases ?? 0} test vectors)`,
+        (verificationFields["passed"] as boolean) === true ? "ok" : "fail",
+        `Correctness verified for ${functionName} (${verificationFields["cases"] === undefined ? "0" : String(verificationFields["cases"])} test vectors)`,
       );
     } else {
+      const benchmarkFields = resultBenchmark as unknown as Record<string, unknown>;
       reporter(
         "benchmark",
         "ok",
-        `Benchmark completed for ${functionName} (${result.benchmark?.iterations ?? 0} iterations, ${result.benchmark?.durationNs ?? 0} ns)`,
+        `Benchmark completed for ${functionName} (${benchmarkFields["iterations"] === undefined ? "0" : String(benchmarkFields["iterations"])} iterations, ${benchmarkFields["durationNs"] === undefined ? "0" : String(benchmarkFields["durationNs"])} ns)`,
       );
     }
   }
@@ -2978,12 +3015,13 @@ export interface SemanticIrOptions {
 export async function runSemanticIr(inputPath: string, options: SemanticIrOptions): Promise<string> {
   const fields = options as unknown as Record<string, unknown>;
   const { input, entry, directory } = readInput(inputPath);
+  const inputFields = input as unknown as Record<string, unknown>;
   const phase = contractPhaseFor(
-    frontendFor(input.language),
+    frontendFor(String(inputFields["language"])),
     input,
     entry,
     moduleReader(directory),
-    input.host,
+    inputFields["host"] as Readonly<Record<string, string>> | undefined,
   );
   const phaseFields = phase as unknown as Record<string, unknown>;
   const contract = phaseFields["program"] as ProgramContract;
@@ -3016,7 +3054,13 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
     fields["from"] === undefined
       ? resolveProgram(body as ProgramBody, contract, objectNames, objectLayouts, objectKeys)
       : parseSemanticProgram(readFileSync(String(fields["from"]), "utf8"), contract);
-  validateSemanticProgram(program, contract, new Map(program.bodies.map((fn) => [fn.name, fn])));
+  const programFields = program as unknown as Record<string, unknown>;
+  const programBodies = programFields["bodies"] as SemanticFunction[];
+  validateSemanticProgram(
+    program,
+    contract,
+    new Map(programBodies.map((fn) => [String((fn as unknown as Record<string, unknown>)["name"]), fn])),
+  );
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
   return printSemanticProgram(optimizeSemanticProgram(program, callees));
@@ -3044,12 +3088,13 @@ export async function listProjects(cwd: string): Promise<string[]> {
 export async function projectStateLine(project: string, cwd: string): Promise<string> {
   const build = await inspectProject(project, cwd).catch(() => undefined);
   if (build === undefined) return project;
-  const selected = build.selectedCandidates ?? {};
+  const buildFields = build as unknown as Record<string, unknown>;
+  const selected = (buildFields["selectedCandidates"] ?? {}) as Record<string, string>;
   const names = Object.keys(selected);
   const label = names.length === 0
     ? "-"
     : names.map((name) => `${name}#${selected[name]}`).join(",");
-  return `${project}  ${build.status}  ${build.model}  ${label}`;
+  return `${project}  ${String(buildFields["status"])}  ${String(buildFields["model"])}  ${label}`;
 }
 
 /** How many functions the program contract covers, for the build report. */
