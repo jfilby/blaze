@@ -280,7 +280,7 @@ binary is made of.
 
 ## Where the self-build stands
 
-The gap report is at zero refusals: the frontend reads all 97 sources of the
+The gap report is at zero refusals: the frontend reads all 100 sources of the
 compiler; the tests and benchmarks are outside the binary. The build reaches the
 contract phase of every module in order, and these slices have landed:
 
@@ -305,6 +305,20 @@ contract phase of every module in order, and these slices have landed:
   module name. The host-service and runtime-ABI tables are literal sources, so
   the wasm backend's host services are constants rather than derived state.
 
-The current gate is the frontend's remaining closure handling: a generated
-collection helper can still carry a free name (`__collect_typescript_24`), and
-the self-build stops there. Fixed point is not reached yet.
+- contract, call-graph and IR values whose TypeScript type is a union of
+  records are read by key rather than by member: a reference with no shape
+  cannot choose between arms that share a field name, and the type text,
+  contract phase, call graph and semantic IR now use the keyed read the IR
+  already uses for a dynamic object;
+- deep freezing moved behind the host boundary (`freezeValue`): the Node
+  adapter keeps contracts immutable and a compiled binary, which has no freeze
+  state, treats the call as a no-op.
+
+The current gate is the layout pass's own body walk. `BodyTypes.statement` and
+the fields its caller reads are keyed; `BodyTypes.expression` still reads the
+`Expression` union by member (`ref<any>.kind` and its neighbours), so the
+self-build stops there with a layout-choice refusal. The rest of
+`semantics/objects.ts` follows the same pattern: its value and statement
+unions are read by key, and the helper functions around them (`mergeShape`,
+`fieldLayout`, the `Inferred` predicates) are next. Fixed point is not reached
+yet.
