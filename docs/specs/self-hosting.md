@@ -314,11 +314,9 @@ contract phase of every module in order, and these slices have landed:
   adapter keeps contracts immutable and a compiled binary, which has no freeze
   state, treats the call as a no-op.
 
-The current gate is the layout pass's own body walk. `BodyTypes.statement` and
-the fields its caller reads are keyed; `BodyTypes.expression` still reads the
-`Expression` union by member (`ref<any>.kind` and its neighbours), so the
-self-build stops there with a layout-choice refusal. The rest of
-`semantics/objects.ts` follows the same pattern: its value and statement
-unions are read by key, and the helper functions around them (`mergeShape`,
-`fieldLayout`, the `Inferred` predicates) are next. Fixed point is not reached
-yet.
+The object layout pass now builds: its statement, expression, shape, counter
+and layout walks read every union field through the record the value is held
+as. The self-build has moved past `semantics/objects.ts` and stops in
+`toolchain/verify-program.ts` at `stopFailure`, whose `RunResult` fields
+(`signal` and its neighbours) are the next keyed read. Fixed point is not
+reached yet.
