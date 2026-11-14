@@ -1154,21 +1154,22 @@ const WHOLE_ASSIGNMENTS: readonly ProgramAssignOp[] = ["%=", "&=", "|=", "^=", "
  * to it, and the store — which is the same program, because `p.x += 1` is
  * `p.x = p.x + 1` in the language.
  */
-const COMPOUND_BINARY: Record<Exclude<ProgramAssignOp, "=">, ProgramBinaryOp> = {
-  "+=": "+",
-  "-=": "-",
-  "*=": "*",
-  "/=": "/",
-  "//=": "//",
-  "%=": "%",
-  "&=": "&",
-  "|=": "|",
-  "^=": "^",
-  "<<=": "<<",
-  ">>=": ">>",
-  ">>>=": ">>>",
-  "**=": "**",
-};
+const COMPOUND_BINARY: ReadonlyMap<Exclude<ProgramAssignOp, "=">, ProgramBinaryOp> =
+  new Map<Exclude<ProgramAssignOp, "=">, ProgramBinaryOp>([
+  ["+=", "+"],
+  ["-=", "-"],
+  ["*=", "*"],
+  ["/=", "/"],
+  ["//=", "//"],
+  ["%=", "%"],
+  ["&=", "&"],
+  ["|=", "|"],
+  ["^=", "^"],
+  ["<<=", "<<"],
+  [">>=", ">>"],
+  [">>>=", ">>>"],
+  ["**=", "**"],
+  ]);
 const EQUALITY: readonly ProgramBinaryOp[] = ["===", "!==", "==", "!="];
 
 const LOGICAL: readonly ProgramBinaryOp[] = ["&&", "||", "??"];
@@ -2748,11 +2749,16 @@ class ProgramResolver {
   }
 
   private declaration(statement: ProgramStatement & { kind: "declare" }): DraftStatement {
-    let annotation = statement.type === null ? null : this.annotation(statement.type, statement.line);
+    const declaredType = fieldOf(statement, "type");
+    const declValue = fieldOf(statement, "value") as ProgramValue;
+    const declName = String(fieldOf(statement, "name"));
+    const declLine = Number(fieldOf(statement, "line"));
+    const mutable = String(fieldOf(statement, "mutable")) === "true";
+    let annotation = String(declaredType) === "null" ? null : this.annotation(String(declaredType), declLine);
     // An empty array literal declared without an annotation is a dynamic array,
     // so it is resolved and checked as `any`.
 
-    if (annotation === null && statement.value.k === "buffer" && statement.value.values.length === 0) {
+    if (annotation === null && declValue.k === "buffer" && (fieldOf(declValue, "values") as readonly ProgramValue[]).length === 0) {
       annotation = { kind: "ref", of: null };
     }
 
@@ -2760,36 +2766,35 @@ class ProgramResolver {
     // advanced past the first `n` arguments: `args[i]` reads argument
     // `i + n` of it. The name is only ever indexed, so the binding stores the
     // first slice element as its value.
-    if (statement.value.k === "argv") {
-      const held: WithoutName<ArgvHeld> = { kind: "argv", mutable: statement.mutable, offset: statement.value.offset };
-      const declared = this.declareName(statement.name, statement.line, held);
+    if (declValue.k === "argv") {
+      const held: WithoutName<ArgvHeld> = { kind: "argv", mutable: mutable, offset: fieldOf(declValue, "offset") as number };
+      const declared = this.declareName(declName, declLine, held);
       const callValue = { k: "call", function: ARGV, args: [{ k: "number", text: String(held.offset) }] } as ProgramValue & { k: "call" };
-      const value: DraftValue = { k: "call", call: this.call(callValue, statement.line) };
-      return { kind: "declare", name: declared.name, held: declared, value, line: statement.line };
+      const value: DraftValue = { k: "call", call: this.call(callValue, declLine) };
+      return { kind: "declare", name: declared.name, held: declared, value, line: declLine };
     }
 
     // A list of pairs is a table the map is built from, not a value the program
     // holds: the entries are resolved where the source wrote them, and the name
     // is bound to them so the map that names it can write them.
-    if (statement.value.k === "pairs") {
-      const entries = statement.value.entries.map((entry) => ({
-        key: this.value(entry.key, TEXT, statement.line),
-        value: this.value(entry.value, null, statement.line),
+    if (declValue.k === "pairs") {
+      const entries = (fieldOf(declValue, "entries") as readonly { key: ProgramValue; value: ProgramValue }[]).map((entry) => ({
+        key: this.value(fieldOf(entry, "key") as ProgramValue, TEXT, declLine),
+        value: this.value(fieldOf(entry, "value") as ProgramValue, null, declLine),
       }));
-      const declared = this.declareName(statement.name, statement.line, {
+      const declared = this.declareName(declName, declLine, {
         kind: "pairs",
-        mutable: statement.mutable,
+        mutable: mutable,
         entries,
       });
-      return { kind: "declare", name: declared.name, held: declared, value: { k: "null", type: REF_NULL }, line: statement.line };
+      return { kind: "declare", name: declared.name, held: declared, value: { k: "null", type: REF_NULL }, line: declLine };
     }
-    const value = this.value(statement.value, annotation, statement.line);
-    const mutable = statement.mutable;
+    const value = this.value(declValue, annotation, declLine);
     // A declaration names the name the program declares, and the value is
     // written as it stands: what it is, the reader reads off what it holds.
     const declare = (held: WithoutName<Held>): DraftStatement => {
-      const declared = this.declareName(statement.name, statement.line, held);
-      return { kind: "declare", name: declared.name, held: declared, value, line: statement.line };
+      const declared = this.declareName(declName, declLine, held);
+      return { kind: "declare", name: declared.name, held: declared, value, line: declLine };
     };
     switch (value.k) {
       // A typed array is a name of its own, whichever of the three forms the
@@ -2799,11 +2804,13 @@ class ProgramResolver {
       case "sized":
       case "view":
       case "fill":
-        if (value.k === "buffer" && Array.isArray(value.held.values) && value.held.values.length === 0) {
-          const emptyArrayValue = this.value({ k: "call", function: "array.new", args: [] }, annotation, statement.line);
+        if (value.k === "buffer" &&
+            Array.isArray(fieldOf(value.held, "values")) &&
+            (fieldOf(value.held, "values") as DraftValue[]).length === 0) {
+          const emptyArrayValue = this.value({ k: "call", function: "array.new", args: [] }, annotation, declLine);
           const held = { kind: "object", mutable, type: { kind: "ref", of: null } as TypeExpr } as any;
-          const declared = this.declareName(statement.name, statement.line, held);
-          return { kind: "declare", name: declared.name, held: declared, value: emptyArrayValue, line: statement.line };
+          const declared = this.declareName(declName, declLine, held);
+          return { kind: "declare", name: declared.name, held: declared, value: emptyArrayValue, line: declLine };
         }
         return declare({
           kind: "array",
@@ -2812,48 +2819,49 @@ class ProgramResolver {
           // annotation names a primitive the array is used at: a list of texts
           // has no primitive element name, so its value's `text` is what the
           // declaration keeps.
-          element: annotation === null || elementOf(annotation) === null ? value.held.element : numeric(elementOf(annotation) as PrimitiveTypeName),
-          length: value.held.length,
-          values: value.held.values,
+          element: annotation === null || elementOf(annotation) === null ? fieldOf(value.held, "element") as TypeExpr | null : numeric(elementOf(annotation) as PrimitiveTypeName),
+          length: fieldOf(value.held, "length") as number | null,
+          values: fieldOf(value.held, "values") as DraftValue[],
         });
       case "fixed":
         return declare({ kind: "text", mutable, value: null });
       case "text": {
-        const written = value.parts
+        const textParts = fieldOf(value, "parts") as readonly { k: string; value: string }[];
+        const written = textParts
           .filter((part) => part.k === "text")
-          .map((part) => part.value)
+          .map((part) => String(fieldOf(part, "value")))
           .join("");
         return declare({
           kind: "text",
           mutable,
-          value: value.parts.every((part) => part.k === "text") ? written : null,
+          value: textParts.every((part) => part.k === "text") ? written : null,
         });
       }
       case "reference": {
         const held = value.held;
         if (held.kind === "number") {
-          return declare({ kind: "number", mutable, type: annotation !== null && primitive(annotation) !== null ? primitive(annotation)! : held.type, text: held.text, ...(held.bigint === true ? { bigint: true } : {}) });
+          return declare({ kind: "number", mutable, type: annotation !== null && primitive(annotation) !== null ? primitive(annotation)! : fieldOf(held, "type") as PrimitiveTypeName, text: String(fieldOf(held, "text")), ...(held.bigint === true ? { bigint: true } : {}) });
         }
         if (held.kind === "array") {
           const alias: ArrayHeld = {
             kind: "array",
             name: "",
             mutable,
-            element: held.element,
-            length: held.length,
+            element: fieldOf(held, "element") as TypeExpr | null,
+            length: fieldOf(held, "length") as number | null,
             values: [],
           };
-          const named = this.declareName(statement.name, statement.line, alias);
+          const named = this.declareName(declName, declLine, alias);
           this.aliases.push([named as ArrayHeld, held]);
-          return { kind: "declare", name: named.name, held: named, value, line: statement.line };
+          return { kind: "declare", name: named.name, held: named, value, line: declLine };
         }
-        if (held.kind === "text") return declare({ kind: "text", mutable, value: held.value });
+        if (held.kind === "text") return declare({ kind: "text", mutable, value: fieldOf(held, "value") as string | null });
         if (held.kind === "object") {
           return declare({
             kind: "object",
             mutable,
-            type: held.type,
-            ...(held.promise === undefined ? {} : { promise: held.promise }),
+            type: fieldOf(held, "type") as TypeExpr,
+            ...(fieldOf(held, "promise") === undefined ? {} : { promise: fieldOf(held, "promise") }),
           });
         }
         // A name bound to `process.argv` is a reference to an argument value.
@@ -2867,19 +2875,33 @@ class ProgramResolver {
       case "null":
         return declare({ kind: "object", mutable, type: REF_NULL });
       case "boolean":
-        return declare({ kind: "number", mutable, type: "bool", text: value.value ? "true" : "false" });
-      case "length":
-        return declare({ kind: "number", mutable, type: value.type, text: "" });
+        return declare({ kind: "number", mutable, type: "bool", text: String(fieldOf(value, "value")) === "true" ? "true" : "false" });
+      case "length": {
+        const lengthType = fieldOf(value, "type") as SemanticType;
+        return declare({
+          kind: "number",
+          mutable,
+          type: lengthType.kind === "primitive" ? lengthType.name : null,
+          text: "",
+        });
+      }
       case "lengthOf":
         return declare({ kind: "number", mutable, type: "usize", text: "" });
       case "stringLength":
         return declare({ kind: "number", mutable, type: "usize", text: "" });
-      case "element":
-        return value.type.kind === "text"
+      case "element": {
+        const elementType = fieldOf(value, "type") as SemanticType;
+        return elementType.kind === "text"
           ? declare({ kind: "text", mutable, value: null })
-          : declare({ kind: "number", mutable, type: value.type.kind === "primitive" ? value.type.name : "f64", text: "" });
+          : declare({
+            kind: "number",
+            mutable,
+            type: elementType.kind === "primitive" ? elementType.name : "f64",
+            text: "",
+          });
+      }
       case "field": {
-        const parsed = value.type;
+        const parsed = fieldOf(value, "type") as SemanticType;
         if (parsed.kind === "ref" || parsed.kind === "ptr") {
           return declare({ kind: "object", mutable, type: parsed });
         }
@@ -2888,33 +2910,35 @@ class ProgramResolver {
           throw programError(
             `a program cannot hold ${typeToString(parsed)}`,
             this.body,
-            statement.line,
-            `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
+            declLine,
+            `line ${declLine} of ${String(fieldOf(this.body, "file"))}: a program holds numbers, strings and references`,
           );
         }
         return declare({ kind: "number", mutable, type: name, text: "" });
       }
       case "object":
-        return declare({ kind: "object", mutable, type: value.type });
+        return declare({ kind: "object", mutable, type: fieldOf(value, "type") as SemanticType });
       case "literal":
         return declare({
           kind: "number",
           mutable,
-          type: annotation !== null && annotation.kind === "primitive" ? annotation.name : value.held.type,
-          text: value.held.text,
-          ...(value.held.bigint === true ? { bigint: true } : {}),
+          type: annotation !== null && annotation.kind === "primitive"
+            ? annotation.name
+            : fieldOf(fieldOf(value, "held"), "type") as PrimitiveTypeName,
+          text: String(fieldOf(fieldOf(value, "held"), "text")),
+          ...(String(fieldOf(fieldOf(value, "held"), "bigint")) === "true" ? { bigint: true } : {}),
         });
       case "compare":
       case "isNull":
         return declare({ kind: "number", mutable, type: "bool", text: "" });
       case "call": {
-        const promise = value.call.promise;
+        const promise = fieldOf(value.call, "promise");
         if (promise !== undefined) {
           // A promise is a handle the program holds, and what it carries is
           // what `await` reads out of it: the name keeps both.
-          return declare({ kind: "object", mutable, type: value.call.returns, promise });
+          return declare({ kind: "object", mutable, type: fieldOf(value.call, "returns") as SemanticType, promise });
         }
-        const returns = primitive(value.call.returns);
+        const returns = primitive(fieldOf(value.call, "returns") as SemanticType);
         if (returns !== null) {
           // A `u256` is the compiler's own spelling of a bigint, and a call that
           // hands one back is a bigint when everything it was made of was: the
@@ -2926,20 +2950,21 @@ class ProgramResolver {
         }
         // A block of bytes is what the views over it are taken of, and a
         // program holds one as the reference it is.
-        if (value.call.returns.kind === "text") {
+        if ((fieldOf(value.call, "returns") as SemanticType).kind === "text") {
           // A name bound to a call that hands back a string holds the string
           // it answered: a text is what the program holds, and the calls the
           // compiler provides answer the texts a program reads apart.
           return declare({ kind: "text", mutable, value: null });
         }
-        if (value.call.returns.kind === "ref" || value.call.returns.kind === "ptr") {
-          return declare({ kind: "object", mutable, type: value.call.returns });
+        const callReturns = fieldOf(value.call, "returns") as SemanticType;
+        if (callReturns.kind === "ref" || callReturns.kind === "ptr") {
+          return declare({ kind: "object", mutable, type: fieldOf(value.call, "returns") as SemanticType });
         }
         // A list a call answers is the block the call handed back: a program
         // holds it as a name with a length, and the length is the one the
         // block's header carries, so the elements are read at the width the
         // return type states.
-        if (value.call.returns.kind === "slice" || value.call.returns.kind === "array") {
+        if (callReturns.kind === "slice" || callReturns.kind === "array") {
           // A list a call answers is the block the call handed back: a program
           // holds it as a name with a length, and the length is the one the
           // block's header carries, so the elements are read at the width the
@@ -2947,16 +2972,16 @@ class ProgramResolver {
           return declare({
             kind: "array",
             mutable,
-            element: value.call.returns.of,
+            element: callReturns.of,
             length: null,
             values: [],
           });
         }
         throw programError(
-          `${value.call.name} returns ${contractText(value.call.returns)}`,
+          `${String(fieldOf(value.call, "name"))} returns ${contractText(fieldOf(value.call, "returns") as SemanticType)}`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
+          declLine,
+          `line ${declLine} of ${String(fieldOf(this.body, "file"))}: a program holds numbers, strings and references`,
         );
       }
       case "binary":
@@ -2973,7 +2998,7 @@ class ProgramResolver {
         // contract type language has no word for. The type of a text is
         // written as nothing, so the text is found by what the value holds.
         if (holdsText(value)) return declare({ kind: "text", mutable, value: null });
-        const type = value.type;
+        const type = fieldOf(value, "type") as SemanticType;
         if (type === null) return declare({ kind: "number", mutable, type: "f64", text: "" });
         if (type.kind === "ref" || type.kind === "ptr") {
           return declare({ kind: "object", mutable, type });
@@ -2983,8 +3008,8 @@ class ProgramResolver {
           throw programError(
             `a program cannot hold ${typeToString(type)}`,
             this.body,
-            statement.line,
-            `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
+            declLine,
+            `line ${declLine} of ${String(fieldOf(this.body, "file"))}: a program holds numbers, strings and references`,
           );
         }
         return declare({ kind: "number", mutable, type: name, text: "", ...(value.bigint === true ? { bigint: true } : {}) });
@@ -2993,8 +3018,8 @@ class ProgramResolver {
         throw programError(
           `a program cannot hold this value`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a program holds numbers, strings and references`,
+          declLine,
+          `line ${declLine} of ${String(fieldOf(this.body, "file"))}: a program holds numbers, strings and references`,
         );
     }
   }
@@ -3005,23 +3030,27 @@ class ProgramResolver {
    * what was there, and the store of the answer.
    */
   private fieldAssignment(statement: ProgramStatement & { kind: "fieldAssign" }): DraftStatement {
-    const held = this.held(statement.object, statement.line);
+    const objectName = String(fieldOf(statement, "object"));
+    const statementLine = Number(fieldOf(statement, "line"));
+    const fieldName = String(fieldOf(statement, "field"));
+    const held = this.held(objectName, statementLine);
+    const heldType = fieldOf(held, "type") as SemanticType;
     if (held.kind !== "object") {
       throw programError(
-        `"${statement.object}" is not an object`,
+        `"${objectName}" is not an object`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: a program writes the fields of an object it holds, as in node.left = null`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: a program writes the fields of an object it holds, as in node.left = null`,
       );
     }
     // The layout a name of an object holds carries with it: the field is a
     // field of the layout the reference points at, or nothing answers.
     if (held.type.kind !== "ref" || held.type.name === undefined) {
       throw programError(
-        `"${statement.object}" is not an object the layout names`,
+        `"${objectName}" is not an object the layout names`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: a field write is a field of a layout, and a program writes the fields of the objects it laid out`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: a field write is a field of a layout, and a program writes the fields of the objects it laid out`,
       );
     }
     const laid = held.type.name;
@@ -3030,106 +3059,108 @@ class ProgramResolver {
       throw programError(
         `"${laid}" is not a layout the program lays out`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: a program writes the fields of the objects it laid out, and nothing else lays out ${laid}`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: a program writes the fields of the objects it laid out, and nothing else lays out ${laid}`,
       );
     }
-    const found = layout.fields.find((field) => field.name === statement.field);
+    const layoutFields = fieldOf(layout, "fields") as readonly { name: string; type: string; offset: number }[];
+    const found = layoutFields.find((field) => String(fieldOf(field, "name")) === fieldName);
     if (found === undefined) {
       throw programError(
-        `${laid} has no field "${statement.field}"`,
+        `${laid} has no field "${fieldName}"`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: write the field an object holds, or read one the layout states`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: write the field an object holds, or read one the layout states`,
       );
     }
     // What is written is read back at the type the layout gives the field, so a
     // field of a whole number is written a whole number and one of a reference
     // is written a reference.
-    const type = parseType(found.type);
-    const value = this.value(statement.value, type, statement.line);
-    const object: DraftValue = { k: "reference", name: held.name, held };
-    const read: DraftValue = { k: "field", object, layout: laid, field: statement.field, type };
+    const type = parseType(String(fieldOf(found, "type")));
+    const value = this.value(fieldOf(statement, "value") as ProgramValue, type, statementLine);
+    const object: DraftValue = { k: "reference", name: String(fieldOf(held, "name")), held };
+    const read: DraftValue = { k: "field", object, layout: laid, field: fieldName, type };
     return {
       kind: "fieldAssign",
-      object: held.name,
-      type: held.type,
+      object: String(fieldOf(held, "name")),
+      type: heldType,
       layout: laid,
-      field: statement.field,
+      field: fieldName,
       value:
-        statement.op === "="
+        String(fieldOf(statement, "op")) === "="
           ? value
           : {
               k: "binary",
-              op: COMPOUND_BINARY[statement.op],
+              op: COMPOUND_BINARY.get(String(fieldOf(statement, "op")) as Exclude<ProgramAssignOp, "=">) as ProgramBinaryOp,
               left: read,
               right: value,
               type,
               ...(isBigint(value) ? { bigint: true as const } : {}),
             },
-      line: statement.line,
+      line: statementLine,
     };
   }
 
   private assignment(statement: ProgramStatement & { kind: "assign" }): DraftStatement {
-    const held = this.held(statement.name, statement.line);
-    this.mutable(held, statement.name, statement.line);
+    const statementOp = String(fieldOf(statement, "op")) as ProgramAssignOp;
+    const held = this.held(String(fieldOf(statement, "name")), Number(fieldOf(statement, "line")));
+    this.mutable(held, String(fieldOf(statement, "name")), Number(fieldOf(statement, "line")));
     if (held.kind === "array") {
       throw programError(
-        `"${statement.name}" is a buffer`,
+        `"${String(fieldOf(statement, "name"))}" is a buffer`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: write an element of it, as in ${statement.name}[0] = 0`,
+        Number(fieldOf(statement, "line")),
+        `line ${Number(fieldOf(statement, "line"))} of ${String(fieldOf(this.body, "file"))}: write an element of it, as in ${String(fieldOf(statement, "name"))}[0] = 0`,
       );
     }
     if (held.kind === "object") {
-      if (statement.op !== "=") {
+      if (statementOp !== "=") {
         throw programError(
-          `"${statement.op}" is not supported on an object reference`,
+          `"${statementOp}" is not supported on an object reference`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: assign a new reference, as in ${statement.name} = ${statement.name}`,
+          Number(fieldOf(statement, "line")),
+          `line ${Number(fieldOf(statement, "line"))} of ${String(fieldOf(this.body, "file"))}: assign a new reference, as in ${String(fieldOf(statement, "name"))} = ${String(fieldOf(statement, "name"))}`,
         );
       }
-      const written = this.value(statement.value, null, statement.line);
+      const written = this.value(fieldOf(statement, "value") as ProgramValue, null, Number(fieldOf(statement, "line")));
       // What the name holds after the write is what was written: a promise is
       // a promise and a value that is not one clears what the name said before.
-      if (promiseOf(written) === undefined) held.promise = undefined;
-      else held.promise = promiseOf(written);
-      return { kind: "assign", name: held.name, op: statement.op, value: written, type: null, line: statement.line };
+      if (promiseOf(written) === undefined) (held as unknown as Record<string, unknown>)["promise"] = undefined;
+      else (held as unknown as Record<string, unknown>)["promise"] = promiseOf(written);
+      return { kind: "assign", name: String(fieldOf(held, "name")), op: statementOp, value: written, type: null, line: Number(fieldOf(statement, "line")) };
     }
     if (held.kind === "text") {
-      const written = this.value(statement.value, null, statement.line);
+      const written = this.value(fieldOf(statement, "value") as ProgramValue, null, Number(fieldOf(statement, "line")));
       // A number written into a string becomes its text, as `s += 1` does in
       // the language, rather than an error the source does not raise.
       const value = holdsText(written) ? written : { k: "text" as const, parts: [{ k: "value" as const, value: written }] };
-      return { kind: "assign", name: held.name, op: statement.op, value, type: null, line: statement.line };
+      return { kind: "assign", name: String(fieldOf(held, "name")), op: statementOp, value, type: null, line: Number(fieldOf(statement, "line")) };
     }
-    const name = held.kind === "number" ? held.type ?? "f64" : "f64";
+    const name = (held.kind === "number" ? (fieldOf(held, "type") as PrimitiveTypeName | null) ?? "f64" : "f64") as PrimitiveTypeName;
     // A compound assignment writes its operator down on the type of the name,
     // so `%=` on a double is a target no compiler accepts. The operator decides
     // what the name may be, as it does in a binary expression, where a whole
     // operator needs whole numbers.
-    if (WHOLE_ASSIGNMENTS.includes(statement.op) && !isWhole(name)) {
+    if (WHOLE_ASSIGNMENTS.includes(statementOp) && !isWhole(name)) {
       throw programError(
-        `"${statement.op.slice(0, -1)}" needs whole numbers`,
+        `"${statementOp.slice(0, -1)}" needs whole numbers`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: "${statement.name}" is a ${name}, and "${statement.op}" rounds it to a whole number`,
+        Number(fieldOf(statement, "line")),
+        `line ${Number(fieldOf(statement, "line"))} of ${String(fieldOf(this.body, "file"))}: "${String(fieldOf(statement, "name"))}" is a ${name}, and "${statementOp}" rounds it to a whole number`,
       );
     }
     const type = numeric(name);
     // The count of a shift is a machine word, whatever the number being shifted
     // is: the kernel takes one word of count, and a count typed at the width of
     // a wide number is the low half of the number being shifted.
-    const counted = statement.op === "<<=" || statement.op === ">>=" || statement.op === ">>>=";
+    const counted = statementOp === "<<=" || statementOp === ">>=" || statementOp === ">>>=";
     return {
       kind: "assign",
-      name: held.name,
-      op: statement.op,
-      value: this.value(statement.value, counted ? USIZE : type, statement.line),
+      name: String(fieldOf(held, "name")),
+      op: statementOp,
+      value: this.value(fieldOf(statement, "value") as ProgramValue, counted ? USIZE : type, Number(fieldOf(statement, "line"))),
       type,
-      line: statement.line,
+      line: Number(fieldOf(statement, "line")),
     };
   }
 
@@ -3140,51 +3171,69 @@ class ProgramResolver {
    * block do not count with the same one.
    */
   private filled(statement: ProgramStatement & { kind: "fill" }): DraftStatement {
-    const held = this.held(statement.buffer, statement.line);
+    const buffer = String(fieldOf(statement, "buffer"));
+    const statementLine = Number(fieldOf(statement, "line"));
+    const held = this.held(buffer, statementLine);
     if (held.kind !== "array") {
       throw programError(
-        `"${statement.buffer}" is not a buffer`,
+        `"${buffer}" is not a buffer`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: only an array has elements to fill`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: only an array has elements to fill`,
       );
     }
-    const element = held.element ?? F64;
-    held.element ??= element;
+    const element = (fieldOf(held, "element") as TypeExpr | null) ?? F64;
+    (held as unknown as Record<string, unknown>)["element"] = element;
     return {
       kind: "fill",
-      buffer: this.reference(statement.buffer, statement.line),
-      value: this.value(statement.value, element, statement.line),
-      held: { ...held, mutable: true },
-      line: statement.line,
+      buffer: this.reference(buffer, statementLine),
+      value: this.value(fieldOf(statement, "value") as ProgramValue, element, statementLine),
+      held: {
+        kind: "array",
+        name: String(fieldOf(held, "name")),
+        mutable: true,
+        element: fieldOf(held, "element") as TypeExpr | null,
+        length: fieldOf(held, "length") as number | null,
+        values: fieldOf(held, "values") as DraftValue[],
+      },
+      line: statementLine,
     };
   }
 
   private elementAssignment(statement: ProgramStatement & { kind: "elementAssign" }): DraftStatement {
-    const held = this.held(statement.buffer, statement.line);
+    const buffer = String(fieldOf(statement, "buffer"));
+    const statementLine = Number(fieldOf(statement, "line"));
+    const statementOp = String(fieldOf(statement, "op")) as ProgramAssignOp;
+    const held = this.held(buffer, statementLine);
     // Writing an element writes the array, not the name: a name declared with
     // const still names an array the program may change.
     if (held.kind !== "array") {
-      throw programError(`"${statement.buffer}" is not a buffer`, this.body, statement.line, `line ${statement.line} of ${this.body.file}: only an array has elements`);
+      throw programError(`"${buffer}" is not a buffer`, this.body, statementLine, `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: only an array has elements`);
     }
-    const element = held.element ?? F64;
-    held.element ??= element;
+    const element = (fieldOf(held, "element") as TypeExpr | null) ?? F64;
+    (held as unknown as Record<string, unknown>)["element"] = element;
     const type = element;
-    const index = this.value(statement.index, USIZE, statement.line);
-    this.within(index, held, statement.line);
+    const index = this.value(fieldOf(statement, "index") as ProgramValue, USIZE, statementLine);
+    this.within(index, held, statementLine);
     return {
       kind: "elementAssign",
-      buffer: held.name,
+      buffer: String(fieldOf(held, "name")),
       index,
-      op: statement.op,
-      value: this.value(statement.value, type, statement.line),
+      op: statementOp,
+      value: this.value(fieldOf(statement, "value") as ProgramValue, type, statementLine),
       type,
-      line: statement.line,
+      line: statementLine,
     };
   }
 
   private counted(statement: ProgramStatement & { kind: "for" }): DraftStatement {
-    const bound = this.value(statement.to, null, statement.line);
+    const statementLine = Number(fieldOf(statement, "line"));
+    const statementTo = fieldOf(statement, "to") as ProgramValue;
+    const statementFrom = fieldOf(statement, "from") as ProgramValue;
+    const statementStep = fieldOf(statement, "step") as ProgramValue | null;
+    const statementBody = fieldOf(statement, "body") as ProgramStatement[];
+    const statementVariable = String(fieldOf(statement, "variable"));
+    const bound = this.value(statementTo, null, statementLine);
     const boundType = primitive(draftType(bound) ?? numeric("f64")) ?? "f64";
 
     // What the index is follows from what it is built from, which is the
@@ -3193,9 +3242,11 @@ class ProgramResolver {
     // numbers whatever it stops at, and a loop that starts at 0.5 counts in
     // halves however whole the bound is. Reading the start as whole when it is
     // not truncates it where it is declared, and the program counts from 0.
-    const written = statement.step === null ? null : this.value(statement.step, null, statement.line);
+    const written = String(fieldOf(statement, "step")) === "null"
+      ? null
+      : this.value(statementStep as ProgramValue, null, statementLine);
     const stepIsWhole = written === null || countsWhole(written);
-    const start = this.value(statement.from, null, statement.line);
+    const start = this.value(statementFrom, null, statementLine);
     const whole = countsWhole(start) && stepIsWhole;
     // The width is the one a whole number the loop is built from was written
     // at. A number written in the source carries no width of its own — it is
@@ -3210,41 +3261,41 @@ class ProgramResolver {
       (name): name is PrimitiveTypeName => name !== null && isWhole(name),
     );
     const counted = whole ? (widths.length === 0 ? "i64" : programWholeOf(widths[0], widths[1] ?? widths[0])) : "f64";
-    const type = numeric(statement.down && counted.startsWith("u") ? "i64" : counted);
-    const from = this.value(statement.from, type, statement.line);
+    const type = numeric(String(fieldOf(statement, "down")) === "true" && counted.startsWith("u") ? "i64" : counted);
+    const from = this.value(statementFrom, type, statementLine);
     // The bound is drafted at the width the loop counts in, unless the loop
     // counts in whole numbers and the bound is not one: a fraction read at a
     // whole width is a number the program never wrote, and the loop compares
     // against it as the fraction it is.
     const wholeCounter = primitive(type) !== null && isWhole(primitive(type) as PrimitiveTypeName);
     const to = wholeCounter && !countsWhole(bound)
-      ? this.value(statement.to, null, statement.line)
-      : this.value(statement.to, type, statement.line);
-    const step = written === null ? null : this.value(statement.step as ProgramValue, type, statement.line);
+      ? this.value(statementTo, null, statementLine)
+      : this.value(statementTo, type, statementLine);
+    const step = written === null ? null : this.value(statement.step as ProgramValue, type, statementLine);
     this.open();
     // A counter written as a bigint is one: `for (let i = 0n; ...)` counts in
     // bigints, so the counter is flagged the way the value it starts at is.
     const bigint = isBigint(from) || (step !== null && isBigint(step));
-    const variable = this.declareName(statement.variable, statement.line, {
+    const variable = this.declareName(statementVariable, statementLine, {
       kind: "number",
       mutable: true,
       type: primitive(type),
       text: "",
       ...(bigint ? { bigint: true } : {}),
     });
-    const body = this.looped(statement.body);
+    const body = this.looped(statementBody);
     this.close();
     return {
       kind: "for",
-      variable: variable.name,
+      variable: String(fieldOf(variable, "name")),
       type,
       from,
       to,
-      inclusive: statement.inclusive,
-      down: statement.down,
+      inclusive: String(fieldOf(statement, "inclusive")) === "true",
+      down: String(fieldOf(statement, "down")) === "true",
       step,
       body,
-      line: statement.line,
+      line: statementLine,
     };
   }
 
@@ -3257,36 +3308,38 @@ class ProgramResolver {
   }
 
   private each(statement: ProgramStatement & { kind: "forOf" }): DraftStatement {
-    const held = this.held(statement.of, statement.line);
+    const statementLine = Number(fieldOf(statement, "line"));
+    const ofName = String(fieldOf(statement, "of"));
+    const held = this.held(ofName, statementLine);
     if (held.kind !== "array") {
       throw programError(
-        `"${statement.of}" is not a buffer`,
+        `"${ofName}" is not a buffer`,
         this.body,
-        statement.line,
-        `line ${statement.line} of ${this.body.file}: a program walks the arrays it allocated`,
+        statementLine,
+        `line ${statementLine} of ${String(fieldOf(this.body, "file"))}: a program walks the arrays it allocated`,
       );
     }
-    const element = held.element ?? F64;
-    held.element ??= element;
+    const element = (fieldOf(held, "element") as TypeExpr | null) ?? F64;
+    (held as unknown as Record<string, unknown>)["element"] = element;
     const elementName: PrimitiveTypeName = element.kind === "primitive" ? element.name : "f64";
     this.open();
     const variable = this.declareName(
-      statement.variable,
-      statement.line,
+      String(fieldOf(statement, "variable")),
+      statementLine,
       element.kind === "text"
         ? { kind: "text", mutable: false, value: null }
         : { kind: "number", mutable: false, type: elementName, text: "" },
     );
-    const body = this.looped(statement.body);
+    const body = this.looped(fieldOf(statement, "body") as ProgramStatement[]);
     this.close();
     return {
       kind: "forOf",
-      variable: variable.name,
+      variable: String(fieldOf(variable, "name")),
       type: element,
-      of: held.name,
-      length: { k: "length", buffer: held.name, bufferType: arrayType(held), type: "usize" },
+      of: String(fieldOf(held, "name")),
+      length: { k: "length", buffer: String(fieldOf(held, "name")), bufferType: arrayType(held), type: "usize" },
       body,
-      line: statement.line,
+      line: statementLine,
     };
   }
 
@@ -3311,19 +3364,19 @@ class ProgramResolver {
       case "whole":
         return true;
       case "name": {
-        if (this.functions.table.has(value.name)) return false;
-        const held = this.lookup(value.name) ?? this.topLevelText(value.name);
+        if (this.functions.table.has(String(fieldOf(value, "name")))) return false;
+        const held = this.lookup(String(fieldOf(value, "name"))) ?? this.topLevelText(String(fieldOf(value, "name")));
         if (held === undefined) return false;
-        return held.kind === "number" && held.bigint === true;
+        return held.kind === "number" && String(fieldOf(held, "bigint")) === "true";
       }
       case "binary":
-        return this.bigintWritten(value.left, line) || this.bigintWritten(value.right, line);
+        return this.bigintWritten(fieldOf(value, "left") as ProgramValue, line) || this.bigintWritten(fieldOf(value, "right") as ProgramValue, line);
       case "unary":
-        return this.bigintWritten(value.operand, line);
+        return this.bigintWritten(fieldOf(value, "operand") as ProgramValue, line);
       case "conditional":
-        return this.bigintWritten(value.then, line) || this.bigintWritten(value.otherwise, line);
+        return this.bigintWritten(fieldOf(value, "then") as ProgramValue, line) || this.bigintWritten(fieldOf(value, "otherwise") as ProgramValue, line);
       case "object":
-        return value.fields.some((field) => this.bigintWritten(field.value, line));
+        return (fieldOf(value, "fields") as readonly { value: ProgramValue }[]).some((field) => this.bigintWritten(fieldOf(field, "value") as ProgramValue, line));
       default:
         return false;
     }
