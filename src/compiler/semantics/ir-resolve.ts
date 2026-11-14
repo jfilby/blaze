@@ -3464,16 +3464,20 @@ class ProgramResolver {
         // the promise the executor runs for. The same reading answers whichever
         // of the four names the source wrote the pair by.
         const executorParams = new Set(["resolve", "reject", "onFulfilled", "onRejected"]);
-        const params: { name: string; type: string }[] = value.params
-          .filter((param) => !executorParams.has(param.name))
-          .map((param) => ({ name: param.name, type: param.type === null ? "any" : param.type }));
+        const arrowParams = fieldOf(value, "params") as readonly { name: string; type: string | null }[];
+        const params: { name: string; type: string }[] = arrowParams
+          .filter((param) => !executorParams.has(String(fieldOf(param, "name"))))
+          .map((param) => ({
+            name: String(fieldOf(param, "name")),
+            type: String(fieldOf(param, "type")) === "null" ? "any" : String(fieldOf(param, "type")),
+          }));
         const statement: ProgramStatement & { kind: "function" } = {
           kind: "function",
           name,
           params,
-          body: value.body,
+          body: fieldOf(value, "body") as ProgramStatement[],
           line,
-          ...(value.async === true ? { async: true } : {}),
+          async: String(fieldOf(value, "async")) === "true" ? true : undefined,
         };
         this.declared(statement);
         const declaredFn = this.functions.table.get(name);
@@ -3489,18 +3493,18 @@ class ProgramResolver {
       }      case "shared": {
         // A block of bytes is what a view is taken of, and the runtime lays it
         // out: the program asks for a number of bytes and is given a block.
-        const count = this.value(value.count, USIZE, line);
+        const count = this.value(fieldOf(value, "count") as ProgramValue, USIZE, line);
         return { k: "call", call: this.shared(count, line) };
       }
       case "sized":
         return {
           k: "sized",
-          element: value.element,
-          count: this.value(value.count, USIZE, line),
-          held: this.arrayed(value.element, null),
+          element: fieldOf(value, "element") as PrimitiveTypeName,
+          count: this.value(fieldOf(value, "count") as ProgramValue, USIZE, line),
+          held: this.arrayed(fieldOf(value, "element") as PrimitiveTypeName, null),
         };
       case "view": {
-        const of = this.value(value.of, null, line);
+        const of = this.value(fieldOf(value, "of") as ProgramValue, null, line);
         const block = draftType(of);
         // A view is a window of a block of bytes, and a block is what a view
         // reads: a number is not a block however it is written.
@@ -3514,24 +3518,31 @@ class ProgramResolver {
         }
         return {
           k: "view",
-          element: value.element,
+          element: fieldOf(value, "element") as PrimitiveTypeName,
           of,
-          offset: this.value(value.offset, USIZE, line),
-          count: this.value(value.count, USIZE, line),
-          held: this.arrayed(value.element, null),
+          offset: this.value(fieldOf(value, "offset") as ProgramValue, USIZE, line),
+          count: this.value(fieldOf(value, "count") as ProgramValue, USIZE, line),
+          held: this.arrayed(fieldOf(value, "element") as PrimitiveTypeName, null),
         };
       }
       case "fill": {
         // `a.fill(x)` answers the array with every element written, so what the
         // name is declared under is the array and what the source wrote happens
         // to it.
-        const buffer = this.value(value.buffer, null, line);
+        const buffer = this.value(fieldOf(value, "buffer") as ProgramValue, null, line);
         const held = this.arrayOf(buffer, line);
         return {
           k: "fill",
           buffer,
-          value: this.value(value.value, (held.element ?? F64), line),
-          held: { ...held, mutable: true },
+          value: this.value(fieldOf(value, "value") as ProgramValue, (held.element ?? F64), line),
+          held: {
+            kind: "array",
+            name: String(fieldOf(held, "name")),
+            mutable: true,
+            element: fieldOf(held, "element") as TypeExpr | null,
+            length: fieldOf(held, "length") as number | null,
+            values: fieldOf(held, "values") as DraftValue[],
+          },
         };
       }
       case "buffer": {
@@ -3543,11 +3554,11 @@ class ProgramResolver {
           // element. Left null for a use to fix, every array became a run of
           // doubles, so an `Int32Array` was lowered as `[f64; N]` and each of
           // its elements read eight bytes out of a four byte stride.
-          element: numeric(value.element),
-          length: value.values.length,
+          element: numeric(fieldOf(value, "element") as PrimitiveTypeName),
+          length: (fieldOf(value, "values") as readonly ProgramValue[]).length,
           // The elements take the type of the array they are written into,
           // which a use of the array fixes.
-          values: value.values.map((element) => this.value(element, { kind: "primitive", name: value.element }, line)),
+          values: (fieldOf(value, "values") as readonly ProgramValue[]).map((element) => this.value(element, { kind: "primitive", name: fieldOf(value, "element") as PrimitiveTypeName }, line)),
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
@@ -3556,20 +3567,20 @@ class ProgramResolver {
         // The entries a map is built from: the pairs written at the map, or the
         // name a list of pairs was declared under. The dictionary is the writes
         // they name, one after another.
-        const pairs = value.source.k === "pairs"
-          ? value.source.entries.map((entry) => ({
-              key: this.value(entry.key, TEXT, line),
-              value: this.value(entry.value, null, line),
+        const pairs = (fieldOf(value, "source") as ProgramValue).k === "pairs"
+          ? (fieldOf(fieldOf(value, "source"), "entries") as readonly { key: ProgramValue; value: ProgramValue }[]).map((entry) => ({
+              key: this.value(fieldOf(entry, "key") as ProgramValue, TEXT, line),
+              value: this.value(fieldOf(entry, "value") as ProgramValue, null, line),
             }))
-          : value.source.k === "name"
+          : (fieldOf(value, "source") as ProgramValue).k === "name"
             ? (() => {
-                const held = this.held((value.source as ProgramValue & { k: "name" }).name, line);
+                const held = this.held(String(String(fieldOf(fieldOf(value, "source"), "name"))), line);
                 return held.kind === "pairs" ? held.entries : null;
               })()
             : null;
         if (pairs !== null) return this.dictFromEntries(pairs, line);
         throw programError(
-          `a ${value.collection} built from a source is not lowered`,
+          `a ${String(fieldOf(value, "collection"))} built from a source is not lowered`,
           this.body,
           line,
           `line ${line} of ${this.body.file}: a map built from a list the program settles when it runs needs the entries written out, as in new Map([[key, value]])`,
@@ -3582,10 +3593,10 @@ class ProgramResolver {
         // written down here, at the length the parts are. A list the program
         // settles when it runs is the block its header measures, so a spread of
         // one is that block copied, and two are the blocks joined.
-        const spreads = value.parts.map((part) => (part.k === "spread" ? this.value(part.of, null, line) : null));
+        const spreads = (fieldOf(value, "parts") as readonly { k: string; of: ProgramValue }[]).map((part) => (part.k === "spread" ? this.value(fieldOf(part, "of") as ProgramValue, null, line) : null));
         const written = spreads.every((spread) => spread === null || this.writtenList(spread));
         if (!written) {
-          if (value.parts.some((part) => part.k !== "spread")) {
+          if ((fieldOf(value, "parts") as readonly { k: string; of: ProgramValue }[]).some((part) => part.k !== "spread")) {
             throw programError(
               "a list written with a spread joins lists only",
               this.body,
@@ -3594,11 +3605,14 @@ class ProgramResolver {
             );
           }
           const blocks = spreads.map((spread) => this.spreadBlock(spread as DraftValue, line));
-          const element = (blocks[0] as { element: TypeExpr }).element;
+          const firstBlock = blocks[0] as { element: TypeExpr; block: DraftValue };
+          const element = fieldOf(firstBlock, "element") as TypeExpr;
           let joined = blocks.length === 1
-            ? this.listCopy((blocks[0] as { block: DraftValue }).block, element, line)
-            : (blocks[0] as { block: DraftValue }).block;
-          for (const next of blocks.slice(1)) joined = this.listJoin(joined, (next as { block: DraftValue }).block, element, line);
+            ? this.listCopy(fieldOf(firstBlock, "block") as DraftValue, element, line)
+            : fieldOf(firstBlock, "block") as DraftValue;
+          for (const next of blocks.slice(1)) {
+            joined = this.listJoin(joined, fieldOf(next, "block") as DraftValue, element, line);
+          }
           if (expect !== null) {
             const wanted = elementOf(expect);
             if (wanted !== null && !(element.kind === "primitive" && element.name === wanted)) {
@@ -3614,18 +3628,19 @@ class ProgramResolver {
         }
         const values: DraftValue[] = [];
         let element: TypeExpr | null = null;
-        for (const [at, part] of value.parts.entries()) {
+        for (const [at, part] of (fieldOf(value, "parts") as readonly { k: string; of: ProgramValue }[]).entries()) {
           const spread = spreads[at] ?? null;
           if (spread === null) {
-            const one = this.value(part, element, line);
+            const one = this.value(part as unknown as ProgramValue, element, line);
             values.push(one);
             if (element === null) element = draftType(one) ?? numeric("f64");
             continue;
           }
+          const spreadHeld = fieldOf(spread, "held") as ArrayHeld;
           const held = spread.k === "buffer"
-            ? spread.held
-            : spread.k === "reference" && spread.held.kind === "array"
-              ? spread.held
+            ? spreadHeld
+            : spread.k === "reference" && spreadHeld.kind === "array"
+              ? spreadHeld
               : null;
           if (held === null) {
             throw programError(
@@ -3635,8 +3650,8 @@ class ProgramResolver {
               `line ${line} of ${this.body.file}: a list literal, a name holding one, and a call answering one are the lists a spread joins`,
             );
           }
-          if (element === null) element = held.element;
-          values.push(...held.values);
+          if (element === null) element = fieldOf(held, "element") as TypeExpr | null;
+          for (const one of fieldOf(held, "values") as DraftValue[]) values.push(one);
         }
         const held: ArrayHeld = {
           kind: "array",
@@ -3683,14 +3698,20 @@ class ProgramResolver {
           name: "",
           mutable: false,
           element: TEXT,
-          length: value.values.length,
-          values: value.values.map((one) => this.value(one, TEXT, line)),
+          length: (fieldOf(value, "values") as readonly ProgramValue[]).length,
+          values: (fieldOf(value, "values") as readonly ProgramValue[]).map((one) => this.value(one, TEXT, line)),
         };
         if (expect !== null) this.expectArray(expect, held, line);
         return { k: "buffer", held };
       }
       case "text":
-        return { k: "text", parts: this.parts(value.parts, line) };
+        return {
+          k: "text",
+          parts: this.parts(
+            fieldOf(value, "parts") as unknown as ProgramText[],
+            line,
+          ),
+        };
       case "fixed": {
         // What is written at a fixed number of digits is a number: a string is
         // already the text the digits would have been written into, and the
@@ -3729,20 +3750,27 @@ class ProgramResolver {
         // A function of another file of the program is handed over by name as
         // well: the runtime calls it, and what calls it is the driver, which
         // links the object the function was compiled into.
-        const contract = this.contracts.get(value.name);
+        const functionName = String(fieldOf(value, "name"));
+        const contract = this.contracts.get(functionName);
         if (contract !== undefined) {
-          return { k: "function", name: value.name, captures: [], symbol: contract.signature.symbol };
+          const signature = fieldOf(contract, "signature") as FunctionSignature;
+          return {
+            k: "function",
+            name: functionName,
+            captures: [],
+            symbol: String(fieldOf(signature, "symbol")),
+          };
         }
         // An array is used at one element type, whichever name it is passed by.
-        const held = this.held(value.name, line);
+        const held = this.held(String(fieldOf(value, "name")), line);
         if (held.kind === "array" && expect !== null) this.expectArray(expect, held, line);
         // A const string is the text it was written as, wherever it is read, so
         // it is written inline as the literal it is: a function that reads one
         // needs no parameter for it and no capture passed at the call.
-        if (held.kind === "text" && !held.mutable && held.value !== null) {
-          return { k: "text", parts: [{ k: "text", value: held.value }] };
+        if (held.kind === "text" && String(fieldOf(held, "mutable")) !== "true" && String(fieldOf(held, "value")) !== "null") {
+          return { k: "text", parts: [{ k: "text", value: fieldOf(held, "value") as string }] };
         }
-        return this.reference(value.name, line);
+        return this.reference(String(fieldOf(value, "name")), line);
       }
       case "argv": {
         // `process.argv[i]` reads argument `i` of the command line, and
@@ -3804,11 +3832,14 @@ class ProgramResolver {
       case "field": {
         // The base of the read is resolved first: it is a name or another
         // field, and whatever it resolves to is the object read here is of.
-        const base = this.value(value.object, null, line);
+        const objectValue = fieldOf(value, "object") as ProgramValue;
+        const fieldName = String(fieldOf(value, "field"));
+        const base = this.value(objectValue, null, line);
         // The layout a base points at: a name of an object slot carries the
         // layout it holds, and a field read of one is a reference to the layout
         // the field it read is a field of, so either way the name is there.
         let laid: string | undefined;
+        const baseHeld = base.k === "reference" ? fieldOf(base, "held") as Held : null;
         if (base.k === "field") {
           // The layout of what the field holds, when the layout gives the field a
           // shape of its own: a literal written into a literal is an object of
@@ -3819,12 +3850,13 @@ class ProgramResolver {
           // shape is: every `left` of it names the layout the tree itself is.
           laid = referenceLayout(base.type);
           if (laid === undefined) laid = base.layout;
-        } else if (base.k === "reference" && base.held.kind === "number") {
+        } else if (baseHeld !== null && baseHeld.kind === "number") {
           laid = "JSON";
-        } else if (base.k === "reference" && base.held.kind === "object" && base.held.type.kind === "ref") {
-          if (base.held.type.name !== undefined) {
-            laid = base.held.type.name;
-          } else {
+        } else if (baseHeld !== null && baseHeld.kind === "object") {
+          const baseHeldType = fieldOf(baseHeld, "type") as SemanticType;
+          if (baseHeldType.kind === "ref" && baseHeldType.name !== undefined) {
+            laid = baseHeldType.name;
+          } else if (baseHeldType.kind === "ref") {
             // A dynamic value (such as the result of JSON.parse) has no fixed
             // layout; read its field through the JSON runtime.
             laid = "JSON";
@@ -3834,10 +3866,10 @@ class ProgramResolver {
           // says it returns: `new Point(1, 2).x` reads the object the
           // constructor just built, and a method whose answer names its class
           // names the layout a caller reads.
-          laid = referenceLayout(base.call.returns);
+          laid = referenceLayout(fieldOf(fieldOf(base, "call"), "returns") as SemanticType);
           if (laid === undefined) {
             throw programError(
-              `the answer of "${base.call.signature.name}" has no layout to read a field of`,
+              `the answer of "${String(fieldOf(fieldOf(fieldOf(base, "call"), "signature"), "name"))}" has no layout to read a field of`,
               this.body,
               line,
               `line ${line} of ${this.body.file}: a field read is a field of a layout, and a program reads the fields of the objects it laid out`,
@@ -3845,7 +3877,7 @@ class ProgramResolver {
           }
         } else {
           throw programError(
-            base.k === "reference" ? `"${base.name}" is not an object the layout names` : "a field is read of something a program does not hold by name",
+            base.k === "reference" ? `"${String(fieldOf(base, "name"))}" is not an object the layout names` : "a field is read of something a program does not hold by name",
             this.body,
             line,
             `line ${line} of ${this.body.file}: a field read is a field of a layout, and a program reads the fields of the objects it laid out`,
@@ -3867,11 +3899,11 @@ class ProgramResolver {
             k: "field",
             object: base,
             layout: laid as string,
-            field: value.field,
+            field: fieldName,
             type: { kind: "primitive", name: "f64" },
           };
         }
-        const found = layout!.fields.find((field) => field.name === value.field);
+        const found = (fieldOf(layout!, "fields") as readonly { name: string; type: string; offset: number }[]).find((field) => String(fieldOf(field, "name")) === fieldName);
         if (found === undefined) {
           throw programError(
             `${laid} has no field "${value.field}"`,
@@ -3880,7 +3912,7 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: write the field an object holds, or read one the layout states`,
           );
         }
-        const fieldType = parseType(found.type);
+        const fieldType = parseType(String(fieldOf(found, "type")));
         // A field the layout holds a whole number in is a whole number: the
         // layout is what says the kind of the value, and the two kinds print
         // differently.
@@ -3889,7 +3921,7 @@ class ProgramResolver {
           k: "field",
           object: base,
           layout: laid as string,
-          field: value.field,
+          field: fieldName,
           type: fieldType,
           ...(whole ? { bigint: true as const } : {}),
         };
@@ -3901,14 +3933,17 @@ class ProgramResolver {
         // been walked, and only that pass can say.
         const key = this.literalKeys.get(value);
         let layout = key === undefined ? undefined : this.objectLayoutNames.get(key);
-        if ((key === undefined || layout === undefined) && value.fields.length > 0) {
-          const fieldNames = new Set(expandedFields(value).map((field: any) => field.name));
-          const candidate = Object.values(this.objects).find((item: any) =>
-            item.fields.length === expandedFields(value).length &&
-            item.fields.every((entry: any) => fieldNames.has(entry.name)),
-          );
+        const objectFields = fieldOf(value, "fields") as readonly { name: string }[];
+        if ((key === undefined || layout === undefined) && objectFields.length > 0) {
+          const expanded = expandedFields(value);
+          const fieldNames = new Set(expanded.map((field) => String(fieldOf(field, "name"))));
+          const candidate = Object.values(this.objects).find((item) => {
+            const itemFields = fieldOf(item, "fields") as readonly { name: string }[];
+            return itemFields.length === expanded.length &&
+              itemFields.every((entry) => fieldNames.has(String(fieldOf(entry, "name"))));
+          });
           if (candidate !== undefined) {
-            layout = candidate!.name;
+            layout = String(fieldOf(candidate, "name"));
           } else {
           }
         }
@@ -3934,17 +3969,19 @@ class ProgramResolver {
         return { k: "object", fields, layout, type: { kind: "ref", of: null, name: layout } };
       }
       case "element": {
-        const held = this.held(value.buffer, line);
+        const bufferName = String(fieldOf(value, "buffer"));
+        const elementIndex = fieldOf(value, "index") as ProgramValue;
+        const held = this.held(bufferName, line);
         // `args[i]` where `args` is `process.argv.slice(n)` reads argument
         // `i + n` of the command line, which the runtime hands back as a
         // number.
         if (held.kind === "argv") {
-          const index = value.index;
-          const argument = held.offset === 0
+          const index = elementIndex;
+          const argument = fieldOf(held, "offset") as number === 0
             ? index
             : index.k === "number"
-              ? { k: "number", text: String(Number(index.text) + held.offset) }
-              : { k: "binary", op: "+", left: index, right: { k: "number", text: String(held.offset) } };
+              ? { k: "number", text: String(Number(String(fieldOf(index, "text"))) + fieldOf(held, "offset") as number) }
+              : { k: "binary", op: "+", left: index, right: { k: "number", text: String(fieldOf(held, "offset") as number) } };
           return {
             k: "call",
             call: this.call(
@@ -3955,10 +3992,10 @@ class ProgramResolver {
         }
         if (held.kind !== "array" && held.kind !== "object") {
           throw programError(
-            `"${value.buffer}" is not a buffer`,
+            `"${bufferName}" is not a buffer`,
             this.body,
             line,
-            `${this.body.file}: only an array has elements`,
+            `${String(fieldOf(this.body, "file"))}: only an array has elements`,
           );
         }
         // A dynamic array is a value the runtime holds rather than a block of
@@ -3970,20 +4007,20 @@ class ProgramResolver {
               {
                 k: "call",
                 function: "array.get",
-                args: [{ k: "name", name: held.name }, value.index],
+                args: [{ k: "name", name: String(fieldOf(held, "name")) }, elementIndex],
               } as ProgramValue & { k: "call" },
               line,
             ),
           };
         }
-        const element = held.element ?? F64;
-        held.element ??= element;
-        const index = this.value(value.index, USIZE, line);
+        const element = (fieldOf(held, "element") as TypeExpr | null) ?? F64;
+        (held as unknown as Record<string, unknown>)["element"] = element;
+        const index = this.value(elementIndex, USIZE, line);
         this.within(index, held, line);
         if (expect !== null) {
-          this.coerce(`an element of ${value.buffer}`, element, expect, line);
+          this.coerce(`an element of ${bufferName}`, element, expect, line);
         }
-        return { k: "element", buffer: held.name, bufferType: arrayType(held), index, type: element };
+        return { k: "element", buffer: String(fieldOf(held, "name")), bufferType: arrayType(held), index, type: element };
       }
       case "call": {
         const folded = this.writtenBigInt(value);
@@ -3993,9 +4030,9 @@ class ProgramResolver {
       case "unary":
         return this.unary(value, line);
       case "conditional": {
-        const condition = this.condition(value.condition, line);
-        const then = this.value(value.then, null, line);
-        const otherwise = this.value(value.otherwise, expect, line);
+        const condition = this.condition(fieldOf(value, "condition") as ProgramValue, line);
+        const then = this.value(fieldOf(value, "then") as ProgramValue, null, line);
+        const otherwise = this.value(fieldOf(value, "otherwise") as ProgramValue, expect, line);
         const type = expect ?? this.common(then, otherwise, line);
         // A choice between two bigints is a bigint: `x > 0 ? 1n : 2n` is the
         // whole number the arms are, and the flag is what writes it with the
@@ -4022,11 +4059,14 @@ class ProgramResolver {
       signature: {
         name: SHARED,
         symbol: SHARED,
-        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
-        returns: contractText(builtin.returns),
+        params: (fieldOf(builtin, "params") as readonly SemanticType[]).map((type, index) => ({
+          name: `argument${index}`,
+          type: contractText(type),
+        })),
+        returns: contractText(fieldOf(builtin, "returns") as SemanticType),
       },
       args: [count],
-      returns: builtin.returns,
+      returns: fieldOf(builtin, "returns") as SemanticType,
       effects: [],
       builtin: true,
       bigint: false,
@@ -4040,9 +4080,9 @@ class ProgramResolver {
   private writtenList(value: DraftValue): boolean {
     if (value.k === "buffer") return true;
     return value.k === "reference"
-      && value.held.kind === "array"
-      && value.held.length !== null
-      && value.held.values.length === value.held.length;
+      && (fieldOf(value, "held") as Held).kind === "array"
+      && fieldOf(fieldOf(value, "held"), "length") !== null
+      && (fieldOf(fieldOf(value, "held"), "values") as readonly DraftValue[]).length === fieldOf(fieldOf(value, "held"), "length");
   }
 
   /**
@@ -4052,17 +4092,24 @@ class ProgramResolver {
    * and a call answering one are the lists a spread joins.
    */
   private spreadBlock(value: DraftValue, line: number): { block: DraftValue; element: TypeExpr } {
-    if (value.k === "reference" && value.held.kind === "array") {
-      return { block: value, element: value.held.element ?? F64 };
+    if (value.k === "reference" && (fieldOf(value, "held") as Held).kind === "array") {
+      return {
+        block: value,
+        element: (fieldOf(fieldOf(value, "held"), "element") as TypeExpr | null) ?? F64,
+      };
     }
-    if (value.k === "call" && (value.call.returns.kind === "slice" || value.call.returns.kind === "array")) {
-      return { block: value, element: value.call.returns.of };
+    if (value.k === "call") {
+      const call = fieldOf(value, "call") as DraftCall;
+      const callReturns = fieldOf(call, "returns") as SemanticType;
+      if (callReturns.kind === "slice" || callReturns.kind === "array") {
+        return { block: value, element: callReturns.of };
+      }
     }
     throw programError(
       "a spread joins a list the program holds",
       this.body,
       line,
-      `line ${line} of ${this.body.file}: a name holding a list, and a call answering one, are the lists a spread joins`,
+      `line ${line} of ${String(fieldOf(this.body, "file"))}: a name holding a list, and a call answering one, are the lists a spread joins`,
     );
   }
 
