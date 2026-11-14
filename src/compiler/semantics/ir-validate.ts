@@ -28,7 +28,8 @@
  */
 
 import { CompilerError } from "../core/errors.ts";
-import type { Effect, FunctionContract, FunctionSignature, ObjectLayout, ProgramContract } from "../core/types.ts";
+import type { Effect, FileContract, FunctionContract, FunctionSignature, ObjectLayout, ProgramContract, TypeExpr } from "../core/types.ts";
+type ProgramContractFile = FileContract;
 import {
   convertibleTo,
   elementTypeOf,
@@ -610,37 +611,48 @@ function walked(value: SemanticValue, visit: (value: SemanticValue) => void): vo
 function structureProblems(body: Body): string[] {
   const problems: string[] = [];
   const ids = new Set<string>();
-  const tree = body.tree;
+  const tree = fieldOf(body, "tree") as Tree;
+  const treeBlocks = fieldOf(tree, "blocks") as readonly PlacedBlock[];
 
-  for (const placed of tree.blocks) {
-    if (ids.has(placed.block.id)) {
-      problems.push(`${label(placed.block.id)}the block id is used by more than one block`);
+  for (const placed of treeBlocks) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const blockId = String(fieldOf(block, "id"));
+    if (ids.has(blockId)) {
+      problems.push(`${label(blockId, undefined)}the block id is used by more than one block`);
       continue;
     }
-    ids.add(placed.block.id);
+    ids.add(blockId);
   }
 
   // The entry block of a program is the one block the IR names, so that a model
   // writing a program back out writes the same program. A function's blocks are
   // named by the lowering that wrote them, and the function is named instead.
-  if (body.single && body.entry.id !== "entry") {
-    problems.push(`entry: the program's entry block is "${body.entry.id}" rather than entry`);
+  const entry = fieldOf(body, "entry") as SemanticBlock;
+  const entryId = String(fieldOf(entry, "id"));
+  if (fieldOf(body, "single") === true && entryId !== "entry") {
+    problems.push(`entry: the program's entry block is "${entryId}" rather than entry`);
   }
 
-  const headers = new Set(tree.loops.map((frame) => frame.loop.header));
+  const headers = new Set<string>();
+  for (const frame of fieldOf(tree, "loops") as readonly LoopFrame[]) {
+    headers.add(String(fieldOf(fieldOf(frame, "loop"), "header")));
+  }
 
-  for (const placed of tree.blocks) {
-    const where = label(placed.block.id);
-    const terminator = placed.block.terminator;
-    const isEntry = placed.block === body.entry;
-    if (TERMINATOR_KINDS[terminator.k] !== true) {
-      problems.push(`${where}the block ends in nothing ${body.subject} may end in`);
+  for (const placed of treeBlocks) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const blockId = String(fieldOf(block, "id"));
+    const where = label(blockId, undefined);
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    const isEntry = block === entry;
+    const terminatorKind = String(fieldOf(terminator, "k"));
+    if (TERMINATOR_KINDS[terminatorKind] !== true) {
+      problems.push(`${where}the block ends in nothing ${String(fieldOf(body, "subject"))} may end in`);
       continue;
     }
-    if (terminator.k === "return" && body.single && !isEntry) {
-      problems.push(`${where}only the entry block ends ${body.own}`);
+    if (terminatorKind === "return" && fieldOf(body, "single") === true && !isEntry) {
+      problems.push(`${where}only the entry block ends ${String(fieldOf(body, "own"))}`);
     }
-    if (terminator.k === "unreachable" && !endsByLeaving(placed.block)) {
+    if (terminatorKind === "unreachable" && !endsByLeaving(block)) {
       // A block that ends where nothing arrives is a claim, and a claim a model
       // or a person writes into IR text is proved here rather than believed:
       // something in the block has to leave, or control does continue past it
@@ -648,8 +660,11 @@ function structureProblems(body: Body): string[] {
       problems.push(`${where}the block ends where nothing arrives, but nothing in it leaves`);
       continue;
     }
-    if (terminator.k === "jump" && !ids.has(terminator.target) && !headers.has(terminator.target)) {
-      problems.push(`${where}jumps to ${terminator.target}, which is not a block of the program`);
+    if (terminatorKind === "jump") {
+      const target = String(fieldOf(terminator, "target"));
+      if (!ids.has(target) && !headers.has(target)) {
+        problems.push(`${where}jumps to ${target}, which is not a block of the program`);
+      }
     }
   }
 
@@ -664,20 +679,25 @@ function structureProblems(body: Body): string[] {
  * The only two ways out of a loop are the only two jumps a program may make: a
  * `continue` back to the header the loop is written in, and a `break` to the
  * block the loop is written in. A body that always breaks is a loop that runs
- * once, which is a loop the language allows, so nothing here asks a body to
+ * once, which is a language the source allows, so nothing here asks a body to
  * reach its header.
  */
 function controlFlowProblems(tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.blocks) {
-    const terminator = placed.block.terminator;
-    if (terminator.k !== "jump") continue;
-    const target = terminator.target;
-    const continues = placed.loops.some((frame) => frame.loop.header === target);
-    const breaks = placed.loops.some((frame) => frame.container.id === target);
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) !== "jump") continue;
+    const target = String(fieldOf(terminator, "target"));
+    let continues = false;
+    let breaks = false;
+    for (const frame of fieldOf(placed, "loops") as readonly LoopFrame[]) {
+      if (String(fieldOf(fieldOf(frame, "loop"), "header")) === target) continues = true;
+      if (String(fieldOf(fieldOf(frame, "container"), "id")) === target) breaks = true;
+    }
     if (!continues && !breaks) {
-      problems.push(`${label(placed.block.id)}jump to ${target} leaves no loop`);
+      problems.push(`${label(String(fieldOf(block, "id")), undefined)}jump to ${target} leaves no loop`);
     }
   }
 
@@ -718,78 +738,76 @@ function compoundProblems(target: SemanticType, value: SemanticValue, operator: 
  */
 function valueProblems(tree: Tree): string[] {
   const problems: string[] = [];
+  const statements = fieldOf(tree, "statements") as readonly { statement: SemanticStatement; scope: Scope; block: PlacedBlock }[];
 
-  for (const placed of tree.statements) {
-    const { statement, scope, block } = placed;
-    const prefix = label(block.block.id, statement.line);
+  for (const placed of statements) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const scope = fieldOf(placed, "scope") as Scope;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const statementLine = Number(fieldOf(statement, "line"));
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), statementLine);
     const writes: string[] = [];
-    if (statement.k === "set" || statement.k === "step") writes.push(statement.name);
+    if (statement.k === "set" || statement.k === "step") writes[writes.length] = String(fieldOf(statement, "name"));
     if (statement.k === "setElement" || statement.k === "fill") {
-      const buffer = scope.slots.get(statement.buffer);
+      const bufferName = String(fieldOf(statement, "buffer"));
+      const slots = fieldOf(scope, "slots") as Map<string, SemanticSlot>;
+      const buffer = slots.get(bufferName);
       if (buffer === undefined) {
-        problems.push(`${prefix}"${statement.buffer}" is not declared where it is written`);
+        problems.push(`${prefix}"${bufferName}" is not declared where it is written`);
       } else if (!isSequence(slotType(buffer))) {
-        // What a name has to hold to have an element written into it is a
-        // sequence, not a slot of one kind: a program allocates the array it
-        // writes and a function is handed a slice as a parameter, and both are
-        // written the same way.
-        problems.push(`${prefix}"${statement.buffer}" is a ${typeText(slotType(buffer))}, which has no elements to write`);
+        problems.push(`${prefix}"${bufferName}" is a ${typeText(slotType(buffer))}, which has no elements to write`);
       }
-      // The count a `fill` writes from is not checked here. A `fill` written as
-      // `array.fill(value)` fills from the first element, and the position it
-      // starts at is a name the compiler made rather than one the source
-      // declared, so asking whether it is in scope refuses every fill a program
-      // writes. The value a fill writes is a value like any other, and is
-      // checked above with the calls written into it.
     }
-    if (statement.k === "loop" && statement.loop.kind === "each") {
-      if (!scope.visible.has(statement.loop.of)) {
-        problems.push(`${prefix}"${statement.loop.of}" is not declared where it is read`);
-      } else {
-        // The element is declared as the type the walk reads it at, and the C
-        // emitter declares it as that type too: an element of a `[]f64` read
-        // as an `i32` is the low half of each double, with no diagnostic.
-        const held = scope.slots.get(statement.loop.of);
-        const element = held === undefined ? null : elementTypeOf(slotType(held));
-        if (element !== null && !typeEquals(element, statement.loop.elementType)) {
-          problems.push(`${prefix}an element of a ${typeText(slotType(held as SemanticSlot))} is a ${typeText(element)}, not a ${typeText(statement.loop.elementType)}`);
+    if (statement.k === "loop") {
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      if (loop.kind === "each") {
+        const loopOf = String(fieldOf(loop, "of"));
+        const visible = fieldOf(scope, "visible") as Set<string>;
+        if (!visible.has(loopOf)) {
+          problems.push(`${prefix}"${loopOf}" is not declared where it is read`);
+        } else {
+          const slots = fieldOf(scope, "slots") as Map<string, SemanticSlot>;
+          const held = slots.get(loopOf);
+          const element = held === undefined ? null : elementTypeOf(slotType(held));
+          const elementType = fieldOf(loop, "elementType") as TypeExpr;
+          if (element !== null && !typeEquals(element, elementType)) {
+            problems.push(`${prefix}an element of a ${typeText(slotType(held as SemanticSlot))} is a ${typeText(element)}, not a ${typeText(elementType)}`);
+          }
         }
       }
     }
 
     for (const name of writes) {
-      const slot = scope.slots.get(name);
+      const slots = fieldOf(scope, "slots") as Map<string, SemanticSlot>;
+      const slot = slots.get(name);
       if (slot === undefined) {
         problems.push(`${prefix}"${name}" is not declared where it is written`);
         continue;
       }
-      // A name the source declared as a constant is a binding rather than a
-      // place, and writing one mutates a binding the program did not declare
-      // mutable: a parameter is written the same way, and an element of a walk
-      // is written by the walk itself. The resolver holds to this, so a body
-      // that breaks it is IR written by hand or by a model, and nothing
-      // downstream checks it again.
-      if (!slot.mutable) {
+      if (fieldOf(slot, "mutable") !== true) {
         problems.push(`${prefix}"${name}" is not a name that can be written`);
         continue;
       }
-      if (statement.k === "set" && statement.op !== "=") {
-        problems.push(...compoundProblems(slotType(slot), statement.value, statement.op, prefix, name));
+      if (statement.k === "set" && String(fieldOf(statement, "op")) !== "=") {
+        problems.push(...compoundProblems(slotType(slot), fieldOf(statement, "value") as SemanticValue, String(fieldOf(statement, "op")), prefix, name));
       }
     }
 
     for (const value of statementValues(statement)) {
+      const visible = fieldOf(scope, "visible") as Set<string>;
       for (const read of localNames(value)) {
-        if (!scope.visible.has(read)) problems.push(`${prefix}"${read}" is not declared where it is read`);
+        if (!visible.has(read)) problems.push(`${prefix}"${read}" is not declared where it is read`);
       }
       problems.push(...readTypeProblems(prefix, value, scope));
     }
   }
 
-  for (const placed of tree.blocks) {
-    const end = placed.block.terminator;
-    if (end.k !== "return" || end.value === null) continue;
-    problems.push(...readTypeProblems(label(placed.block.id), end.value, placed.final));
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const end = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(end, "k")) !== "return" || fieldOf(end, "value") === null) continue;
+    const finalScope = fieldOf(placed, "final") as Scope;
+    problems.push(...readTypeProblems(label(String(fieldOf(block, "id")), undefined), fieldOf(end, "value") as SemanticValue, finalScope));
   }
 
   return problems;
@@ -935,83 +953,83 @@ function comparableTo(side: SemanticValue, operand: SemanticType): boolean {
 function valueTypeProblems(prefix: string, value: SemanticValue, context: Context): string[] {
   const problems: string[] = [];
 
-  if (!isSemanticType(value.type)) problems.push(`${prefix}${typeText(value.type)} is not a type`);
+  if (!isSemanticType(fieldOf(value, "type") as SemanticType)) problems.push(`${prefix}${typeText(fieldOf(value, "type") as SemanticType)} is not a type`);
 
   switch (value.k) {
     case "text":
-      if (!isTextType(value.type)) problems.push(`${prefix}a string is written as a ${typeText(value.type)}`);
+      if (!isTextType(fieldOf(value, "type") as SemanticType)) problems.push(`${prefix}a string is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       return problems;
     case "bool":
-      if (!isBoolean(value.type)) problems.push(`${prefix}a truth is written as a ${typeText(value.type)}`);
+      if (!isBoolean(fieldOf(value, "type") as SemanticType)) problems.push(`${prefix}a truth is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       return problems;
     case "local":
     case "nothing":
     case "const":
       return problems;
     case "length":
-      if (!isSequence(value.of.type) && !isTextType(value.of.type)) {
-        problems.push(`${prefix}length reads a ${typeText(value.of.type)}, which has no length`);
+      if (!isSequence((fieldOf(value, "of") as SemanticValue).type) && !isTextType((fieldOf(value, "of") as SemanticValue).type)) {
+        problems.push(`${prefix}length reads a ${typeText((fieldOf(value, "of") as SemanticValue).type)}, which has no length`);
       }
-      if (!isNumber(value.type)) {
-        problems.push(`${prefix}the length of a ${typeText(value.of.type)} is written as a ${typeText(value.type)}`);
+      if (!isNumber(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}the length of a ${typeText((fieldOf(value, "of") as SemanticValue).type)} is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
     case "element": {
-      if (!isSequence(value.of.type)) {
-        problems.push(`${prefix}an element is read out of a ${typeText(value.of.type)}, which is not a sequence`);
+      if (!isSequence((fieldOf(value, "of") as SemanticValue).type)) {
+        problems.push(`${prefix}an element is read out of a ${typeText((fieldOf(value, "of") as SemanticValue).type)}, which is not a sequence`);
         return problems;
       }
       // An index is a whole number, and the source may write one as a double —
       // a loop counting in fractions indexes just as well. What has to be a
       // number is the index: a truth or a reference is not a place in an array,
       // and a target has no way to read one as one.
-      if (!isNumber(value.index.type)) {
-        problems.push(`${prefix}an element is read at a ${typeText(value.index.type)}, which is not a number`);
+      if (!isNumber((fieldOf(value, "index") as SemanticValue).type)) {
+        problems.push(`${prefix}an element is read at a ${typeText((fieldOf(value, "index") as SemanticValue).type)}, which is not a number`);
       }
-      const element = elementTypeOf(value.of.type);
-      if (element !== null && !typeEquals(element, value.type)) {
-        problems.push(`${prefix}an element of a ${typeText(value.of.type)} is a ${typeText(element)}, not a ${typeText(value.type)}`);
+      const element = elementTypeOf((fieldOf(value, "of") as SemanticValue).type);
+      if (element !== null && !typeEquals(element, fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}an element of a ${typeText((fieldOf(value, "of") as SemanticValue).type)} is a ${typeText(element)}, not a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
     }
     case "buffer": {
-      if (value.length === null) {
+      if (fieldOf(value, "length") === null) {
         // The count the program settled on is a value, and a view writes no
         // values of its own: what it holds is the block it looks into.
-        if (value.count === null) {
+        if (fieldOf(value, "count") as SemanticValue | null === null) {
           problems.push(`${prefix}the array declares no elements and settles on no count`);
-        } else if (!isNumber(value.count.type)) {
-          problems.push(`${prefix}the array is settled on a ${typeText(value.count.type)}, which is not a number`);
+        } else if (!isNumber((fieldOf(value, "count") as SemanticValue).type)) {
+          problems.push(`${prefix}the array is settled on a ${typeText((fieldOf(value, "count") as SemanticValue).type)}, which is not a number`);
         }
-        if (value.view === null && value.values.length > 0) {
-          problems.push(`${prefix}the array settles on a count and writes ${value.values.length} value(s) out`);
+        if (fieldOf(value, "view") === null && (fieldOf(value, "values") as readonly SemanticValue[]).length > 0) {
+          problems.push(`${prefix}the array settles on a count and writes ${(fieldOf(value, "values") as readonly SemanticValue[]).length} value(s) out`);
         }
         // A window of a block is taken of any sequence: a name bound to a
         // typed array is an array of its length, one that came from a call is a
         // slice, and both are a block of elements the window reaches into.
-        if (value.view !== null && !isSequence(value.view.of.type)) {
-          problems.push(`${prefix}a view is taken of a ${typeText(value.view.of.type)}, which is not a block of bytes`);
+        if (fieldOf(value, "view") !== null && !isSequence((fieldOf(fieldOf(value, "view"), "of") as SemanticValue).type)) {
+          problems.push(`${prefix}a view is taken of a ${typeText((fieldOf(fieldOf(value, "view"), "of") as SemanticValue).type)}, which is not a block of bytes`);
         }
-        if (value.view !== null && !isNumber(value.view.offset.type)) {
-          problems.push(`${prefix}the view starts at a ${typeText(value.view.offset.type)}, which is not a number`);
+        if (fieldOf(value, "view") !== null && !isNumber((fieldOf(fieldOf(value, "view"), "offset") as SemanticValue).type)) {
+          problems.push(`${prefix}the view starts at a ${typeText((fieldOf(fieldOf(value, "view"), "offset") as SemanticValue).type)}, which is not a number`);
         }
         return problems;
       }
-      if (value.view !== null) {
-        problems.push(`${prefix}a view declares ${value.length} elements of its own`);
+      if (fieldOf(value, "view") !== null) {
+        problems.push(`${prefix}a view declares ${Number(fieldOf(value, "length"))} elements of its own`);
       }
-      if (value.values.length !== value.length) {
-        problems.push(`${prefix}the array declares ${value.length} elements and writes ${value.values.length}`);
+      if ((fieldOf(value, "values") as readonly SemanticValue[]).length !== Number(fieldOf(value, "length"))) {
+        problems.push(`${prefix}the array declares ${Number(fieldOf(value, "length"))} elements and writes ${(fieldOf(value, "values") as readonly SemanticValue[]).length}`);
       }
-      for (const element of value.values) {
-        if (!convertibleTo(element.type, value.element)) {
-          problems.push(`${prefix}the array holds a ${typeText(value.element)} and writes a ${typeText(element.type)}`);
+      for (const element of fieldOf(value, "values") as readonly SemanticValue[]) {
+        if (!convertibleTo(element.type, fieldOf(value, "element") as TypeExpr)) {
+          problems.push(`${prefix}the array holds a ${typeText(fieldOf(value, "element") as TypeExpr)} and writes a ${typeText(element.type)}`);
           break;
         }
       }
-      const element = elementTypeOf(value.type);
-      if (element === null || !typeEquals(element, value.element)) {
-        problems.push(`${prefix}the array is a ${typeText(value.type)} and holds a ${typeText(value.element)}`);
+      const element = elementTypeOf(fieldOf(value, "type") as SemanticType);
+      if (element === null || !typeEquals(element, fieldOf(value, "element") as TypeExpr)) {
+        problems.push(`${prefix}the array is a ${typeText(fieldOf(value, "type") as SemanticType)} and holds a ${typeText(fieldOf(value, "element") as TypeExpr)}`);
       }
       return problems;
     }
@@ -1020,22 +1038,22 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // already built is read: the layout must be one the program lays out, the
       // field must be one of its fields, and what is written must be readable
       // as the type the layout gives that field.
-      if (value.layout !== "JSON" && !isLayout(context, value.layout) && !isContractLayout(context.contract, value.layout)) {
-        problems.push(`${prefix}the object ${value.layout} is not a layout the program lays out`);
+      if (String(fieldOf(value, "layout")) !== "JSON" && !isLayout(context, String(fieldOf(value, "layout"))) && !isContractLayout(fieldOf(context, "contract") as ProgramContract | undefined, String(fieldOf(value, "layout")))) {
+        problems.push(`${prefix}the object ${String(fieldOf(value, "layout"))} is not a layout the program lays out`);
         return problems;
       }
-      for (const field of value.fields) {
-        problems.push(...layoutProblems(prefix, value.layout, field.name, context));
-        const declared = fieldType(value.layout, field.name, context);
-        if (declared !== null) problems.push(...writeProblems(prefix, `${value.layout}.${field.name}`, declared, field.value));
+      for (const field of fieldOf(value, "fields") as readonly { name: string; value: SemanticValue }[]) {
+        problems.push(...layoutProblems(prefix, String(fieldOf(value, "layout")), String(fieldOf(field, "name")), context));
+        const declared = fieldType(String(fieldOf(value, "layout")), String(fieldOf(field, "name")), context);
+        if (declared !== null) problems.push(...writeProblems(prefix, `${String(fieldOf(value, "layout"))}.${String(fieldOf(field, "name"))}`, declared, fieldOf(field, "value") as SemanticValue));
       }
       return problems;
     }
     case "loadField": {
-      problems.push(...layoutProblems(prefix, value.layout, value.field, context));
-      const declared = fieldType(value.layout, value.field, context);
-      if (declared !== null && !fieldReadsAs(declared, value.type)) {
-        problems.push(`${prefix}${value.layout}.${value.field} is a ${typeText(declared)}, not a ${typeText(value.type)}`);
+      problems.push(...layoutProblems(prefix, String(fieldOf(value, "layout")), String(fieldOf(value, "field")), context));
+      const declared = fieldType(String(fieldOf(value, "layout")), String(fieldOf(value, "field")), context);
+      if (declared !== null && !fieldReadsAs(declared, fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}${String(fieldOf(value, "layout"))}.${String(fieldOf(value, "field"))} is a ${typeText(declared)}, not a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
     }
@@ -1046,20 +1064,20 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // operator over a struct and produce a source that does not compile, and
       // the machine backend would have nothing to emit — so it is refused here,
       // which is the last point before a backend is handed the tree.
-      if (isWideType(value.left.type) || isWideType(value.right.type) || isWideType(value.type)) {
-        if (!WIDE_ARITHMETIC.has(value.op)) {
+      if (isWideType((fieldOf(value, "left") as SemanticValue).type) || isWideType((fieldOf(value, "right") as SemanticValue).type) || isWideType(fieldOf(value, "type") as SemanticType)) {
+        if (!WIDE_ARITHMETIC.has(String(fieldOf(value, "op")))) {
           problems.push(
-            `${prefix}${value.op} is not defined over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}; a wide number has an add, a subtraction, a product, a quotient, a remainder, the logical operations and the shifts`,
+            `${prefix}${String(fieldOf(value, "op"))} is not defined over a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)}; a wide number has an add, a subtraction, a product, a quotient, a remainder, the logical operations and the shifts`,
           );
         }
-        const pair = widePairProblem(value.left, value.right, value.type, COUNTED_OPERATIONS.has(value.op));
-        if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
+        const pair = widePairProblem(fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue, fieldOf(value, "type") as SemanticType, COUNTED_OPERATIONS.has(String(fieldOf(value, "op"))));
+        if (pair !== null) problems.push(`${prefix}${String(fieldOf(value, "op"))}: ${pair}`);
         // A zero divisor is a number the language raises on, so it is refused by
         // name here rather than answered with the kernel's total zero: the
         // kernel's answer is a total function, and the language is not.
-        if ((value.op === "div" || value.op === "mod") && value.right.k === "const") {
+        if ((String(fieldOf(value, "op")) === "div" || String(fieldOf(value, "op")) === "mod") && (fieldOf(value, "right") as SemanticValue).k === "const") {
           try {
-            const text = value.right.text.replace(/n$/, "").trim();
+            const text = String(fieldOf(fieldOf(value, "right"), "text")).replace(/n$/, "").trim();
             if (text !== "" && BigInt(text) === 0n) {
               problems.push(`${prefix}a wide number cannot be divided by zero`);
             }
@@ -1070,21 +1088,21 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
         }
         return problems;
       }
-      if (value.op === "concat") {
-        if (!isTextType(value.left.type) || !isTextType(value.right.type) || !isTextType(value.type)) {
-          problems.push(`${prefix}concat is written over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
+      if (String(fieldOf(value, "op")) === "concat") {
+        if (!isTextType((fieldOf(value, "left") as SemanticValue).type) || !isTextType((fieldOf(value, "right") as SemanticValue).type) || !isTextType(fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}concat is written over a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)}`);
         }
         return problems;
       }
-      if (value.op === "arrayConcat") {
-        if (!isSequence(value.left.type) || !isSequence(value.right.type) || !isSequence(value.type)) {
-          problems.push(`${prefix}arrayConcat is written over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
+      if (String(fieldOf(value, "op")) === "arrayConcat") {
+        if (!isSequence((fieldOf(value, "left") as SemanticValue).type) || !isSequence((fieldOf(value, "right") as SemanticValue).type) || !isSequence(fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}arrayConcat is written over a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)}`);
         }
         return problems;
       }
-      if (value.op === "add" && (isTextType(value.left.type) || isTextType(value.right.type))) {
-        if (!isTextType(value.type)) {
-          problems.push(`${prefix}text added to a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+      if (String(fieldOf(value, "op")) === "add" && (isTextType((fieldOf(value, "left") as SemanticValue).type) || isTextType((fieldOf(value, "right") as SemanticValue).type))) {
+        if (!isTextType(fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}text added to a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
         }
         return problems;
       }
@@ -1095,13 +1113,13 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // whole answer first used to let through: the check for numbers is below
       // this, so a pair of texts over `%` or `&` was accepted and the backend
       // wrote a C operator over two pointers.
-      if (WHOLE_OPERATIONS[value.op] === true) {
-        if (!isInteger(value.type)) {
-          problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is not a whole number`);
+      if (WHOLE_OPERATIONS[String(fieldOf(value, "op"))] === true) {
+        if (!isInteger(fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}, which is not a whole number`);
           return problems;
         }
-        if (!isNumber(value.left.type) || !isNumber(value.right.type)) {
-          problems.push(`${prefix}${value.op} over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
+        if (!isNumber((fieldOf(value, "left") as SemanticValue).type) || !isNumber((fieldOf(value, "right") as SemanticValue).type)) {
+          problems.push(`${prefix}${String(fieldOf(value, "op"))} over a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)}`);
         }
         return problems;
       }
@@ -1110,28 +1128,28 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // a whole number is a truncation, and `2 ** 40` is 1099511627776 rather
       // than what a 32 bit answer would hold. The resolver gives it a double,
       // whatever the operands are.
-      if (value.op === "pow" && isInteger(value.type)) {
-        problems.push(`${prefix}pow of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is not a floating value`);
+      if (String(fieldOf(value, "op")) === "pow" && isInteger(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}pow of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}, which is not a floating value`);
         return problems;
       }
       // What an operation is written as is one of the two types it works on —
       // `length - 10` is a double and `10 - length` is a whole number, because
       // that is what the language says — and both sides convert to it.
-      if (!isNumber(value.left.type) || !isNumber(value.right.type)) {
-        problems.push(`${prefix}${value.op} over a ${typeText(value.left.type)} and a ${typeText(value.right.type)}`);
+      if (!isNumber((fieldOf(value, "left") as SemanticValue).type) || !isNumber((fieldOf(value, "right") as SemanticValue).type)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} over a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)}`);
         return problems;
       }
       // A shift is written as the type of what it shifts, and `>>>` is the one
       // that converts: JavaScript reads both of its sides as 32 bit unsigned
       // numbers whatever they are, so its answer is its own type and not the
       // type of either side.
-      const expected = value.op === "shl" || value.op === "shr" ? value.left.type : value.type;
+      const expected = String(fieldOf(value, "op")) === "shl" || String(fieldOf(value, "op")) === "shr" ? (fieldOf(value, "left") as SemanticValue).type : fieldOf(value, "type") as SemanticType;
       // `>>>` is the one shift that converts, so it is not written as the type
       // of either side: both are read as the unsigned 32 bit numbers the
       // language reads them as, and what it answers is one of those.
-      if (value.op === "ushr") {
-        if (!convertibleTo(value.left.type, value.type) || !convertibleTo(value.right.type, value.type)) {
-          problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+      if (String(fieldOf(value, "op")) === "ushr") {
+        if (!convertibleTo((fieldOf(value, "left") as SemanticValue).type, fieldOf(value, "type") as SemanticType) || !convertibleTo((fieldOf(value, "right") as SemanticValue).type, fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
         }
         return problems;
       }
@@ -1140,25 +1158,25 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // a program counts in whole numbers and computes in doubles, so `i * i`
       // over a loop index is a double on both sides of the language and here.
       const widened =
-        isFloat(value.type) && isInteger(value.left.type) && isInteger(value.right.type) && value.op !== "min" && value.op !== "max";
-      if (!widened && !typeEquals(expected, value.left.type) && !typeEquals(expected, value.right.type)) {
-        problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}, which is neither`);
+        isFloat(fieldOf(value, "type") as SemanticType) && isInteger((fieldOf(value, "left") as SemanticValue).type) && isInteger((fieldOf(value, "right") as SemanticValue).type) && String(fieldOf(value, "op")) !== "min" && String(fieldOf(value, "op")) !== "max";
+      if (!widened && !typeEquals(expected, (fieldOf(value, "left") as SemanticValue).type) && !typeEquals(expected, (fieldOf(value, "right") as SemanticValue).type)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}, which is neither`);
         return problems;
       }
-      if (!convertibleTo(value.left.type, value.type) || !convertibleTo(value.right.type, value.type)) {
-        problems.push(`${prefix}${value.op} of a ${typeText(value.left.type)} and a ${typeText(value.right.type)} is a ${typeText(value.type)}`);
+      if (!convertibleTo((fieldOf(value, "left") as SemanticValue).type, fieldOf(value, "type") as SemanticType) || !convertibleTo((fieldOf(value, "right") as SemanticValue).type, fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
     }
     case "compare":
-      if (!isBoolean(value.type)) {
-        problems.push(`${prefix}a comparison is written as a ${typeText(value.type)}`);
+      if (!isBoolean(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}a comparison is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
-      if (!comparableTo(value.left, value.operand)) {
-        problems.push(`${prefix}${value.op} compares a ${typeText(value.left.type)} as a ${typeText(value.operand)}`);
+      if (!comparableTo(fieldOf(value, "left") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "left") as SemanticValue).type)} as a ${typeText((fieldOf(value, "operand") as SemanticValue).type)}`);
       }
-      if (!comparableTo(value.right, value.operand)) {
-        problems.push(`${prefix}${value.op} compares a ${typeText(value.right.type)} as a ${typeText(value.operand)}`);
+      if (!comparableTo(fieldOf(value, "right") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "right") as SemanticValue).type)} as a ${typeText((fieldOf(value, "operand") as SemanticValue).type)}`);
       }
       // A wide number is compared by the kernel, over two of them. The operand
       // is what the comparison is read at, so a wide number beside an operand
@@ -1167,8 +1185,8 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // C comparison, and the machine backend asks for the width a wide number
       // does not have. The count of a shift is the one narrower number a wide
       // number may be beside, and it is not a comparison.
-      const pair = widePairProblem(value.left, value.right, value.operand, false);
-      if (pair !== null) problems.push(`${prefix}${value.op}: ${pair}`);
+      const pair = widePairProblem(fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type, false);
+      if (pair !== null) problems.push(`${prefix}${String(fieldOf(value, "op"))}: ${pair}`);
       return problems;
     case "logical": {
       // `&&` and `||` hand back one of their arms rather than a truth, so what
@@ -1180,18 +1198,18 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // type as well: a number beside a text is the test, and the text is the
       // value the operator hands back. This is the reading the program pass
       // gives the same two arms.
-      const arms: [SemanticType, SemanticType] = [value.left.type, value.right.type];
-      const holds = arms.filter((arm) => convertibleTo(arm, value.type));
+      const arms: [SemanticType, SemanticType] = [(fieldOf(value, "left") as SemanticValue).type, (fieldOf(value, "right") as SemanticValue).type];
+      const holds = arms.filter((arm) => convertibleTo(arm, fieldOf(value, "type") as SemanticType));
       // The arms are both of the type, or one of them is the test that decides
       // whether the other is handed back and the other is of the type.
       const tests = arms.filter((arm) => isNumber(arm) || isBoolean(arm)).length;
       if (!(holds.length === arms.length || (holds.length === 1 && tests === 1))) {
-        problems.push(`${prefix}${value.op} over a ${typeText(arms[0])} and a ${typeText(arms[1])} is a ${typeText(value.type)}`);
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} over a ${typeText(arms[0])} and a ${typeText(arms[1])} is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       return problems;
     }
     case "isNull":
-      if (!isBoolean(value.type)) problems.push(`${prefix}a null test is written as a ${typeText(value.type)}`);
+      if (!isBoolean(fieldOf(value, "type") as SemanticType)) problems.push(`${prefix}a null test is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       return problems;
     case "coalesce": {
       // `a ?? b` hands back one of its two arms, the way `&&` and `||` do, so
@@ -1199,9 +1217,9 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // is the one that decides, and it is only a null test if it can be
       // nothing: a left arm that always holds leaves the right one dead, which
       // is a different program from the one that is written.
-      for (const [what, arm] of [["left", value.left], ["right", value.right]] as const) {
-        if (!convertibleTo(arm.type, value.type)) {
-          problems.push(`${prefix}the ${what} arm of ?? is a ${typeText(arm.type)}, and the whole is a ${typeText(value.type)}`);
+      for (const [what, arm] of [["left", fieldOf(value, "left") as SemanticValue], ["right", fieldOf(value, "right") as SemanticValue]] as const) {
+        if (!convertibleTo(arm.type, fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}the ${what} arm of ?? is a ${typeText(arm.type)}, and the whole is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
         }
       }
       return problems;
@@ -1212,29 +1230,29 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // arms into one conditional, and a string beside a number is a
       // conditional no compiler takes. What decides it is a question the
       // backends answer, and an array is one of the answers.
-      for (const [what, arm] of [["then", value.then], ["otherwise", value.otherwise]] as const) {
-        if (!convertibleTo(arm.type, value.type)) {
-          problems.push(`${prefix}the ${what} arm of a conditional is a ${typeText(arm.type)}, and the whole is a ${typeText(value.type)}`);
+      for (const [what, arm] of [["then", fieldOf(value, "then") as SemanticValue], ["otherwise", fieldOf(value, "otherwise") as SemanticValue]] as const) {
+        if (!convertibleTo(arm.type, fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}the ${what} arm of a conditional is a ${typeText(arm.type)}, and the whole is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
         }
       }
       return problems;
     }
     case "unary": {
-      if (value.op === "not") {
-        if (!isBoolean(value.operand.type) || !isBoolean(value.type)) {
-          problems.push(`${prefix}not is written over a ${typeText(value.operand.type)} as a ${typeText(value.type)}`);
+      if (String(fieldOf(value, "op")) === "not") {
+        if (!isBoolean((fieldOf(value, "operand") as SemanticValue).type) || !isBoolean(fieldOf(value, "type") as SemanticType)) {
+          problems.push(`${prefix}not is written over a ${typeText((fieldOf(value, "operand") as SemanticValue).type)} as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
         }
         return problems;
       }
-      if (!isNumber(value.operand.type) || !isNumber(value.type)) {
-        problems.push(`${prefix}${value.op} is written over a ${typeText(value.operand.type)} as a ${typeText(value.type)}`);
+      if (!isNumber((fieldOf(value, "operand") as SemanticValue).type) || !isNumber(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} is written over a ${typeText((fieldOf(value, "operand") as SemanticValue).type)} as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
       // A bitwise inversion is the operation on whole numbers its binary forms
       // are: there is no `~` of a double for a target to perform, so a body
       // that asks for one is refused here rather than handed to a compiler
       // that cannot read it.
-      if (value.op === "bitNot" && !isInteger(value.type)) {
-        problems.push(`${prefix}bitNot of a ${typeText(value.operand.type)} is a ${typeText(value.type)}, which is not a whole number`);
+      if (String(fieldOf(value, "op")) === "bitNot" && !isInteger(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}bitNot of a ${typeText((fieldOf(value, "operand") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}, which is not a whole number`);
       }
       // A complement and a negation are the two operations whose answer the
       // language that wrote the program does not hold in an unsigned wide
@@ -1246,37 +1264,111 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // other, and there is no spelling of the source's answer this type holds.
       // The signed wide number does hold below zero, so `~a` and `-a` of an
       // `i256` are answered as the two's complement they are.
-      if (value.op === "bitNot" || value.op === "neg") {
-        const wide = isWideType(value.operand.type) ? value.operand.type : value.type;
+      if (String(fieldOf(value, "op")) === "bitNot" || String(fieldOf(value, "op")) === "neg") {
+        const wide = isWideType((fieldOf(value, "operand") as SemanticValue).type) ? (fieldOf(value, "operand") as SemanticValue).type : fieldOf(value, "type") as SemanticType;
         if (wide.kind === "primitive" && wide.name === "u256") {
-          problems.push(`${prefix}${value.op} of a ${typeText(value.operand.type)} is a number below zero, and a wide number holds none`);
+          problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "operand") as SemanticValue).type)} is a number below zero, and a wide number holds none`);
         }
       }
       return problems;
     }
     case "toText":
-      if (!isTextType(value.type)) problems.push(`${prefix}text is read as a ${typeText(value.type)}`);
+      if (!isTextType(fieldOf(value, "type") as SemanticType)) problems.push(`${prefix}text is read as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       return problems;
     case "argv":
-      if (value.index !== null && !isNumber(value.index.type)) {
-        problems.push(`${prefix}an argument is read at a ${typeText(value.index.type)}, which is not a number`);
+      if (fieldOf(value, "index") as SemanticValue !== null && !isNumber((fieldOf(value, "index") as SemanticValue).type)) {
+        problems.push(`${prefix}an argument is read at a ${typeText((fieldOf(value, "index") as SemanticValue).type)}, which is not a number`);
       }
       return problems;
     case "closure":
-      if (!isReference(value.type)) {
-        problems.push(`${prefix}a closure is written as a ${typeText(value.type)}, which is not a reference`);
+      if (!isReference(fieldOf(value, "type") as SemanticType)) {
+        problems.push(`${prefix}a closure is written as a ${typeText(fieldOf(value, "type") as SemanticType)}, which is not a reference`);
       }
-      if (value.captures.some((capture) => capture.type.kind === "void")) {
+      if ((fieldOf(value, "captures") as readonly { name: string; type: SemanticType }[]).some((capture) => (fieldOf(capture, "type") as SemanticType).kind === "void")) {
         problems.push(`${prefix}a closure captures nothing, and nothing is not a value`);
       }
       return problems;
     case "capture": {
-      if (!isReference(value.closure.type)) {
-        problems.push(`${prefix}a value is captured out of a ${typeText(value.closure.type)}, which is not a closure`);
+      if (!isReference((fieldOf(value, "closure") as SemanticValue).type)) {
+        problems.push(`${prefix}a value is captured out of a ${typeText((fieldOf(value, "closure") as SemanticValue).type)}, which is not a closure`);
       }
-      if (value.index < 0) problems.push(`${prefix}a capture is read at ${value.index}`);
+      if (Number(fieldOf(value, "index")) < 0) problems.push(`${prefix}a capture is read at ${String(fieldOf(value, "index"))}`);
       return problems;
     }
+    default:
+      return problems;
+  }
+}
+
+/** Every value a value holds, checked against the type each states. */
+function valueTypeProblemsDeep(prefix: string, value: SemanticValue, context: Context): string[] {
+  const problems: string[] = [];
+  for (const one of valueTypeProblems(prefix, value, context)) problems.push(one);
+  switch (value.k) {
+    case "newObject":
+      for (const field of fieldOf(value, "fields") as readonly { value: SemanticValue }[]) {
+        for (const one of valueTypeProblemsDeep(prefix, fieldOf(field, "value") as SemanticValue, context)) problems.push(one);
+      }
+      return problems;
+    case "loadField":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "object") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "text":
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: SemanticValue }[]) {
+        if (part.k === "value") for (const one of valueTypeProblemsDeep(prefix, part.value, context)) problems.push(one);
+      }
+      return problems;
+    case "buffer": {
+      const count = fieldOf(value, "count") as SemanticValue | null;
+      if (count !== null) for (const one of valueTypeProblemsDeep(prefix, count, context)) problems.push(one);
+      const view = fieldOf(value, "view") as { of: SemanticValue; offset: SemanticValue } | null;
+      if (view !== null) {
+        for (const one of valueTypeProblemsDeep(prefix, fieldOf(view, "of") as SemanticValue, context)) problems.push(one);
+        for (const one of valueTypeProblemsDeep(prefix, fieldOf(view, "offset") as SemanticValue, context)) problems.push(one);
+      }
+      for (const item of fieldOf(value, "values") as readonly SemanticValue[]) for (const one of valueTypeProblemsDeep(prefix, item, context)) problems.push(one);
+      return problems;
+    }
+    case "call": {
+      const call = fieldOf(value, "call") as SemanticCall;
+      for (const item of fieldOf(call, "args") as readonly SemanticValue[]) for (const one of valueTypeProblemsDeep(prefix, item, context)) problems.push(one);
+      return problems;
+    }
+    case "arith":
+    case "compare":
+    case "logical":
+    case "coalesce":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "left") as SemanticValue, context)) problems.push(one);
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "right") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "select":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "condition") as SemanticValue, context)) problems.push(one);
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "then") as SemanticValue, context)) problems.push(one);
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "otherwise") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "unary":
+    case "isNull":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "operand") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "toText":
+    case "length":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "of") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "element":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "of") as SemanticValue, context)) problems.push(one);
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "index") as SemanticValue, context)) problems.push(one);
+      return problems;
+    case "argv": {
+      const index = fieldOf(value, "index") as SemanticValue | null;
+      if (index !== null) for (const one of valueTypeProblemsDeep(prefix, index, context)) problems.push(one);
+      return problems;
+    }
+    case "closure":
+      for (const one of fieldOf(value, "captures") as readonly SemanticValue[]) for (const item of valueTypeProblemsDeep(prefix, one, context)) problems.push(item);
+      return problems;
+    case "capture":
+      for (const one of valueTypeProblemsDeep(prefix, fieldOf(value, "closure") as SemanticValue, context)) problems.push(one);
+      return problems;
     default:
       return problems;
   }
@@ -1305,12 +1397,13 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
  */
 function writeProblems(prefix: string, what: string, declared: SemanticType, value: SemanticValue): string[] {
   const problems: string[] = [];
-  if (isTextType(value.type) && isNumber(declared)) return problems;
+  if (isTextType((fieldOf(value, "type") as SemanticType)) && isNumber(declared)) return problems;
   // Nothing is held at an unshaped reference, and an object being laid out
   // starts every field as nothing: nothing fits a field of any type.
-  if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return problems;
-  if (!convertibleTo(value.type, declared)) {
-    problems.push(`${prefix}${what} is a ${typeText(declared)}, not a ${typeText(value.type)}`);
+  const writtenType = fieldOf(value, "type") as TypeExpr;
+  if (writtenType.kind === "ref" && writtenType.of === null && writtenType.name === undefined) return problems;
+  if (!convertibleTo((fieldOf(value, "type") as SemanticType), declared)) {
+    problems.push(`${prefix}${what} is a ${typeText(declared)}, not a ${typeText((fieldOf(value, "type") as SemanticType))}`);
   }
   const reason = wideningReason(value, declared);
   if (reason !== null) problems.push(`${prefix}${what} is written where a ${typeText(declared)} is read, and ${reason}`);
@@ -1320,11 +1413,13 @@ function writeProblems(prefix: string, what: string, declared: SemanticType, val
 /** A field of a layout the body lays out, and the type the layout gives it. */
 function layoutProblems(prefix: string, layout: string, field: string, context: Context): string[] {
   if (layout === "JSON") return [];
-  if (layout !== "JSON" && !isLayout(context, layout) && !isContractLayout(context.contract, layout)) {
+  if (layout !== "JSON" && !isLayout(context, layout) && !isContractLayout(fieldOf(context, "contract") as ProgramContract | undefined, layout)) {
     return [`${prefix}the object ${layout} is not a layout the program lays out`];
   }
   const found = layoutOf(context, layout);
-  const declared = found?.fields.find((one) => one.name === field);
+  const fields = found === undefined ? [] : fieldOf(found, "fields") as readonly { name: string; type: string }[];
+  let declared: { name: string; type: string } | undefined;
+  for (const one of fields) if (one.name === field) declared = one;
   if (declared === undefined) {
     return [`${prefix}${layout} has no field ${field}`];
   }
@@ -1333,12 +1428,12 @@ function layoutProblems(prefix: string, layout: string, field: string, context: 
 
 /** The layout a body carries, wherever it came from. */
 function layoutOf(context: Context, name: string): ObjectLayout | undefined {
-  if (isLayout(context, name)) return context.objects[name];
-  const contract = context.contract;
+  if (isLayout(context, name)) return (fieldOf(context, "objects") as Record<string, ObjectLayout>)[name];
+  const contract = fieldOf(context, "contract") as ProgramContract | undefined;
   if (contract === undefined) return undefined;
-  for (const file of contract.files) {
-    for (const declared of Object.values(file.functions)) {
-      const found = declared.definition.objects[name];
+  for (const file of fieldOf(contract, "files") as readonly ProgramContractFile[]) {
+    for (const declared of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      const found = (fieldOf(fieldOf(declared, "definition"), "objects") as Record<string, ObjectLayout>)[name];
       if (found !== undefined) return found;
     }
   }
@@ -1349,21 +1444,23 @@ function layoutOf(context: Context, name: string): ObjectLayout | undefined {
 function fieldType(layout: string, field: string, context: Context): SemanticType | null {
   if (layout === "JSON") return { kind: "primitive", name: "f64" };
   const found = layoutOf(context, layout);
-  const declared = found?.fields.find((one) => one.name === field);
-  return declared === undefined ? null : parseType(declared.type);
+  const fields = found === undefined ? [] : fieldOf(found, "fields") as readonly { name: string; type: string }[];
+  let declared: { name: string; type: string } | undefined;
+  for (const one of fields) if (one.name === field) declared = one;
+  return declared === undefined ? null : parseType(String(fieldOf(declared, "type")));
 }
 
 /** A layout the IR itself carries. */
 function isLayout(context: Context, object: string): boolean {
-  return Object.prototype.hasOwnProperty.call(context.objects, object);
+  return Object.prototype.hasOwnProperty.call(fieldOf(context, "objects"), object);
 }
 
 /** A layout a contract lays out, which every function's body can reach. */
 function isContractLayout(contract: ProgramContract | undefined, object: string): boolean {
   if (contract === undefined) return false;
-  for (const file of contract.files) {
-    for (const declared of Object.values(file.functions)) {
-      if (Object.prototype.hasOwnProperty.call(declared.definition.objects, object)) return true;
+  for (const file of fieldOf(contract, "files") as readonly ProgramContractFile[]) {
+    for (const declared of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      if (Object.prototype.hasOwnProperty.call(fieldOf(fieldOf(declared, "definition"), "objects"), object)) return true;
     }
   }
   return false;
@@ -1373,15 +1470,18 @@ function isContractLayout(contract: ProgramContract | undefined, object: string)
 function typeProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.statements) {
-    const { statement, block } = placed;
-    const prefix = label(block.block.id, statement.line);
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const scope = fieldOf(placed, "scope") as Scope;
+    const slots = fieldOf(scope, "slots") as Map<string, SemanticSlot>;
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
 
-    if (statement.k === "printText" && !isTextType(statement.value.type)) {
-      problems.push(`${prefix}print is given a ${typeText(statement.value.type)}, which is not text`);
+    if (statement.k === "printText" && !isTextType((fieldOf(statement, "value") as SemanticValue).type)) {
+      problems.push(`${prefix}print is given a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}, which is not text`);
     }
-    if (statement.k === "printNumber" && !isNumber(statement.value.type)) {
-      problems.push(`${prefix}a number is printed as a ${typeText(statement.value.type)}`);
+    if (statement.k === "printNumber" && !isNumber((fieldOf(statement, "value") as SemanticValue).type)) {
+      problems.push(`${prefix}a number is printed as a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
     }
     // A bigint is the `i64` the language's `1n` is, and the `n` after it says
     // so. A value of any other width has no such spelling: a double is written
@@ -1390,18 +1490,18 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // that is not an `i64`: the language has no `u256`, so every value that is
     // one here was written as a bigint, and the driver writes the marker after
     // the digits the formatter gives it.
-    if (statement.k === "printNumber" && statement.bigint && !isWideType(statement.value.type)) {
-      const printed = statement.value.type;
+    if (statement.k === "printNumber" && fieldOf(statement, "bigint") === true && !isWideType((fieldOf(statement, "value") as SemanticValue).type)) {
+      const printed = (fieldOf(statement, "value") as SemanticValue).type;
       if (printed.kind !== "primitive" || printed.name !== "i64") {
         problems.push(`${prefix}a bigint is printed as a ${typeText(printed)}, which is not the sixty-four bit whole number a bigint is`);
       }
     }
-    if (statement.k === "raise" && !isTextType(statement.message.type)) {
-      problems.push(`${prefix}a program is raised with a ${typeText(statement.message.type)}, which is not text`);
+    if (statement.k === "raise" && !isTextType((fieldOf(statement, "message") as SemanticValue).type)) {
+      problems.push(`${prefix}a program is raised with a ${typeText((fieldOf(statement, "message") as SemanticValue).type)}, which is not text`);
     }
-    if (statement.k === "retain" && !isReference(statement.value.type) && !isTextType(statement.value.type)) {
-      if (statement.value.k !== "call") {
-        problems.push(`${prefix}a ${typeText(statement.value.type)} is nothing to keep alive`);
+    if (statement.k === "retain" && !isReference((fieldOf(statement, "value") as SemanticValue).type) && !isTextType((fieldOf(statement, "value") as SemanticValue).type)) {
+      if ((fieldOf(statement, "value") as SemanticValue).k !== "call") {
+        problems.push(`${prefix}a ${typeText((fieldOf(statement, "value") as SemanticValue).type)} is nothing to keep alive`);
       }
     }
     // A name is written with the type it is declared and read as, and the two
@@ -1414,43 +1514,43 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // as well: the value it starts as is cast to the slot, so a number declared
     // where a string is written came out as a pointer cast to a double.
     if (statement.k === "let") {
-      const declared = slotType(statement.slot);
-      if (!convertibleTo(statement.value.type, declared)) {
-        problems.push(`${prefix}"${statement.slot.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      const declared = slotType(fieldOf(statement, "slot") as SemanticSlot);
+      if (!convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+        problems.push(`${prefix}"${String(fieldOf(statement, "slot", ))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
-      const reason = wideningReason(statement.value, declared);
-      if (reason !== null) problems.push(`${prefix}"${statement.slot.name}" is written where a ${typeText(declared)} is read, and ${reason}`);
+      const reason = wideningReason(fieldOf(statement, "value") as SemanticValue, declared);
+      if (reason !== null) problems.push(`${prefix}"${String(fieldOf(statement, "slot", ))}" is written where a ${typeText(declared)} is read, and ${reason}`);
     }
-    if (statement.k === "set" && statement.op === "=") {
-      const slot = placed.scope.slots.get(statement.name);
+    if (statement.k === "set" && String(fieldOf(statement, "op")) === "=") {
+      const slot = slots.get(String(fieldOf(statement, "name")));
       const declared = slot === undefined ? null : slotType(slot);
-      if (declared !== null && !convertibleTo(statement.value.type, declared)) {
-        problems.push(`${prefix}"${statement.name}" holds a ${typeText(declared)}, not a ${typeText(statement.value.type)}`);
+      if (declared !== null && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+        problems.push(`${prefix}"${String(fieldOf(statement, "name"))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
       if (declared !== null) {
-        const reason = wideningReason(statement.value, declared);
-        if (reason !== null) problems.push(`${prefix}"${statement.name}" is written where a ${typeText(declared)} is read, and ${reason}`);
+        const reason = wideningReason(fieldOf(statement, "value") as SemanticValue, declared);
+        if (reason !== null) problems.push(`${prefix}"${String(fieldOf(statement, "name"))}" is written where a ${typeText(declared)} is read, and ${reason}`);
       }
     }
     if (statement.k === "step") {
-      const slot = placed.scope.slots.get(statement.name);
+      const slot = slots.get(String(fieldOf(statement, "name")));
       const declared = slot === undefined ? null : slotType(slot);
       if (declared !== null && !isNumber(declared)) {
-        problems.push(`${prefix}"${statement.name}" is a ${typeText(declared)}, which is not a number a step can move`);
+        problems.push(`${prefix}"${String(fieldOf(statement, "name"))}" is a ${typeText(declared)}, which is not a number a step can move`);
       }
     }
     if (statement.k === "setElement") {
-      const buffer = placed.scope.slots.get(statement.buffer);
+      const buffer = slots.get(String(fieldOf(statement, "buffer")));
       const element = buffer === undefined ? null : elementTypeOf(slotType(buffer));
       if (element !== null) {
-        if (statement.op === "=") {
-          if (!convertibleTo(statement.value.type, element)) {
-            problems.push(`${prefix}"${statement.buffer}" holds a ${typeText(element)}, not a ${typeText(statement.value.type)}`);
+        if (String(fieldOf(statement, "op")) === "=") {
+          if (!convertibleTo((fieldOf(statement, "value") as SemanticValue).type, element)) {
+            problems.push(`${prefix}"${String(fieldOf(statement, "buffer"))}" holds a ${typeText(element)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
           }
-          const reason = wideningReason(statement.value, element);
-          if (reason !== null) problems.push(`${prefix}"${statement.buffer}[...]" is written where a ${typeText(element)} is read, and ${reason}`);
+          const reason = wideningReason(fieldOf(statement, "value") as SemanticValue, element);
+          if (reason !== null) problems.push(`${prefix}"${String(fieldOf(statement, "buffer"))}[...]" is written where a ${typeText(element)} is read, and ${reason}`);
         } else {
-          problems.push(...compoundProblems(element, statement.value, statement.op, prefix, `${statement.buffer}[...]`));
+          problems.push(...compoundProblems(element, fieldOf(statement, "value") as SemanticValue, String(fieldOf(statement, "op")), prefix, `${String(fieldOf(statement, "buffer"))}[...]`));
         }
       }
     }
@@ -1460,13 +1560,13 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // layout gives it. The object it is written through is a reference, or the
     // C emitter casts whatever it holds to that layout and writes through it.
     if (statement.k === "storeField") {
-      problems.push(...layoutProblems(prefix, statement.layout, statement.field, context));
-      if (!isReference(statement.object.type)) {
-        problems.push(`${prefix}${statement.layout}.${statement.field} is written through a ${typeText(statement.object.type)}, which is not a reference`);
+      problems.push(...layoutProblems(prefix, String(fieldOf(statement, "layout")), String(fieldOf(statement, "field")), context));
+      if (!isReference((fieldOf(statement, "object") as SemanticValue).type)) {
+        problems.push(`${prefix}${String(fieldOf(statement, "layout"))}.${String(fieldOf(statement, "field"))} is written through a ${typeText((fieldOf(statement, "object") as SemanticValue).type)}, which is not a reference`);
       }
-      const declared = fieldType(statement.layout, statement.field, context);
+      const declared = fieldType(String(fieldOf(statement, "layout")), String(fieldOf(statement, "field")), context);
       if (declared !== null) {
-        problems.push(...writeProblems(prefix, `${statement.layout}.${statement.field}`, declared, statement.value));
+        problems.push(...writeProblems(prefix, `${String(fieldOf(statement, "layout"))}.${String(fieldOf(statement, "field"))}`, declared, fieldOf(statement, "value") as SemanticValue));
       }
     }
 
@@ -1501,18 +1601,18 @@ function contractType(text: string): SemanticType | null {
  * cannot name is a call it may not refuse.
  */
 function declaredSignature(context: Context, callee: string): FunctionSignature | null {
-  const functions = context.functions;
+  const functions = fieldOf(context, "functions") as readonly FunctionSignature[] | null;
   if (functions === null) return null;
   return (
-    functions.find((signature) => signature.name === callee) ??
-    functions.find((signature) => signature.symbol === callee) ??
+    functions.find((signature) => String(fieldOf(signature, "name")) === callee) ??
+    functions.find((signature) => String(fieldOf(signature, "symbol")) === callee) ??
     null
   );
 }
 
 /** Whether a context declares the whole program, and so every callee in it. */
 function declaresEveryCallee(context: Context): boolean {
-  return context.functions !== null;
+  return fieldOf(context, "functions") !== null;
 }
 
 /**
@@ -1523,9 +1623,11 @@ function declaresEveryCallee(context: Context): boolean {
 function callProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.statements) {
-    const prefix = label(placed.block.block.id, placed.statement.line);
-    for (const call of statementCalls(placed.statement)) {
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
+    for (const call of statementCalls(statement)) {
       problems.push(...oneCallProblems(prefix, call, context));
     }
   }
@@ -1536,100 +1638,110 @@ function callProblems(context: Context, tree: Tree): string[] {
 /** One call, against the signature the program or the compiler declares it with. */
 function oneCallProblems(prefix: string, call: SemanticCall, context: Context): string[] {
   const problems: string[] = [];
+  const through = fieldOf(call, "through") as SemanticValue | undefined;
+  const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+  const args = fieldOf(call, "args") as readonly SemanticValue[];
+  const callee = String(fieldOf(call, "callee"));
+  const builtinFlag = fieldOf(call, "builtin") === true;
   // A call through a closure names no callee and is made against the signature
   // the call site states, so what is checked is the arguments it hands over and
   // not a signature the program declares.
-  if (call.through !== undefined) {
-    if (call.argTypes.length !== call.args.length) {
-      problems.push(`${prefix}a call through a closure passes ${call.args.length} argument(s) as ${call.argTypes.length} type(s)`);
+  if (through !== undefined) {
+    if (argTypes.length !== args.length) {
+      problems.push(`${prefix}a call through a closure passes ${args.length} argument(s) as ${argTypes.length} type(s)`);
     }
-    call.args.forEach((value, at) => {
-      const passed = call.argTypes[at];
+    args.forEach((value, at) => {
+      const passed = argTypes[at];
       if (passed === undefined) return;
-      if (!convertibleTo(value.type, passed)) {
-        problems.push(`${prefix}argument ${at + 1} of a closure call is a ${typeText(value.type)} and is read as a ${typeText(passed)}`);
+      if (!convertibleTo((fieldOf(value, "type") as SemanticType), passed)) {
+        problems.push(`${prefix}argument ${at + 1} of a closure call is a ${typeText((fieldOf(value, "type") as SemanticType))} and is read as a ${typeText(passed)}`);
       }
     });
     return problems;
   }
-  const builtin = builtinFor(call.callee);
-  const signature = declaredSignature(context, call.callee);
+  const builtin = builtinFor(callee);
+  const signature = declaredSignature(context, callee);
 
   // A context that declares no program cannot say what a call it cannot name
   // takes or returns, so it may neither refuse the call nor read it against a
   // signature it does not have.
   if (builtin === null && signature === null) {
     if (declaresEveryCallee(context)) {
-      problems.push(`${prefix}${call.callee} is neither a function of the program nor a builtin`);
+      problems.push(`${prefix}${callee} is neither a function of the program nor a builtin`);
     }
     return problems;
   }
-  if (call.builtin && builtin === null) {
-    problems.push(`${prefix}${call.callee} is called as a builtin, and the compiler provides no such builtin`);
+  if (builtinFlag && builtin === null) {
+    problems.push(`${prefix}${callee} is called as a builtin, and the compiler provides no such builtin`);
   }
-  if (!call.builtin && builtin !== null && signature === null) {
-    problems.push(`${prefix}${call.callee} is a builtin and is not called as one`);
+  if (!builtinFlag && builtin !== null && signature === null) {
+    problems.push(`${prefix}${callee} is a builtin and is not called as one`);
   }
 
-  const params: string[] =
-    builtin !== null
-      ? builtin.params.map((type) => contractText(type))
-      : (signature?.params ?? []).map((param) => param.type);
-  const returns = builtin !== null ? contractText(builtin.returns) : (signature?.returns ?? "void");
+  const params: string[] = [];
+  let returns = "void";
+  if (builtin !== null) {
+    for (const type of fieldOf(builtin, "params") as readonly SemanticType[]) params.push(contractText(type));
+    returns = contractText(fieldOf(builtin, "returns") as SemanticType);
+  } else if (signature !== null) {
+    for (const param of fieldOf(signature, "params") as readonly { type: string }[]) params.push(String(fieldOf(param, "type")));
+    returns = String(fieldOf(signature, "returns"));
+  }
 
-  if (call.signature.params.length !== params.length) {
-    problems.push(`${prefix}${call.callee} is called against a signature of ${call.signature.params.length} parameters`);
+  if ((fieldOf(fieldOf(call, "signature"), "params") as readonly unknown[]).length !== params.length) {
+    problems.push(`${prefix}${callee} is called against a signature of ${(fieldOf(fieldOf(call, "signature"), "params") as readonly unknown[]).length} parameters`);
   }
 
   const allowed = builtin?.arities ?? [builtin?.arity ?? params.length];
-  if (call.args.length !== params.length && !allowed.includes(call.args.length)) {
-    problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${params.length}`);
+  if (args.length !== params.length && !allowed.includes(args.length)) {
+    problems.push(`${prefix}${callee} is called with ${args.length} arguments and takes ${params.length}`);
   }
-  if (!allowed.includes(call.args.length)) {
-    problems.push(`${prefix}${call.callee} is called with ${call.args.length} arguments and takes ${allowed.join(" or ")}`);
+  if (!allowed.includes(args.length)) {
+    problems.push(`${prefix}${callee} is called with ${args.length} arguments and takes ${allowed.join(" or ")}`);
   }
   // The settle functions of a promise take whatever the executor hands them:
   // the value is the number, text, reference or nothing the promise carries,
   // and the builtin's declared parameter is the untyped reference only because
   // the contract language has no one type for all four.
-  const settlesAny = call.builtin && (call.callee === "resolve" || call.callee === "onFulfilled" ||
-    call.callee === "reject" || call.callee === "onRejected");
+  const settlesAny = builtinFlag && (callee === "resolve" || callee === "onFulfilled" ||
+    callee === "reject" || callee === "onRejected");
   // A list service takes a block as the pointer it is whatever the elements the
   // block holds: the two sides of `[...a, ...b]` are lists of the one element
   // type the read fixed, and the service moves bytes.
-  const listService = call.builtin && (call.callee === "array.copy" || call.callee === "array.join");
+  const listService = builtinFlag && (callee === "array.copy" || callee === "array.join");
   // A state cell holds whatever the module value is: the type the getter
   // states, boxed or cast at the call.
-  const stateCell = call.builtin && call.callee === "blaze_rt_state_set";
+  const stateCell = builtinFlag && callee === "blaze_rt_state_set";
   // Variable-arity builtins may carry more types than arguments; that is expected.
   for (let index = 0; index < params.length; index += 1) {
     const parameter = contractType(params[index]);
     if (parameter === null) {
-      problems.push(`${prefix}${call.callee} declares a parameter type that is not a type`);
+      problems.push(`${prefix}${callee} declares a parameter type that is not a type`);
       continue;
     }
-    const argument = call.argTypes[index];
+    const argument = argTypes[index];
     if (argument === undefined) continue;
     if (settlesAny || listService || (stateCell && index === 1)) continue;
     // An unshaped reference parameter takes any reference: the deep copy and
     // the settle functions ask about the value, not about the fields a record
     // it points at was laid out with.
-    if (parameter.kind === "ref" && parameter.of === null && argument.kind === "ref") continue;
+    const parameterType = parameter as TypeExpr;
+    if (parameterType.kind === "ref" && fieldOf(parameterType, "of") === null && argument.kind === "ref") continue;
     if (!typeEquals(parameter, argument)) {
-      problems.push(`${prefix}argument ${index + 1} of ${call.callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
+      problems.push(`${prefix}argument ${index + 1} of ${callee} is passed as a ${typeText(argument)} and is taken as a ${typeText(parameter)}`);
     }
     // The type an argument is passed as is not the type the value is: the value
     // is what the program computed and this is the width the callee reads it at,
     // and where the two are not one is a conversion a backend has to make. A
     // wide number beside a machine word is the one there is no answer for.
-    const value = call.args[index];
+    const value = args[index];
     if (value === undefined) continue;
-    if (!listService && !convertibleTo(value.type, argument)) {
-      problems.push(`${prefix}argument ${index + 1} of ${call.callee} is a ${typeText(value.type)} and is read as a ${typeText(argument)}`);
+    if (!listService && !convertibleTo((fieldOf(value, "type") as SemanticType), argument)) {
+      problems.push(`${prefix}argument ${index + 1} of ${callee} is a ${typeText((fieldOf(value, "type") as SemanticType))} and is read as a ${typeText(argument)}`);
     }
     const reason = wideningReason(value, argument);
     if (reason !== null) {
-      problems.push(`${prefix}argument ${index + 1} of ${call.callee} is a ${typeText(value.type)} where a ${typeText(argument)} is read, and ${reason}`);
+      problems.push(`${prefix}argument ${index + 1} of ${callee} is a ${typeText((fieldOf(value, "type") as SemanticType))} where a ${typeText(argument)} is read, and ${reason}`);
     }
   }
 
@@ -1639,13 +1751,14 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   // that handle carries: `m.get(k)` answers the list the map holds, and the
   // runtime function answers the block the list is. The ABI is the same
   // pointer either way, and the read is what knows which.
-  const carried = builtin !== null &&
-    builtin.returns.kind === "ref" && builtin.returns.of === null && builtin.returns.name === undefined &&
-    isReference(call.returns);
+  const builtinReturns = builtin === null ? null : fieldOf(builtin, "returns") as TypeExpr;
+  const carried = builtinReturns !== null &&
+    builtinReturns.kind === "ref" && builtinReturns.of === null && builtinReturns.name === undefined &&
+    isReference(fieldOf(call, "returns") as SemanticType);
   if (returned === null) {
-    problems.push(`${prefix}${call.callee} declares a return type that is not a type`);
-  } else if (!carried && !typeEquals(returned, call.returns)) {
-    problems.push(`${prefix}${call.callee} returns a ${typeText(call.returns)} and is declared to return a ${typeText(returned)}`);
+    problems.push(`${prefix}${callee} declares a return type that is not a type`);
+  } else if (!carried && !typeEquals(returned, fieldOf(call, "returns") as SemanticType)) {
+    problems.push(`${prefix}${callee} returns a ${typeText(fieldOf(call, "returns") as SemanticType)} and is declared to return a ${typeText(returned)}`);
   }
 
   return problems;
@@ -1659,27 +1772,30 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
 function effectProblems(prefix: string, call: SemanticCall, contracted: FunctionContract | null): string[] {
   const problems: string[] = [];
   const seen = new Set<Effect>();
+  const callee = String(fieldOf(call, "callee"));
 
-  for (const effect of call.effects) {
-    if (EFFECT_NAMES[effect] !== true) {
-      problems.push(`${prefix}${call.callee} has an effect the contract language does not name`);
+  for (const effect of fieldOf(call, "effects") as readonly Effect[]) {
+    if (EFFECT_NAMES[String(effect) as Effect] !== true) {
+      problems.push(`${prefix}${callee} has an effect the contract language does not name`);
       continue;
     }
     if (seen.has(effect)) {
-      problems.push(`${prefix}${call.callee} says it has the effect ${effect} twice`);
+      problems.push(`${prefix}${callee} says it has the effect ${effect} twice`);
     }
     seen.add(effect);
   }
 
   if (contracted === null) return problems;
 
-  const says = [...call.effects].sort().join(", ");
-  const means = [...contracted.effects].sort().join(", ");
+  const callEffects = fieldOf(call, "effects") as readonly Effect[];
+  const says = callEffects.slice().sort().join(", ");
+  const contractedEffects = fieldOf(contracted, "effects") as readonly Effect[];
+  const means = contractedEffects.slice().sort().join(", ");
   if (says !== means) {
-    problems.push(`${prefix}${call.callee} has the effects [${says}] and its contract declares [${means}]`);
+    problems.push(`${prefix}${callee} has the effects [${says}] and its contract declares [${means}]`);
   }
-  if (!signatureEquals(call.signature, contracted.function)) {
-    problems.push(`${prefix}${call.callee} is called with a signature its contract does not declare`);
+  if (!signatureEquals(fieldOf(call, "signature") as FunctionSignature, fieldOf(contracted, "function") as FunctionSignature)) {
+    problems.push(`${prefix}${callee} is called with a signature its contract does not declare`);
   }
 
   return problems;
@@ -1687,22 +1803,31 @@ function effectProblems(prefix: string, call: SemanticCall, contracted: Function
 
 /** Two signatures are the same when a caller may pass to either of them. */
 function signatureEquals(left: FunctionSignature, right: FunctionSignature): boolean {
-  if (left.name !== right.name || left.symbol !== right.symbol || left.returns !== right.returns) return false;
-  if (left.params.length !== right.params.length) return false;
-  return left.params.every((param, index) => {
-    const other = right.params[index];
-    return other !== undefined && param.name === other.name && param.type === other.type;
-  });
+  if (String(fieldOf(left, "name")) !== String(fieldOf(right, "name")) ||
+      String(fieldOf(left, "symbol")) !== String(fieldOf(right, "symbol")) ||
+      String(fieldOf(left, "returns")) !== String(fieldOf(right, "returns"))) return false;
+  const leftParams = fieldOf(left, "params") as readonly { name: string; type: string }[];
+  const rightParams = fieldOf(right, "params") as readonly { name: string; type: string }[];
+  if (leftParams.length !== rightParams.length) return false;
+  for (let index = 0; index < leftParams.length; index += 1) {
+    const param = leftParams[index];
+    const other = rightParams[index];
+    if (String(fieldOf(param, "name")) !== String(fieldOf(other, "name")) ||
+        String(fieldOf(param, "type")) !== String(fieldOf(other, "type"))) return false;
+  }
+  return true;
 }
 
 /** The contract of the function a call names, or null when there is no contract. */
 function contractedFunction(contract: ProgramContract | undefined, callee: string): FunctionContract | null {
   if (contract === undefined) return null;
-  for (const file of contract.files) {
-    const declared = file.functions[callee];
+  for (const file of fieldOf(contract, "files") as readonly ProgramContractFile[]) {
+    const functions = fieldOf(file, "functions") as Record<string, FunctionContract>;
+    const declared = functions[callee];
     if (declared !== undefined) return declared;
-    for (const candidate of Object.values(file.functions)) {
-      if (candidate.function.name === callee || candidate.function.symbol === callee) return candidate;
+    for (const candidate of Object.values(functions)) {
+      const signature = fieldOf(candidate, "function") as FunctionSignature;
+      if (String(fieldOf(signature, "name")) === callee || String(fieldOf(signature, "symbol")) === callee) return candidate;
     }
   }
   return null;
@@ -1712,14 +1837,17 @@ function contractedFunction(contract: ProgramContract | undefined, callee: strin
 function ownershipProblems(prefix: string, call: SemanticCall): string[] {
   const problems: string[] = [];
 
-  if (isReference(call.returns) && call.ownership !== "owned") {
-    problems.push(`${prefix}${call.callee} hands back a ${typeText(call.returns)}, which the caller has to free`);
+  const callee = String(fieldOf(call, "callee"));
+  const returns = fieldOf(call, "returns") as SemanticType;
+  const ownership = String(fieldOf(call, "ownership"));
+  if (isReference(returns) && ownership !== "owned") {
+    problems.push(`${prefix}${callee} hands back a ${typeText(returns)}, which the caller has to free`);
   }
   if (
-    (isNumber(call.returns) || isBoolean(call.returns) || call.returns.kind === "void") &&
-    call.ownership !== "none"
+    (isNumber(returns) || isBoolean(returns) || returns.kind === "void") &&
+    ownership !== "none"
   ) {
-    problems.push(`${prefix}${call.callee} hands back a ${typeText(call.returns)}, which owns nothing`);
+    problems.push(`${prefix}${callee} hands back a ${typeText(returns)}, which owns nothing`);
   }
 
   return problems;
@@ -1732,11 +1860,17 @@ function ownershipProblems(prefix: string, call: SemanticCall): string[] {
  * it stops being run.
  */
 function blocksLeft(from: PlacedBlock): PlacedBlock[] {
-  const loop = from.loops[from.loops.length - 1];
+  const loops = fieldOf(from, "loops") as readonly LoopFrame[];
+  const loop = loops[loops.length - 1];
   if (loop === undefined) return [];
+  const loopBody = fieldOf(loop, "body") as PlacedBlock | null;
   const left: PlacedBlock[] = [];
-  for (let at: PlacedBlock | null = from; at !== null && at !== loop.body; at = at.parent) left.push(at);
-  if (loop.body !== null) left.push(loop.body);
+  let at: PlacedBlock | null = from;
+  while (at !== null && at !== loopBody) {
+    left[left.length] = at;
+    at = fieldOf(at, "parent") as PlacedBlock | null;
+  }
+  if (loopBody !== null) left[left.length] = loopBody;
   return left;
 }
 
@@ -1763,7 +1897,8 @@ function jumpReleaseProblems(prefix: string, releases: string[], expected: strin
  */
 function releaseProblems(prefix: string, releases: string[], declared: string[]): string[] {
   const problems: string[] = [];
-  const position = new Map(declared.map((name, index) => [name, index]));
+  const position = new Map<string, number>();
+  for (let index = 0; index < declared.length; index += 1) position.set(declared[index], index);
   const seen = new Set<string>();
   let previous = 1 / 0;
 
@@ -1796,24 +1931,31 @@ function releaseProblems(prefix: string, releases: string[], declared: string[])
 function effectAndOwnershipProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.statements) {
-    const prefix = label(placed.block.block.id, placed.statement.line);
-    for (const call of statementCalls(placed.statement)) {
-      problems.push(...effectProblems(prefix, call, contractedFunction(context.contract, call.callee)));
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
+    for (const call of statementCalls(statement)) {
+      const callee = String(fieldOf(call, "callee"));
+      problems.push(...effectProblems(prefix, call, contractedFunction(fieldOf(context, "contract") as ProgramContract | undefined, callee)));
       problems.push(...ownershipProblems(prefix, call));
     }
   }
 
-  for (const placed of tree.blocks) {
-    const id = placed.block.id;
-    problems.push(...releaseProblems(label(id), placed.block.releases, placed.own));
-    const terminator = placed.block.terminator;
-    if (terminator.k === "jump") {
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const id = String(fieldOf(block, "id"));
+    problems.push(...releaseProblems(label(id, undefined), fieldOf(block, "releases") as string[], fieldOf(placed, "own") as string[]));
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) === "jump") {
       // A jump leaves every block it is written in, up to and including the
       // body of the loop it is in, so it frees exactly what those blocks free
       // when control falls out of them — no more, and none left behind.
-      const expected = blocksLeft(placed).flatMap((left) => left.block.releases);
-      problems.push(...jumpReleaseProblems(label(id), terminator.releases, expected));
+      const expected: string[] = [];
+      for (const left of blocksLeft(placed)) {
+        for (const release of fieldOf(fieldOf(left, "block"), "releases") as string[]) expected[expected.length] = release;
+      }
+      problems.push(...jumpReleaseProblems(label(id, undefined), fieldOf(terminator, "releases") as string[], expected));
     }
   }
 
@@ -1838,24 +1980,28 @@ function evaluatedOnceProblems(tree: Tree): string[] {
     walked(root, (inner) => {
       if (inner.k !== "logical" && inner.k !== "coalesce") return;
       if (!hasCall(inner.left)) return;
-      const callee = inner.left.k === "call" ? inner.left.call.callee : "a function";
+      const left = fieldOf(inner, "left") as SemanticValue;
+      const callee = left.k === "call" ? String(fieldOf(left, "callee")) : "a function";
       problems.push(`${prefix}${inner.k} decides on an arm that calls ${callee}, which is written twice`);
     });
   };
 
-  for (const placed of tree.statements) {
-    const prefix = label(placed.block.block.id, placed.statement.line);
-    for (const value of statementValues(placed.statement)) decide(prefix, value);
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
+    for (const value of statementValues(statement)) decide(prefix, value);
   }
   // What a block hands back is a value the backends lower like any other, and
   // for a function whose body is one expression it is the only place the value
   // lives. A block's terminator is not one of its statements, so an arm written
   // in a return was decided on by this rule never, and the call the C backend
   // binds to a temporary ran once where the WebAssembly one ran it twice.
-  for (const placed of tree.blocks) {
-    const terminator = placed.block.terminator;
-    if (terminator.k !== "return" || terminator.value === null) continue;
-    decide(label(placed.block.id, 0), terminator.value);
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) !== "return" || fieldOf(terminator, "value") === null) continue;
+    decide(label(String(fieldOf(block, "id")), 0), fieldOf(terminator, "value") as SemanticValue);
   }
 
   return problems;
@@ -1885,69 +2031,144 @@ function checkName(problems: string[], prefix: string, name: string): void {
 function nameProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.blocks) {
-    const where = label(placed.block.id);
-    checkName(problems, "", placed.block.id);
-    for (const declared of placed.own) checkName(problems, where, declared);
-    for (const release of placed.block.releases) checkName(problems, where, release);
-    const terminator = placed.block.terminator;
-    if (terminator.k === "jump") {
-      checkName(problems, where, terminator.target);
-      for (const release of terminator.releases) checkName(problems, where, release);
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const blockId = String(fieldOf(block, "id"));
+    const where = label(blockId, undefined);
+    checkName(problems, "", blockId);
+    for (const declared of fieldOf(placed, "own") as readonly string[]) checkName(problems, where, declared);
+    for (const release of fieldOf(block, "releases") as readonly string[]) checkName(problems, where, release);
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) === "jump") {
+      checkName(problems, where, String(fieldOf(terminator, "target")));
+      for (const release of fieldOf(terminator, "releases") as readonly string[]) checkName(problems, where, release);
     }
-    for (const frame of placed.loops) {
-      if (frame.loop.kind === "counted") checkName(problems, where, frame.loop.variable);
-      if (frame.loop.kind === "each") {
-        checkName(problems, where, frame.loop.of);
-        checkName(problems, where, frame.loop.index);
-        checkName(problems, where, frame.loop.element);
+    for (const frame of fieldOf(placed, "loops") as readonly LoopFrame[]) {
+      const loop = fieldOf(frame, "loop") as SemanticLoop;
+      if (loop.kind === "counted") checkName(problems, where, String(fieldOf(loop, "variable")));
+      if (loop.kind === "each") {
+        checkName(problems, where, String(fieldOf(loop, "of")));
+        checkName(problems, where, String(fieldOf(loop, "index")));
+        checkName(problems, where, String(fieldOf(loop, "element")));
       }
     }
   }
 
-  for (const placed of tree.statements) {
-    const prefix = label(placed.block.block.id, placed.statement.line);
-    const statement = placed.statement;
-    if (statement.k === "set") checkName(problems, prefix, statement.name);
-    if (statement.k === "step") checkName(problems, prefix, statement.name);
-    if (statement.k === "setElement") checkName(problems, prefix, statement.buffer);
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const prefix = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
+    if (statement.k === "set" || statement.k === "step") checkName(problems, prefix, String(fieldOf(statement, "name")));
+    if (statement.k === "setElement") checkName(problems, prefix, String(fieldOf(statement, "buffer")));
     if (statement.k === "storeField") {
-      checkName(problems, prefix, statement.layout);
-      checkName(problems, prefix, statement.field);
+      checkName(problems, prefix, String(fieldOf(statement, "layout")));
+      checkName(problems, prefix, String(fieldOf(statement, "field")));
     }
-    for (const value of statementValues(statement)) {
-      walked(value, (inner) => {
-        if (inner.k === "newObject") {
-          checkName(problems, prefix, inner.layout);
-          // A field is read and written through the member the backend spells
-          // it by, which is an identifier of its own however the source named
-          // the field: a quoted key such as "content-type" is legal source and
-          // a member the escape answers.
-          for (const field of inner.fields) checkName(problems, prefix, cMemberName(field.name));
-        }
-        if (inner.k === "loadField") {
-          checkName(problems, prefix, inner.layout);
-          checkName(problems, prefix, cMemberName(inner.field));
-        }
-      });
-    }
+    for (const value of statementValues(statement)) checkNameValue(problems, prefix, value);
     for (const call of statementCalls(statement)) {
       // A call through a closure names no callee: the value is what is called.
-      if (call.through === undefined && builtinFor(call.callee) === null) checkName(problems, prefix, call.callee);
+      const callee = String(fieldOf(call, "callee"));
+      if (fieldOf(call, "through") === undefined && builtinFor(callee) === null) checkName(problems, prefix, callee);
     }
   }
 
-  for (const signature of context.functions ?? []) {
-    checkName(problems, "", signature.name);
-    checkName(problems, "", signature.symbol);
+  const functions = fieldOf(context, "functions") as readonly FunctionSignature[] | null;
+  if (functions !== null) {
+    for (const signature of functions) {
+      checkName(problems, "", String(fieldOf(signature, "name")));
+      checkName(problems, "", String(fieldOf(signature, "symbol")));
+    }
   }
-  for (const layout of Object.values(context.objects)) {
-    checkName(problems, "", layout.name);
-    for (const field of layout.fields) checkName(problems, "", cMemberName(field.name));
+  for (const layout of Object.values(fieldOf(context, "objects") as Record<string, ObjectLayout>)) {
+    checkName(problems, "", String(fieldOf(layout, "name")));
+    for (const field of fieldOf(layout, "fields") as readonly { name: string }[]) checkName(problems, "", cMemberName(String(fieldOf(field, "name"))));
   }
-  for (const name of context.declared) checkName(problems, "", name);
+  for (const name of fieldOf(context, "declared") as readonly string[]) checkName(problems, "", name);
 
   return problems;
+}
+
+/** Every name a value carries is a plain identifier. */
+function checkNameValue(problems: string[], prefix: string, value: SemanticValue): void {
+  switch (value.k) {
+    case "newObject": {
+      checkName(problems, prefix, String(fieldOf(value, "layout")));
+      // A field is read and written through the member the backend spells
+      // it by, which is an identifier of its own however the source named
+      // the field: a quoted key such as "content-type" is legal source and
+      // a member the escape answers.
+      for (const field of fieldOf(value, "fields") as readonly { name: string; value: SemanticValue }[]) {
+        checkName(problems, prefix, cMemberName(String(fieldOf(field, "name"))));
+        checkNameValue(problems, prefix, fieldOf(field, "value") as SemanticValue);
+      }
+      return;
+    }
+    case "loadField": {
+      checkName(problems, prefix, String(fieldOf(value, "layout")));
+      checkName(problems, prefix, cMemberName(String(fieldOf(value, "field"))));
+      checkNameValue(problems, prefix, fieldOf(value, "object") as SemanticValue);
+      return;
+    }
+    case "text": {
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: SemanticValue }[]) {
+        if (part.k === "value") checkNameValue(problems, prefix, part.value);
+      }
+      return;
+    }
+    case "buffer": {
+      const count = fieldOf(value, "count") as SemanticValue | null;
+      if (count !== null) checkNameValue(problems, prefix, count);
+      const view = fieldOf(value, "view") as { of: SemanticValue; offset: SemanticValue } | null;
+      if (view !== null) {
+        checkNameValue(problems, prefix, fieldOf(view, "of") as SemanticValue);
+        checkNameValue(problems, prefix, fieldOf(view, "offset") as SemanticValue);
+      }
+      for (const one of fieldOf(value, "values") as readonly SemanticValue[]) checkNameValue(problems, prefix, one);
+      return;
+    }
+    case "call": {
+      const call = fieldOf(value, "call") as SemanticCall;
+      for (const one of fieldOf(call, "args") as readonly SemanticValue[]) checkNameValue(problems, prefix, one);
+      return;
+    }
+    case "arith":
+    case "compare":
+    case "logical":
+    case "coalesce":
+      checkNameValue(problems, prefix, fieldOf(value, "left") as SemanticValue);
+      checkNameValue(problems, prefix, fieldOf(value, "right") as SemanticValue);
+      return;
+    case "select":
+      checkNameValue(problems, prefix, fieldOf(value, "condition") as SemanticValue);
+      checkNameValue(problems, prefix, fieldOf(value, "then") as SemanticValue);
+      checkNameValue(problems, prefix, fieldOf(value, "otherwise") as SemanticValue);
+      return;
+    case "unary":
+    case "isNull":
+      checkNameValue(problems, prefix, fieldOf(value, "operand") as SemanticValue);
+      return;
+    case "toText":
+    case "length":
+      checkNameValue(problems, prefix, fieldOf(value, "of") as SemanticValue);
+      return;
+    case "element":
+      checkNameValue(problems, prefix, fieldOf(value, "of") as SemanticValue);
+      checkNameValue(problems, prefix, fieldOf(value, "index") as SemanticValue);
+      return;
+    case "argv": {
+      const index = fieldOf(value, "index") as SemanticValue | null;
+      if (index !== null) checkNameValue(problems, prefix, index);
+      return;
+    }
+    case "closure":
+      for (const one of fieldOf(value, "captures") as readonly SemanticValue[]) checkNameValue(problems, prefix, one);
+      return;
+    case "capture":
+      checkNameValue(problems, prefix, fieldOf(value, "closure") as SemanticValue);
+      return;
+    default:
+      return;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1960,37 +2181,28 @@ function nameProblems(context: Context, tree: Tree): string[] {
 export function semanticIrProblems(
   program: SemanticProgram,
   contract?: ProgramContract,
-  known: Callees = new Map(program.bodies.map((fn) => [fn.name, fn])),
+  known?: Callees,
 ): string[] {
+  const defaultCallees = new Map<string, SemanticFunction>();
+  for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) defaultCallees.set(String(fieldOf(fn, "name")), fn);
+  const callees: Callees = known === undefined ? defaultCallees : known;
   const tree = readTree(program);
-  // A loop marked parallel is proved against the bodies the caller holds: a call
-  // to one of them is a call whose writes this check can read, and a call to
-  // anything else is a call it cannot.
-  const callees: Callees = known;
-  return [
-    ...bodyProblems(programContext(program, callees, contract), programBody(program, tree), tree),
-    // A function the program declares is checked as the function it is: the
-    // same body a candidate of the program is checked against, with the
-    // signatures it is called by in hand.
-    ...program.bodies.flatMap((fn) => {
-      const own = readFunctionTree(fn, fn.entry);
-      const own_context = {
-        objects: program.objects,
-        functions: program.functions,
-        callees,
-        contract,
-        declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)],
-      };
-      return [
-        ...bodyProblems(own_context, functionBody(fn.entry, own), own),
-        // A function a program declares returns what it declared, and the rule
-        // is the one a function of a module is held to. It was not asked of a
-        // program's own bodies, so a body that fell off its last block ended by
-        // handing back whatever the register held.
-        ...returnProblems(fn, own_context, own),
-      ].map((problem) => `${fn.symbol}: ${problem}`);
-    }),
-  ];
+  const problems: string[] = [];
+  for (const one of bodyProblems(programContext(program, callees, contract), programBody(program, tree), tree)) problems.push(one);
+  for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) {
+    const entry = fieldOf(fn, "entry") as SemanticBlock;
+    const own = readFunctionTree(fn, entry);
+    const ownContext: Context = {
+      objects: fieldOf(program, "objects") as Record<string, ObjectLayout>,
+      functions: fieldOf(program, "functions") as FunctionSignature[],
+      callees,
+      contract,
+      declared: [String(fieldOf(fn, "name")), String(fieldOf(fn, "symbol")), ...(fieldOf(fn, "params") as readonly { name: string }[]).map((param) => String(fieldOf(param, "name")))],
+    };
+    for (const one of bodyProblems(ownContext, functionBody(entry, own), own)) problems.push(`${String(fieldOf(fn, "symbol"))}: ${one}`);
+    for (const one of returnProblems(fn, ownContext, own)) problems.push(`${String(fieldOf(fn, "symbol"))}: ${one}`);
+  }
+  return problems;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2022,40 +2234,45 @@ function bodyProblems(context: Context, body: Body, tree: Tree): string[] {
  */
 function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): string[] {
   const problems: string[] = [];
+  const returns = fieldOf(fn, "returns") as SemanticType;
 
-  for (const placed of tree.blocks) {
-    const terminator = placed.block.terminator;
-    if (terminator.k !== "return") continue;
-    const where = label(placed.block.id);
-    const value = terminator.value;
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) !== "return") continue;
+    const where = label(String(fieldOf(block, "id")), undefined);
+    const value = fieldOf(terminator, "value") as SemanticValue | null;
 
     // A return type the IR does not state is a return nothing can be checked
     // against, so the return that hands it back is refused rather than read.
-    if (!isSemanticType(fn.returns)) {
-      problems.push(`${where}the body returns ${typeText(fn.returns)}, which is not a type`);
+    if (!isSemanticType(returns)) {
+      problems.push(`${where}the body returns ${typeText(returns)}, which is not a type`);
       continue;
     }
-    if (fn.returns.kind === "void") {
+    if (returns.kind === "void") {
       if (value !== null) {
-        problems.push(`${where}the body returns a ${typeText(value.type)} and is declared to return nothing`);
+        problems.push(`${where}the body returns a ${typeText((fieldOf(value, "type") as SemanticType))} and is declared to return nothing`);
       }
       continue;
     }
     if (value === null) {
-      problems.push(`${where}the body returns nothing and is declared to return a ${typeText(fn.returns)}`);
+      problems.push(`${where}the body returns nothing and is declared to return a ${typeText(returns)}`);
       continue;
     }
-    if (!convertibleTo(value.type, fn.returns)) {
-      problems.push(`${where}the body returns a ${typeText(value.type)} and is declared to return a ${typeText(fn.returns)}`);
+    const valueType = fieldOf(value, "type") as SemanticType;
+    if (!convertibleTo(valueType, returns)) {
+      problems.push(`${where}the body returns a ${typeText(valueType)} and is declared to return a ${typeText(returns)}`);
     }
-    const reason = wideningReason(value, fn.returns);
-    if (reason !== null) problems.push(`${where}the body returns a ${typeText(value.type)} where a ${typeText(fn.returns)} is read, and ${reason}`);
+    const reason = wideningReason(value, returns);
+    if (reason !== null) problems.push(`${where}the body returns a ${typeText(valueType)} where a ${typeText(returns)} is read, and ${reason}`);
+    const finalScope = fieldOf(placed, "final") as Scope;
+    const visible = fieldOf(finalScope, "visible") as Set<string>;
     for (const read of localNames(value)) {
-      if (!placed.final.visible.has(read)) {
+      if (!visible.has(read)) {
         problems.push(`${where}returns ${read}, which the block it is written in does not hold`);
       }
     }
-    walked(value, (inner) => { problems.push(...valueTypeProblems(where, inner, context)); });
+    for (const one of valueTypeProblemsDeep(where, value, context)) problems.push(one);
   }
 
   return problems;
