@@ -3859,7 +3859,7 @@ class TypeScriptParser {
   /** The suffix the next collection helper takes, so each is a name of its own. */
   private collectCount = 0;
 
-  private nextCollectName(line: number): string {
+  private nextCollectName(_line: number): string {
     const name = `__collect_${this.stem}_${this.collectCount}`;
     this.collectCount += 1;
     return name;
