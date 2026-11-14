@@ -40,6 +40,11 @@ import type {
   SemanticTextPart,
   SemanticType,
   SemanticValue,
+  ArithOp,
+  CompareOp,
+  UnaryOp,
+  TextType,
+  Ownership,
 } from "../core/semantic-ir.ts";
 import { hasCall, isInteger, isTextType, isUnsigned, isWideType, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
@@ -48,6 +53,15 @@ import { restructureHotFunction } from "./restructure.ts";
 import { markParallelLoops, type Callees } from "./parallel.ts";
 import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
+import type { TypeExpr, FunctionSignature, Effect } from "../core/types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Numbers                                                                     */
@@ -109,9 +123,12 @@ function asText(value: number): string {
 
 /** The type a whole number is written at, which is what its range follows. */
 function numberType(value: SemanticValue): NumericName | null {
-  if (value.type.kind !== "primitive") return null;
-  const name = value.type.name;
-  return name in WIDTH || FLOAT_TYPES[name] === true ? (name as NumericName) : null;
+  const type = fieldOf(value, "type") as TypeExpr;
+  if (type.kind !== "primitive") return null;
+  const name = String(fieldOf(type, "name"));
+  if (name in WIDTH) return name as NumericName;
+  if (fieldOf(FLOAT_TYPES, name) === true) return name as NumericName;
+  return null;
 }
 
 /**
@@ -127,8 +144,8 @@ function numberType(value: SemanticValue): NumericName | null {
 function wrapWhole(value: number, name: NumericName): number {
   const width = WIDTH[name];
   if (width === undefined || !Number.isFinite(value)) return value;
-  const bits = BigInt(width);
-  const modulus = 2n ** bits;
+  let modulus = 1n;
+  for (let at = 0; at < width; at += 1) modulus = modulus * 2n;
   // A double at or above 2^53 has no fractional part, so this is the very
   // integer the double holds.
   const whole = BigInt(Math.trunc(value));
@@ -247,19 +264,19 @@ function shiftCount(count: number, name: NumericName): number {
  */
 function wholeBits(left: number, right: number, op: "and" | "or" | "xor", name: NumericName): number {
   if (WIDTH[name] !== 64) {
-    if (op === "and") return toBits(left) & toBits(right);
-    if (op === "or") return toBits(left) | toBits(right);
+    if (String(op) === "and") return toBits(left) & toBits(right);
+    if (String(op) === "or") return toBits(left) | toBits(right);
     return toBits(left) ^ toBits(right);
   }
-  const modulus = 2n ** 64n;
+  const modulus = 18446744073709551616n;
   const wrap = (value: number): bigint => {
     const whole = BigInt(Math.trunc(value));
     return ((whole % modulus) + modulus) % modulus;
   };
   const leftBits = wrap(left);
   const rightBits = wrap(right);
-  const wrapped = op === "and" ? leftBits & rightBits : op === "or" ? leftBits | rightBits : leftBits ^ rightBits;
-  if (!isUnsigned({ kind: "primitive", name } as SemanticType) && wrapped >= 2n ** 63n) {
+  const wrapped = String(op) === "and" ? leftBits & rightBits : String(op) === "or" ? leftBits | rightBits : leftBits ^ rightBits;
+  if (!isUnsigned({ kind: "primitive", name } as SemanticType) && wrapped >= 9223372036854775808n) {
     return readBack(wrapped - modulus);
   }
   return readBack(wrapped);
@@ -288,41 +305,53 @@ function readBack(wrapped: bigint): number {
 export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
   switch (value.k) {
     case "arith":
-      return [value.left, value.right];
     case "compare":
-      return [value.left, value.right];
     case "logical":
     case "coalesce":
-      return [value.left, value.right];
+      return [fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue];
     case "select":
-      return [value.condition, value.then, value.otherwise];
+      return [fieldOf(value, "condition") as SemanticValue, fieldOf(value, "then") as SemanticValue, fieldOf(value, "otherwise") as SemanticValue];
     case "unary":
-      return [value.operand];
     case "isNull":
-      return [value.operand];
+      return [fieldOf(value, "operand") as SemanticValue];
     case "toText":
-      return [value.of];
     case "length":
-      return [value.of];
+      return [fieldOf(value, "of") as SemanticValue];
     case "element":
-      return [value.of, value.index];
+      return [fieldOf(value, "of") as SemanticValue, fieldOf(value, "index") as SemanticValue];
     case "loadField":
-      return [value.object];
-    case "newObject":
-      return value.fields.map((field) => field.value);
-    case "buffer":
+      return [fieldOf(value, "object") as SemanticValue];
+    case "newObject": {
+      const children: SemanticValue[] = [];
+      for (const field of fieldOf(value, "fields") as readonly { value: SemanticValue }[]) children[children.length] = fieldOf(field, "value") as SemanticValue;
+      return children;
+    }
+    case "buffer": {
       // A count the program settled on when it ran is a value of its own, and
       // a view is a window of a block another name holds: both are read, and a
       // walk that stops at the block reads nothing at all.
-      return [
-        ...(value.count === null ? [] : [value.count]),
-        ...(value.view === null ? [] : [value.view.of, value.view.offset]),
-        ...value.values,
-      ];
-    case "text":
-      return value.parts.flatMap((part) => (part.k === "value" ? [part.value] : []));
-    case "argv":
-      return value.index === null ? [] : [value.index];
+      const children: SemanticValue[] = [];
+      const count = fieldOf(value, "count") as SemanticValue | null;
+      if (count !== null) children[children.length] = count;
+      const view = fieldOf(value, "view") as { of: SemanticValue; offset: SemanticValue } | null;
+      if (view !== null) {
+        children[children.length] = fieldOf(view, "of") as SemanticValue;
+        children[children.length] = fieldOf(view, "offset") as SemanticValue;
+      }
+      for (const one of fieldOf(value, "values") as readonly SemanticValue[]) children[children.length] = one;
+      return children;
+    }
+    case "text": {
+      const children: SemanticValue[] = [];
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: SemanticValue }[]) {
+        if (part.k === "value") children[children.length] = fieldOf(part, "value") as SemanticValue;
+      }
+      return children;
+    }
+    case "argv": {
+      const index = fieldOf(value, "index") as SemanticValue | null;
+      return index === null ? [] : [index];
+    }
     // The arguments of a call are values of their own: a name read in one and a
     // constant written into one are both what the body reads and computes, and
     // a walk that stops at the call answers "nothing here" for both.
@@ -330,12 +359,18 @@ export function valueChildren(value: SemanticValue): readonly SemanticValue[] {
     // read before the arguments are: it is the callee, and a walk that skipped
     // it read nothing of the name the call is made through — a `let` holding
     // only such a call's callee was dropped as unread.
-    case "call":
-      return [...(value.call.through === undefined ? [] : [value.call.through]), ...value.call.args];
+    case "call": {
+      const call = fieldOf(value, "call") as SemanticCall;
+      const children: SemanticValue[] = [];
+      const through = fieldOf(call, "through") as SemanticValue | undefined;
+      if (through !== undefined) children[children.length] = through;
+      for (const one of fieldOf(call, "args") as readonly SemanticValue[]) children[children.length] = one;
+      return children;
+    }
     case "closure":
-      return value.captures;
+      return fieldOf(value, "captures") as readonly SemanticValue[];
     case "capture":
-      return [value.closure];
+      return [fieldOf(value, "closure") as SemanticValue];
     default:
       return [];
   }
@@ -356,28 +391,60 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
     return child;
   };
   switch (value.k) {
-    case "arith": return { ...value, left: next(), right: next() };
-    case "compare": return { ...value, left: next(), right: next() };
+    case "arith":
+      return { k: "arith", type: fieldOf(value, "type") as SemanticType, op: fieldOf(value, "op") as ArithOp, left: next(), right: next() };
+    case "compare":
+      return { k: "compare", type: fieldOf(value, "type") as TypeExpr, op: fieldOf(value, "op") as CompareOp, operand: fieldOf(value, "operand") as SemanticType, left: next(), right: next() };
     case "logical":
-    case "coalesce": return { ...value, left: next(), right: next() };
-    case "select": return { ...value, condition: next(), then: next(), otherwise: next() };
-    case "unary": return { ...value, operand: next() };
-    case "isNull": return { ...value, operand: next() };
-    case "toText": return { ...value, of: next() };
-    case "length": return { ...value, of: next() };
-    case "element": return { ...value, of: next(), index: next() };
-    case "loadField": return { ...value, object: next() };
-    case "argv": return value.index === null ? value : { ...value, index: next() };
-    // The types of the arguments are the ones the call was made with, and a
-    // fold never changes a type, so the folded values line up with them.
+      return { k: "logical", type: fieldOf(value, "type") as SemanticType, op: String(fieldOf(value, "op")) as "and" | "or", left: next(), right: next() };
+    case "coalesce":
+      return { k: "coalesce", type: fieldOf(value, "type") as SemanticType, left: next(), right: next() };
+    case "select":
+      return { k: "select", type: fieldOf(value, "type") as SemanticType, condition: next(), then: next(), otherwise: next() };
+    case "unary":
+      return { k: "unary", type: fieldOf(value, "type") as SemanticType, op: fieldOf(value, "op") as UnaryOp, operand: next() };
+    case "isNull":
+      return { k: "isNull", type: fieldOf(value, "type") as TypeExpr, operand: next(), negate: fieldOf(value, "negate") === true };
+    case "toText":
+      return { k: "toText", type: fieldOf(value, "type") as TextType, of: next(), digits: fieldOf(value, "digits") as number | null, precision: fieldOf(value, "precision") as true | undefined };
+    case "length":
+      return { k: "length", type: fieldOf(value, "type") as SemanticType, of: next() };
+    case "element":
+      return { k: "element", type: fieldOf(value, "type") as SemanticType, of: next(), index: next() };
+    case "loadField":
+      return { k: "loadField", type: fieldOf(value, "type") as SemanticType, object: next(), layout: String(fieldOf(value, "layout")), field: String(fieldOf(value, "field")) };
+    case "argv":
+      return { k: "argv", type: fieldOf(value, "type") as SemanticType, index: fieldOf(value, "index") === null ? null : next() };
     case "call": {
-      const through = value.call.through === undefined ? undefined : next();
+      const oldCall = fieldOf(value, "call") as SemanticCall;
+      const through = fieldOf(oldCall, "through") as SemanticValue | undefined;
+      const throughValue = through === undefined ? undefined : next();
+      const args: SemanticValue[] = [];
+      for (let index = through === undefined ? 0 : 1; index < children.length; index += 1) args[args.length] = children[index];
       return {
-        ...value,
-        call: { ...value.call, ...(through === undefined ? {} : { through }), args: children.slice(through === undefined ? 0 : 1) },
+        k: "call",
+        type: fieldOf(value, "type") as SemanticType,
+        call: {
+          callee: String(fieldOf(oldCall, "callee")),
+          through: throughValue,
+          signature: fieldOf(oldCall, "signature") as FunctionSignature,
+          args,
+          argTypes: fieldOf(oldCall, "argTypes") as unknown as SemanticType[],
+          returns: fieldOf(oldCall, "returns") as SemanticType,
+          effects: fieldOf(oldCall, "effects") as unknown as Effect[],
+          ownership: String(fieldOf(oldCall, "ownership")) as Ownership,
+          retain: fieldOf(oldCall, "retain") === true,
+          builtin: fieldOf(oldCall, "builtin") === true,
+        },
       };
     }
-    case "newObject": return { ...value, fields: value.fields.map((field) => ({ ...field, value: next() })) };
+    case "newObject": {
+      const fields: { name: string; value: SemanticValue }[] = [];
+      for (const field of fieldOf(value, "fields") as readonly { name: string }[]) {
+        fields[fields.length] = { name: String(fieldOf(field, "name")), value: next() };
+      }
+      return { k: "newObject", type: fieldOf(value, "type") as SemanticType, layout: String(fieldOf(value, "layout")), fields };
+    }
     case "buffer": {
       // The children a buffer holds are the count, then the two sides of a
       // view, then the elements — the same order `valueChildren` walked them
@@ -385,29 +452,48 @@ function withChildren(value: SemanticValue, children: SemanticValue[]): Semantic
       // into the elements of the buffer and left the count the arithmetic it
       // was before the fold, so a sized buffer the program asked for held a
       // count nothing had folded and an element it never wrote.
-      let at = 0;
-      const count = value.count === null ? null : (children[at++] as SemanticValue);
-      const view = value.view === null ? null : { of: children[at++] as SemanticValue, offset: children[at++] as SemanticValue };
-      return { ...value, count, view, values: children.slice(at) };
-    }
-    case "text":
+      const count = fieldOf(value, "count") === null ? null : next();
+      const oldView = fieldOf(value, "view") as { of: SemanticValue; offset: SemanticValue } | null;
+      const view = oldView === null ? null : { of: next(), offset: next() };
+      const values: SemanticValue[] = [];
+      while (at < children.length) values[values.length] = next();
       return {
-        ...value,
-        parts: value.parts.map((part) => (part.k === "value" ? { k: "value" as const, value: next() } : part)),
+        k: "buffer",
+        type: fieldOf(value, "type") as SemanticType,
+        element: fieldOf(value, "element") as SemanticType,
+        length: fieldOf(value, "length") as number | null,
+        count,
+        view,
+        values,
       };
-    case "closure": return { ...value, captures: children };
-    case "capture": return { ...value, closure: next() };
-    default: return value;
+    }
+    case "text": {
+      const parts: SemanticTextPart[] = [];
+      for (const part of fieldOf(value, "parts") as readonly SemanticTextPart[]) {
+        parts[parts.length] = part.k === "value" ? { k: "value", value: next() } : part;
+      }
+      return { k: "text", type: fieldOf(value, "type") as TextType, parts };
+    }
+    case "closure":
+      return { k: "closure", type: fieldOf(value, "type") as SemanticType, code: String(fieldOf(value, "code")), signature: fieldOf(value, "signature") as FunctionSignature, captures: children };
+    case "capture":
+      return { k: "capture", type: fieldOf(value, "type") as SemanticType, closure: next(), index: Number(fieldOf(value, "index")) };
+    default:
+      return value;
   }
 }
 
 /** Every statement of a block that is a block of its own. */
 export function nestedSemanticBlocks(block: SemanticBlock): SemanticBlock[] {
   const nested: SemanticBlock[] = [];
-  for (const statement of block.statements) {
-    for (const one of statementBlocksOf(statement)) nested.push(...nestedSemanticBlocks(one));
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    for (const one of statementBlocksOf(statement)) {
+      for (const inner of nestedSemanticBlocks(one)) nested[nested.length] = inner;
+    }
   }
-  return [block, ...nested];
+  const all: SemanticBlock[] = [block];
+  for (const one of nested) all[all.length] = one;
+  return all;
 }
 
 
@@ -437,15 +523,18 @@ function smallWideOf(value: SemanticValue): number | null {
   };
   if (value.k === "const") return small(value);
   if (value.k !== "call") return null;
-  if (value.call.callee === "u256_from_u64x2") {
-    const low = small(value.call.args[0]);
-    const high = small(value.call.args[1]);
+  const call = fieldOf(value, "call") as SemanticCall;
+  const callee = String(fieldOf(call, "callee"));
+  const args = fieldOf(call, "args") as readonly SemanticValue[];
+  if (callee === "u256_from_u64x2") {
+    const low = small(args[0]);
+    const high = small(args[1]);
     return low !== null && high === 0 ? low : null;
   }
-  if (value.call.callee === "u256_from_u64x4") {
-    const low = small(value.call.args[0]);
-    const rest = [small(value.call.args[1]), small(value.call.args[2]), small(value.call.args[3])];
-    return low !== null && rest.every((one) => one === 0) ? low : null;
+  if (callee === "u256_from_u64x4") {
+    const low = small(args[0]);
+    const rest = [small(args[1]), small(args[2]), small(args[3])];
+    return low !== null && rest[0] === 0 && rest[1] === 0 && rest[2] === 0 ? low : null;
   }
   return null;
 }
@@ -567,8 +656,15 @@ function chainOf(
   taken: Set<string>,
   line: number,
 ): SemanticValue | null {
-  if (value.call.callee !== "u256_mul_mod" || !isWideType(value.type)) return null;
-  const [left, right, mod] = value.call.args;
+  const call = fieldOf(value, "call") as SemanticCall;
+  const callee = String(fieldOf(call, "callee"));
+  const valueType = fieldOf(value, "type") as SemanticType;
+  const signature = fieldOf(call, "signature") as FunctionSignature;
+  if (callee !== "u256_mul_mod" || !isWideType(valueType)) return null;
+  const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+  const left = callArgs[0];
+  const right = callArgs[1];
+  const mod = callArgs[2];
   if (left === undefined || right === undefined || mod === undefined) return null;
   const count = smallCountOf(left) ?? smallCountOf(right);
   if (count === null) return null;
@@ -586,22 +682,37 @@ function chainOf(
   if (other.k !== "local" && other.k !== "const") {
     const name = freshName(taken, "smallCountOperand");
     bindings.push({ k: "let", slot: slotFor(other, name), value: other, line });
-    seed = { k: "local", type: value.type, name };
+    seed = { k: "local", type: valueType, name };
   }
-  const addMod = (a: SemanticValue, b: SemanticValue): SemanticValue => ({
-    k: "call",
-    type: value.type,
-    call: {
-      ...value.call,
-      callee: "u256_add_mod",
-      signature: { ...value.call.signature, name: "u256_add_mod", symbol: "u256_add_mod" },
-      args: [a, b, mod],
-    },
-  });
+  const addMod = (a: SemanticValue, b: SemanticValue): SemanticValue => {
+    const addSignature: FunctionSignature = {
+      name: "u256_add_mod",
+      symbol: "u256_add_mod",
+      params: fieldOf(signature, "params") as unknown as FunctionSignature["params"],
+      returns: String(fieldOf(signature, "returns")),
+    };
+    const args: SemanticValue[] = [a, b, mod];
+    return {
+      k: "call",
+      type: valueType,
+      call: {
+        callee: "u256_add_mod",
+        through: fieldOf(call, "through") as SemanticValue | undefined,
+        signature: addSignature,
+        args,
+        argTypes: fieldOf(call, "argTypes") as unknown as SemanticType[],
+        returns: fieldOf(call, "returns") as SemanticType,
+        effects: fieldOf(call, "effects") as unknown as Effect[],
+        ownership: String(fieldOf(call, "ownership")) as Ownership,
+        retain: fieldOf(call, "retain") === true,
+        builtin: fieldOf(call, "builtin") === true,
+      },
+    };
+  };
   const bind = (step: SemanticValue): SemanticValue => {
     const name = freshName(taken, "smallCountStep");
     bindings.push({ k: "let", slot: slotFor(step, name), value: step, line });
-    return { k: "local", type: value.type, name };
+    return { k: "local", type: valueType, name };
   };
   let acc = seed;
   for (let bit = wholeLog2(count) - 1; bit >= 0; bit -= 1) {
@@ -616,10 +727,12 @@ function smallProductIn(value: SemanticValue): (SemanticValue & { k: "call" }) |
   let found: (SemanticValue & { k: "call" }) | null = null;
   walkValues(value, (one) => {
     if (found !== null || one.k !== "call") return;
-    if (one.call.callee !== "u256_mul_mod" || !isWideType(one.type)) return;
-    if (one.call.args.length !== 3) return;
-    if (smallCountOf(one.call.args[0] as SemanticValue) !== null) found = one;
-    else if (smallCountOf(one.call.args[1] as SemanticValue) !== null) found = one;
+    const call = fieldOf(one, "call") as SemanticCall;
+    if (String(fieldOf(call, "callee")) !== "u256_mul_mod" || !isWideType(fieldOf(one, "type") as SemanticType)) return;
+    const args = fieldOf(call, "args") as readonly SemanticValue[];
+    if (args.length !== 3) return;
+    if (smallCountOf(args[0]) !== null) found = one;
+    else if (smallCountOf(args[1]) !== null) found = one;
   });
   return found;
 }
@@ -632,55 +745,64 @@ function smallProductIn(value: SemanticValue): (SemanticValue & { k: "call" }) |
  * same way they reach a fold the previous one exposed.
  */
 function chainSmallProducts(body: Body): boolean {
-  const taken = new Set<string>(body.params.map((param) => param.name));
-  for (const block of nestedSemanticBlocks(body.entry)) {
-    taken.add(block.id);
-    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  const taken = new Set<string>();
+  for (const param of fieldOf(body, "params") as readonly { name: string }[]) taken.add(String(fieldOf(param, "name")));
+  const entry = fieldOf(body, "entry") as SemanticBlock;
+  for (const block of nestedSemanticBlocks(entry)) {
+    taken.add(String(fieldOf(block, "id")));
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") taken.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+    }
   }
   let changed = false;
   const walk = (block: SemanticBlock): void => {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
     if (chainOne(block, taken)) changed = true;
   };
-  walk(body.entry);
+  walk(entry);
   return changed;
 }
 
 function chainOne(block: SemanticBlock, taken: Set<string>): boolean {
   const statements: SemanticStatement[] = [];
   let changed = false;
-  for (const statement of block.statements) {
-    const value = statement.k === "let" || statement.k === "set" ? statement.value : null;
+  const original = fieldOf(block, "statements") as readonly SemanticStatement[];
+  for (const statement of original) {
+    const value = statement.k === "let" || statement.k === "set" ? fieldOf(statement, "value") as SemanticValue : null;
     const product = value === null ? null : smallProductIn(value);
     if (product !== null) {
       const bindings: SemanticStatement[] = [];
-      const chained = chainOf(product, bindings, taken, statement.line);
+      const chained = chainOf(product, bindings, taken, Number(fieldOf(statement, "line")));
       if (chained !== null) {
-        const replacements = new Map([[valueKey(product), chained]]);
-        statements.push(...bindings);
-        statements.push(replaceValues(statement, replacements) as SemanticStatement);
+        const replacements = new Map<string, SemanticValue>();
+        replacements.set(valueKey(product), chained);
+        for (const one of bindings) statements[statements.length] = one;
+        statements[statements.length] = replaceValues(statement, replacements) as SemanticStatement;
         changed = true;
         continue;
       }
     }
-    statements.push(statement);
+    statements[statements.length] = statement;
   }
-  if (block.terminator.k === "return" && block.terminator.value !== null) {
-    const product = smallProductIn(block.terminator.value);
+  const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+  if (String(fieldOf(terminator, "k")) === "return" && fieldOf(terminator, "value") !== null) {
+    const product = smallProductIn(fieldOf(terminator, "value") as SemanticValue);
     if (product !== null) {
       const bindings: SemanticStatement[] = [];
-      const chained = chainOf(product, bindings, taken, block.statements[0]?.line ?? 0);
+      const first = original[0];
+      const chained = chainOf(product, bindings, taken, first === undefined ? 0 : Number(fieldOf(first, "line")));
       if (chained !== null) {
-        const replacements = new Map([[valueKey(product), chained]]);
-        statements.push(...bindings);
-        block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, replacements) };
+        const replacements = new Map<string, SemanticValue>();
+        replacements.set(valueKey(product), chained);
+        for (const one of bindings) statements[statements.length] = one;
+        setFieldOn(block, "terminator", { k: "return", value: replaceValues(fieldOf(terminator, "value") as SemanticValue, replacements) });
         changed = true;
       }
     }
   }
-  if (changed) block.statements = statements;
+  if (changed) setFieldOn(block, "statements", statements);
   return changed;
 }
 
@@ -691,9 +813,9 @@ function chainOne(block: SemanticBlock, taken: Set<string>): boolean {
 function literalTextOf(value: SemanticValue): string | null {
   if (value.k !== "text") return null;
   let text = "";
-  for (const part of value.parts) {
+  for (const part of fieldOf(value, "parts") as readonly SemanticTextPart[]) {
     if (part.k !== "text") return null;
-    text += part.value;
+    text += String(fieldOf(part, "value"));
   }
   return text;
 }

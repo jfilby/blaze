@@ -827,13 +827,16 @@ function valueProblems(tree: Tree): string[] {
  */
 function readTypeProblems(prefix: string, value: SemanticValue, scope: Scope): string[] {
   const problems: string[] = [];
+  const slots = fieldOf(scope, "slots") as Map<string, SemanticSlot>;
   walkValues(value, (inner) => {
     if (inner.k !== "local") return;
-    const slot = scope.slots.get(inner.name);
+    const name = String(fieldOf(inner, "name"));
+    const slot = slots.get(name);
     if (slot === undefined) return;
     const held = slotType(slot);
-    if (!narrowsTo(held, inner.type)) {
-      problems.push(`${prefix}"${inner.name}" holds a ${typeText(held)} and is read as a ${typeText(inner.type)}, which cannot hold it`);
+    const read = fieldOf(inner, "type") as SemanticType;
+    if (!narrowsTo(held, read)) {
+      problems.push(`${prefix}"${name}" holds a ${typeText(held)} and is read as a ${typeText(read)}, which cannot hold it`);
     }
   });
   return problems;
@@ -1571,7 +1574,7 @@ function typeProblems(context: Context, tree: Tree): string[] {
     }
 
     for (const value of statementValues(statement)) {
-      walked(value, (inner) => { problems.push(...valueTypeProblems(prefix, inner, context)); });
+      for (const one of valueTypeProblemsDeep(prefix, value, context)) problems.push(one);
     }
   }
 
@@ -2307,15 +2310,16 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
 function regionProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.statements) {
-    const statement = placed.statement;
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
     if (statement.k !== "loop") continue;
-    const loop = statement.loop;
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
     if (loop.kind !== "counted" && loop.kind !== "each") continue;
-    if (loop.region !== true) continue;
-    const refusal = regionRefusalFor(loop, context.callees);
+    if (fieldOf(loop, "region") !== true) continue;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const refusal = regionRefusalFor(loop, fieldOf(context, "callees") as Callees);
     if (refusal !== null) {
-      problems.push(`${label(placed.block.block.id, statement.line)}loop is marked region but ${refusal}`);
+      problems.push(`${label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")))}loop is marked region but ${refusal}`);
     }
   }
 
@@ -2326,9 +2330,12 @@ function regionProblems(context: Context, tree: Tree): string[] {
   // block that turn took before the inner loop began is handed out a second
   // time. Proving each separately cannot see it, so the shape is refused here.
   for (const outer of markedRegionLoops(tree)) {
-    if (firstMarkedRegionWithin(outer.loop.body) !== null) {
+    const outerLoop = fieldOf(outer, "loop") as MarkedLoop;
+    if (firstMarkedRegionWithin(fieldOf(outerLoop, "body") as SemanticBlock) !== null) {
+      const outerStatement = fieldOf(outer, "statement") as SemanticStatement;
+      const outerBlock = fieldOf(outer, "block") as PlacedBlock;
       problems.push(
-        `${label(outer.block.block.id, outer.statement.line)}loop is marked region around a loop that is also marked region, and a rewind inside a marked loop writes over what the outer turn took`,
+        `${label(String(fieldOf(fieldOf(outerBlock, "block"), "id")), Number(fieldOf(outerStatement, "line")))}loop is marked region around a loop that is also marked region, and a rewind inside a marked loop writes over what the outer turn took`,
       );
     }
   }
@@ -2338,25 +2345,27 @@ function regionProblems(context: Context, tree: Tree): string[] {
 
 /** Every marked region loop of a tree, paired with the statement that holds it. */
 function markedRegionLoops(tree: Tree): { block: PlacedBlock; statement: SemanticStatement; loop: MarkedLoop }[] {
-  return tree.statements.flatMap((placed) => {
-    const statement = placed.statement;
-    if (statement.k !== "loop") return [];
-    const loop = statement.loop;
-    if (loop.kind !== "counted" && loop.kind !== "each") return [];
-    if (loop.region !== true) return [];
-    return [{ block: placed.block, statement, loop }];
-  });
+  const found: { block: PlacedBlock; statement: SemanticStatement; loop: MarkedLoop }[] = [];
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
+    if (statement.k !== "loop") continue;
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
+    if (loop.kind !== "counted" && loop.kind !== "each") continue;
+    if (fieldOf(loop, "region") !== true) continue;
+    found[found.length] = { block: fieldOf(placed, "block") as PlacedBlock, statement, loop: loop as MarkedLoop };
+  }
+  return found;
 }
 
 /** A marked region loop somewhere inside a body, at any depth, or null. */
 function firstMarkedRegionWithin(body: SemanticBlock): MarkedLoop | null {
-  for (const statement of body.statements) {
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     if (statement.k === "loop") {
-      const loop = statement.loop;
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
       if (loop.kind === "counted" || loop.kind === "each") {
-        if (loop.region === true) return loop;
+        if (fieldOf(loop, "region") === true) return loop;
       }
-      const found = firstMarkedRegionWithin(statement.loop.body);
+      const found = firstMarkedRegionWithin(fieldOf(loop, "body") as SemanticBlock);
       if (found !== null) return found;
       continue;
     }
@@ -2371,14 +2380,15 @@ function firstMarkedRegionWithin(body: SemanticBlock): MarkedLoop | null {
 function parallelProblems(context: Context, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.statements) {
-    const statement = placed.statement;
+  for (const placed of fieldOf(tree, "statements") as readonly { statement: SemanticStatement; block: PlacedBlock }[]) {
+    const statement = fieldOf(placed, "statement") as SemanticStatement;
     if (statement.k !== "loop") continue;
-    const loop = statement.loop;
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
     if (loop.kind !== "counted" && loop.kind !== "each") continue;
-    if (loop.parallel !== true) continue;
-    const where = label(placed.block.block.id, statement.line);
-    const refusal = refusalFor(loop, context.callees);
+    if (fieldOf(loop, "parallel") !== true) continue;
+    const block = fieldOf(placed, "block") as PlacedBlock;
+    const where = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
+    const refusal = refusalFor(loop, fieldOf(context, "callees") as Callees);
     if (refusal !== null) {
       problems.push(`${where}loop is marked parallel but ${refusal}`);
     }
@@ -2392,13 +2402,13 @@ function parallelProblems(context: Context, tree: Tree): string[] {
     // turn computed. `refusalFor` above derives the clauses the body really has
     // and never reads the ones written beside the mark, so IR text carries any
     // it likes.
-    const derived = reductionsFor(loop.body, loop.kind === "counted" ? loop.variable : loop.index);
-    for (const reduction of loop.reductions ?? []) {
+    const derived = reductionsFor(fieldOf(loop, "body") as SemanticBlock, loop.kind === "counted" ? String(fieldOf(loop, "variable")) : String(fieldOf(loop, "index")));
+    for (const reduction of (fieldOf(loop, "reductions") as readonly { name: string; op: string }[] | undefined) ?? []) {
       const performed = derived.get(reduction.name);
       if (performed === undefined) {
         problems.push(`${where}loop is marked parallel with a reduction on "${reduction.name}", and its body accumulates into no name`);
-      } else if (performed.op !== reduction.op) {
-        const verb = performed.op === "+" ? "adds into" : "multiplies into";
+      } else if (String(fieldOf(performed, "op")) !== reduction.op) {
+        const verb = String(fieldOf(performed, "op")) === "+" ? "adds into" : "multiplies into";
         problems.push(`${where}loop is marked parallel with a ${reduction.op} reduction on "${reduction.name}", and its body ${verb} it`);
       }
     }
@@ -2416,16 +2426,18 @@ function parallelProblems(context: Context, tree: Tree): string[] {
 function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
   const problems: string[] = [];
 
-  for (const placed of tree.blocks) {
-    const where = label(placed.block.id);
-    if (placed.block === fn.entry) {
-      const terminator = placed.block.terminator;
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const where = label(String(fieldOf(block, "id")), undefined);
+    if (block === fieldOf(fn, "entry")) {
+      const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
       // An entry block that ends where nothing arrives returns from every path,
       // which is what a return is: the two say the same thing about a function,
       // and the statements the block holds after the `if` that proved it are the
       // ones the program never runs.
-      if (terminator.k !== "return" && terminator.k !== "unreachable") {
-        problems.push(`entry: the entry block ends in ${terminator.k} rather than in a return`);
+      const terminatorKind = String(fieldOf(terminator, "k"));
+      if (terminatorKind !== "return" && terminatorKind !== "unreachable") {
+        problems.push(`entry: the entry block ends in ${terminatorKind} rather than in a return`);
       }
       continue;
     }
@@ -2433,9 +2445,11 @@ function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
     // around it still has a way through that does not return. A return in a
     // block of its own is not: it ends the function, and every statement the
     // block around it writes after it is a statement nothing reaches.
-    if (placed.block.terminator.k === "return" && !placed.guarded && placed.rest > 0) {
-      const around = placed.parent === null ? "the body" : placed.parent.block.id;
-      problems.push(`${where}returns, and ${placed.rest} statements of ${around} after it are never reached`);
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(terminator, "k")) === "return" && fieldOf(placed, "guarded") !== true && Number(fieldOf(placed, "rest")) > 0) {
+      const parent = fieldOf(placed, "parent") as PlacedBlock | null;
+      const around = parent === null ? "the body" : String(fieldOf(fieldOf(parent, "block"), "id"));
+      problems.push(`${where}returns, and ${Number(fieldOf(placed, "rest"))} statements of ${around} after it are never reached`);
     }
   }
 
@@ -2452,40 +2466,47 @@ function wayOutProblems(fn: SemanticFunction, tree: Tree): string[] {
 function parameterProblems(fn: SemanticFunction, contract?: FunctionContract): string[] {
   const problems: string[] = [];
   const seen = new Set<string>();
+  const params = fieldOf(fn, "params") as readonly { name: string; kind: string; type: SemanticType }[];
 
-  for (const param of fn.params) {
-    if (seen.has(param.name)) {
-      problems.push(`${param.name}: the function takes a parameter of that name twice`);
+  for (const param of params) {
+    const paramName = String(fieldOf(param, "name"));
+    if (seen.has(paramName)) {
+      problems.push(`${paramName}: the function takes a parameter of that name twice`);
     }
-    seen.add(param.name);
-    if (param.kind !== "value") {
-      problems.push(`${param.name}: a parameter is one value, and this one is a ${param.kind}`);
+    seen.add(paramName);
+    if (String(fieldOf(param, "kind")) !== "value") {
+      problems.push(`${paramName}: a parameter is one value, and this one is a ${String(fieldOf(param, "kind"))}`);
       continue;
     }
-    if (!isSemanticType(param.type)) {
-      problems.push(`${param.name}: a parameter is read as ${typeText(param.type)}, which is not a type`);
+    const paramType = fieldOf(param, "type") as SemanticType;
+    if (!isSemanticType(paramType)) {
+      problems.push(`${paramName}: a parameter is read as ${typeText(paramType)}, which is not a type`);
     }
   }
 
   if (contract !== undefined) {
-    const declared = contract.function.params;
-    if (declared.length !== fn.params.length) {
-      problems.push(`the body takes ${fn.params.length} parameters and the signature declares ${declared.length}`);
+    const signature = fieldOf(contract, "function") as FunctionSignature;
+    const declared = fieldOf(signature, "params") as readonly { name: string; type: string }[];
+    if (declared.length !== params.length) {
+      problems.push(`the body takes ${params.length} parameters and the signature declares ${declared.length}`);
     }
     for (let index = 0; index < declared.length; index += 1) {
       const expected = declared[index];
-      const held = fn.params[index];
+      const held = params[index];
       if (expected === undefined || held === undefined) continue;
-      if (held.name !== expected.name) {
-        problems.push(`parameter ${index + 1} is ${held.name} and the signature declares ${expected.name}`);
+      const expectedName = String(fieldOf(expected, "name"));
+      const heldName = String(fieldOf(held, "name"));
+      if (heldName !== expectedName) {
+        problems.push(`parameter ${index + 1} is ${heldName} and the signature declares ${expectedName}`);
       }
-      const wanted = contractType(expected.type);
+      const wanted = contractType(String(fieldOf(expected, "type")));
       if (wanted === null) {
         problems.push(`parameter ${index + 1} declares a type that is not a type`);
         continue;
       }
-      if (held.kind === "value" && !convertibleTo(held.type, wanted)) {
-        problems.push(`${held.name} is read as a ${typeText(held.type)} and the signature declares a ${typeText(wanted)}`);
+      const heldType = fieldOf(held, "type") as SemanticType;
+      if (String(fieldOf(held, "kind")) === "value" && !convertibleTo(heldType, wanted)) {
+        problems.push(`${heldName} is read as a ${typeText(heldType)} and the signature declares a ${typeText(wanted)}`);
       }
     }
   }
@@ -2501,21 +2522,22 @@ function parameterProblems(fn: SemanticFunction, contract?: FunctionContract): s
  * program, and the shared rules above already report it.
  */
 function allocationProblems(fn: SemanticFunction, tree: Tree): string[] {
-  if (!fn.allocates) return [];
+  if (fieldOf(fn, "allocates") !== true) return [];
   const problems: string[] = [];
 
-  for (const placed of tree.blocks) {
-    const where = label(placed.block.id);
-    const terminator = placed.block.terminator;
-    const returned = terminator.k === "return" ? returnedName(terminator.value) : null;
-    for (const release of placed.block.releases) {
-      if (release === returned) {
+  for (const placed of fieldOf(tree, "blocks") as readonly PlacedBlock[]) {
+    const block = fieldOf(placed, "block") as SemanticBlock;
+    const where = label(String(fieldOf(block, "id")), undefined);
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    const returned = String(fieldOf(terminator, "k")) === "return" ? returnedName(fieldOf(terminator, "value") as SemanticValue | null) : null;
+    for (const release of fieldOf(block, "releases") as readonly string[]) {
+      if (returned !== null && String(release) === String(returned)) {
         problems.push(`${where}frees ${release}, which the caller of the function owns`);
       }
     }
-    if (terminator.k === "jump") {
-      for (const release of terminator.releases) {
-        if (release === returned) {
+    if (String(fieldOf(terminator, "k")) === "jump") {
+      for (const release of fieldOf(terminator, "releases") as readonly string[]) {
+        if (returned !== null && String(release) === String(returned)) {
           problems.push(`${where}frees ${release} on the way out, which the caller of the function owns`);
         }
       }
@@ -2533,18 +2555,14 @@ function allocationProblems(fn: SemanticFunction, tree: Tree): string[] {
  */
 function conditionProblems(fn: SemanticFunction): string[] {
   const problems: string[] = [];
-
-  for (const requires of fn.requires) {
-    if (typeof requires !== "string" || requires.trim() === "") {
-      problems.push("a precondition of the function is empty");
-    }
+  const requires = fieldOf(fn, "requires") as readonly string[];
+  const ensures = fieldOf(fn, "ensures") as readonly string[];
+  for (const one of requires) {
+    if (one.trim() === "") problems.push("a precondition of the function is empty");
   }
-  for (const ensures of fn.ensures) {
-    if (typeof ensures !== "string" || ensures.trim() === "") {
-      problems.push("a postcondition of the function is empty");
-    }
+  for (const one of ensures) {
+    if (one.trim() === "") problems.push("a postcondition of the function is empty");
   }
-
   return problems;
 }
 
@@ -2562,12 +2580,13 @@ function functionProblems(
   program: ProgramContract | undefined,
   callees: Callees,
 ): string[] {
-  const tree = readFunctionTree(fn, fn.entry);
+  const entry = fieldOf(fn, "entry") as SemanticBlock;
+  const tree = readFunctionTree(fn, entry);
   const context = functionContext(fn, callees, program);
   const found = [
     ...conditionProblems(fn),
     ...parameterProblems(fn, contract),
-    ...bodyProblems(context, functionBody(fn.entry, tree), tree),
+    ...bodyProblems(context, functionBody(entry, tree), tree),
     ...returnProblems(fn, context, tree),
     ...wayOutProblems(fn, tree),
     ...allocationProblems(fn, tree),
@@ -2575,7 +2594,9 @@ function functionProblems(
   // Every message names the function it is about, so a file of them is read one
   // function at a time: a block is called b1 in every function of a file, so
   // the function is what tells two of them apart.
-  return found.map((problem) => `${fn.symbol}: ${problem}`);
+  const named: string[] = [];
+  for (const problem of found) named.push(`${String(fieldOf(fn, "symbol"))}: ${problem}`);
+  return named;
 }
 
 /**
@@ -2595,19 +2616,23 @@ export function semanticFunctionProblems(
 export function semanticModuleProblems(
   module: SemanticModule,
   program?: ProgramContract,
-  callees: Callees = new Map(module.functions.map((fn) => [fn.name, fn])),
+  callees?: Callees,
 ): string[] {
+  const defaultCallees = new Map<string, SemanticFunction>();
+  const functions = fieldOf(module, "functions") as readonly SemanticFunction[];
+  for (const fn of functions) defaultCallees.set(String(fieldOf(fn, "name")), fn);
+  const resolvedCallees: Callees = callees === undefined ? defaultCallees : callees;
   const problems: string[] = [];
-  for (const fn of module.functions) {
-    const contract = contractedFunction(program, fn.symbol);
-    problems.push(...functionProblems(fn, contract ?? undefined, program, callees));
+  for (const fn of functions) {
+    const contract = contractedFunction(program, String(fieldOf(fn, "symbol")));
+    problems.push(...functionProblems(fn, contract ?? undefined, program, resolvedCallees));
   }
   return problems;
 }
 
 /** Refuses a program that is not one. Throws one CompilerError. */
 export function validateSemanticProgram(program: SemanticProgram, contract?: ProgramContract, callees?: Callees): void {
-  refuse(`${program.file} is not a program the compiler may lower`, semanticIrProblems(program, contract, callees));
+  refuse(`${String(fieldOf(program, "file"))} is not a program the compiler may lower`, semanticIrProblems(program, contract, callees));
 }
 
 /** Refuses a function that is not one. Throws one CompilerError. */
@@ -2616,12 +2641,12 @@ export function validateSemanticFunction(
   contract?: FunctionContract,
   callees: Callees = new Map(),
 ): void {
-  refuse(`${fn.symbol} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees));
+  refuse(`${String(fieldOf(fn, "symbol"))} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees));
 }
 
 /** Refuses a module holding a function that is not one. Throws one CompilerError. */
 export function validateSemanticModule(module: SemanticModule, program?: ProgramContract, callees?: Callees): void {
-  refuse(`${module.path} is not a module the compiler may lower`, semanticModuleProblems(module, program, callees));
+  refuse(`${String(fieldOf(module, "path"))} is not a module the compiler may lower`, semanticModuleProblems(module, program, callees));
 }
 
 /** The one error a caller is given: what it read, and everything wrong with it. */
