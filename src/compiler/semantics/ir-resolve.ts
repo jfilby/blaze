@@ -60,6 +60,10 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+function setField(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 
 import { contractText, parseType, typeToString } from "./contract.ts";
 import { isWholeNumberText } from "./objects.ts";
@@ -105,6 +109,7 @@ import {
   type SemanticFunction,
   type SemanticProgram,
   type SemanticSlot,
+  type SemanticAssignOp,
   type SemanticStatement,
   type SemanticType,
   type SemanticValue,
@@ -208,40 +213,43 @@ interface ArgvHeld {
 type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld | ArgvHeld | PairsHeld;
 
 function renameHeld(held: WithoutName<Held>, name: string): Held {
-  switch (held.kind) {
+  const kind = String(fieldOf(held, "kind"));
+  const mutable = fieldOf(held, "mutable") === true;
+  switch (kind) {
     case "number":
-      return { kind: "number", name, mutable: held.mutable, type: held.type, text: held.text, bigint: held.bigint };
+      return { kind: "number", name, mutable, type: fieldOf(held, "type"), text: fieldOf(held, "text"), bigint: fieldOf(held, "bigint") } as Held;
     case "array":
       return {
         kind: "array",
         name,
-        mutable: held.mutable,
-        element: held.element,
-        length: held.length,
-        values: held.values,
-      };
+        mutable,
+        element: fieldOf(held, "element"),
+        length: fieldOf(held, "length"),
+        values: fieldOf(held, "values"),
+      } as Held;
     case "object":
       return {
         kind: "object",
         name,
-        mutable: held.mutable,
-        type: held.type,
-        promise: held.promise,
-      };
+        mutable,
+        type: fieldOf(held, "type"),
+        promise: fieldOf(held, "promise"),
+      } as Held;
     case "text":
       return {
         kind: "text",
         name,
-        mutable: held.mutable,
-        value: held.value,
-        boxed: held.boxed,
-        parameter: held.parameter,
-      };
+        mutable,
+        value: fieldOf(held, "value"),
+        boxed: fieldOf(held, "boxed"),
+        parameter: fieldOf(held, "parameter"),
+      } as Held;
     case "argv":
-      return { kind: "argv", name, mutable: held.mutable, offset: held.offset };
+      return { kind: "argv", name, mutable, offset: fieldOf(held, "offset") } as Held;
     case "pairs":
-      return { kind: "pairs", name, mutable: held.mutable, entries: held.entries };
+      return { kind: "pairs", name, mutable, entries: fieldOf(held, "entries") } as Held;
   }
+  return { kind: "number", name, mutable, type: null, text: "0", bigint: undefined } as Held;
 }
 
 /** A name as a declaration states it, before it is declared. */
@@ -491,9 +499,11 @@ const U64_MAX = 18446744073709551615n;
  */
 function countsWhole(value: DraftValue): boolean {
   if (value.k === "literal") {
-    return value.held.type === null
-      ? isWholeNumberText(value.held.text)
-      : isWhole(value.held.type);
+    const held = fieldOf(value, "held") as { type?: unknown; text?: unknown };
+    const writtenType = fieldOf(held, "type");
+    return writtenType === null
+      ? isWholeNumberText(String(fieldOf(held, "text")))
+      : isWhole(String(writtenType) as PrimitiveTypeName);
   }
   const name = primitive(draftType(value));
   return name !== null && isWhole(name);
@@ -569,22 +579,24 @@ const BIGINT_TYPE: PrimitiveTypeName = "i64";
 function isBigint(value: DraftValue): boolean {
   switch (value.k) {
     case "literal":
-    case "reference":
-      return value.held.kind === "number" && value.held.bigint === true;
+    case "reference": {
+      const held = fieldOf(value, "held") as Held;
+      return String(fieldOf(held, "kind")) === "number" && fieldOf(held, "bigint") === true;
+    }
     case "binary":
     case "unary":
     case "conditional":
-      return value.bigint === true;
+      return fieldOf(value, "bigint") === true;
     case "field":
       // A field the layout holds a whole number in holds a whole number: the
       // layout is what says the kind of the value.
-      return value.bigint === true;
+      return fieldOf(value, "bigint") === true;
     case "call":
       // What a call hands back is what the callee declared it returns. Without
       // this `console.log(f())` for a `f(): bigint` printed the number without
       // the `n` that is what says it is a bigint, and `f() + 1n` was refused as
       // a bigint mixed with a number.
-      if (value.call.bigint) return true;
+      if (fieldOf(fieldOf(value, "call"), "bigint") === true) return true;
       // A `u256` is the compiler's own spelling of a bigint too wide for a
       // machine word, and nothing in the signature says whether the program
       // wrote it with an `n` beside it. A wide number the source wrote as a
@@ -603,7 +615,7 @@ function isBigint(value: DraftValue): boolean {
       // such answer — a callee this build holds no body for, or one whose paths
       // disagree — is not marked, which is what the source prints for a number
       // written without an `n`.
-      return value.call.wide === true;
+      return fieldOf(fieldOf(value, "call"), "wide") === true;
     default:
       return false;
   }
@@ -637,30 +649,31 @@ function returnsBigint(returns: string): boolean {
  * arguments were and `return n` hands back the parameter as it arrived, which
  * is the one place the call itself is the answer.
  */
+function collectReturnedExpressions(statements: readonly Statement[], results: Expression[]): void {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "result":
+        if (fieldOf(statement, "value") !== null) results.push(fieldOf(statement, "value") as Expression);
+        break;
+      case "if":
+        collectReturnedExpressions(fieldOf(statement, "then") as readonly Statement[], results);
+        collectReturnedExpressions(fieldOf(statement, "otherwise") as readonly Statement[], results);
+        break;
+      case "while":
+      case "doWhile":
+      case "loop":
+      case "forOf":
+        collectReturnedExpressions(fieldOf(statement, "body") as readonly Statement[], results);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 function returnsWideBigint(body: readonly Statement[], written: readonly DraftValue[], params: readonly string[]): boolean {
   const results: Expression[] = [];
-  const walk = (statements: readonly Statement[]): void => {
-    for (const statement of statements) {
-      switch (statement.kind) {
-        case "result":
-          if (statement.value !== null) results.push(statement.value);
-          break;
-        case "if":
-          walk(statement.then);
-          walk(statement.otherwise);
-          break;
-        case "while":
-        case "doWhile":
-        case "loop":
-        case "forOf":
-          walk(statement.body);
-          break;
-        default:
-          break;
-      }
-    }
-  };
-  walk(body);
+  collectReturnedExpressions(body, results);
   if (results.length === 0) return false;
   // A return on one path and not another is a value that is sometimes a bigint
   // and sometimes a number, and which of the two prints an `n` is decided by
@@ -677,15 +690,15 @@ function wideMark(expression: Expression, written: readonly DraftValue[], params
     case "bigint":
       return true;
     case "ident": {
-      const position = params.indexOf(expression.name);
+      const position = params.indexOf(String(fieldOf(expression, "name")));
       return position >= 0 && position < written.length && isBigint(written[position] as DraftValue);
     }
     case "binary":
-      return wideMark(expression.left, written, params) && wideMark(expression.right, written, params);
+      return wideMark(fieldOf(expression, "left") as Expression, written, params) && wideMark(fieldOf(expression, "right") as Expression, written, params);
     case "unary":
-      return wideMark(expression.operand, written, params);
+      return wideMark(fieldOf(expression, "operand") as Expression, written, params);
     case "conditional":
-      return wideMark(expression.then, written, params) && wideMark(expression.otherwise, written, params);
+      return wideMark(fieldOf(expression, "then") as Expression, written, params) && wideMark(fieldOf(expression, "otherwise") as Expression, written, params);
     default:
       // A literal was written without an `n` and is a number, and a call is
       // settled by the body of the function it names rather than by anything
@@ -705,17 +718,17 @@ function wideMark(expression: Expression, written: readonly DraftValue[], params
  */
 function declaredWideBigint(compiled: DraftProgram | null, written: readonly DraftValue[], params: readonly string[]): boolean {
   if (compiled === null) return false;
-  const results = returnsIn(compiled.statements);
+  const results = returnsIn(fieldOf(compiled, "statements") as readonly DraftStatement[]);
   if (results.length === 0) return false;
   const marks = results.map((result) => {
-    const value = result.value;
+    const value = fieldOf(result, "value") as DraftValue | null;
     // A bare return hands back nothing, which is not a wide bigint.
     if (value === null) return false;
     // A return of a parameter is the one place the call is the answer: `return n`
     // hands back the argument as it arrived, and the argument at this position is
     // what says whether it was written as a bigint.
     if (value.k === "reference") {
-      const position = params.indexOf(value.name);
+      const position = params.indexOf(String(fieldOf(value, "name")));
       if (position >= 0 && position < written.length) return isBigint(written[position] as DraftValue);
     }
     return isBigint(value);
@@ -737,11 +750,11 @@ function holdsArray(value: DraftValue): boolean {
     case "fill":
       return true;
     case "reference":
-      return value.held.kind === "array";
+      return String(fieldOf(fieldOf(value, "held"), "kind")) === "array";
     case "binary":
-      return isSequenceType(value.type);
+      return isSequenceType(fieldOf(value, "type") as TypeExpr | null);
     case "conditional":
-      return isSequenceType(value.type);
+      return isSequenceType(fieldOf(value, "type") as TypeExpr | null);
     default:
       return false;
   }
@@ -753,19 +766,19 @@ function holdsText(value: DraftValue): boolean {
     case "fixed":
       return true;
     case "reference":
-      return value.held.kind === "text";
+      return String(fieldOf(fieldOf(value, "held"), "kind")) === "text";
     case "binary":
       // A binary that is a text is one the program built: `+` over two texts,
       // and a short-circuit operator whose arms are of different kinds, which
       // is written as the text of the arm that answers. The `??` asks whether a
       // value is nothing rather than whether it holds, and is left as it was.
-      return value.type === null && (value.op === "+" || value.op === "&&" || value.op === "||");
+      return fieldOf(value, "type") === null && (String(fieldOf(value, "op")) === "+" || String(fieldOf(value, "op")) === "&&" || String(fieldOf(value, "op")) === "||");
     case "conditional":
-      return value.type === null;
+      return fieldOf(value, "type") === null;
     case "call":
       // A call that hands back a string is a string, the way the type of the
       // call says it is: printing one is printing the text it answered.
-      return value.call.returns.kind === "text";
+      return (fieldOf(fieldOf(value, "call"), "returns") as SemanticType).kind === "text";
     case "literal":
     case "buffer":
     case "sized":
@@ -791,34 +804,34 @@ function holdsText(value: DraftValue): boolean {
 function draftType(value: DraftValue): TypeExpr | null {
   switch (value.k) {
     case "literal":
-      return value.held.type === null ? null : { kind: "primitive", name: value.held.type };
+      return fieldOf(fieldOf(value, "held"), "type") === null ? null : { kind: "primitive", name: String(fieldOf(fieldOf(value, "held"), "type")) as PrimitiveTypeName };
     case "sized":
     case "view":
     case "fill":
-      return { kind: "array", of: value.held.element ?? F64, length: value.held.length };
+      return { kind: "array", of: (fieldOf(fieldOf(value, "held"), "element") as TypeExpr) ?? F64, length: fieldOf(fieldOf(value, "held"), "length") as number | null };
     case "buffer":
-      return { kind: "slice", of: value.held.element ?? F64 };
+      return { kind: "slice", of: (fieldOf(fieldOf(value, "held"), "element") as TypeExpr) ?? F64 };
     case "reference":
-      return heldType(value.held);
+      return heldType(fieldOf(value, "held") as Held);
     case "text":
     case "fixed":
       return null;
     case "field":
-      return value.type;
+      return fieldOf(value, "type") as TypeExpr;
     case "function":
       return VOID;
     case "object":
-      return value.type;
+      return fieldOf(value, "type") as TypeExpr;
     case "call":
       // A call that hands back a string is a string, and a string is a value
       // the type of a draft does not spell.
-      return value.call.returns.kind === "text" ? null : value.call.returns;
+      return (fieldOf(fieldOf(value, "call"), "returns") as SemanticType).kind === "text" ? null : fieldOf(fieldOf(value, "call"), "returns") as TypeExpr;
     case "length":
     case "lengthOf":
     case "stringLength":
-      return { kind: "primitive", name: value.k === "length" ? value.type : "usize" };
+      return { kind: "primitive", name: value.k === "length" ? String(fieldOf(value, "type")) as PrimitiveTypeName : "usize" };
     case "element":
-      return value.type;
+      return fieldOf(value, "type") as TypeExpr;
     case "boolean":
     case "compare":
     case "isNull":
@@ -828,7 +841,7 @@ function draftType(value: DraftValue): TypeExpr | null {
     case "binary":
     case "unary":
     case "conditional":
-      return value.type;
+      return fieldOf(value, "type") as TypeExpr;
   }
 }
 
@@ -852,18 +865,20 @@ function payloadTypeOf(value: DraftValue): TypeExpr {
  */
 function promiseOf(value: DraftValue): { payload: TypeExpr } | undefined {
   switch (value.k) {
-    case "reference":
-      return value.held.kind === "object" ? value.held.promise : undefined;
+    case "reference": {
+      const held = fieldOf(value, "held") as Held;
+      return String(fieldOf(held, "kind")) === "object" ? fieldOf(held, "promise") as { payload: TypeExpr } | undefined : undefined;
+    }
     case "call":
-      return value.call.promise;
+      return fieldOf(fieldOf(value, "call"), "promise") as { payload: TypeExpr } | undefined;
     case "conditional": {
       // Both arms have to be promises for the choice to be one: an arm that is
       // a number is awaited as itself, and reading it as a handle would read
       // the number as an address.
-      const then = promiseOf(value.then);
-      const otherwise = promiseOf(value.otherwise);
+      const then = promiseOf(fieldOf(value, "then") as DraftValue);
+      const otherwise = promiseOf(fieldOf(value, "otherwise") as DraftValue);
       if (then === undefined || otherwise === undefined) return undefined;
-      return contractTextOfType(then.payload) === contractTextOfType(otherwise.payload) ? then : { payload: { kind: "ref", of: null } };
+      return contractTextOfType(fieldOf(then, "payload") as TypeExpr) === contractTextOfType(fieldOf(otherwise, "payload") as TypeExpr) ? then : { payload: REF_NULL };
     }
     default:
       return undefined;
@@ -881,155 +896,178 @@ function contractTextOfType(type: TypeExpr): string {
  * number and one settled with a string carries a string; a promise settled with
  * both, or with a value this cannot see, carries a value read dynamically.
  */
-function executorPayload(program: DraftProgram, callee?: (name: string) => DraftProgram | null): TypeExpr {
-  const found: TypeExpr[] = [];
-  const seen = new Set<string>();
-  const queued: DraftStatement[][] = [];
-  const note = (value: DraftValue): void => {
-    switch (value.k) {
-      case "call": {
-        const settled = value.call.name === "resolve" || value.call.name === "onFulfilled";
-        if (settled && value.call.args[0] !== undefined) found.push(payloadTypeOf(value.call.args[0]));
-        for (const argument of value.call.args) {
-          note(argument);
-          // A callback the executor hands to a call settles the promise too:
-          // `res.on("end", () => resolve(body))` is where a promise built
-          // around an event is settled.
-          if (argument.k === "function" && argument.name !== undefined && !seen.has(argument.name)) {
-            seen.add(argument.name);
-            const nested = callee?.(argument.name) ?? null;
-            if (nested !== null) queued.push(nested.statements);
-          }
+interface PayloadWalk {
+  found: TypeExpr[];
+  seen: Set<string>;
+  queued: DraftStatement[][];
+  resolver: ProgramResolver | null;
+}
+
+function notePayload(value: DraftValue, walk: PayloadWalk): void {
+  const found = fieldOf(walk, "found") as TypeExpr[];
+  const seen = fieldOf(walk, "seen") as Set<string>;
+  const queued = fieldOf(walk, "queued") as DraftStatement[][];
+  const resolver = fieldOf(walk, "resolver") as ProgramResolver | null;
+  switch (value.k) {
+    case "call": {
+      const call = fieldOf(value, "call") as DraftCall;
+      const callName = String(fieldOf(call, "name"));
+      const callArgs = fieldOf(call, "args") as readonly DraftValue[];
+      const settled = callName === "resolve" || callName === "onFulfilled";
+      if (settled && callArgs[0] !== undefined) found.push(payloadTypeOf(callArgs[0]));
+      for (const argument of callArgs) {
+        notePayload(argument, walk);
+        // A callback the executor hands to a call settles the promise too:
+        // `res.on("end", () => resolve(body))` is where a promise built
+        // around an event is settled.
+        const argumentName = fieldOf(argument, "name");
+        if (argument.k === "function" && argumentName !== undefined && !seen.has(String(argumentName))) {
+          seen.add(String(argumentName));
+          let nested: DraftProgram | null = null;
+          if (resolver !== null) nested = resolver.compiledNested(String(argumentName));
+          if (nested !== null) queued.push(fieldOf(nested, "statements") as DraftStatement[]);
         }
-        if (value.call.grid !== undefined) note(value.call.grid);
-        return;
       }
-      case "text":
-        for (const part of value.parts) if (part.k === "value") note(part.value);
-        return;
-      case "binary":
-        note(value.left);
-        note(value.right);
-        return;
-      case "unary":
-        note(value.operand);
-        return;
-      case "conditional":
-        note(value.condition);
-        note(value.then);
-        note(value.otherwise);
-        return;
-      case "field":
-        note(value.object);
-        return;
-      case "object":
-        for (const field of value.fields) note(field.value);
-        return;
-      case "fixed":
-        note(value.of);
-        return;
-      default:
-        return;
+      const grid = fieldOf(call, "grid") as DraftValue | undefined;
+      if (grid !== undefined) notePayload(grid, walk);
+      return;
     }
-  };
-  function walk(statements: readonly DraftStatement[]): void {
-    for (const statement of statements) {
-      switch (statement.kind) {
-        case "declare":
-        case "assign":
-          note(statement.value);
-          continue;
-        case "result":
-          if (statement.value !== null) note(statement.value);
-          continue;
-        case "elementAssign":
-          note(statement.index);
-          note(statement.value);
-          continue;
-        case "fieldAssign":
-          note(statement.value);
-          continue;
-        case "print":
-          statement.values.forEach(note);
-          continue;
-        case "fill":
-          note(statement.value);
-          continue;
-        case "if":
-          note(statement.condition);
-          walk(statement.then);
-          walk(statement.otherwise);
-          continue;
-        case "while":
-        case "doWhile":
-          note(statement.condition);
-          walk(statement.body);
-          continue;
-        case "for":
-          note(statement.from);
-          note(statement.to);
-          if (statement.step !== null) note(statement.step);
-          walk(statement.body);
-          continue;
-        case "forOf":
-          walk(statement.body);
-          continue;
-        case "try":
-          walk(statement.body);
-          if (statement.catchBody !== null) walk(statement.catchBody);
-          if (statement.finallyBody !== null) walk(statement.finallyBody);
-          continue;
-        case "block":
-          walk(statement.body);
-          continue;
-        default:
-          continue;
-      }
-    }
-    while (queued.length > 0) walk(queued.pop() as DraftStatement[]);
+    case "text":
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: DraftValue }[]) if (part.k === "value") notePayload(part.value, walk);
+      return;
+    case "binary":
+      notePayload(fieldOf(value, "left") as DraftValue, walk);
+      notePayload(fieldOf(value, "right") as DraftValue, walk);
+      return;
+    case "unary":
+      notePayload(fieldOf(value, "operand") as DraftValue, walk);
+      return;
+    case "conditional":
+      notePayload(fieldOf(value, "condition") as DraftValue, walk);
+      notePayload(fieldOf(value, "then") as DraftValue, walk);
+      notePayload(fieldOf(value, "otherwise") as DraftValue, walk);
+      return;
+    case "field":
+      notePayload(fieldOf(value, "object") as DraftValue, walk);
+      return;
+    case "object":
+      for (const field of fieldOf(value, "fields") as readonly { value: DraftValue }[]) notePayload(field.value, walk);
+      return;
+    case "fixed":
+      notePayload(fieldOf(value, "of") as DraftValue, walk);
+      return;
+    default:
+      return;
   }
-  walk(program.statements);
-  const first = found[0];
+}
+
+function walkPayloadStatements(statements: readonly DraftStatement[], walk: PayloadWalk): void {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "declare":
+      case "assign":
+        notePayload(fieldOf(statement, "value") as DraftValue, walk);
+        continue;
+      case "result":
+        if (fieldOf(statement, "value") !== null) notePayload(fieldOf(statement, "value") as DraftValue, walk);
+        continue;
+      case "elementAssign":
+        notePayload(fieldOf(statement, "index") as DraftValue, walk);
+        notePayload(fieldOf(statement, "value") as DraftValue, walk);
+        continue;
+      case "fieldAssign":
+        notePayload(fieldOf(statement, "value") as DraftValue, walk);
+        continue;
+      case "print":
+        for (const one of fieldOf(statement, "values") as readonly DraftValue[]) notePayload(one, walk);
+        continue;
+      case "fill":
+        notePayload(fieldOf(statement, "value") as DraftValue, walk);
+        continue;
+      case "if":
+        notePayload(fieldOf(statement, "condition") as DraftValue, walk);
+        walkPayloadStatements(fieldOf(statement, "then") as readonly DraftStatement[], walk);
+        walkPayloadStatements(fieldOf(statement, "otherwise") as readonly DraftStatement[], walk);
+        continue;
+      case "while":
+      case "doWhile":
+        notePayload(fieldOf(statement, "condition") as DraftValue, walk);
+        walkPayloadStatements(fieldOf(statement, "body") as readonly DraftStatement[], walk);
+        continue;
+      case "for":
+        notePayload(fieldOf(statement, "from") as DraftValue, walk);
+        notePayload(fieldOf(statement, "to") as DraftValue, walk);
+        if (fieldOf(statement, "step") !== null) notePayload(fieldOf(statement, "step") as DraftValue, walk);
+        walkPayloadStatements(fieldOf(statement, "body") as readonly DraftStatement[], walk);
+        continue;
+      case "forOf":
+        walkPayloadStatements(fieldOf(statement, "body") as readonly DraftStatement[], walk);
+        continue;
+      case "try":
+        walkPayloadStatements(fieldOf(statement, "body") as readonly DraftStatement[], walk);
+        if (fieldOf(statement, "catchBody") !== null) walkPayloadStatements(fieldOf(statement, "catchBody") as readonly DraftStatement[], walk);
+        if (fieldOf(statement, "finallyBody") !== null) walkPayloadStatements(fieldOf(statement, "finallyBody") as readonly DraftStatement[], walk);
+        continue;
+      case "block":
+        walkPayloadStatements(fieldOf(statement, "body") as readonly DraftStatement[], walk);
+        continue;
+      default:
+        continue;
+    }
+  }
+}
+
+function executorPayload(program: DraftProgram, resolver: ProgramResolver | null): TypeExpr {
+  const walk: PayloadWalk = { found: [], seen: new Set(), queued: [], resolver };
+  walkPayloadStatements(fieldOf(program, "statements") as readonly DraftStatement[], walk);
+  const queued = fieldOf(walk, "queued") as DraftStatement[][];
+  let at = 0;
+  while (at < queued.length) {
+    walkPayloadStatements(queued[at], walk);
+    at += 1;
+  }
+  const first = walk.found[0];
   if (first === undefined) return { kind: "ref", of: null };
   const written = contractTextOfType(first);
-  return found.every((type) => contractTextOfType(type) === written) ? first : { kind: "ref", of: null };
+  return walk.found.every((type) => contractTextOfType(type) === written) ? first : { kind: "ref", of: null };
 }
 
 /** Every value a body returns, as the statements of it were resolved. */
+function collectReturnedValues(list: readonly DraftStatement[], values: DraftValue[]): void {
+  for (const statement of list) {
+    switch (statement.kind) {
+      case "result":
+        if (fieldOf(statement, "value") !== null) values.push(fieldOf(statement, "value") as DraftValue);
+        continue;
+      case "if":
+        collectReturnedValues(fieldOf(statement, "then") as readonly DraftStatement[], values);
+        collectReturnedValues(fieldOf(statement, "otherwise") as readonly DraftStatement[], values);
+        continue;
+      case "while":
+      case "doWhile":
+        collectReturnedValues(fieldOf(statement, "body") as readonly DraftStatement[], values);
+        continue;
+      case "for":
+      case "forOf":
+        collectReturnedValues(fieldOf(statement, "body") as readonly DraftStatement[], values);
+        continue;
+      case "try":
+        collectReturnedValues(fieldOf(statement, "body") as readonly DraftStatement[], values);
+        if (fieldOf(statement, "catchBody") !== null) collectReturnedValues(fieldOf(statement, "catchBody") as readonly DraftStatement[], values);
+        if (fieldOf(statement, "finallyBody") !== null) collectReturnedValues(fieldOf(statement, "finallyBody") as readonly DraftStatement[], values);
+        continue;
+      case "block":
+        collectReturnedValues(fieldOf(statement, "body") as readonly DraftStatement[], values);
+        continue;
+      default:
+        continue;
+    }
+  }
+}
+
 function returnedValues(statements: readonly DraftStatement[]): DraftValue[] {
   const values: DraftValue[] = [];
-  const walk = (list: readonly DraftStatement[]): void => {
-    for (const statement of list) {
-      switch (statement.kind) {
-        case "result":
-          if (statement.value !== null) values.push(statement.value);
-          continue;
-        case "if":
-          walk(statement.then);
-          walk(statement.otherwise);
-          continue;
-        case "while":
-        case "doWhile":
-          walk(statement.body);
-          continue;
-        case "for":
-        case "forOf":
-          walk(statement.body);
-          continue;
-        case "try":
-          walk(statement.body);
-          if (statement.catchBody !== null) walk(statement.catchBody);
-          if (statement.finallyBody !== null) walk(statement.finallyBody);
-          continue;
-        case "block":
-          walk(statement.body);
-          continue;
-        default:
-          continue;
-      }
-    }
-  };
-  walk(statements);
+  collectReturnedValues(statements, values);
   return values;
 }
 
@@ -1048,15 +1086,15 @@ function returnedPromise(statements: readonly DraftStatement[]): { payload: Type
  * element type a use of it fixes.
  */
 function heldType(held: Held): TypeExpr | null {
-  switch (held.kind) {
+  switch (String(fieldOf(held, "kind"))) {
     case "text":
       return null;
     case "array":
-      return { kind: "slice", of: held.element ?? F64 };
+      return { kind: "slice", of: (fieldOf(held, "element") as TypeExpr) ?? F64 };
     case "object":
-      return held.type;
+      return fieldOf(held, "type") as TypeExpr;
     case "number":
-      return { kind: "primitive", name: held.type ?? "f64" };
+      return { kind: "primitive", name: String(fieldOf(held, "type") ?? "f64") as PrimitiveTypeName };
     case "argv":
       // A name bound to the command line is read as an argument value, which
       // the runtime hands back as a number.
@@ -1067,7 +1105,7 @@ function heldType(held: Held): TypeExpr | null {
 
 /** The type an array is written out as, which is the type its name is read as. */
 function arrayType(held: ArrayHeld): TypeExpr {
-  return { kind: "array", of: held.element ?? F64, length: held.length };
+  return { kind: "array", of: (fieldOf(held, "element") as TypeExpr) ?? F64, length: fieldOf(held, "length") as number | null };
 }
 
 /**
@@ -1079,17 +1117,26 @@ function arrayType(held: ArrayHeld): TypeExpr {
  */
 function contractsOf(program: ProgramContract): Map<string, CompiledFunction> {
   const contracts = new Map<string, CompiledFunction>();
-  for (const file of program.files) {
-    for (const contract of Object.values(file.functions)) {
-      contracts.set(contract.function.symbol, {
-        signature: contract.function,
-        effects: contract.effects,
-        body: contract.definition.statements,
-        ...(contract.promise === undefined ? {} : { promise: contract.promise }),
+  for (const file of fieldOf(program, "files") as readonly { functions: Record<string, Record<string, unknown>> }[]) {
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, Record<string, unknown>>)) {
+      const definition = fieldOf(contract, "definition") as { statements: Statement[] };
+      const promise = fieldOf(contract, "promise") as string | undefined;
+      contracts.set(String(fieldOf(fieldOf(contract, "function"), "symbol")), {
+        signature: fieldOf(contract, "function") as FunctionSignature,
+        effects: fieldOf(contract, "effects") as unknown as Effect[],
+        body: fieldOf(definition, "statements") as readonly Statement[],
+        promise,
       });
     }
   }
   return contracts;
+}
+
+/** The signature of every function the program calls, in contract order. */
+function contractSignatures(contracts: Map<string, CompiledFunction>): FunctionSignature[] {
+  const signatures: FunctionSignature[] = [];
+  for (const contract of contracts.values()) signatures.push(fieldOf(contract, "signature") as FunctionSignature);
+  return signatures;
 }
 
 /**
@@ -1129,7 +1176,7 @@ function sideType(value: DraftValue, result: TypeExpr | null): TypeExpr | null {
   // A literal with no type of its own is a number as the source wrote it, and
   // what it was written as is in its text: `1.5` is a fraction whatever it is
   // initializing, and a whole result does not hold one.
-  if (written === null) return value.k === "literal" && !isWholeNumberText(value.held.text) ? null : result;
+  if (written === null) return value.k === "literal" && !isWholeNumberText(String(fieldOf(fieldOf(value, "held"), "text"))) ? null : result;
   return isWhole(written) ? result : null;
 }
 
@@ -1241,51 +1288,51 @@ const WHOLE_ANSWERS: Record<string, string> = {
 function callsInValue(value: ProgramValue, called: string[]): void {
   switch (value.k) {
     case "call":
-      if (!called.includes(value.function)) called.push(value.function);
-      value.args.forEach((argument) => callsInValue(argument, called));
+      if (!called.includes(String(fieldOf(value, "function")))) called.push(String(fieldOf(value, "function")));
+      for (const argument of fieldOf(value, "args") as readonly ProgramValue[]) callsInValue(argument, called);
       return;
     case "unary":
-      callsInValue(value.operand, called);
+      callsInValue(fieldOf(value, "operand") as ProgramValue, called);
       return;
     case "binary":
-      callsInValue(value.left, called);
-      callsInValue(value.right, called);
+      callsInValue(fieldOf(value, "left") as ProgramValue, called);
+      callsInValue(fieldOf(value, "right") as ProgramValue, called);
       return;
     case "conditional":
-      callsInValue(value.condition, called);
-      callsInValue(value.then, called);
-      callsInValue(value.otherwise, called);
+      callsInValue(fieldOf(value, "condition") as ProgramValue, called);
+      callsInValue(fieldOf(value, "then") as ProgramValue, called);
+      callsInValue(fieldOf(value, "otherwise") as ProgramValue, called);
       return;
     case "text":
-      for (const part of value.parts) if (part.k === "value") callsInValue(part.value, called);
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: ProgramValue }[]) if (part.k === "value") callsInValue(part.value, called);
       return;
     case "object":
-      for (const field of value.fields) callsInValue(field.value, called);
-      for (const spread of value.spreads ?? []) callsInValue(spread, called);
+      for (const field of fieldOf(value, "fields") as readonly { value: ProgramValue }[]) callsInValue(field.value, called);
+      for (const spread of (fieldOf(value, "spreads") as readonly ProgramValue[] | undefined) ?? []) callsInValue(spread, called);
       return;
     case "fixed":
-      callsInValue(value.of, called);
+      callsInValue(fieldOf(value, "of") as ProgramValue, called);
       return;
     case "shared":
-      callsInValue(value.count, called);
+      callsInValue(fieldOf(value, "count") as ProgramValue, called);
       return;
     case "sized":
-      callsInValue(value.count, called);
+      callsInValue(fieldOf(value, "count") as ProgramValue, called);
       return;
     case "view":
-      callsInValue(value.of, called);
-      callsInValue(value.offset, called);
-      callsInValue(value.count, called);
+      callsInValue(fieldOf(value, "of") as ProgramValue, called);
+      callsInValue(fieldOf(value, "offset") as ProgramValue, called);
+      callsInValue(fieldOf(value, "count") as ProgramValue, called);
       return;
     case "fill":
-      callsInValue(value.buffer, called);
-      callsInValue(value.value, called);
+      callsInValue(fieldOf(value, "buffer") as ProgramValue, called);
+      callsInValue(fieldOf(value, "value") as ProgramValue, called);
       return;
     case "element":
-      callsInValue(value.index, called);
+      callsInValue(fieldOf(value, "index") as ProgramValue, called);
       return;
     case "lengthOf":
-      callsInValue(value.of, called);
+      callsInValue(fieldOf(value, "of") as ProgramValue, called);
       return;
     case "name":
     case "length":
@@ -1308,265 +1355,263 @@ function callsInValue(value: ProgramValue, called: string[]): void {
  * of a callee has to be given in turn, so a name it misses is a name the
  * caller is not handed and a body refused for reading it.
  */
+function walkCalledStatements(statements: readonly ProgramStatement[], called: string[]): void {
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "invoke": {
+        const functionName = String(fieldOf(statement, "function"));
+        if (!called.includes(functionName)) called.push(functionName);
+        for (const argument of fieldOf(statement, "args") as readonly ProgramValue[]) callsInValue(argument, called);
+        continue;
+      }
+      case "declare":
+      case "assign":
+        callsInValue(fieldOf(statement, "value") as ProgramValue, called);
+        continue;
+      case "elementAssign":
+        callsInValue(fieldOf(statement, "index") as ProgramValue, called);
+        callsInValue(fieldOf(statement, "value") as ProgramValue, called);
+        continue;
+      case "fieldAssign":
+        callsInValue(fieldOf(statement, "value") as ProgramValue, called);
+        continue;
+      case "print":
+        for (const one of fieldOf(statement, "values") as readonly ProgramValue[]) callsInValue(one, called);
+        continue;
+      case "result":
+        if (fieldOf(statement, "value") !== null) callsInValue(fieldOf(statement, "value") as ProgramValue, called);
+        continue;
+      case "if":
+        callsInValue(fieldOf(statement, "condition") as ProgramValue, called);
+        walkCalledStatements(fieldOf(statement, "then") as readonly ProgramStatement[], called);
+        walkCalledStatements(fieldOf(statement, "otherwise") as readonly ProgramStatement[], called);
+        continue;
+      case "while":
+      case "doWhile":
+        callsInValue(fieldOf(statement, "condition") as ProgramValue, called);
+        walkCalledStatements(fieldOf(statement, "body") as readonly ProgramStatement[], called);
+        continue;
+      case "for":
+        callsInValue(fieldOf(statement, "from") as ProgramValue, called);
+        callsInValue(fieldOf(statement, "to") as ProgramValue, called);
+        if (fieldOf(statement, "step") !== null) callsInValue(fieldOf(statement, "step") as ProgramValue, called);
+        walkCalledStatements(fieldOf(statement, "body") as readonly ProgramStatement[], called);
+        continue;
+      case "forOf":
+      case "block":
+        walkCalledStatements(fieldOf(statement, "body") as readonly ProgramStatement[], called);
+        continue;
+      case "update":
+      case "break":
+      case "continue":
+      case "function":
+        continue;
+    }
+  }
+}
+
 function calledNames(body: readonly ProgramStatement[]): string[] {
   const called: string[] = [];
-  const walk = (statements: readonly ProgramStatement[]): void => {
-    for (const statement of statements) {
-      switch (statement.kind) {
-        case "invoke":
-          if (!called.includes(statement.function)) called.push(statement.function);
-          statement.args.forEach((argument) => callsInValue(argument, called));
-          continue;
-        case "declare":
-          callsInValue(statement.value, called);
-          continue;
-        case "assign":
-          callsInValue(statement.value, called);
-          continue;
-        case "elementAssign":
-          callsInValue(statement.index, called);
-          callsInValue(statement.value, called);
-          continue;
-        case "fieldAssign":
-          callsInValue(statement.value, called);
-          continue;
-        case "print":
-          statement.values.forEach((value) => callsInValue(value, called));
-          continue;
-        case "result":
-          if (statement.value !== null) callsInValue(statement.value, called);
-          continue;
-        case "if":
-          callsInValue(statement.condition, called);
-          walk(statement.then);
-          walk(statement.otherwise);
-          continue;
-        case "while":
-        case "doWhile":
-          callsInValue(statement.condition, called);
-          walk(statement.body);
-          continue;
-        case "for":
-          callsInValue(statement.from, called);
-          callsInValue(statement.to, called);
-          if (statement.step !== null) callsInValue(statement.step, called);
-          walk(statement.body);
-          continue;
-        case "forOf":
-        case "block":
-          walk(statement.body);
-          continue;
-        case "update":
-        case "break":
-        case "continue":
-        case "function":
-          continue;
-      }
-    }
-  };
-  walk(body);
+  walkCalledStatements(body, called);
   return called;
 }
 
-/**
- * The names a body reads that it does not declare itself, in the order they
- * were first read. A function of a program is compiled on its own, so every
- * name it reads of the scope it is declared in is a parameter of its own: this
- * is the list of what it reads, and the types are the types the scope it was
- * declared in holds.
- *
- * A name declared in the block a read is written in shadows one of the same
- * name outside it, so the walk carries the scopes rather than collecting every
- * name the body mentions: a body that declares `let i` of its own inside a loop
- * reads the `i` around it nowhere, and one that only reads the `i` it declared
- * reads nothing at all.
- */
+interface ReadsWalk {
+  read: string[];
+  scopes: Set<string>[];
+}
+
+function noteRead(walk: ReadsWalk, name: string): void {
+  const read = fieldOf(walk, "read") as string[];
+  const scopes = fieldOf(walk, "scopes") as Set<string>[];
+  if (scopes.some((scope) => scope.has(name)) || read.includes(name)) return;
+  read.push(name);
+}
+
+function readValue(one: ProgramValue, walk: ReadsWalk): void {
+  switch (one.k) {
+    case "name":
+      noteRead(walk, String(fieldOf(one, "name")));
+      return;
+    case "length":
+      noteRead(walk, String(fieldOf(one, "of")));
+      return;
+    case "lengthOf":
+      readValue(fieldOf(one, "of") as ProgramValue, walk);
+      return;
+    case "element":
+      noteRead(walk, String(fieldOf(one, "buffer")));
+      readValue(fieldOf(one, "index") as ProgramValue, walk);
+      return;
+    case "object":
+      for (const field of fieldOf(one, "fields") as readonly { value: ProgramValue }[]) readValue(field.value, walk);
+      for (const spread of (fieldOf(one, "spreads") as readonly ProgramValue[] | undefined) ?? []) readValue(spread, walk);
+      return;
+    case "field":
+      readValue(fieldOf(one, "object") as ProgramValue, walk);
+      return;
+    case "call":
+      for (const argument of fieldOf(one, "args") as readonly ProgramValue[]) readValue(argument, walk);
+      return;
+    case "unary":
+      readValue(fieldOf(one, "operand") as ProgramValue, walk);
+      return;
+    case "binary":
+      readValue(fieldOf(one, "left") as ProgramValue, walk);
+      readValue(fieldOf(one, "right") as ProgramValue, walk);
+      return;
+    case "conditional":
+      readValue(fieldOf(one, "condition") as ProgramValue, walk);
+      readValue(fieldOf(one, "then") as ProgramValue, walk);
+      readValue(fieldOf(one, "otherwise") as ProgramValue, walk);
+      return;
+    case "text":
+      for (const part of fieldOf(one, "parts") as readonly { k: string; value: ProgramValue }[]) {
+        if (part.k === "value") readValue(part.value, walk);
+      }
+      return;
+    case "arrow": {
+      // An arrow is called where it is written, so the names its body reads
+      // are the names the function around it reads: the call passes them.
+      for (const name of readsAround(fieldOf(one, "body") as readonly ProgramStatement[], new Set((fieldOf(one, "params") as readonly { name: string }[]).map((param) => param.name)))) {
+        noteRead(walk, name);
+      }
+      return;
+    }
+    case "fixed":
+      readValue(fieldOf(one, "of") as ProgramValue, walk);
+      return;
+    case "shared":
+      readValue(fieldOf(one, "count") as ProgramValue, walk);
+      return;
+    case "sized":
+      readValue(fieldOf(one, "count") as ProgramValue, walk);
+      return;
+    case "view":
+      readValue(fieldOf(one, "of") as ProgramValue, walk);
+      readValue(fieldOf(one, "offset") as ProgramValue, walk);
+      readValue(fieldOf(one, "count") as ProgramValue, walk);
+      return;
+    case "fill":
+      readValue(fieldOf(one, "buffer") as ProgramValue, walk);
+      readValue(fieldOf(one, "value") as ProgramValue, walk);
+      return;
+    case "number":
+    case "whole":
+    case "boolean":
+    case "null":
+    case "buffer":
+      return;
+  }
+}
+
+function walkReadStatements(statements: readonly ProgramStatement[], walk: ReadsWalk): void {
+  const scopes = fieldOf(walk, "scopes") as Set<string>[];
+  for (const statement of statements) {
+    switch (statement.kind) {
+      case "declare":
+        // A declaration is a name of the block it is written in, whether the
+        // value it holds is read before it: `const n = +Deno.args[0]` reads
+        // the command line and declares `n` in the same breath.
+        readValue(fieldOf(statement, "value") as ProgramValue, walk);
+        scopes[scopes.length - 1].add(String(fieldOf(statement, "name")));
+        continue;
+      // The name a statement writes to is read to write it: `total += n`
+      // reads `total` and writes it, and `n` is not the only name the turn
+      // touches. A name that is not noted here is a name the function is not
+      // handed at the call, and the body that wrote it is then refused for
+      // reading a name nothing declared.
+      case "assign":
+        noteRead(walk, String(fieldOf(statement, "name")));
+        readValue(fieldOf(statement, "value") as ProgramValue, walk);
+        continue;
+      case "elementAssign":
+        noteRead(walk, String(fieldOf(statement, "buffer")));
+        readValue(fieldOf(statement, "index") as ProgramValue, walk);
+        readValue(fieldOf(statement, "value") as ProgramValue, walk);
+        continue;
+      case "fieldAssign":
+        noteRead(walk, String(fieldOf(statement, "object")));
+        readValue(fieldOf(statement, "value") as ProgramValue, walk);
+        continue;
+      case "update":
+        noteRead(walk, String(fieldOf(statement, "name")));
+        continue;
+      case "print":
+        for (const item of fieldOf(statement, "values") as readonly ProgramValue[]) readValue(item, walk);
+        continue;
+      case "invoke":
+        for (const argument of fieldOf(statement, "args") as readonly ProgramValue[]) readValue(argument, walk);
+        continue;
+      case "if":
+        readValue(fieldOf(statement, "condition") as ProgramValue, walk);
+        scopes.push(new Set());
+        walkReadStatements(fieldOf(statement, "then") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        scopes.push(new Set());
+        walkReadStatements(fieldOf(statement, "otherwise") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        continue;
+      case "while":
+      case "doWhile":
+        readValue(fieldOf(statement, "condition") as ProgramValue, walk);
+        scopes.push(new Set());
+        walkReadStatements(fieldOf(statement, "body") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        continue;
+      case "for":
+        // The bounds are read before the counter is declared, which is the
+        // order the resolver writes them in: a loop that counts from a value
+        // of the counter's own name counts from the one around it
+        // (`for (let limit = limit; ...)`). Opening the counter's scope first
+        // would hide that name from itself and drop it from the parameters.
+        readValue(fieldOf(statement, "from") as ProgramValue, walk);
+        readValue(fieldOf(statement, "to") as ProgramValue, walk);
+        if (fieldOf(statement, "step") !== null) readValue(fieldOf(statement, "step") as ProgramValue, walk);
+        scopes.push(new Set([String(fieldOf(statement, "variable"))]));
+        walkReadStatements(fieldOf(statement, "body") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        continue;
+      case "forOf":
+        // What is walked is read where the walk is written, so the counter
+        // the walk declares does not hide it.
+        noteRead(walk, String(fieldOf(statement, "of")));
+        scopes.push(new Set([String(fieldOf(statement, "variable"))]));
+        walkReadStatements(fieldOf(statement, "body") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        continue;
+      case "block":
+        scopes.push(new Set());
+        walkReadStatements(fieldOf(statement, "body") as readonly ProgramStatement[], walk);
+        scopes.pop();
+        continue;
+      case "break":
+      case "continue":
+        continue;
+      case "result":
+        if (fieldOf(statement, "value") !== null) readValue(fieldOf(statement, "value") as ProgramValue, walk);
+        continue;
+      case "function": {
+        // A function reads the scope it is declared in when it is *called*,
+        // and the call is what passes the names: what the declaration itself
+        // is written with is its own parameters, which are its own scope.
+        // The names the nested function reads off the scope around this one
+        // are the reads the enclosing function has it in the scope: the
+        // call passes them through, so it names them as reads of its own.
+        const declarationParams = fieldOf(statement, "params") as readonly { name: string }[];
+        for (const name of readsAround(fieldOf(statement, "body") as readonly ProgramStatement[], new Set(declarationParams.map((param) => param.name)))) {
+          noteRead(walk, name);
+        }
+        continue;
+      }
+    }
+  }
+}
+
 function readsAround(body: readonly ProgramStatement[], parameters: ReadonlySet<string>): string[] {
-  const read: string[] = [];
-  const scopes: Set<string>[] = [new Set(parameters)];
-  const seen = (name: string): boolean => scopes.some((scope) => scope.has(name));
-  function note(name: string): void {
-    if (seen(name) || read.includes(name)) return;
-    read.push(name);
-  }
-  function value(one: ProgramValue): void {
-    switch (one.k) {
-      case "name":
-        note(one.name);
-        return;
-      case "length":
-        note(one.of);
-        return;
-      case "lengthOf":
-        value(one.of);
-        return;
-      case "element":
-        note(one.buffer);
-        value(one.index);
-        return;
-      case "object":
-        for (const field of one.fields) value(field.value);
-        for (const spread of one.spreads ?? []) value(spread);
-        return;
-      case "field":
-        value(one.object);
-        return;
-      case "call":
-        one.args.forEach((one) => value(one));
-        return;
-      case "unary":
-        value(one.operand);
-        return;
-      case "binary":
-        value(one.left);
-        value(one.right);
-        return;
-      case "conditional":
-        value(one.condition);
-        value(one.then);
-        value(one.otherwise);
-        return;
-      case "text":
-        one.parts.forEach((part) => {
-          if (part.k === "value") value(part.value);
-        });
-        return;
-      case "arrow": {
-        // An arrow is called where it is written, so the names its body reads
-        // are the names the function around it reads: the call passes them.
-        for (const name of readsAround(one.body, new Set(one.params.map((param) => param.name)))) {
-          note(name);
-        }
-        return;
-      }
-      case "fixed":
-        value(one.of);
-        return;
-      case "shared":
-        value(one.count);
-        return;
-      case "sized":
-        value(one.count);
-        return;
-      case "view":
-        value(one.of);
-        value(one.offset);
-        value(one.count);
-        return;
-      case "fill":
-        value(one.buffer);
-        value(one.value);
-        return;
-      case "number":
-      case "whole":
-      case "boolean":
-      case "null":
-      case "buffer":
-        return;
-    }
-  }
-  function walk(statements: readonly ProgramStatement[]): void {
-    for (const statement of statements) {
-      switch (statement.kind) {
-        case "declare":
-          // A declaration is a name of the block it is written in, whether the
-          // value it holds is read before it: `const n = +Deno.args[0]` reads
-          // the command line and declares `n` in the same breath.
-          value(statement.value);
-          scopes[scopes.length - 1].add(statement.name);
-          continue;
-        // The name a statement writes to is read to write it: `total += n`
-        // reads `total` and writes it, and `n` is not the only name the turn
-        // touches. A name that is not noted here is a name the function is not
-        // handed at the call, and the body that wrote it is then refused for
-        // reading a name nothing declared.
-        case "assign":
-          note(statement.name);
-          value(statement.value);
-          continue;
-        case "elementAssign":
-          note(statement.buffer);
-          value(statement.index);
-          value(statement.value);
-          continue;
-        case "fieldAssign":
-          note(statement.object);
-          value(statement.value);
-          continue;
-        case "update":
-          note(statement.name);
-          continue;
-        case "print":
-          statement.values.forEach((one) => value(one));
-          continue;
-        case "invoke":
-          statement.args.forEach((one) => value(one));
-          continue;
-        case "if":
-          value(statement.condition);
-          scopes.push(new Set());
-          walk(statement.then);
-          scopes.pop();
-          scopes.push(new Set());
-          walk(statement.otherwise);
-          scopes.pop();
-          continue;
-        case "while":
-        case "doWhile":
-          value(statement.condition);
-          scopes.push(new Set());
-          walk(statement.body);
-          scopes.pop();
-          continue;
-        case "for":
-          // The bounds are read before the counter is declared, which is the
-          // order the resolver writes them in: a loop that counts from a value
-          // of the counter's own name counts from the one around it
-          // (`for (let limit = limit; ...)`). Opening the counter's scope first
-          // would hide that name from itself and drop it from the parameters.
-          value(statement.from);
-          value(statement.to);
-          if (statement.step !== null) value(statement.step);
-          scopes.push(new Set([statement.variable]));
-          walk(statement.body);
-          scopes.pop();
-          continue;
-        case "forOf":
-          // What is walked is read where the walk is written, so the counter
-          // the walk declares does not hide it.
-          note(statement.of);
-          scopes.push(new Set([statement.variable]));
-          walk(statement.body);
-          scopes.pop();
-          continue;
-        case "block":
-          scopes.push(new Set());
-          walk(statement.body);
-          scopes.pop();
-          continue;
-        case "break":
-        case "continue":
-          continue;
-        case "result":
-          if (statement.value !== null) value(statement.value);
-          continue;
-        case "function": {
-          // A function reads the scope it is declared in when it is *called*,
-          // and the call is what passes the names: what the declaration itself
-          // is written with is its own parameters, which are its own scope.
-          // The names the nested function reads off the scope around this one
-          // are the reads the enclosing function has it in the scope: the
-          // call passes them through, so it names them as reads of its own.
-          for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
-            note(name);
-          }
-          continue;
-        }
-      }
-    }
-  }
-  walk(body);
-  return read;
+  const walk: ReadsWalk = { read: [], scopes: [new Set(parameters)] };
+  walkReadStatements(body, walk);
+  return fieldOf(walk, "read") as string[];
 }
 
 /**
@@ -1655,7 +1700,7 @@ class Observations {
 }
 
 /** The type a parameter the source wrote no type for is read at. */
-function inferredType(kind: "text" | "number" | "other"): string {
+function inferredType(kind: string): string {
   if (kind === "text") return "text";
   if (kind === "number") return "f64";
   return "ref<any>";
@@ -1878,19 +1923,20 @@ function returnsIn(statements: readonly DraftStatement[]): (DraftStatement & { k
         found.push(statement);
         break;
       case "if":
-        found.push(...returnsIn(statement.then), ...returnsIn(statement.otherwise));
+        for (const one of returnsIn(fieldOf(statement, "then") as readonly DraftStatement[])) found.push(one);
+        for (const one of returnsIn(fieldOf(statement, "otherwise") as readonly DraftStatement[])) found.push(one);
         break;
       case "block":
       case "while":
       case "doWhile":
       case "for":
       case "forOf":
-        found.push(...returnsIn(statement.body));
+        for (const one of returnsIn(fieldOf(statement, "body") as readonly DraftStatement[])) found.push(one);
         break;
       case "try":
-        found.push(...returnsIn(statement.body));
-        if (statement.catchBody !== null) found.push(...returnsIn(statement.catchBody));
-        if (statement.finallyBody !== null) found.push(...returnsIn(statement.finallyBody));
+        for (const one of returnsIn(fieldOf(statement, "body") as readonly DraftStatement[])) found.push(one);
+        if (fieldOf(statement, "catchBody") !== null) for (const one of returnsIn(fieldOf(statement, "catchBody") as readonly DraftStatement[])) found.push(one);
+        if (fieldOf(statement, "finallyBody") !== null) for (const one of returnsIn(fieldOf(statement, "finallyBody") as readonly DraftStatement[])) found.push(one);
         break;
       default:
         break;
@@ -1927,7 +1973,7 @@ function referenceLayout(type: TypeExpr): string | undefined {
  * an `if` with two arms that each leave means for the block it is written in.
  */
 function leaves(block: SemanticBlock): boolean {
-  return block.terminator.k !== "next";
+  return String(fieldOf(fieldOf(block, "terminator"), "k")) !== "next";
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1952,7 +1998,6 @@ class ProgramResolver {
   private readonly scopes: Map<string, Held>[] = [new Map()];
   private readonly body: ProgramBody;
   private readonly contracts: Map<string, CompiledFunction>;
-  private readonly objects: Record<string, ObjectLayout>;
   /** The layout name each literal's shape is laid out as, keyed by its shape key. */
   private readonly objectLayoutNames: Map<string, string>;
   /**
@@ -1991,7 +2036,7 @@ class ProgramResolver {
   ) {
     this.body = body;
     this.contracts = contracts;
-    this.objects = objects;
+    setField(this, "objects", objects);
     this.functions = functions;
     this.objectLayoutNames = objectLayoutNames;
     this.literalKeys = literalKeys;
@@ -2004,13 +2049,18 @@ class ProgramResolver {
     // what the body hands back. A function nobody calls is read here, at the
     // end of the scope it was declared in, which is the same body either way.
     for (const draft of [...this.functions.waiting]) this.settle(draft);
+    const signatures: FunctionSignature[] = [];
+    for (const contract of this.contracts.values()) signatures.push(fieldOf(contract, "signature") as FunctionSignature);
+    const declaredDrafts = fieldOf(this.functions, "table") as Map<string, ProgramFunctionDraft>;
+    const handlers: string[] = [];
+    for (const one of this.httpHandlers) handlers.push(one);
     return {
       file: String(fieldOf(this.body, "file")),
       statements,
-      functions: [...this.contracts.values()].map((contract) => contract.signature),
-      declared: [...this.functions.table.values()],
-      objects: this.objects,
-      httpHandlers: [...this.httpHandlers],
+      functions: signatures,
+      declared: [...declaredDrafts.values()],
+      objects: fieldOf(this, "objects"),
+      httpHandlers: handlers,
     };
   }
 
@@ -2194,11 +2244,12 @@ class ProgramResolver {
    * it says so.
    */
   private closure(): void {
-    for (let round = 0; round <= this.functions.table.size; round += 1) {
+    const functions = fieldOf(this, "functions") as ProgramFunctions;
+    for (let round = 0; round <= functions.table.size; round += 1) {
       let changed = false;
-      for (const draft of this.functions.table.values()) {
+      for (const draft of functions.table.values()) {
         for (const called of calledNames(fieldOf(draft, "body") as readonly ProgramStatement[])) {
-          const other = this.functions.table.get(called);
+          const other = functions.table.get(called);
           if (other === undefined) continue;
           const draftParams = fieldOf(draft, "params") as readonly { name: string; type: string | null }[];
           const draftCaptured = fieldOf(draft, "captured") as { name: string; type: SemanticType; held: Held; boxed: boolean }[];
@@ -2213,7 +2264,7 @@ class ProgramResolver {
       }
       if (!changed) break;
     }
-    for (const draft of this.functions.table.values()) {
+    for (const draft of functions.table.values()) {
       // The parameters the source wrote come first, in the order it wrote them,
       // and the names the body reads of the scope around it come after: a
       // function of a program is compiled on its own, so what it reads from
@@ -2228,7 +2279,7 @@ class ProgramResolver {
           // callers pass it at.
           type:
             String(fieldOf(param, "type")) === "null"
-              ? inferredType(this.functions.observed.kindOf(draftName, position))
+              ? inferredType(functions.observed.kindOf(draftName, position))
               : contractText(fieldOf(param, "type") as TypeExpr),
         })),
         ...draftCaptured.map((capture) => ({
@@ -2244,7 +2295,7 @@ class ProgramResolver {
         })),
       ];
       const currentSignature = fieldOf(draft, "signature") as { returns: string } | null;
-      draft.signature = {
+      setField(draft, "signature", {
         name: draftName,
         symbol: draftName === "main" ? PROGRAM_ENTRY_SYMBOL : draftName,
         // A program is hosted by a driver that has a `main` of its own, so a
@@ -2258,7 +2309,7 @@ class ProgramResolver {
         // carries two `main` definitions and the link fails.
         params,
         returns: currentSignature === null ? "void" : String(fieldOf(currentSignature, "returns")),
-      };
+      });
     }
   }
 
@@ -2376,13 +2427,22 @@ class ProgramResolver {
    * they are settled at the declaration: a function is called from inside the
    * scope it was written in.
    */
+  compiledNested(name: string): DraftProgram | null {
+    const draft = this.functions.table.get(name);
+    if (draft === undefined) return null;
+    this.settle(draft);
+    return fieldOf(draft, "compiled") as DraftProgram | null;
+  }
+
   private read(draft: ProgramFunctionDraft): DraftProgram {
-    if (draft.signature === null) {
+    if (fieldOf(draft, "signature") === null) {
+      const draftName = String(fieldOf(draft, "name"));
+      const draftLine = Number(fieldOf(draft, "line"));
       throw programError(
-        `"${draft.name}" reads a name the scope around it does not hold`,
+        `"${draftName}" reads a name the scope around it does not hold`,
         this.body,
-        draft.line,
-        `line ${draft.line} of ${this.body.file}: declare the name above the function that reads it, or take it as a parameter of the function`,
+        draftLine,
+        `line ${draftLine} of ${String(fieldOf(this.body, "file"))}: declare the name above the function that reads it, or take it as a parameter of the function`,
       );
     }
     // A body is a program of its own: the same contracts and the same
@@ -2391,13 +2451,13 @@ class ProgramResolver {
     const inner = new ProgramResolver(
       this.body,
       this.contracts,
-      this.objects,
+      fieldOf(this, "objects"),
       this.functions,
       this.objectLayoutNames,
       this.literalKeys,
     );
     inner.open();
-    const signature = draft.signature as FunctionSignature;
+    const signature = fieldOf(draft, "signature") as FunctionSignature;
     const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
     const draftParams = fieldOf(draft, "params") as readonly { name: string; type: TypeExpr | null }[];
     for (const [position, param] of signatureParams.entries()) {
@@ -2405,7 +2465,7 @@ class ProgramResolver {
       // A string the source wrote as a parameter is the function's own
       // binding: a function that reads it is given the string, and not the
       // cell a mutable local is shared through.
-      if (held.kind === "text" && position < draftParams.length) held.parameter = true;
+      if (String(fieldOf(held, "kind")) === "text" && position < draftParams.length) setField(held, "parameter", true);
       inner.declareName(String(fieldOf(param, "name")), Number(fieldOf(draft, "line")), held);
     }
     const statements = inner.statements(fieldOf(draft, "body") as readonly ProgramStatement[]);
@@ -2413,9 +2473,9 @@ class ProgramResolver {
     return {
       file: String(fieldOf(this.body, "file")),
       statements,
-      functions: [...this.contracts.values()].map((contract) => contract.signature),
+      functions: contractSignatures(this.contracts),
       declared: [],
-      objects: this.objects,
+      objects: fieldOf(this, "objects"),
       httpHandlers: [],
     };
   }
@@ -3043,7 +3103,7 @@ class ProgramResolver {
       );
     }
     const laid = held.type.name;
-    const layout = this.objects[laid] as ObjectLayout | undefined;
+    const layout = (fieldOf(this, "objects") as Record<string, ObjectLayout>)[laid] as ObjectLayout | undefined;
     if (layout === undefined) {
       throw programError(
         `"${laid}" is not a layout the program lays out`,
@@ -3470,14 +3530,15 @@ class ProgramResolver {
         };
         this.declared(statement);
         const declaredFn = this.functions.table.get(name);
-        const captures = declaredFn?.captured.map((capture) => {
-          const held = capture.held;
+        const declaredCaptures = declaredFn === undefined ? [] : fieldOf(declaredFn, "captured") as readonly { held: Held; type: SemanticType }[];
+        const captures = declaredCaptures.map((capture) => {
+          const held = fieldOf(capture, "held") as Held;
           // A number the program wrote out is the number it was written as,
           // wherever it is read; a number it computed is read by the name it
           // was declared under.
-          const name = held.kind === "number" && !held.mutable && held.text !== "" ? held.text : held.name;
-          return { name, type: capture.type };
-        }) ?? [];
+          const captureName = String(fieldOf(held, "kind")) === "number" && fieldOf(held, "mutable") !== true && String(fieldOf(held, "text")) !== "" ? String(fieldOf(held, "text")) : String(fieldOf(held, "name"));
+          return { name: captureName, type: fieldOf(capture, "type") as SemanticType };
+        });
         return { k: "function", name, captures };
       }      case "shared": {
         // A block of bytes is what a view is taken of, and the runtime lays it
@@ -3564,7 +3625,7 @@ class ProgramResolver {
           : (fieldOf(value, "source") as ProgramValue).k === "name"
             ? (() => {
                 const held = this.held(String(String(fieldOf(fieldOf(value, "source"), "name"))), line);
-                return held.kind === "pairs" ? held.entries : null;
+                return String(fieldOf(held, "kind")) === "pairs" ? fieldOf(held, "entries") as { key: DraftValue; value: DraftValue }[] : null;
               })()
             : null;
         if (pairs !== null) return this.dictFromEntries(pairs, line);
@@ -3705,7 +3766,7 @@ class ProgramResolver {
         // What is written at a fixed number of digits is a number: a string is
         // already the text the digits would have been written into, and the
         // digits would be dropped rather than refused.
-        const of = this.value(value.of, null, line);
+        const of = this.value(fieldOf(value, "of") as ProgramValue, null, line);
         if (holdsText(of)) {
           throw programError(
             "a string is not written at a fixed number of digits",
@@ -3714,7 +3775,8 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: a string is already text; write it as it is`,
           );
         }
-        return { k: "fixed", of, digits: value.digits, ...(value.precision === undefined ? {} : { precision: value.precision }) };
+        const precision = fieldOf(value, "precision") as true | undefined;
+        return { k: "fixed", of, digits: fieldOf(value, "digits") as number, precision };
       }
       case "name": {
         // A named program function is passed by name rather than by value, the
@@ -3725,15 +3787,16 @@ class ProgramResolver {
           // A function handed to something as a callback is called by
           // something that is not a program, and passes it two values rather
           // than the arguments the source wrote.
-          if (declaredFn !== undefined) declaredFn.callback = true;
-          const captures = declaredFn?.captured.map((capture) => {
-            const held = capture.held;
+          if (declaredFn !== undefined) setField(declaredFn, "callback", true);
+          const declaredCaptures = declaredFn === undefined ? [] : fieldOf(declaredFn, "captured") as readonly { held: Held; type: SemanticType }[];
+          const captures = declaredCaptures.map((capture) => {
+            const held = fieldOf(capture, "held") as Held;
             // A number the program wrote out is the number it was written as,
             // wherever it is read; a number it computed is read by the name it
             // was declared under.
-            const name = held.kind === "number" && !held.mutable && held.text !== "" ? held.text : held.name;
-            return { name, type: capture.type };
-          }) ?? [];
+            const captureName = String(fieldOf(held, "kind")) === "number" && fieldOf(held, "mutable") !== true && String(fieldOf(held, "text")) !== "" ? String(fieldOf(held, "text")) : String(fieldOf(held, "name"));
+            return { name: captureName, type: fieldOf(capture, "type") as SemanticType };
+          });
           return { k: "function", name: value.name, captures };
         }
         // A function of another file of the program is handed over by name as
@@ -3752,11 +3815,11 @@ class ProgramResolver {
         }
         // An array is used at one element type, whichever name it is passed by.
         const held = this.held(String(fieldOf(value, "name")), line);
-        if (held.kind === "array" && expect !== null) this.expectArray(expect, held, line);
+        if (String(fieldOf(held, "kind")) === "array" && expect !== null) this.expectArray(expect, held as ArrayHeld, line);
         // A const string is the text it was written as, wherever it is read, so
         // it is written inline as the literal it is: a function that reads one
         // needs no parameter for it and no capture passed at the call.
-        if (held.kind === "text" && String(fieldOf(held, "mutable")) !== "true" && String(fieldOf(held, "value")) !== "null") {
+        if (String(fieldOf(held, "kind")) === "text" && String(fieldOf(held, "mutable")) !== "true" && String(fieldOf(held, "value")) !== "null") {
           return { k: "text", parts: [{ k: "text", value: fieldOf(held, "value") as string }] };
         }
         return this.reference(String(fieldOf(value, "name")), line);
@@ -3765,12 +3828,13 @@ class ProgramResolver {
         // `process.argv[i]` reads argument `i` of the command line, and
         // `process.argv.slice(n)[i]` reads argument `i + n`; either way the
         // argument is a number the runtime reads out of the arguments array.
-        const offset = value.offset;
-        const index = value.index === null ? { k: "number", text: String(offset) } : value.index;
+        const offset = Number(fieldOf(value, "offset"));
+        const indexValue = fieldOf(value, "index") as ProgramValue | null;
+        const index = indexValue === null ? { k: "number", text: String(offset) } : indexValue;
         const argument = offset === 0
           ? index
           : index.k === "number"
-            ? { k: "number", text: String(Number(index.text) + offset) }
+            ? { k: "number", text: String(Number(fieldOf(index, "text")) + offset) }
             : { k: "binary", op: "+", left: index, right: { k: "number", text: String(offset) } };
         return {
           k: "call",
@@ -3874,7 +3938,7 @@ class ProgramResolver {
         }
         // The layout the base points at is the one the program lays out, and the
         // field is a field of it or nothing the program answers.
-        const layout = laid === "JSON" ? undefined : (this.objects[laid as string] as ObjectLayout | undefined);
+        const layout = laid === "JSON" ? undefined : ((fieldOf(this, "objects") as Record<string, ObjectLayout>)[laid as string] as ObjectLayout | undefined);
         if (laid !== "JSON" && layout === undefined) {
           throw programError(
             `"${laid}" is not a layout the program lays out`,
@@ -3926,7 +3990,7 @@ class ProgramResolver {
         if ((key === undefined || layout === undefined) && objectFields.length > 0) {
           const expanded = expandedFields(value);
           const fieldNames = new Set(expanded.map((field) => String(fieldOf(field, "name"))));
-          const candidate = Object.values(this.objects).find((item) => {
+          const candidate = Object.values(fieldOf(this, "objects") as Record<string, ObjectLayout>).find((item) => {
             const itemFields = fieldOf(item, "fields") as readonly { name: string }[];
             return itemFields.length === expanded.length &&
               itemFields.every((entry) => fieldNames.has(String(fieldOf(entry, "name"))));
@@ -3944,15 +4008,18 @@ class ProgramResolver {
             `line ${line} of ${this.body.file}: the program lays out the objects its bodies write at the shapes they write; a literal of a shape the layout pass cannot read is refused where it is read`,
           );
         }
-        const laid = this.objects[layout as string];
+        const laid = (fieldOf(this, "objects") as Record<string, ObjectLayout>)[layout as string] as ObjectLayout | undefined;
+        const laidFields = laid === undefined ? [] : fieldOf(laid, "fields") as readonly { name: string; type: string }[];
         // Every field is written as the type the layout gives it: a null is a
         // reference to nothing and holds no type of its own until the field it
         // is written into says which reference it is.
         const fields = expandedFields(value).map((field) => {
-          const declared = laid?.fields.find((entry) => entry.name === field.name)?.type;
+          const fieldName = String(fieldOf(field, "name"));
+          const entry = laidFields.find((one) => String(fieldOf(one, "name")) === fieldName);
+          const declared = entry === undefined ? undefined : fieldOf(entry, "type") as string;
           return {
-            name: field.name,
-            value: this.value(field.value, declared === undefined ? null : parseType(declared), line),
+            name: fieldName,
+            value: this.value(fieldOf(field, "value") as ProgramValue, declared === undefined ? null : parseType(declared), line),
           };
         });
         return { k: "object", fields, layout, type: { kind: "ref", of: null, name: layout } };
@@ -4062,6 +4129,7 @@ class ProgramResolver {
       // A block of bytes is laid out by the compiler itself and hands back a
       // reference, so no wide number is involved.
       wide: null,
+      promise: undefined,
     };
   }
 
@@ -4161,6 +4229,7 @@ class ProgramResolver {
         builtin: true,
         bigint: false,
         wide: null,
+        promise: undefined,
       },
     };
   }
@@ -4474,7 +4543,7 @@ class ProgramResolver {
     // The whole number is read as the fraction it is, and the answer is not a
     // whole number, so it is written the way a fraction is written.
     const promoted = leftBig !== rightBig && rules.promotion === "promote";
-    const comparison = comparisonOf(op);
+    const comparison = comparisonOf(op as ProgramBinaryOp);
     const type = comparison !== null
       ? numeric("bool")
       : trueDivision || promoted
@@ -4759,6 +4828,7 @@ class ProgramResolver {
       builtin: true,
       bigint: false,
       wide: null,
+      promise: undefined,
       awaiting: true,
     };
   }
@@ -4794,24 +4864,20 @@ class ProgramResolver {
   }
 
   private builtinPromise(name: string, args: readonly DraftValue[]): { promise?: { payload: TypeExpr } } | null {
-    const payload = { payload: { kind: "ref", of: null } as TypeExpr };
+    const functions = fieldOf(this, "functions") as ProgramFunctions;
+    const payload = { payload: REF_NULL };
     if (name === "Promise") {
       const executor = args[0];
-      let carried: TypeExpr = payload.payload;
+      let carried: TypeExpr = fieldOf(payload, "payload") as TypeExpr;
       if (executor !== undefined && executor.k === "function") {
         const executorName = fieldOf(executor, "name");
         if (typeof executorName === "string") {
-          const draft = this.functions.table.get(executorName);
+          const draft = functions.table.get(executorName);
           if (draft !== undefined) {
             this.settle(draft);
             const compiled = fieldOf(draft, "compiled") as DraftProgram | null;
             if (compiled !== null) {
-              carried = executorPayload(compiled, (name) => {
-                const nested = this.functions.table.get(name);
-                if (nested === undefined) return null;
-                this.settle(nested);
-                return fieldOf(nested, "compiled") as DraftProgram | null;
-              });
+              carried = executorPayload(compiled, this);
             }
           }
         }
@@ -4909,8 +4975,12 @@ class ProgramResolver {
           }
         }
       }
+      const answeredName = String(fieldOf(answered, "name"));
+      const promiseInfo = answeredName.startsWith("Promise")
+        ? this.builtinPromise(answeredName, args)
+        : null;
       return {
-        name: String(fieldOf(answered, "name")),
+        name: answeredName,
         signature: {
           name: String(fieldOf(answered, "name")),
           symbol: String(fieldOf(answered, "name")),
@@ -4930,7 +5000,7 @@ class ProgramResolver {
         // A builtin is written by the compiler and returns a number of its
         // own, so the question a wide number asks it does not arise.
         wide: null,
-        ...(String(fieldOf(answered, "name")).startsWith("Promise") ? { ...(this.builtinPromise(String(fieldOf(answered, "name")), args) ?? {}) } : {}),
+        promise: promiseInfo === null ? undefined : fieldOf(promiseInfo, "promise") as { payload: TypeExpr } | undefined,
       };
     }
     // A function the program declared is called like any other: it is compiled
@@ -4956,13 +5026,14 @@ class ProgramResolver {
       }
       this.settle(declared);
       const signature = fieldOf(declared, "signature") as FunctionSignature;
+      const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
       // The arguments the source wrote are the ones it takes: what it reads of
       // the scope around it is passed at every call and counted by neither.
-      const arity = signature.params.length - (fieldOf(declared, "captured") as readonly unknown[]).length;
+      const arity = signatureParams.length - (fieldOf(declared, "captured") as readonly unknown[]).length;
       if (callArgs.length !== arity) {
-        const expected = signature.params
+        const expected = signatureParams
           .slice(0, arity)
-          .map((param) => `${param.name}: ${param.type}`)
+          .map((param) => `${String(fieldOf(param, "name"))}: ${String(fieldOf(param, "type"))}`)
           .join(", ");
         throw programError(
           `${functionName} takes ${arity} argument(s), not ${callArgs.length}`,
@@ -4975,7 +5046,7 @@ class ProgramResolver {
       // at every call, after the arguments the source wrote: the call is the
       // only place the two scopes meet, so the call is what hands them over.
       const written = callArgs.map((argument, position) => {
-        const wanted = signature.params[position].type;
+        const wanted = String(fieldOf(signatureParams[position], "type"));
         const resolved = this.value(argument, parameterExpect(wanted), line);
         // A parameter written as a string is given a string: a number is not
         // one, and the language has no way of turning a number into a string
@@ -4984,7 +5055,7 @@ class ProgramResolver {
         const given = draftType(resolved);
         if ((wanted === "text" || wanted === "boxedtext") && given !== null && isNumberType(given)) {
           throw programError(
-            `"${signature.params[position].name}" is given a value that is not a string`,
+            `"${signatureParams[position].name}" is given a value that is not a string`,
             this.body,
             line,
             `line ${line} of ${String(fieldOf(this.body, "file"))}: a parameter written as a string is given a string`,
@@ -4999,7 +5070,7 @@ class ProgramResolver {
       // } { let base = 100; console.log(f(10)); }` answers 11, and passing the
       // inner binding answered 110.
       const captured = (fieldOf(declared, "captured") as readonly { held: Held }[]).map((capture, position) => {
-        const paramType = signature.params[callArgs.length + position].type;
+        const paramType = signatureParams[callArgs.length + position].type;
         const capturedHeld = fieldOf(capture, "held") as Held;
         if (paramType !== "text" && paramType !== "boxedtext") {
           const expected = parseType(paramType);
@@ -5011,21 +5082,21 @@ class ProgramResolver {
           held: capturedHeld,
         } satisfies DraftValue;
       });
-      const held = primitive(parseType(signature.returns));
+      const held = primitive(parseType(String(fieldOf(signature, "returns"))));
       return {
-        name: signature.symbol,
+        name: String(fieldOf(signature, "symbol")),
         signature,
         args: [...written, ...captured],
-        returns: parseType(signature.returns),
+        returns: parseType(String(fieldOf(signature, "returns"))),
         effects: [],
         builtin: false,
-        bigint: returnsBigint(signature.returns),
+        bigint: returnsBigint(String(fieldOf(signature, "returns"))),
         wide:
           held !== null && isWide(held)
             ? declaredWideBigint(
                 fieldOf(declared, "compiled") as DraftProgram | null,
                 written,
-                signature.params.slice(0, arity).map((param) => param.name),
+                signatureParams.slice(0, arity).map((param) => param.name),
               )
             : null,
         ...(String(fieldOf(declared, "payload")) === "undefined" ? {} : { promise: { payload: fieldOf(declared, "payload") as TypeExpr } }),
@@ -5047,31 +5118,32 @@ class ProgramResolver {
       );
     }
     const signature = fieldOf(contract, "signature") as FunctionSignature;
-    if (callArgs.length !== signature.params.length) {
-      const expected = signature.params.map((param) => `${param.name}: ${param.type}`).join(", ");
+    const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+    if (callArgs.length !== signatureParams.length) {
+      const expected = signatureParams.map((param) => `${String(fieldOf(param, "name"))}: ${String(fieldOf(param, "type"))}`).join(", ");
       throw programError(
-        `${functionName} takes ${signature.params.length} argument(s), not ${callArgs.length}`,
+        `${functionName} takes ${signatureParams.length} argument(s), not ${callArgs.length}`,
         this.body,
         line,
         `${String(fieldOf(this.body, "file"))}: ${expected}`,
       );
     }
-    const given = callArgs.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line));
-    const held = primitive(parseType(signature.returns));
+    const given = callArgs.map((arg, position) => this.value(arg, parseType(String(fieldOf(signatureParams[position], "type"))), line));
+    const held = primitive(parseType(String(fieldOf(signature, "returns"))));
     return {
-      name: signature.symbol,
+      name: String(fieldOf(signature, "symbol")),
       signature,
       args: given,
-      returns: parseType(signature.returns),
+      returns: parseType(String(fieldOf(signature, "returns"))),
       effects: fieldOf(contract, "effects") as Effect[],
       builtin: false,
-      bigint: returnsBigint(signature.returns),
+      bigint: returnsBigint(String(fieldOf(signature, "returns"))),
       wide:
         held !== null && isWide(held)
           ? returnsWideBigint(
               fieldOf(contract, "body") as readonly Statement[],
               given,
-              signature.params.map((param) => param.name),
+              signatureParams.map((param) => String(fieldOf(param, "name"))),
             )
           : null,
       // A function of another file that is async answers a promise, and what
@@ -5114,13 +5186,13 @@ class ProgramResolver {
         return "other";
       }
       case "call": {
-        const builtin = builtinFor(value.function);
+        const builtin = builtinFor(String(fieldOf(value, "function")));
         if (builtin !== null) {
-          return isNumberType(builtin.returns) ? "number" : "other";
+          return isNumberType(fieldOf(builtin, "returns") as SemanticType) ? "number" : "other";
         }
-        const declared = this.functions.table.get(value.function);
-        if (declared === undefined || declared.signature === null) return "other";
-        const returns = declared.signature.returns;
+        const declared = this.functions.table.get(String(fieldOf(value, "function")));
+        if (declared === undefined || fieldOf(declared, "signature") === null) return "other";
+        const returns = String(fieldOf(fieldOf(declared, "signature"), "returns"));
         if (returns === "text" || returns === "boxedtext") return "text";
         return isNumberType(parseType(returns)) ? "number" : "other";
       }
@@ -5128,19 +5200,19 @@ class ProgramResolver {
         // A string added to a string is a string, and every other operation is
         // a number. The `||` and `&&` operators answer one of their two sides,
         // so they answer what the left one is.
-        if (value.op === "+") {
-          const left = this.kindOf(value.left, line);
-          const right = this.kindOf(value.right, line);
+        if (String(fieldOf(value, "op")) === "+") {
+          const left = this.kindOf(fieldOf(value, "left") as ProgramValue, line);
+          const right = this.kindOf(fieldOf(value, "right") as ProgramValue, line);
           return left === "text" && right === "text" ? "text" : "number";
         }
-        if (value.op === "||" || value.op === "&&") return this.kindOf(value.left, line);
+        if (String(fieldOf(value, "op")) === "||" || String(fieldOf(value, "op")) === "&&") return this.kindOf(fieldOf(value, "left") as ProgramValue, line);
         return "number";
       }
       case "unary":
         // A sign in front of a value reads it as a number, whatever it was.
-        return value.op === "+" || value.op === "-" ? "number" : "other";
+        return String(fieldOf(value, "op")) === "+" || value.op === "-" ? "number" : "other";
       case "conditional":
-        return this.kindOf(value.then, line);
+        return this.kindOf(fieldOf(value, "then") as ProgramValue, line);
       case "length":
       case "lengthOf":
       case "element":
@@ -5158,18 +5230,19 @@ class ProgramResolver {
         `a number cannot be used as ${typeToString(expect)}`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: a number goes to a numeric parameter, and an array parameter takes an array`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: a number goes to a numeric parameter, and an array parameter takes an array`,
       );
     }
-    if (held.type !== null && held.type !== wanted) {
+    const heldType = fieldOf(held, "type");
+    if (heldType !== null && String(heldType) !== wanted) {
       throw programError(
-        `the value ${held.text} is used as ${typeToString({ kind: "primitive", name: held.type })} and as ${typeToString(expect)}`,
+        `the value ${String(fieldOf(held, "text"))} is used as ${typeToString({ kind: "primitive", name: String(heldType) as PrimitiveTypeName })} and as ${typeToString(expect)}`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: one value in a program has one type`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: one value in a program has one type`,
       );
     }
-    held.type = wanted;
+    setField(held, "type", wanted);
   }
 
   /** An array is used at one element type, and at a length a parameter fixes. */
@@ -5184,7 +5257,7 @@ class ProgramResolver {
         `a typed array cannot be used as ${typeToString(expect)}`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: a buffer parameter takes the array the program allocated`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: a buffer parameter takes the array the program allocated`,
       );
     }
     const wanted = elementOf(expect);
@@ -5193,23 +5266,26 @@ class ProgramResolver {
       // for it takes the element type, or the call would read the same bytes
       // as a type the array was never written at.
       const group = this.aliased(held);
-      const fixed = group.find((member) => member.element !== null && member.element.kind === "primitive" && member.element.name !== wanted);
-      if (fixed !== undefined && fixed.element !== null) {
+      const fixed = group.find((member) => {
+        const element = fieldOf(member, "element") as TypeExpr | null;
+        return element !== null && element.kind === "primitive" && String(fieldOf(element, "name")) !== wanted;
+      });
+      if (fixed !== undefined && fieldOf(fixed, "element") !== null) {
         throw programError(
-          `an array of ${typeToString(fixed.element)} is used where ${wanted} is expected`,
+          `an array of ${typeToString(fieldOf(fixed, "element") as TypeExpr)} is used where ${wanted} is expected`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: allocate the array with the element type the parameter takes`,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: allocate the array with the element type the parameter takes`,
         );
       }
-      for (const member of group) member.element = numeric(wanted);
+      for (const member of group) setField(member, "element", numeric(wanted));
     }
-    if (expect.kind === "array" && expect.length !== null && expect.length !== held.length) {
+    if (expect.kind === "array" && expect.length !== null && expect.length !== fieldOf(held, "length")) {
       throw programError(
-        `an array of ${held.length} element(s) is used where ${expect.length} is expected`,
+        `an array of ${String(fieldOf(held, "length"))} element(s) is used where ${expect.length} is expected`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: a parameter with a fixed length takes an array of exactly that length`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: a parameter with a fixed length takes an array of exactly that length`,
       );
     }
   }
@@ -5241,15 +5317,17 @@ class ProgramResolver {
     if (index.k !== "literal") return;
     // An array the program sized when it ran is as long as the count it settled
     // on, and that count is a value: there is no bound to refuse a read against.
-    if (held.length === null) return;
-    const at = integerLiteral(index.held.text);
+    if (fieldOf(held, "length") === null) return;
+    const literalHeld = fieldOf(index, "held") as { text?: unknown };
+    const written = String(fieldOf(literalHeld, "text"));
+    const at = integerLiteral(written);
     if (at === null) return;
-    if (at < 0n || at >= BigInt(held.length)) {
+    if (at < 0n || at >= BigInt(fieldOf(held, "length") as number)) {
       throw programError(
-        `${held.name}[${index.held.text}] is outside the array`,
+        `${String(fieldOf(held, "name"))}[${written}] is outside the array`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: ${held.name} holds ${held.length} element(s), 0 to ${held.length - 1}`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: ${String(fieldOf(held, "name"))} holds ${String(fieldOf(held, "length"))} element(s), 0 to ${Number(fieldOf(held, "length")) - 1}`,
       );
     }
   }
@@ -5267,10 +5345,10 @@ class ProgramResolver {
   /** The type an annotation names, as a contract type. */
   private annotation(text: string, line: number): TypeExpr {
     if (text.trim() === "any" || text.trim() === "object" || text.trim() === "unknown") {
-      return { kind: "ref", of: null };
+      return REF_NULL;
     }
     try {
-      return mapTypeScriptType(text, `line ${line} of ${this.body.file}`, this.body.wideBigint === true);
+      return mapTypeScriptType(text, `line ${line} of ${String(fieldOf(this.body, "file"))}`, fieldOf(this.body, "wideBigint") === true);
     } catch (error) {
       if (!(error instanceof CompilerError)) throw error;
       throw programError(error.message, this.body, line, error.detail ?? undefined);
@@ -5280,7 +5358,7 @@ class ProgramResolver {
   /** An array has no printed form, so it may not reach a console.log. */
   private assertPrintable(value: DraftValue, line: number): void {
     if (value.k === "text") {
-      for (const part of value.parts) {
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: DraftValue }[]) {
         if (part.k === "value") this.assertPrintable(part.value, line);
       }
       return;
@@ -5297,22 +5375,22 @@ class ProgramResolver {
     // own type is the layout's, so this is the same question the printed
     // value answers: a field of a reference type is not a buffer.
     if (value.k === "field") return;
-    const held = value.k === "buffer" || (value.k === "reference" && value.held.kind === "array");
+    const held = value.k === "buffer" || (value.k === "reference" && (fieldOf(value, "held") as Held).kind === "array");
     if (held) {
       throw programError(
         "a program cannot print a buffer",
         this.body,
         line,
-        `line ${line} of ${this.body.file}: print a number, or a string that interpolates one`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: print a number, or a string that interpolates one`,
       );
     }
-    if (value.k === "reference" && value.held.kind === "object" &&
-        (((value.held.type as { name?: string }).name !== undefined) || ((value.held.type as { of?: TypeExpr | null }).of !== null))) {
+    if (value.k === "reference" && (fieldOf(value, "held") as Held).kind === "object" &&
+        (((fieldOf(fieldOf(value, "held"), "type") as { name?: string }).name !== undefined) || ((fieldOf(fieldOf(value, "held"), "type") as { of?: TypeExpr | null }).of !== null))) {
       throw programError(
         "a program cannot print an object",
         this.body,
         line,
-        `line ${line} of ${this.body.file}: print a number, or a string that interpolates one`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: print a number, or a string that interpolates one`,
       );
     }
     // A dynamic value (`any`) may be a string at run time, so printing one is
@@ -5325,7 +5403,7 @@ class ProgramResolver {
       "a program prints a number or a string",
       this.body,
       line,
-      `line ${line} of ${this.body.file}: a buffer has no printed form`,
+      `line ${line} of ${String(fieldOf(this.body, "file"))}: a buffer has no printed form`,
     );
   }
 }
@@ -5384,45 +5462,46 @@ function draftHasCall(value: DraftValue): boolean {
     case "reference":
       return false;
     case "element":
-      return draftHasCall(value.index);
+      return draftHasCall(fieldOf(value, "index") as DraftValue);
     case "lengthOf":
       // The value the length is of is written once, so a call inside it is a
       // call the length's statement makes.
-      return draftHasCall(value.of);
+      return draftHasCall(fieldOf(value, "of") as DraftValue);
     case "text":
       // A string written out in the source is laid down in the object beside
       // the code; one with anything computed in it is built at run time.
-      return value.parts.some((part) => part.k === "value");
+      return (fieldOf(value, "parts") as readonly { k: string }[]).some((part) => part.k === "value");
     case "compare":
       // A comparison of two texts is the runtime's own.
-      if (value.how === "string") return true;
-      return draftHasCall(value.left) || draftHasCall(value.right);
+      if (String(fieldOf(value, "how")) === "string") return true;
+      return draftHasCall(fieldOf(value, "left") as DraftValue) || draftHasCall(fieldOf(value, "right") as DraftValue);
     case "isNull":
-      return draftHasCall(value.operand);
+      return draftHasCall(fieldOf(value, "operand") as DraftValue);
     case "unary":
-      return draftHasCall(value.operand);
+      return draftHasCall(fieldOf(value, "operand") as DraftValue);
     case "binary": {
       // A power is `pow`, and two texts put together are a string built at run
       // time: the runtime measures the two, allocates the answer and copies
       // the parts into it.
-      if (value.op === "**") return true;
-      if (value.op === "+" && value.type !== null && value.type.kind === "text") return true;
+      if (String(fieldOf(value, "op")) === "**") return true;
+      if (String(fieldOf(value, "op")) === "+" && fieldOf(value, "type") !== null && (fieldOf(value, "type") as TypeExpr).kind === "text") return true;
       // A product and a quotient of a whole number wider than a machine word
       // are the runtime kernel, for the same reason a power is.
+      const wideType = fieldOf(value, "type") as TypeExpr | null;
       if (
-        (value.op === "*" || value.op === "/" || value.op === "%") &&
-        value.type !== null &&
-        value.type.kind === "primitive" &&
-        (value.type.name === "u256" || value.type.name === "i256")
+        (String(fieldOf(value, "op")) === "*" || String(fieldOf(value, "op")) === "/" || String(fieldOf(value, "op")) === "%") &&
+        wideType !== null &&
+        wideType.kind === "primitive" &&
+        (wideType.name === "u256" || wideType.name === "i256")
       ) {
         return true;
       }
-      return draftHasCall(value.left) || draftHasCall(value.right);
+      return draftHasCall(fieldOf(value, "left") as DraftValue) || draftHasCall(fieldOf(value, "right") as DraftValue);
     }
     case "conditional":
-      return draftHasCall(value.condition) || draftHasCall(value.then) || draftHasCall(value.otherwise);
+      return draftHasCall(fieldOf(value, "condition") as DraftValue) || draftHasCall(fieldOf(value, "then") as DraftValue) || draftHasCall(fieldOf(value, "otherwise") as DraftValue);
     case "field":
-      return draftHasCall(value.object);
+      return draftHasCall(fieldOf(value, "object") as DraftValue);
   }
 }
 
@@ -5489,45 +5568,50 @@ class ProgramLowering {
     // the binding the capture was taken from, and the parameter the capture
     // arrives under is named by the source, which are two names when the
     // declaration was renamed to keep the two apart — so both are boxed.
-    for (const draft of program.declared) {
-      if (draft.signature === null || draft.compiled === null) continue;
-      for (const capture of draft.captured) {
+    const declaredDrafts = fieldOf(program, "declared") as readonly SettledFunction[];
+    for (const draft of declaredDrafts) {
+      if (fieldOf(draft, "signature") === null || fieldOf(draft, "compiled") === null) continue;
+      for (const capture of fieldOf(draft, "captured") as readonly { boxed: boolean; held: { name: string }; name: string }[]) {
         // A string the function writes through is shared through a cell, and
         // the cell is named by the binding the capture was taken from and by
         // the name the capture arrives under, which are two names when the
         // declaration was renamed to keep the two apart — so both are boxed.
-        if (capture.boxed) {
-          this.boxedTexts.add(capture.held.name);
-          this.boxedTexts.add(capture.name);
+        if (fieldOf(capture, "boxed") === true) {
+          this.boxedTexts.add(String(fieldOf(fieldOf(capture, "held"), "name")));
+          this.boxedTexts.add(String(fieldOf(capture, "name")));
         }
       }
     }
     // A function the program declares is a function of its own, lowered by a
     // lowering of its own: the names it holds are its own, and a name it
     // generates is not one the program around it generated.
-    const settled = program.declared.filter(
-      (draft): draft is SettledFunction => draft.signature !== null && draft.compiled !== null,
-    );
+    const settled = declaredDrafts.filter(
+      (draft) => fieldOf(draft, "signature") !== null && fieldOf(draft, "compiled") !== null,
+    ) as SettledFunction[];
     const bodies = settled.map((draft) => this.function(draft));
     const trampolines = settled
-      .filter((draft) => draft.name.startsWith("__arrow_"))
+      .filter((draft) => String(fieldOf(draft, "name")).startsWith("__arrow_"))
       .flatMap((draft) => {
-        const suffix = draft.name.slice("__arrow_".length);
+        const draftName = String(fieldOf(draft, "name"));
+        const suffix = draftName.slice("__arrow_".length);
         const trampolineName = `__arrow_trampoline_${suffix}`;
         // A handler the runtime calls is given the request and the response and
         // nothing else, so the names it captured are read from where the
         // program left them rather than from the call.
-        if (draft.serverHandler) {
+        if (fieldOf(draft, "serverHandler") === true) {
           const holders = captureHolders(draft);
-          const written = draft.signature.params.slice(0, draft.params.length);
-          const captured = draft.signature.params.slice(draft.params.length);
+          const signature = fieldOf(draft, "signature") as FunctionSignature;
+          const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+          const writtenCount = (fieldOf(draft, "params") as readonly unknown[]).length;
+          const written = signatureParams.slice(0, writtenCount);
+          const captured = signatureParams.slice(writtenCount);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
             ...captured.flatMap((param, index) =>
-              captureArguments(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+              captureArguments(String(fieldOf(param, "type")), ((fieldOf((fieldOf(draft, "captured") as readonly { type: unknown }[])[index] ?? {}, "type") ?? fieldOf(param, "type")) as SemanticType), holders[index] ?? "((blaze_capture_t){ 0 })"),
             ),
           ].join(", ");
-          const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+          const call = args.length > 0 ? `${draftName}(${args});` : `${draftName}();`;
           return serverHandlerTrampoline(trampolineName, draft, holders, call);
         }
         // A captured text local arrives as the pointer to the shared cell that
@@ -5536,18 +5620,22 @@ class ProgramLowering {
         // What calls the trampoline is given one value — the value of the
         // event — so the names the arrow captured are read out of the bundle
         // it is handed beside it, one for each of them.
-        const args = draft.signature.params
+        const signature = fieldOf(draft, "signature") as FunctionSignature;
+        const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+        const writtenCount = (fieldOf(draft, "params") as readonly unknown[]).length;
+        const captured = fieldOf(draft, "captured") as readonly { type: unknown }[];
+        const args = signatureParams
           .flatMap((param, index) =>
-            index < draft.params.length
-              ? [callbackValue(param.type, index === 0 ? "p0" : "0")]
+            index < writtenCount
+              ? [callbackValue(String(fieldOf(param, "type")), index === 0 ? "p0" : "0")]
               : captureArguments(
-                  param.type,
-                  draft.captured[index - draft.params.length]?.type ?? param.type,
-                  `((blaze_capture_t *)p1)[${index - draft.params.length}]`,
+                  String(fieldOf(param, "type")),
+                  ((fieldOf(captured[index - writtenCount] ?? {}, "type") ?? fieldOf(param, "type")) as SemanticType),
+                  `((blaze_capture_t *)p1)[${index - writtenCount}]`,
                 ),
           )
           .join(", ");
-        const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+        const call = args.length > 0 ? `${draftName}(${args});` : `${draftName}();`;
         const body = `static void ${trampolineName}(${callbackParameters()}) {\n  ${call}\n}`;
         return [{ name: trampolineName, body }];
       });
@@ -5555,31 +5643,38 @@ class ProgramLowering {
     // through a trampoline of its own: what calls it is not a program, and
     // passes it two values rather than the arguments the source wrote.
     const callbacks = settled
-      .filter((draft) => draft.callback)
+      .filter((draft) => fieldOf(draft, "callback") === true)
       .flatMap((draft) => {
-        const trampolineName = `__callback_${draft.name}`;
+        const draftName = String(fieldOf(draft, "name"));
+        const trampolineName = `__callback_${draftName}`;
         // A handler the runtime calls is given the request and the response
         // and nothing else, so the names it captured are read from where the
         // program left them rather than from the call.
-        if (draft.serverHandler) {
+        if (fieldOf(draft, "serverHandler") === true) {
           const holders = captureHolders(draft);
-          const written = draft.signature.params.slice(0, draft.params.length);
-          const captured = draft.signature.params.slice(draft.params.length);
+          const signature = fieldOf(draft, "signature") as FunctionSignature;
+          const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+          const writtenCount = (fieldOf(draft, "params") as readonly unknown[]).length;
+          const written = signatureParams.slice(0, writtenCount);
+          const captured = signatureParams.slice(writtenCount);
           const args = [
             ...written.map((param, index) => callbackValue(param.type, `p${index}`)),
             ...captured.flatMap((param, index) =>
-              captureArguments(param.type, draft.captured[index]?.type ?? param.type, holders[index] ?? "((blaze_capture_t){ 0 })"),
+              captureArguments(String(fieldOf(param, "type")), ((fieldOf((fieldOf(draft, "captured") as readonly { type: unknown }[])[index] ?? {}, "type") ?? fieldOf(param, "type")) as SemanticType), holders[index] ?? "((blaze_capture_t){ 0 })"),
             ),
           ].join(", ");
-          const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
+          const call = args.length > 0 ? `${draftName}(${args});` : `${draftName}();`;
           return serverHandlerTrampoline(trampolineName, draft, holders, call);
         }
-        const args = draft.signature.params
-          .slice(0, draft.params.length)
-          .map((param, index) => callbackValue(param.type, `p${index}`))
+        const signature = fieldOf(draft, "signature") as FunctionSignature;
+        const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+        const writtenCount = (fieldOf(draft, "params") as readonly unknown[]).length;
+        const args = signatureParams
+          .slice(0, writtenCount)
+          .map((param, index) => callbackValue(String(fieldOf(param, "type")), `p${index}`))
           .join(", ");
-        const call = args.length > 0 ? `${draft.name}(${args});` : `${draft.name}();`;
-        const body = `static void ${trampolineName}(${trampolineParameters(draft.params.length)}) {\n  ${call}\n}`;
+        const call = args.length > 0 ? `${draftName}(${args});` : `${draftName}();`;
+        const body = `static void ${trampolineName}(${trampolineParameters(writtenCount)}) {\n  ${call}\n}`;
         return [{ name: trampolineName, body }];
       });
     // A block starts open and is closed by what ends it: a program ends by
@@ -5587,61 +5682,74 @@ class ProgramLowering {
     // returns or by falling off the end of its body.
     const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
     this.enter(entry, null);
-    this.statements(program.statements);
+    this.statements(fieldOf(program, "statements") as readonly DraftStatement[]);
     this.leave();
     if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
+    const functionsOut: FunctionSignature[] = [];
+    for (const one of fieldOf(program, "functions") as readonly FunctionSignature[]) functionsOut.push(one);
+    for (const draft of settled) functionsOut.push(fieldOf(draft, "signature") as FunctionSignature);
+    const extraFunctionsOut: { name: string; body: string }[] = [];
+    for (const one of trampolines) extraFunctionsOut.push(one);
+    for (const one of callbacks) extraFunctionsOut.push(one);
+    const httpHandlersOut: string[] = [];
+    for (const one of fieldOf(program, "httpHandlers") as readonly string[]) httpHandlersOut.push(one);
     return {
-      file: program.file,
+      file: String(fieldOf(program, "file")),
       language: this.language,
       entry,
-      functions: [...program.functions, ...settled.map((draft) => draft.signature)],
+      functions: functionsOut,
       bodies,
-      objects: program.objects,
-      extraFunctions: [...trampolines, ...callbacks],
-      httpHandlers: [...program.httpHandlers],
+      objects: fieldOf(program, "objects") as SemanticProgram["objects"],
+      extraFunctions: extraFunctionsOut,
+      httpHandlers: httpHandlersOut,
     };
   }
 
   /** One function the program declared, as the IR holds a function whole. */
   private function(draft: SettledFunction): SemanticFunction {
-    const signature = draft.signature as FunctionSignature;
+    const signature = fieldOf(draft, "signature") as FunctionSignature;
+    const boxedTexts = fieldOf(this, "boxedTexts") as Set<string>;
+    const used = fieldOf(this, "used") as Set<string>;
+    const programLanguage = String(fieldOf(this, "language"));
+    const layouts = fieldOf(this, "layouts") as Record<string, ObjectLayout>;
+    const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
     // The parameters are the parameters of the signature the resolver settled,
     // read back as the types the body reads them at: a buffer is a pointer to
     // its first element, and a number is the number it is.
-    const params = signature.params.map((param) => {
-      if (param.type === "text" || param.type === "boxedtext") {
+    const params = signatureParams.map((param) => {
+      if (String(fieldOf(param, "type")) === "text" || String(fieldOf(param, "type")) === "boxedtext") {
         return {
           kind: "text" as const,
-          name: param.name,
+          name: String(fieldOf(param, "name")),
           mutable: true,
           // A string the function writes through is shared through a cell, and
           // a string it is given is the string itself.
-          boxed: param.type === "boxedtext" || this.boxedTexts.has(param.name),
+          boxed: String(fieldOf(param, "type")) === "boxedtext" || boxedTexts.has(String(fieldOf(param, "name"))),
         };
       }
       return {
         kind: "value" as const,
-        name: param.name,
+        name: String(fieldOf(param, "name")),
         mutable: false,
-        type: parseType(param.type) as SemanticType,
+        type: parseType(String(fieldOf(param, "type"))) as SemanticType,
       };
     });
     // The body is lowered on its own: its own entry block, its own names, and
     // a value of its own for each parameter it is given.
-    const inner = new ProgramLowering(new Set(this.used), this.boxedTexts, this.language, this.layouts);
-    const entry = inner.body(draft.compiled as DraftProgram);
+    const inner = new ProgramLowering(new Set(used), boxedTexts, programLanguage, layouts);
+    const entry = inner.body(fieldOf(draft, "compiled") as DraftProgram);
     // An async function answers a promise carrying what its body returns, so
     // every way out of the body settles that promise before the call returns.
     // The body itself is unchanged: it runs straight through, which is what a
     // compiled program does, and the promise is settled with the value the
     // return made.
-    if (draft.async === true) inner.settleReturns(entry);
-    const allocates = entry.releases.length > 0;
+    if (fieldOf(draft, "async") === true) inner.settleReturns(entry);
+    const allocates = (fieldOf(entry, "releases") as readonly unknown[]).length > 0;
     return {
-      name: signature.name,
-      symbol: signature.symbol,
+      name: String(fieldOf(signature, "name")),
+      symbol: String(fieldOf(signature, "symbol")),
       params,
-      returns: parseType(signature.returns),
+      returns: parseType(String(fieldOf(signature, "returns"))),
       requires: [],
       ensures: [],
       // What a function of a program does beyond computing its result is what
@@ -5665,11 +5773,12 @@ class ProgramLowering {
   private body(program: DraftProgram): SemanticBlock {
     const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
     this.enter(entry, null);
-    this.statements(program.statements);
+    this.statements(fieldOf(program, "statements") as readonly DraftStatement[]);
     this.leave();
     // A body that falls off the end hands back what the function returns, which
     // is nothing at all unless the source returns something.
-    if (entry.terminator.k === "next") entry.terminator = { k: "return", value: null };
+    const terminator = fieldOf(entry, "terminator") as SemanticBlock["terminator"];
+    if (terminator.k === "next") setField(entry, "terminator", { k: "return", value: null });
     return entry;
   }
 
@@ -5680,17 +5789,18 @@ class ProgramLowering {
    * language's own function does when it runs out of statements.
    */
   private settleReturns(block: SemanticBlock): void {
-    if (block.terminator.k === "return") {
-      block.terminator = { k: "return", value: this.settled(block.terminator.value) };
+    const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (terminator.k === "return") {
+      setField(block, "terminator", { k: "return", value: this.settled(fieldOf(terminator, "value") as SemanticValue | null) });
     }
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       for (const nested of statementBlocksOf(statement)) this.settleReturns(nested);
     }
   }
 
   /** The promise a settled return answers, carrying the value it returned. */
   private settled(value: SemanticValue | null): SemanticValue {
-    const payload: SemanticType = value === null ? VOID : value.type;
+    const payload: SemanticType = value === null ? VOID : fieldOf(value, "type") as SemanticType;
     const callee = value === null
       ? "Promise.settle.nothing"
       : payload.kind === "text"
@@ -5709,12 +5819,12 @@ class ProgramLowering {
         signature: {
           name: callee,
           symbol: callee,
-          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
-          returns: contractText(builtin.returns),
+          params: (fieldOf(builtin, "params") as readonly SemanticType[]).map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(fieldOf(builtin, "returns") as SemanticType),
         },
         args: value === null ? [] : [value],
         argTypes: value === null ? [] : [payload],
-        returns: builtin.returns,
+        returns: fieldOf(builtin, "returns") as SemanticType,
         effects: ["memory"],
         ownership: "none",
         retain: false,
@@ -5741,8 +5851,9 @@ class ProgramLowering {
 
   /** The statements a value hoisted, written where the program wrote them. */
   private flush(): void {
-    const block = this.frame().block;
-    for (const before of this.pending) block.statements.push(before);
+    const block = fieldOf(this.frame(), "block") as SemanticBlock;
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    for (const before of this.pending) statements.push(before);
     this.pending = [];
   }
 
@@ -5772,7 +5883,9 @@ class ProgramLowering {
    */
   private statement(statement: SemanticStatement): void {
     this.flush();
-    this.frame().block.statements.push(statement);
+    const block = fieldOf(this.frame(), "block") as SemanticBlock;
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    statements.push(statement);
   }
 
   /**
@@ -5799,22 +5912,22 @@ class ProgramLowering {
 
   /** The slot a declaration makes, and the type the name is read as. */
   private declared(held: Held): SemanticSlot {
-    if (held.kind === "text") return { kind: "text", name: held.name, mutable: held.mutable, boxed: held.boxed === true || this.boxedTexts.has(held.name) };
-    if (held.kind === "array") {
+    if (String(fieldOf(held, "kind")) === "text") return { kind: "text", name: String(fieldOf(held, "name")), mutable: fieldOf(held, "mutable") === true, boxed: fieldOf(held, "boxed") === true || this.boxedTexts.has(String(fieldOf(held, "name"))) };
+    if (String(fieldOf(held, "kind")) === "array") {
       return {
         kind: "buffer",
-        name: held.name,
-        mutable: held.mutable,
-        element: (held.element ?? F64),
-        length: held.length,
+        name: String(fieldOf(held, "name")),
+        mutable: fieldOf(held, "mutable") === true,
+        element: (fieldOf(held, "element") ?? F64) as TypeExpr,
+        length: fieldOf(held, "length") as number | null,
       };
     }
-    if (held.kind === "object") return { kind: "object", name: held.name, mutable: held.mutable, type: held.type };
-    if (held.kind === "argv") return { kind: "value", name: held.name, mutable: held.mutable, type: numeric("f64") };
+    if (String(fieldOf(held, "kind")) === "object") return { kind: "object", name: String(fieldOf(held, "name")), mutable: fieldOf(held, "mutable") === true, type: fieldOf(held, "type") as TypeExpr };
+    if (String(fieldOf(held, "kind")) === "argv") return { kind: "value", name: String(fieldOf(held, "name")), mutable: fieldOf(held, "mutable") === true, type: numeric("f64") };
     // A list of pairs is a table the map is built from: the name it was declared
     // under holds no value, and the entries are the reads of the map.
-    if (held.kind === "pairs") return { kind: "value", name: held.name, mutable: held.mutable, type: numeric("f64") };
-    return { kind: "value", name: held.name, mutable: held.mutable, type: numeric(held.type ?? "f64") };
+    if (String(fieldOf(held, "kind")) === "pairs") return { kind: "value", name: String(fieldOf(held, "name")), mutable: fieldOf(held, "mutable") === true, type: numeric("f64") };
+    return { kind: "value", name: String(fieldOf(held, "name")), mutable: fieldOf(held, "mutable") === true, type: numeric(String(fieldOf(held, "type") ?? "f64") as PrimitiveTypeName) };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -5833,7 +5946,8 @@ class ProgramLowering {
       // `if` whose every arm leaves and a loop that never ends are both
       // statements nothing after them can be reached from, and what the source
       // wrote after them is dead as well.
-      const end = this.frame().block.terminator.k;
+      const frameBlock = fieldOf(this.frame(), "block") as SemanticBlock;
+      const end = (fieldOf(frameBlock, "terminator") as SemanticBlock["terminator"]).k;
       if (end === "jump" || end === "return" || end === "unreachable") break;
       this.draft(statement);
     }
@@ -5849,158 +5963,197 @@ class ProgramLowering {
         // declaration is not: the fill is a loop, and a loop is a statement of
         // its own, so the array is written under a name first and the name
         // declared here is that array again.
-        const slot = this.declared(statement.held);
+        const declaration = fieldOf(statement, "held") as Held;
+        const line = Number(fieldOf(statement, "line"));
+        const declaredValue = fieldOf(statement, "value") as DraftValue;
+        const slot = this.declared(declaration);
         const written: DraftValue | null =
-          statement.held.kind === "array" && ARRAY_FORMS.has(statement.value.k) ? statement.value : null;
+          String(fieldOf(declaration, "kind")) === "array" && ARRAY_FORMS.has(declaredValue.k) ? declaredValue : null;
         const allocated =
           written !== null && (written.k === "buffer" || written.k === "sized" || written.k === "view");
-        const value = allocated ? this.buffer(written, statement.line) : this.value(statement.value, null, statement.line);
+        const value = allocated ? this.buffer(written, line) : this.value(declaredValue, null, line);
         // A name that is nothing is declared as the reference it is, so the
         // name reads as what it holds. An array another name already holds is
         // named again rather than allocated again, so the block owns it once.
-        const held = value.k === "nothing" && slot.kind === "object" ? { ...value, type: slot.type } : value;
+        const held = value.k === "nothing" && slot.kind === "object" ? { ...value, type: fieldOf(slot, "type") as TypeExpr } : value;
         // A view holds no block of its own: the block it looks into belongs to
         // the name the program gave it, and what that block frees is freed
         // after every view of it, because a block frees in the reverse of the
         // order the program took it. Freeing a view would free bytes in the
         // middle of a block, which is not a block at all.
-        if (allocated && written !== null && written.k !== "view") this.own(slot.name);
-        if (value.k === "newObject") this.own(slot.name);
+        if (allocated && written !== null && written.k !== "view") this.own(String(fieldOf(slot, "name")));
+        if (value.k === "newObject") this.own(String(fieldOf(slot, "name")));
         // A list a call answered is the caller's to free: the callee laid it
         // out, and the name the block binds it to releases it where the block
         // ends.
-        if (slot.kind === "buffer" && value.k === "call" && isSequence(value.type)) this.own(slot.name);
-        this.statement({ k: "let", slot, value: held, line: statement.line });
+        if (slot.kind === "buffer" && value.k === "call" && isSequence(fieldOf(value, "type") as SemanticType)) this.own(String(fieldOf(slot, "name")));
+        this.statement({ k: "let", slot, value: held, line });
         return;
       }
       case "fieldAssign": {
         // The object is the name the program bound, read as the reference it
         // is: a store is written through a reference, and the validator holds a
         // store of anything else to be a name the program did not bind.
-        const object: SemanticValue = { k: "local", type: statement.type, name: statement.object };
+        const line = Number(fieldOf(statement, "line"));
+        const object: SemanticValue = { k: "local", type: fieldOf(statement, "type") as TypeExpr, name: String(fieldOf(statement, "object")) };
         this.statement({
           k: "storeField",
           object,
-          layout: statement.layout,
-          field: statement.field,
-          value: this.value(statement.value, null, statement.line),
-          line: statement.line,
+          layout: String(fieldOf(statement, "layout")),
+          field: String(fieldOf(statement, "field")),
+          value: this.value(fieldOf(statement, "value") as DraftValue, null, line),
+          line,
         });
         return;
       }
       case "assign": {
-        const value = this.value(statement.value, statement.type, statement.line);
+        const line = Number(fieldOf(statement, "line"));
+        const type = fieldOf(statement, "type") as TypeExpr | null;
+        const name = String(fieldOf(statement, "name"));
+        const op = String(fieldOf(statement, "op")) as SemanticAssignOp;
+        const value = this.value(fieldOf(statement, "value") as DraftValue, type, line);
         // A wide number has no compound operator a backend can write, and a
         // floor division has no compound form C has, so the compound is
         // written as the binary form every backend either writes or refuses
         // by name.
-        const wide = compoundAsBinary(statement.op, statement.type ?? numeric("f64"), { k: "local", type: statement.type ?? numeric("f64"), name: statement.name }, value);
+        const wide = compoundAsBinary(op, type ?? numeric("f64"), { k: "local", type: type ?? numeric("f64"), name }, value);
         this.statement({
           k: "set",
-          name: statement.name,
-          op: wide === null ? statement.op : wide.op,
+          name,
+          op: wide === null ? op : wide.op,
           value: wide === null ? value : wide.value,
-          line: statement.line,
+          line,
         });
         return;
       }
       case "elementAssign": {
-        const index = this.value(statement.index, USIZE, statement.line);
-        const value = this.value(statement.value, statement.type, statement.line);
+        const line = Number(fieldOf(statement, "line"));
+        const type = fieldOf(statement, "type") as TypeExpr | null;
+        const buffer = String(fieldOf(statement, "buffer"));
+        const index = this.value(fieldOf(statement, "index") as DraftValue, USIZE, line);
+        const value = this.value(fieldOf(statement, "value") as DraftValue, type, line);
         // The same rule over one element rather than a slot.
-        const element = statement.type ?? numeric("f64");
-        const wide = compoundAsBinary(statement.op, element, { k: "element", type: element, of: { k: "local", type: element, name: statement.buffer }, index }, value);
+        const element = type ?? numeric("f64");
+        const wide = compoundAsBinary(String(fieldOf(statement, "op")) as SemanticAssignOp, element, { k: "element", type: element, of: { k: "local", type: element, name: buffer }, index }, value);
         this.statement({
           k: "setElement",
-          buffer: statement.buffer,
+          buffer,
           index,
-          op: wide === null ? statement.op : wide.op,
+          op: wide === null ? String(fieldOf(statement, "op")) as SemanticAssignOp : wide.op,
           value: wide === null ? value : wide.value,
-          line: statement.line,
+          line,
         });
         return;
       }
-      case "update":
-        this.statement({ k: "step", name: statement.name, op: statement.op, prefix: statement.prefix, line: statement.line });
+      case "update": {
+        const line = Number(fieldOf(statement, "line"));
+        this.statement({ k: "step", name: String(fieldOf(statement, "name")), op: String(fieldOf(statement, "op")) as "++" | "--", prefix: fieldOf(statement, "prefix") === true, line });
         return;
+      }
       case "fill": {
         // The same statement `a.fill(x)` writes when it is bound to a name: the
         // array is written from an index the compiler names, so two fills in one
         // block do not count with the same one.
-        const array = this.value(statement.buffer, null, statement.line);
+        const line = Number(fieldOf(statement, "line"));
+        const array = this.value(fieldOf(statement, "buffer") as DraftValue, null, line);
         if (array.k !== "local") {
           throw new CompilerError("ContractError", "program", "a fill is written of an array the program did not name", "fill an array a name holds", "", "", "");
         }
-        const element = (statement.held.element ?? F64);
+        const element = (fieldOf(fieldOf(statement, "held") as Held, "element") ?? F64) as TypeExpr;
         this.pending.push({
           k: "fill",
           buffer: array.name,
           index: this.generated("i"),
-          value: this.value(statement.value, element, statement.line),
+          value: this.value(fieldOf(statement, "value") as DraftValue, element, line),
           type: element,
-          line: statement.line,
+          line,
         });
         return;
       }
       case "print":
         this.print(statement);
         return;
-      case "invoke":
-        this.statement({ k: "call", call: this.call(statement.call, statement.line), line: statement.line });
+      case "invoke": {
+        const line = Number(fieldOf(statement, "line"));
+        this.statement({ k: "call", call: this.call(fieldOf(statement, "call") as DraftCall, line), line });
         return;
+      }
       case "if": {
-        const condition = this.truth(this.value(statement.condition, null, statement.line));
-        const then = this.arm(statement.then, this.frame().loop);
-        const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop);
-        this.statement({ k: "if", condition, then, otherwise, line: statement.line });
+        const line = Number(fieldOf(statement, "line"));
+        const condition = this.truth(this.value(fieldOf(statement, "condition") as DraftValue, null, line));
+        const loop = fieldOf(this.frame(), "loop") as LoopTarget | null;
+        const then = this.arm(fieldOf(statement, "then") as readonly DraftStatement[], loop);
+        const otherwiseList = fieldOf(statement, "otherwise") as readonly DraftStatement[];
+        const otherwise = otherwiseList.length === 0 ? null : this.arm(otherwiseList, loop);
+        this.statement({ k: "if", condition, then, otherwise, line });
         // An `if` with an arm on each side, each of which leaves, is a statement
         // nothing after it can be reached from. The block says so, rather than
         // falling out of itself into a return of nothing: a function declared to
         // return a number does not end by handing back whatever the register
         // held, and a function that returns from every path returns.
-        if (otherwise !== null && this.frame().block.terminator.k === "next" && leaves(then) && leaves(otherwise)) {
-          this.frame().block.terminator = { k: "unreachable" };
+        const frameBlock = fieldOf(this.frame(), "block") as SemanticBlock;
+        if (otherwise !== null && (fieldOf(frameBlock, "terminator") as SemanticBlock["terminator"]).k === "next" && leaves(then) && leaves(otherwise)) {
+          setField(frameBlock, "terminator", { k: "unreachable" });
         }
         return;
       }
       case "while": {
-        const condition = this.truth(this.value(statement.condition, null, statement.line));
-        const { target, ...info } = this.loop(statement.body);
-        const loop = { kind: "while" as const, condition, ...info };
-        const cond = statement.condition as { k?: string; value?: boolean; text?: string };
+        const line = Number(fieldOf(statement, "line"));
+        const condition = this.truth(this.value(fieldOf(statement, "condition") as DraftValue, null, line));
+        const bodyList = fieldOf(statement, "body") as readonly DraftStatement[];
+        const loopResult = this.loop(bodyList);
+        const target = fieldOf(loopResult, "target") as LoopTarget;
+        const loop = {
+          kind: "while" as const,
+          condition,
+          header: String(fieldOf(loopResult, "header")),
+          exit: String(fieldOf(loopResult, "exit")),
+          body: fieldOf(loopResult, "body") as SemanticBlock,
+        };
+        const cond = fieldOf(statement, "condition") as { k?: string; value?: boolean; text?: string };
         const isConstantTrue =
-          (cond.k === "boolean" && cond.value === true) ||
-          (cond.k === "literal" && (cond.text === "true" || cond.text === "1"));
+          (String(fieldOf(cond, "k")) === "boolean" && fieldOf(cond, "value") === true) ||
+          (String(fieldOf(cond, "k")) === "literal" && (String(fieldOf(cond, "text")) === "true" || String(fieldOf(cond, "text")) === "1"));
         // A loop whose condition is always true does not end by its condition,
         // and the code after it runs only where the body leaves it. A body that
         // leaves the loop may or may not do so, and a body that does not leaves
         // it never.
-        const neverExits = isConstantTrue && target.left !== true;
-        if (neverExits) (loop as { neverExits?: boolean }).neverExits = true;
+        const neverExits = isConstantTrue && fieldOf(target, "left") !== true;
+        if (neverExits) setField(loop, "neverExits", true);
         this.statement({
           k: "loop",
           loop,
-          line: statement.line,
+          line,
         });
         if (neverExits) {
-          if (this.frame().block.terminator.k === "next") {
-            this.frame().block.terminator = { k: "unreachable" };
+          const frameBlock = fieldOf(this.frame(), "block") as SemanticBlock;
+          if ((fieldOf(frameBlock, "terminator") as SemanticBlock["terminator"]).k === "next") {
+            setField(frameBlock, "terminator", { k: "unreachable" });
           }
         }
         return;
       }
       case "doWhile": {
-        const condition = this.truth(this.value(statement.condition, null, statement.line));
+        const line = Number(fieldOf(statement, "line"));
+        const condition = this.truth(this.value(fieldOf(statement, "condition") as DraftValue, null, line));
+        const info = this.loopInfo(fieldOf(statement, "body") as readonly DraftStatement[]);
         this.statement({
           k: "loop",
-          loop: { kind: "doWhile", condition, ...this.loopInfo(statement.body) },
-          line: statement.line,
+          loop: {
+            kind: "doWhile",
+            condition,
+            header: String(fieldOf(info, "header")),
+            exit: String(fieldOf(info, "exit")),
+            body: fieldOf(info, "body") as SemanticBlock,
+          },
+          line,
         });
         return;
       }
       case "for": {
-        const type = statement.type;
-        const from = this.value(statement.from, type, statement.line);
+        const line = Number(fieldOf(statement, "line"));
+        const type = fieldOf(statement, "type") as TypeExpr;
+        const from = this.value(fieldOf(statement, "from") as DraftValue, type, line);
         // The bound is where the loop stops, and the comparison that stops it
         // is between the counter and the bound. A counter that counts in whole
         // numbers and a bound that is a fraction are compared as the numbers
@@ -6011,43 +6164,52 @@ class ProgramLowering {
         // counter that counts up to a bound it does not reach, and the floor of
         // it for one that counts down. A counter that counts in fractions is
         // compared against the bound as it is, and the bound is left alone.
+        const bound = fieldOf(statement, "to") as DraftValue;
         const wholeCounter = primitive(type) !== null && isWhole(primitive(type) as PrimitiveTypeName);
-        const to = wholeCounter && !countsWhole(statement.to)
-          ? roundedBound(this.value(statement.to, null, statement.line), statement.down === statement.inclusive)
-          : this.value(statement.to, type, statement.line);
-        const step = statement.step === null ? null : this.value(statement.step, type, statement.line);
+        const to = wholeCounter && !countsWhole(bound)
+          ? roundedBound(this.value(bound, null, line), fieldOf(statement, "down") === fieldOf(statement, "inclusive"))
+          : this.value(bound, type, line);
+        const stepValue = fieldOf(statement, "step") as DraftValue | null;
+        const step = stepValue === null ? null : this.value(stepValue, type, line);
+        const info = this.loopInfo(fieldOf(statement, "body") as readonly DraftStatement[]);
         this.statement({
           k: "loop",
           loop: {
             kind: "counted",
-            variable: statement.variable,
+            variable: String(fieldOf(statement, "variable")),
             type,
             from,
             to,
-            inclusive: statement.inclusive,
-            down: statement.down,
+            inclusive: fieldOf(statement, "inclusive") === true,
+            down: fieldOf(statement, "down") === true,
             step,
-            ...this.loopInfo(statement.body),
+            header: String(fieldOf(info, "header")),
+            exit: String(fieldOf(info, "exit")),
+            body: fieldOf(info, "body") as SemanticBlock,
           },
-          line: statement.line,
+          line,
         });
         return;
       }
       case "forOf": {
-        const length = this.value(statement.length, USIZE, statement.line);
+        const line = Number(fieldOf(statement, "line"));
+        const length = this.value(fieldOf(statement, "length") as DraftValue, USIZE, line);
         const index = this.generated("i");
+        const info = this.loopInfo(fieldOf(statement, "body") as readonly DraftStatement[]);
         this.statement({
           k: "loop",
           loop: {
             kind: "each",
             index,
-            element: statement.variable,
-            elementType: statement.type,
-            of: statement.of,
+            element: String(fieldOf(statement, "variable")),
+            elementType: fieldOf(statement, "type") as TypeExpr,
+            of: String(fieldOf(statement, "of")),
             length,
-            ...this.loopInfo(statement.body),
+            header: String(fieldOf(info, "header")),
+            exit: String(fieldOf(info, "exit")),
+            body: fieldOf(info, "body") as SemanticBlock,
           },
-          line: statement.line,
+          line,
         });
         return;
       }
@@ -6055,18 +6217,23 @@ class ProgramLowering {
       case "continue":
         this.jump(statement.kind === "break");
         return;
-      case "block":
-        this.statement({ k: "block", body: this.arm(statement.body, this.frame().loop), line: statement.line });
+      case "block": {
+        const line = Number(fieldOf(statement, "line"));
+        this.statement({ k: "block", body: this.arm(fieldOf(statement, "body") as readonly DraftStatement[], fieldOf(this.frame(), "loop") as LoopTarget | null), line });
         return;
+      }
       case "result": {
         // What a function hands back ends the block it was written in, and
         // whatever that value hoisted is written before the block ends. A bare
         // return hands back nothing.
+        const line = Number(fieldOf(statement, "line"));
         this.flush();
-        this.frame().block.terminator = {
+        const frameBlock = fieldOf(this.frame(), "block") as SemanticBlock;
+        const returned = fieldOf(statement, "value") as DraftValue | null;
+        setField(frameBlock, "terminator", {
           k: "return",
-          value: statement.value === null ? null : this.value(statement.value, null, statement.line),
-        };
+          value: returned === null ? null : this.value(returned, null, line),
+        });
         return;
       }
     }
@@ -6083,7 +6250,7 @@ class ProgramLowering {
     const header = this.blockId();
     // Control resumes in the block the loop was written in, which is the one
     // the loop statement is in, and never in a block of its own.
-    const target: LoopTarget = { header, exit: this.frame().block.id };
+    const target: LoopTarget = { header, exit: String(fieldOf(fieldOf(this.frame(), "block"), "id")) };
     return { header, exit: target.exit, body: this.arm(body, target, true), target };
   }
 
@@ -6104,27 +6271,29 @@ class ProgramLowering {
    */
   private jump(leaving: boolean): void {
     const frame = this.frame();
-    const target = frame.loop;
+    const target = fieldOf(frame, "loop") as LoopTarget | null;
     if (target === null) return;
     // A loop that is left does not hold the code after it: the loop may end
     // by its `break` and the code after it runs.
-    if (leaving) target.left = true;
+    if (leaving) setField(target, "left", true);
     const names: string[] = [];
     for (let index = this.frames.length - 1; index >= 0; index -= 1) {
       const left = this.frames[index];
-      names.push(...left.block.releases);
+      const leftBlock = fieldOf(left, "block") as SemanticBlock;
+      for (const release of fieldOf(leftBlock, "releases") as readonly string[]) names.push(release);
       // The body of the loop is left too, and it is the last block that is:
       // every block it holds carries the same loop, so the body itself is what
       // says where the walk stops. The blocks left are freed here rather than
       // when they end, which is why they keep what they own for the fall out
       // of the block the jump is written in.
-      if (left.body) break;
+      if (fieldOf(left, "body") === true) break;
     }
-    frame.block.terminator = {
+    const frameBlock = fieldOf(frame, "block") as SemanticBlock;
+    setField(frameBlock, "terminator", {
       k: "jump",
-      target: leaving ? target.exit : target.header,
+      target: leaving ? String(fieldOf(target, "exit")) : String(fieldOf(target, "header")),
       releases: names,
-    };
+    });
   }
 
   /**
@@ -6133,21 +6302,27 @@ class ProgramLowering {
    * list is the order the runtime is given rather than the order it happened in.
    */
   private own(name: string): void {
-    this.frame().block.releases.unshift(name);
+    const block = fieldOf(this.frame(), "block") as SemanticBlock;
+    const releases = fieldOf(block, "releases") as readonly string[];
+    const next: string[] = [name];
+    for (const release of releases) next.push(release);
+    setField(block, "releases", next);
   }
 
   /** What a console.log writes, one value at a time and then the line. */
   private print(statement: DraftStatement & { kind: "print" }): void {
-    statement.values.forEach((item, position) => {
-      const value = this.value(item, null, statement.line);
+    const line = Number(fieldOf(statement, "line"));
+    const values = fieldOf(statement, "values") as readonly DraftValue[];
+    values.forEach((item, position) => {
+      const value = this.value(item, null, line);
       if (position > 0) {
-        this.statement({ k: "printText", value: { k: "text", type: TEXT, parts: [{ k: "text", value: " " }] }, line: statement.line });
+        this.statement({ k: "printText", value: { k: "text", type: TEXT, parts: [{ k: "text", value: " " }] }, line });
       }
-      this.printed(value, isBigint(item), statement.line);
+      this.printed(value, isBigint(item), line);
     });
     // `process.stdout.write` writes the values where they are, and does not end
     // the line the way a console does.
-    if (statement.newline !== false) this.statement({ k: "printNewline", line: statement.line });
+    if (fieldOf(statement, "newline") !== false) this.statement({ k: "printNewline", line });
   }
 
   /** One printed value, the way the runtime writes what it holds. */
@@ -6178,8 +6353,9 @@ class ProgramLowering {
       case "literal": {
         // A number no use has fixed is a double, as it is in the language it
         // was written in; a use that fixed it is the one that names it.
-        const name = value.held.type ?? primitive(as) ?? "f64";
-        return { k: "const", type: numeric(name), text: value.held.text };
+        const held = fieldOf(value, "held") as { type?: unknown; text?: unknown };
+        const name = String(fieldOf(held, "type") ?? primitive(as) ?? "f64");
+        return { k: "const", type: numeric(name as PrimitiveTypeName), text: String(fieldOf(held, "text")) };
       }
       case "buffer":
       case "sized":
@@ -6194,60 +6370,66 @@ class ProgramLowering {
         // is, and `new Float64Array(n).fill(1)` fills what it just made. An
         // allocation written in the breath of the fill is written under a name
         // of its own first, so the fill has a name to walk.
-        const array = this.value(value.buffer, null, line);
+        const array = this.value(fieldOf(value, "buffer") as DraftValue, null, line);
         if (array.k !== "local") {
           throw new CompilerError("ContractError", "program", "a fill is written of an array the program allocated", "the resolver resolved the array to a name; the lowering writes it down under that name", "", "", "");
         }
-        const element = (value.held.element ?? F64);
+        const element = ((fieldOf(fieldOf(value, "held") as Held, "element") ?? F64) as TypeExpr);
         this.pending.push({
           k: "fill",
           buffer: array.name,
           index: this.generated("i"),
-          value: this.value(value.value, element, line),
+          value: this.value(fieldOf(value, "value") as DraftValue, element, line),
           type: element,
           line,
         });
         return array;
       }
-      case "fixed":
-        return { k: "toText", type: TEXT, of: this.value(value.of, null, line), digits: value.digits, ...(value.precision === undefined ? {} : { precision: value.precision }) };
+      case "fixed": {
+        const precision = fieldOf(value, "precision") as true | undefined;
+        return { k: "toText", type: TEXT, of: this.value(fieldOf(value, "of") as DraftValue, null, line), digits: fieldOf(value, "digits") as number, ...(precision === undefined ? {} : { precision }) };
+      }
       case "reference":
-        return { k: "local", type: this.localType(value.held), name: value.name };
-      case "text":
-        return { k: "text", type: TEXT, parts: value.parts.map((part) => part.k === "text" ? part : { k: "value", value: this.written(part.value, line) }) };
+        return { k: "local", type: this.localType(fieldOf(value, "held") as Held), name: String(fieldOf(value, "name")) };
+      case "text": {
+        const parts = fieldOf(value, "parts") as readonly { k: string; value: DraftValue; text?: string }[];
+        return { k: "text", type: TEXT, parts: parts.map((part) => part.k === "text" ? { k: "text" as const, value: String(fieldOf(part, "text")) } : { k: "value" as const, value: this.written(part.value, line) }) };
+      }
       case "boolean":
-        return { k: "bool", type: BOOLEAN, value: value.value };
+        return { k: "bool", type: BOOLEAN, value: fieldOf(value, "value") === true };
       case "null":
-        return { k: "nothing", type: value.type ?? VOID };
-      case "function":
+        return { k: "nothing", type: (fieldOf(value, "type") as TypeExpr | null) ?? VOID };
+      case "function": {
         return {
           k: "functionRef",
           type: VOID,
-          name: value.name,
-          captures: value.captures,
-          ...(value.symbol === undefined ? {} : { symbol: value.symbol }),
+          name: String(fieldOf(value, "name")),
+          captures: fieldOf(value, "captures") as unknown as CaptureRef[],
+          symbol: fieldOf(value, "symbol") as string | undefined,
         };
+      }
       case "field": {
         // The base is written down first: it is a name of an object slot, or
         // the field of one the resolver has already read, and both answer as
         // the value a field is read of.
-        const object = value.object;
+        const object = fieldOf(value, "object") as DraftValue;
         if (object.k !== "reference" && object.k !== "field" && object.k !== "call") {
           throw new CompilerError("ContractError", "program", "a field is read of something the resolver did not read an object of", "the field read's object is neither a name nor another field read; the resolver refuses one that is", "", "", "");
         }
-        if (object.k === "reference" && object.held.kind !== "object") {
-          throw new CompilerError("ContractError", "program", `"${object.name}" is not an object`, "the field read's object is a name of a slot that is not an object; the resolver refuses one that is", "", "", "");
+        const objectHeld = object.k === "reference" ? fieldOf(object, "held") as Held : null;
+        if (objectHeld !== null && objectHeld.kind !== "object") {
+          throw new CompilerError("ContractError", "program", `"${String(fieldOf(object, "name"))}" is not an object`, "the field read's object is a name of a slot that is not an object; the resolver refuses one that is", "", "", "");
         }
         const base =
-          object.k === "reference"
-            ? { k: "local" as const, type: (object.held as ObjectHeld).type, name: (object.held as ObjectHeld).name }
+          objectHeld !== null
+            ? { k: "local" as const, type: (objectHeld as ObjectHeld).type, name: (objectHeld as ObjectHeld).name }
             : this.value(object, null, line);
         return {
           k: "loadField",
-          type: value.type,
+          type: fieldOf(value, "type") as SemanticType,
           object: base,
-          layout: value.layout,
-          field: value.field,
+          layout: String(fieldOf(value, "layout")),
+          field: String(fieldOf(value, "field")),
         };
       }
       case "object": {
@@ -6256,75 +6438,83 @@ class ProgramLowering {
         // it, and a number printed as text is not a number. A field the layout
         // holds at a wide width takes a whole constant written at a narrower
         // one widened to the width it is stored at.
-        const fields = value.fields.map((field) => ({
+        const layout = String(fieldOf(value, "layout"));
+        const fields = (fieldOf(value, "fields") as readonly { name: string; value: DraftValue }[]).map((field) => ({
           name: field.name,
-          value: this.stored(value.layout, field.name, this.value(field.value, null, line)),
+          value: this.stored(layout, field.name, this.value(field.value, null, line)),
         }));
-        return { k: "newObject", type: value.type, layout: value.layout, fields };
+        return { k: "newObject", type: fieldOf(value, "type") as SemanticType, layout, fields };
       }
       case "length":
-        return { k: "length", type: numeric(value.type), of: { k: "local", type: value.bufferType, name: value.buffer } };
+        return { k: "length", type: numeric(String(fieldOf(value, "type")) as PrimitiveTypeName), of: { k: "local", type: fieldOf(value, "bufferType") as TypeExpr, name: String(fieldOf(value, "buffer")) } };
       case "lengthOf":
-        return { k: "length", type: numeric("usize"), of: this.value(value.of, null, line) };
+        return { k: "length", type: numeric("usize"), of: this.value(fieldOf(value, "of") as DraftValue, null, line) };
       case "stringLength":
-        return { k: "length", type: numeric("usize"), of: this.value(value.of, null, line) };
+        return { k: "length", type: numeric("usize"), of: this.value(fieldOf(value, "of") as DraftValue, null, line) };
       case "element":
         return {
           k: "element",
-          type: value.type,
-          of: { k: "local", type: value.bufferType, name: value.buffer },
-          index: this.value(value.index, USIZE, line),
+          type: fieldOf(value, "type") as SemanticType,
+          of: { k: "local", type: fieldOf(value, "bufferType") as TypeExpr, name: String(fieldOf(value, "buffer")) },
+          index: this.value(fieldOf(value, "index") as DraftValue, USIZE, line),
         };
-      case "call":
-        if (value.call.awaiting === true) {
+      case "call": {
+        const call = fieldOf(value, "call") as DraftCall;
+        if (call.awaiting === true) {
           // A value that is not a promise is awaited as itself: the operand is
           // the value, and the call is only how the word was written down.
-          const operand = value.call.args[0] as DraftValue;
+          const operand = (fieldOf(call, "args") as readonly DraftValue[])[0] as DraftValue;
           if (promiseOf(operand) === undefined) return this.value(operand, as, line);
         }
-        return this.builtin(value.call, line);
+        return this.builtin(call, line);
+      }
       case "compare": {
         // Two strings are compared as the strings they are, at no number at
         // all, which is the only comparison with no operand behind it.
-        if (value.how === "string") {
+        const negate = fieldOf(value, "negate") === true;
+        if (String(fieldOf(value, "how")) === "string") {
           return {
             k: "compare",
             type: BOOLEAN,
-            op: value.negate ? "ne" : "eq",
+            op: negate ? "ne" : "eq",
             operand: TEXT,
-            left: this.value(value.left, null, line),
-            right: this.value(value.right, null, line),
+            left: this.value(fieldOf(value, "left") as DraftValue, null, line),
+            right: this.value(fieldOf(value, "right") as DraftValue, null, line),
           };
         }
-        const operand = this.compared(value.left, value.right);
+        const operand = this.compared(fieldOf(value, "left") as DraftValue, fieldOf(value, "right") as DraftValue);
         return {
           k: "compare",
           type: BOOLEAN,
-          op: value.negate ? "ne" : "eq",
+          op: negate ? "ne" : "eq",
           operand,
-          left: this.value(value.left, operand, line),
-          right: this.value(value.right, operand, line),
+          left: this.value(fieldOf(value, "left") as DraftValue, operand, line),
+          right: this.value(fieldOf(value, "right") as DraftValue, operand, line),
         };
       }
       case "isNull":
-        return { k: "isNull", type: BOOLEAN, operand: this.value(value.operand, null, line), negate: value.negate };
-      case "unary":
+        return { k: "isNull", type: BOOLEAN, operand: this.value(fieldOf(value, "operand") as DraftValue, null, line), negate: fieldOf(value, "negate") === true };
+      case "unary": {
+        const type = fieldOf(value, "type") as TypeExpr | null;
         return {
           k: "unary",
-          type: value.type ?? numeric("f64"),
-          op: UNARY[value.op],
-          operand: this.value(value.operand, value.type, line),
+          type: type ?? numeric("f64"),
+          op: UNARY[String(fieldOf(value, "op")) as keyof typeof UNARY],
+          operand: this.value(fieldOf(value, "operand") as DraftValue, type, line),
         };
+      }
       case "binary":
         return this.binary(value, line);
-      case "conditional":
+      case "conditional": {
+        const type = fieldOf(value, "type") as TypeExpr | null;
         return {
           k: "select",
-          type: value.type ?? TEXT,
-          condition: this.truth(this.value(value.condition, null, line)),
-          then: this.value(value.then, value.type, line),
-          otherwise: this.value(value.otherwise, value.type, line),
+          type: type ?? TEXT,
+          condition: this.truth(this.value(fieldOf(value, "condition") as DraftValue, null, line)),
+          then: this.value(fieldOf(value, "then") as DraftValue, type, line),
+          otherwise: this.value(fieldOf(value, "otherwise") as DraftValue, type, line),
         };
+      }
     }
   }
 
@@ -6383,14 +6573,14 @@ class ProgramLowering {
    * array, and it is freed when the block ends.
    */
   private array(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
-    const held = value.held;
+    const held = fieldOf(value, "held") as ArrayHeld;
     const name = this.generated("a");
     const slot: SemanticSlot = {
       kind: "buffer",
       name,
       mutable: false,
-      element: (held.element ?? F64),
-      length: held.length,
+      element: (fieldOf(held, "element") ?? F64) as TypeExpr,
+      length: fieldOf(held, "length") as number | null,
     };
     this.pending.push({ k: "let", slot, value: this.buffer(value, line), line });
     // A view holds no block of its own: the block it looks into was declared
@@ -6402,8 +6592,8 @@ class ProgramLowering {
 
   /** A typed array, in the form the program wrote it. */
   private buffer(value: DraftValue & { k: "buffer" | "sized" | "view" }, line: number): SemanticValue {
-    const held = value.held;
-    const element = (held.element ?? F64);
+    const held = fieldOf(value, "held") as ArrayHeld;
+    const element = (fieldOf(held, "element") ?? F64) as TypeExpr;
     if (value.k === "sized") {
       // The count the program settled on is the length of the array, and the
       // block is cleared: a read past what the program filled is the zero the
@@ -6413,7 +6603,7 @@ class ProgramLowering {
         type: arrayType(held),
         element,
         length: null,
-        count: this.value(value.count, USIZE, line),
+        count: this.value(fieldOf(value, "count") as DraftValue, USIZE, line),
         view: null,
         values: [],
       };
@@ -6424,8 +6614,8 @@ class ProgramLowering {
         type: arrayType(held),
         element,
         length: null,
-        count: this.value(value.count, USIZE, line),
-        view: { of: this.held(this.value(value.of, null, line), line), offset: this.value(value.offset, USIZE, line) },
+        count: this.value(fieldOf(value, "count") as DraftValue, USIZE, line),
+        view: { of: this.held(this.value(fieldOf(value, "of") as DraftValue, null, line), line), offset: this.value(fieldOf(value, "offset") as DraftValue, USIZE, line) },
         values: [],
       };
     }
@@ -6433,10 +6623,10 @@ class ProgramLowering {
       k: "buffer",
       type: arrayType(held),
       element,
-      length: held.length,
+      length: fieldOf(held, "length") as number | null,
       count: null,
       view: null,
-      values: held.values.map((item) => this.value(item, element, line)),
+      values: (fieldOf(held, "values") as readonly DraftValue[]).map((item) => this.value(item, element, line)),
     };
   }
 
@@ -6447,9 +6637,10 @@ class ProgramLowering {
   private held(value: SemanticValue, line: number): SemanticValue {
     if (value.k === "local") return value;
     const name = this.generated("a");
-    this.pending.push({ k: "let", slot: this.slot(name, value.type, false), value, line });
+    const type = fieldOf(value, "type") as SemanticType;
+    this.pending.push({ k: "let", slot: this.slot(name, type, false), value, line });
     this.own(name);
-    return { k: "local", type: value.type, name };
+    return { k: "local", type, name };
   }
 
   /**
@@ -6459,8 +6650,9 @@ class ProgramLowering {
    */
   private temporary(value: SemanticValue, line: number): SemanticValue {
     const name = this.generated("t");
-    this.pending.push({ k: "let", slot: this.slot(name, value.type, false), value, line });
-    return { k: "local", type: value.type, name };
+    const type = fieldOf(value, "type") as SemanticType;
+    this.pending.push({ k: "let", slot: this.slot(name, type, false), value, line });
+    return { k: "local", type, name };
   }
 
   /** The left arm of `&&`, `||` and `??`, which is never written out twice. */
@@ -6471,7 +6663,10 @@ class ProgramLowering {
   }
 
   private binary(value: DraftValue & { k: "binary" }, line: number): SemanticValue {
-    const op = value.op;
+    const op = String(fieldOf(value, "op"));
+    const statedType = fieldOf(value, "type") as TypeExpr | null;
+    const leftDraft = fieldOf(value, "left") as DraftValue;
+    const rightDraft = fieldOf(value, "right") as DraftValue;
     // The left arm decides first, and the source form of these operators
     // writes it out twice, so a call in it is written under a name first.
     if (op === "&&" || op === "||") {
@@ -6481,34 +6676,34 @@ class ProgramLowering {
         // is one; a string pair has no common type the resolver recorded, and
         // `&&` and `||` hand back one of the arms, so the arm's own type is the
         // type of the expression. `??` below reads the same null the same way.
-        type: value.type ?? TEXT,
+        type: statedType ?? TEXT,
         op: op === "&&" ? "and" : "or",
-        left: this.decide(value.left, line),
-        right: this.value(value.right, value.type, line),
+        left: this.decide(leftDraft, line),
+        right: this.value(rightDraft, statedType, line),
       };
     }
     if (op === "??") {
       return {
         k: "coalesce",
-        type: value.type ?? TEXT,
-        left: this.decide(value.left, line),
-        right: this.value(value.right, value.type, line),
+        type: statedType ?? TEXT,
+        left: this.decide(leftDraft, line),
+        right: this.value(rightDraft, statedType, line),
       };
     }
     // The two sides of a comparison are compared as the double they are, which
     // is what a number in a program is whichever array it was read out of — as
     // the whole number they are when both of them are bigints, and as the wide
     // number they are when one of them is one.
-    const comparison = comparisonOf(op);
+    const comparison = comparisonOf(op as ProgramBinaryOp);
     if (comparison !== null) {
-      const operand = this.compared(value.left, value.right);
+      const operand = this.compared(leftDraft, rightDraft);
       return {
         k: "compare",
         type: BOOLEAN,
         op: comparison,
         operand,
-        left: this.value(value.left, operand, line),
-        right: this.value(value.right, operand, line),
+        left: this.value(leftDraft, operand, line),
+        right: this.value(rightDraft, operand, line),
       };
     }
     // Both sides are read at the one width the operation states, so a number
@@ -6516,21 +6711,23 @@ class ProgramLowering {
     // is: `a + 1.5` over a `u256` is a mix the kernel has no answer for, and
     // reading 1.5 as four limbs answers `a + 1` instead. A side that cannot be
     // read at the width keeps its own type, and the validator names the pair.
-    const left = this.value(value.left, sideType(value.left, value.type), line);
+    const left = this.value(leftDraft, sideType(leftDraft, statedType), line);
     // The count of a shift is the machine word the source wrote the shift by, and
     // not the number being shifted: the kernel every backend shifts a wide number
     // with takes one word of count, and a four-limb count is a count of 256 bits
     // that each target truncates to a different answer.
     const counted = op === "<<" || op === ">>" || op === ">>>";
-    const right = this.value(value.right, counted ? numeric("usize") : sideType(value.right, value.type), line);
+    const right = this.value(rightDraft, counted ? numeric("usize") : sideType(rightDraft, statedType), line);
     // An array added to an array is the one operation that joins two
     // sequences: the elements of the right follow those of the left.
-    if (op === "+" && isSequence(left.type) && isSequence(right.type)) {
-      return { k: "arith", type: left.type, op: "arrayConcat", left, right };
+    const leftType = fieldOf(left, "type") as SemanticType;
+    const rightType = fieldOf(right, "type") as SemanticType;
+    if (op === "+" && isSequence(leftType) && isSequence(rightType)) {
+      return { k: "arith", type: leftType, op: "arrayConcat", left, right };
     }
     // A string added to a string is the one operation with no number behind
     // it: the two arms were text, and it is text the IR states.
-    if (value.type === null) return { k: "arith", type: TEXT, op: "concat", left, right };
+    if (statedType === null) return { k: "arith", type: TEXT, op: "concat", left, right };
     // The answer is the width the two sides are computed at: a wide number keeps
     // its width (a `u256` beside an `i64` is still a `u256`), and anything else
     // is a double. The draft states no width of its own when a program value is
@@ -6540,8 +6737,8 @@ class ProgramLowering {
     // operator: it reads both sides as unsigned 32 bit numbers and answers one
     // of those, so its type is the one the draft already fixed. A bigint
     // operation is computed at sixty-four bits, which the draft already states.
-    const leftPrim = left.type.kind === "primitive" ? left.type.name : null;
-    const rightPrim = right.type.kind === "primitive" ? right.type.name : null;
+    const leftPrim = leftType.kind === "primitive" ? leftType.name : null;
+    const rightPrim = rightType.kind === "primitive" ? rightType.name : null;
     // A wide number keeps the width its two whole sides are computed at, and a
     // bigint operation is computed at sixty-four bits. Both are already stated
     // by the draft, so only fall back to the arithmetic rule when neither.
@@ -6553,24 +6750,25 @@ class ProgramLowering {
     const trueDivision = op === "/" && rules.division === "true";
     const type = trueDivision
       ? numeric("f64")
-      : value.bigint && !isWideType(left.type) && !isWideType(right.type)
+      : fieldOf(value, "bigint") === true && !isWideType(leftType) && !isWideType(rightType)
         ? numeric(BIGINT_TYPE)
-        : CONVERTING_OPERATORS.includes(op)
-          ? value.type
-          : WHOLE_OPERATORS.includes(op)
+        : CONVERTING_OPERATORS.includes(op as ProgramBinaryOp)
+          ? statedType
+          : WHOLE_OPERATORS.includes(op as ProgramBinaryOp)
             ? numeric(wholeResult(leftPrim, rightPrim))
             : numeric(numericResult(leftPrim, rightPrim, op === "/"));
-    const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
-    const folded = this.foldedValue(arithmetic, left, right, type);
+    const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op as keyof typeof ARITHMETIC] as ArithOp);
+    const folded = this.foldedValue(arithmetic as ArithOp, left, right, type as SemanticType);
     if (folded !== null) return folded;
     // A wide remainder is the kernels' answer, not the machine's: the product
     // of two 256 bit numbers does not fit in one, and a `%` of the low half is
     // a different number from the remainder of the whole.
-    if (arithmetic === "mod" && type.kind === "primitive" && type.name === "u256") {
+    const resultType = type as SemanticType;
+    if (String(arithmetic) === "mod" && resultType.kind === "primitive" && resultType.name === "u256") {
       const reduced = modularReduction(left, right, (name, args) => this.wideKernel(name, args));
       if (reduced !== null) return reduced;
     }
-    return { k: "arith", type, op: arithmetic, left, right };
+    return { k: "arith", type: resultType, op: arithmetic as ArithOp, left, right };
   }
 
   /**
@@ -6584,12 +6782,16 @@ class ProgramLowering {
    * that computes one.
    */
   private stored(layout: string, field: string, value: SemanticValue): SemanticValue {
-    const declared = this.layouts[layout]?.fields.find((entry) => entry.name === field)?.type;
+    const layoutInfo = fieldOf(this.layouts, layout) as ObjectLayout | undefined;
+    const fields = layoutInfo === undefined ? [] : fieldOf(layoutInfo, "fields") as readonly { name: string; type: string }[];
+    const entry = fields.find((one) => one.name === field);
+    const declared = entry === undefined ? undefined : fieldOf(entry, "type") as string;
     if (declared === undefined) return value;
     const type = parseType(declared);
     if (type.kind !== "primitive" || !isWhole(type.name)) return value;
-    if (value.k !== "const" || value.type.kind !== "primitive" || !isWhole(value.type.name)) return value;
-    const number = wholeText(value.text);
+    const valueType = fieldOf(value, "type") as SemanticType;
+    if (value.k !== "const" || valueType.kind !== "primitive" || !isWhole(valueType.name)) return value;
+    const number = wholeText(String(fieldOf(value, "text")));
     if (number === null) return value;
     return wholeConstant(number, type) ?? value;
   }
@@ -6606,10 +6808,12 @@ class ProgramLowering {
   private foldedValue(op: ArithOp, left: SemanticValue, right: SemanticValue, type: SemanticType): SemanticValue | null {
     if (left.k !== "const" || right.k !== "const") return null;
     if (type.kind !== "primitive" || !isWhole(type.name)) return null;
-    if (left.type.kind !== "primitive" || !isWhole(left.type.name)) return null;
-    if (right.type.kind !== "primitive" || !isWhole(right.type.name)) return null;
-    const first = wholeText(left.text);
-    const second = wholeText(right.text);
+    const leftType = fieldOf(left, "type") as SemanticType;
+    const rightType = fieldOf(right, "type") as SemanticType;
+    if (leftType.kind !== "primitive" || !isWhole(leftType.name)) return null;
+    if (rightType.kind !== "primitive" || !isWhole(rightType.name)) return null;
+    const first = wholeText(String(fieldOf(left, "text")));
+    const second = wholeText(String(fieldOf(right, "text")));
     if (first === null || second === null) return null;
     const value = foldWhole(op, first, second, type.name);
     if (value === null) return null;
@@ -6623,18 +6827,18 @@ class ProgramLowering {
     const signature: FunctionSignature = {
       name,
       symbol: name,
-      params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
-      returns: contractText(builtin.returns),
+      params: (fieldOf(builtin, "params") as readonly SemanticType[]).map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+      returns: contractText(fieldOf(builtin, "returns") as SemanticType),
     };
     return {
       k: "call",
-      type: builtin.returns,
+      type: fieldOf(builtin, "returns") as SemanticType,
       call: {
         callee: name,
         signature,
         args: [...args],
-        argTypes: [...builtin.params],
-        returns: builtin.returns,
+        argTypes: fieldOf(builtin, "params") as unknown as SemanticType[],
+        returns: fieldOf(builtin, "returns") as SemanticType,
         effects: [],
         ownership: "none",
         retain: false,
@@ -6663,48 +6867,55 @@ class ProgramLowering {
 
   /** A call, or the one builtin that is an operation rather than a call. */
   private builtin(call: DraftCall, line: number): SemanticValue {
-    if (call.builtin) {
-      const extreme = EXTREMES[call.name];
+    const name = String(fieldOf(call, "name"));
+    const args = fieldOf(call, "args") as readonly DraftValue[];
+    const returns = fieldOf(call, "returns") as SemanticType;
+    if (fieldOf(call, "builtin") === true) {
+      const extreme = EXTREMES[name];
       if (extreme !== undefined) {
         const type = this.operand;
         return {
           k: "arith",
           type,
           op: extreme,
-          left: this.value(call.args[0], type, line),
-          right: this.value(call.args[1], type, line),
+          left: this.value(args[0], type, line),
+          right: this.value(args[1], type, line),
         };
       }
-      if (call.name === ARGV_LENGTH) return { k: "argv", type: call.returns, index: null };
-      if (call.name === ARGV) return { k: "argv", type: call.returns, index: this.value(call.args[0], USIZE, line) };
+      if (name === ARGV_LENGTH) return { k: "argv", type: returns, index: null };
+      if (name === ARGV) return { k: "argv", type: returns, index: this.value(args[0], USIZE, line) };
     }
-    return { k: "call", type: call.returns, call: this.call(call, line) };
+    return { k: "call", type: returns, call: this.call(call, line) };
   }
 
   private call(call: DraftCall, line: number): SemanticCall {
+    const signature = fieldOf(call, "signature") as FunctionSignature;
+    const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+    const args = fieldOf(call, "args") as readonly DraftValue[];
+    const returns = fieldOf(call, "returns") as SemanticType;
     return {
-      callee: call.name,
-      signature: call.signature,
-      args: call.args.map((argument, position) =>
-        this.value(argument, parameterExpect(call.signature.params[position].type), line),
+      callee: String(fieldOf(call, "name")),
+      signature,
+      args: args.map((argument, position) =>
+        this.value(argument, parameterExpect(String(fieldOf(signatureParams[position], "type"))), line),
       ),
       // A call of a count the call lower in arities names carries one type per
       // argument the call was made with, and the types the rest of the
       // signature names are the ones the longer form would have read them at.
-      argTypes: call.signature.params.map((param) => parameterType(param.type)).slice(0, call.args.length),
-      returns: call.returns,
-      effects: call.effects,
+      argTypes: signatureParams.map((param) => parameterType(String(fieldOf(param, "type")))).slice(0, args.length),
+      returns,
+      effects: fieldOf(call, "effects") as unknown as Effect[],
       // What the caller owns is what the callee made: a block of bytes is laid
       // out with one reference of its own, and a pointer a function was handed
       // is borrowed for as long as the caller holds it.
-      ownership: call.name === SHARED ? "owned" : ownership(call.returns),
+      ownership: String(fieldOf(call, "name")) === SHARED ? "owned" : ownership(returns),
       retain: false,
-      builtin: call.builtin,
+      builtin: fieldOf(call, "builtin") === true,
       // A grid launch is the call a kernel is launched with, and it is written
       // only where it was stated: an ordinary call has no grid, and a property
       // holding `undefined` is not the same value as one that says nothing
       // when the IR is compared against what the text reads back.
-      ...(call.grid === undefined ? {} : { grid: this.value(call.grid, null, line) }),
+      grid: fieldOf(call, "grid") === undefined ? undefined : this.value(fieldOf(call, "grid") as DraftValue, null, line),
     };
   }
 
@@ -6712,18 +6923,19 @@ class ProgramLowering {
   private localType(held: Held): SemanticType {
     // An array is read as the array it was allocated as, so a name of one and
     // the name it was declared under are one value to a backend.
-    if (held.kind === "array") return arrayType(held);
+    if (String(fieldOf(held, "kind")) === "array") return arrayType(held as ArrayHeld);
     return heldType(held) ?? TEXT;
   }
 }
 
 /** Whether a body and the blocks inside it print anything. */
 function printsOf(block: SemanticBlock): boolean {
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     if (statement.k === "printText" || statement.k === "printNumber") return true;
     for (const nested of statementBlocksOf(statement)) if (printsOf(nested)) return true;
   }
-  return block.terminator.k === "return" && block.terminator.value !== null && printsValue(block.terminator.value);
+  const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+  return terminator.k === "return" && fieldOf(terminator, "value") !== null && printsValue(fieldOf(terminator, "value") as SemanticValue);
 }
 
 /** Whether a value, or anything inside it, is the command line. */
@@ -6737,7 +6949,7 @@ function printsValue(value: SemanticValue): boolean {
 
 /** Whether a body reads the command line the program was started with. */
 function readsArgvOf(block: SemanticBlock): boolean {
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     for (const value of statementValues(statement)) {
       if (printsValue(value)) return true;
     }
@@ -6748,7 +6960,8 @@ function readsArgvOf(block: SemanticBlock): boolean {
   // Number(process.argv[1])`. Leaving the terminator out is what answered "this
   // body has no effect" for it, and a body with no effect is one a caller may
   // run on two threads and one the inliner may fold into either.
-  return block.terminator.k === "return" && block.terminator.value !== null && printsValue(block.terminator.value);
+  const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+  return terminator.k === "return" && fieldOf(terminator, "value") !== null && printsValue(fieldOf(terminator, "value") as SemanticValue);
 }
 
 /** Every call a body makes, in the order it first makes each. */
@@ -6756,21 +6969,24 @@ function callsOf(block: SemanticBlock): CallEdge[] {
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
   const walk = (one: SemanticBlock): void => {
-    for (const statement of one.statements) {
+    for (const statement of fieldOf(one, "statements") as readonly SemanticStatement[]) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k !== "call" || seen.has(inner.call.callee)) return;
-          seen.add(inner.call.callee);
-          edges.push({ callee: inner.call.callee, strategy: "call" });
+          const callee = String(fieldOf(fieldOf(inner, "call"), "callee"));
+          if (inner.k !== "call" || seen.has(callee)) return;
+          seen.add(callee);
+          edges.push({ callee, strategy: "call" });
         });
       }
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
-    if (one.terminator.k === "return" && one.terminator.value !== null) {
-      walkValues(one.terminator.value, (inner) => {
-        if (inner.k !== "call" || seen.has(inner.call.callee)) return;
-        seen.add(inner.call.callee);
-        edges.push({ callee: inner.call.callee, strategy: "call" });
+    const terminator = fieldOf(one, "terminator") as SemanticBlock["terminator"];
+    if (terminator.k === "return" && fieldOf(terminator, "value") !== null) {
+      walkValues(fieldOf(terminator, "value") as SemanticValue, (inner) => {
+        const callee = String(fieldOf(fieldOf(inner, "call"), "callee"));
+        if (inner.k !== "call" || seen.has(callee)) return;
+        seen.add(callee);
+        edges.push({ callee, strategy: "call" });
       });
     }
   };
@@ -6800,9 +7016,13 @@ export function resolveProgram(
   // counter, and a literal the body writes is built at the layout its own
   // shape was named as.
   const layouts: Record<string, ObjectLayout> = { ...objectLayouts };
-  for (const file of program.files) {
-    for (const contract of Object.values(file.functions)) {
-      Object.assign(layouts, contract.definition?.objects ?? {});
+  for (const file of fieldOf(program, "files") as readonly { functions: Record<string, Record<string, unknown>> }[]) {
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, Record<string, unknown>>)) {
+      const definition = fieldOf(contract, "definition") as Record<string, unknown> | undefined;
+      const objects = definition === undefined ? undefined : fieldOf(definition, "objects") as Record<string, ObjectLayout> | undefined;
+      if (objects !== undefined) {
+        for (const name of Object.keys(objects)) setField(layouts, name, fieldOf(objects, name));
+      }
     }
   }
   // A parameter the source wrote no type for is read at the type its callers
@@ -6829,9 +7049,9 @@ export function resolveProgram(
       },
       new Map(Object.entries(objectNames)),
       objectKeys,
-      program.language,
+      String(fieldOf(program, "language")),
     );
-    resolved = new ProgramLowering(resolver.taken(), undefined, program.language, layouts).lower(resolver.resolve());
+    resolved = new ProgramLowering(resolver.taken(), undefined, String(fieldOf(program, "language")), layouts).lower(resolver.resolve());
     if (!observed.changed) break;
   }
   return resolved as SemanticProgram;

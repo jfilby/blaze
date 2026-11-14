@@ -508,6 +508,7 @@ class BodyTypes {
         const overload = this.callees.get(overloadName);
         const returns = overload ?? this.callees.get(String(fieldOf(expression,"name")));
         if (returns === undefined) {
+          if (String(fieldOf(expression,"name")) === "") console.log(JSON.stringify(expression));
           throw objectsError(
             `${this.path}: ${this.functionName} calls "${String(fieldOf(expression,"name"))}", which the program does not compile`,
             "a function may only call the functions of the program it is part of",

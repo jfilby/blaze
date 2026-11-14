@@ -116,6 +116,10 @@ function fieldOfValue(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+function setFieldValue(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /* -------------------------------------------------------------------------- */
 /* What a function body needs from the program around it                       */
 /* -------------------------------------------------------------------------- */
@@ -365,7 +369,6 @@ interface Narrowing {
 class FunctionBody {
   private readonly contract: FunctionContract;
   private readonly definition: FunctionDefinition;
-  private readonly context: FunctionContext;
   private readonly objects: Record<string, ObjectLayout>;
   /** The type every `return` of this function hands back. */
   private readonly returns: Inferred;
@@ -397,21 +400,23 @@ class FunctionBody {
   constructor(contract: FunctionContract, definition: FunctionDefinition, context: FunctionContext) {
     this.contract = contract;
     this.definition = definition;
-    this.context = context;
-    this.objects = definition.objects;
-    this.returns = { kind: "type", type: parseType(contract.function.returns) };
-    for (const param of contract.function.params) {
-      const type = parseType(param.type);
+    setFieldValue(this, "context", context);
+    this.objects = fieldOfValue(definition, "objects") as Record<string, ObjectLayout>;
+    const signature = fieldOfValue(contract, "function") as FunctionSignature;
+    this.returns = { kind: "type", type: parseType(String(fieldOfValue(signature, "returns"))) };
+    const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
+    for (const param of signatureParams) {
+      const type = parseType(String(fieldOfValue(param, "type")));
       // A parameter is a slot the body reads it by. A body that writes one
       // reassigns its own argument, which the language it was written in
       // allows, so the slot is one the body may change.
-      this.bind(param.name, {
-        name: param.name,
+      this.bind(String(fieldOfValue(param, "name")), {
+        name: String(fieldOfValue(param, "name")),
         inferred: { kind: "type", type },
-        slot: { kind: "value", name: param.name, mutable: true, type },
+        slot: { kind: "value", name: String(fieldOfValue(param, "name")), mutable: true, type },
       });
     }
-    this.used = sourceNames(definition.statements, new Set(contract.function.params.map((param) => param.name)));
+    this.used = sourceNames(fieldOfValue(definition, "statements") as readonly Statement[], new Set(signatureParams.map((param) => String(fieldOfValue(param, "name")))));
   }
 
   /* ---------------------------------------------------------------------- */
@@ -422,7 +427,7 @@ class FunctionBody {
   lower(): SemanticBlock {
     const entry: SemanticBlock = { id: "entry", statements: [], releases: [], terminator: { k: "next" } };
     this.enter(entry, null);
-    this.statements(this.definition.statements);
+    this.statements(fieldOfValue(this.definition, "statements") as readonly Statement[]);
     this.leave();
     // A body that falls off the end returns nothing: a function with no
     // `result` is a function that returns nothing, and its entry block still
@@ -466,8 +471,11 @@ class FunctionBody {
     const names: string[] = [];
     for (const scope of this.scopes) {
       for (const [name, held] of scope) {
-        if (held.inferred.kind !== "type" || held.inferred.type.kind !== "primitive") continue;
-        if (isWhole(held.inferred.type.name)) names.push(name);
+        const inferred = fieldOfValue(held, "inferred") as Inferred;
+        if (String(fieldOfValue(inferred, "kind")) !== "type") continue;
+        const type = fieldOfValue(inferred, "type") as TypeExpr;
+        if (type.kind !== "primitive") continue;
+        if (isWhole(String(type.name) as PrimitiveTypeName)) names.push(name);
       }
     }
     return names;
@@ -540,8 +548,9 @@ class FunctionBody {
 
   /** The statements a value hoisted, written where the body wrote them. */
   private flush(): void {
-    const block = this.frame().block;
-    for (const before of this.pending) block.statements.push(before);
+    const block = fieldOfValue(this.frame(), "block") as SemanticBlock;
+    const statements = fieldOfValue(block, "statements") as SemanticStatement[];
+    for (const before of this.pending) statements.push(before);
     this.pending = [];
   }
 
@@ -615,9 +624,24 @@ class FunctionBody {
     return this.frames[this.frames.length - 1];
   }
 
+  private finish(terminator: SemanticBlock["terminator"]): void {
+    const block = fieldOfValue(this.frame(), "block") as SemanticBlock;
+    setFieldValue(block, "terminator", terminator);
+  }
+
+  private currentTerminator(): SemanticBlock["terminator"] {
+    return fieldOfValue(fieldOfValue(this.frame(), "block"), "terminator") as SemanticBlock["terminator"];
+  }
+
+  private currentLoop(): LoopTarget | null {
+    return fieldOfValue(this.frame(), "loop") as LoopTarget | null;
+  }
+
   private write(statement: SemanticStatement): void {
     this.flush();
-    this.frame().block.statements.push(statement);
+    const block = fieldOfValue(this.frame(), "block") as SemanticBlock;
+    const statements = fieldOfValue(block, "statements") as SemanticStatement[];
+    statements.push(statement);
   }
 
   /** A block id nothing else names. */
@@ -646,12 +670,13 @@ class FunctionBody {
     this.open();
     if (settled !== null) {
       const scope = this.narrowings[this.narrowings.length - 1];
-      let held = scope.get(settled.name);
+      const settledName = String(fieldOfValue(settled, "name"));
+      let held = scope.get(settledName);
       if (held === undefined) {
         held = [];
-        scope.set(settled.name, held);
+        scope.set(settledName, held);
       }
-      held.push({ field: settled.field, value: settled.value, negated: settled.negated === true });
+      held.push({ field: String(fieldOfValue(settled, "field")), value: String(fieldOfValue(settled, "value")), negated: fieldOfValue(settled, "negated") === true });
     }
     this.statements(body);
     this.close();
@@ -666,7 +691,7 @@ class FunctionBody {
    */
   private loop(body: readonly Statement[]): { header: string; exit: string; body: SemanticBlock; target: LoopTarget } {
     const header = this.blockId();
-    const target: LoopTarget = { header, exit: this.frame().block.id, left: false };
+    const target: LoopTarget = { header, exit: String(fieldOfValue(fieldOfValue(this.frame(), "block"), "id")), left: false };
     return { header, exit: target.exit, body: this.arm(body, target, true), target };
   }
 
@@ -678,7 +703,7 @@ class FunctionBody {
    */
   private jump(leaving: boolean, line: number): void {
     const frame = this.frame();
-    const target = frame.loop;
+    const target = fieldOfValue(frame, "loop") as LoopTarget | null;
     if (target === null) {
       throw this.error(
         `"${leaving ? "break" : "continue"}" is not within a loop`,
@@ -689,15 +714,17 @@ class FunctionBody {
     const names: string[] = [];
     for (let at = this.frames.length - 1; at >= 0; at -= 1) {
       const left = this.frames[at];
-      names.push(...left.block.releases);
+      const leftBlock = fieldOfValue(left, "block") as SemanticBlock;
+      for (const release of fieldOfValue(leftBlock, "releases") as readonly string[]) names.push(release);
       // Every block a loop holds carries the same loop, so the body itself is
       // what says where the walk over the blocks it leaves stops.
-      if (left.body) break;
+      if (fieldOfValue(left, "body") === true) break;
     }
     // A loop that is left does not hold the code after it: the loop may end by
     // its `break` and the code after it runs.
-    if (leaving) target.left = true;
-    frame.block.terminator = { k: "jump", target: leaving ? target.exit : target.header, releases: names };
+    if (leaving) setFieldValue(target, "left", true);
+    const frameBlock = fieldOfValue(frame, "block") as SemanticBlock;
+    setFieldValue(frameBlock, "terminator", { k: "jump", target: leaving ? String(fieldOfValue(target, "exit")) : String(fieldOfValue(target, "header")), releases: names });
   }
 
   /* ---------------------------------------------------------------------- */
@@ -711,7 +738,8 @@ class FunctionBody {
       // written from. A block that ends where nothing arrives ends there too:
       // an `if` whose every arm leaves and a loop that never ends are both
       // statements nothing after them can be reached from.
-      const end = this.frame().block.terminator.k;
+      const frameBlock = fieldOfValue(this.frame(), "block") as SemanticBlock;
+      const end = String(fieldOfValue(fieldOfValue(frameBlock, "terminator"), "k"));
       if (end === "jump" || end === "return" || end === "unreachable") break;
       this.statement(statement);
     }
@@ -724,104 +752,109 @@ class FunctionBody {
       case "assign": {
         // The name is written as the type it is read at, so `x += 1` adds a
         // number of that type to a number of that type.
-        const held = this.read(statement.target, statement.line);
+        const held = this.read(String(fieldOfValue(statement, "target")), Number(fieldOfValue(statement, "line")));
+        const heldSlot = fieldOfValue(held, "slot") as SemanticSlot;
+        const heldInferred = fieldOfValue(held, "inferred") as Inferred;
         // A compound assignment writes its operator down on the type of the
         // name, so `%=` on a double is a target no compiler accepts: the C
         // backend writes `x %= 3.0`, which is not C at all. The operator
         // decides what the name may be, as it does in a binary expression,
         // where a whole operator needs whole numbers. The program path refuses
         // the same write the same way (semantics/ir-resolve.ts).
-        if (WHOLE_ASSIGNMENTS.includes(statement.op) && !isInteger(slotType(held.slot))) {
-          const name = typeText(slotType(held.slot));
+        if (WHOLE_ASSIGNMENTS.includes(String(fieldOfValue(statement, "op")) as AssignOperator) && !isInteger(slotType(heldSlot))) {
+          const name = typeText(slotType(heldSlot));
           throw this.error(
-            `"${statement.op.slice(0, -1)}" needs whole numbers`,
-            statement.line,
-            `"${statement.target}" is a ${name}, and "${statement.op}" rounds it to a whole number`,
+            `"${String(fieldOfValue(statement, "op")).slice(0, -1)}" needs whole numbers`,
+            Number(fieldOfValue(statement, "line")),
+            `"${String(fieldOfValue(statement, "target"))}" is a ${name}, and "${String(fieldOfValue(statement, "op"))}" rounds it to a whole number`,
           );
         }
         // The count of a shift is a machine word, whatever the number being
         // shifted is — the same rule the binary form follows, over the name
         // rather than over a literal.
-        const counted = statement.op === "<<=" || statement.op === ">>=" || statement.op === ">>>=";
-        const value = this.typed(statement.value, counted ? asType(USIZE) : held.inferred, statement.line).value;
+        const counted = String(fieldOfValue(statement, "op")) === "<<=" || String(fieldOfValue(statement, "op")) === ">>=" || String(fieldOfValue(statement, "op")) === ">>>=";
+        const value = this.typed(fieldOfValue(statement, "value") as Expression, counted ? asType(USIZE) : heldInferred, Number(fieldOfValue(statement, "line"))).value;
         // A number written into a string is written as its text, as `s += 1`
         // is in the language the body was written in, rather than as a refusal
         // the source does not raise.
         const written =
-          held.slot.kind === "text" && !isText(value.type)
+          heldSlot.kind === "text" && !isText(value.type)
             ? { k: "text" as const, type: TEXT, parts: [{ k: "value" as const, value }] }
             : value;
         // A wide number has no compound operator a backend can write, and a
         // floor division has no compound form C has, so the compound is
         // written as the binary form every backend either writes or refuses
         // by name.
-        const wide = compoundAsBinary(statement.op, slotType(held.slot), { k: "local", type: slotType(held.slot), name: held.name }, written);
+        const wide = compoundAsBinary(String(fieldOfValue(statement, "op")) as AssignOperator, slotType(heldSlot), { k: "local", type: slotType(heldSlot), name: String(fieldOfValue(held, "name")) }, written);
         this.write({
           k: "set",
-          name: held.name,
-          op: wide === null ? statement.op : wide.op,
+          name: String(fieldOfValue(held, "name")),
+          op: wide === null ? String(fieldOfValue(statement, "op")) as AssignOperator : wide.op,
           value: wide === null ? written : wide.value,
-          line: statement.line,
+          line: Number(fieldOfValue(statement, "line")),
         });
         return;
       }
       case "memberAssign":
         return this.fieldAssignment(statement);
       case "indexAssign": {
-        const buffer = this.read(statement.buffer, statement.line);
-        const bufferType = slotType(buffer.slot);
+        const buffer = this.read(String(fieldOfValue(statement, "buffer")), Number(fieldOfValue(statement, "line")));
+        const bufferSlot = fieldOfValue(buffer, "slot") as SemanticSlot;
+        const bufferInferred = fieldOfValue(buffer, "inferred") as Inferred;
+        const bufferName = String(fieldOfValue(buffer, "name"));
+        const bufferType = slotType(bufferSlot);
         // A write into a dynamic value is the entry the key names: the runtime
         // stores it, and there is no buffer to lay an element out in.
         if (!this.isBufferValue(bufferType)) {
-          const base: Typed = { value: { k: "local", type: bufferType, name: buffer.name }, inferred: buffer.inferred };
-          const key = this.typed(statement.index, null, statement.line);
-          const value = this.typed(statement.value, null, statement.line);
-          if (statement.op !== "=") {
+          const base: Typed = { value: { k: "local", type: bufferType, name: bufferName }, inferred: bufferInferred };
+          const key = this.typed(fieldOfValue(statement, "index") as Expression, null, Number(fieldOfValue(statement, "line")));
+          const value = this.typed(fieldOfValue(statement, "value") as Expression, null, Number(fieldOfValue(statement, "line")));
+          if (String(fieldOfValue(statement, "op")) !== "=") {
             throw this.error(
-              `a compound write of an entry of "${buffer.name}" is not part of the subset`,
-              statement.line,
+              `a compound write of an entry of "${bufferName}" is not part of the subset`,
+              Number(fieldOfValue(statement, "line")),
               "read the entry into a name, combine it, and write the name back",
             );
           }
-          this.dynamicIndexWrite(base, key, value, statement.line);
+          this.dynamicIndexWrite(base, key, value, Number(fieldOfValue(statement, "line")));
           return;
         }
-        const elementType = elementOf(buffer.inferred);
+        const elementType = elementOf(bufferInferred);
         const element = asType(elementType);
-        const index = this.typed(statement.index, WHOLE, statement.line).value;
-        const value = this.typed(statement.value, element, statement.line).value;
+        const index = this.typed(fieldOfValue(statement, "index") as Expression, WHOLE, Number(fieldOfValue(statement, "line"))).value;
+        const value = this.typed(fieldOfValue(statement, "value") as Expression, element, Number(fieldOfValue(statement, "line"))).value;
         // The same rule as the whole name above, over one element rather than
         // a slot: a wide element has no compound operator a backend writes.
-        const wide = compoundAsBinary(statement.op, elementType, { k: "element", type: elementType, of: { k: "local", type: slotType(buffer.slot), name: buffer.name }, index }, value);
+        const wide = compoundAsBinary(String(fieldOfValue(statement, "op")) as AssignOperator, elementType, { k: "element", type: elementType, of: { k: "local", type: slotType(bufferSlot), name: bufferName }, index }, value);
         this.write({
           k: "setElement",
-          buffer: buffer.name,
+          buffer: bufferName,
           index,
-          op: wide === null ? statement.op : wide.op,
+          op: wide === null ? String(fieldOfValue(statement, "op")) as AssignOperator : wide.op,
           value: wide === null ? value : wide.value,
-          line: statement.line,
+          line: Number(fieldOfValue(statement, "line")),
         });
         return;
       }
       case "update":
         this.write({
           k: "step",
-          name: this.read(statement.name, statement.line).name,
-          op: statement.op,
-          prefix: statement.prefix,
-          line: statement.line,
+          name: String(fieldOfValue(this.read(String(fieldOfValue(statement, "name")), Number(fieldOfValue(statement, "line"))), "name")),
+          op: String(fieldOfValue(statement, "op")) as "++" | "--",
+          prefix: fieldOfValue(statement, "prefix") === true,
+          line: Number(fieldOfValue(statement, "line")),
         });
         return;
       case "result": {
         // A bare return hands back nothing, and a function declared to return
         // nothing is the one that may write it.
-        if (statement.value === null) {
+        if (fieldOfValue(statement, "value") === null) {
           this.flush();
           this.finallysWritten();
-          this.frame().block.terminator = { k: "return", value: null };
+          this.finish({ k: "return", value: null });
           return;
         }
-        const value = this.typed(statement.value, this.returns, statement.line).value;
+        const value = this.typed(fieldOfValue(statement, "value") as Expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
         // Whatever the value hoisted is written before the block ends, and what
         // it hoisted into is what the function hands back.
         this.flush();
@@ -833,40 +866,41 @@ class FunctionBody {
         if (this.finallys.length > 0 && this.finallys.some((body) => body.length > 0)) {
           const name = this.generated("t");
           const slot: SemanticSlot = { kind: "value", name, mutable: false, type: value.type };
-          this.write({ k: "let", slot, value, line: statement.line });
+          this.write({ k: "let", slot, value, line: Number(fieldOfValue(statement, "line")) });
           this.finallysWritten();
-          this.frame().block.terminator = { k: "return", value: { k: "local", type: value.type, name } };
+          this.finish({ k: "return", value: { k: "local", type: value.type, name } });
           return;
         }
-        this.frame().block.terminator = { k: "return", value };
+        this.finish({ k: "return", value });
         return;
       }
       case "throw": {
         // An error the source raises ends the program: a finally runs before
         // the block leaves, and what follows it is not code anything reaches.
-        const written = this.typed(statement.value, null, statement.line).value;
+        const written = this.typed(fieldOfValue(statement, "value") as Expression, null, Number(fieldOfValue(statement, "line"))).value;
         const message = isText(written.type) ? written : { k: "toText" as const, type: TEXT, of: written, digits: null };
         this.finallysWritten();
-        this.write({ k: "raise", message, line: statement.line });
-        this.frame().block.terminator = { k: "unreachable" };
+        this.write({ k: "raise", message, line: Number(fieldOfValue(statement, "line")) });
+        this.finish({ k: "unreachable" });
         return;
       }
       case "if": {
-        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
-        const settled = this.tagTest(statement.condition);
-        const then = this.arm(statement.then, this.frame().loop, false, settled);
+        const condition = this.truth(this.typed(fieldOfValue(statement, "condition") as Expression, null, Number(fieldOfValue(statement, "line"))).value);
+        const settled = this.tagTest(fieldOfValue(statement, "condition") as Expression);
+        const then = this.arm(fieldOfValue(statement, "then") as Statement[], this.currentLoop(), false, settled);
         const opposite = settled === null
           ? null
-          : { name: settled.name, field: settled.field, value: settled.value, negated: settled.negated !== true };
-        const otherwise = statement.otherwise.length === 0 ? null : this.arm(statement.otherwise, this.frame().loop, false, opposite);
-        this.write({ k: "if", condition, then, otherwise, line: statement.line });
+          : { name: String(fieldOfValue(settled, "name")), field: String(fieldOfValue(settled, "field")), value: String(fieldOfValue(settled, "value")), negated: fieldOfValue(settled, "negated") !== true };
+        const otherwiseStatements = fieldOfValue(statement, "otherwise") as Statement[];
+        const otherwise = otherwiseStatements.length === 0 ? null : this.arm(otherwiseStatements, this.currentLoop(), false, opposite);
+        this.write({ k: "if", condition, then, otherwise, line: Number(fieldOfValue(statement, "line")) });
         // An `if` with an arm on each side, each of which leaves, is a statement
         // nothing after it can be reached from. The block says so, rather than
         // falling out of itself into a return of nothing: a function declared to
         // return a number does not end by handing back whatever the register
         // held, and a function that returns from every path returns.
-        if (otherwise !== null && this.frame().block.terminator.k === "next" && leaves(then) && leaves(otherwise)) {
-          this.frame().block.terminator = { k: "unreachable" };
+        if (otherwise !== null && this.currentTerminator().k === "next" && leaves(then) && leaves(otherwise)) {
+          this.finish({ k: "unreachable" });
         }
         return;
       }
@@ -882,8 +916,9 @@ class FunctionBody {
             { kind: "void" },
             [],
             true,
+            [],
           ),
-          line: statement.line,
+          line: Number(fieldOfValue(statement, "line")),
         });
         // Run the protected body. It may leave the block early (return / jump),
         // in which case there is nothing to catch and the check below is not
@@ -894,8 +929,9 @@ class FunctionBody {
         // the finally first. A leave is written as a statement of the block it
         // is written in, so the finally's own statements are written before it
         // and run before it.
-        this.finallys.push(statement.finallyBody ?? []);
-        this.statements(statement.body);
+        const finallyBody = fieldOfValue(statement, "finallyBody") as Statement[] | null;
+        this.finallys.push(finallyBody ?? []);
+        this.statements(fieldOfValue(statement, "body") as Statement[]);
         this.finallys.pop();
         // If the body fell through, an error is pending and there is a catch
         // arm, run it. The catch parameter is bound to `blaze_last_error()` so
@@ -903,77 +939,80 @@ class FunctionBody {
         // catch arm so it is only initialized when there actually is an error.
         // The arm is written with the finally pending as well: a return out of
         // the arm runs the finally before it returns.
-        if (statement.catchBody !== null) {
-          this.finallys.push(statement.finallyBody ?? []);
-          const catchBody: Statement[] =
-            statement.catchParam === null
-              ? statement.catchBody
-              : [
-                  {
-                    kind: "declare",
-                    name: statement.catchParam,
-                    type: null,
-                    init: { k: "call", name: "blaze_last_error", args: [] } as Expression,
-                    line: statement.line,
-                  },
-                  ...statement.catchBody,
-                ];
+        const catchBodyRaw = fieldOfValue(statement, "catchBody") as Statement[] | null;
+        const catchParam = fieldOfValue(statement, "catchParam") as string | null;
+        if (catchBodyRaw !== null) {
+          this.finallys.push(finallyBody ?? []);
+          const catchBody: Statement[] = [];
+          if (catchParam !== null) {
+            catchBody.push({
+              kind: "declare",
+              name: catchParam,
+              type: null,
+              init: { k: "call", name: "blaze_last_error", args: [] } as Expression,
+              line: Number(fieldOfValue(statement, "line")),
+            });
+          }
+          for (const one of catchBodyRaw) catchBody.push(one);
           const hadError = this.typed(
             { k: "call", name: "blaze_had_error", args: [] },
             null,
-            statement.line,
+            Number(fieldOfValue(statement, "line")),
           ).value;
-          const catchBlock = this.arm(catchBody, this.frame().loop);
+          const catchBlock = this.arm(catchBody, this.currentLoop());
           this.finallys.pop();
-          this.write({ k: "if", condition: hadError, then: catchBlock, otherwise: null, line: statement.line });
+          this.write({ k: "if", condition: hadError, then: catchBlock, otherwise: null, line: Number(fieldOfValue(statement, "line")) });
         }
         // Finally runs whether or not the catch arm ran.
-        this.statements(statement.finallyBody ?? []);
+        this.statements(fieldOfValue(statement, "finallyBody") as Statement[] | null ?? []);
         return;
       }
       case "while": {
-        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
-        const { target, ...info } = this.loop(statement.body);
+        const condition = this.truth(this.typed(fieldOfValue(statement, "condition") as Expression, null, Number(fieldOfValue(statement, "line"))).value);
+        const { target, ...info } = this.loop(fieldOfValue(statement, "body") as Statement[]);
         // `while (true)` never leaves its body through the loop's exit, so
         // nothing written after it is reachable — unless the body leaves the
         // loop with a `break`, which is the one way out of it. A loop that may
         // be left is not a loop that never ends, and the code after it runs.
-        const conditionText = (statement.condition as { text?: string; name?: string }).text ?? (statement.condition as { name?: string }).name;
-        const neverExits = (conditionText === "true" || conditionText === "1") && !target.left;
+        const conditionText = (fieldOfValue(statement, "condition") as Expression as { text?: string; name?: string }).text ?? (fieldOfValue(statement, "condition") as Expression as { name?: string }).name;
+        const neverExits = (conditionText === "true" || conditionText === "1") && fieldOfValue(target, "left") !== true;
         this.write({
           k: "loop",
           loop: { kind: "while", condition, ...info, ...(neverExits ? { neverExits: true } : {}) },
-          line: statement.line,
+          line: Number(fieldOfValue(statement, "line")),
         });
         if (neverExits) {
-          this.frame().block.terminator = { k: "unreachable" };
+          this.finish({ k: "unreachable" });
         }
         return;
       }
       case "doWhile": {
-        const condition = this.truth(this.typed(statement.condition, null, statement.line).value);
-        this.write({ k: "loop", loop: { kind: "doWhile", condition, ...this.loop(statement.body) }, line: statement.line });
+        const condition = this.truth(this.typed(fieldOfValue(statement, "condition") as Expression, null, Number(fieldOfValue(statement, "line"))).value);
+        this.write({ k: "loop", loop: { kind: "doWhile", condition, ...this.loop(fieldOfValue(statement, "body") as Statement[]) }, line: Number(fieldOfValue(statement, "line")) });
         return;
       }
       case "loop":
         return this.counted(statement);
       case "forOf": {
-        const source = this.read(statement.of, statement.line);
-        const element = elementOf(source.inferred);
-        const length: SemanticValue = { k: "length", type: USIZE, of: { k: "local", type: slotType(source.slot), name: source.name } };
+        const source = this.read(String(fieldOfValue(statement, "of")), Number(fieldOfValue(statement, "line")));
+        const sourceInferred = fieldOfValue(source, "inferred") as Inferred;
+        const sourceSlot = fieldOfValue(source, "slot") as SemanticSlot;
+        const sourceName = String(fieldOfValue(source, "name"));
+        const element = elementOf(sourceInferred);
+        const length: SemanticValue = { k: "length", type: USIZE, of: { k: "local", type: slotType(sourceSlot), name: sourceName } };
         const index = this.generated("i");
         this.open();
-        this.bind(statement.variable, {
-          name: statement.variable,
+        this.bind(String(fieldOfValue(statement, "variable")), {
+          name: String(fieldOfValue(statement, "variable")),
           inferred: asType(element),
-          slot: { kind: "value", name: statement.variable, mutable: false, type: element },
+          slot: { kind: "value", name: String(fieldOfValue(statement, "variable")), mutable: false, type: element },
         });
-        const walked = this.loop(statement.body);
+        const walked = this.loop(fieldOfValue(statement, "body") as Statement[]);
         this.close();
         this.write({
           k: "loop",
-          loop: { kind: "each", index, element: statement.variable, elementType: element, of: source.name, length, ...walked },
-          line: statement.line,
+          loop: { kind: "each", index, element: String(fieldOfValue(statement, "variable")), elementType: element, of: sourceName, length, ...walked },
+          line: Number(fieldOfValue(statement, "line")),
         });
         return;
       }
@@ -983,7 +1022,7 @@ class FunctionBody {
         // a leave: the finally's statements are written before the jump and
         // run before it.
         this.finallysWritten();
-        this.jump(statement.kind === "break", statement.line);
+        this.jump(statement.kind === "break", Number(fieldOfValue(statement, "line")));
         return;
       case "print":
         return this.print(statement);
@@ -991,8 +1030,8 @@ class FunctionBody {
         // A call kept for what it does. Any other value a statement holds has
         // no effect of its own and the source dropped it too, so there is
         // nothing to write down and nothing to refuse.
-        const value = this.typed(statement.value, null, statement.line).value;
-        if (value.k === "call") this.write({ k: "call", call: value.call, line: statement.line });
+        const value = this.typed(fieldOfValue(statement, "value") as Expression, null, Number(fieldOfValue(statement, "line"))).value;
+        if (value.k === "call") this.write({ k: "call", call: fieldOfValue(value, "call") as SemanticCall, line: Number(fieldOfValue(statement, "line")) });
         return;
       }
     }
@@ -1004,23 +1043,32 @@ class FunctionBody {
    * declaration is one `let` holding an object built where it is written.
    */
   private declaration(statement: Statement & { kind: "declare" }): void {
-    const annotation = statement.type === null ? null : asType(statement.type);
-    if (statement.init.k === "object") {
-      const built = this.allocated(statement.init, statement.line);
+    const line = Number(fieldOfValue(statement, "line"));
+    const declaredName = String(fieldOfValue(statement, "name"));
+    const init = fieldOfValue(statement, "init") as Expression;
+    const declaredType = fieldOfValue(statement, "type") as TypeExpr | null;
+    const annotation = declaredType === null ? null : asType(declaredType);
+    if (init.k === "object") {
+      const built = this.allocated(init, line);
+      const builtValue = fieldOfValue(built, "value") as SemanticValue;
+      const builtInferred = fieldOfValue(built, "inferred") as Inferred;
       // An annotation does not narrow an object: the layout is what the body
       // allocates, and the fields it writes are of that layout or of none.
-      const slot: SemanticSlot = { kind: "object", name: statement.name, mutable: true, type: built.value.type };
-      this.bind(statement.name, { name: statement.name, inferred: built.inferred, slot });
-      this.write({ k: "let", slot, value: built.value, line: statement.line });
+      const slot: SemanticSlot = { kind: "object", name: declaredName, mutable: true, type: fieldOfValue(builtValue, "type") as SemanticType };
+      this.bind(declaredName, { name: declaredName, inferred: builtInferred, slot });
+      this.write({ k: "let", slot, value: builtValue, line });
       return;
     }
-    const value = this.typed(statement.init, annotation, statement.line);
-    const slot = this.slot(statement.name, value, annotation, statement.line);
-    this.bind(statement.name, { name: statement.name, inferred: bound(value.inferred, annotation), slot });
-    if (statement.init.k === "member" && statement.init.base.k === "ident" && statement.name.slice(0, 8) === "__switch") {
-      this.tagAliases.set(statement.name, { base: statement.init.base.name, field: statement.init.field });
+    const value = this.typed(init, annotation, line);
+    const slot = this.slot(declaredName, value, annotation, line);
+    this.bind(declaredName, { name: declaredName, inferred: bound(fieldOfValue(value, "inferred") as Inferred, annotation), slot });
+    if (init.k === "member") {
+      const base = fieldOfValue(init, "base") as Expression;
+      if (base.k === "ident" && declaredName.slice(0, 8) === "__switch") {
+        this.tagAliases.set(declaredName, { base: String(fieldOfValue(base, "name")), field: String(fieldOfValue(init, "field")) });
+      }
     }
-    this.write({ k: "let", slot, value: value.value, line: statement.line });
+    this.write({ k: "let", slot, value: fieldOfValue(value, "value") as SemanticValue, line });
   }
 
   /**
@@ -1029,30 +1077,38 @@ class FunctionBody {
    * because a store is the only write the IR states and it states no operators.
    */
   private fieldAssignment(statement: Statement & { kind: "memberAssign" }): void {
-    const base = this.read(statement.base, statement.line);
-    const written = this.typed(statement.value, null, statement.line);
-    const layout = this.layoutForWrite(base, statement.field, written.inferred, statement.line);
-    const object: SemanticValue = { k: "local", type: slotType(base.slot), name: base.name };
+    const line = Number(fieldOfValue(statement, "line"));
+    const fieldName = String(fieldOfValue(statement, "field"));
+    const op = String(fieldOfValue(statement, "op"));
+    const base = this.read(String(fieldOfValue(statement, "base")), line);
+    const written = this.typed(fieldOfValue(statement, "value") as Expression, null, line);
+    const writtenInferred = fieldOfValue(written, "inferred") as Inferred;
+    const writtenValue = fieldOfValue(written, "value") as SemanticValue;
+    const baseSlot = fieldOfValue(base, "slot") as SemanticSlot;
+    const baseInferred = fieldOfValue(base, "inferred") as Inferred;
+    const baseName = String(fieldOfValue(base, "name"));
+    const layout = this.layoutForWrite(base, fieldName, writtenInferred, line);
+    const object: SemanticValue = { k: "local", type: slotType(baseSlot), name: baseName };
     // A layout is what the body stores, so a field written as nothing and then
     // as a number is a number, and a field the body writes but the literal
     // never held is a field of the object.
-    if (base.inferred.kind === "object") this.stored(base.inferred.key, statement.field, written.inferred);
+    if (String(fieldOfValue(baseInferred, "kind")) === "object") this.stored(String(fieldOfValue(baseInferred, "key")), fieldName, writtenInferred);
     this.write({
       k: "storeField",
       object,
       layout,
-      field: statement.field,
+      field: fieldName,
       value:
-        statement.op === "="
-          ? written.value
+        op === "="
+          ? writtenValue
           : {
               k: "arith",
-              type: this.fieldType(layout, statement.field, statement.line),
-              op: COMPOUND[statement.op],
-              left: { k: "loadField", type: this.fieldType(layout, statement.field, statement.line), object, layout, field: statement.field },
-              right: written.value,
+              type: this.fieldType(layout, fieldName, line),
+              op: COMPOUND[op as keyof typeof COMPOUND],
+              left: { k: "loadField", type: this.fieldType(layout, fieldName, line), object, layout, field: fieldName },
+              right: writtenValue,
             },
-      line: statement.line,
+      line,
     });
   }
 
@@ -1062,13 +1118,19 @@ class FunctionBody {
    * by; a bound only says where the loop stops.
    */
   private counted(statement: Statement & { kind: "loop" }): void {
-    const from = this.typed(statement.from, null, statement.line);
+    const line = Number(fieldOfValue(statement, "line"));
+    const variableName = String(fieldOfValue(statement, "variable"));
+    const fromExpression = fieldOfValue(statement, "from") as Expression;
+    const toExpression = fieldOfValue(statement, "to") as Expression;
+    const stepExpression = fieldOfValue(statement, "step") as Expression | null;
+    const bodyStatements = fieldOfValue(statement, "body") as Statement[];
+    const from = this.typed(fromExpression, null, line);
     // What the loop counts with follows from the start and the step, so the
     // step is typed once, before the count is settled, and read twice: the
     // value the IR states is built from it and typing it again would run the
     // side effects a typed expression has — an `i++` written as the step
     // becomes a `let` and a `step` of its own — a second time.
-    const step = statement.step === null ? null : this.typed(statement.step, null, statement.line);
+    const step = stepExpression === null ? null : this.typed(stepExpression, null, line);
     // A counter that starts and moves by whole numbers counts in whole numbers,
     // and the body decides whether it may: a body written entirely in whole
     // numbers reads the counter at the counter's width whatever that width is,
@@ -1077,7 +1139,11 @@ class FunctionBody {
     // alone, because there the counter is read through the accumulator's width
     // and an `i64` in that expression is a number the source never wrote.
     const wholeNames = new Set(this.wholeNames());
-    const countsWholeItself = countsWholeNumber(statement.from, from.inferred) && (step === null || (statement.step !== null && countsWholeNumber(statement.step, step.inferred)));
+    const fromInferred = fieldOfValue(from, "inferred") as Inferred;
+    const fromValue = fieldOfValue(from, "value") as SemanticValue;
+    const stepInferred = step === null ? null : fieldOfValue(step, "inferred") as Inferred;
+    const stepValue = step === null ? null : fieldOfValue(step, "value") as SemanticValue;
+    const countsWholeItself = countsWholeNumber(fromExpression, fromInferred) && (step === null || (stepExpression !== null && countsWholeNumber(stepExpression, stepInferred as Inferred)));
     // The counter may be a whole number on any of three grounds: the body's
     // arithmetic is already whole, so reading the counter at either width gives
     // the same number; the body never reads it, so there is no arithmetic for
@@ -1088,21 +1154,21 @@ class FunctionBody {
     // neither turn — and the third is what admits a loop that counts elements
     // of an array of doubles.
     const countsWhole =
-      bodyIsWhole(statement.body, statement.variable, wholeNames) ||
-      bodyIgnoresCounter(statement.body, statement.variable) ||
-      bodyIndexesCounter(statement.body, statement.variable);
+      bodyIsWhole(bodyStatements, variableName, wholeNames) ||
+      bodyIgnoresCounter(bodyStatements, variableName) ||
+      bodyIndexesCounter(bodyStatements, variableName);
     const counted =
       countsWholeItself && countsWhole
         ? I64
-        : from.inferred.kind === "type"
-          ? step === null || step.inferred.kind !== "type"
-            ? from.inferred.type
-            : numeric(from.inferred, step.inferred)
+        : fromInferred.kind === "type"
+          ? stepInferred === null || stepInferred.kind !== "type"
+            ? fromInferred.type
+            : numeric(fromInferred, stepInferred)
           : USIZE;
     const type = asType(counted);
     // A number written as the start is counted in the type the loop counts in.
     const starts: SemanticValue =
-      from.value.k === "const" && counted.kind === "primitive" ? { ...from.value, type: counted } : from.value;
+      fromValue.k === "const" && counted.kind === "primitive" ? { ...fromValue, type: counted } : fromValue;
     // The bound is where the loop stops, and the comparison that stops it is
     // between the counter and the bound. A counter that counts in whole
     // numbers and a bound that is a fraction are compared as the numbers they
@@ -1113,41 +1179,45 @@ class FunctionBody {
     // bound it does not reach, and the floor of it for one that counts down. A
     // counter that counts in fractions is compared against the bound as it is,
     // and the bound is left alone.
-    const natural = this.typed(statement.to, null, statement.line);
+    const natural = this.typed(toExpression, null, line);
+    const naturalInferred = fieldOfValue(natural, "inferred") as Inferred;
+    const naturalValue = fieldOfValue(natural, "value") as SemanticValue;
     const wholeCounter = counted.kind === "primitive" && isWhole(counted.name);
-    const bound: SemanticValue = wholeCounter && !countsWholeNumber(statement.to, natural.inferred)
-      ? roundedBound(natural.value, statement.down === statement.inclusive)
-      : natural.value.k === "const" && counted.kind === "primitive"
-        ? { ...natural.value, type: counted }
-        : natural.value;
+    const down = fieldOfValue(statement, "down") === true;
+    const inclusive = fieldOfValue(statement, "inclusive") === true;
+    const bound: SemanticValue = wholeCounter && !countsWholeNumber(toExpression, naturalInferred)
+      ? roundedBound(naturalValue, down === inclusive)
+      : naturalValue.k === "const" && counted.kind === "primitive"
+        ? { ...naturalValue, type: counted }
+        : naturalValue;
     // A number written as the step is counted in the type the loop counts in,
     // for the same reason the start is: the IR states the loop in one width.
     const moves: SemanticValue | null =
-      step === null || step.value.k !== "const" || counted.kind !== "primitive"
-        ? step?.value ?? null
-        : { ...step.value, type: counted };
+      step === null || stepValue === null || stepValue.k !== "const" || counted.kind !== "primitive"
+        ? stepValue
+        : { ...stepValue, type: counted };
     this.open();
-    this.bind(statement.variable, {
-      name: statement.variable,
+    this.bind(variableName, {
+      name: variableName,
       inferred: type,
-      slot: { kind: "value", name: statement.variable, mutable: true, type: counted },
+      slot: { kind: "value", name: variableName, mutable: true, type: counted },
     });
-    const walked = this.loop(statement.body);
+    const walked = this.loop(bodyStatements);
     this.close();
     this.write({
       k: "loop",
       loop: {
         kind: "counted",
-        variable: statement.variable,
+        variable: variableName,
         type: counted,
         from: starts,
         to: bound,
-        inclusive: statement.inclusive,
-        down: statement.down,
+        inclusive,
+        down,
         step: moves,
         ...walked,
       },
-      line: statement.line,
+      line,
     });
   }
 
@@ -1156,10 +1226,12 @@ class FunctionBody {
    * and then the line the console ends it with.
    */
   private print(statement: Statement & { kind: "print" }): void {
-    const value = this.typed(statement.value, null, statement.line).value;
+    const line = Number(fieldOfValue(statement, "line"));
+    const printed = fieldOfValue(statement, "value") as Expression;
+    const value = fieldOfValue(this.typed(printed, null, line), "value") as SemanticValue;
     switch (valueKind(value)) {
       case "text":
-        this.write({ k: "printText", value, line: statement.line });
+        this.write({ k: "printText", value, line });
         break;
       case "number":
         // A bigint *parameter* of a function is stated as the `i64` it is, so a
@@ -1168,21 +1240,21 @@ class FunctionBody {
         // bigint the source spelled, and the language prints it with the `n` —
         // and reading the mark off the expression is what tells the two apart.
         // Reading it off nothing hardcoded every one of them as the parameter.
-        this.write({ k: "printNumber", value, line: statement.line, bigint: statement.value.k === "bigint" });
+        this.write({ k: "printNumber", value, line, bigint: printed.k === "bigint" });
         break;
       case "boolean":
       case "reference":
-        this.write({ k: "printText", value: { k: "toText", type: TEXT, of: value, digits: null }, line: statement.line });
+        this.write({ k: "printText", value: { k: "toText", type: TEXT, of: value, digits: null }, line });
         break;
       case "null":
         this.write({
           k: "printText",
           value: { k: "text", type: TEXT, parts: [{ k: "text", value: "null" }] },
-          line: statement.line,
+          line,
         });
         break;
     }
-    if (statement.newline !== false) this.write({ k: "printNewline", line: statement.line });
+    if (fieldOfValue(statement, "newline") !== false) this.write({ k: "printNewline", line });
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1196,9 +1268,9 @@ class FunctionBody {
         // another width, and a whole literal is still a double. `true` and
         // `false` are truths the source wrote, so a use that says nothing takes
         // the truth they are rather than the double they are held as.
-        const written = numberAt(expect) ?? (expression.boolean === true ? BOOL : F64);
+        const written = numberAt(expect) ?? (fieldOfValue(expression, "boolean") === true === true ? BOOL : F64);
         return {
-          value: { k: "const", type: written, text: expression.text },
+          value: { k: "const", type: written, text: String(fieldOfValue(expression, "text")) },
           inferred: { kind: "type", type: written },
         };
       }
@@ -1209,71 +1281,73 @@ class FunctionBody {
         // answered as the low sixty-four bits of itself, which is a number the
         // source never wrote. The program resolver types it the same way.
         let literal: bigint | null = null;
-        try { literal = BigInt(expression.text); } catch { /* not a valid bigint */ }
+        try { literal = BigInt(String(fieldOfValue(expression, "text"))); } catch { /* not a valid bigint */ }
         // When a `u64` is expected and the value fits in 64 unsigned bits, type
         // it as `u64` so it can be passed to `u256_from_u64x2` or
         // `u256_from_u64x4` without first being widened to `u256`.
         if (expect !== null && expect.kind === "type" && expect.type.kind === "primitive" && expect.type.name === "u64" && literal !== null && literal >= 0n && literal <= U64_MAX) {
-          return { value: { k: "const", type: U64, text: expression.text }, inferred: asType(U64) };
+          return { value: { k: "const", type: U64, text: String(fieldOfValue(expression, "text")) }, inferred: asType(U64) };
         }
         if (literal !== null && (literal > I64_MAX || literal < I64_MIN)) {
-          return { value: { k: "const", type: U256, text: expression.text }, inferred: asType(U256) };
+          return { value: { k: "const", type: U256, text: String(fieldOfValue(expression, "text")) }, inferred: asType(U256) };
         }
-        return { value: { k: "const", type: I64, text: expression.text }, inferred: asType(I64) };
+        return { value: { k: "const", type: I64, text: String(fieldOfValue(expression, "text")) }, inferred: asType(I64) };
       }
       case "ident": {
-        const held = this.read(expression.name, line);
-        return { value: { k: "local", type: slotType(held.slot), name: held.name }, inferred: held.inferred };
+        const held = this.read(String(fieldOfValue(expression, "name")), line);
+        return { value: { k: "local", type: slotType(fieldOfValue(held, "slot") as SemanticSlot), name: String(fieldOfValue(held, "name")) }, inferred: fieldOfValue(held, "inferred") as Inferred };
       }
       case "null":
         return { value: { k: "nothing", type: referenceAt(expect) ?? REF_NULL }, inferred: ANY };
       case "argv":
         // `process.argv` itself is a count of the arguments the program was
         // given, and one of them is a number.
-        if (expression.index === null) return { value: { k: "argv", type: USIZE, index: null }, inferred: asType(USIZE) };
-        return { value: { k: "argv", type: F64, index: this.typed(expression.index, WHOLE, line).value }, inferred: asType(F64) };
+        if ((fieldOfValue(expression, "index") as Expression | null) === null) return { value: { k: "argv", type: USIZE, index: null }, inferred: asType(USIZE) };
+        return { value: { k: "argv", type: F64, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value }, inferred: asType(F64) };
       case "length": {
-        const held = this.read(expression.buffer, line);
-        return { value: { k: "length", type: USIZE, of: { k: "local", type: slotType(held.slot), name: held.name } }, inferred: asType(USIZE) };
+        const held = this.read(String(fieldOfValue(expression, "buffer")), line);
+        return { value: { k: "length", type: USIZE, of: { k: "local", type: slotType(fieldOfValue(held, "slot") as SemanticSlot), name: String(fieldOfValue(held, "name")) } }, inferred: asType(USIZE) };
       }
       case "lengthOf": {
-        const operand = this.typed(expression.of, null, line);
+        const operand = this.typed(fieldOfValue(expression, "of") as Expression, null, line);
         // A dynamic value carries its length in the runtime's array, not in a
         // block header: the length is the service that answers it.
-        if (!this.isBufferValue(operand.value.type) && operand.value.type.kind !== "text") {
-          return this.runtimeCall("blaze_rt_array_length", [operand.value], F64);
+        const operandValue = fieldOfValue(operand, "value") as SemanticValue;
+        if (!this.isBufferValue(operandValue.type) && operandValue.type.kind !== "text") {
+          return this.runtimeCall("blaze_rt_array_length", [operandValue], F64);
         }
         return {
-          value: { k: "length", type: USIZE, of: operand.value },
+          value: { k: "length", type: USIZE, of: operandValue },
           inferred: asType(USIZE),
         };
       }
       case "index": {
-        const base = this.typed(expression.base, null, line);
-        if (base.inferred.kind === "object") {
+        const base = this.typed(fieldOfValue(expression, "base") as Expression, null, line);
+        if ((fieldOfValue(base, "inferred") as Inferred).kind === "object") {
           throw this.error(
-            `reads an element of ${describe(base.inferred)}, which is an object`,
+            `reads an element of ${describe(fieldOfValue(base, "inferred") as Inferred)}, which is an object`,
             line,
             "an object is read field by field, as in node.left",
           );
         }
         // A value that is not a buffer is a dynamic value: its entries are the
         // runtime's, and the key chooses the service that reads one.
-        if (!this.isBufferValue(base.value.type)) {
-          const key = this.typed(expression.index, null, line);
+        const baseValue = fieldOfValue(base, "value") as SemanticValue;
+        if (!this.isBufferValue(baseValue.type)) {
+          const key = this.typed(fieldOfValue(expression, "index") as Expression, null, line);
           return this.dynamicIndexRead(base, key, expect);
         }
-        const element = elementOf(base.inferred);
+        const element = elementOf(fieldOfValue(base, "inferred") as Inferred);
         return {
-          value: { k: "element", type: element, of: base.value, index: this.typed(expression.index, WHOLE, line).value },
+          value: { k: "element", type: element, of: baseValue, index: this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line).value },
           inferred: asType(element),
         };
       }
       case "slice": {
-        const base = this.typed(expression.base, null, line);
-        if (expression.start !== null) this.typed(expression.start, null, line);
-        if (expression.stop !== null) this.typed(expression.stop, null, line);
-        if (expression.step !== null) this.typed(expression.step, null, line);
+        const base = this.typed(fieldOfValue(expression, "base") as Expression, null, line);
+        if ((fieldOfValue(expression, "start") as Expression | null) !== null) this.typed(fieldOfValue(expression, "start") as Expression, null, line);
+        if ((fieldOfValue(expression, "stop") as Expression | null) !== null) this.typed(fieldOfValue(expression, "stop") as Expression, null, line);
+        if ((fieldOfValue(expression, "step") as Expression | null) !== null) this.typed(fieldOfValue(expression, "step") as Expression, null, line);
         return base;
       }
       case "member":
@@ -1286,7 +1360,7 @@ class FunctionBody {
         // `new Float64Array(n)` is a block of `n` elements the program sizes
         // when it runs, cleared: a read past what the program filled is the
         // zero the language answers it with.
-        const element = parseType(expression.element);
+        const element = parseType(String(fieldOfValue(expression, "element")));
         const type: TypeExpr = { kind: "array", of: element, length: null };
         return {
           value: {
@@ -1294,7 +1368,7 @@ class FunctionBody {
             type,
             element,
             length: null,
-            count: this.typed(expression.count, WHOLE, line).value,
+            count: this.typed(fieldOfValue(expression, "count") as Expression, WHOLE, line).value,
             view: null,
             values: [],
           },
@@ -1304,12 +1378,13 @@ class FunctionBody {
       case "buffer": {
         // A list whose element type no use stated is the runtime's dynamic
         // array, which holds the values pushed into it.
-        if (expression.dynamic === true) return this.runtimeCall("blaze_rt_dyn_array_new", [], ANY_REF);
+        if (fieldOfValue(expression, "dynamic") === true) return this.runtimeCall("blaze_rt_dyn_array_new", [], ANY_REF);
         // `bytes.subarray(from, to)` is a window of a block another name holds:
         // the block moved by the offset, and the elements it reaches are the
         // count the source wrote. Nothing is allocated and nothing is copied.
-        if (expression.view !== undefined) {
-          const element = parseType(expression.element);
+        const view = fieldOfValue(expression, "view") as { count: Expression; of: Expression; offset: Expression } | undefined;
+        if (view !== undefined) {
+          const element = parseType(String(fieldOfValue(expression, "element")));
           const type: TypeExpr = { kind: "slice", of: element };
           return {
             value: {
@@ -1317,10 +1392,10 @@ class FunctionBody {
               type,
               element,
               length: null,
-              count: this.typed(expression.view.count, WHOLE, line).value,
+              count: this.typed(fieldOfValue(view, "count") as Expression, WHOLE, line).value,
               view: {
-                of: this.typed(expression.view.of, null, line).value,
-                offset: this.typed(expression.view.offset, WHOLE, line).value,
+                of: this.typed(fieldOfValue(view, "of") as Expression, null, line).value,
+                offset: this.typed(fieldOfValue(view, "offset") as Expression, WHOLE, line).value,
               },
               values: [],
             },
@@ -1330,17 +1405,17 @@ class FunctionBody {
         // `new Float64Array([1, 2, 3])` is a block whose length the program
         // wrote down, and the elements take the type of the array they are
         // written into rather than the type they were written at.
-        const element = parseType(expression.element);
-        const type: TypeExpr = { kind: "array", of: element, length: expression.values.length };
+        const element = parseType(String(fieldOfValue(expression, "element")));
+        const type: TypeExpr = { kind: "array", of: element, length: (fieldOfValue(expression, "values") as Expression[]).length };
         return {
           value: {
             k: "buffer",
             type,
             element,
-            length: expression.values.length,
+            length: (fieldOfValue(expression, "values") as Expression[]).length,
             count: null,
             view: null,
-            values: expression.values.map((value) => this.typed(value, { kind: "type", type: element }, line).value),
+            values: (fieldOfValue(expression, "values") as Expression[]).map((value) => this.typed(value, { kind: "type", type: element }, line).value),
           },
           inferred: asType(type),
         };
@@ -1350,7 +1425,7 @@ class FunctionBody {
         // already that text, and the digits would be dropped rather than
         // refused, so it is refused here for the reason the program body
         // refuses it.
-        const of = this.typed(expression.of, null, line).value;
+        const of = this.typed(fieldOfValue(expression, "of") as Expression, null, line).value;
         if (isText(of.type)) {
           throw this.error(
             "a string is not written at a fixed number of digits",
@@ -1358,7 +1433,7 @@ class FunctionBody {
             "a string is already text; write it as it is",
           );
         }
-        return { value: { k: "toText", type: TEXT, of, digits: expression.digits, ...(expression.precision === undefined ? {} : { precision: expression.precision }) }, inferred: asType(USIZE) };
+        return { value: { k: "toText", type: TEXT, of, digits: Number(fieldOfValue(expression, "digits")), ...(fieldOfValue(expression, "precision") as true | undefined === undefined ? {} : { precision: fieldOfValue(expression, "precision") as true | undefined }) }, inferred: asType(USIZE) };
       }
       case "text": {
         const parts: SemanticTextPart[] = [];
@@ -1377,24 +1452,26 @@ class FunctionBody {
       case "unary":
         return this.unary(expression, expect, line);
       case "conditional": {
-        const condition = this.truth(this.typed(expression.condition, null, line).value);
-        const then = this.typed(expression.then, expect, line);
-        const otherwise = this.typed(expression.otherwise, expect, line);
+        const condition = this.truth(this.typed(fieldOfValue(expression, "condition") as Expression, null, line).value);
+        const then = this.typed(fieldOfValue(expression, "then") as Expression, expect, line);
+        const otherwise = this.typed(fieldOfValue(expression, "otherwise") as Expression, expect, line);
         // An arm written `null` is the absence of the other arm's value, not a
         // value of another type: `a?.[i]` is the element or nothing, and the
         // conditional is a number where the element is one. Two absences are
         // still the unshaped reference a null is.
-        const absent = (one: Typed): boolean => one.value.k === "nothing";
-        const type = absent(otherwise) && !absent(then) ? then.value.type
-          : absent(then) && !absent(otherwise) ? otherwise.value.type
-            : this.common(then.value.type, otherwise.value.type, line);
+        const absent = (one: Typed): boolean => (fieldOfValue(one, "value") as SemanticValue).k === "nothing";
+        const thenType = (fieldOfValue(then, "value") as SemanticValue).type;
+        const otherwiseType = (fieldOfValue(otherwise, "value") as SemanticValue).type;
+        const type = absent(otherwise) && !absent(then) ? thenType
+          : absent(then) && !absent(otherwise) ? otherwiseType
+            : this.common(thenType, otherwiseType, line);
         return {
           value: {
             k: "select",
             type,
             condition,
-            then: then.value,
-            otherwise: otherwise.value,
+            then: fieldOfValue(then, "value") as SemanticValue,
+            otherwise: fieldOfValue(otherwise, "value") as SemanticValue,
           },
           // Both arms are walked so both objects are laid out, but a choice is
           // whichever arm it takes: two arms that name the same thing, or a
@@ -1405,8 +1482,8 @@ class FunctionBody {
           // one number, and reading the choice as a length keeps the arithmetic
           // that follows it arithmetic. Two references are a reference, and the
           // source did not say which layout it is.
-          inferred: describe(then.inferred) === describe(otherwise.inferred)
-            ? then.inferred
+          inferred: describe(fieldOfValue(then, "inferred") as Inferred) === describe(fieldOfValue(otherwise, "inferred") as Inferred)
+            ? fieldOfValue(then, "inferred") as Inferred
             : type.kind === "slice" || type.kind === "array" || type.kind === "primitive" || type.kind === "text"
               ? asType(type)
               : ANY,
@@ -1420,14 +1497,15 @@ class FunctionBody {
         // One of the values a closure carries, read at the type the arrow that
         // captured it reads it at. The closure is the value it travels in, so
         // it is typed first: a name it reads is a name the body has.
-        const closure = this.typed(expression.closure, null, line).value;
-        return { value: { k: "capture", type: expression.type, closure, index: expression.index }, inferred: asType(expression.type) };
+        const closure = this.typed(fieldOfValue(expression, "closure") as Expression, null, line).value;
+        const captureType = fieldOfValue(expression, "type") as TypeExpr;
+        return { value: { k: "capture", type: captureType, closure, index: Number(fieldOfValue(expression, "index")) }, inferred: asType(captureType) };
       }
       case "invoke":
         return this.invoke(expression, line);
       case "append":
         throw this.error(
-          `writes ${expression.target}.${expression.op} where a value is expected`,
+          `writes ${String(fieldOfValue(expression, "target"))}.${String(fieldOfValue(expression, "op"))} where a value is expected`,
           line,
           "a push and a pop answer the array the name holds afterwards, and the write that keeps it is a statement of its own",
         );
@@ -1441,70 +1519,73 @@ class FunctionBody {
    * scope the body that wrote it is in, and travel with the closure from there.
    */
   private closure(expression: Expression & { k: "arrow" }, line: number): Typed {
-    if (expression.code === undefined) {
+    const code = fieldOfValue(expression, "code") as string | undefined;
+    if (code === undefined) {
       throw this.error(
-        `reads the arrow function ${expression.name} as a value, which the frontend lowered no closure entry for`,
+        `reads the arrow function ${String(fieldOfValue(expression, "name"))} as a value, which the frontend lowered no closure entry for`,
         line,
         "an arrow read as a value is entered through a function the frontend writes beside it",
       );
     }
-    const lifted = this.context.functions[expression.code];
+    const context = fieldOfValue(this, "context") as FunctionContext;
+    const functions = fieldOfValue(context, "functions") as Record<string, FunctionContract>;
+    const lifted = functions[code];
     if (lifted === undefined) {
       throw this.error(
-        `calls the arrow function ${expression.code}, which the program does not compile`,
+        `calls the arrow function ${code}, which the program does not compile`,
         line,
         "the function an arrow is entered through is a function of the same file",
       );
     }
-    const captures = expression.captures.map(
-      (name) => this.typed({ k: "ident", name }, null, line).value,
+    const captureNames = fieldOfValue(expression, "captures") as string[];
+    const captures = captureNames.map(
+      (name) => fieldOfValue(this.typed({ k: "ident", name }, null, line), "value") as SemanticValue,
     );
     return {
       value: {
         k: "closure",
         type: REF_NULL,
-        code: lifted.function.symbol,
-        signature: lifted.function,
+        code: String(fieldOfValue(fieldOfValue(lifted, "function"), "symbol")),
+        signature: fieldOfValue(lifted, "function") as FunctionSignature,
         captures,
       },
       inferred: ANY,
     };
   }
 
-  /**
-   * A call of a value. The signature is the one the call site is written
-   * against, because the value does not carry the types its parameters were
-   * declared with: the arguments are read at the types the call names.
-   */
   private invoke(expression: Expression & { k: "invoke" }, line: number): Typed {
-    const calleeTyped = this.typed(expression.callee, null, line);
+    const calleeExpression = fieldOfValue(expression, "callee") as Expression;
+    const params = fieldOfValue(expression, "params") as TypeExpr[];
+    const argumentExpressions = fieldOfValue(expression, "args") as Expression[];
+    const calleeTyped = this.typed(calleeExpression, null, line);
+    const calleeValue = fieldOfValue(calleeTyped, "value") as SemanticValue;
     // A member that is no field of any layout the program lays out reads back
     // as its base — field() answers that way for a read — but calling the
     // object as the value it holds is a jump to data. The load that would
     // hand the call its value does not exist where the method is behaviour of
     // a class rather than a field of an object, and the call is refused here
     // than built to crash.
-    if (expression.callee.k === "member" && calleeTyped.value.k === "local") {
+    if (calleeExpression.k === "member" && calleeValue.k === "local") {
       throw this.error(
-        `calls ${expression.callee.field}, which is not a field of any object the program lays out`,
+        `calls ${String(fieldOfValue(calleeExpression, "field"))}, which is not a field of any object the program lays out`,
         line,
         "a method of a class is called as its function; a value held at a function type reads the field the object lays out",
       );
     }
-    const callee = calleeTyped.value;
-    if (expression.params.length !== expression.args.length) {
+    const callee = calleeValue;
+    if (params.length !== argumentExpressions.length) {
       throw this.error(
-        `calls a value with ${expression.args.length} argument${expression.args.length === 1 ? "" : "s"}, but it takes ${expression.params.length}`,
+        `calls a value with ${argumentExpressions.length} argument${argumentExpressions.length === 1 ? "" : "s"}, but it takes ${params.length}`,
         line,
       );
     }
-    const args = expression.args.map((argument, at) => this.typed(argument, asType(expression.params[at]), line).value);
-    const returns: SemanticType = expression.returns;
+    const args = argumentExpressions.map((argument, at) => fieldOfValue(this.typed(argument, asType(params[at]), line), "value") as SemanticValue);
+    const returns = fieldOfValue(expression, "returns") as SemanticType;
     // The type each argument is handed over as is the one the call site states,
     // not the one the value happens to be: a loop counter handed to a parameter
     // declared as a double is converted where it is passed, exactly as it is in
     // a call of a named function.
-    const argTypes: SemanticType[] = expression.params.map((type) => type);
+    const argTypes: SemanticType[] = params.map((type) => type);
     const signature: FunctionSignature = {
       name: "(closure)",
       symbol: "(closure)",
@@ -1539,18 +1620,19 @@ class FunctionBody {
    * holds it.
    */
   private field(expression: Expression & { k: "member" }, expect: Inferred | null, line: number): Typed {
-    const base = this.typed(expression.base, null, line);
-    const object = base.value;
-    if (base.inferred.kind === "object") {
-      const layout = this.layoutFor(base.inferred.key, line);
+    const base = this.typed(fieldOfValue(expression, "base") as Expression, null, line);
+    const object = fieldOfValue(base, "value") as SemanticValue;
+    if ((fieldOfValue(base, "inferred") as Inferred).kind === "object") {
+      const layout = this.layoutFor(String(fieldOfValue(fieldOfValue(base, "inferred") as Inferred, "key")), line);
       return {
-        value: { k: "loadField", type: this.fieldType(layout, expression.field, line), object, layout, field: expression.field },
-        inferred: this.fieldOf(base.inferred.key, expression.field),
+        value: { k: "loadField", type: this.fieldType(layout, String(fieldOfValue(expression, "field")), line), object, layout, field: String(fieldOfValue(expression, "field")) },
+        inferred: this.fieldOfValue(String(fieldOfValue(fieldOfValue(base, "inferred") as Inferred, "key")), String(fieldOfValue(expression, "field"))),
       };
     }
-    const baseName = expression.base.k === "ident" ? expression.base.name : null;
+    const baseExpression = fieldOfValue(expression, "base") as Expression;
+    const baseName = baseExpression.k === "ident" ? String(fieldOfValue(baseExpression, "name")) : null;
     const settled = baseName === null ? null : this.narrowingFor(baseName);
-    const layouts = this.layoutsWith(base.inferred, describe(base.inferred), expression.field, expect ?? ANY, line, settled);
+    const layouts = this.layoutsWith(fieldOfValue(base, "inferred") as Inferred, describe(fieldOfValue(base, "inferred") as Inferred), String(fieldOfValue(expression, "field")), expect ?? ANY, line, settled);
     // The program lays out no object with that field at all, so it says
     // nothing about what is behind the reference. The reference is then the
     // only value of the object the IR can name, and it is the one every body
@@ -1559,14 +1641,14 @@ class FunctionBody {
     // not have.
     if (layouts.length === 0) return { value: object, inferred: ANY };
     const layout = layouts[0] as string;
-    const type = this.fieldType(layout, expression.field, line);
+    const type = this.fieldType(layout, String(fieldOfValue(expression, "field")), line);
     // The read is at the type the layout gives the field, which is the number
     // behind it rather than the reference: `p.x + p.y` over an `any` is a sum
     // of two doubles because the layouts the program lays out say the fields
     // are doubles, and it was refused as a sum of two references because
     // nothing said what was behind them.
     return {
-      value: { k: "loadField", type, object, layout, field: expression.field },
+      value: { k: "loadField", type, object, layout, field: String(fieldOfValue(expression, "field")) },
       inferred: inferredOfField(type),
     };
   }
@@ -1596,42 +1678,45 @@ class FunctionBody {
     line: number,
     settled: readonly { field: string; value: string; negated?: boolean }[] | null = null,
   ): string[] {
-    if (inferred.kind === "object") return [this.layoutFor(inferred.key, line)];
+    const tagLayouts = fieldOfValue(this.definition, "tagLayouts") as Record<string, Record<string, string[]>> | undefined;
+    if (String(fieldOfValue(inferred, "kind")) === "object") return [this.layoutFor(String(fieldOfValue(inferred, "key")), line)];
     // A reference that names the layout it points at is that layout: the
     // program wrote the name, so a field read through it is that layout's
     // field and no other. `Info` and a literal that writes the same field name
     // are two layouts, and only the one the reference names is the value.
-    if (inferred.kind === "type") {
-      const named = layoutOf(inferred.type) as { name?: string } | null;
-      if (named !== null && typeof named.name === "string" && this.objects[named.name] !== undefined) {
-        return [named.name];
+    if (String(fieldOfValue(inferred, "kind")) === "type") {
+      const named = layoutOf(fieldOfValue(inferred, "type") as TypeExpr) as { name?: string } | null;
+      const namedName = named === null ? undefined : fieldOfValue(named, "name") as string | undefined;
+      if (namedName !== undefined && (fieldOfValue(this, "objects") as Record<string, ObjectLayout>)[namedName] !== undefined) {
+        return [namedName];
       }
     }
     // A reference to nothing in particular behind it: `p.x` in a body whose
     // `p` is an `any` asks what is behind `p`, not for a reference.
-    const unshaped = use.kind === "type" && use.type.kind === "ref" && use.type.of === null;
+    const useType = fieldOfValue(use, "type") as TypeExpr;
+    const unshaped = String(fieldOfValue(use, "kind")) === "type" && useType.kind === "ref" && useType.of === null;
     const candidates: { name: string; read: string }[] = [];
-    for (const layout of Object.values(this.objects)) {
-      const declared = layout.fields.find((one) => one.name === field);
+    for (const layout of Object.values((fieldOfValue(this, "objects") as Record<string, ObjectLayout>))) {
+      const declared = (fieldOfValue(layout, "fields") as readonly { name: string; type: string; offset: number }[]).find((one) => one.name === field);
       if (declared === undefined) continue;
-      if (!unshaped && !holds(declared.type, use)) continue;
-      candidates.push({ name: layout.name, read: `${declared.type} at ${declared.offset}` });
+      if (!unshaped && !holds(String(fieldOfValue(declared, "type")), use)) continue;
+      candidates.push({ name: String(fieldOfValue(layout, "name")), read: `${String(fieldOfValue(declared, "type"))} at ${String(fieldOfValue(declared, "offset"))}` });
     }
     let considered = candidates;
-    if (settled !== null && this.definition.tagLayouts !== undefined) {
+    if (settled !== null && tagLayouts !== undefined) {
       for (const constraint of settled) {
-        const listed = this.definition.tagLayouts[constraint.field]?.[constraint.value];
+        const listed = tagLayouts[String(fieldOfValue(constraint, "field"))]?.[String(fieldOfValue(constraint, "value"))];
         if (listed === undefined) continue;
-        const narrowed = considered.filter((one) => listed.includes(one.name) !== (constraint.negated === true));
+        const narrowed = considered.filter((one) => listed.includes(one.name) !== (fieldOfValue(constraint, "negated") === true));
         if (narrowed.length > 0) considered = narrowed;
       }
     }
     let [first] = considered;
     if (first === undefined) return [];
     let disagreeing = considered.filter((one) => one.read !== first.read).map((one) => one.name);
-    if (disagreeing.length > 0 && this.definition.tagLayouts !== undefined) {
+    if (disagreeing.length > 0 && tagLayouts !== undefined) {
       const taggedNames = new Set<string>();
-      const byValue = this.definition.tagLayouts[field];
+      const byValue = tagLayouts[field];
       if (byValue !== undefined) {
         for (const value of Object.keys(byValue)) {
           for (const name of byValue[value]) taggedNames.add(name);
@@ -1651,7 +1736,7 @@ class FunctionBody {
         disagreeing = considered.filter((one) => one.read !== first.read).map((one) => one.name);
       }
     }
-    if (disagreeing.length > 0 && use.kind === "type" && use.type.kind === "ref" && use.type.of === null) {
+    if (disagreeing.length > 0 && String(fieldOfValue(use, "kind")) === "type" && useType.kind === "ref" && useType.of === null) {
       const text = considered.filter((one) => parseType(one.read.slice(0, one.read.lastIndexOf(" at "))).kind === "text");
       const [tag] = text;
       if (tag !== undefined && text.every((one) => one.read === tag.read)) {
@@ -1670,11 +1755,11 @@ class FunctionBody {
 
   /** The layout a field the body writes belongs to, or a refusal where there is none. */
   private layoutForWrite(base: Held, field: string, use: Inferred, line: number): string {
-    const settled = this.narrowingFor(base.name);
-    const layouts = this.layoutsWith(base.inferred, base.name, field, use, line, settled);
+    const settled = this.narrowingFor(String(fieldOfValue(base, "name")));
+    const layouts = this.layoutsWith(fieldOfValue(base, "inferred") as Inferred, String(fieldOfValue(base, "name")), field, use, line, settled);
     if (layouts.length > 0) return layouts[0];
     throw this.error(
-      `writes "${base.name}.${field}", which no layout the program lays out holds`,
+      `writes "${String(fieldOfValue(base, "name"))}.${field}", which no layout the program lays out holds`,
       line,
       `the program lays out ${this.laidOut()}, and a field of an object it does not lay out cannot be written`,
     );
@@ -1682,12 +1767,16 @@ class FunctionBody {
 
   /** A call, or the one builtin that is an operation rather than a call. */
   private call(expression: Expression & { k: "call" }, line: number, expect: Inferred | null = null): Typed {
+    const context = fieldOfValue(this, "context") as FunctionContext;
+    const functions = fieldOfValue(context, "functions") as Record<string, FunctionContract>;
+    const callArgs = fieldOfValue(expression, "args") as Expression[];
+    const callName = String(fieldOfValue(expression, "name"));
     // A value the read could not settle. The read refuses the construct where
     // it is written; this is where a refusal that did not survive in the
     // declaration's trial becomes one the build reports, rather than a zero the
     // program reads a field of.
-    if (expression.name.startsWith("__refused_")) {
-      const at = Number(expression.name.slice("__refused_".length));
+    if (callName.startsWith("__refused_")) {
+      const at = Number(callName.slice("__refused_".length));
       throw this.error(
         "a construct outside the subset the compiler reads reached the body",
         line,
@@ -1698,19 +1787,22 @@ class FunctionBody {
     // promise is awaited as itself, and a promise's value is the type the use
     // asks for: a function's body is typed before it is written, so the use is
     // what says which value is read out of the promise.
-    if (expression.name === "Promise.await") {
-      const operand = this.typed(expression.args[0] as Expression, null, line);
-      const inferred = operand.inferred;
-      const promise = inferred.kind === "type" && inferred.type.kind === "ref" && inferred.type.of === null && inferred.type.name === undefined;
+    if (callName === "Promise.await") {
+      const operand = this.typed(callArgs[0] as Expression, null, line);
+      const inferred = fieldOfValue(operand, "inferred") as Inferred;
+      const inferredType = fieldOfValue(inferred, "type") as TypeExpr;
+      const promise = String(fieldOfValue(inferred, "kind")) === "type" && inferredType.kind === "ref" && inferredType.of === null && inferredType.name === undefined;
       if (!promise) return operand;
-      let payload: TypeExpr = expect !== null && expect.kind === "type" ? expect.type : ANY_REF;
+      let payload: TypeExpr = expect !== null && String(fieldOfValue(expect, "kind")) === "type" ? fieldOfValue(expect, "type") as TypeExpr : ANY_REF;
       // A use that fixes no type is a use of the value the promise carries,
       // which the contract of an async function states beside its own.
       if (payload.kind === "ref" && payload.of === null && payload.name === undefined) {
-        const awaited = expression.args[0];
+        const awaited = callArgs[0];
         if (awaited !== undefined && awaited.k === "call") {
-          const contract = this.context.functions[awaited.name] ?? this.context.functions[`${awaited.name}__${awaited.args.length}`];
-          if (contract?.promise !== undefined) payload = parseType(contract.promise);
+          const awaitedName = String(fieldOfValue(awaited, "name"));
+          const awaitedArgs = fieldOfValue(awaited, "args") as Expression[];
+          const contract = functions[awaitedName] ?? functions[`${awaitedName}__${awaitedArgs.length}`];
+          if (contract !== undefined && fieldOfValue(contract, "promise") !== undefined) payload = parseType(String(fieldOfValue(contract, "promise")));
         }
       }
       const callee = payload.kind === "text"
@@ -1725,7 +1817,7 @@ class FunctionBody {
                 ? "Promise.await.value"
                 : "Promise.await";
       const awaited = builtinFor(callee) as BuiltinSignature;
-      const returns = awaited.returns;
+      const returns = fieldOfValue(awaited, "returns") as SemanticType;
       return {
         value: {
           k: "call",
@@ -1735,14 +1827,14 @@ class FunctionBody {
             {
               name: callee,
               symbol: callee,
-              params: awaited.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+              params: (fieldOfValue(awaited, "params") as readonly SemanticType[]).map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
               returns: contractText(returns),
             },
-            [operand.value],
+            [fieldOfValue(operand, "value") as SemanticValue],
             returns,
             [],
             true,
-            [operand.value.type],
+            [(fieldOfValue(operand, "value") as SemanticValue).type],
           ),
         },
         inferred: asType(returns),
@@ -1751,7 +1843,7 @@ class FunctionBody {
     // `BigInt(x)` is the whole number a value names, and a literal argument is
     // a value the compiler already holds: folding it is what lets a constant
     // expression be written the way the language writes one, `2n ** BigInt(8n)`.
-    if (expression.name === "BigInt") {
+    if (callName === "BigInt") {
       const folded = this.bigIntCall(expression);
       if (folded !== null) return folded;
     }
@@ -1761,25 +1853,25 @@ class FunctionBody {
     // it captured, which the backend calls in front of the promise's own
     // current-promise bookkeeping. The settle parameters were dropped from the
     // lifted function when the frontend read the allocation.
-    if (expression.name === "Promise") {
+    if (callName === "Promise") {
       const promise = builtinFor("Promise") as BuiltinSignature;
-      this.builtinArity("Promise", promise, expression.args.length, line);
-      const executor = expression.args[0];
+      this.builtinArity("Promise", promise, callArgs.length, line);
+      const executor = callArgs[0];
       let handed: SemanticValue;
       if (executor !== undefined && executor.k === "arrow") {
-        const lifted = this.context.functions[executor.name];
+        const lifted = functions[String(fieldOfValue(executor, "name"))];
         if (lifted === undefined) {
           throw this.error(
-            `calls the executor ${executor.name}, which the program does not compile`,
+            `calls the executor ${String(fieldOfValue(executor, "name"))}, which the program does not compile`,
             line,
             "a promise executor is a function of the same file",
           );
         }
-        const captures: CaptureRef[] = executor.captures.map((name) => {
+        const captures: CaptureRef[] = (fieldOfValue(executor, "captures") as string[]).map((name) => {
           const held = this.typed({ k: "ident", name }, null, line).value;
-          return { name, type: held.type };
+          return { name, type: fieldOfValue(held, "type") as SemanticType };
         });
-        handed = { k: "functionRef", type: VOID, name: lifted.function.symbol, captures };
+        handed = { k: "functionRef", type: VOID, name: String(fieldOfValue(fieldOfValue(lifted, "function"), "symbol")), captures };
       } else if (executor !== undefined) {
         handed = this.typed(executor, null, line).value;
       } else {
@@ -1788,41 +1880,42 @@ class FunctionBody {
       return {
         value: {
           k: "call",
-          type: promise.returns,
+          type: fieldOfValue(promise, "returns") as SemanticType,
           call: this.semanticCall(
             "Promise",
             {
               name: "Promise",
               symbol: "Promise",
               params: [{ name: "argument0", type: contractText(ANY_REF) }],
-              returns: contractText(promise.returns),
+              returns: contractText(fieldOfValue(promise, "returns") as SemanticType),
             },
             [handed],
-            promise.returns,
-            promise.effects ?? [],
+            fieldOfValue(promise, "returns") as SemanticType,
+            (fieldOfValue(promise, "effects") as readonly Effect[] | undefined) ?? [],
             true,
             [ANY_REF],
           ),
         },
-        inferred: asType(promise.returns),
+        inferred: asType(fieldOfValue(promise, "returns") as SemanticType),
       };
     }
     // A function the program compiles is the name the source bound: a local or
     // an import shadows a builtin of the same name, as it does in the language.
     // The builtin is the fallback for a name the program does not declare.
-    const directOverload = `${expression.name}__${expression.args.length}`;
-    const direct = this.context.functions[directOverload] ?? this.context.functions[expression.name];
+    const directOverload = `${callName}__${callArgs.length}`;
+    const direct = functions[directOverload] ?? functions[callName];
     if (direct !== undefined) {
-      const called = this.context.functions[directOverload] !== undefined ? directOverload : expression.name;
-      const signature = direct.function;
-      this.arity(called, signature.params.length, expression.args.length, line);
-      const args = expression.args.map((argument, at) => this.typed(argument, asType(parseType(signature.params[at].type)), line));
-      const returns = parseType(signature.returns);
+      const called = functions[directOverload] !== undefined ? directOverload : callName;
+      const signature = fieldOfValue(direct, "function") as FunctionSignature;
+      const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
+      this.arity(called, signatureParams.length, callArgs.length, line);
+      const args = callArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
+      const returns = parseType(String(fieldOfValue(signature, "returns")));
       return {
         value: {
           k: "call",
           type: returns,
-          call: this.semanticCall(signature.symbol, signature, args.map((argument) => argument.value), returns, direct.effects, false),
+          call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(direct, "effects") as readonly Effect[], false, []),
         },
         inferred: asType(returns),
       };
@@ -1831,8 +1924,8 @@ class FunctionBody {
     // is the value itself, and an object, a list or a dictionary is copied by
     // the runtime when the program runs. The copy carries the type the source
     // read the value at, so a field of it reads as it did.
-    if (expression.name === "structuredClone" && expression.args.length === 1) {
-      const argument = this.typed(expression.args[0], null, line);
+    if (callName === "structuredClone" && callArgs.length === 1) {
+      const argument = this.typed(callArgs[0], null, line);
       const type = argument.value.type;
       if (type.kind === "primitive" || type.kind === "text") return argument;
       const signature = {
@@ -1850,15 +1943,15 @@ class FunctionBody {
         inferred: asType(type),
       };
     }
-    const builtin = builtinFor(expression.name);
+    const builtin = builtinFor(callName);
     if (builtin !== null) {
-      this.builtinArity(expression.name, builtin, expression.args.length, line);
-      const args = expression.args.map((argument, at) => this.typed(argument, asType(builtin.params[at]), line));
+      this.builtinArity(callName, builtin, callArgs.length, line);
+      const args = callArgs.map((argument, at) => this.typed(argument, asType(builtin.params[at]), line));
       // What the read of the call knows it answers, where the builtin's own
       // result is the opaque value the ABI carries: a map of lists answers the
       // list it holds, and the call that lowers to the block is typed as one.
-      const returns = expression.returns ?? builtin.returns;
-      const extreme = EXTREMES[expression.name];
+      const returns = fieldOfValue(expression, "returns") as SemanticType | undefined ?? builtin.returns;
+      const extreme = EXTREMES[callName];
       if (extreme !== undefined) {
         return {
           value: {
@@ -1871,35 +1964,35 @@ class FunctionBody {
           inferred: asType(returns),
         };
       }
-      if (expression.name === ARGV_LENGTH) return { value: { k: "argv", type: returns, index: null }, inferred: asType(returns) };
-      if (expression.name === ARGV) return { value: { k: "argv", type: returns, index: args[0].value }, inferred: asType(returns) };
+      if (callName === ARGV_LENGTH) return { value: { k: "argv", type: returns, index: null }, inferred: asType(returns) };
+      if (callName === ARGV) return { value: { k: "argv", type: returns, index: fieldOfValue(args[0], "value") as SemanticValue }, inferred: asType(returns) };
       // The settle functions of a promise carry whatever the source hands
       // them: reading the value at the builtin's untyped parameter would hand
       // a number over as the dynamic reference it is not, and the runtime
       // would settle the promise with the wrong kind.
-      const settles = expression.name === "resolve" || expression.name === "onFulfilled" ||
-        expression.name === "reject" || expression.name === "onRejected";
-      const handed = settles ? args.map((argument) => argument.value.type) : builtin.params;
+      const settles = callName === "resolve" || callName === "onFulfilled" ||
+        callName === "reject" || callName === "onRejected";
+      const handed = settles ? args.map((argument) => (fieldOfValue(argument, "value") as SemanticValue).type) : fieldOfValue(builtin, "params") as readonly SemanticType[];
       return {
         value: {
           k: "call",
           type: returns,
           call: this.semanticCall(
-            expression.name,
+            callName,
             {
-              name: expression.name,
-              symbol: expression.name,
+              name: callName,
+              symbol: callName,
               params: handed.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
               returns: contractText(returns),
             },
-            args.map((argument) => argument.value),
+            args.map((argument) => fieldOfValue(argument, "value") as SemanticValue),
             returns,
             // A builtin's effects are the world it reads: a file question, a
             // command started, a clock read. A call the read knows is free is a
             // value the optimizer may move; one that reads the world is not,
             // and folding it past the statement that frees what it reads undid
             // the order the source wrote.
-            builtin.effects ?? [],
+            (fieldOfValue(builtin, "effects") as readonly Effect[] | undefined) ?? [],
             true,
             handed,
           ),
@@ -1911,23 +2004,24 @@ class FunctionBody {
     // last parameter without one up to all of them, and each shorter arity is
     // the overload the module declared for it. The full function is the one the
     // source named; the overload is the one that fills what the call left out.
-    const overloadName = `${expression.name}__${expression.args.length}`;
-    const overload = this.context.functions[overloadName];
-    const callee = overload ?? this.context.functions[expression.name];
-    const called = overload !== undefined ? overloadName : expression.name;
+    const overloadName = `${callName}__${callArgs.length}`;
+    const overload = functions[overloadName];
+    const callee = overload ?? functions[callName];
+    const called = overload !== undefined ? overloadName : callName;
     if (callee === undefined) {
       throw this.error(
-        `calls "${expression.name}", which the program does not compile`,
+        `calls "${callName}", which the program does not compile`,
         line,
         `a function may only call the functions of the program it is part of`,
       );
     }
-    const signature = callee.function;
-    this.arity(called, signature.params.length, expression.args.length, line);
-    const args = expression.args.map((argument, at) => this.typed(argument, asType(parseType(signature.params[at].type)), line));
-    const returns = parseType(signature.returns);
+    const signature = fieldOfValue(callee, "function") as FunctionSignature;
+    const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
+    this.arity(called, signatureParams.length, callArgs.length, line);
+    const args = callArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
+    const returns = parseType(String(fieldOfValue(signature, "returns")));
     return {
-      value: { k: "call", type: returns, call: this.semanticCall(signature.symbol, signature, args.map((argument) => argument.value), returns, callee.effects, false) },
+      value: { k: "call", type: returns, call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(callee, "effects") as readonly Effect[], false, []) },
       inferred: asType(returns),
     };
   }
@@ -1942,15 +2036,24 @@ class FunctionBody {
     builtin: boolean,
     argTypes?: readonly SemanticType[],
   ): SemanticCall {
+    const callArgs: SemanticValue[] = [];
+    for (const one of args) callArgs.push(one);
+    const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
+    const callArgTypes: SemanticType[] = [];
+    if (argTypes === undefined) {
+      for (const param of signatureParams) callArgTypes.push(parseType(String(fieldOfValue(param, "type"))));
+    } else {
+      for (const one of argTypes) callArgTypes.push(one);
+    }
+    const callEffects: Effect[] = [];
+    for (const one of effects) callEffects.push(one);
     return {
       callee,
       signature,
-      args: [...args],
-      argTypes: argTypes === undefined
-        ? signature.params.map((param) => parseType(param.type))
-        : [...argTypes],
+      args: callArgs,
+      argTypes: callArgTypes,
       returns,
-      effects: [...effects],
+      effects: callEffects,
       ownership: ownership(returns),
       retain: false,
       builtin,
@@ -1963,7 +2066,9 @@ class FunctionBody {
    * a call of it is one of them.
    */
   private builtinArity(name: string, builtin: BuiltinSignature, written: number, line: number): void {
-    const expected = builtin.arities ?? [builtin.params.length];
+    const arities = fieldOfValue(builtin, "arities") as readonly number[] | undefined;
+    const params = fieldOfValue(builtin, "params") as readonly SemanticType[];
+    const expected = arities ?? [params.length];
     if (expected.includes(written)) return;
     const counts = expected.map((count) => `${count} argument${count === 1 ? "" : "s"}`).join(" or ");
     throw this.error(`${name} takes ${counts}, not ${written}`, line);
@@ -1975,31 +2080,31 @@ class FunctionBody {
   }
 
   private binary(expression: Expression & { k: "binary" }, line: number): Typed {
-    const op = expression.op;
+    const op = String(fieldOfValue(expression, "op")) as BinaryOp;
     if (op === "&&" || op === "||") {
       // The left arm decides first, and the source form of these operators
       // writes that arm out twice, so a call in it is written under a name.
-      const left = this.decide(expression.left, line);
-      const right = this.typed(expression.right, null, line);
+      const left = this.decide(fieldOfValue(expression, "left") as Expression, line);
+      const right = this.typed(fieldOfValue(expression, "right") as Expression, null, line);
       // They hand back one of their arms, so the IR states the type both arms
       // are, and so does the inferred type: `const n = +Deno.args[0] || 1`
       // binds a number, not the truth the test of it would be.
-      const type = this.logicalType(left.value.type, right.value.type, line);
+      const type = this.logicalType((fieldOfValue(left, "value") as SemanticValue).type, (fieldOfValue(right, "value") as SemanticValue).type, line);
       return {
         value: {
           k: "logical",
           type,
           op: op === "&&" ? "and" : "or",
-          left: left.value,
-          right: right.value,
+          left: fieldOfValue(left, "value") as SemanticValue,
+          right: fieldOfValue(right, "value") as SemanticValue,
         },
         inferred: asType(type),
       };
     }
     if (op === "??") {
-      const left = this.decide(expression.left, line);
-      const right = this.typed(expression.right, null, line);
-      const held = coalesce(left.inferred, right.inferred);
+      const left = this.decide(fieldOfValue(expression, "left") as Expression, line);
+      const right = this.typed(fieldOfValue(expression, "right") as Expression, null, line);
+      const held = coalesce(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred);
       // `a ?? b` answers `a` where it is there and `b` where it is not, so the
       // whole is the arm that names the value. A text is inferred as the
       // unshaped reference a string is, so a text read out of a field would
@@ -2007,12 +2112,12 @@ class FunctionBody {
       // itself says it is a text. A left arm that says nothing leaves the
       // right arm to answer, which is the rule the frontend and `coalesce`
       // state.
-      const unshaped = saysNothing(left.inferred);
-      const type = isText(left.value.type) || (unshaped && isText(right.value.type))
+      const unshaped = saysNothing(fieldOfValue(left, "inferred") as Inferred);
+      const type = isText((fieldOfValue(left, "value") as SemanticValue).type) || (unshaped && isText((fieldOfValue(right, "value") as SemanticValue).type))
         ? TEXT
         : this.typeOf(held, line);
       return {
-        value: { k: "coalesce", type, left: left.value, right: right.value },
+        value: { k: "coalesce", type, left: fieldOfValue(left, "value") as SemanticValue, right: fieldOfValue(right, "value") as SemanticValue },
         inferred: held,
       };
     }
@@ -2029,12 +2134,13 @@ class FunctionBody {
     // its name. The expectation is the text type itself, not `asType(TEXT)`:
     // that shape is the unshaped reference every string is, which filters
     // nothing.
-    const compareText = expression.right.k === "text" ||
-      (expression.right.k === "literal" &&
-        expression.right.boolean !== true &&
-        expression.right.text !== undefined &&
-        !NUMBER_TEXT.test(expression.right.text));
-    const left = this.typed(expression.left, converting ? asType(U32) : compareText ? { kind: "type", type: TEXT } : null, line);
+    const rightExpression = fieldOfValue(expression, "right") as Expression;
+    const compareText = rightExpression.k === "text" ||
+      (rightExpression.k === "literal" &&
+        fieldOfValue(rightExpression, "boolean") !== true &&
+        fieldOfValue(rightExpression, "text") !== undefined &&
+        !NUMBER_TEXT.test(String(fieldOfValue(rightExpression, "text"))));
+    const left = this.typed(fieldOfValue(expression, "left") as Expression, converting ? asType(U32) : compareText ? { kind: "type", type: TEXT } : null, line);
     // The count of a shift is a machine word, whatever the number being shifted
     // is: the kernel every backend shifts with takes one word of count, and a
     // count typed at the width of a wide number is the low half of the number
@@ -2043,13 +2149,13 @@ class FunctionBody {
     // not the count's. The count of a `>>>` is one of the 32 bit numbers the
     // language reads its sides as, so it is read as one of those.
     const counted = op === "<<" || op === ">>";
-    const right = this.typed(expression.right, counted ? asType(USIZE) : converting ? asType(U32) : null, line);
+    const right = this.typed(fieldOfValue(expression, "right") as Expression, counted ? asType(USIZE) : converting ? asType(U32) : null, line);
     // Asking whether a value is there is a different question from comparing
     // two of them, and one the IR states on its own.
-    if (EQUALITY.includes(op) && (expression.left.k === "null" || expression.right.k === "null")) {
-      const other = expression.left.k === "null" ? right : left;
+    if (EQUALITY.includes(op) && ((fieldOfValue(expression, "left") as Expression).k === "null" || (fieldOfValue(expression, "right") as Expression).k === "null")) {
+      const other = (fieldOfValue(expression, "left") as Expression).k === "null" ? right : left;
       return {
-        value: { k: "isNull", type: BOOLEAN, operand: other.value, negate: op === "!==" || op === "!=" },
+        value: { k: "isNull", type: BOOLEAN, operand: fieldOfValue(other, "value") as SemanticValue, negate: op === "!==" || op === "!=" },
         inferred: asType(BOOL),
       };
     }
@@ -2060,10 +2166,10 @@ class FunctionBody {
       // numbers.
       // Two texts are ordered by what they say, which is the comparison the
       // text operand names; a number beside one is not the question this asks.
-      const bothText = isText(left.value.type) && isText(right.value.type);
-      const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
-      const leftValue = wide === null ? left.value : this.wideOperand(left.value, wide, line);
-      const rightValue = wide === null ? right.value : this.wideOperand(right.value, wide, line);
+      const bothText = isText((fieldOfValue(left, "value") as SemanticValue).type) && isText((fieldOfValue(right, "value") as SemanticValue).type);
+      const wide = isWideType((fieldOfValue(left, "value") as SemanticValue).type) ? (fieldOfValue(left, "value") as SemanticValue).type : isWideType((fieldOfValue(right, "value") as SemanticValue).type) ? (fieldOfValue(right, "value") as SemanticValue).type : null;
+      const leftValue = wide === null ? fieldOfValue(left, "value") as SemanticValue : this.wideOperand(fieldOfValue(left, "value") as SemanticValue, wide, line);
+      const rightValue = wide === null ? fieldOfValue(right, "value") as SemanticValue : this.wideOperand(fieldOfValue(right, "value") as SemanticValue, wide, line);
       return {
         value: {
           k: "compare",
@@ -2077,17 +2183,17 @@ class FunctionBody {
       };
     }
     if (EQUALITY.includes(op)) {
-      const text = isText(left.value.type) || isText(right.value.type);
-      if (text && !(isText(left.value.type) && isText(right.value.type))) {
+      const text = isText((fieldOfValue(left, "value") as SemanticValue).type) || isText((fieldOfValue(right, "value") as SemanticValue).type);
+      if (text && !(isText((fieldOfValue(left, "value") as SemanticValue).type) && isText((fieldOfValue(right, "value") as SemanticValue).type))) {
         throw this.error(
-          `"${op}" compares a ${typeText(left.value.type)} and a ${typeText(right.value.type)}`,
+          `"${op}" compares a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
           line,
           `a string is only compared with a string, and with another string for ===`,
         );
       }
-      const wide = isWideType(left.value.type) ? left.value.type : isWideType(right.value.type) ? right.value.type : null;
-      const leftValue = wide === null ? left.value : this.wideOperand(left.value, wide, line);
-      const rightValue = wide === null ? right.value : this.wideOperand(right.value, wide, line);
+      const wide = isWideType((fieldOfValue(left, "value") as SemanticValue).type) ? (fieldOfValue(left, "value") as SemanticValue).type : isWideType((fieldOfValue(right, "value") as SemanticValue).type) ? (fieldOfValue(right, "value") as SemanticValue).type : null;
+      const leftValue = wide === null ? fieldOfValue(left, "value") as SemanticValue : this.wideOperand(fieldOfValue(left, "value") as SemanticValue, wide, line);
+      const rightValue = wide === null ? fieldOfValue(right, "value") as SemanticValue : this.wideOperand(fieldOfValue(right, "value") as SemanticValue, wide, line);
       return {
         value: {
           k: "compare",
@@ -2101,32 +2207,32 @@ class FunctionBody {
       };
     }
     // A string added to a string is the one operation with no number behind it.
-    if (isText(left.value.type) || isText(right.value.type)) {
-      if (!isText(left.value.type) || !isText(right.value.type)) {
+    if (isText((fieldOfValue(left, "value") as SemanticValue).type) || isText((fieldOfValue(right, "value") as SemanticValue).type)) {
+      if (!isText((fieldOfValue(left, "value") as SemanticValue).type) || !isText((fieldOfValue(right, "value") as SemanticValue).type)) {
         throw this.error(
-          `"${op}" is written over a ${typeText(left.value.type)} and a ${typeText(right.value.type)}`,
+          `"${op}" is written over a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
           line,
           `a string is added to a string, and compared with == and ===`,
         );
       }
       return {
-        value: { k: "arith", type: TEXT, op: "concat", left: left.value, right: right.value },
-        inferred: asType(numeric(left.inferred, right.inferred)),
+        value: { k: "arith", type: TEXT, op: "concat", left: fieldOfValue(left, "value") as SemanticValue, right: fieldOfValue(right, "value") as SemanticValue },
+        inferred: asType(numeric(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred)),
       };
     }
     // An array added to an array joins the two: the elements of the right
     // follow those of the left. Anything else mixed with an array is refused.
-    if (isSequence(left.value.type) || isSequence(right.value.type)) {
-      if (!isSequence(left.value.type) || !isSequence(right.value.type)) {
+    if (isSequence((fieldOfValue(left, "value") as SemanticValue).type) || isSequence((fieldOfValue(right, "value") as SemanticValue).type)) {
+      if (!isSequence((fieldOfValue(left, "value") as SemanticValue).type) || !isSequence((fieldOfValue(right, "value") as SemanticValue).type)) {
         throw this.error(
-          `"${op}" is written over a ${typeText(left.value.type)} and a ${typeText(right.value.type)}`,
+          `"${op}" is written over a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
           line,
           `a list is added to a list, and compared with == and ===`,
         );
       }
       return {
-        value: { k: "arith", type: left.value.type, op: "arrayConcat", left: left.value, right: right.value },
-        inferred: left.inferred,
+        value: { k: "arith", type: (fieldOfValue(left, "value") as SemanticValue).type, op: "arrayConcat", left: fieldOfValue(left, "value") as SemanticValue, right: fieldOfValue(right, "value") as SemanticValue },
+        inferred: fieldOfValue(left, "inferred") as Inferred,
       };
     }
     // `%`, a shift and a bitwise operator are operations on whole numbers
@@ -2137,23 +2243,23 @@ class FunctionBody {
     // language: a division of two whole numbers is a whole division in one
     // language and a true division in another, and a remainder takes the sign
     // of its left side in one and of its divisor in the other.
-    const rules = rulesFor(this.context.language);
+    const rules = rulesFor(String(fieldOfValue(fieldOfValue(this, "context"), "language")));
     const type = op === "/" && rules.division === "true"
       ? F64
       : converting
         ? U32
         : WHOLE_OPERATORS[op] === true
-          ? wholeResult(left.inferred, right.inferred)
-          : numeric(left.inferred, right.inferred);
+          ? wholeResult(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred)
+          : numeric(fieldOfValue(left, "inferred") as Inferred, fieldOfValue(right, "inferred") as Inferred);
     const arithmetic = op === "%" && rules.remainder === "floored" ? "floorMod" : (ARITHMETIC[op] as ArithOp);
     // A power of whole numbers is a whole number: it is folded where both sides
     // are constant, written out as the products it is where the exponent is a
     // small constant, and refused otherwise. A double's power is what the
     // library answers, and a wide number is not one.
     if (op === "**") {
-      const power = this.power(left.value, right.value, line);
+      const power = this.power(fieldOfValue(left, "value") as SemanticValue, fieldOfValue(right, "value") as SemanticValue, line);
       if (power !== null) return power;
-      if (isInteger(left.value.type) || isInteger(right.value.type)) {
+      if (isInteger((fieldOfValue(left, "value") as SemanticValue).type) || isInteger((fieldOfValue(right, "value") as SemanticValue).type)) {
         throw this.error(
           '"**" needs numbers',
           line,
@@ -2164,16 +2270,16 @@ class FunctionBody {
     // A wide result is computed over two wide numbers. An operand of a
     // narrower whole type is widened into a name of the wide type, which is
     // the store the backends already widen at; a literal is the value itself.
-    const leftWide = this.wideOperand(left.value, type, line);
+    const leftWide = this.wideOperand(fieldOfValue(left, "value") as SemanticValue, type, line);
     // A shift's right side is the machine word of count, not the shifted
     // value's width: it is read as one above and is not widened with it.
-    const rightWide = counted || converting ? right.value : this.wideOperand(right.value, type, line);
+    const rightWide = counted || converting ? fieldOfValue(right, "value") as SemanticValue : this.wideOperand(fieldOfValue(right, "value") as SemanticValue, type, line);
     const folded = this.foldedValue(arithmetic, leftWide, rightWide, type);
     if (folded !== null) return folded;
     // A wide remainder is the kernels' answer, not the machine's: the product
     // of two 256 bit numbers does not fit in one, and a `%` of the low half is
     // a different number from the remainder of the whole.
-    if (arithmetic === "mod" && type.kind === "primitive" && type.name === "u256") {
+    if (String(arithmetic) === "mod" && type.kind === "primitive" && type.name === "u256") {
       const reduced = modularReduction(leftWide, rightWide, (name, args) => this.wideKernel(name, args));
       if (reduced !== null) return { value: reduced, inferred: asType(type) };
     }
@@ -2186,8 +2292,9 @@ class FunctionBody {
   /** A `BigInt(...)` of a value written out, answered here rather than at a
    * runtime that has no such call. */
   private bigIntCall(expression: Expression & { k: "call" }): Typed | null {
-    if (expression.args.length !== 1) return null;
-    const argument = (fieldOfValue(expression, "args") as Expression[])[0];
+    const callArguments = fieldOfValue(expression, "args") as Expression[];
+    if (callArguments.length !== 1) return null;
+    const argument = callArguments[0];
     const kind = String(fieldOfValue(argument, "k"));
     let text: string | null = null;
     if (kind === "literal") {
@@ -2218,18 +2325,18 @@ class FunctionBody {
    * a whole number is a product of them and the kernels have no wide power.
    */
   private power(base: SemanticValue, exponent: SemanticValue, line: number): Typed | null {
-    const count = exponent.k === "const" ? wholeText(exponent.text) : null;
+    const count = exponent.k === "const" ? wholeText(String(fieldOfValue(exponent, "text"))) : null;
     if (count === null || count < 0n) return null;
     // A bigint and a number are not mixed, and a power is where that rule is
     // easiest to miss: `2n ** 3` is a bigint raised by a number, which the
     // language raises on rather than reading one as the other.
-    if (!isInteger(base.type) || !isInteger(exponent.type)) return null;
+    if (!isInteger(fieldOfValue(base, "type") as SemanticType) || !isInteger(fieldOfValue(exponent, "type") as SemanticType)) return null;
     if (base.k === "const") {
-      const value = wholeText(base.text);
+      const value = wholeText(String(fieldOfValue(base, "text")));
       if (value === null) return null;
       const exact = wholePower(value, count);
       if (exact === null) return null;
-      const wide = isWideType(base.type) || exact > 9223372036854775807n || exact < -9223372036854775808n;
+      const wide = isWideType(fieldOfValue(base, "type") as SemanticType) || exact > 9223372036854775807n || exact < -9223372036854775808n;
       const type = wide ? wholeType("u256") : I64;
       const constant = wholeConstant(exact, type);
       if (constant === null) return null;
@@ -2237,9 +2344,9 @@ class FunctionBody {
     }
     if (count > 64n) return null;
     if (count === 0n) {
-      const one = wholeConstant(1n, isWideType(base.type) ? wholeType("u256") : I64);
+      const one = wholeConstant(1n, isWideType(fieldOfValue(base, "type") as SemanticType) ? wholeType("u256") : I64);
       if (one === null) return null;
-      return { value: one, inferred: asType(one.type) };
+      return { value: one, inferred: asType(fieldOfValue(one, "type") as SemanticType) };
     }
     // A base that computes something would run again for every factor, and the
     // body said it once. It is read once into a name of its own first, and the
@@ -2248,15 +2355,15 @@ class FunctionBody {
     let value = base;
     if (base.k !== "local") {
       const name = this.generated("t");
-      const slot: SemanticSlot = { kind: "value", name, mutable: false, type: base.type };
+      const slot: SemanticSlot = { kind: "value", name, mutable: false, type: fieldOfValue(base, "type") as SemanticType };
       this.write({ k: "let", slot, value: base, line });
-      value = { k: "local", type: base.type, name };
+      value = { k: "local", type: fieldOfValue(base, "type") as SemanticType, name };
     }
     let product: SemanticValue = value;
     for (let factor = 1n; factor < count; factor += 1n) {
-      product = { k: "arith", type: value.type, op: "mul", left: product, right: value };
+      product = { k: "arith", type: fieldOfValue(value, "type") as SemanticType, op: "mul", left: product, right: value };
     }
-    return { value: product, inferred: asType(value.type) };
+    return { value: product, inferred: asType(fieldOfValue(value, "type") as SemanticType) };
   }
 
   /**
@@ -2302,14 +2409,14 @@ class FunctionBody {
       {
         name,
         symbol: name,
-        params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+        params: (fieldOfValue(builtin, "params") as readonly SemanticType[]).map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
         returns: contractText(returns),
       },
       args,
       returns,
       [],
       true,
-      builtin.params,
+      fieldOfValue(builtin, "params") as readonly SemanticType[],
     );
     return { value: { k: "call", type: returns, call }, inferred: asType(returns) };
   }
@@ -2326,8 +2433,8 @@ class FunctionBody {
    * handle the entry holds.
    */
   private dynamicIndexRead(base: Typed, key: Typed, expect: Inferred | null): Typed {
-    const expected = expect !== null && expect.kind === "type" ? expect.type : null;
-    const textKey = key.value.type.kind !== "primitive";
+    const expected = expect !== null && String(fieldOfValue(expect, "kind")) === "type" ? fieldOfValue(expect, "type") as TypeExpr : null;
+    const textKey = (fieldOfValue(key, "value") as SemanticValue).type.kind !== "primitive";
     let name: string;
     let returns: SemanticType;
     if (!textKey) {
@@ -2346,7 +2453,7 @@ class FunctionBody {
       name = "blaze_rt_dict_get_ref";
       returns = ANY_REF;
     }
-    return this.runtimeCall(name, [base.value, key.value], returns);
+    return this.runtimeCall(name, [fieldOfValue(base, "value") as SemanticValue, fieldOfValue(key, "value") as SemanticValue], returns);
   }
 
   /**
@@ -2358,8 +2465,10 @@ class FunctionBody {
    * handle it is, and a number as the entry it becomes.
    */
   private dynamicIndexWrite(base: Typed, key: Typed, value: Typed, line: number): void {
-    const textKey = key.value.type.kind !== "primitive";
-    const kind = value.value.type.kind;
+    const keyValue = fieldOfValue(key, "value") as SemanticValue;
+    const writtenValue = fieldOfValue(value, "value") as SemanticValue;
+    const textKey = keyValue.type.kind !== "primitive";
+    const kind = writtenValue.type.kind;
     const text = kind === "text";
     const reference = kind === "ref" || kind === "ptr" || kind === "slice" || kind === "array";
     let name: string;
@@ -2368,8 +2477,9 @@ class FunctionBody {
     } else {
       name = text ? "blaze_rt_dict_set_numkey_text" : reference ? "blaze_rt_dict_set_numkey_ref" : "blaze_rt_dict_set_numkey";
     }
-    const call = this.runtimeCall(name, [base.value, key.value, value.value], F64);
-    if (call.value.k === "call") this.write({ k: "call", call: call.value.call, line });
+    const call = this.runtimeCall(name, [fieldOfValue(base, "value") as SemanticValue, keyValue, writtenValue], F64);
+    const callValue = fieldOfValue(call, "value") as SemanticValue;
+    if (callValue.k === "call") this.write({ k: "call", call: fieldOfValue(callValue, "call") as SemanticCall, line });
   }
 
   /** A call of one of the wide modular kernels, as the builtin it is. */
@@ -2378,20 +2488,20 @@ class FunctionBody {
     if (builtin === null) return null;
     return {
       k: "call",
-      type: builtin.returns,
+      type: fieldOfValue(builtin, "returns") as SemanticType,
       call: this.semanticCall(
         name,
         {
           name,
           symbol: name,
-          params: builtin.params.map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
-          returns: contractText(builtin.returns),
+          params: (fieldOfValue(builtin, "params") as readonly SemanticType[]).map((type, at) => ({ name: `argument${at}`, type: contractText(type) })),
+          returns: contractText(fieldOfValue(builtin, "returns") as SemanticType),
         },
         args,
-        builtin.returns,
+        fieldOfValue(builtin, "returns") as SemanticType,
         [],
         true,
-        builtin.params,
+        fieldOfValue(builtin, "params") as readonly SemanticType[],
       ),
     };
   }
@@ -2405,51 +2515,55 @@ class FunctionBody {
    * source wrote with `!== 0n`.
    */
   private truth(value: SemanticValue): SemanticValue {
-    if (!isWideType(value.type)) return value;
+    if (!isWideType(fieldOfValue(value, "type") as SemanticType)) return value;
     return {
       k: "compare",
       type: BOOLEAN,
       op: "ne",
-      operand: value.type,
+      operand: fieldOfValue(value, "type") as SemanticType,
       left: value,
-      right: { k: "const", type: value.type, text: "0" },
+      right: { k: "const", type: fieldOfValue(value, "type") as SemanticType, text: "0" },
     };
   }
 
   private unary(expression: Expression & { k: "unary" }, expect: Inferred | null, line: number): Typed {
+    const op = String(fieldOfValue(expression, "op"));
+    const operandExpression = fieldOfValue(expression, "operand") as Expression;
     // A number written with its sign is one literal, so a use can still fix its
     // type without a conversion.
-    if (expression.op === "-" && expression.operand.k === "literal") {
-      return { value: { k: "const", type: numberAt(expect) ?? F64, text: `-${expression.operand.text}` }, inferred: DOUBLE };
+    if (op === "-" && operandExpression.k === "literal") {
+      return { value: { k: "const", type: numberAt(expect) ?? F64, text: `-${String(fieldOfValue(operandExpression, "text"))}` }, inferred: DOUBLE };
     }
-    const operand = this.typed(expression.operand, null, line);
-    if (expression.op === "+") return operand;
-    if (expression.op === "!") {
+    const operand = this.typed(operandExpression, null, line);
+    const operandValue = fieldOfValue(operand, "value") as SemanticValue;
+    const operandInferred = fieldOfValue(operand, "inferred") as Inferred;
+    if (op === "+") return operand;
+    if (op === "!") {
       // `!` asks what a value is rather than inverting a number: it is a null
       // test of a reference, an empty-string test of a string, and only a truth
       // is inverted as one.
-      if (isText(operand.value.type)) {
+      if (isText(operandValue.type)) {
         return {
           value: {
             k: "compare",
             type: BOOLEAN,
             op: "ne",
             operand: TEXT,
-            left: operand.value,
+            left: operandValue,
             right: { k: "text", type: TEXT, parts: [{ k: "text", value: "" }] },
           },
           inferred: asType(BOOL),
         };
       }
-      if (isBoolean(operand.value.type)) {
-        return { value: { k: "unary", type: BOOLEAN, op: UNARY["!"], operand: operand.value }, inferred: asType(BOOL) };
+      if (isBoolean(operandValue.type)) {
+        return { value: { k: "unary", type: BOOLEAN, op: UNARY["!"], operand: operandValue }, inferred: asType(BOOL) };
       }
-      if (isReference(operand.value.type)) {
+      if (isReference(operandValue.type)) {
         // `!a` asks whether a reference is nothing, which is the null test and
         // not its negation: `!node.left` is the arm a leaf takes.
-        return { value: { k: "isNull", type: BOOLEAN, operand: operand.value, negate: false }, inferred: asType(BOOL) };
+        return { value: { k: "isNull", type: BOOLEAN, operand: operandValue, negate: false }, inferred: asType(BOOL) };
       }
-      if (isInteger(operand.value.type)) {
+      if (isInteger(operandValue.type)) {
         // A whole number is a truth as it stands, and a negation asks whether
         // it is zero. A wide number is four limbs and has no truth of its own,
         // so the test is written as the comparison both kinds answer.
@@ -2458,21 +2572,21 @@ class FunctionBody {
             k: "compare",
             type: BOOLEAN,
             op: "eq",
-            operand: operand.value.type,
-            left: operand.value,
-            right: { k: "const", type: operand.value.type, text: "0" },
+            operand: operandValue.type,
+            left: operandValue,
+            right: { k: "const", type: operandValue.type, text: "0" },
           },
           inferred: asType(BOOL),
         };
       }
       throw this.error(
-        `negates a ${typeText(operand.value.type)}, which is not a truth`,
+        `negates a ${typeText(operandValue.type)}, which is not a truth`,
         line,
         `a number is not a truth, so the body says what it means by it`,
       );
     }
-    const type = numberAt(operand.inferred) ?? numeric(operand.inferred, operand.inferred);
-    return { value: { k: "unary", type, op: UNARY[expression.op], operand: operand.value }, inferred: asType(type) };
+    const type = numberAt(operandInferred) ?? numeric(operandInferred, operandInferred);
+    return { value: { k: "unary", type, op: UNARY[op as SourceUnaryOp], operand: operandValue }, inferred: asType(type) };
   }
 
   /**
@@ -2485,25 +2599,25 @@ class FunctionBody {
    * value `i` already had.
    */
   private updated(expression: Expression & { k: "update" }, line: number): Typed {
-    const held = this.read(expression.name, line);
-    const type = slotType(held.slot);
+    const held = this.read(String(fieldOfValue(expression, "name")), line);
+    const type = slotType(fieldOfValue(held, "slot") as SemanticSlot);
     const snapshot = this.generated("t");
     const take = (): SemanticStatement => ({
       k: "let",
       slot: { kind: "value", name: snapshot, mutable: false, type },
-      value: { k: "local", type, name: held.name },
+      value: { k: "local", type, name: String(fieldOfValue(held, "name")) },
       line,
     });
     const step: SemanticStatement = {
       k: "step",
-      name: held.name,
-      op: expression.op,
-      prefix: expression.prefix,
+      name: String(fieldOfValue(held, "name")),
+      op: String(fieldOfValue(expression, "op")) as "++" | "--",
+      prefix: fieldOfValue(expression, "prefix") === true,
       line,
     };
-    if (expression.prefix) this.pending.push(step, take());
+    if (fieldOfValue(expression, "prefix") === true) this.pending.push(step, take());
     else this.pending.push(take(), step);
-    return { value: { k: "local", type, name: snapshot }, inferred: held.inferred };
+    return { value: { k: "local", type, name: snapshot }, inferred: fieldOfValue(held, "inferred") as Inferred };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -2518,33 +2632,42 @@ class FunctionBody {
     // A list written into a field is a slice, which is what the layout pass
     // types it as: the key of a shape is the types of its fields, and a body
     // that spelled this one differently would name a layout nothing lays out.
-    const typed = fields.map((field) => {
-      const value = this.typed(field.value, null, line);
-      const written = value.value;
+    const typed: { name: string; value: { [key: string]: unknown } }[] = [];
+    for (const field of fields) {
+      const fieldName = String(fieldOfValue(field, "name"));
+      const fieldExpression = fieldOfValue(field, "value") as Expression;
+      const value = this.typed(fieldExpression, null, line);
+      const written = fieldOfValue(value, "value") as SemanticValue;
       // A text the source wrote is the text it is. The shape key has to say
       // text where the layout pass says text, or the literal is filed under a
       // key no layout names.
       if (written.k === "text") {
-        value.inferred = textInferred();
-      } else if (
-        written.k === "const" &&
-        written.type.kind === "primitive" &&
-        written.type.name === "f64" &&
-        field.value.k === "literal" &&
-        field.value.boolean !== true &&
-        !NUMBER_TEXT.test(written.text)
-      ) {
-        value.inferred = textInferred();
+        setFieldValue(value, "inferred", textInferred());
+      } else if (written.k === "const") {
+        const writtenType = fieldOfValue(written, "type") as SemanticType;
+        if (writtenType.kind === "primitive" && writtenType.name === "f64" &&
+            fieldExpression.k === "literal" &&
+            fieldOfValue(fieldExpression, "boolean") !== true &&
+            !NUMBER_TEXT.test(String(fieldOfValue(written, "text")))) {
+          setFieldValue(value, "inferred", textInferred());
+        }
       }
-      return { name: field.name, value: { ...value, inferred: asField(value.inferred) } };
-    });
+      setFieldValue(value, "inferred", asField(fieldOfValue(value, "inferred") as Inferred));
+      typed[typed.length] = { name: fieldName, value: value as unknown as { [key: string]: unknown } };
+    }
     // The key is a function of the shape alone, and the shape is written as
     // JSON so that a field name cannot read like the key of another shape.
-    const key = JSON.stringify(typed.map((field) => [field.name, describe(field.value.inferred)]));
+    const keyParts: [string, string][] = [];
+    for (const field of typed) keyParts[keyParts.length] = [String(fieldOfValue(field, "name")), describe(fieldOfValue(fieldOfValue(field, "value"), "inferred") as Inferred)];
+    const key = JSON.stringify(keyParts);
     if (!this.shapes.has(key)) {
-      this.shapes.set(key, { key, fields: typed.map((field) => ({ name: field.name, value: field.value.inferred })) });
+      const shapeFields: { name: string; value: Inferred }[] = [];
+      for (const field of typed) shapeFields[shapeFields.length] = { name: String(fieldOfValue(field, "name")), value: fieldOfValue(fieldOfValue(field, "value"), "inferred") as Inferred };
+      this.shapes.set(key, { key, fields: shapeFields });
     }
-    return { key, layout: this.layoutFor(key, line), fields: typed.map((field) => ({ name: field.name, value: field.value.value })) };
+    const literalFields: { name: string; value: SemanticValue }[] = [];
+    for (const field of typed) literalFields[literalFields.length] = { name: String(fieldOfValue(field, "name")), value: fieldOfValue(fieldOfValue(field, "value"), "value") as SemanticValue };
+    return { key, layout: this.layoutFor(key, line), fields: literalFields };
   }
 
   /**
@@ -2553,9 +2676,9 @@ class FunctionBody {
    * a conditional is built when that arm is taken.
    */
   private allocated(expression: Expression & { k: "object" }, line: number): Typed {
-    const literal = this.literal(expression.fields, line);
-    const type = this.objectType(literal.key, line);
-    return { value: { k: "newObject", type, layout: literal.layout, fields: literal.fields }, inferred: { kind: "object", key: literal.key } };
+    const literal = this.literal(fieldOfValue(expression, "fields") as readonly { name: string; value: Expression }[], line);
+    const type = this.objectType(String(fieldOfValue(literal, "key")), line);
+    return { value: { k: "newObject", type, layout: String(fieldOfValue(literal, "layout")), fields: fieldOfValue(literal, "fields") as { name: string; value: SemanticValue }[] }, inferred: { kind: "object", key: String(fieldOfValue(literal, "key")) } };
   }
 
   /**
@@ -2567,7 +2690,8 @@ class FunctionBody {
   private layoutFor(key: string, line: number): string {
     const known = this.layouts.get(key);
     if (known !== undefined) return known;
-    const exact = this.context.objectNames[key];
+    const objectNames = fieldOfValue(fieldOfValue(this, "context"), "objectNames") as Record<string, string>;
+    const exact = objectNames[key];
     if (exact !== undefined) {
       this.layouts.set(key, exact);
       return exact;
@@ -2578,6 +2702,8 @@ class FunctionBody {
     // spelled it with the one the source declared. The object is the same
     // object: the fields it holds are the fields it is laid out as.
     const shape = this.shapes.get(key);
+    const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+    const shapeFields = shape === undefined ? [] : fieldOfValue(shape, "fields") as readonly { name: string; value: Inferred }[];
     const candidates: string[] = shape === undefined ? [] : this.knownLayouts(key, shape);
     const found = [...new Set(candidates)];
     if (found.length === 1) {
@@ -2585,21 +2711,13 @@ class FunctionBody {
       return found[0];
     }
     if (found.length > 1 && shape !== undefined) {
-      const shapeSignature = (name: string): string => {
-        const layout = this.objects[name];
-        if (layout === undefined) return "";
-        return JSON.stringify(shape.fields.map((field) => {
-          const declared = layout.fields.find((entry) => entry.name === field.name);
-          return declared === undefined ? [field.name] : [field.name, declared.offset, declared.type];
-        }));
-      };
-      const first = shapeSignature(found[0]);
-      if (found.every((name) => shapeSignature(name) === first)) return found[0];
-      const literalNames = shape.fields.map((field) => field.name).slice().sort().join(",");
+      const first = this.shapeSignature(found[0], shapeFields);
+      if (found.every((name) => this.shapeSignature(name, shapeFields) === first)) return found[0];
+      const literalNames = this.fieldNames(shapeFields);
       for (const name of found) {
-        const layout = this.objects[name];
+        const layout = objects[name];
         if (layout === undefined) continue;
-        if (layout.fields.map((field) => field.name).slice().sort().join(",") === literalNames) return name;
+        if (this.sameNames(this.fieldNames(fieldOfValue(layout, "fields") as readonly { name: string }[]), literalNames)) return name;
       }
     }
     if (found.length === 0 && shape !== undefined) {
@@ -2607,15 +2725,16 @@ class FunctionBody {
       // key it had before the fold. The layouts that hold the same fields are
       // the object it was folded into, and a literal writes the same offsets
       // whichever name the pass kept.
-      const literalNames = shape.fields.map((field) => field.name).slice().sort().join(",");
-      for (const [name, layout] of Object.entries(this.objects)) {
-        if (layout.fields.map((field) => field.name).slice().sort().join(",") !== literalNames) continue;
+      const literalNames = this.fieldNames(shapeFields);
+      const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+      for (const [name, layout] of Object.entries(objects)) {
+        if (!this.sameNames(this.fieldNames(fieldOfValue(layout, "fields") as readonly { name: string }[]), literalNames)) continue;
         this.layouts.set(key, name);
         return name;
       }
     }
     if (found.length > 1) {
-      console.log(`LAYOUT3 ${key} exact=${this.context.objectNames[key] ?? "none"} found=${found.join(",")}`);
+      console.log(`LAYOUT3 ${key} exact=${objectNames[key] ?? "none"} found=${found.join(",")}`);
       throw this.error(
         `writes an object ${found.join(" and ")} could each be`,
         line,
@@ -2632,9 +2751,11 @@ class FunctionBody {
   /** The layouts the program lays out that hold the fields of one shape, in the order they are written. */
   private knownLayouts(key: string, shape: Shape): string[] {
     const found: string[] = [];
-    for (const [shapeKey, name] of Object.entries(this.context.objectNames)) {
+    const objectNames = fieldOfValue(fieldOfValue(this, "context"), "objectNames") as Record<string, string>;
+    const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+    for (const [shapeKey, name] of Object.entries(objectNames)) {
       if (shapeKey === key) continue;
-      const layout = this.objects[name];
+      const layout = objects[name];
       if (layout === undefined || !holdsShape(shape, layout)) continue;
       found.push(name);
       if (found.length > 1) return found;
@@ -2648,22 +2769,62 @@ class FunctionBody {
   }
 
   /** What a field of an object the body wrote holds, or a reference when unknown. */
-  private fieldOf(key: string, field: string): Inferred {
-    return this.shapes.get(key)?.fields.find((one) => one.name === field)?.value ?? ANY;
+  private fieldOfValue(key: string, field: string): Inferred {
+    const shape = this.shapes.get(key);
+    const fields = shape === undefined ? [] : fieldOfValue(shape, "fields") as readonly { name: string; value: Inferred }[];
+    const found = fields.find((one) => one.name === field);
+    return found === undefined ? ANY : fieldOfValue(found, "value") as Inferred;
   }
 
   /** What a field holds once the body has written it, which the layout is built from. */
   private stored(key: string, field: string, value: Inferred): void {
     const shape = this.shapes.get(key);
     if (shape === undefined) return;
-    const known = shape.fields.find((one) => one.name === field);
-    if (known === undefined) shape.fields.push({ name: field, value });
-    else known.value = value;
+    const fields = fieldOfValue(shape, "fields") as { name: string; value: Inferred }[];
+    const known = fields.find((one) => one.name === field);
+    if (known === undefined) fields.push({ name: field, value });
+    else setFieldValue(known, "value", value);
+  }
+
+  /** The fields of one layout, spelled so two layouts of one shape compare equal. */
+  private shapeSignature(name: string, shapeFields: readonly { name: string; value: Inferred }[]): string {
+    const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+    const layout = objects[name];
+    if (layout === undefined) return "";
+    const layoutFields = fieldOfValue(layout, "fields") as readonly { name: string; offset: number; type: string }[];
+    const written: unknown[][] = [];
+    for (const field of shapeFields) {
+      const fieldName = String(fieldOfValue(field, "name"));
+      let found: { name: string; offset: number; type: string } | undefined;
+      for (const one of layoutFields) if (one.name === fieldName) found = one;
+      if (found === undefined) written.push([fieldName]);
+      else written.push([fieldName, fieldOfValue(found, "offset"), fieldOfValue(found, "type")]);
+    }
+    return JSON.stringify(written);
+  }
+
+  /** The names of a list of fields, in the order they are written. */
+  private fieldNames(fields: readonly { name: string }[]): string[] {
+    const names: string[] = [];
+    for (const field of fields) names.push(String(fieldOfValue(field, "name")));
+    return names;
+  }
+
+  /** True when two lists of field names name the same fields. */
+  private sameNames(left: readonly string[], right: readonly string[]): boolean {
+    if (left.length !== right.length) return false;
+    for (const name of left) {
+      let seen = false;
+      for (const other of right) if (other === name) seen = true;
+      if (!seen) return false;
+    }
+    return true;
   }
 
   /** The type a layout gives one field, as the IR states it. */
   private fieldType(layout: string, field: string, line: number): SemanticType {
-    const declared = this.objects[layout]?.fields.find((one) => one.name === field);
+    const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+    const declared = objects[layout] === undefined ? undefined : (fieldOfValue(objects[layout], "fields") as readonly { name: string; type: string }[]).find((one) => one.name === field);
     if (declared === undefined) {
       throw this.error(
         `${layout} has no field ${field}`,
@@ -2671,7 +2832,7 @@ class FunctionBody {
         `a field is written in the literal that writes the object`,
       );
     }
-    return parseType(declared.type);
+    return parseType(String(fieldOfValue(declared, "type")));
   }
 
   /** The layouts the program lays out, for a refusal that has to say what there is. */
