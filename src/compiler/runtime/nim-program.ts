@@ -258,18 +258,18 @@ interface NimInteger {
   readonly high: bigint;
 }
 
-const NIM_INTEGERS: Record<string, NimInteger> = {
-  i8: { type: "int8", suffix: "'i8", low: -128n, high: 127n },
-  i16: { type: "int16", suffix: "'i16", low: -32768n, high: 32767n },
-  i32: { type: "int32", suffix: "'i32", low: -2147483648n, high: 2147483647n },
-  i64: { type: "int64", suffix: "'i64", low: -9223372036854775808n, high: 9223372036854775807n },
-  isize: { type: "clong", suffix: ".clong", low: -9223372036854775808n, high: 9223372036854775807n },
-  u8: { type: "uint8", suffix: "'u8", low: 0n, high: 255n },
-  u16: { type: "uint16", suffix: "'u16", low: 0n, high: 65535n },
-  u32: { type: "uint32", suffix: "'u32", low: 0n, high: 4294967295n },
-  u64: { type: "uint64", suffix: "'u64", low: 0n, high: 18446744073709551615n },
-  usize: { type: "csize_t", suffix: ".csize_t", low: 0n, high: 18446744073709551615n },
-};
+const NIM_INTEGERS: ReadonlyMap<string, NimInteger> = new Map<string, NimInteger>([
+  ["i8", { type: "int8", suffix: "'i8", low: -128n, high: 127n }],
+  ["i16", { type: "int16", suffix: "'i16", low: -32768n, high: 32767n }],
+  ["i32", { type: "int32", suffix: "'i32", low: -2147483648n, high: 2147483647n }],
+  ["i64", { type: "int64", suffix: "'i64", low: -9223372036854775808n, high: 9223372036854775807n }],
+  ["isize", { type: "clong", suffix: ".clong", low: -9223372036854775808n, high: 9223372036854775807n }],
+  ["u8", { type: "uint8", suffix: "'u8", low: 0n, high: 255n }],
+  ["u16", { type: "uint16", suffix: "'u16", low: 0n, high: 65535n }],
+  ["u32", { type: "uint32", suffix: "'u32", low: 0n, high: 4294967295n }],
+  ["u64", { type: "uint64", suffix: "'u64", low: 0n, high: 18446744073709551615n }],
+  ["usize", { type: "csize_t", suffix: ".csize_t", low: 0n, high: 18446744073709551615n }],
+]);
 
 /** The value of an integer literal, or null where the text is not one. */
 function integerLiteral(text: string): bigint | null {
@@ -299,7 +299,7 @@ function literal(text: string, element: string): string {
     }
     return /^[+-]?[0-9]+$/.test(text) ? `${text}.0` : text;
   }
-  const integer = NIM_INTEGERS[element];
+  const integer = NIM_INTEGERS.get(element);
   if (integer === undefined) return text;
   const value = integerLiteral(text);
   // Nim refuses a literal its type cannot hold, while the C driver writes one
@@ -308,9 +308,12 @@ function literal(text: string, element: string): string {
   // The bits are the value, not its magnitude: `cast` reads them as they are,
   // so the magnitude of a negative value would leave the sign behind and a
   // `uint8` the source wrote as -1 came out as 1.
-  if (value === null || (value >= integer.low && value <= integer.high)) return `${text}${integer.suffix}`;
+  if (value === null ||
+      (value >= (fieldOf(integer, "low") as bigint) && value <= (fieldOf(integer, "high") as bigint))) {
+    return `${text}${String(fieldOf(integer, "suffix"))}`;
+  }
   const bits = value < 0n ? (1n << 64n) + value : value;
-  return `cast[${integer.type}](${bits}'u64)`;
+  return `cast[${String(fieldOf(integer, "type"))}](${bits}'u64)`;
 }
 
 /** The operator Nim spells for the one the source used: `&` concatenates. */
@@ -764,14 +767,17 @@ ${anchor}
   }
 
   call(call: SemanticCall, argumentsText: string[]): string {
-    return `${call.signature.symbol}(${argumentsText.join(", ")})`;
+    const signature = fieldOf(call, "signature") as { symbol: string };
+    return `${String(fieldOf(signature, "symbol"))}(${argumentsText.join(", ")})`;
   }
 
   builtin(call: SemanticCall, argumentsText: string[]): string {
+    const callee = String(fieldOf(call, "callee"));
+    const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
     const argument = (index: number): string => argumentsText[index] ?? "0.0";
     // A promise is the handle the runtime holds it in, and the language holds a
     // handle as the number that address is.
-    if (call.callee === "Promise") {
+    if (callee === "Promise") {
       // The executor is a function of the program, and the Nim driver has no
       // way to hand a runtime a function of its own: an async function settles
       // its promise on the way out, and the runtime settles the one a program
@@ -779,45 +785,45 @@ ${anchor}
       // than written as a call nothing can make.
       throw hostError("the Nim driver cannot write down a Promise executor");
     }
-    if (call.callee.startsWith("Promise.await")) {
+    if (callee.startsWith("Promise.await")) {
       const handle = `cast[pointer](uint(${argument(0)}))`;
-      if (call.callee === "Promise.await.text") return `$blaze_promise_await_text(${handle})`;
-      if (call.callee === "Promise.await.whole") return `int64(blaze_promise_await(${handle}))`;
-      if (call.callee === "Promise.await.bool") return `(blaze_promise_await(${handle}) != 0.0)`;
-      if (call.callee === "Promise.await.value") return `blaze_promise_await_value(${handle})`;
-      if (call.callee === "Promise.await.nothing") return `(blaze_promise_await_nothing(${handle}); 0.0)`;
+      if (callee === "Promise.await.text") return `$blaze_promise_await_text(${handle})`;
+      if (callee === "Promise.await.whole") return `int64(blaze_promise_await(${handle}))`;
+      if (callee === "Promise.await.bool") return `(blaze_promise_await(${handle}) != 0.0)`;
+      if (callee === "Promise.await.value") return `blaze_promise_await_value(${handle})`;
+      if (callee === "Promise.await.nothing") return `(blaze_promise_await_nothing(${handle}); 0.0)`;
       return `blaze_promise_await(${handle})`;
     }
-    if (call.callee === "resolve" || call.callee === "onFulfilled") {
-      const type = call.argTypes[0];
+    if (callee === "resolve" || callee === "onFulfilled") {
+      const type = argTypes[0];
       if (type !== undefined && isTextType(type)) return `(blaze_promise_resolve_current_text(${argument(0)}); 0.0)`;
       if (type !== undefined && type.kind === "ref") return `(blaze_promise_resolve_current_value(${argument(0)}); 0.0)`;
       return `(blaze_promise_resolve_current(${argument(0)}); 0.0)`;
     }
-    if (call.callee === "reject" || call.callee === "onRejected") {
-      const type = call.argTypes[0];
+    if (callee === "reject" || callee === "onRejected") {
+      const type = argTypes[0];
       const text = type !== undefined && isTextType(type) ? argument(0) : `$${RUNTIME_NAME}_to_text(${argument(0)})`;
       return `(blaze_promise_reject_current(${text}); 0.0)`;
     }
-    if (call.callee.startsWith("Promise.resolve") || call.callee.startsWith("Promise.settle")) {
-      const settled = call.callee.startsWith("Promise.settle") ? "blaze_promise_settled" : "blaze_promise_resolved";
-      const handle = call.callee.endsWith(".text")
+    if (callee.startsWith("Promise.resolve") || callee.startsWith("Promise.settle")) {
+      const settled = callee.startsWith("Promise.settle") ? "blaze_promise_settled" : "blaze_promise_resolved";
+      const handle = callee.endsWith(".text")
         ? `${settled}_text(${argument(0)})`
-        : call.callee.endsWith(".bool")
+        : callee.endsWith(".bool")
           ? `${settled}_number(if ${argument(0)}: 1.0 else: 0.0)`
-          : call.callee.endsWith(".nothing")
+          : callee.endsWith(".nothing")
             ? `${settled}_null()`
-            : call.callee.endsWith(".value")
+            : callee.endsWith(".value")
               ? `${settled}_value(${argument(0)})`
               : `${settled}_number(${argument(0)})`;
       return `float64(cast[uint](${handle}))`;
     }
-    if (call.callee === "Promise.reject") {
-      const type = call.argTypes[0];
+    if (callee === "Promise.reject") {
+      const type = argTypes[0];
       const text = type !== undefined && isTextType(type) ? argument(0) : `$${RUNTIME_NAME}_to_text(${argument(0)})`;
       return `float64(cast[uint](blaze_promise_rejected(${text})))`;
     }
-    switch (call.callee) {
+    switch (callee) {
       case "Math.abs":
         return `abs(${argument(0)})`;
       case "Math.sqrt":
@@ -870,7 +876,7 @@ ${anchor}
         // The error stream is the runtime's own, and the call answers nothing.
         return `(${RUNTIME_NAME}_print_error_text(${argument(0)}); 0.0)`;
       default:
-        throw hostError(`the driver cannot write down ${call.callee}`);
+        throw hostError(`the driver cannot write down ${callee}`);
     }
   }
 
@@ -1091,10 +1097,13 @@ export interface ProgramHostRequest {
 
 /** Compiles the adapter and the driver, and links the program objects in. */
 export async function buildProgramHost(request: ProgramHostRequest): Promise<Runner> {
-  const adapterPath = `${request.workDirectory}/${RUNTIME_NAME}.nim`;
-  const hostPath = `${request.workDirectory}/program_host.nim`;
-  await writeFile(adapterPath, generateRuntimeAdapterSource(request.mode), "utf8");
-  await writeFile(hostPath, generateProgramHostSource(request.program), "utf8");
+  const workDirectory = String(fieldOf(request, "workDirectory"));
+  const outputPath = String(fieldOf(request, "outputPath"));
+  const mode = String(fieldOf(request, "mode")) as BuildMode;
+  const adapterPath = `${workDirectory}/${RUNTIME_NAME}.nim`;
+  const hostPath = `${workDirectory}/program_host.nim`;
+  await writeFile(adapterPath, generateRuntimeAdapterSource(mode), "utf8");
+  await writeFile(hostPath, generateProgramHostSource(fieldOf(request, "program") as SemanticProgram), "utf8");
 
   const result = run(
     "nim",
@@ -1102,19 +1111,21 @@ export async function buildProgramHost(request: ProgramHostRequest): Promise<Run
       "c",
       "--hints:off",
       "--warnings:off",
-      ...nimOptimizationOptions(request.mode),
-      `--nimcache:${request.workDirectory}/nimcache`,
-      `--out:${request.outputPath}`,
-      ...request.objectPaths.map((path) => `--passL:${path}`),
+      ...nimOptimizationOptions(mode),
+      `--nimcache:${workDirectory}/nimcache`,
+      `--out:${outputPath}`,
+      ...(fieldOf(request, "objectPaths") as readonly string[]).map((path) => `--passL:${path}`),
       hostPath,
     ],
     { timeoutMs: 600_000 },
   );
-  if (result.spawnError !== undefined) {
-    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${result.spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
+  const spawnError = fieldOf(result, "spawnError");
+  if (String(spawnError) !== "undefined") {
+    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
   }
-  if (result.code !== 0) {
-    throw hostError("the Nim program driver did not build", `${adapterPath}\n${hostPath}\n${result.stderr.trim()}`);
+  if (Number(fieldOf(result, "code")) !== 0) {
+    const stderr = String(fieldOf(result, "stderr"));
+    throw hostError("the Nim program driver did not build", `${adapterPath}\n${hostPath}\n${stderr.trim()}`);
   }
-  return { command: request.outputPath, args: [] };
+  return { command: outputPath, args: [] };
 }

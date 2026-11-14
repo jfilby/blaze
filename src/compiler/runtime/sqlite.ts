@@ -240,11 +240,16 @@ const SQLITE_HEADER_EPILOGUE = `
 #endif
 `;
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /** The C header a program that uses SQLite includes. */
 export function sqliteHeaderSource(): string {
   const declarations = SQLITE_ABI.map((item) => {
-    return `${item.returns} ${item.symbol}(${
-      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
+    const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
+    return `${String(fieldOf(item, "returns"))} ${String(fieldOf(item, "symbol"))}(${
+      params.length === 0 ? "void" : params.map(([name, type]) => `${type} ${name}`).join(", ")
     });`;
   }).join("\n");
   return `${SQLITE_HEADER_PREAMBLE}\n${declarations}\n${SQLITE_HEADER_EPILOGUE}`;

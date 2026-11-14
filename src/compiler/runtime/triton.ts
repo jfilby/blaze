@@ -11,6 +11,10 @@
 export const TRITON_NAME = "blaze_triton";
 
 /** One entry point of the Triton ABI. */
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 export interface TritonEntry {
   symbol: string;
   returns: string;
@@ -28,7 +32,14 @@ function tritonEntry(
   ownership: string,
   extra: { noreturn?: boolean } = {},
 ): TritonEntry {
-  return { symbol, returns, params, summary, ownership, ...extra };
+  return {
+    symbol,
+    returns,
+    params,
+    summary,
+    ownership,
+    noreturn: String(fieldOf(extra, "noreturn")) === "true" ? true : undefined,
+  };
 }
 
 /**
@@ -44,6 +55,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     [],
     "Initializes the device for kernel execution.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_device_sync",
@@ -51,6 +63,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     [],
     "Synchronizes the device stream.",
     "Blocks until all queued work is complete.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_malloc",
@@ -58,6 +71,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     [["bytes", "size_t"]],
     "Allocates device memory.",
     "Returns an owned device pointer; null on failure.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_free",
@@ -65,6 +79,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     [["ptr", "void*"]],
     "Frees device memory.",
     "The pointer is no longer valid after this.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_memcpy_h2d",
@@ -76,6 +91,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     ],
     "Copies memory from host to device.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_memcpy_d2h",
@@ -87,6 +103,7 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     ],
     "Copies memory from device to host.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   tritonEntry(
     "blaze_triton_launch",
@@ -106,23 +123,25 @@ export const TRITON_ABI: readonly TritonEntry[] = [
     ],
     "Launches a kernel.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
 ];
 
 /** Symbols generated Triton/kernel code may reference. Nothing else resolves at link time. */
-export const TRITON_SYMBOLS: Record<string, true> = {
-  "blaze_triton_device_init": true,
-  "blaze_triton_device_sync": true,
-  "blaze_triton_free": true,
-  "blaze_triton_launch": true,
-  "blaze_triton_malloc": true,
-  "blaze_triton_memcpy_d2h": true,
-  "blaze_triton_memcpy_h2d": true,
-};
-
 /** True when generated code is allowed to reference a Triton symbol. */
 export function isTritonSymbol(symbol: string): boolean {
-  return TRITON_SYMBOLS[symbol] === true;
+  switch (symbol) {
+    case "blaze_triton_device_init":
+    case "blaze_triton_device_sync":
+    case "blaze_triton_free":
+    case "blaze_triton_launch":
+    case "blaze_triton_malloc":
+    case "blaze_triton_memcpy_d2h":
+    case "blaze_triton_memcpy_h2d":
+      return true;
+    default:
+      return false;
+  }
 }
 
 const TRITON_HEADER_PREAMBLE = `#ifndef BLAZE_TRITON_H
@@ -145,9 +164,11 @@ const TRITON_HEADER_EPILOGUE = `
 /** The C header a program that uses the Triton runtime includes. */
 export function tritonHeaderSource(): string {
   const declarations = TRITON_ABI.map((item) => {
-    const suffix = item.noreturn === true ? " /* never returns */" : "";
-    return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
-      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
+    const suffix = String(fieldOf(item, "noreturn")) === "true" ? " /* never returns */" : "";
+    const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
+    const returns = String(fieldOf(item, "returns"));
+    return `${returns === "void" ? "void" : returns} ${String(fieldOf(item, "symbol"))}(${
+      params.length === 0 ? "void" : params.map(([name, type]) => `${type} ${name}`).join(", ")
     })${suffix};`;
   }).join("\n");
   return `${TRITON_HEADER_PREAMBLE}\n${declarations}\n\n${TRITON_HEADER_EPILOGUE}`;

@@ -27,6 +27,10 @@
  */
 
 import type { ProgramBody, ProgramStatement, ProgramValue } from "../semantics/module.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 import { codeOnly, withoutComments } from "../util/source.ts";
 
 /**
@@ -58,7 +62,7 @@ const HTTP_CONNECTION_SLACK = 64;
 const FACIL_IO_MAX_CONNECTIONS = 131072;
 
 /** What the HTTP runtime of a build is built for. */
-export interface HttpRuntimeNeeds {
+export class HttpRuntimeNeeds {
   /**
    * The most connections the program's server may hold at once. The table the
    * event loop keeps is this many entries long, so it is what the program
@@ -70,11 +74,16 @@ export interface HttpRuntimeNeeds {
    * backend and links OpenSSL; a program that does not carries neither.
    */
   tls: boolean;
+
+  constructor(maxConnections: number, tls: boolean) {
+    this.maxConnections = maxConnections;
+    this.tls = tls;
+  }
 }
 
 /** The needs of a program that says nothing about its server. */
 export function defaultHttpRuntimeNeeds(): HttpRuntimeNeeds {
-  return { maxConnections: DEFAULT_HTTP_MAX_CONNECTIONS, tls: false };
+  return new HttpRuntimeNeeds(DEFAULT_HTTP_MAX_CONNECTIONS, false);
 }
 
 /**
@@ -86,7 +95,7 @@ export function defaultHttpRuntimeNeeds(): HttpRuntimeNeeds {
 type UrlScheme = "plain" | "secure" | "unknown";
 
 /** What the walk of the program found, and what it is still looking for. */
-interface Reading {
+class Reading {
   /** The needs the walk is filling in. */
   needs: HttpRuntimeNeeds;
   /** How many calls that state a limit the walk found. */
@@ -103,6 +112,15 @@ interface Reading {
    *  is written, so the program is walked twice: once for what it binds, once
    *  for what it asks. */
   binding: boolean;
+
+  constructor() {
+    this.needs = defaultHttpRuntimeNeeds();
+    this.calls = 0;
+    this.readALimit = false;
+    this.room = 0;
+    this.schemes = new Map();
+    this.binding = true;
+  }
 }
 
 /**
@@ -122,18 +140,12 @@ interface Reading {
  * transport the URL the name was bound to is over.
  */
 export function httpRuntimeNeeds(body: ProgramBody | undefined, sources: readonly string[]): HttpRuntimeNeeds {
-  const reading: Reading = {
-    needs: defaultHttpRuntimeNeeds(),
-    calls: 0,
-    readALimit: false,
-    room: 0,
-    schemes: new Map(),
-    binding: true,
-  };
+  const reading = new Reading();
+
   if (body !== undefined) {
-    for (const statement of body.statements) readStatement(statement, reading);
+    for (const statement of fieldOf(body, "statements") as readonly ProgramStatement[]) readStatement(statement, reading);
     reading.binding = false;
-    for (const statement of body.statements) readStatement(statement, reading);
+    for (const statement of fieldOf(body, "statements") as readonly ProgramStatement[]) readStatement(statement, reading);
   }
   /* A server the program states a limit for, and a server the compiler could
      not read the limit of, are two different servers: the first is given the
@@ -204,56 +216,69 @@ function countMentions(source: string, callee: string): number {
 function readStatement(statement: ProgramStatement, reading: Reading): void {
   switch (statement.kind) {
     case "declare":
-      if (reading.binding) bindName(statement.name, statement.value, statement.mutable, reading.schemes);
-      readValue(statement.value, reading);
+      if (reading.binding) {
+        bindName(
+          String(fieldOf(statement, "name")),
+          fieldOf(statement, "value") as ProgramValue,
+          String(fieldOf(statement, "mutable")) === "true",
+          reading.schemes,
+        );
+      }
+      readValue(fieldOf(statement, "value") as ProgramValue, reading);
       return;
     case "assign":
       /* A name that is written again holds nothing the compiler can follow. */
-      if (reading.binding) reading.schemes.set(statement.name, "unknown");
-      readValue(statement.value, reading);
+      if (reading.binding) reading.schemes.set(String(fieldOf(statement, "name")), "unknown");
+      readValue(fieldOf(statement, "value") as ProgramValue, reading);
       return;
     case "elementAssign":
-      readValue(statement.index, reading);
-      readValue(statement.value, reading);
+      readValue(fieldOf(statement, "index") as ProgramValue, reading);
+      readValue(fieldOf(statement, "value") as ProgramValue, reading);
       return;
     case "fieldAssign":
       /* The object is named rather than written out, so there is nothing to
          read in it. */
       return;
     case "fill":
-      readValue(statement.value, reading);
+      readValue(fieldOf(statement, "value") as ProgramValue, reading);
       return;
     case "print":
-      for (const value of statement.values) readValue(value, reading);
+      for (const value of fieldOf(statement, "values") as readonly ProgramValue[]) readValue(value, reading);
       return;
     case "if":
-      readValue(statement.condition, reading);
-      for (const inner of statement.then) readStatement(inner, reading);
-      for (const inner of statement.otherwise) readStatement(inner, reading);
+      readValue(fieldOf(statement, "condition") as ProgramValue, reading);
+      for (const inner of fieldOf(statement, "then") as readonly ProgramStatement[]) readStatement(inner, reading);
+      for (const inner of fieldOf(statement, "otherwise") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "while":
     case "doWhile":
-      readValue(statement.condition, reading);
-      for (const inner of statement.body) readStatement(inner, reading);
+      readValue(fieldOf(statement, "condition") as ProgramValue, reading);
+      for (const inner of fieldOf(statement, "body") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "for":
-      readValue(statement.from, reading);
-      readValue(statement.to, reading);
-      if (statement.step !== null) readValue(statement.step, reading);
-      for (const inner of statement.body) readStatement(inner, reading);
+      readValue(fieldOf(statement, "from") as ProgramValue, reading);
+      readValue(fieldOf(statement, "to") as ProgramValue, reading);
+      if (String(fieldOf(statement, "step")) !== "null") {
+        readValue(fieldOf(statement, "step") as ProgramValue, reading);
+      }
+      for (const inner of fieldOf(statement, "body") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "forOf":
     case "block":
-      for (const inner of statement.body) readStatement(inner, reading);
+      for (const inner of fieldOf(statement, "body") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "invoke":
-      readCall(statement.function, statement.args, reading);
+      readCall(
+        String(fieldOf(statement, "function")),
+        fieldOf(statement, "args") as readonly ProgramValue[],
+        reading,
+      );
       return;
     case "function":
-      for (const inner of statement.body) readStatement(inner, reading);
+      for (const inner of fieldOf(statement, "body") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "result":
-      readValue(statement.value, reading);
+      readValue(fieldOf(statement, "value") as ProgramValue, reading);
       return;
     case "update":
     case "break":
@@ -266,55 +291,55 @@ function readStatement(statement: ProgramStatement, reading: Reading): void {
 function readValue(value: ProgramValue, reading: Reading): void {
   switch (value.k) {
     case "call":
-      readCall(value.function, value.args, reading);
+      readCall(String(fieldOf(value, "function")), fieldOf(value, "args") as readonly ProgramValue[], reading);
       return;
     case "binary":
-      readValue(value.left, reading);
-      readValue(value.right, reading);
+      readValue(fieldOf(value, "left") as ProgramValue, reading);
+      readValue(fieldOf(value, "right") as ProgramValue, reading);
       return;
     case "unary":
-      readValue(value.operand, reading);
+      readValue(fieldOf(value, "operand") as ProgramValue, reading);
       return;
     case "conditional":
-      readValue(value.condition, reading);
-      readValue(value.then, reading);
-      readValue(value.otherwise, reading);
+      readValue(fieldOf(value, "condition") as ProgramValue, reading);
+      readValue(fieldOf(value, "then") as ProgramValue, reading);
+      readValue(fieldOf(value, "otherwise") as ProgramValue, reading);
       return;
     case "text":
-      for (const part of value.parts) {
-        if (part.k === "value") readValue(part.value, reading);
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: ProgramValue }[]) {
+        if (part.k === "value") readValue(fieldOf(part, "value") as ProgramValue, reading);
       }
       return;
     case "fixed":
-      readValue(value.of, reading);
+      readValue(fieldOf(value, "of") as ProgramValue, reading);
       return;
     case "buffer":
-      for (const item of value.values) readValue(item, reading);
+      for (const item of fieldOf(value, "values") as readonly ProgramValue[]) readValue(item, reading);
       return;
     case "shared":
     case "sized":
-      readValue(value.count, reading);
+      readValue(fieldOf(value, "count") as ProgramValue, reading);
       return;
     case "view":
-      readValue(value.of, reading);
-      readValue(value.offset, reading);
-      readValue(value.count, reading);
+      readValue(fieldOf(value, "of") as ProgramValue, reading);
+      readValue(fieldOf(value, "offset") as ProgramValue, reading);
+      readValue(fieldOf(value, "count") as ProgramValue, reading);
       return;
     case "fill":
-      readValue(value.buffer, reading);
-      readValue(value.value, reading);
+      readValue(fieldOf(value, "buffer") as ProgramValue, reading);
+      readValue(fieldOf(value, "value") as ProgramValue, reading);
       return;
     case "element":
-      readValue(value.index, reading);
+      readValue(fieldOf(value, "index") as ProgramValue, reading);
       return;
     case "field":
-      readValue(value.object, reading);
+      readValue(fieldOf(value, "object") as ProgramValue, reading);
       return;
     case "object":
-      for (const field of value.fields) readValue(field.value, reading);
+      for (const field of fieldOf(value, "fields") as readonly { value: ProgramValue }[]) readValue(fieldOf(field, "value") as ProgramValue, reading);
       return;
     case "arrow":
-      for (const inner of value.body) readStatement(inner, reading);
+      for (const inner of fieldOf(value, "body") as readonly ProgramStatement[]) readStatement(inner, reading);
       return;
     case "whole":
     case "number":
@@ -385,12 +410,12 @@ function readWhatTheCallSays(callee: string, args: readonly ProgramValue[], read
  * over plain text, and the name `api` is how the request spells it.
  */
 function schemeOf(value: ProgramValue, schemes: ReadonlyMap<string, UrlScheme>): UrlScheme {
-  if (value.k === "name") return schemes.get(value.name) ?? "unknown";
+  if (value.k === "name") return schemes.get(String(fieldOf(value, "name"))) ?? "unknown";
   if (value.k !== "text") return "unknown";
   let beginning = "";
-  for (const part of value.parts) {
+  for (const part of fieldOf(value, "parts") as readonly { k: string; value: string }[]) {
     if (part.k !== "text") break;
-    beginning += part.value;
+    beginning += String(fieldOf(part, "value"));
   }
   if (beginning.startsWith("https://")) return "secure";
   if (beginning.startsWith("http://")) return "plain";
