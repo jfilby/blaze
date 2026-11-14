@@ -56,6 +56,11 @@
  * type: it is declared as a string, and `+` on a string is concatenation.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+
 import { contractText, parseType, typeToString } from "./contract.ts";
 import { isWholeNumberText } from "./objects.ts";
 import type { LiteralKeys } from "./program-objects.ts";
@@ -201,6 +206,43 @@ interface ArgvHeld {
 
 /** What a declared name holds. */
 type Held = NumberHeld | ArrayHeld | ObjectHeld | TextHeld | ArgvHeld | PairsHeld;
+
+function renameHeld(held: WithoutName<Held>, name: string): Held {
+  switch (held.kind) {
+    case "number":
+      return { kind: "number", name, mutable: held.mutable, type: held.type, text: held.text, bigint: held.bigint };
+    case "array":
+      return {
+        kind: "array",
+        name,
+        mutable: held.mutable,
+        element: held.element,
+        length: held.length,
+        values: held.values,
+      };
+    case "object":
+      return {
+        kind: "object",
+        name,
+        mutable: held.mutable,
+        type: held.type,
+        promise: held.promise,
+      };
+    case "text":
+      return {
+        kind: "text",
+        name,
+        mutable: held.mutable,
+        value: held.value,
+        boxed: held.boxed,
+        parameter: held.parameter,
+      };
+    case "argv":
+      return { kind: "argv", name, mutable: held.mutable, offset: held.offset };
+    case "pairs":
+      return { kind: "pairs", name, mutable: held.mutable, entries: held.entries };
+  }
+}
 
 /** A name as a declaration states it, before it is declared. */
 type WithoutName<T> = T extends unknown ? Omit<T, "name"> : never;
@@ -1740,7 +1782,7 @@ function serverHandlerTrampoline(
 }
 
 /** A function the program declared, and what has been settled about it. */
-interface ProgramFunctionDraft {
+class ProgramFunctionDraft {
   name: string;
   /**
    * The names the body reads of the scope it is declared in, each with the
@@ -1786,6 +1828,28 @@ interface ProgramFunctionDraft {
    * trampoline that calls the handler reads them.
    */
   serverHandler: boolean;
+
+  constructor(
+    name: string,
+    captured: { name: string; type: SemanticType; held: Held; boxed: boolean }[],
+    params: { name: string; type: TypeExpr | null }[],
+    body: ProgramStatement[],
+    line: number,
+    callback: boolean,
+    serverHandler: boolean,
+    async?: boolean,
+  ) {
+    this.name = name;
+    this.captured = captured;
+    this.params = params;
+    this.body = body;
+    this.line = line;
+    this.signature = null;
+    this.compiled = null;
+    this.callback = callback;
+    this.serverHandler = serverHandler;
+    this.async = async;
+  }
 }
 
 /** A declared function whose body has been read, and so is settled whole. */
@@ -1805,7 +1869,7 @@ interface ProgramFunctions {
   /** The bodies being read right now, which a call of one of them reaches. */
   readonly settling: Set<ProgramFunctionDraft>;
   /** The names the program holds, so a generated name is not one of them. */
-  readonly used: Set<string>;
+  readonly heldNames: Set<string>;
   /** What the call sites say about the parameters the source wrote no type for. */
   readonly observed: Observations;
 }
@@ -1945,13 +2009,13 @@ class ProgramResolver {
   }
 
   resolve(): DraftProgram {
-    const statements = this.statements(this.body.statements, false);
+    const statements = this.statements(fieldOf(this.body, "statements") as readonly ProgramStatement[], false);
     // A body is read when it is called, because what a call is typed by is
     // what the body hands back. A function nobody calls is read here, at the
     // end of the scope it was declared in, which is the same body either way.
     for (const draft of [...this.functions.waiting]) this.settle(draft);
     return {
-      file: this.body.file,
+      file: String(fieldOf(this.body, "file")),
       statements,
       functions: [...this.contracts.values()].map((contract) => contract.signature),
       declared: [...this.functions.table.values()],
@@ -1971,35 +2035,44 @@ class ProgramResolver {
     // A function bound to the block it is declared in is bound once, whatever
     // the statement it is written at: the block hoists it and the statement
     // that reached it finds it already there.
-    if (this.functions.table.has(statement.name)) return;
-    const params = statement.params.map((param) => {
+    const statementName = String(fieldOf(statement, "name"));
+    if (this.functions.table.has(statementName)) return;
+    const declarationParams = fieldOf(statement, "params") as readonly
+      { name: string; type: string | null; default?: unknown }[];
+    const params = declarationParams.map((param) => {
       // A parameter the source wrote no type for is read at the type its
       // callers pass it at, which is what the call sites of the program say.
       // The kind is settled in `closure`, once the call sites have been read.
-      if (param.type === null) return { name: param.name, type: null };
-      return { name: param.name, type: this.annotation(param.type, statement.line) };
+      const paramName = String(fieldOf(param, "name"));
+      const paramType = fieldOf(param, "type");
+      if (String(paramType) === "null") return { name: paramName, type: null };
+      return { name: paramName, type: this.annotation(String(paramType), Number(fieldOf(statement, "line"))) };
     });
     // Every name the body reads of the scope around it is a parameter of the
     // function, of the type the scope holds it at: a function of a program is
     // compiled on its own, so what it reads from around it is passed to it at
     // every call, and the call is where that scope is.
     const captures: { name: string; type: SemanticType; held: Held; boxed: boolean }[] = [];
-    for (const name of readsAround(statement.body, new Set(statement.params.map((param) => param.name)))) {
+    const statementBody = fieldOf(statement, "body") as readonly ProgramStatement[];
+    const paramNames = new Set(declarationParams.map((param) => String(fieldOf(param, "name"))));
+    for (const name of readsAround(statementBody, paramNames)) {
       const held = this.lookup(name) ?? this.topLevelText(name);
       if (declaredHere.includes(name)) {
         throw programError(
-          `${statement.name} reads "${name}", which the block it is declared in declares`,
+          `${statementName} reads "${name}", which the block it is declared in declares`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a name a block declares shadows the one around it for the whole of the block, so this function would have to be given the block's "${name}" and a function of a program is declared before the block is read; declare it outside the block, or give it the name as a parameter`,
+          Number(fieldOf(statement, "line")),
+          `line ${fieldOf(statement, "line")} of ${String(fieldOf(this.body, "file"))}: a name a block declares shadows the one around it for the whole of the block, so this function would have to be given the block's "${name}" and a function of a program is declared before the block is read; declare it outside the block, or give it the name as a parameter`,
         );
       }
       if (held === undefined) {
         // A named program function is referenced by name rather than captured,
         // so a function that reads one needs no parameter for it.
         if (this.functions.table.has(name)) continue;
-        const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
-        if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
+        const bodyStatements = fieldOf(this.body, "statements") as readonly ProgramStatement[];
+        const decl = bodyStatements.find((item) =>
+          item.kind === "declare" && String(fieldOf(item, "name")) === name);
+        if (decl !== undefined && decl.kind === "declare" && (fieldOf(decl, "value") as ProgramValue).k === "text") {
           // A const string the program declares is written inline where it is
           // read, so a function that reads one needs no parameter for it.
           continue;
@@ -2007,8 +2080,8 @@ class ProgramResolver {
         throw programError(
           `"${name}" is not declared`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: ${statement.name} reads "${name}" of the scope it is declared in, and a name it reads is one the scope holds`,
+          Number(fieldOf(statement, "line")),
+          `line ${fieldOf(statement, "line")} of ${String(fieldOf(this.body, "file"))}: ${statementName} reads "${name}" of the scope it is declared in, and a name it reads is one the scope holds`,
         );
       }
       // A mutable text local captured by a nested program function is boxed:
@@ -2028,28 +2101,25 @@ class ProgramResolver {
         throw programError(
           `"${name}" is a string`,
           this.body,
-          statement.line,
-          `line ${statement.line} of ${this.body.file}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
+          Number(fieldOf(statement, "line")),
+          `line ${fieldOf(statement, "line")} of ${String(fieldOf(this.body, "file"))}: a function of a program is given a number or a buffer; a string is written inside it rather than read out of it`,
         );
       }
       captures.push({ name, type, held, boxed: false });
     }
-    const draft: ProgramFunctionDraft = {
-      name: statement.name,
-      captured: captures,
+    const draft = new ProgramFunctionDraft(
+      statementName,
+      captures,
       params,
-      body: statement.body,
-      line: statement.line,
-      // What the function hands back is settled by reading its body, and the
-      // names it is given are settled here, where the scope it reads is.
-      signature: null,
-      compiled: null,
-      callback: false,
-      serverHandler: false,
-      ...(statement.async === true ? { async: true } : {}),
-    };
-    this.functions.table.set(statement.name, draft);
-    this.functions.used.add(statement.name);
+      statementBody as ProgramStatement[],
+      Number(fieldOf(statement, "line")),
+      false,
+      false,
+      String(fieldOf(statement, "async")) === "true" ? true : undefined,
+    );
+
+    this.functions.table.set(statementName, draft);
+    this.functions.heldNames.add(statementName);
     this.functions.waiting.push(draft);
     // A function is also given what the functions it calls read, so the closure
     // is settled as soon as there is a call to settle it from.
@@ -2074,18 +2144,19 @@ class ProgramResolver {
     statement: ProgramStatement & { kind: "function" },
     declaredHere: readonly string[],
   ): void {
+    const declarationParams = fieldOf(statement, "params") as readonly { name: string; type: string | null; default?: unknown }[];
     let required = 0;
-    statement.params.forEach((param, index) => {
-      if (param.default === undefined) required = index + 1;
-    });
-    for (let arity = required; arity < statement.params.length; arity += 1) {
-      const name = `${statement.name}__${arity}`;
+    for (const [index, param] of declarationParams.entries()) {
+      if (String(fieldOf(param, "default")) === "undefined") required = index + 1;
+    }
+    for (let arity = required; arity < declarationParams.length; arity += 1) {
+      const name = `${String(fieldOf(statement, "name"))}__${arity}`;
       if (this.functions.table.has(name)) continue;
       const body: ProgramStatement[] = [];
       const args: ProgramValue[] = [];
-      statement.params.forEach((param, index) => {
+      declarationParams.forEach((param, index) => {
         if (index < arity) {
-          args.push({ k: "name", name: param.name });
+          args.push({ k: "name", name: String(fieldOf(param, "name")) });
           return;
         }
         // The default is read once, under a name of its own, before the call:
@@ -2097,24 +2168,27 @@ class ProgramResolver {
           mutable: false,
           name: held,
           type: null,
-          value: param.default as ProgramValue,
-          line: statement.line,
+          value: fieldOf(param, "default") as ProgramValue,
+          line: Number(fieldOf(statement, "line")),
         });
         args.push({ k: "name", name: held });
       });
       body.push({
         kind: "result",
-        value: { k: "call", function: statement.name, args },
-        line: statement.line,
+        value: { k: "call", function: String(fieldOf(statement, "name")), args },
+        line: Number(fieldOf(statement, "line")),
       });
       this.declared(
         {
           kind: "function",
           name,
-          params: statement.params.slice(0, arity).map((param) => ({ name: param.name, type: param.type })),
+          params: declarationParams.slice(0, arity).map((param) => ({
+            name: String(fieldOf(param, "name")),
+            type: fieldOf(param, "type") as string | null,
+          })),
           body,
-          line: statement.line,
-          ...(statement.async === true ? { async: true } : {}),
+          line: Number(fieldOf(statement, "line")),
+          async: String(fieldOf(statement, "async")) === "true" ? true : undefined,
         },
         declaredHere,
       );
@@ -2133,13 +2207,16 @@ class ProgramResolver {
     for (let round = 0; round <= this.functions.table.size; round += 1) {
       let changed = false;
       for (const draft of this.functions.table.values()) {
-        for (const called of calledNames(draft.body)) {
+        for (const called of calledNames(fieldOf(draft, "body") as readonly ProgramStatement[])) {
           const other = this.functions.table.get(called);
           if (other === undefined) continue;
-          for (const capture of other.captured) {
-            if (draft.params.some((param) => param.name === capture.name)) continue;
-            if (draft.captured.some((one) => one.name === capture.name)) continue;
-            draft.captured.push(capture);
+          const draftParams = fieldOf(draft, "params") as readonly { name: string; type: string | null }[];
+          const draftCaptured = fieldOf(draft, "captured") as { name: string; type: SemanticType; held: Held; boxed: boolean }[];
+          for (const capture of fieldOf(other, "captured") as readonly { name: string; type: SemanticType; held: Held; boxed: boolean }[]) {
+            const captureName = String(fieldOf(capture, "name"));
+            if (draftParams.some((param) => String(fieldOf(param, "name")) === captureName)) continue;
+            if (draftCaptured.some((one) => String(fieldOf(one, "name")) === captureName)) continue;
+            draftCaptured.push(capture);
             changed = true;
           }
         }
@@ -2151,29 +2228,35 @@ class ProgramResolver {
       // and the names the body reads of the scope around it come after: a
       // function of a program is compiled on its own, so what it reads from
       // around it is passed to it after the arguments the source wrote.
+      const draftParams = fieldOf(draft, "params") as readonly { name: string; type: string | null }[];
+      const draftCaptured = fieldOf(draft, "captured") as readonly { name: string; type: SemanticType; held: Held; boxed: boolean }[];
+      const draftName = String(fieldOf(draft, "name"));
       const params = [
-        ...draft.params.map((param, position) => ({
-          name: param.name,
+        ...draftParams.map((param, position) => ({
+          name: String(fieldOf(param, "name")),
           // A parameter the source wrote no type for is read at the type its
           // callers pass it at.
           type:
-            param.type === null
-              ? inferredType(this.functions.observed.kindOf(draft.name, position))
-              : contractText(param.type),
+            String(fieldOf(param, "type")) === "null"
+              ? inferredType(this.functions.observed.kindOf(draftName, position))
+              : contractText(fieldOf(param, "type") as TypeExpr),
         })),
-        ...draft.captured.map((capture) => ({
+        ...draftCaptured.map((capture) => ({
           // The name a capture arrives under is the name the scope it was taken
           // from holds it by, which is the name the body reads it by.
-          name: capture.held.name,
+          name: String(fieldOf(fieldOf(capture, "held"), "name")),
           // A mutable string is shared through a cell, and the cell is what the
           // function is given; a string that is not written through is the
           // string itself.
-          type: capture.boxed ? "boxedtext" : contractText(capture.type),
+          type: String(fieldOf(capture, "boxed")) === "true"
+            ? "boxedtext"
+            : contractText(fieldOf(capture, "type") as SemanticType),
         })),
       ];
+      const currentSignature = fieldOf(draft, "signature") as { returns: string } | null;
       draft.signature = {
-        name: draft.name,
-        symbol: draft.name === "main" ? PROGRAM_ENTRY_SYMBOL : draft.name,
+        name: draftName,
+        symbol: draftName === "main" ? PROGRAM_ENTRY_SYMBOL : draftName,
         // A program is hosted by a driver that has a `main` of its own, so a
         // function the program declares under the name `main` is compiled
         // under another symbol. A module declares its functions before its
@@ -2184,7 +2267,7 @@ class ProgramResolver {
         // both spell the entry the one way, or the C the driver is written in
         // carries two `main` definitions and the link fails.
         params,
-        returns: draft.signature?.returns ?? "void",
+        returns: currentSignature === null ? "void" : String(fieldOf(currentSignature, "returns")),
       };
     }
   }
@@ -2254,10 +2337,16 @@ class ProgramResolver {
         // A plain function whose body returns a promise answers one to its
         // callers: `function get() { return new Promise(...); }` is awaited as
         // the promise it made, which is the one the value it returns carries.
-        const promise = returnedPromise(body.statements);
-        if (promise !== undefined) draft.payload = promise.payload;
+        const promise = returnedPromise(fieldOf(body, "statements") as readonly DraftStatement[]);
+        if (promise !== undefined) draft.payload = fieldOf(promise, "payload") as TypeExpr;
       }
-      draft.signature = { ...(draft.signature as FunctionSignature), returns: typeToString(returns) };
+      const signature = draft.signature as FunctionSignature;
+      draft.signature = {
+        name: String(fieldOf(signature, "name")),
+        symbol: String(fieldOf(signature, "symbol")),
+        params: fieldOf(signature, "params") as FunctionSignature["params"],
+        returns: typeToString(returns),
+      };
       draft.compiled = body;
     } finally {
       this.functions.settling.delete(draft);
@@ -2318,18 +2407,21 @@ class ProgramResolver {
       this.literalKeys,
     );
     inner.open();
-    for (const [position, param] of draft.signature.params.entries()) {
-      const held = heldOf(param.type);
+    const signature = draft.signature as FunctionSignature;
+    const signatureParams = fieldOf(signature, "params") as FunctionSignature["params"];
+    const draftParams = fieldOf(draft, "params") as readonly { name: string; type: TypeExpr | null }[];
+    for (const [position, param] of signatureParams.entries()) {
+      const held = heldOf(String(fieldOf(param, "type")));
       // A string the source wrote as a parameter is the function's own
       // binding: a function that reads it is given the string, and not the
       // cell a mutable local is shared through.
-      if (held.kind === "text" && position < draft.params.length) held.parameter = true;
-      inner.declareName(param.name, draft.line, held);
+      if (held.kind === "text" && position < draftParams.length) held.parameter = true;
+      inner.declareName(String(fieldOf(param, "name")), Number(fieldOf(draft, "line")), held);
     }
-    const statements = inner.statements(draft.body);
+    const statements = inner.statements(fieldOf(draft, "body") as readonly ProgramStatement[]);
     inner.close();
     return {
-      file: this.body.file,
+      file: String(fieldOf(this.body, "file")),
       statements,
       functions: [...this.contracts.values()].map((contract) => contract.signature),
       declared: [],
@@ -2340,7 +2432,7 @@ class ProgramResolver {
 
   /** The names the program holds, so a generated name is not one of them. */
   taken(): Set<string> {
-    return this.functions.used;
+    return this.functions.heldNames;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -2369,14 +2461,23 @@ class ProgramResolver {
    * string as it was written out, which every reader of it agrees on.
    */
   private topLevelText(name: string): Held | undefined {
-    const decl = this.body.statements.find((item) => item.kind === "declare" && item.name === name);
-    if (decl !== undefined && decl.kind === "declare" && decl.value.k === "text") {
-      const written = decl.value.parts
-        .filter((part: any) => part.k === "text")
-        .map((part: any) => part.value)
+    const bodyStatements = fieldOf(this.body, "statements") as readonly ProgramStatement[];
+    const decl = bodyStatements.find((item) =>
+      item.kind === "declare" && String(fieldOf(item, "name")) === name);
+    if (decl !== undefined && decl.kind === "declare" && (fieldOf(decl, "value") as ProgramValue).k === "text") {
+      const value = fieldOf(decl, "value") as ProgramValue;
+      const parts = fieldOf(value, "parts") as readonly { k: string; value: string }[];
+      const written = parts
+        .filter((part) => part.k === "text")
+        .map((part) => String(fieldOf(part, "value")))
         .join("");
-      const allText = decl.value.parts.every((part: any) => part.k === "text");
-      return { kind: "text", name, mutable: decl.mutable, value: allText ? written : null } as Held;
+      const allText = parts.every((part) => part.k === "text");
+      return {
+        kind: "text",
+        name,
+        mutable: String(fieldOf(decl, "mutable")) === "true",
+        value: allText ? written : null,
+      } as Held;
     }
     return undefined;
   }
@@ -2421,8 +2522,8 @@ class ProgramResolver {
     // capture carries the binding rather than the name, so the call still passes
     // the binding it took.
     const bound = this.lookup(name) === undefined ? name : this.freshName(name);
-    const declared = { ...held, name: bound } as Held;
-    this.functions.used.add(name);
+    const declared = renameHeld(held, bound);
+    this.functions.heldNames.add(name);
     this.scopes[this.scopes.length - 1].set(name, declared);
     return declared;
   }
@@ -2447,12 +2548,12 @@ class ProgramResolver {
   }
 
   private mutable(held: Held, name: string, line: number): void {
-    if (!held.mutable) {
+    if (String(fieldOf(held, "mutable")) !== "true") {
       throw programError(
         `"${name}" is declared with const and cannot be changed`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: write it with let, or declare it again where it changes`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: write it with let, or declare it again where it changes`,
       );
     }
   }
@@ -2512,33 +2613,33 @@ class ProgramResolver {
       case "fill":
         return this.filled(statement);
       case "update": {
-        const held = this.held(statement.name, statement.line);
-        this.mutable(held, statement.name, statement.line);
+        const held = this.held(String(fieldOf(statement, "name")), Number(fieldOf(statement, "line")));
+        this.mutable(held, String(fieldOf(statement, "name")), Number(fieldOf(statement, "line")));
         if (held.kind !== "number" && held.kind !== "text") {
-          throw programError(`"${statement.name}" is not a number`, this.body, statement.line);
+          throw programError(`"${String(fieldOf(statement, "name"))}" is not a number`, this.body, Number(fieldOf(statement, "line")));
         }
         if (held.kind === "text") {
-          throw programError(`"${statement.name}" is a string`, this.body, statement.line, `line ${statement.line} of ${this.body.file}: only a number goes up and down`);
+          throw programError(`"${String(fieldOf(statement, "name"))}" is a string`, this.body, Number(fieldOf(statement, "line")), `line ${Number(fieldOf(statement, "line"))} of ${this.body.file}: only a number goes up and down`);
         }
         return {
           kind: "update",
           name: held.name,
-          op: statement.op,
-          prefix: statement.prefix,
+          op: String(fieldOf(statement, "op")) as "++" | "--",
+          prefix: String(fieldOf(statement, "prefix")) === "true",
           type: { kind: "primitive", name: held.type ?? "f64" },
-          line: statement.line,
+          line: Number(fieldOf(statement, "line")),
         };
       }
       case "print":
         return {
           kind: "print",
-          values: statement.values.map((value) => {
-            const resolved = this.value(value, null, statement.line);
-            this.assertPrintable(resolved, statement.line);
+          values: (fieldOf(statement, "values") as readonly ProgramValue[]).map((value) => {
+            const resolved = this.value(value, null, Number(fieldOf(statement, "line")));
+            this.assertPrintable(resolved, Number(fieldOf(statement, "line")));
             return resolved;
           }),
-          ...(statement.newline === false ? { newline: false } : {}),
-          line: statement.line,
+          ...(String(fieldOf(statement, "newline")) === "false" ? { newline: false } : {}),
+          line: Number(fieldOf(statement, "line")),
         };
       case "invoke": {
         // `await v;` written as a statement: what the promise carries is not
@@ -2546,27 +2647,33 @@ class ProgramResolver {
         // the failure it carries one a catch arm sees. A value that is not a
         // promise is nothing to wait for: a call written there is the call the
         // statement runs, and a name is a reading with no effect.
-        if (statement.function === "Promise.await") {
-          const operand = this.value(statement.args[0] as ProgramValue, null, statement.line);
+        if (String(fieldOf(statement, "function")) === "Promise.await") {
+          const operand = this.value((fieldOf(statement, "args") as readonly ProgramValue[])[0], null, Number(fieldOf(statement, "line")));
           if (promiseOf(operand) === undefined) {
-            if (operand.k === "call") return { kind: "invoke", call: operand.call, line: statement.line };
-            return { kind: "block", body: [], line: statement.line };
+            if (operand.k === "call") {
+              return { kind: "invoke", call: fieldOf(operand, "call") as DraftCall, line: Number(fieldOf(statement, "line")) };
+            }
+            return { kind: "block", body: [], line: Number(fieldOf(statement, "line")) };
           }
-          return { kind: "invoke", call: this.awaitCall(operand), line: statement.line };
+          return { kind: "invoke", call: this.awaitCall(operand), line: Number(fieldOf(statement, "line")) };
         }
-        const call = this.call({ k: "call", function: statement.function, args: statement.args }, statement.line);
-        if (statement.grid !== undefined) {
-          call.grid = this.value(statement.grid, null, statement.line);
+        const call = this.call({ k: "call", function: String(fieldOf(statement, "function")), args: fieldOf(statement, "args") as ProgramValue[] }, Number(fieldOf(statement, "line")));
+        if (String(fieldOf(statement, "grid")) !== "undefined") {
+          (call as unknown as Record<string, unknown>)["grid"] = this.value(
+            fieldOf(statement, "grid") as ProgramValue,
+            null,
+            Number(fieldOf(statement, "line")),
+          );
         }
-        return { kind: "invoke", call, line: statement.line };
+        return { kind: "invoke", call, line: Number(fieldOf(statement, "line")) };
       }
       case "if":
         return {
           kind: "if",
-          condition: this.condition(statement.condition, statement.line),
-          then: this.block(statement.then),
-          otherwise: this.block(statement.otherwise),
-          line: statement.line,
+          condition: this.condition(fieldOf(statement, "condition") as ProgramValue, Number(fieldOf(statement, "line"))),
+          then: this.block(fieldOf(statement, "then") as ProgramStatement[]),
+          otherwise: this.block(fieldOf(statement, "otherwise") as ProgramStatement[]),
+          line: Number(fieldOf(statement, "line")),
         };
 
       case "while": {
@@ -2574,24 +2681,24 @@ class ProgramResolver {
         // block is: a name it declares is not a name outside it, and a name
         // outside it may be declared again inside it.
         this.open();
-        const body = this.looped(statement.body);
+        const body = this.looped(fieldOf(statement, "body") as ProgramStatement[]);
         this.close();
         return {
           kind: "while",
-          condition: this.condition(statement.condition, statement.line),
+          condition: this.condition(fieldOf(statement, "condition") as ProgramValue, Number(fieldOf(statement, "line"))),
           body,
-          line: statement.line,
+          line: Number(fieldOf(statement, "line")),
         };
       }
       case "doWhile": {
         this.open();
-        const body = this.looped(statement.body);
+        const body = this.looped(fieldOf(statement, "body") as ProgramStatement[]);
         this.close();
         return {
           kind: "doWhile",
-          condition: this.condition(statement.condition, statement.line),
+          condition: this.condition(fieldOf(statement, "condition") as ProgramValue, Number(fieldOf(statement, "line"))),
           body,
-          line: statement.line,
+          line: Number(fieldOf(statement, "line")),
         };
       }
       case "for":
@@ -2606,31 +2713,33 @@ class ProgramResolver {
           throw programError(
             `"${statement.kind}" is not within a loop`,
             this.body,
-            statement.line,
-            `line ${statement.line} of ${this.body.file}: a program leaves a loop with break, and goes on with continue`,
+            Number(fieldOf(statement, "line")),
+            `line ${Number(fieldOf(statement, "line"))} of ${this.body.file}: a program leaves a loop with break, and goes on with continue`,
           );
         }
         return statement.kind === "break"
-          ? { kind: "break", line: statement.line }
-          : { kind: "continue", line: statement.line };
+          ? { kind: "break", line: Number(fieldOf(statement, "line")) }
+          : { kind: "continue", line: Number(fieldOf(statement, "line")) };
       case "block":
-        return { kind: "block", body: this.block(statement.body), line: statement.line };
+        return { kind: "block", body: this.block(fieldOf(statement, "body") as ProgramStatement[]), line: Number(fieldOf(statement, "line")) };
       case "result":
         return {
           kind: "result",
-          value: statement.value === null ? null : this.value(statement.value, null, statement.line),
-          line: statement.line,
+          value: String(fieldOf(statement, "value")) === "null" ? null : this.value(fieldOf(statement, "value") as ProgramValue, null, Number(fieldOf(statement, "line"))),
+          line: Number(fieldOf(statement, "line")),
         };
       case "function":
         // A function is a name the program binds, and a name runs when it is
         // called: what is written here is its signature, and its body is
         // compiled once the scope it was declared in has every name in it.
-        if (this.functions.table.has(statement.name) && this.functions.table.get(statement.name)?.line !== statement.line) {
+        const functionName = String(fieldOf(statement, "name"));
+        const existing = this.functions.table.get(functionName);
+        if (existing !== undefined && Number(fieldOf(existing, "line")) !== Number(fieldOf(statement, "line"))) {
           throw programError(
-            `"${statement.name}" is declared twice`,
+            `"${String(fieldOf(statement, "name"))}" is declared twice`,
             this.body,
-            statement.line,
-            `line ${statement.line} of ${this.body.file}: a program compiles every function it declares under the name it is called by`,
+            Number(fieldOf(statement, "line")),
+            `line ${Number(fieldOf(statement, "line"))} of ${String(fieldOf(this.body, "file"))}: a program compiles every function it declares under the name it is called by`,
           );
         }
         this.declared(statement);
@@ -6595,7 +6704,7 @@ export function resolveProgram(
         table: new Map(),
         waiting: [],
         settling: new Set(),
-        used: new Set(),
+        heldNames: new Set(),
         observed,
       },
       new Map(Object.entries(objectNames)),
