@@ -1202,32 +1202,21 @@ const ARITHMETIC: Record<ProgramBinaryOp, ArithOp | null> = {
   "??": null,
 };
 
-const COMPARISONS: Record<ProgramBinaryOp, CompareOp | null> = {
-  "+": null,
-  "-": null,
-  "*": null,
-  "/": null,
-  "//": null,
-  "%": null,
-  "**": null,
-  "<<": null,
-  ">>": null,
-  ">>>": null,
-  "&": null,
-  "|": null,
-  "^": null,
-  "<": "lt",
-  "<=": "le",
-  ">": "gt",
-  ">=": "ge",
-  "===": null,
-  "!==": null,
-  "==": null,
-  "!=": null,
-  "&&": null,
-  "||": null,
-  "??": null,
-};
+function comparisonOf(op: ProgramBinaryOp): CompareOp | null {
+  switch (op) {
+    case "<": return "lt";
+    case "<=": return "le";
+    case ">": return "gt";
+    case ">=": return "ge";
+    case "===":
+    case "==": return "eq";
+    case "!==":
+    case "!=": return "ne";
+    default: return null;
+  }
+}
+
+
 
 const UNARY: Record<ProgramUnaryOp, UnaryOp> = { "-": "neg", "+": "pos", "!": "not", "~": "bitNot" };
 
@@ -4287,11 +4276,13 @@ class ProgramResolver {
   }
 
   private binary(value: ProgramValue & { k: "binary" }, expect: TypeExpr | null, line: number): DraftValue {
-    const op = value.op;
+    const op = String(fieldOf(value, "op")) as ProgramBinaryOp;
+    const leftValue = fieldOf(value, "left") as ProgramValue;
+    const rightValue = fieldOf(value, "right") as ProgramValue;
     if (LOGICAL.includes(op)) {
       // `a && b` is `b` when `a` holds, so the arms have a type of their own.
-      const left = this.condition(value.left, line);
-      const right = this.value(value.right, op === "??" ? null : expect, line);
+      const left = this.condition(leftValue, line);
+      const right = this.value(rightValue, op === "??" ? null : expect, line);
       // `a ?? b` is `b` when `a` is nothing, so it has the type of whichever
       // arm holds; a number no use has fixed is a double, as it is written.
       const type =
@@ -4303,8 +4294,8 @@ class ProgramResolver {
       return { k: "binary", op, left, right, type };
     }
     if (EQUALITY.includes(op)) {
-      const left = this.value(value.left, null, line);
-      const right = this.value(value.right, null, line);
+      const left = this.value(leftValue, null, line);
+      const right = this.value(rightValue, null, line);
       const compared = this.equality(op, left, right, line);
       if (compared.k === "boolean") return compared;
       return { ...compared, negate: op === "!==" || op === "!=" };
@@ -4318,24 +4309,24 @@ class ProgramResolver {
       // A bigint is the one value it does not answer: the language reads both
       // sides as 32 bit numbers and a bigint is not one, so it raises rather
       // than truncating, and so does this.
-      if (this.bigintWritten(value.left, line) || this.bigintWritten(value.right, line)) {
+      if (this.bigintWritten(leftValue, line) || this.bigintWritten(rightValue, line)) {
         throw programError(
           `"${op}" needs numbers`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: both sides are read as 32 bit numbers, and a bigint is a whole number of sixty-four bits; use >> , which shifts a bigint as it is written`,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: both sides are read as 32 bit numbers, and a bigint is a whole number of sixty-four bits; use >> , which shifts a bigint as it is written`,
         );
       }
       const type = numeric("u32");
       return {
         k: "binary",
         op,
-        left: this.value(value.left, type, line),
-        right: this.value(value.right, type, line),
+        left: this.value(leftValue, type, line),
+        right: this.value(rightValue, type, line),
         type,
       };
     }
-    const left = this.value(value.left, null, line);
+    const left = this.value(leftValue, null, line);
     const leftName = primitive(draftType(left));
     // The count of a shift is the machine word every backend writes it at, which
     // the whole-number rule below cannot see: a count beside a wide number is
@@ -4346,9 +4337,9 @@ class ProgramResolver {
     // target, and the validator is where that refusal is stated.
     const counted = op === "<<" || op === ">>" || op === ">>>";
     const wideValue = leftName !== null && isWide(leftName);
-    const wideCount = value.right.k === "name" && this.countsWide(value.right.name, line);
+    const wideCount = rightValue.k === "name" && this.countsWide(rightValue.name, line);
     const right = this.value(
-      value.right,
+      rightValue,
       counted && wideValue && !wideCount ? USIZE : left.k === "literal" ? draftType(left) : null,
       line,
     );
@@ -4358,7 +4349,7 @@ class ProgramResolver {
           'a string is only added to a string',
           this.body,
           line,
-          `line ${line} of ${this.body.file}: write the number as text, as in \`\${value}\``,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: write the number as text, as in \`\${value}\``,
         );
       }
       return { k: "binary", op: "+", left, right, type: null };
@@ -4369,7 +4360,7 @@ class ProgramResolver {
           'a list is only added to a list',
           this.body,
           line,
-          `line ${line} of ${this.body.file}: write the list out, as in [1, 2, 3, 4]`,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: write the list out, as in [1, 2, 3, 4]`,
         );
       }
       const type = draftType(left) ?? draftType(right);
@@ -4387,7 +4378,7 @@ class ProgramResolver {
           '"**" needs numbers',
           this.body,
           line,
-          `line ${line} of ${this.body.file}: a power is a double and a bigint is a whole number, and the language raises on one raised to another; multiply it out, or convert it with Number()`,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: a power is a double and a bigint is a whole number, and the language raises on one raised to another; multiply it out, or convert it with Number()`,
         );
       }
       return {
@@ -4403,7 +4394,7 @@ class ProgramResolver {
         `"${op}" needs a number`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: a string is added to a string, and compared with == and ===`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: a string is added to a string, and compared with == and ===`,
       );
     }
     if (WHOLE_OPERATORS.includes(op)) {
@@ -4416,14 +4407,14 @@ class ProgramResolver {
         // width being shifted is the low half of the number being shifted.
         if (what === "the right" && counted && wideValue) continue;
         const name = primitive(draftType(side));
-        const written = side.k === "literal" ? side.held.text : null;
+        const written = side.k === "literal" ? String(fieldOf(fieldOf(side, "held"), "text")) : null;
         if (name === null && (written === null || isWholeNumberText(written))) continue;
         if (name !== null && isWhole(name)) continue;
         throw programError(
           `"${op}" needs whole numbers`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: ${what} is ${
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: ${what} is ${
             name === null && written !== null ? `the value ${written}` : `a ${typeToString(draftType(side) ?? numeric("f64"))}`
           }, and "${op}" rounds it to a whole number`,
         );
@@ -4462,7 +4453,7 @@ class ProgramResolver {
         `"${op}" cannot mix ${side(left, leftBig)} and ${side(right, rightBig)}`,
         this.body,
         line,
-        `line ${line} of ${this.body.file}: the language adds, subtracts, multiplies, divides and compares a bigint with another bigint and raises on a number beside one; convert it with Number() and say which of the two you meant`,
+        `line ${line} of ${String(fieldOf(this.body, "file"))}: the language adds, subtracts, multiplies, divides and compares a bigint with another bigint and raises on a number beside one; convert it with Number() and say which of the two you meant`,
       );
     }
     // The right side's own name, read once here: the left one was read where the
@@ -4483,7 +4474,8 @@ class ProgramResolver {
     // The whole number is read as the fraction it is, and the answer is not a
     // whole number, so it is written the way a fraction is written.
     const promoted = leftBig !== rightBig && rules.promotion === "promote";
-    const type = COMPARISONS[op] !== null
+    const comparison = comparisonOf(op);
+    const type = comparison !== null
       ? numeric("bool")
       : trueDivision || promoted
         ? numeric("f64")
@@ -4513,7 +4505,7 @@ class ProgramResolver {
    * and no kernel has a wide power.
    */
   private power(left: DraftValue, right: DraftValue): DraftValue | null {
-    const exponent = right.k === "literal" ? integerLiteral(right.held.text) : null;
+    const exponent = right.k === "literal" ? integerLiteral(String(fieldOf(fieldOf(right, "held"), "text"))) : null;
     if (exponent === null || exponent < 0n) return null;
     const name = primitive(draftType(left));
     if (name === null || !isWhole(name)) return null;
@@ -4524,7 +4516,7 @@ class ProgramResolver {
     // one is a count it reads as a whole number.
     if (isBigint(left) !== isBigint(right) && !isWide(name)) return null;
     if (left.k === "literal") {
-      const base = integerLiteral(left.held.text);
+      const base = integerLiteral(String(fieldOf(fieldOf(left, "held"), "text")));
       if (base === null) return null;
       const exact = wholePower(base, exponent);
       if (exact === null) return null;
@@ -4578,12 +4570,12 @@ class ProgramResolver {
    * that has no such call.
    */
   private writtenBigInt(value: ProgramValue & { k: "call" }): DraftValue | null {
-    if (value.function !== "BigInt" || value.args.length !== 1) return null;
-    const argument = value.args[0] as ProgramValue;
+    if (String(fieldOf(value, "function")) !== "BigInt" || (fieldOf(value, "args") as readonly ProgramValue[]).length !== 1) return null;
+    const argument = (fieldOf(value, "args") as readonly ProgramValue[])[0];
     const text = argument.k === "number" || argument.k === "whole"
       ? argument.text
-      : argument.k === "text" && argument.parts.length === 1 && argument.parts[0].k === "text"
-        ? argument.parts[0].value
+      : argument.k === "text" && (fieldOf(argument, "parts") as readonly { k: string; value: string }[]).length === 1 && (fieldOf(argument, "parts") as readonly { k: string; value: string }[])[0].k === "text"
+        ? String(fieldOf((fieldOf(argument, "parts") as readonly { k: string; value: string }[])[0], "value"))
         : null;
     if (text === null) return null;
     const literal = integerLiteral(text);
@@ -4737,7 +4729,7 @@ class ProgramResolver {
    * not name as the dynamic value it is.
    */
   private awaitCall(operand: DraftValue): DraftCall {
-    const known = promiseOf(operand)?.payload;
+    const known = fieldOf(promiseOf(operand), "payload") as TypeExpr | undefined;
     const payload = known ?? numeric("f64");
     const callee = known === undefined
       ? "Promise.await"
@@ -4759,10 +4751,10 @@ class ProgramResolver {
         name: callee,
         symbol: callee,
         params: [{ name: "promise", type: "ref<any>" }],
-        returns: contractText(builtin.returns),
+        returns: contractText(fieldOf(builtin, "returns") as SemanticType),
       },
       args: [operand],
-      returns: builtin.returns,
+      returns: fieldOf(builtin, "returns") as SemanticType,
       effects: [],
       builtin: true,
       bigint: false,
@@ -4785,11 +4777,14 @@ class ProgramResolver {
       signature: {
         name: callee,
         symbol: callee,
-        params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
-        returns: contractText(builtin.returns),
+        params: (fieldOf(builtin, "params") as readonly SemanticType[]).map((type, index) => ({
+          name: `argument${index}`,
+          type: contractText(type),
+        })),
+        returns: contractText(fieldOf(builtin, "returns") as SemanticType),
       },
       args: [operand],
-      returns: builtin.returns,
+      returns: fieldOf(builtin, "returns") as SemanticType,
       effects: [],
       builtin: true,
       bigint: false,
@@ -4803,17 +4798,21 @@ class ProgramResolver {
     if (name === "Promise") {
       const executor = args[0];
       let carried: TypeExpr = payload.payload;
-      if (executor !== undefined && executor.k === "function" && typeof executor.name === "string") {
-        const draft = this.functions.table.get(executor.name);
-        if (draft !== undefined) {
-          this.settle(draft);
-          if (draft.compiled !== null) {
-            carried = executorPayload(draft.compiled, (name) => {
-              const nested = this.functions.table.get(name);
-              if (nested === undefined) return null;
-              this.settle(nested);
-              return nested.compiled;
-            });
+      if (executor !== undefined && executor.k === "function") {
+        const executorName = fieldOf(executor, "name");
+        if (typeof executorName === "string") {
+          const draft = this.functions.table.get(executorName);
+          if (draft !== undefined) {
+            this.settle(draft);
+            const compiled = fieldOf(draft, "compiled") as DraftProgram | null;
+            if (compiled !== null) {
+              carried = executorPayload(compiled, (name) => {
+                const nested = this.functions.table.get(name);
+                if (nested === undefined) return null;
+                this.settle(nested);
+                return fieldOf(nested, "compiled") as DraftProgram | null;
+              });
+            }
           }
         }
       }
@@ -4829,47 +4828,49 @@ class ProgramResolver {
   }
 
   private call(value: ProgramValue & { k: "call" }, line: number): DraftCall {
+    const functionName = String(fieldOf(value, "function"));
+    const callArgs = fieldOf(value, "args") as readonly ProgramValue[];
     // A function the program compiles is the name the source bound; a builtin
     // of the same name is what a name the program does not declare reaches.
     const shadows =
-      this.contracts.has(value.function) || this.contracts.has(`${value.function}__${value.args.length}`);
-    const builtin = shadows ? null : builtinFor(value.function);
+      this.contracts.has(functionName) || this.contracts.has(`${functionName}__${callArgs.length}`);
+    const builtin = shadows ? null : builtinFor(functionName);
     if (builtin !== null) {
-      if (builtin.moduleOnly === true) {
+      if (String(fieldOf(builtin, "moduleOnly")) === "true") {
         throw programError(
-          `${value.function} is the HTTP API of a module function`,
+          `${functionName} is the HTTP API of a module function`,
           this.body,
           line,
           "a program body reads the request with req.path, req.method and req.text(), and answers it with res.writeHead, res.setHeader and res.end",
         );
       }
-      const counts = builtin.arities ?? [builtin.arity ?? builtin.params.length];
-      if (!counts.includes(value.args.length)) {
+      const counts = (fieldOf(builtin, "arities") as readonly number[] | undefined) ?? [(fieldOf(builtin, "arity") as number | undefined) ?? (fieldOf(builtin, "params") as readonly SemanticType[]).length];
+      if (!counts.includes(callArgs.length)) {
         throw programError(
-          `${value.function} takes ${counts.join(" or ")} argument(s), not ${value.args.length}`,
+          `${functionName} takes ${counts.join(" or ")} argument(s), not ${callArgs.length}`,
           this.body,
           line,
         );
       }
-      const args = value.args.map((argument, position) =>
-        this.value(argument, builtin.params[position].kind === "text" ? null : builtin.params[position], line),
+      const args = callArgs.map((argument, position) =>
+        this.value(argument, (fieldOf(builtin, "params") as readonly SemanticType[])[position].kind === "text" ? null : (fieldOf(builtin, "params") as readonly SemanticType[])[position], line),
       );
       // `await v` is not a call the runtime makes before the operand is read:
       // what is awaited decides which value is read out of the promise, so the
       // call is written as the one that reads that value.
-      if (value.function === "Promise.await") {
+      if (functionName === "Promise.await") {
         return this.awaitCall(args[0] as DraftValue);
       }
       // `asyncio.run(v)` is the value the coroutine's promise carries: a
       // Python program has no top-level `await`, so this is where it reads one.
-      if (value.function === "asyncio.run") {
+      if (functionName === "asyncio.run") {
         return this.awaitCall(args[0] as DraftValue);
       }
       // `Promise.resolve(v)` carries the value `v` is, so the call is written
       // as the one that resolves a value of that shape: a string as a string,
       // a truth as a truth, and a value of a shape nothing names as the dynamic
       // value it is.
-      if (value.function === "Promise.resolve") {
+      if (functionName === "Promise.resolve") {
         const argument = args[0] as DraftValue;
         const payload = payloadTypeOf(argument);
         const callee = payload.kind === "text"
@@ -4887,48 +4888,49 @@ class ProgramResolver {
       // `Math.abs` answers a fraction. The two are two kinds of number, and
       // the printer writes them differently, so the call is answered by the
       // whole one where the language says so.
-      const answered = this.answeredBy(value.function, builtin, args);
+      const answered = this.answeredBy(functionName, builtin, args);
       // The handler a server is given is called by the runtime, which passes
       // it the request and the response and nothing else. The names the
       // handler captured are not among them, so the handler is marked here and
       // the trampoline that calls it reads them from where the program left
       // them.
-      if (value.function === "http.createServer") {
+      if (functionName === "http.createServer") {
         const handler = args[0];
-        if (handler !== undefined && handler.k === "function" && typeof handler.name === "string") {
-          const draft = this.functions.table.get(handler.name);
+        if (handler !== undefined && handler.k === "function") {
+          const handlerName = fieldOf(handler, "name");
+          const draft = typeof handlerName === "string" ? this.functions.table.get(handlerName) : undefined;
           if (draft !== undefined) {
             draft.serverHandler = true;
-          } else if (handler.symbol !== undefined) {
+          } else if (String(fieldOf(handler, "symbol")) !== "undefined") {
             // A handler of another file of the program is compiled on its own
             // and linked beside the program, and the driver writes the bridge
             // between the runtime and it.
-            this.httpHandlers.push(handler.symbol);
+            this.httpHandlers.push(String(fieldOf(handler, "symbol")));
           }
         }
       }
       return {
-        name: answered.name,
+        name: String(fieldOf(answered, "name")),
         signature: {
-          name: answered.name,
-          symbol: answered.name,
-          params: answered.builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
-          returns: contractText(answered.builtin.returns),
+          name: String(fieldOf(answered, "name")),
+          symbol: String(fieldOf(answered, "name")),
+          params: (fieldOf(fieldOf(answered, "builtin") as BuiltinSignature, "params") as readonly SemanticType[]).map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          returns: contractText(fieldOf(fieldOf(answered, "builtin") as BuiltinSignature, "returns") as SemanticType),
         },
         args,
-        returns: answered.builtin.returns,
+        returns: fieldOf(fieldOf(answered, "builtin") as BuiltinSignature, "returns") as SemanticType,
         // What the builtin does beyond answering: a builtin that reads the
         // world is not a value the optimizer may compute twice or move.
-        effects: [...(answered.builtin.effects ?? [])],
+        effects: [...((fieldOf(fieldOf(answered, "builtin") as BuiltinSignature, "effects") as readonly Effect[] | undefined) ?? [])],
         builtin: true,
         // A builtin that answers a whole number answers a bigint, which is
         // what says the answer is a whole number and not a fraction: the
         // printer writes the two differently.
-        bigint: returnsBigint(contractText(answered.builtin.returns)),
+        bigint: returnsBigint(contractText(fieldOf(fieldOf(answered, "builtin") as BuiltinSignature, "returns") as SemanticType)),
         // A builtin is written by the compiler and returns a number of its
         // own, so the question a wide number asks it does not arise.
         wide: null,
-        ...(answered.name.startsWith("Promise") ? { ...(this.builtinPromise(answered.name, args) ?? {}) } : {}),
+        ...(String(fieldOf(answered, "name")).startsWith("Promise") ? { ...(this.builtinPromise(String(fieldOf(answered, "name")), args) ?? {}) } : {}),
       };
     }
     // A function the program declared is called like any other: it is compiled
@@ -4936,8 +4938,8 @@ class ProgramResolver {
     // call reads the body of what it calls before it types the call. A call of
     // a shorter arity is the wrapper the default parameters made, which is the
     // function the source names with the count it was called at.
-    const declared = this.functions.table.get(`${value.function}__${value.args.length}`) ??
-      this.functions.table.get(value.function);
+    const declared = this.functions.table.get(`${functionName}__${callArgs.length}`) ??
+      this.functions.table.get(functionName);
     if (declared !== undefined) {
       // What the arguments are written as is what the parameters the source
       // wrote no type for are read at. The kinds are read here, at the call
@@ -4945,34 +4947,34 @@ class ProgramResolver {
       // parameter of a function is read at the type the callers of that
       // function pass it at, and a caller may itself be read at a type only a
       // later round settles.
-      for (const [position, argument] of value.args.entries()) {
-        if (declared.params[position]?.type !== null) continue;
+      for (const [position, argument] of callArgs.entries()) {
+        if (fieldOf((fieldOf(declared, "params") as readonly { type: TypeExpr | null }[])[position], "type") !== null) continue;
         const kind = this.kindOf(argument, line);
         if (kind === "text" || kind === "number") {
-          this.functions.observed.record(value.function, position, kind);
+          this.functions.observed.record(functionName, position, kind);
         }
       }
       this.settle(declared);
-      const signature = declared.signature as FunctionSignature;
+      const signature = fieldOf(declared, "signature") as FunctionSignature;
       // The arguments the source wrote are the ones it takes: what it reads of
       // the scope around it is passed at every call and counted by neither.
-      const arity = signature.params.length - declared.captured.length;
-      if (value.args.length !== arity) {
+      const arity = signature.params.length - (fieldOf(declared, "captured") as readonly unknown[]).length;
+      if (callArgs.length !== arity) {
         const expected = signature.params
           .slice(0, arity)
           .map((param) => `${param.name}: ${param.type}`)
           .join(", ");
         throw programError(
-          `${value.function} takes ${arity} argument(s), not ${value.args.length}`,
+          `${functionName} takes ${arity} argument(s), not ${callArgs.length}`,
           this.body,
           line,
-          `line ${line} of ${this.body.file}: ${expected}`,
+          `line ${line} of ${String(fieldOf(this.body, "file"))}: ${expected}`,
         );
       }
       // What the function reads of the scope it was declared in is passed to it
       // at every call, after the arguments the source wrote: the call is the
       // only place the two scopes meet, so the call is what hands them over.
-      const written = value.args.map((argument, position) => {
+      const written = callArgs.map((argument, position) => {
         const wanted = signature.params[position].type;
         const resolved = this.value(argument, parameterExpect(wanted), line);
         // A parameter written as a string is given a string: a number is not
@@ -4985,7 +4987,7 @@ class ProgramResolver {
             `"${signature.params[position].name}" is given a value that is not a string`,
             this.body,
             line,
-            `line ${line} of ${this.body.file}: a parameter written as a string is given a string`,
+            `line ${line} of ${String(fieldOf(this.body, "file"))}: a parameter written as a string is given a string`,
           );
         }
         return resolved;
@@ -4996,13 +4998,18 @@ class ProgramResolver {
       // answers to the same one. `let base = 1; function f(x) { return x + base;
       // } { let base = 100; console.log(f(10)); }` answers 11, and passing the
       // inner binding answered 110.
-      const captured = declared.captured.map((capture, position) => {
-        const paramType = signature.params[value.args.length + position].type;
+      const captured = (fieldOf(declared, "captured") as readonly { held: Held }[]).map((capture, position) => {
+        const paramType = signature.params[callArgs.length + position].type;
+        const capturedHeld = fieldOf(capture, "held") as Held;
         if (paramType !== "text" && paramType !== "boxedtext") {
           const expected = parseType(paramType);
-          if (capture.held.kind === "array") this.expectArray(expected, capture.held, line);
+          if (capturedHeld.kind === "array") this.expectArray(expected, capturedHeld as ArrayHeld, line);
         }
-        return { k: "reference", name: capture.held.name, held: capture.held } satisfies DraftValue;
+        return {
+          k: "reference",
+          name: String(fieldOf(capturedHeld, "name")),
+          held: capturedHeld,
+        } satisfies DraftValue;
       });
       const held = primitive(parseType(signature.returns));
       return {
@@ -5016,60 +5023,60 @@ class ProgramResolver {
         wide:
           held !== null && isWide(held)
             ? declaredWideBigint(
-                declared.compiled,
+                fieldOf(declared, "compiled") as DraftProgram | null,
                 written,
                 signature.params.slice(0, arity).map((param) => param.name),
               )
             : null,
-        ...(declared.payload === undefined ? {} : { promise: { payload: declared.payload } }),
+        ...(String(fieldOf(declared, "payload")) === "undefined" ? {} : { promise: { payload: fieldOf(declared, "payload") as TypeExpr } }),
       };
     }
     // A function with default parameters is callable at a shorter arity
     // through the overload the module declares for it, which is the name with
     // the count the call is written with.
-    const overloadName = `${value.function}__${value.args.length}`;
+    const overloadName = `${functionName}__${callArgs.length}`;
     const overload = this.contracts.get(overloadName);
-    const contract = overload ?? this.contracts.get(value.function);
+    const contract = overload ?? this.contracts.get(functionName);
     if (contract === undefined) {
       const compiled = [...this.contracts.keys()];
       throw programError(
-        `"${value.function}" is not a function of this program`,
+        `"${functionName}" is not a function of this program`,
         this.body,
         line,
         `the program compiles ${compiled.join(", ") || "no functions"}; a program calls the functions the program exports`,
       );
     }
-    const signature = contract.signature;
-    if (value.args.length !== signature.params.length) {
+    const signature = fieldOf(contract, "signature") as FunctionSignature;
+    if (callArgs.length !== signature.params.length) {
       const expected = signature.params.map((param) => `${param.name}: ${param.type}`).join(", ");
       throw programError(
-        `${value.function} takes ${signature.params.length} argument(s), not ${value.args.length}`,
+        `${functionName} takes ${signature.params.length} argument(s), not ${callArgs.length}`,
         this.body,
         line,
-        `${this.body.file}: ${expected}`,
+        `${String(fieldOf(this.body, "file"))}: ${expected}`,
       );
     }
-    const given = value.args.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line));
+    const given = callArgs.map((arg, position) => this.value(arg, parseType(signature.params[position].type), line));
     const held = primitive(parseType(signature.returns));
     return {
       name: signature.symbol,
       signature,
       args: given,
       returns: parseType(signature.returns),
-      effects: contract.effects,
+      effects: fieldOf(contract, "effects") as Effect[],
       builtin: false,
       bigint: returnsBigint(signature.returns),
       wide:
         held !== null && isWide(held)
           ? returnsWideBigint(
-              contract.body,
+              fieldOf(contract, "body") as readonly Statement[],
               given,
               signature.params.map((param) => param.name),
             )
           : null,
       // A function of another file that is async answers a promise, and what
       // the promise carries is stated beside its contract.
-      ...(contract.promise === undefined ? {} : { promise: { payload: parseType(contract.promise) } }),
+      ...(String(fieldOf(contract, "promise")) === "undefined" ? {} : { promise: { payload: parseType(String(fieldOf(contract, "promise"))) } }),
     };
   }
 
@@ -6492,7 +6499,7 @@ class ProgramLowering {
     // is what a number in a program is whichever array it was read out of — as
     // the whole number they are when both of them are bigints, and as the wide
     // number they are when one of them is one.
-    const comparison = COMPARISONS[op];
+    const comparison = comparisonOf(op);
     if (comparison !== null) {
       const operand = this.compared(value.left, value.right);
       return {
