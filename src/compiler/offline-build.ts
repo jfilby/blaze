@@ -29,7 +29,7 @@ import { frontendFor } from "./semantics/frontend.ts";
 import { runContractPhase } from "./semantics/program.ts";
 import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, type FunctionContext } from "./semantics/ir-function.ts";
-import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { optimizeSemanticFunction, optimizeProgram } from "./semantics/optimize-ir.ts";
 import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { contractsByName, vectorChecked } from "./semantics/calls.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
   const inlinable: RepairContext = { functions: resolvedByName };
 
   // The program, resolved and folded exactly as a build folds the driver.
-  const program = optimizeSemanticProgram(resolvedProgram, inlinable.functions);
+  const program = optimizeProgram(resolvedProgram, inlinable.functions);
   // The validator refuses rather than answers, so a program that is not one a
   // backend may lower stops here with the reason it gave. The callees are the
   // program's own bodies, the same map a build hands the validator: a loop

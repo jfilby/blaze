@@ -74,11 +74,17 @@ import {
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
+  type SemanticLoop,
   type SemanticSlot,
   type SemanticStatement,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
+import type { TypeExpr } from "../core/types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 /** The type a whole number is held at. */
 const WHOLE: SemanticType = { kind: "primitive", name: "i64" };
@@ -127,32 +133,37 @@ function doubleNumber(text: string): { value: number; whole: boolean } | null {
 /** What a literal spells, and whether it is a whole number, whatever it is written at. */
 function literalOf(value: SemanticValue): { value: number; whole: boolean } | null {
   if (value.k !== "const") return null;
-  if (isFloat(value.type)) return doubleNumber(value.text);
+  const type = fieldOf(value, "type") as SemanticType;
+  const text = String(fieldOf(value, "text"));
+  if (isFloat(type)) return doubleNumber(text);
   // A whole number is a whole number whatever it is written at, and a loop the
   // resolver counted is written at a whole width: reading only the floating point
   // spelling of a literal would answer nothing for the ends of every counter it
   // itself narrowed.
-  if (!isInteger(value.type)) return null;
-  const number = wholeNumber(value.text.replace(/n$/, ""));
+  if (!isInteger(type)) return null;
+  const number = wholeNumber(text.replace(/n$/, ""));
   return number === null ? null : { value: number, whole: true };
 }
 
 /** The number of places a value is a whole literal, or null where it is not one. */
 function placesOf(value: SemanticValue): number | null {
   const literal = literalOf(value);
-  if (literal === null || !literal.whole || literal.value < 0 || literal.value > 63) return null;
-  return literal.value;
+  if (literal === null || fieldOf(literal, "whole") !== true) return null;
+  const number = Number(fieldOf(literal, "value"));
+  return number < 0 || number > 63 ? null : number;
 }
 
 /** The number of places a value is a power of two, or null where it is not one. */
 function exponentOf(value: SemanticValue): number | null {
   const literal = literalOf(value);
-  if (literal === null || !literal.whole || literal.value < 1 || literal.value > 2 ** 52) return null;
-  if ((literal.value & (literal.value - 1)) !== 0) return null;
+  if (literal === null || fieldOf(literal, "whole") !== true) return null;
+  const literalValue = Number(fieldOf(literal, "value"));
+  if (literalValue < 1 || literalValue > Math.pow(2, 52)) return null;
+  if ((literalValue & (literalValue - 1)) !== 0) return null;
   // The exponent of the one bit the number has: halving until one is the
   // power it is, without a logarithm the language does not carry.
   let count = 0;
-  let held = literal.value;
+  let held = literalValue;
   while (held > 1) {
     held = held / 2;
     count += 1;
@@ -185,9 +196,13 @@ interface Body {
 
 /** Every block a statement holds of its own. */
 function blocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
-  if (statement.k === "if") return statement.otherwise === null ? [statement.then] : [statement.then, statement.otherwise];
-  if (statement.k === "loop") return [statement.loop.body];
-  if (statement.k === "block") return [statement.body];
+  if (statement.k === "if") {
+    const thenBlock = fieldOf(statement, "then") as SemanticBlock;
+    const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+    return otherwise === null ? [thenBlock] : [thenBlock, otherwise];
+  }
+  if (statement.k === "loop") return [fieldOf(fieldOf(statement, "loop"), "body") as SemanticBlock];
+  if (statement.k === "block") return [fieldOf(statement, "body") as SemanticBlock];
   return [];
 }
 
@@ -195,52 +210,53 @@ function blocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
 function callsUnder(value: SemanticValue, into: SemanticCall[]): void {
   switch (value.k) {
     case "call":
-      into.push(value.call);
-      for (const argument of value.call.args) callsUnder(argument, into);
+      const call = fieldOf(value, "call") as SemanticCall;
+      into.push(call);
+      for (const argument of fieldOf(call, "args") as readonly SemanticValue[]) callsUnder(argument, into);
       return;
     case "text":
-      for (const part of value.parts) if (part.k === "value") callsUnder(part.value, into);
+      for (const part of fieldOf(value, "parts") as readonly { k: string; value: SemanticValue }[]) if (part.k === "value") callsUnder(fieldOf(part, "value") as SemanticValue, into);
       return;
     case "length":
     case "toText":
-      callsUnder(value.of, into);
+      callsUnder(fieldOf(value, "of") as SemanticValue, into);
       return;
     case "isNull":
     case "unary":
-      callsUnder(value.operand, into);
+      callsUnder(fieldOf(value, "operand") as SemanticValue, into);
       return;
     case "element":
-      callsUnder(value.of, into);
-      callsUnder(value.index, into);
+      callsUnder(fieldOf(value, "of") as SemanticValue, into);
+      callsUnder(fieldOf(value, "index") as SemanticValue, into);
       return;
     case "argv":
-      if (value.index !== null) callsUnder(value.index, into);
+      if (fieldOf(value, "index") !== null) callsUnder(fieldOf(value, "index") as SemanticValue, into);
       return;
     case "arith":
     case "compare":
     case "logical":
     case "coalesce":
-      callsUnder(value.left, into);
-      callsUnder(value.right, into);
+      callsUnder(fieldOf(value, "left") as SemanticValue, into);
+      callsUnder(fieldOf(value, "right") as SemanticValue, into);
       return;
     case "buffer":
-      if (value.count !== null) callsUnder(value.count, into);
-      if (value.view !== null) {
-        callsUnder(value.view.of, into);
-        callsUnder(value.view.offset, into);
+      if (fieldOf(value, "count") !== null) callsUnder(fieldOf(value, "count") as SemanticValue, into);
+      if (fieldOf(value, "view") !== null) {
+        callsUnder(fieldOf(fieldOf(value, "view"), "of") as SemanticValue, into);
+        callsUnder(fieldOf(fieldOf(value, "view"), "offset") as SemanticValue, into);
       }
-      for (const element of value.values) callsUnder(element, into);
+      for (const element of fieldOf(value, "values") as readonly SemanticValue[]) callsUnder(element, into);
       return;
     case "loadField":
-      callsUnder(value.object, into);
+      callsUnder(fieldOf(value, "object") as SemanticValue, into);
       return;
     case "newObject":
-      for (const field of value.fields) callsUnder(field.value, into);
+      for (const field of fieldOf(value, "fields") as readonly { value: SemanticValue }[]) callsUnder(fieldOf(field, "value") as SemanticValue, into);
       return;
     case "select":
-      callsUnder(value.condition, into);
-      callsUnder(value.then, into);
-      callsUnder(value.otherwise, into);
+      callsUnder(fieldOf(value, "condition") as SemanticValue, into);
+      callsUnder(fieldOf(value, "then") as SemanticValue, into);
+      callsUnder(fieldOf(value, "otherwise") as SemanticValue, into);
       return;
     default:
       return;
@@ -251,10 +267,13 @@ function callsUnder(value: SemanticValue, into: SemanticCall[]): void {
 function sequencesOf(functions: readonly SemanticFunction[]): ReadonlyMap<string, readonly Sequence[]> {
   const sequences = new Map<string, readonly Sequence[]>();
   for (const fn of functions) {
-    sequences.set(
-      fn.name,
-      fn.params.flatMap((param, at) => (param.kind === "value" && isSequence(param.type) ? [{ at, name: param.name }] : [])),
-    );
+    const found: Sequence[] = [];
+    const params = fieldOf(fn, "params") as readonly SemanticSlot[];
+    for (let at = 0; at < params.length; at += 1) {
+      const param = params[at];
+      if (param.kind === "value" && isSequence(fieldOf(param, "type") as TypeExpr)) found[found.length] = { at, name: String(fieldOf(param, "name")) };
+    }
+    sequences.set(String(fieldOf(fn, "name")), found);
   }
   return sequences;
 }
@@ -265,7 +284,7 @@ function bodyOf(
   entry: SemanticBlock,
   sequencesByCallee: ReadonlyMap<string, readonly Sequence[]>,
 ): Body {
-  const declared = fn?.name ?? null;
+  const declared = fn === null ? null : String(fieldOf(fn, "name"));
   return {
     fn: declared,
     entry,
@@ -277,7 +296,7 @@ function bodyOf(
 /** Every call of the program one statement makes, whether at the top or in a value. */
 function callsOf(statement: SemanticStatement): readonly SemanticCall[] {
   const calls: SemanticCall[] = [];
-  if (statement.k === "call") calls.push(statement.call);
+  if (statement.k === "call") calls.push(fieldOf(statement, "call") as SemanticCall);
   for (const value of statementValues(statement)) callsUnder(value, calls);
   return calls;
 }
@@ -338,18 +357,20 @@ function knownOf(value: SemanticValue, where: Where): Known {
   switch (value.k) {
     case "const": {
       const literal = literalOf(value);
-      return literal === null || !literal.whole ? unknown : { whole: true, reach: Math.abs(literal.value), reduced: null };
+      return literal === null || fieldOf(literal, "whole") !== true ? unknown : { whole: true, reach: Math.abs(Number(fieldOf(literal, "value"))), reduced: null };
     }
     case "local":
-      return where.locals.get(value.name) ?? unknown;
+      return (fieldOf(where, "locals") as Map<string, Known>).get(String(fieldOf(value, "name"))) ?? unknown;
     case "element": {
-      if (value.of.k !== "local") return unknown;
-      return where.facts.get(nameOf(value.of.name, where.fn)) ?? unknown;
+      const of = fieldOf(value, "of") as SemanticValue;
+      if (of.k !== "local") return unknown;
+      return (fieldOf(where, "facts") as ReadonlyMap<string, Known>).get(nameOf(String(fieldOf(of, "name")), fieldOf(where, "fn") as string | null)) ?? unknown;
     }
     case "unary":
-      return value.op === "neg" || value.op === "pos" ? knownOf(value.operand, where) : unknown;
+      const op = String(fieldOf(value, "op"));
+      return op === "neg" || op === "pos" ? knownOf(fieldOf(value, "operand") as SemanticValue, where) : unknown;
     case "call":
-      return knownOfCall(value.call, where);
+      return knownOfCall(fieldOf(value, "call") as SemanticCall, where);
     case "arith":
       return knownOfArithmetic(value, where);
     case "compare":
@@ -370,49 +391,50 @@ function isRounding(callee: string): boolean {
 
 /** What a call answers, for the ones the language spells that are about numbers. */
 function knownOfCall(call: SemanticCall, where: Where): Known {
-  if (!call.builtin) return unknown;
-  const argument = call.args[0];
+  if (fieldOf(call, "builtin") !== true) return unknown;
+  const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+  const argument = callArgs[0];
   if (argument === undefined) return unknown;
-  if (call.callee === "Math.abs") return knownOf(argument, where);
+  if (String(fieldOf(call, "callee")) === "Math.abs") return knownOf(argument, where);
   // A power of a whole number by a whole number of places is a whole number of
   // places, and its reach is the reach of the base raised to the reach of the
   // count: the only way a loop writing one of these stays bounded is the count
   // being bounded, so a count nothing bounds answers nothing.
-  if (call.callee === "Math.pow") {
+  if (String(fieldOf(call, "callee")) === "Math.pow") {
     const base = knownOf(argument, where);
-    const count = call.args[1];
+    const count = callArgs[1];
     if (count === undefined) return unknown;
     const places = knownOf(count, where);
-    if (!base.whole || !places.whole || base.reach === 0 || places.reach === UNBOUNDED) return unknown;
-    return { whole: true, reach: Math.max(1, base.reach) ** Math.ceil(places.reach), reduced: null };
+    if (fieldOf(base, "whole") !== true || fieldOf(places, "whole") !== true || Number(fieldOf(base, "reach")) === 0 || Number(fieldOf(places, "reach")) === UNBOUNDED) return unknown;
+    return { whole: true, reach: Math.pow(Math.max(1, Number(fieldOf(base, "reach"))), Math.ceil(Number(fieldOf(places, "reach")))), reduced: null };
   }
-  if (!isRounding(call.callee)) return unknown;
+  if (!isRounding(String(fieldOf(call, "callee")))) return unknown;
   // Every rounding answers a whole number whatever it rounds. The reach of a
   // floor of a quotient by a power of two is the reach of the dividend brought
   // down by those places, and every other rounding is at most one more than
   // what it rounded — which is the difference between a bound that shrinks with
   // the limbs and one that does not, and the bound that shrinks is what lets a
   // carry be bounded at all.
-  const divided = call.callee === "Math.floor" ? quotientOf(argument) : null;
+  const divided = String(fieldOf(call, "callee")) === "Math.floor" ? quotientOf(argument) : null;
   if (divided !== null) {
-    const dividend = knownOf(divided.dividend, where);
-    return dividend.whole
+    const dividend = knownOf(fieldOf(divided, "dividend") as SemanticValue, where);
+    return fieldOf(dividend, "whole") === true
       ? {
           whole: true,
-          reach: dividend.reach / 2 ** divided.places,
-          reduced: { places: divided.places, dividend: divided.dividend },
+          reach: Number(fieldOf(dividend, "reach")) / Math.pow(2, Number(fieldOf(divided, "places"))),
+          reduced: { places: Number(fieldOf(divided, "places")), dividend: fieldOf(divided, "dividend") as SemanticValue },
         }
       : unknown;
   }
   const inside = knownOf(argument, where);
-  return inside.whole ? { whole: true, reach: inside.reach + 1, reduced: null } : unknown;
+  return fieldOf(inside, "whole") === true ? { whole: true, reach: Number(fieldOf(inside, "reach")) + 1, reduced: null } : unknown;
 }
 
 /** The dividend and the number of places a value divides by a power of two. */
 function quotientOf(value: SemanticValue): { dividend: SemanticValue; places: number } | null {
-  if (value.k !== "arith" || value.op !== "div") return null;
-  const places = exponentOf(value.right);
-  return places === null ? null : { dividend: value.left, places };
+  if (value.k !== "arith" || String(fieldOf(value, "op")) !== "div") return null;
+  const places = exponentOf(fieldOf(value, "right") as SemanticValue);
+  return places === null ? null : { dividend: fieldOf(value, "left") as SemanticValue, places };
 }
 
 /** What an arithmetic answers. */
@@ -422,30 +444,35 @@ function knownOfArithmetic(value: SemanticValue & { k: "arith" }, where: Where):
   // what was operated on.
   const remainder = remainderOf(value, where);
   if (remainder !== null) return remainder;
-  const left = knownOf(value.left, where);
-  const right = knownOf(value.right, where);
-  if (!left.whole || !right.whole) return unknown;
-  switch (value.op) {
+  const left = knownOf(fieldOf(value, "left") as SemanticValue, where);
+  const right = knownOf(fieldOf(value, "right") as SemanticValue, where);
+  if (fieldOf(left, "whole") !== true || fieldOf(right, "whole") !== true) return unknown;
+  const op = String(fieldOf(value, "op"));
+  const leftReach = Number(fieldOf(left, "reach"));
+  const rightReach = Number(fieldOf(right, "reach"));
+  switch (op) {
     case "add":
     case "sub":
-      return { whole: true, reach: left.reach + right.reach, reduced: null };
+      return { whole: true, reach: leftReach + rightReach, reduced: null };
     case "mul": {
       // Multiplying a number brought down by places of a power of two back up by
       // that power of two is what makes it a subtraction's other side a
       // remainder, so the fact travels with it.
-      const places = exponentOf(value.right);
-      const reduced = left.reduced !== null && places !== null && left.reduced.places === places ? left.reduced : null;
-      return { whole: true, reach: left.reach * right.reach, reduced };
+      const places = exponentOf(fieldOf(value, "right") as SemanticValue);
+      const leftReduced = fieldOf(left, "reduced") as { places: number; dividend: SemanticValue } | null;
+      const reduced = leftReduced !== null && places !== null && Number(fieldOf(leftReduced, "places")) === places ? leftReduced : null;
+      return { whole: true, reach: leftReach * rightReach, reduced };
     }
     case "shl": {
-      const places = placesOf(value.right);
-      const reduced = left.reduced !== null && places !== null && left.reduced.places === places ? left.reduced : null;
-      return places === null ? unknown : { whole: true, reach: left.reach * 2 ** places, reduced };
+      const places = placesOf(fieldOf(value, "right") as SemanticValue);
+      const leftReduced = fieldOf(left, "reduced") as { places: number; dividend: SemanticValue } | null;
+      const reduced = leftReduced !== null && places !== null && Number(fieldOf(leftReduced, "places")) === places ? leftReduced : null;
+      return places === null ? unknown : { whole: true, reach: leftReach * Math.pow(2, places), reduced };
     }
     case "shr":
       // A shift carries a value down, and what it carries down is bounded by
       // what it was carried from — a shift is where a carry stops growing.
-      return { whole: true, reach: left.reach, reduced: null };
+      return { whole: true, reach: leftReach, reduced: null };
     default:
       // A quotient, a remainder, a power and the two extremal forms are not the
       // same arithmetic over whole numbers as over doubles, so a value built of
@@ -465,9 +492,9 @@ function knownOfArithmetic(value: SemanticValue & { k: "arith" }, where: Where):
  * reach of the remainder is not read out of them.
  */
 function remainderOf(value: SemanticValue & { k: "arith" }, where: Where): Known | null {
-  if (value.op !== "sub") return null;
-  const scaled = shiftedDownOf(value.right, value.left, where);
-  return scaled === null ? null : { whole: true, reach: 2 ** scaled - 1, reduced: null };
+  if (String(fieldOf(value, "op")) !== "sub") return null;
+  const scaled = shiftedDownOf(fieldOf(value, "right") as SemanticValue, fieldOf(value, "left") as SemanticValue, where);
+  return scaled === null ? null : { whole: true, reach: Math.pow(2, scaled) - 1, reduced: null };
 }
 
 /**
@@ -480,38 +507,48 @@ function remainderOf(value: SemanticValue & { k: "arith" }, where: Where): Known
  * three are under the power of two whatever the dividend was.
  */
 function shiftedDownOf(scaled: SemanticValue, dividend: SemanticValue, where: Where): number | null {
+  const locals = fieldOf(where, "locals") as Map<string, Known>;
   // The name the source gave the quotient is what the compiler reads here: the
   // floor of a quotient is written down as a declaration of its own, so the
   // places it brought down and what it brought them down from are the places and
   // the dividend that declaration recorded.
-  if (scaled.k === "local" && where.locals.get(scaled.name)?.reduced != null) {
-    const reduced = where.locals.get(scaled.name)?.reduced ?? null;
-    return reduced !== null && sameValue(reduced.dividend, dividend) ? reduced.places : null;
+  if (scaled.k === "local") {
+    const known = locals.get(String(fieldOf(scaled, "name")));
+    const reduced = known === undefined ? null : fieldOf(known, "reduced") as { places: number; dividend: SemanticValue } | null;
+    if (reduced !== null && sameValue(fieldOf(reduced, "dividend") as SemanticValue, dividend)) return Number(fieldOf(reduced, "places"));
   }
-  if (scaled.k === "call" && scaled.call.builtin && scaled.call.callee === "Math.floor") {
-    const argument = scaled.call.args[0];
-    const divided = argument === undefined ? null : quotientOf(argument);
-    if (divided === null || !sameValue(divided.dividend, dividend)) return null;
-    const places = exponentOf(scaledRight(argument as SemanticValue));
-    return places !== null && places === divided.places ? places : null;
+  if (scaled.k === "call") {
+    const scaledCall = fieldOf(scaled, "call") as SemanticCall;
+    if (fieldOf(scaledCall, "builtin") === true && String(fieldOf(scaledCall, "callee")) === "Math.floor") {
+      const argument = (fieldOf(scaledCall, "args") as readonly SemanticValue[])[0];
+      const divided = argument === undefined ? null : quotientOf(argument);
+      if (divided === null || !sameValue(fieldOf(divided, "dividend") as SemanticValue, dividend)) return null;
+      const places = exponentOf(scaledRight(argument as SemanticValue));
+      return places !== null && places === Number(fieldOf(divided, "places")) ? places : null;
+    }
   }
-  if (scaled.k === "arith" && scaled.op === "mul") {
-    const places = exponentOf(scaled.right);
+  if (scaled.k === "arith" && String(fieldOf(scaled, "op")) === "mul") {
+    const places = exponentOf(fieldOf(scaled, "right") as SemanticValue);
     if (places === null) return null;
-    if (scaled.left.k === "arith" && scaled.left.op === "shr" && sameValue(scaled.left.left, dividend)) {
-      const written = placesOf(scaled.left.right);
+    const scaledLeft = fieldOf(scaled, "left") as SemanticValue;
+    if (scaledLeft.k === "arith" && String(fieldOf(scaledLeft, "op")) === "shr" && sameValue(fieldOf(scaledLeft, "left") as SemanticValue, dividend)) {
+      const written = placesOf(fieldOf(scaledLeft, "right") as SemanticValue);
       return written === places ? places : null;
     }
-    if (scaled.left.k === "call" && scaled.left.call.builtin && scaled.left.call.callee === "Math.floor") {
-      const argument = scaled.left.call.args[0];
-      const divided = argument === undefined ? null : quotientOf(argument);
-      if (divided !== null && sameValue(divided.dividend, dividend) && divided.places === places) return places;
+    if (scaledLeft.k === "call") {
+      const leftCall = fieldOf(scaledLeft, "call") as SemanticCall;
+      if (fieldOf(leftCall, "builtin") === true && String(fieldOf(leftCall, "callee")) === "Math.floor") {
+        const argument = (fieldOf(leftCall, "args") as readonly SemanticValue[])[0];
+        const divided = argument === undefined ? null : quotientOf(argument);
+        if (divided !== null && sameValue(fieldOf(divided, "dividend") as SemanticValue, dividend) && Number(fieldOf(divided, "places")) === places) return places;
+      }
     }
     // The name the source gave the quotient, brought back up by the power of two
     // it was brought down by.
-    if (scaled.left.k === "local") {
-      const reduced = where.locals.get(scaled.left.name)?.reduced ?? null;
-      if (reduced !== null && reduced.places === places && sameValue(reduced.dividend, dividend)) return places;
+    if (scaledLeft.k === "local") {
+      const known = locals.get(String(fieldOf(scaledLeft, "name")));
+      const reduced = known === undefined ? null : fieldOf(known, "reduced") as { places: number; dividend: SemanticValue } | null;
+      if (reduced !== null && Number(fieldOf(reduced, "places")) === places && sameValue(fieldOf(reduced, "dividend") as SemanticValue, dividend)) return places;
     }
     return null;
   }
@@ -520,18 +557,18 @@ function shiftedDownOf(scaled: SemanticValue, dividend: SemanticValue, where: Wh
 
 /** The divisor of a quotient, where the value is one. */
 function scaledRight(quotient: SemanticValue): SemanticValue {
-  return quotient.k === "arith" && quotient.op === "div" ? quotient.right : { k: "nothing", type: WHOLE };
+  return quotient.k === "arith" && String(fieldOf(quotient, "op")) === "div" ? fieldOf(quotient, "right") as SemanticValue : { k: "nothing", type: WHOLE };
 }
 
 /** Whether two values are the same value written twice, which a remainder needs. */
 function sameValue(one: SemanticValue, other: SemanticValue): boolean {
   if (one.k !== other.k) return false;
-  if (one.k === "local") return one.name === (other as { name: string }).name;
-  if (one.k === "const") return literalOf(one)?.value === literalOf(other)?.value;
+  if (one.k === "local") return String(fieldOf(one, "name")) === String(fieldOf(other, "name"));
+  if (one.k === "const") return Number(fieldOf(literalOf(one) ?? {}, "value")) === Number(fieldOf(literalOf(other) ?? {}, "value"));
   if (one.k === "arith") {
-    const left = one as { op: string; left: SemanticValue; right: SemanticValue };
-    const right = other as { op: string; left: SemanticValue; right: SemanticValue };
-    return left.op === right.op && sameValue(left.left, right.left) && sameValue(left.right, right.right);
+    return String(fieldOf(one, "op")) === String(fieldOf(other, "op")) &&
+      sameValue(fieldOf(one, "left") as SemanticValue, fieldOf(other, "left") as SemanticValue) &&
+      sameValue(fieldOf(one, "right") as SemanticValue, fieldOf(other, "right") as SemanticValue);
   }
   return false;
 }
@@ -546,9 +583,9 @@ function sameValue(one: SemanticValue, other: SemanticValue): boolean {
  * counter written down only as a whole number would bound nothing at all.
  */
 function counterReach(loop: Extract<SemanticStatement, { k: "loop" }>["loop"] & { kind: "counted" }): number {
-  const from = knownOf(loop.from, { locals: new Map(), fn: null, facts: new Map() }).reach;
-  const to = knownOf(loop.to, { locals: new Map(), fn: null, facts: new Map() }).reach;
-  return Math.max(from, to);
+  const from = knownOf(fieldOf(loop, "from") as SemanticValue, { locals: new Map(), fn: null, facts: new Map() });
+  const to = knownOf(fieldOf(loop, "to") as SemanticValue, { locals: new Map(), fn: null, facts: new Map() });
+  return Math.max(Number(fieldOf(from, "reach")), Number(fieldOf(to, "reach")));
 }
 
 /** The key a name is asked and answered under, which is what it is a buffer of. */
@@ -583,7 +620,8 @@ interface Facts {
  * own execution.
  */
 function elementFacts(bodies: readonly Body[]): Facts {
-  const sequences: ReadonlyMap<string, readonly Sequence[]> = bodies[0]?.sequencesByCallee ?? new Map();
+  const firstBody = bodies[0];
+  const sequences: ReadonlyMap<string, readonly Sequence[]> = firstBody === undefined ? new Map() : fieldOf(firstBody, "sequencesByCallee") as ReadonlyMap<string, readonly Sequence[]>;
 
   // The places the question is asked of: every buffer the program body declares,
   // and every sequence parameter of every function. A parameter is a buffer the
@@ -591,13 +629,16 @@ function elementFacts(bodies: readonly Body[]): Facts {
   // its spelling because the two may be written the same name.
   const held = new Map<string, Known>();
   for (const body of bodies) {
-    if (body.fn !== null) {
-      for (const one of body.sequences) held.set(nameOf(one.name, body.fn), { whole: true, reach: 0, reduced: null });
+    const fnName = fieldOf(body, "fn") as string | null;
+    if (fnName !== null) {
+      for (const one of fieldOf(body, "sequences") as readonly Sequence[]) held.set(nameOf(one.name, fnName), { whole: true, reach: 0, reduced: null });
       continue;
     }
-    for (const statement of body.entry.statements) {
-      if (statement.k !== "let" || statement.slot.kind !== "buffer") continue;
-      held.set(nameOf(statement.slot.name, null), initialOf(statement.value));
+    for (const statement of fieldOf(fieldOf(body, "entry") as SemanticBlock, "statements") as readonly SemanticStatement[]) {
+      if (statement.k !== "let") continue;
+      const slot = fieldOf(statement, "slot") as SemanticSlot;
+      if (slot.kind !== "buffer") continue;
+      held.set(nameOf(String(fieldOf(slot, "name")), null), initialOf(fieldOf(statement, "value") as SemanticValue));
     }
   }
 
@@ -611,23 +652,25 @@ function elementFacts(bodies: readonly Body[]): Facts {
   const handed = new Map<string, Set<string>>();
   for (const body of bodies) {
     const reachCalls = (block: SemanticBlock): void => {
-      for (const statement of block.statements) {
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         for (const call of callsOf(statement)) {
-          const names = body.sequencesByCallee.get(call.callee);
+          const callee = String(fieldOf(call, "callee"));
+          const names = (fieldOf(body, "sequencesByCallee") as ReadonlyMap<string, readonly Sequence[]>).get(callee);
           if (names === undefined) continue;
+          const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
           for (const one of names) {
-            const argument = call.args[one.at];
+            const argument = callArgs[one.at];
             if (argument === undefined || argument.k !== "local") continue;
-            const given = nameOf(one.name, call.callee);
+            const given = nameOf(one.name, callee);
             const found = handed.get(given) ?? new Set<string>();
-            found.add(nameOf(argument.name, body.fn));
+            found.add(nameOf(String(fieldOf(argument, "name")), fieldOf(body, "fn") as string | null));
             handed.set(given, found);
           }
         }
         for (const nested of blocksOf(statement)) reachCalls(nested);
       }
     };
-    reachCalls(body.entry);
+    reachCalls(fieldOf(body, "entry") as SemanticBlock);
   }
 
   /**
@@ -645,13 +688,13 @@ function elementFacts(bodies: readonly Body[]): Facts {
     const before = held.get(key);
     if (before === undefined) return false;
     let moved = false;
-    if (!value.whole && before.whole) {
+    if (fieldOf(value, "whole") !== true && fieldOf(before, "whole") === true) {
       held.set(key, unknown);
       moved = true;
-    } else if (value.whole && before.whole && value.reach > before.reach) {
-      held.set(key, { whole: true, reach: value.reach, reduced: null });
+    } else if (fieldOf(value, "whole") === true && fieldOf(before, "whole") === true && Number(fieldOf(value, "reach")) > Number(fieldOf(before, "reach"))) {
+      held.set(key, { whole: true, reach: Number(fieldOf(value, "reach")), reduced: null });
       moved = true;
-    } else if (!value.whole || !before.whole) {
+    } else if (fieldOf(value, "whole") !== true || fieldOf(before, "whole") !== true) {
       return false;
     }
     for (const given of handed.get(key) ?? []) if (spread(given, value, seen)) moved = true;
@@ -672,10 +715,10 @@ function elementFacts(bodies: readonly Body[]): Facts {
     // answered by the same walk: an argument a call site hands over is a name of
     // the body it is in, and a buffer the body allocated is one of its names too.
     for (const body of bodies) {
-      const where: Where = { locals: new Map(), fn: body.fn, facts: facts.held };
+      const where: Where = { locals: new Map(), fn: fieldOf(body, "fn") as string | null, facts: fieldOf(facts, "held") as ReadonlyMap<string, Known> };
       readBody(body, where, (key, value) => {
-        if (spread(key, { whole: value.whole, reach: within(value.reach), reduced: null }, new Set())) moved = true;
-      });
+        if (spread(key, { whole: fieldOf(value, "whole") === true, reach: within(Number(fieldOf(value, "reach"))), reduced: null }, new Set())) moved = true;
+      }, new Set());
     }
     if (!moved) break;
   }
@@ -685,7 +728,7 @@ function elementFacts(bodies: readonly Body[]): Facts {
   // proof: a buffer whose bound the rounds pushed past it is one this pass does
   // not rewrite a loop over, and saying so here is what keeps a loop from being
   // rewritten against a bound nothing holds.
-  for (const [key, value] of held) held.set(key, { whole: value.whole, reach: within(value.reach), reduced: null });
+  for (const [key, value] of held) held.set(key, { whole: fieldOf(value, "whole") === true, reach: within(Number(fieldOf(value, "reach"))), reduced: null });
   return answer;
 }
 
@@ -701,38 +744,42 @@ function elementFacts(bodies: readonly Body[]): Facts {
  * values on either side of it.
  */
 function reductionOf(statement: Extract<SemanticStatement, { k: "if" }>): { buffer: string; places: number } | null {
-  if (statement.condition.k !== "compare" || (statement.condition.op !== "lt" && statement.condition.op !== "le")) return null;
-  if (statement.condition.right.k !== "const" || literalOf(statement.condition.right)?.value !== 0) return null;
-  if (statement.condition.left.k !== "local" || statement.otherwise === null) return null;
-  const value = statement.condition.left.name;
-  const brought = reductionArm(statement.then, value);
+  const condition = fieldOf(statement, "condition") as SemanticValue;
+  if (condition.k !== "compare" || (String(fieldOf(condition, "op")) !== "lt" && String(fieldOf(condition, "op")) !== "le")) return null;
+  const conditionRight = fieldOf(condition, "right") as SemanticValue;
+  if (conditionRight.k !== "const" || fieldOf(literalOf(conditionRight) ?? {}, "value") !== 0) return null;
+  const conditionLeft = fieldOf(condition, "left") as SemanticValue;
+  if (conditionLeft.k !== "local" || fieldOf(statement, "otherwise") === null) return null;
+  const value = String(fieldOf(conditionLeft, "name"));
+  const brought = reductionArm(fieldOf(statement, "then") as SemanticBlock, value);
   // The arm that adds the power of two back and the arm that leaves the value
   // alone have to be one reduction rather than two writes, and what says so is
   // that they write the same element.
-  if (brought === null || brought.places === null) return null;
-  const kept = reductionArm(statement.otherwise, value);
-  if (kept === null || kept.places !== null || kept.buffer !== brought.buffer) return null;
-  if (!sameValue(kept.index, brought.index)) return null;
-  return { buffer: brought.buffer, places: brought.places };
+  if (brought === null || fieldOf(brought, "places") === null) return null;
+  const kept = reductionArm(fieldOf(statement, "otherwise") as SemanticBlock, value);
+  if (kept === null || fieldOf(kept, "places") !== null || String(fieldOf(kept, "buffer")) !== String(fieldOf(brought, "buffer"))) return null;
+  if (!sameValue(fieldOf(kept, "index") as SemanticValue, fieldOf(brought, "index") as SemanticValue)) return null;
+  return { buffer: String(fieldOf(brought, "buffer")), places: Number(fieldOf(brought, "places")) };
 }
 
 /** One arm of a conditional subtraction: what it writes, and the places it brings back. */
 function reductionArm(arm: SemanticBlock, value: string): { buffer: string; index: SemanticValue; places: number | null } | null {
   let found: { buffer: string; index: SemanticValue; places: number | null } | null = null;
-  for (const statement of arm.statements) {
+  for (const statement of fieldOf(arm, "statements") as readonly SemanticStatement[]) {
     if (statement.k !== "setElement") continue;
-    const written = statement.value;
+    const written = fieldOf(statement, "value") as SemanticValue;
     if (found !== null) return null;
-    if (written.k === "local" && written.name === value) {
-      found = { buffer: statement.buffer, index: statement.index, places: null };
+    if (written.k === "local" && String(fieldOf(written, "name")) === value) {
+      found = { buffer: String(fieldOf(statement, "buffer")), index: fieldOf(statement, "index") as SemanticValue, places: null };
       continue;
     }
+    const writtenLeft = written.k === "arith" ? fieldOf(written, "left") as SemanticValue : null;
     const places =
-      written.k === "arith" && written.op === "add" && written.left.k === "local" && written.left.name === value
-        ? exponentOf(written.right)
+      written.k === "arith" && String(fieldOf(written, "op")) === "add" && writtenLeft !== null && writtenLeft.k === "local" && String(fieldOf(writtenLeft, "name")) === value
+        ? exponentOf(fieldOf(written, "right") as SemanticValue)
         : null;
     if (places === null) return null;
-    found = { buffer: statement.buffer, index: statement.index, places };
+    found = { buffer: String(fieldOf(statement, "buffer")), index: fieldOf(statement, "index") as SemanticValue, places };
   }
   return found;
 }
@@ -755,28 +802,36 @@ function readBody(
   // A buffer the program allocated and a sequence parameter of a function are the
   // two kinds of name whose value is a place in memory rather than a number, and
   // both are asked of what the facts hold for them.
-  for (const one of body.sequences) where.locals.set(one.name, where.facts.get(nameOf(one.name, body.fn)) ?? unknown);
+  const locals = fieldOf(where, "locals") as Map<string, Known>;
+  const factsHeld = fieldOf(where, "facts") as ReadonlyMap<string, Known>;
+  const bodyFn = fieldOf(body, "fn") as string | null;
+  for (const one of fieldOf(body, "sequences") as readonly Sequence[]) locals.set(one.name, factsHeld.get(nameOf(one.name, bodyFn)) ?? unknown);
   const walk = (block: SemanticBlock, skip: ReadonlySet<string>): void => {
-    for (const statement of block.statements) {
-      if (statement.k === "let" && statement.slot.kind === "value") {
-        where.locals.set(statement.slot.name, knownOf(statement.value, where));
-      } else if (statement.k === "let" && statement.slot.kind === "buffer") {
-        where.locals.set(statement.slot.name, where.facts.get(nameOf(statement.slot.name, body.fn)) ?? unknown);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") {
+        const slot = fieldOf(statement, "slot") as SemanticSlot;
+        const slotName = String(fieldOf(slot, "name"));
+        if (slot.kind === "value") {
+          locals.set(slotName, knownOf(fieldOf(statement, "value") as SemanticValue, where));
+        } else if (slot.kind === "buffer") {
+          locals.set(slotName, factsHeld.get(nameOf(slotName, bodyFn)) ?? unknown);
+        }
       } else if (statement.k === "set") {
-        const before = where.locals.get(statement.name);
-        const value = knownOf(statement.value, where);
-        where.locals.set(
-          statement.name,
-          before === undefined || !value.whole
+        const name = String(fieldOf(statement, "name"));
+        const before = locals.get(name);
+        const value = knownOf(fieldOf(statement, "value") as SemanticValue, where);
+        locals.set(
+          name,
+          before === undefined || fieldOf(value, "whole") !== true
             ? value
-            : { whole: true, reach: Math.max(before.reach, value.reach), reduced: value.reduced ?? before.reduced },
+            : { whole: true, reach: Math.max(Number(fieldOf(before, "reach")), Number(fieldOf(value, "reach"))), reduced: fieldOf(value, "reduced") ?? fieldOf(before, "reduced") },
         );
       } else if (statement.k === "setElement") {
         // A write is asked of the buffer it writes, which is a name of this body
         // if the body declares one and a parameter if it was handed one — unless
         // the write is one arm of a reduction already asked of as a reduction,
         // which is the only way the two arms of one can be asked of together.
-        if (!skip.has(statement.buffer)) answer(nameOf(statement.buffer, body.fn), knownOf(statement.value, where));
+        if (!skip.has(String(fieldOf(statement, "buffer")))) answer(nameOf(String(fieldOf(statement, "buffer")), bodyFn), knownOf(fieldOf(statement, "value") as SemanticValue, where));
       } else if (statement.k === "if") {
         // A conditional subtraction is a reduction to a range, and reading its
         // two arms as two writes says nothing of the sort: the value the arm
@@ -786,31 +841,33 @@ function readBody(
         // every round until there is none.
         const reduction = reductionOf(statement);
         if (reduction !== null) {
-              answer(nameOf(reduction.buffer, body.fn), { whole: true, reach: 2 ** reduction.places - 1, reduced: null });
+          answer(nameOf(String(fieldOf(reduction, "buffer")), bodyFn), { whole: true, reach: Math.pow(2, Number(fieldOf(reduction, "places"))) - 1, reduced: null });
           // The arms of the reduction are walked for everything else they do,
           // and not for the writes that made it a reduction.
           const inside = new Set(skip);
-          inside.add(reduction.buffer);
+          inside.add(String(fieldOf(reduction, "buffer")));
           for (const arm of blocksOf(statement)) walk(arm, inside);
           continue;
         }
-      } else if (statement.k === "loop" && statement.loop.kind === "counted") {
-        where.locals.set(statement.loop.variable, { whole: true, reach: counterReach(statement.loop), reduced: null });
-      } else if (statement.k === "loop" && statement.loop.kind === "each") {
-        where.locals.set(statement.loop.index, { whole: true, reach: REACH, reduced: null });
+      } else if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        if (loop.kind === "counted") locals.set(String(fieldOf(loop, "variable")), { whole: true, reach: counterReach(loop as Extract<SemanticStatement, { k: "loop" }>["loop"] & { kind: "counted" }), reduced: null });
+        else if (loop.kind === "each") locals.set(String(fieldOf(loop, "index")), { whole: true, reach: REACH, reduced: null });
       }
       for (const call of callsOf(statement)) {
-        const names = body.sequencesByCallee.get(call.callee);
+        const callCallee = String(fieldOf(call, "callee"));
+        const names = (fieldOf(body, "sequencesByCallee") as ReadonlyMap<string, readonly Sequence[]>).get(callCallee);
         if (names === undefined) continue;
+        const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
         for (const one of names) {
-          const argument = call.args[one.at];
-          answer(nameOf(one.name, call.callee), argument === undefined ? unknown : knownOf(argument, where));
+          const argument = callArgs[one.at];
+          answer(nameOf(one.name, callCallee), argument === undefined ? unknown : knownOf(argument, where));
         }
       }
       for (const nested of blocksOf(statement)) walk(nested, skip);
     }
   };
-  walk(body.entry, skip);
+  walk(fieldOf(body, "entry") as SemanticBlock, skip);
 }
 
 /** A reach a whole-number form may be reached with, or nothing at all. */
@@ -827,16 +884,17 @@ function initialOf(value: SemanticValue): Known {
   // both start as the zeros. A view is the one buffer whose start is another
   // buffer's contents, and a buffer whose start this pass cannot see is a buffer
   // it may not bound.
-  if (value.view !== null) return unknown;
-  if (value.values.length === 0) {
-    return value.length !== null || value.count !== null ? { whole: true, reach: 0, reduced: null } : unknown;
+  if (fieldOf(value, "view") !== null) return unknown;
+  const values = fieldOf(value, "values") as readonly SemanticValue[];
+  if (values.length === 0) {
+    return fieldOf(value, "length") !== null || fieldOf(value, "count") !== null ? { whole: true, reach: 0, reduced: null } : unknown;
   }
   const where: Where = { locals: new Map(), fn: null, facts: new Map() };
   let reach = 0;
-  for (const element of value.values) {
+  for (const element of values) {
     const known = knownOf(element, where);
-    if (!known.whole) return unknown;
-    reach = Math.max(reach, known.reach);
+    if (fieldOf(known, "whole") !== true) return unknown;
+    reach = Math.max(reach, Number(fieldOf(known, "reach")));
   }
   return { whole: true, reach, reduced: null };
 }

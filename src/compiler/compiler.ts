@@ -67,7 +67,7 @@ import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
-import { optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
+import { optimizeProgram, optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
 import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
 import type { Threading } from "./core/target.ts";
@@ -3133,7 +3133,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   );
   // As for a function: the program the backends lower is folded, so the one
   // printed here is the one they were handed.
-  return printSemanticProgram(optimizeSemanticProgram(program, callees));
+  return printSemanticProgram(optimizeProgram(program, callees));
 }
 
 export async function inspectProject(project: string, cwd: string): Promise<BuildStatus> {
