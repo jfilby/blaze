@@ -45,6 +45,7 @@ import type {
   UnaryOp,
   TextType,
   Ownership,
+  SemanticReduction,
 } from "../core/semantic-ir.ts";
 import { hasCall, isInteger, isTextType, isUnsigned, isWideType, slotType, statementBlocksOf, statementValues, typeEquals, walkValues, TEXT } from "../core/semantic-ir.ts";
 import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds, replaceValues, slotFor, substituteLocals, typeLabel, valueKey } from "./repair.ts";
@@ -54,6 +55,7 @@ import { markParallelLoops, type Callees } from "./parallel.ts";
 import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
 import type { TypeExpr, FunctionSignature, Effect } from "../core/types.ts";
+import type { AssignOperator } from "../core/ir.ts";
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
@@ -829,9 +831,9 @@ function literalTextOf(value: SemanticValue): string | null {
  * writes nothing at all.
  */
 function foldConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null {
-  const left = literalTextOf(value.left);
+  const left = literalTextOf(fieldOf(value, "left") as SemanticValue);
   if (left === null) return null;
-  const right = literalTextOf(value.right);
+  const right = literalTextOf(fieldOf(value, "right") as SemanticValue);
   if (right === null) return null;
   return { k: "text", type: TEXT, parts: [{ k: "text", value: left + right }] };
 }
@@ -844,19 +846,28 @@ function foldConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null
  * would have built by joining them at run time.
  */
 function foldArrayConcat(value: SemanticValue & { k: "arith" }): SemanticValue | null {
-  if (value.left.k !== "buffer" || value.right.k !== "buffer") return null;
-  if (value.left.count !== null || value.left.view !== null) return null;
-  if (value.right.count !== null || value.right.view !== null) return null;
-  const element = value.left.element;
-  if (!typeEquals(element, value.right.element)) return null;
+  const left = fieldOf(value, "left") as SemanticValue;
+  const right = fieldOf(value, "right") as SemanticValue;
+  if (left.k !== "buffer" || right.k !== "buffer") return null;
+  if (fieldOf(left, "count") !== null || fieldOf(left, "view") !== null) return null;
+  if (fieldOf(right, "count") !== null || fieldOf(right, "view") !== null) return null;
+  const element = fieldOf(left, "element") as SemanticType;
+  if (!typeEquals(element, fieldOf(right, "element") as SemanticType)) return null;
+  const leftValues = fieldOf(left, "values") as readonly SemanticValue[];
+  const rightValues = fieldOf(right, "values") as readonly SemanticValue[];
+  const leftLength = fieldOf(left, "length") as number | null;
+  const rightLength = fieldOf(right, "length") as number | null;
+  const values: SemanticValue[] = [];
+  for (const one of leftValues) values[values.length] = one;
+  for (const one of rightValues) values[values.length] = one;
   return {
     k: "buffer",
-    type: value.type,
+    type: fieldOf(value, "type") as SemanticType,
     element,
-    length: (value.left.length ?? value.left.values.length) + (value.right.length ?? value.right.values.length),
+    length: (leftLength ?? leftValues.length) + (rightLength ?? rightValues.length),
     count: null,
     view: null,
-    values: [...value.left.values, ...value.right.values],
+    values,
   };
 }
 
@@ -877,14 +888,14 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // it, so it is folded before the numbers are: two strings written out are
       // one string written out, and a string written out is not built at run
       // time at all.
-      if (value.op === "concat") return foldConcat(value);
-      if (value.op === "arrayConcat") return foldArrayConcat(value);
+      if (String(fieldOf(value, "op")) === "concat") return foldConcat(value);
+      if (String(fieldOf(value, "op")) === "arrayConcat") return foldArrayConcat(value);
       const name = numberType(value);
       if (name === null) return null;
-      const left = literalOf(value.left);
-      const right = literalOf(value.right);
+      const left = literalOf(fieldOf(value, "left") as SemanticValue);
+      const right = literalOf(fieldOf(value, "right") as SemanticValue);
       if (left !== null && right !== null) {
-        const folded = foldArithmetic(value.op, left, right, name);
+        const folded = foldArithmetic(String(fieldOf(value, "op")), left, right, name);
         if (folded === null) return null;
         // A whole number the compiler writes back as text is read by a backend
         // as text, and text carries a number exactly only to 2^53. An answer
@@ -893,8 +904,8 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // `u64` is 18446744073709551609, and what it was written as was
         // 18446744073709552000. Such an answer is left as the arithmetic it
         // came from, which the backend computes at the width it wraps to.
-        if (isInteger(value.type) && !Number.isSafeInteger(folded)) return null;
-        return { k: "const", type: value.type, text: asText(folded) };
+        if (isInteger(fieldOf(value, "type") as SemanticType) && !Number.isSafeInteger(folded)) return null;
+        return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(folded) };
       }
       // The identities, each of which holds at the type it is written at.
       //
@@ -903,18 +914,18 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // `x * 1.0` is exact, so one float identity is not the same program as
       // the other and neither is written here. A whole number has no such
       // value, so all of them are the same program at a whole type.
-      if (value.right.k === "const" && right !== null && FLOAT_TYPES[name] !== true) {
-        if (value.op === "add" && right === 0) return value.left;
-        if (value.op === "sub" && right === 0) return value.left;
-        if (value.op === "mul" && right === 1) return value.left;
+      if ((fieldOf(value, "right") as SemanticValue).k === "const" && right !== null && FLOAT_TYPES[name] !== true) {
+        if (String(fieldOf(value, "op")) === "add" && right === 0) return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "sub" && right === 0) return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "mul" && right === 1) return fieldOf(value, "left") as SemanticValue;
         // A product with a zero is a zero, and not the other side: `x * 0` is
         // zero however large `x` is, so folding it to the other side handed a
         // program that answered with the value it was asked to multiply rather
         // than with the product. The bitwise zero two lines below is written
         // the same way, and this one was the copy of it that answered with the
         // wrong side.
-        if (value.op === "mul" && right === 0 && isInteger(value.type)) return { k: "const", type: value.type, text: asText(0) };
-        if (value.op === "shl" && right === 0) return value.left;
+        if (String(fieldOf(value, "op")) === "mul" && right === 0 && isInteger(fieldOf(value, "type") as SemanticType)) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
+        if (String(fieldOf(value, "op")) === "shl" && right === 0) return fieldOf(value, "left") as SemanticValue;
         // A right shift by nothing is the value, as a left shift by nothing
         // is. The three were written together and only the left one was
         // written down, so `x >> 0` and `x >>> 0` reached a backend as a
@@ -928,49 +939,49 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // value it was asked about rather than with the number the language
         // reads it as. The fold is taken where the conversion is nothing:
         // where the side is already at the width the answer is.
-        if ((value.op === "shr" || value.op === "ushr") && right === 0 && typeEquals(value.left.type, value.type)) {
-          return value.left;
+        if ((String(fieldOf(value, "op")) === "shr" || String(fieldOf(value, "op")) === "ushr") && right === 0 && typeEquals((fieldOf(value, "left") as SemanticValue).type, fieldOf(value, "type") as SemanticType)) {
+          return fieldOf(value, "left") as SemanticValue;
         }
         // A whole number divided by one is itself and a whole number
         // remaindered by one is zero, and neither is a fault: one is never
         // zero, so the divide the backend would run is one it does not have to.
-        if (value.op === "div" && right === 1) return value.left;
-        if (value.op === "mod" && right === 1) return { k: "const", type: value.type, text: asText(0) };
+        if (String(fieldOf(value, "op")) === "div" && right === 1) return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "mod" && right === 1) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
         // The bitwise identities, at the width the type holds. An index is
         // masked and combined more often than anything else in a kernel, and
         // `x | 0` and `x ^ 0` are how a source spells a value it did not
         // change.
-        const allOnes = allOnesAt(value.type, name);
-        if (value.op === "or" && right === 0) return value.left;
-        if (value.op === "xor" && right === 0) return value.left;
-        if (value.op === "and" && right === 0) return { k: "const", type: value.type, text: asText(0) };
+        const allOnes = allOnesAt(fieldOf(value, "type") as SemanticType, name);
+        if (String(fieldOf(value, "op")) === "or" && right === 0) return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "xor" && right === 0) return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "and" && right === 0) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
         if (allOnes !== null) {
-          if (value.op === "and" && right === allOnes) return value.left;
-          if (value.op === "or" && right === allOnes) return { k: "const", type: value.type, text: asText(allOnes) };
+          if (String(fieldOf(value, "op")) === "and" && right === allOnes) return fieldOf(value, "left") as SemanticValue;
+          if (String(fieldOf(value, "op")) === "or" && right === allOnes) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(allOnes) };
           // `x ^ allOnes` is the bitwise complement of x, which the IR spells
           // as a unary rather than as another binary over the same mask.
-          if (value.op === "xor" && right === allOnes) {
-            return { k: "unary", type: value.type, op: "bitNot", operand: value.left };
+          if (String(fieldOf(value, "op")) === "xor" && right === allOnes) {
+            return { k: "unary", type: fieldOf(value, "type") as SemanticType, op: "bitNot", operand: fieldOf(value, "left") as SemanticValue };
           }
         }
       }
-      if (value.left.k === "const" && left !== null) {
-        if (value.op === "add" && left === 0) return value.right;
-        if (value.op === "mul" && left === 1) return value.right;
+      if ((fieldOf(value, "left") as SemanticValue).k === "const" && left !== null) {
+        if (String(fieldOf(value, "op")) === "add" && left === 0) return fieldOf(value, "right") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "mul" && left === 1) return fieldOf(value, "right") as SemanticValue;
         // A product with a zero on the left is the same zero the same product
         // with the zero on the right is, so it is folded the same way.
-        if (value.op === "mul" && left === 0 && isInteger(value.type)) return { k: "const", type: value.type, text: asText(0) };
+        if (String(fieldOf(value, "op")) === "mul" && left === 0 && isInteger(fieldOf(value, "type") as SemanticType)) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
         // `0 - x` is the negation of x, and not x: this returned the right
         // side, so `0 - a.length` printed the length rather than its
         // negation. A whole number negates by the same wrap the subtraction
         // does, so it is the negation; a float does not, because `0.0 - 0.0`
         // is a positive zero and negating a zero is a negative one, so that
         // form is left as the subtraction it was written as.
-        if (value.op === "sub" && left === 0 && isInteger(value.type)) {
-          return { k: "unary", type: value.type, op: "neg", operand: value.right };
+        if (String(fieldOf(value, "op")) === "sub" && left === 0 && isInteger(fieldOf(value, "type") as SemanticType)) {
+          return { k: "unary", type: fieldOf(value, "type") as SemanticType, op: "neg", operand: fieldOf(value, "right") as SemanticValue };
         }
-        if (value.op === "div" && left === 0 && right !== null && right !== 0) {
-          return { k: "const", type: value.type, text: asText(0) };
+        if (String(fieldOf(value, "op")) === "div" && left === 0 && right !== null && right !== 0) {
+          return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
         }
       }
       // A value against itself is zero, one, or false — and only where the
@@ -983,25 +994,25 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // So the fold is taken where the operand is written out — a literal is a
       // number the source can see, and a finite one is not a 0 / 0 — and over a
       // whole number, which has no 0 / 0 and no infinity to divide by.
-      if (valueKey(value.left) === valueKey(value.right)) {
+      if (valueKey(fieldOf(value, "left") as SemanticValue) === valueKey(fieldOf(value, "right") as SemanticValue)) {
         // `literalOf` answers null for anything that is not written out, and
         // null is not zero: the test this replaces asked `!== 0` of it, so a
         // *variable* against itself satisfied it and every `x / x` the
         // compiler lowered was a one — including the `x / x` of a program that
         // had found a zero there and was asking for the 0 / 0.
-        const literal = literalOf(value.left);
+        const literal = literalOf(fieldOf(value, "left") as SemanticValue);
         const written = literal !== null && Number.isFinite(literal);
-        if (value.op === "sub") {
-          return written || isInteger(value.type) ? { k: "const", type: value.type, text: asText(0) } : null;
+        if (String(fieldOf(value, "op")) === "sub") {
+          return written || isInteger(fieldOf(value, "type") as SemanticType) ? { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) } : null;
         }
-        if (value.op === "div") {
-          if (written && literal !== 0) return { k: "const", type: value.type, text: asText(1) };
-          if (!isInteger(value.type)) return null;
-          if (numberType(value.left) === null) return null;
+        if (String(fieldOf(value, "op")) === "div") {
+          if (written && literal !== 0) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(1) };
+          if (!isInteger(fieldOf(value, "type") as SemanticType)) return null;
+          if (numberType(fieldOf(value, "left") as SemanticValue) === null) return null;
         }
-        if (value.op === "min" || value.op === "max") return value.left;
-        if (value.op === "and" || value.op === "or") return value.left;
-        if (value.op === "xor") return { k: "const", type: value.type, text: asText(0) };
+        if (String(fieldOf(value, "op")) === "min" || String(fieldOf(value, "op")) === "max") return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "and" || String(fieldOf(value, "op")) === "or") return fieldOf(value, "left") as SemanticValue;
+        if (String(fieldOf(value, "op")) === "xor") return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(0) };
       }
       // A whole number divided and multiplied by a power of two is a shift,
       // which is the instruction the machine backend has and the division is
@@ -1014,20 +1025,22 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // zero on the machine, where the multiplication it replaced has already
       // wrapped the value to nothing at all. `2^32 * x` is zero at `i32` and
       // `x << 32` is `x << 0`, which is `x`.
-      if (isInteger(value.type) && value.right.k === "const" && right !== null && right > 0) {
+      if (isInteger(fieldOf(value, "type") as SemanticType) && (fieldOf(value, "right") as SemanticValue).k === "const" && right !== null && right > 0) {
         const exponent = Math.pow(2, wholeLog2(right)) === right ? wholeLog2(right) : null;
         if (exponent !== null && exponent >= 1 && exponent < WIDTH[name]) {
           // A value that cannot be negative divides and shifts alike, and one
           // that can does not: `-7 / 2` is `-3` and `-7 >> 1` is `-4`.
-          const exact = isUnsigned(value.type) || (literalOf(value.left) ?? -1) >= 0;
-          if (exact && value.op === "div") {
-            return { ...value, op: "shr", right: { k: "const", type: value.right.type, text: String(exponent) } };
+          const exact = isUnsigned(fieldOf(value, "type") as SemanticType) || (literalOf(fieldOf(value, "left") as SemanticValue) ?? -1) >= 0;
+          const rightValue = fieldOf(value, "right") as SemanticValue;
+          const rightType = fieldOf(rightValue, "type") as SemanticType;
+          if (exact && String(fieldOf(value, "op")) === "div") {
+            return { k: "arith", type: fieldOf(value, "type") as SemanticType, op: "shr", left: fieldOf(value, "left") as SemanticValue, right: { k: "const", type: rightType, text: String(exponent) } };
           }
-          if (exact && value.op === "mod") {
-            return { ...value, op: "and", right: { k: "const", type: value.right.type, text: String(right - 1) } };
+          if (exact && String(fieldOf(value, "op")) === "mod") {
+            return { k: "arith", type: fieldOf(value, "type") as SemanticType, op: "and", left: fieldOf(value, "left") as SemanticValue, right: { k: "const", type: rightType, text: String(right - 1) } };
           }
-          if (value.op === "mul") {
-            return { ...value, op: "shl", right: { k: "const", type: value.right.type, text: String(exponent) } };
+          if (String(fieldOf(value, "op")) === "mul") {
+            return { k: "arith", type: fieldOf(value, "type") as SemanticType, op: "shl", left: fieldOf(value, "left") as SemanticValue, right: { k: "const", type: rightType, text: String(exponent) } };
           }
         }
       }
@@ -1039,24 +1052,28 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // count is read from the side that is written out; the other side is the
       // value being counted, and it has to be the wide number the answer is,
       // because the additions are made at that width.
-      if (value.call.callee !== "u256_mul_mod" || !isWideType(value.type)) return null;
-      const [left, right, mod] = value.call.args;
+      const wideCall = fieldOf(value, "call") as SemanticCall;
+      if (String(fieldOf(wideCall, "callee")) !== "u256_mul_mod" || !isWideType(fieldOf(value, "type") as SemanticType)) return null;
+      const callArgs = fieldOf(wideCall, "args") as readonly SemanticValue[];
+      const left = callArgs[0];
+      const right = callArgs[1];
+      const mod = callArgs[2];
       if (left === undefined || right === undefined || mod === undefined) return null;
       const writtenLeft = smallWideOf(left);
       const writtenRight = smallWideOf(right);
-      if (writtenLeft !== null && isWideType(right.type)) {
+      if (writtenLeft !== null && isWideType(fieldOf(right, "type") as SemanticType)) {
         return modularMultiplyOf(value, writtenLeft, right, mod);
       }
-      if (writtenRight !== null && isWideType(left.type)) {
+      if (writtenRight !== null && isWideType(fieldOf(left, "type") as SemanticType)) {
         return modularMultiplyOf(value, writtenRight, left, mod);
       }
       return null;
     }
     case "compare": {
-      const name = numberType(value.left);
+      const name = numberType(fieldOf(value, "left") as SemanticValue);
       if (name === null) return null;
-      const left = literalOf(value.left);
-      const right = literalOf(value.right);
+      const left = literalOf(fieldOf(value, "left") as SemanticValue);
+      const right = literalOf(fieldOf(value, "right") as SemanticValue);
       if (left === null || right === null) {
         // A whole number against itself is an answer whatever the operator is:
         // it equals itself, it is not above or below itself, and it is neither
@@ -1074,13 +1091,13 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // as, which is the type the backends compare them as: a value that is
         // not written out has no type of its own to read, so the type of the
         // comparison is the only thing that says whether the answer is obvious.
-        if (numberType(value.right) === null) return null;
-        if (!isInteger(value.operand)) return null;
-        if (valueKey(value.left) !== valueKey(value.right)) return null;
-        if (value.op === "eq" || value.op === "ge" || value.op === "le") {
+        if (numberType(fieldOf(value, "right") as SemanticValue) === null) return null;
+        if (!isInteger((fieldOf(value, "operand") as SemanticValue).type)) return null;
+        if (valueKey(fieldOf(value, "left") as SemanticValue) !== valueKey(fieldOf(value, "right") as SemanticValue)) return null;
+        if (String(fieldOf(value, "op")) === "eq" || String(fieldOf(value, "op")) === "ge" || String(fieldOf(value, "op")) === "le") {
           return { k: "bool", type: BOOL, value: true };
         }
-        if (value.op === "ne" || value.op === "lt" || value.op === "gt") {
+        if (String(fieldOf(value, "op")) === "ne" || String(fieldOf(value, "op")) === "lt" || String(fieldOf(value, "op")) === "gt") {
           return { k: "bool", type: BOOL, value: false };
         }
         return null;
@@ -1088,15 +1105,19 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       if (FLOAT_TYPES[name] === true && (Number.isNaN(left) || Number.isNaN(right))) {
         // A comparison with a 0 / 0 is false whatever the operator is, except
         // `ne`, which is true. The backends answer it that way too.
-        return { k: "bool", type: BOOL, value: value.op === "ne" };
+        return { k: "bool", type: BOOL, value: String(fieldOf(value, "op")) === "ne" };
       }
-      const answer = compare(value.op, left, right);
+      const answer = compare(String(fieldOf(value, "op")), left, right);
       if (answer === null) return null;
       return { k: "bool", type: BOOL, value: answer };
     }
     case "logical": {
-      if (value.left.k === "bool" && value.right.k === "bool") {
-        return { k: "bool", type: BOOL, value: value.op === "and" ? value.left.value && value.right.value : value.left.value || value.right.value };
+      const logicalLeft = fieldOf(value, "left") as SemanticValue;
+      const logicalRight = fieldOf(value, "right") as SemanticValue;
+      if (logicalLeft.k === "bool" && logicalRight.k === "bool") {
+        const leftTruth = fieldOf(logicalLeft, "value") === true;
+        const rightTruth = fieldOf(logicalRight, "value") === true;
+        return { k: "bool", type: BOOL, value: String(fieldOf(value, "op")) === "and" ? leftTruth && rightTruth : leftTruth || rightTruth };
       }
       // A short circuit whose left side is already a truth is its right side,
       // whichever way it decides. `false && x` is false and never runs x;
@@ -1104,60 +1125,64 @@ function foldValue(value: SemanticValue): SemanticValue | null {
       // x; `false || x` is x and runs only x. Each is the other side with the
       // branch the deciding truth already made taken out of it, which is what
       // a guard that is already a guard comes to after the fold.
-      if (value.left.k === "bool") {
-        if (value.op === "and") return value.left.value ? value.right : { k: "bool", type: BOOL, value: false };
-        return value.left.value ? { k: "const", type: value.type, text: "1" } : value.right;
+      if (logicalLeft.k === "bool") {
+        const leftTruth = fieldOf(logicalLeft, "value") === true;
+        if (String(fieldOf(value, "op")) === "and") return leftTruth ? logicalRight : { k: "bool", type: BOOL, value: false };
+        return leftTruth ? { k: "const", type: fieldOf(value, "type") as SemanticType, text: "1" } : logicalRight;
       }
       // A short circuit over the same value twice is that value. `x && x` is x
       // whether x is a truth or not: a falsy x answers the left side, and a
       // true one answers the right, and both are x. This is what a name read
       // twice through a short circuit comes to.
-      if (valueKey(value.left) === valueKey(value.right)) return value.left;
+      if (valueKey(logicalLeft) === valueKey(logicalRight)) return logicalLeft;
       return null;
     }
     case "coalesce": {
-      if (value.left.k === "nothing") return value.right;
+      if ((fieldOf(value, "left") as SemanticValue).k === "nothing") return fieldOf(value, "right") as SemanticValue;
       return null;
     }
     case "select": {
-      if (value.condition.k === "bool") {
-        return value.condition.value ? value.then : value.otherwise;
+      const condition = fieldOf(value, "condition") as SemanticValue;
+      if (condition.k === "bool") {
+        return fieldOf(condition, "value") === true ? fieldOf(value, "then") as SemanticValue : fieldOf(value, "otherwise") as SemanticValue;
       }
       return null;
     }
     case "unary": {
-      const operand = literalOf(value.operand);
-      if (value.op === "pos" && !(value.operand.type.kind === "ref" && value.operand.type.of === null && value.operand.type.name === undefined)) return value.operand;
-      if (value.op === "neg" && operand !== null) {
+      const unaryOperand = fieldOf(value, "operand") as SemanticValue;
+      const operand = literalOf(unaryOperand);
+      const unaryType = fieldOf(unaryOperand, "type") as TypeExpr;
+      if (String(fieldOf(value, "op")) === "pos" && !(unaryType.kind === "ref" && unaryType.of === null && unaryType.name === undefined)) return unaryOperand;
+      if (String(fieldOf(value, "op")) === "neg" && operand !== null) {
         const name = numberType(value);
         if (name === null) return null;
-        return { k: "const", type: value.type, text: asText(FLOAT_TYPES[name] === true ? -operand : wrapWhole(-operand, name)) };
+        return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(FLOAT_TYPES[name] === true ? -operand : wrapWhole(-operand, name)) };
       }
       // The complement of a number written out is a number written out, which
       // is how `x ^ allOnes` above is answered and how a source that spells a
       // mask directly is folded. It is the mask minus the value at a whole
       // number, and the subtraction wraps exactly as the complement does.
-      if (value.op === "bitNot" && operand !== null) {
+      if (String(fieldOf(value, "op")) === "bitNot" && operand !== null) {
         const name = numberType(value);
         if (name !== null && FLOAT_TYPES[name] !== true) {
-          const mask = allOnesAt(value.type, name);
-          if (mask !== null) return { k: "const", type: value.type, text: asText(wrapWhole(mask - operand, name)) };
+          const mask = allOnesAt(fieldOf(value, "type") as SemanticType, name);
+          if (mask !== null) return { k: "const", type: fieldOf(value, "type") as SemanticType, text: asText(wrapWhole(mask - operand, name)) };
         }
       }
-      if (value.operand.k === "bool") {
-        if (value.op === "not") return { k: "bool", type: BOOL, value: !value.operand.value };
-        return value.operand;
+      if (unaryOperand.k === "bool") {
+        if (String(fieldOf(value, "op")) === "not") return { k: "bool", type: BOOL, value: fieldOf(unaryOperand, "value") !== true };
+        return unaryOperand;
       }
       return null;
     }
     case "isNull": {
-      if (value.operand.k === "nothing") return { k: "bool", type: BOOL, value: value.negate };
+      if ((fieldOf(value, "operand") as SemanticValue).k === "nothing") return { k: "bool", type: BOOL, value: fieldOf(value, "negate") === true };
       return null;
     }
     case "text": {
       // A string of nothing but literals is a literal.
-      if (value.parts.every((part) => part.k === "text")) {
-        return { k: "text", type: value.type, parts: value.parts };
+      if ((fieldOf(value, "parts") as readonly SemanticTextPart[]).every((part) => part.k === "text")) {
+        return { k: "text", type: TEXT, parts: fieldOf(value, "parts") as unknown as SemanticTextPart[] };
       }
       return null;
     }
@@ -1213,30 +1238,38 @@ function joinTextParts(value: SemanticValue): SemanticValue {
   if (value.k !== "text") return value;
   let changed = false;
   const parts: SemanticTextPart[] = [];
-  const push = (text: string): void => {
-    const last = parts[parts.length - 1];
-    if (last !== undefined && last.k === "text") {
-      parts[parts.length - 1] = { k: "text", value: last.value + text };
-      changed = true;
-      return;
-    }
-    parts.push({ k: "text", value: text });
-  };
-  for (const part of value.parts) {
+  for (const part of fieldOf(value, "parts") as readonly SemanticTextPart[]) {
     if (part.k === "text") {
-      push(part.value);
+      const text = String(fieldOf(part, "value"));
+      const last = parts[parts.length - 1];
+      if (last !== undefined && last.k === "text") {
+        parts[parts.length - 1] = { k: "text", value: String(fieldOf(last, "value")) + text };
+        changed = true;
+      } else {
+        parts[parts.length] = { k: "text", value: text };
+      }
       continue;
     }
-    const inner = part.value;
-    if (inner.k === "text" && inner.parts.every((one) => one.k === "text")) {
+    const inner = fieldOf(part, "value") as SemanticValue;
+    const innerParts = inner.k === "text" ? fieldOf(inner, "parts") as readonly SemanticTextPart[] : [];
+    if (inner.k === "text" && innerParts.every((one) => one.k === "text")) {
       changed = true;
-      for (const one of inner.parts) push((one as { k: "text"; value: string }).value);
+      for (const one of innerParts) {
+        const text = String(fieldOf(one, "value"));
+        const last = parts[parts.length - 1];
+        if (last !== undefined && last.k === "text") {
+          parts[parts.length - 1] = { k: "text", value: String(fieldOf(last, "value")) + text };
+          changed = true;
+        } else {
+          parts[parts.length] = { k: "text", value: text };
+        }
+      }
       continue;
     }
-    parts.push(part);
+    parts[parts.length] = part;
   }
   if (!changed) return value;
-  return { ...value, parts };
+  return { k: "text", type: fieldOf(value, "type") as TextType, parts };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1255,11 +1288,12 @@ function joinTextParts(value: SemanticValue): SemanticValue {
 
 /** Every value a block computes, and every one inside those values. */
 function valuesOf(block: SemanticBlock, visit: (value: SemanticValue) => void): void {
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     for (const value of statementValues(statement)) walkSemanticValue(value, visit);
   }
-  if (block.terminator.k === "return" && block.terminator.value !== null) {
-    walkSemanticValue(block.terminator.value, visit);
+  const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+  if (String(fieldOf(terminator, "k")) === "return" && fieldOf(terminator, "value") !== null) {
+    walkSemanticValue(fieldOf(terminator, "value") as SemanticValue, visit);
   }
 }
 
@@ -1272,10 +1306,10 @@ function valuesOf(block: SemanticBlock, visit: (value: SemanticValue) => void): 
  */
 function sharedNames(body: Body): Set<string> {
   const names = new Set<string>();
-  for (const param of body.params) {
-    if (param.kind !== "text") continue;
-    if ((param as { boxed?: boolean }).boxed !== true) continue;
-    names.add(param.name);
+  for (const param of fieldOf(body, "params") as readonly { kind: string; name: string }[]) {
+    if (String(fieldOf(param, "kind")) !== "text") continue;
+    if (fieldOf(param, "boxed") !== true) continue;
+    names.add(String(fieldOf(param, "name")));
   }
   return names;
 }
@@ -1314,28 +1348,37 @@ function capturedNames(body: Body): Set<string> {
  * and drops the write that gave the name its value.
  */
 function namesOfNode(one: SemanticValue): readonly string[] {
-  if (one.k === "local") return [one.name];
-  if (one.k === "functionRef") return one.captures.map((capture) => capture.name);
+  if (one.k === "local") return [String(fieldOf(one, "name"))];
+  if (one.k === "functionRef") {
+    const names: string[] = [];
+    for (const capture of fieldOf(one, "captures") as readonly { name: string }[]) names[names.length] = String(fieldOf(capture, "name"));
+    return names;
+  }
   return [];
 }
 
 /** A block with every value in it folded, and with its nested blocks folded. */
 function foldBlock(block: SemanticBlock): boolean {
   let changed = false;
-  block.statements = block.statements.map((statement) => {
+  const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+  const foldedStatements: SemanticStatement[] = [];
+  for (const statement of statements) {
     const folded = foldStatement(statement);
     if (folded !== statement) changed = true;
-    return folded;
-  });
-  for (const statement of block.statements) {
+    foldedStatements[foldedStatements.length] = folded;
+  }
+  setFieldOn(block, "statements", foldedStatements);
+  for (const statement of foldedStatements) {
     for (const nested of statementBlocksOf(statement)) {
       if (foldBlock(nested)) changed = true;
     }
   }
-  if (block.terminator.k === "return" && block.terminator.value !== null) {
-    const folded = foldSemanticValue(block.terminator.value);
-    if (folded !== block.terminator.value) {
-      block.terminator = { ...block.terminator, value: folded };
+  const terminator = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+  if (String(fieldOf(terminator, "k")) === "return" && fieldOf(terminator, "value") !== null) {
+    const oldValue = fieldOf(terminator, "value") as SemanticValue;
+    const folded = foldSemanticValue(oldValue);
+    if (folded !== oldValue) {
+      setFieldOn(block, "terminator", { k: "return", value: folded });
       changed = true;
     }
   }
@@ -1359,13 +1402,30 @@ function foldStatement(statement: SemanticStatement): SemanticStatement {
     case "step":
       return statement;
     case "setElement": {
-      const index = foldSemanticValue(statement.index);
-      const value = foldSemanticValue(statement.value);
-      return index === statement.index && value === statement.value ? statement : { ...statement, index, value };
+      const oldIndex = fieldOf(statement, "index") as SemanticValue;
+      const oldValue = fieldOf(statement, "value") as SemanticValue;
+      const index = foldSemanticValue(oldIndex);
+      const value = foldSemanticValue(oldValue);
+      return index === oldIndex && value === oldValue ? statement : {
+        k: "setElement",
+        buffer: String(fieldOf(statement, "buffer")),
+        index,
+        op: String(fieldOf(statement, "op")) as AssignOperator,
+        value,
+        line: Number(fieldOf(statement, "line")),
+      };
     }
     case "fill": {
-      const value = foldSemanticValue(statement.value);
-      return value === statement.value ? statement : { ...statement, value };
+      const oldValue = fieldOf(statement, "value") as SemanticValue;
+      const value = foldSemanticValue(oldValue);
+      return value === oldValue ? statement : {
+        k: "fill",
+        buffer: String(fieldOf(statement, "buffer")),
+        index: String(fieldOf(statement, "index")),
+        value,
+        type: fieldOf(statement, "type") as SemanticType,
+        line: Number(fieldOf(statement, "line")),
+      };
     }
     case "let":
     case "set":
@@ -1373,20 +1433,43 @@ function foldStatement(statement: SemanticStatement): SemanticStatement {
     case "printNumber":
     case "retain":
     case "storeField": {
-      const value = foldSemanticValue(statement.value);
-      return value === statement.value ? statement : { ...statement, value };
+      const oldValue = fieldOf(statement, "value") as SemanticValue;
+      const value = foldSemanticValue(oldValue);
+      if (value === oldValue) return statement;
+      if (statement.k === "let") return { k: "let", slot: fieldOf(statement, "slot") as SemanticSlot, value, line: Number(fieldOf(statement, "line")) };
+      if (statement.k === "set") return { k: "set", name: String(fieldOf(statement, "name")), op: String(fieldOf(statement, "op")) as AssignOperator, value, line: Number(fieldOf(statement, "line")) };
+      if (statement.k === "printText") return { k: "printText", value, line: Number(fieldOf(statement, "line")) };
+      if (statement.k === "printNumber") return { k: "printNumber", value, line: Number(fieldOf(statement, "line")), bigint: fieldOf(statement, "bigint") === true };
+      if (statement.k === "retain") return { k: "retain", value, line: Number(fieldOf(statement, "line")) };
+      return {
+        k: "storeField",
+        object: fieldOf(statement, "object") as SemanticValue,
+        layout: String(fieldOf(statement, "layout")),
+        field: String(fieldOf(statement, "field")),
+        value,
+        line: Number(fieldOf(statement, "line")),
+      };
     }
     case "if": {
-      const condition = foldSemanticValue(statement.condition);
-      return condition === statement.condition ? statement : { ...statement, condition };
+      const oldCondition = fieldOf(statement, "condition") as SemanticValue;
+      const condition = foldSemanticValue(oldCondition);
+      return condition === oldCondition ? statement : {
+        k: "if",
+        condition,
+        then: fieldOf(statement, "then") as SemanticBlock,
+        otherwise: fieldOf(statement, "otherwise") as SemanticBlock | null,
+        line: Number(fieldOf(statement, "line")),
+      };
     }
     case "raise": {
-      const message = foldSemanticValue(statement.message);
-      return message === statement.message ? statement : { ...statement, message };
+      const oldMessage = fieldOf(statement, "message") as SemanticValue;
+      const message = foldSemanticValue(oldMessage);
+      return message === oldMessage ? statement : { k: "raise", message, line: Number(fieldOf(statement, "line")) };
     }
     case "loop": {
-      const loop = foldLoop(statement.loop);
-      return loop === statement.loop ? statement : { ...statement, loop };
+      const oldLoop = fieldOf(statement, "loop") as SemanticLoop;
+      const loop = foldLoop(oldLoop);
+      return loop === oldLoop ? statement : { k: "loop", loop, line: Number(fieldOf(statement, "line")) };
     }
     default: return statement;
   }
@@ -1394,18 +1477,51 @@ function foldStatement(statement: SemanticStatement): SemanticStatement {
 
 function foldLoop(loop: SemanticLoop): SemanticLoop {
   if (loop.kind === "counted") {
-    const from = foldSemanticValue(loop.from);
-    const to = foldSemanticValue(loop.to);
-    const step = loop.step === null ? null : foldSemanticValue(loop.step);
-    if (from === loop.from && to === loop.to && step === loop.step) return loop;
-    return { ...loop, from, to, step };
+    const oldFrom = fieldOf(loop, "from") as SemanticValue;
+    const oldTo = fieldOf(loop, "to") as SemanticValue;
+    const oldStep = fieldOf(loop, "step") as SemanticValue | null;
+    const from = foldSemanticValue(oldFrom);
+    const to = foldSemanticValue(oldTo);
+    const step = oldStep === null ? null : foldSemanticValue(oldStep);
+    if (from === oldFrom && to === oldTo && step === oldStep) return loop;
+    return {
+      kind: "counted",
+      variable: String(fieldOf(loop, "variable")),
+      type: fieldOf(loop, "type") as SemanticType,
+      from,
+      to,
+      inclusive: fieldOf(loop, "inclusive") === true,
+      down: fieldOf(loop, "down") === true,
+      step,
+      header: String(fieldOf(loop, "header")),
+      exit: String(fieldOf(loop, "exit")),
+      body: fieldOf(loop, "body") as SemanticBlock,
+      parallel: fieldOf(loop, "parallel") as true | undefined,
+      region: fieldOf(loop, "region") as true | undefined,
+      reductions: fieldOf(loop, "reductions") as SemanticReduction[] | undefined,
+    };
   }
   if (loop.kind === "each") {
-    const length = foldSemanticValue(loop.length);
-    return length === loop.length ? loop : { ...loop, length };
+    const oldLength = fieldOf(loop, "length") as SemanticValue;
+    const length = foldSemanticValue(oldLength);
+    return length === oldLength ? loop : {
+      kind: "each",
+      index: String(fieldOf(loop, "index")),
+      element: String(fieldOf(loop, "element")),
+      elementType: fieldOf(loop, "elementType") as SemanticType,
+      of: String(fieldOf(loop, "of")),
+      length,
+      header: String(fieldOf(loop, "header")),
+      exit: String(fieldOf(loop, "exit")),
+      body: fieldOf(loop, "body") as SemanticBlock,
+      parallel: fieldOf(loop, "parallel") as true | undefined,
+      region: fieldOf(loop, "region") as true | undefined,
+      reductions: fieldOf(loop, "reductions") as SemanticReduction[] | undefined,
+    };
   }
-  const condition = foldSemanticValue(loop.condition);
-  return condition === loop.condition ? loop : { ...loop, condition };
+  const oldCondition = fieldOf(loop, "condition") as SemanticValue;
+  const condition = foldSemanticValue(oldCondition);
+  return condition === oldCondition ? loop : { kind: "while", condition, header: String(fieldOf(loop, "header")), exit: String(fieldOf(loop, "exit")), body: fieldOf(loop, "body") as SemanticBlock };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1461,7 +1577,7 @@ function readCounts(body: Body): Map<string, number> {
       if (statement.k === "set") count(statement.name);
     }
   };
-  walk(body.entry);
+  walk(fieldOf(body, "entry") as SemanticBlock);
   return counts;
 }
 
@@ -1533,21 +1649,26 @@ function hoistLoopInvariants(body: Body): boolean {
   // above its outer loop and `k + 1` above its inner one then read the *inner*
   // name where the source read the outer value, and answered 87 where it says
   // 78. One set for the whole body is what makes a name answer for one binding.
-  const taken = new Set<string>(body.params.map((param) => param.name));
-  for (const block of nestedSemanticBlocks(body.entry)) {
-    for (const statement of block.statements) if (statement.k === "let") taken.add(statement.slot.name);
+  const taken = new Set<string>();
+  for (const param of fieldOf(body, "params") as readonly { name: string }[]) taken.add(String(fieldOf(param, "name")));
+  const entry = fieldOf(body, "entry") as SemanticBlock;
+  for (const block of nestedSemanticBlocks(entry)) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") taken.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+    }
   }
   let changed = false;
   const walk = (block: SemanticBlock): void => {
     // A hoist inserts a statement above the loop it hoisted out of, so the
     // index moves under the walk and it is stepped rather than mapped.
-    for (let at = 0; at < block.statements.length; at += 1) {
+    const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+    for (let at = 0; at < statements.length; at += 1) {
       if (hoistOne(block, at, taken)) {
         changed = true;
         at += 1;
       }
     }
-    for (const statement of block.statements) {
+    for (const statement of statements) {
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
   };
@@ -1585,7 +1706,7 @@ const MAX_UNROLLED_STATEMENTS = 64;
 function countedNumber(value: SemanticValue): number | null {
   if (value.k !== "const") return null;
   if (numberType(value) === null) return null;
-  const number = asNumber(value.text);
+  const number = asNumber(String(fieldOf(value, "text")));
   return number !== null && Number.isSafeInteger(number) ? number : null;
 }
 
@@ -1629,22 +1750,33 @@ function isWrittenNumber(value: SemanticValue, wanted: number): boolean {
  */
 function isPointIdentity(value: SemanticValue, callees: Callees, depth = 0): boolean {
   if (value.k === "newObject") {
-    const x = value.fields.find((field) => field.name === "x");
-    const z = value.fields.find((field) => field.name === "z");
-    return x !== undefined && z !== undefined && isWrittenZero(x.value) && isWrittenZero(z.value);
-  }
-  if (value.k !== "call") return false;
-  const params = value.call.signature.params;
-  if (params.length === 3 && params[0]?.name === "x" && params[2]?.name === "z") {
-    const x = value.call.args[0];
-    const z = value.call.args[2];
+    const fields = fieldOf(value, "fields") as readonly { name: string; value: SemanticValue }[];
+    let x: SemanticValue | undefined;
+    let z: SemanticValue | undefined;
+    for (const field of fields) {
+      const name = String(fieldOf(field, "name"));
+      if (name === "x") x = fieldOf(field, "value") as SemanticValue;
+      if (name === "z") z = fieldOf(field, "value") as SemanticValue;
+    }
     return x !== undefined && z !== undefined && isWrittenZero(x) && isWrittenZero(z);
   }
-  if (value.call.args.length !== 0 || depth >= 2) return false;
-  const callee = callees.get(value.call.callee);
-  if (callee === undefined || callee.entry.statements.length > 0) return false;
-  const end = callee.entry.terminator;
-  return end.k === "return" && end.value !== null && isPointIdentity(end.value, callees, depth + 1);
+  if (value.k !== "call") return false;
+  const call = fieldOf(value, "call") as SemanticCall;
+  const signature = fieldOf(call, "signature") as FunctionSignature;
+  const params = fieldOf(signature, "params") as readonly { name: string }[];
+  const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+  if (params.length === 3 && String(fieldOf(params[0], "name")) === "x" && String(fieldOf(params[2], "name")) === "z") {
+    const x = callArgs[0];
+    const z = callArgs[2];
+    return x !== undefined && z !== undefined && isWrittenZero(x) && isWrittenZero(z);
+  }
+  if (callArgs.length !== 0 || depth >= 2) return false;
+  const callee = callees.get(String(fieldOf(call, "callee")));
+  if (callee === undefined) return false;
+  const calleeEntry = fieldOf(callee, "entry") as SemanticBlock;
+  if ((fieldOf(calleeEntry, "statements") as readonly SemanticStatement[]).length > 0) return false;
+  const end = fieldOf(calleeEntry, "terminator") as SemanticBlock["terminator"];
+  return String(fieldOf(end, "k")) === "return" && fieldOf(end, "value") !== null && isPointIdentity(fieldOf(end, "value") as SemanticValue, callees, depth + 1);
 }
 
 /**
