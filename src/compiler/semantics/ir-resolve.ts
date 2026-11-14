@@ -4157,7 +4157,10 @@ class ProgramResolver {
         signature: {
           name,
           symbol: name,
-          params: builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) })),
+          params: (fieldOf(builtin, "params") as readonly SemanticType[]).map((type, index) => ({
+            name: `argument${index}`,
+            type: contractText(type),
+          })),
           returns: contractText(returns),
         },
         args,
@@ -4165,7 +4168,7 @@ class ProgramResolver {
         // A builtin's effects are the world it reads, and a call that reads the
         // world is not a value the optimizer may move past the statement that
         // changes what it reads.
-        effects: [...(builtin.effects ?? [])],
+        effects: [...((fieldOf(builtin, "effects") as readonly Effect[] | undefined) ?? [])],
         builtin: true,
         bigint: false,
         wide: null,
@@ -4175,19 +4178,22 @@ class ProgramResolver {
 
   /** The array a value holds, or the diagnostic of what the value is instead. */
   private arrayOf(value: DraftValue, line: number): ArrayHeld {
-    if (value.k === "reference" && value.held.kind === "array") return value.held;
-    if (value.k === "buffer" || value.k === "sized" || value.k === "view" || value.k === "fill") return value.held;
+    const held = fieldOf(value, "held") as Held;
+    if (value.k === "reference" && held.kind === "array") return held as ArrayHeld;
+    if (value.k === "buffer" || value.k === "sized" || value.k === "view" || value.k === "fill") {
+      return held as ArrayHeld;
+    }
     throw programError(
       "an array is what is written into element by element",
       this.body,
       line,
-      `line ${line} of ${this.body.file}: a program fills the arrays it allocated, as in a.fill(1)`,
+      `line ${line} of ${String(fieldOf(this.body, "file"))}: a program fills the arrays it allocated, as in a.fill(1)`,
     );
   }
 
   private reference(name: string, line: number): DraftValue {
     const held = this.held(name, line);
-    return { k: "reference", name: held.name, held };
+    return { k: "reference", name: String(fieldOf(held, "name")), held };
   }
 
   private parts(parts: ProgramText[], line: number): DraftTextPart[] {
@@ -4199,37 +4205,40 @@ class ProgramResolver {
   }
 
   private unary(value: ProgramValue & { k: "unary" }, line: number): DraftValue {
-    if (value.op === "-" || value.op === "+") {
+    const op = String(fieldOf(value, "op"));
+    const operandValue = fieldOf(value, "operand") as ProgramValue;
+    if (op === "-" || op === "+") {
       // The most negative value is written as a magnitude and a sign in front
       // of it, so the literal this reads is one past the top of the range. The
       // sign is folded in here, where the value it makes is in range, rather
       // than refused as a literal no `i64` holds.
-      if (value.op === "-" && value.operand.k === "whole") {
-        const literal = integerLiteral(value.operand.text);
+      if (op === "-" && operandValue.k === "whole") {
+        const literal = integerLiteral(String(fieldOf(operandValue, "text")));
         if (literal !== null && literal === -I64_MIN) {
           return {
             k: "literal",
-            held: { kind: "number", name: "", mutable: false, type: "i64", text: `-${value.operand.text}` },
+            held: { kind: "number", name: "", mutable: false, type: "i64", text: `-${String(fieldOf(operandValue, "text"))}` },
           };
         }
       }
       // A number written with its sign is one literal, so a use can still fix
       // its type without a conversion.
-      if (value.operand.k === "number") {
-        const text = value.op === "-" ? `-${value.operand.text}` : value.operand.text;
+      if (operandValue.k === "number") {
+        const operandText = String(fieldOf(operandValue, "text"));
+        const text = op === "-" ? `-${operandText}` : operandText;
         return { k: "literal", held: { kind: "number", name: "", mutable: false, type: null, text } };
       }
-      const resolved = this.value(value.operand, null, line);
+      const resolved = this.value(operandValue, null, line);
       // A sign in front of a number is the number itself. A sign in front of a
       // string is the number the text names: the `+content` of a Promise the
       // HTTP answers in text is the read `Number(content)` makes of it.
-      if (value.op === "+" && holdsText(resolved)) {
-        return { k: "call", call: this.call({ k: "call", function: "Number", args: [value.operand] } as ProgramValue & { k: "call" }, line) };
+      if (op === "+" && holdsText(resolved)) {
+        return { k: "call", call: this.call({ k: "call", function: "Number", args: [operandValue] } as ProgramValue & { k: "call" }, line) };
       }
-      if (value.op === "+") return resolved;
+      if (op === "+") return resolved;
     }
-    const operand = this.value(value.operand, null, line);
-    if (value.op === "!") {
+    const operand = this.value(operandValue, null, line);
+    if (op === "!") {
       if (holdsText(operand)) {
         return { k: "compare", how: "string", negate: true, left: operand, right: { k: "text", parts: [{ k: "text", value: "" }] } };
       }
@@ -4245,13 +4254,13 @@ class ProgramResolver {
         return { k: "isNull", operand, negate: false };
       }
       if (held === null || !isBoolean(held)) {
-        throw programError("`!` needs something that is a truth", this.body, line, `line ${line} of ${this.body.file}: a number is not a truth, so the program says what it means by it`);
+        throw programError("`!` needs something that is a truth", this.body, line, `line ${line} of ${String(fieldOf(this.body, "file"))}: a number is not a truth, so the program says what it means by it`);
       }
       return { k: "unary", op: "!", operand, type: { kind: "primitive", name: "bool" } };
     }
     // `~` inverts a whole number bit by bit, and a number written in the source
     // is whole here because it is written without a point.
-    if (value.op === "~") {
+    if (op === "~") {
       // Inverting a number gives a signed one, as it does in the language: the
       // bits of 3 inverted are -4, and not a very large unsigned number. A wide
       // number is the one exception, because a signed machine word is not wide
@@ -4260,17 +4269,21 @@ class ProgramResolver {
       // what `~` is over a `u256`.
       const name = primitive(draftType(operand));
       if (name !== null && !isWhole(name)) throw programError("~ needs a whole number", this.body, line);
-      if (name !== null && isWide(name)) return { k: "unary", op: value.op, operand, type: numeric(name) };
+      if (name !== null && isWide(name)) return { k: "unary", op: op, operand, type: numeric(name) };
       // `-` and `~` answer a bigint as a bigint: `~5n` is `-6n` in the language
       // and not `-6`, and the difference is the `n` the printer writes after the
       // digits. The mark is on the operand rather than on the operator, so a
       // number with an `n` beside it keeps it and a number without one does not
       // gain it — and the validator's bigint rule only fires in the other
       // direction, so nothing downstream would have objected.
-      return isBigint(operand) ? { k: "unary", op: value.op, operand, type: numeric("i64"), bigint: true } : { k: "unary", op: value.op, operand, type: numeric("i64") };
+      return isBigint(operand)
+        ? { k: "unary", op: op as ProgramUnaryOp, operand, type: numeric("i64"), bigint: true }
+        : { k: "unary", op: op as ProgramUnaryOp, operand, type: numeric("i64") };
     }
     const type = primitive(draftType(operand)) ?? "f64";
-    return isBigint(operand) ? { k: "unary", op: value.op, operand, type: numeric(type), bigint: true } : { k: "unary", op: value.op, operand, type: numeric(type) };
+    return isBigint(operand)
+      ? { k: "unary", op: op as ProgramUnaryOp, operand, type: numeric(type), bigint: true }
+      : { k: "unary", op: op as ProgramUnaryOp, operand, type: numeric(type) };
   }
 
   private binary(value: ProgramValue & { k: "binary" }, expect: TypeExpr | null, line: number): DraftValue {
