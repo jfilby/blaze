@@ -3858,6 +3858,12 @@ class TypeScriptParser {
   private collectHelpers = new Map<string, { name: string; returns: TypeExpr }>();
   /** The suffix the next collection helper takes, so each is a name of its own. */
   private collectCount = 0;
+
+  private nextCollectName(line: number): string {
+    const name = `__collect_${this.stem}_${this.collectCount}`;
+    this.collectCount += 1;
+    return name;
+  }
   /**
    * The helpers the frontend wrote as a text's own method.
    *
@@ -15811,8 +15817,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["jsonListPretty", element, elementShape, level, indent]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known.name;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const savedTypes = this.valueTypes;
     const savedShapes = this.valueShapes;
     this.valueTypes = new Map(savedTypes);
@@ -15883,8 +15888,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["jsonMapPretty", collection.key, collection.value, collection.valueShape, level, indent]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known.name;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const savedTypes = this.valueTypes;
     const savedShapes = this.valueShapes;
     this.valueTypes = new Map(savedTypes);
@@ -16222,8 +16226,7 @@ class TypeScriptParser {
       const settled = this.settledShape();
       return { name: known.name, returns: known.returns, shape: { kind: "list", of: settled } };
     }
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const written = (value: string): Expression => ({ k: "text", parts: [{ k: "text", value }] });
@@ -16367,8 +16370,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["all", element]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const elementText = typeToString(element);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
@@ -16419,8 +16421,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["allVoid", element]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
@@ -17127,8 +17128,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["latin1"]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const params = [{ name: "bytes", type: { kind: "slice", of: BYTE } as TypeExpr }];
@@ -17719,8 +17719,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
@@ -17919,8 +17918,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const less = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
@@ -17990,8 +17988,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const less = (left: Expression, right: Expression): Expression => ({ k: "binary", op: "<", left, right });
@@ -18082,8 +18079,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const element: Expression = { k: "index", base: ident("numbers"), index: ident("i") };
@@ -18132,8 +18128,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const body: Statement[] = [
@@ -18183,8 +18178,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["replaceAll"]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const at: Expression = { k: "ident", name: "at" };
@@ -18280,8 +18274,7 @@ class TypeScriptParser {
       element.kind === "slice" ||
       element.kind === "array";
     if (!readable) return { name: "", returns: ANY_TYPE };
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const written = (value: string): Expression => ({ k: "text", parts: [{ k: "text", value }] });
@@ -18356,8 +18349,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const call = (callee: string, args: Expression[]): Expression => ({ k: "call", name: callee, args });
@@ -18500,8 +18492,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const elementText = typeToString(element);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
@@ -18976,8 +18967,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["sortDefault", element]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const length = (): Expression => ({ k: "length", buffer: "items" });
@@ -19048,8 +19038,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["typedFrom", from, to]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const items: TypeExpr = { kind: "slice", of: from };
@@ -19090,8 +19079,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["flat", inner]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const append = this.appendHelper("push", inner, 1, line);
@@ -19234,8 +19222,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return { ...known, elementShape };
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const readName = list === "keys" ? this.keyReadName(collection) : this.valueReadName(element);
@@ -19390,8 +19377,7 @@ class TypeScriptParser {
     const key = JSON.stringify(["from", element, signature.params.length]);
     let helper = this.collectHelpers.get(key);
     if (helper === undefined) {
-      const name = `__collect_${this.stem}_${this.collectCount}`;
-      this.collectCount += 1;
+      const name = this.nextCollectName(line);
       const ident = (value: string): Expression => ({ k: "ident", name: value });
       /** The call of the callback, written with as many arguments as it takes. */
       const callBack = (all: readonly Expression[]): Expression => {
@@ -19490,8 +19476,7 @@ class TypeScriptParser {
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
 
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const elementText = typeToString(element);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
@@ -21329,8 +21314,7 @@ class TypeScriptParser {
     const params = new Set(writtenNames);
     const element = (): Expression => ({ k: "index", base: { k: "ident", name: "item" }, index: { k: "ident", name: "at" } });
     const held = substituteParams(record, params, element);
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
 const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of };
     const paramsOut = [{ name: "item", type: items }, ...captures.map((capture, index) => ({ name: capture, type: captureTypes[index] ?? ANY_TYPE }))];
     const returns: TypeExpr = NUMBER_RESULT;
@@ -21486,8 +21470,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     // read lifted is not a function of it.
     this.liftedArrows.delete(callback.name);
     this.closures = this.closures.filter((one) => one.name !== callback.name);
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const captureParams = captures.map((capture, index) => ({ name: capture, type: captureTypes[index] ?? ANY_TYPE }));
@@ -21759,8 +21742,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     this.closures = this.closures.filter((one) => one.name !== callback.name);
     const setName = this.collectionSetNameFor(collection);
     if (setName === null) return null;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const walked: { name: string; type: TypeExpr } = isEntries || sequence === null
       ? { name: "item", type: NUMBER_RESULT }
       : { name: "item", type: { kind: "slice", of: (sequence as { of: TypeExpr }).of } as TypeExpr };
@@ -21882,8 +21864,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const arguments_: Expression[] = [];
     for (const pair of pairs) arguments_.push(pair.key, pair.value);
     if (known !== undefined) return { k: "call", name: known.name, args: arguments_ };
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const params: { name: string; type: TypeExpr }[] = [];
     const body: Statement[] = [
       { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
@@ -21985,8 +21966,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const key = JSON.stringify(["merge", collection.kind, collection.key, collection.value]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const set = this.collectionSetNameFor(collection) as string;
@@ -22062,8 +22042,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const key = JSON.stringify(["rest", collection.key, collection.value, excluded]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return known;
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const set = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
@@ -22154,8 +22133,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       );
       return this.hole();
     }
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const params: { name: string; type: TypeExpr }[] = [];
     const body: Statement[] = [
       { kind: "declare", name: "m", type: null, init: { k: "call", name: "blaze_rt_dict_new", args: [] }, line },
@@ -22197,8 +22175,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     if (known !== undefined) {
       return { k: "call", name: known.name, args: [source] };
     }
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const items: TypeExpr = { kind: "slice", of: element };
     const setName = this.dictionaryCall(element, "set");
     if (setName === null) {
@@ -22257,8 +22234,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const key = JSON.stringify(["pairs", collection.kind, collection.key, collection.value]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return { k: "call", name: known.name, args: [source] };
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const set = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";
     const body: Statement[] = [
@@ -22388,8 +22364,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const key = JSON.stringify(["assign", collection.kind, collection.key, collection.value, sourceCollection.kind, sourceCollection.key, sourceCollection.value]);
     const known = this.collectHelpers.get(key);
     if (known !== undefined) return { k: "call", name: known.name, args: [target, source] };
-    const name = `__collect_${this.stem}_${this.collectCount}`;
-    this.collectCount += 1;
+    const name = this.nextCollectName(line);
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const keyRead = this.keyReadName(sourceCollection);
     const setName = this.collectionSetNameFor(collection) ?? "blaze_rt_dict_set";

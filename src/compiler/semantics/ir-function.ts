@@ -80,7 +80,7 @@ const U256: TypeExpr = { kind: "primitive", name: "u256" };
  */
 const U32: TypeExpr = { kind: "primitive", name: "u32" };
 import type { AssignOperator, BinaryOp, Expression, Statement, UnaryOp as SourceUnaryOp } from "../core/ir.ts";
-import type { Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
+import type { CallEdge, Effect, FunctionContract, FunctionDefinition, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import {
   BOOLEAN,
   TEXT,
@@ -336,7 +336,7 @@ interface LoopTarget {
 
 /** Whether a block ends by leaving it, which is what an `if` arm that leaves does. */
 function leaves(block: SemanticBlock): boolean {
-  return block.terminator.k !== "next";
+  return String(fieldOfValue(fieldOfValue(block, "terminator"), "k")) !== "next";
 }
 
 /** One block being written, and the loop whose body it is. */
@@ -1946,11 +1946,13 @@ class FunctionBody {
     const builtin = builtinFor(callName);
     if (builtin !== null) {
       this.builtinArity(callName, builtin, callArgs.length, line);
-      const args = callArgs.map((argument, at) => this.typed(argument, asType(builtin.params[at]), line));
+      const builtinParams = fieldOfValue(builtin, "params") as readonly SemanticType[];
+      const args = callArgs.map((argument, at) => this.typed(argument, asType(builtinParams[at]), line));
       // What the read of the call knows it answers, where the builtin's own
       // result is the opaque value the ABI carries: a map of lists answers the
       // list it holds, and the call that lowers to the block is typed as one.
-      const returns = fieldOfValue(expression, "returns") as SemanticType | undefined ?? builtin.returns;
+      const declaredReturns = fieldOfValue(expression, "returns") as SemanticType | undefined;
+      const returns = declaredReturns === undefined ? fieldOfValue(builtin, "returns") as SemanticType : declaredReturns;
       const extreme = EXTREMES[callName];
       if (extreme !== undefined) {
         return {
@@ -2792,15 +2794,20 @@ class FunctionBody {
     const layout = objects[name];
     if (layout === undefined) return "";
     const layoutFields = fieldOfValue(layout, "fields") as readonly { name: string; offset: number; type: string }[];
-    const written: unknown[][] = [];
+    let signature = "";
     for (const field of shapeFields) {
       const fieldName = String(fieldOfValue(field, "name"));
-      let found: { name: string; offset: number; type: string } | undefined;
-      for (const one of layoutFields) if (one.name === fieldName) found = one;
-      if (found === undefined) written.push([fieldName]);
-      else written.push([fieldName, fieldOfValue(found, "offset"), fieldOfValue(found, "type")]);
+      let offset = -1;
+      let type = "";
+      for (const one of layoutFields) {
+        if (one.name === fieldName) {
+          offset = Number(fieldOfValue(one, "offset"));
+          type = String(fieldOfValue(one, "type"));
+        }
+      }
+      signature = signature + fieldName + "@" + String(offset) + ":" + type + ";";
     }
-    return JSON.stringify(written);
+    return signature;
   }
 
   /** The names of a list of fields, in the order they are written. */
@@ -2847,9 +2854,11 @@ class FunctionBody {
 
   /** The slot a name declared as this value is read by. */
   private slot(name: string, value: Typed, annotation: Inferred | null, line: number): SemanticSlot {
-    if (isText(value.value.type)) return { kind: "text", name, mutable: true, boxed: true };
+    const valueValue = fieldOfValue(value, "value") as SemanticValue;
+    const valueInferred = fieldOfValue(value, "inferred") as Inferred;
+    if (isText(valueValue.type)) return { kind: "text", name, mutable: true, boxed: true };
     const type =
-      annotation !== null && value.inferred.kind !== "object" ? this.typeOf(annotation, line) : this.typeOf(value.inferred, line);
+      annotation !== null && String(fieldOfValue(valueInferred, "kind")) !== "object" ? this.typeOf(annotation, line) : this.typeOf(valueInferred, line);
     return this.slotOf(name, type, true);
   }
 
@@ -2862,7 +2871,7 @@ class FunctionBody {
 
   /** The type the IR states an inferred value as. */
   private typeOf(inferred: Inferred, line: number): SemanticType {
-    return inferred.kind === "type" ? inferred.type : this.objectType(inferred.key, line);
+    return String(fieldOfValue(inferred, "kind")) === "type" ? fieldOfValue(inferred, "type") as TypeExpr : this.objectType(String(fieldOfValue(inferred, "key")), line);
   }
 
   /**
@@ -2966,20 +2975,22 @@ class FunctionBody {
    */
   private hoist(value: SemanticValue, line: number): SemanticValue {
     const name = this.generated("t");
-    this.pending.push({ k: "let", slot: this.slotOf(name, value.type, false), value, line });
-    return { k: "local", type: value.type, name };
+    const type = fieldOfValue(value, "type") as SemanticType;
+    this.pending.push({ k: "let", slot: this.slotOf(name, type, false), value, line });
+    return { k: "local", type, name };
   }
 
   /** The left arm of `&&`, `||` and `??`, which is never written out twice. */
   private decide(expression: Expression, line: number): Typed {
     const value = this.typed(expression, null, line);
-    if (!hasCall(value.value)) return value;
-    return { value: this.hoist(value.value, line), inferred: value.inferred };
+    const mapped = fieldOfValue(value, "value") as SemanticValue;
+    if (!hasCall(mapped)) return value;
+    return { value: this.hoist(mapped, line), inferred: fieldOfValue(value, "inferred") as Inferred };
   }
 
   /** A value as the text a string carries it as. */
   private asText(value: SemanticValue): SemanticValue {
-    return isText(value.type) ? value : { k: "toText", type: TEXT, of: value, digits: null };
+    return isText(fieldOfValue(value, "type") as SemanticType) ? value : { k: "toText", type: TEXT, of: value, digits: null };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -2988,7 +2999,7 @@ class FunctionBody {
 
   /** A refusal that names the function and the line it was written at. */
   private error(message: string, line: number, detail?: string): CompilerError {
-    const name = this.contract.function.name;
+    const name = String(fieldOfValue(fieldOfValue(this.contract, "function"), "name"));
     return new CompilerError("SemanticIrError", "ir", `${name}: ${message}`, detail === undefined ? `line ${line} of ${name}` : `line ${line} of ${name}: ${detail}`, name, "", "");
   }
 }
@@ -3002,23 +3013,23 @@ function sourceNames(list: readonly Statement[], into: Set<string>): Set<string>
   for (const statement of list) {
     switch (statement.kind) {
       case "declare":
-        into.add(statement.name);
+        into.add(String(fieldOfValue(statement, "name")));
         break;
       case "loop":
-        into.add(statement.variable);
-        sourceNames(statement.body, into);
+        into.add(String(fieldOfValue(statement, "variable")));
+        sourceNames(fieldOfValue(statement, "body") as Statement[], into);
         break;
       case "if":
-        sourceNames(statement.then, into);
-        sourceNames(statement.otherwise, into);
+        sourceNames(fieldOfValue(statement, "then") as Statement[], into);
+        sourceNames(fieldOfValue(statement, "otherwise") as Statement[], into);
         break;
       case "while":
       case "doWhile":
-        sourceNames(statement.body, into);
+        sourceNames(fieldOfValue(statement, "body") as Statement[], into);
         break;
       case "forOf":
-        into.add(statement.variable);
-        sourceNames(statement.body, into);
+        into.add(String(fieldOfValue(statement, "variable")));
+        sourceNames(fieldOfValue(statement, "body") as Statement[], into);
         break;
       default:
         break;
@@ -3038,7 +3049,7 @@ function asType(type: SemanticType): Inferred {
 
 /** What a name holds once it is declared: an object is what it was written as. */
 function bound(inferred: Inferred, annotation: Inferred | null): Inferred {
-  if (inferred.kind === "object" || annotation === null) return inferred;
+  if (String(fieldOfValue(inferred, "kind")) === "object" || annotation === null) return inferred;
   return annotation;
 }
 
@@ -3054,14 +3065,16 @@ function ownership(returns: SemanticType): Ownership {
 
 /** The number a use fixes a written number to, where it fixes one at all. */
 function numberAt(inferred: Inferred | null): TypeExpr | null {
-  if (inferred === null || inferred.kind !== "type") return null;
-  return inferred.type.kind === "primitive" ? inferred.type : null;
+  if (inferred === null || String(fieldOfValue(inferred, "kind")) !== "type") return null;
+  const type = fieldOfValue(inferred, "type") as TypeExpr;
+  return type.kind === "primitive" ? type : null;
 }
 
 /** The reference a use expects, where it expects one at all. */
 function referenceAt(inferred: Inferred | null): TypeExpr | null {
-  if (inferred === null || inferred.kind !== "type") return null;
-  return isReference(inferred.type) || inferred.type.kind === "void" ? inferred.type : null;
+  if (inferred === null || String(fieldOfValue(inferred, "kind")) !== "type") return null;
+  const type = fieldOfValue(inferred, "type") as TypeExpr;
+  return isReference(type) || type.kind === "void" ? type : null;
 }
 
 /** Whether a type is a string, which the contract type language does not have. */
@@ -3071,12 +3084,12 @@ function isText(type: SemanticType): boolean {
 
 /** Whether a type is a truth. */
 function isBoolean(type: SemanticType): boolean {
-  return type.kind === "primitive" && type.name === "bool";
+  return type.kind === "primitive" && String(fieldOfValue(type, "name")) === "bool";
 }
 
 /** The reference that names the layout it points at, where one does. */
 function layoutOf(type: SemanticType): SemanticType | null {
-  return type.kind === "ref" && type.name !== undefined ? type : null;
+  return type.kind === "ref" && String(fieldOfValue(type, "name")) !== undefined ? type : null;
 }
 
 /**
@@ -3089,11 +3102,16 @@ function layoutOf(type: SemanticType): SemanticType | null {
  * the layout declares, and every field the layout declares one of the shape's.
  */
 function holdsShape(shape: Shape, layout: ObjectLayout): boolean {
-  if (shape.fields.length !== layout.fields.length) return false;
-  return shape.fields.every((field) => {
-    const declared = layout.fields.find((entry) => entry.name === field.name);
-    return declared !== undefined && holds(declared.type, field.value);
-  });
+  const shapeFields = fieldOfValue(shape, "fields") as readonly { name: string; value: Inferred }[];
+  const layoutFields = fieldOfValue(layout, "fields") as readonly { name: string; type: string }[];
+  if (shapeFields.length !== layoutFields.length) return false;
+  for (const field of shapeFields) {
+    const fieldName = String(fieldOfValue(field, "name"));
+    let declared: { name: string; type: string } | undefined;
+    for (const entry of layoutFields) if (entry.name === fieldName) declared = entry;
+    if (declared === undefined || !holds(String(fieldOfValue(declared, "type")), fieldOfValue(field, "value") as Inferred)) return false;
+  }
+  return true;
 }
 
 /**
@@ -3109,26 +3127,27 @@ function inferredOfField(type: SemanticType): Inferred {
 
 /** Whether a use of a value is a use of the kind a field of that type takes. */
 function holds(declared: string, use: Inferred): boolean {
+  const useType = fieldOfValue(use, "type") as TypeExpr;
   // An object is a pointer, so it is written into a field that holds a
   // reference whatever the source wrote it as.
-  if (use.kind === "object") return isReference(parseType(declared));
+  if (String(fieldOfValue(use, "kind")) === "object") return isReference(parseType(declared));
   const type = parseType(declared);
   // A string is stored as the number a string is stored as, so a text field is
   // a field a number may be written into, and a string may be written into it
   // as well.
   const numeric = type.kind === "primitive" || isText(type);
-  if (isText(use.type)) return numeric;
-  if (use.type.kind === "primitive") return numeric;
+  if (isText(useType)) return numeric;
+  if (useType.kind === "primitive") return numeric;
   // A field that holds an array holds any array of the same element type: a
   // block written out is an `array` and one a name holds is a `slice`, and the
   // two are the same value.
   // An unshaped reference is what nothing is held at, and an object being laid
   // out starts every field as nothing: nothing fits any field.
-  if (use.type.kind === "ref" && use.type.of === null && use.type.name === undefined) return true;
+  if (useType.kind === "ref" && useType.of === null && useType.name === undefined) return true;
   const arrayed = (one: SemanticType): one is Extract<SemanticType, { kind: "array" | "slice" | "ptr" }> =>
     one.kind === "array" || one.kind === "slice" || one.kind === "ptr";
-  if (arrayed(type) && arrayed(use.type)) return typeEquals(type.of, use.type.of);
-  return type.kind === use.type.kind;
+  if (arrayed(type) && arrayed(useType)) return typeEquals(type.of, useType.of);
+  return type.kind === useType.kind;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3137,25 +3156,38 @@ function holds(declared: string, use: Inferred): boolean {
 
 /** One function, as the IR holds it: signature, conditions, effects and body. */
 export function resolveFunction(contract: FunctionContract, context: FunctionContext): SemanticFunction {
-  const definition = contract.definition;
+  const definition = fieldOfValue(contract, "definition") as FunctionDefinition;
+  const signature = fieldOfValue(contract, "function") as FunctionSignature;
+  const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
+  const params: SemanticSlot[] = [];
+  for (const param of signatureParams) {
+    params.push({ kind: "value", name: String(fieldOfValue(param, "name")), mutable: true, type: parseType(String(fieldOfValue(param, "type"))) });
+  }
+  const requires = fieldOfValue(contract, "requires") as readonly string[];
+  const requiresOut: string[] = [];
+  for (const one of requires) requiresOut.push(one);
+  const ensures = fieldOfValue(contract, "ensures") as readonly string[];
+  const ensuresOut: string[] = [];
+  for (const one of ensures) ensuresOut.push(one);
+  const effects = fieldOfValue(contract, "effects") as readonly Effect[];
+  const effectsOut: Effect[] = [];
+  for (const one of effects) effectsOut.push(one);
+  const calls = fieldOfValue(definition, "calls") as readonly CallEdge[];
+  const callsOut: CallEdge[] = [];
+  for (const one of calls) callsOut.push(one);
   return {
-    name: contract.function.name,
-    symbol: contract.function.symbol,
-    params: contract.function.params.map((param) => ({
-      kind: "value",
-      name: param.name,
-      mutable: true,
-      type: parseType(param.type),
-    })),
-    returns: parseType(contract.function.returns),
-    requires: [...contract.requires],
-    ensures: [...contract.ensures],
-    effects: [...contract.effects],
-    allocates: definition.allocates,
-    prints: definition.prints,
-    readsArgv: definition.readsArgv,
-    objects: definition.objects,
-    calls: [...definition.calls],
+    name: String(fieldOfValue(signature, "name")),
+    symbol: String(fieldOfValue(signature, "symbol")),
+    params,
+    returns: parseType(String(fieldOfValue(signature, "returns"))),
+    requires: requiresOut,
+    ensures: ensuresOut,
+    effects: effectsOut,
+    allocates: fieldOfValue(definition, "allocates") === true,
+    prints: fieldOfValue(definition, "prints") === true,
+    readsArgv: fieldOfValue(definition, "readsArgv") === true,
+    objects: fieldOfValue(definition, "objects") as Record<string, ObjectLayout>,
+    calls: callsOut,
     entry: new FunctionBody(contract, definition, context).lower(),
   };
 }

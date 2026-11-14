@@ -70,6 +70,14 @@ import { contractText, parseType } from "./contract.ts";
 import { reductionsFor, refusalFor, type Callees } from "./parallel.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Tables                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -84,14 +92,17 @@ const TERMINATOR_KINDS: Record<string, true> = { next: true, return: true, jump:
  * claim is checked here rather than trusted from the text that made it.
  */
 function endsByLeaving(block: SemanticBlock): boolean {
-  const last = block.statements[block.statements.length - 1];
+  const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+  const last = statements[statements.length - 1];
   if (last === undefined) return false;
   if (last.k === "raise") return true;
-  if (last.k === "loop" && last.loop.kind === "while" && last.loop.neverExits === true) {
+  if (last.k === "loop" && (fieldOf(last, "loop") as SemanticLoop).kind === "while" && fieldOf(fieldOf(last, "loop"), "neverExits") === true) {
     return true;
   }
-  if (last.k !== "if" || last.otherwise === null) return false;
-  return last.then.terminator.k !== "next" && last.otherwise.terminator.k !== "next";
+  const otherwise = fieldOf(last, "otherwise") as SemanticBlock | null;
+  if (last.k !== "if" || otherwise === null) return false;
+  const thenBlock = fieldOf(last, "then") as SemanticBlock;
+  return String(fieldOf(fieldOf(thenBlock, "terminator"), "k")) !== "next" && String(fieldOf(fieldOf(otherwise, "terminator"), "k")) !== "next";
 }
 
 /** The effects a call may say it has, as the contract language names them. */
@@ -271,32 +282,32 @@ interface Body {
 
 /** What a program body is checked against: everything the program holds. */
 function programContext(program: SemanticProgram, callees: Callees, contract?: ProgramContract): Context {
-  return { objects: program.objects, functions: program.functions, callees, contract, declared: [] };
+  return { objects: fieldOf(program, "objects") as Record<string, ObjectLayout>, functions: fieldOf(program, "functions") as unknown as FunctionSignature[], callees, contract, declared: [] };
 }
 
 /** What a function body is checked against: what the function itself holds. */
 function functionContext(fn: SemanticFunction, callees: Callees, program?: ProgramContract): Context {
   return {
-    objects: fn.objects,
+    objects: fieldOf(fn, "objects") as Record<string, ObjectLayout>,
     functions: program === undefined ? null : signaturesOf(program),
     callees,
     contract: program,
-    declared: [fn.name, fn.symbol, ...fn.params.map((param) => param.name)],
+    declared: [String(fieldOf(fn, "name")), String(fieldOf(fn, "symbol")), ...(fieldOf(fn, "params") as readonly { name: string }[]).map((param) => String(fieldOf(param, "name")))],
   };
 }
 
 /** Every signature the program contract declares, in the order it declares them. */
 function signaturesOf(program: ProgramContract): FunctionSignature[] {
   const signatures: FunctionSignature[] = [];
-  for (const file of program.files) {
-    for (const declared of Object.values(file.functions)) signatures.push(declared.function);
+  for (const file of fieldOf(program, "files") as readonly { functions: Record<string, { function: FunctionSignature }> }[]) {
+    for (const declared of Object.values(fieldOf(file, "functions") as Record<string, { function: FunctionSignature }>)) signatures.push(fieldOf(declared, "function") as FunctionSignature);
   }
   return signatures;
 }
 
 /** A program body, read as a body of its own. */
 function programBody(program: SemanticProgram, tree: Tree): Body {
-  return { entry: program.entry, tree, subject: "a program", own: "the program", single: true };
+  return { entry: fieldOf(program, "entry") as SemanticBlock, tree, subject: "a program", own: "the program", single: true };
 }
 
 /** A function body, read as a body of its own. */
@@ -392,21 +403,23 @@ function loopSlots(loop: SemanticLoop): SemanticSlot[] {
 
 /** A scope with one more name declared in it. */
 function declaring(scope: Scope, slot: SemanticSlot): Scope {
-  const slots = new Map(scope.slots);
-  slots.set(slot.name, slot);
-  const visible = new Set(scope.visible);
-  visible.add(slot.name);
+  const slotName = String(fieldOf(slot, "name"));
+  const slots = new Map(fieldOf(scope, "slots") as Map<string, SemanticSlot>);
+  slots.set(slotName, slot);
+  const visible = new Set(fieldOf(scope, "visible") as Set<string>);
+  visible.add(slotName);
   return { slots, visible };
 }
 
 /** A scope with the names a loop hands its body added, which the body never frees. */
 function innerScope(scope: Scope, slots: SemanticSlot[]): Scope {
   if (slots.length === 0) return scope;
-  const inner = new Map(scope.slots);
-  const visible = new Set(scope.visible);
+  const inner = new Map(fieldOf(scope, "slots") as Map<string, SemanticSlot>);
+  const visible = new Set(fieldOf(scope, "visible") as Set<string>);
   for (const slot of slots) {
-    inner.set(slot.name, slot);
-    visible.add(slot.name);
+    const slotName = String(fieldOf(slot, "name"));
+    inner.set(slotName, slot);
+    visible.add(slotName);
   }
   return { slots: inner, visible };
 }
@@ -428,36 +441,47 @@ function walkBlock(
   rest = 0,
 ): PlacedBlock {
   const placed: PlacedBlock = { block, loops, own: [], parent, final: scope, guarded, rest };
-  tree.blocks.push(placed);
+  
 
   let current = scope;
-  for (let at = 0; at < block.statements.length; at += 1) {
-    const statement = block.statements[at];
-    tree.statements.push({ statement, block: placed, scope: current });
+  const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+  const treeStatements = fieldOf(tree, "statements") as { statement: SemanticStatement; block: PlacedBlock; scope: Scope }[];
+  const treeBlocks = fieldOf(tree, "blocks") as PlacedBlock[];
+  const treeLoops = fieldOf(tree, "loops") as LoopFrame[];
+  treeBlocks[treeBlocks.length] = placed;
+  for (let at = 0; at < statements.length; at += 1) {
+    const statement = statements[at];
+    treeStatements[treeStatements.length] = { statement, block: placed, scope: current };
     if (statement.k === "let") {
-      current = declaring(current, statement.slot);
-      placed.own.push(statement.slot.name);
+      const slot = fieldOf(statement, "slot") as SemanticSlot;
+      current = declaring(current, slot);
+      (fieldOf(placed, "own") as string[])[(fieldOf(placed, "own") as string[]).length] = String(fieldOf(slot, "name"));
       continue;
     }
-    const after = block.statements.length - at - 1;
+    const after = statements.length - at - 1;
     if (statement.k === "if") {
-      walkBlock(statement.then, loops, current, tree, placed, true, after);
-      if (statement.otherwise !== null) {
-        walkBlock(statement.otherwise, loops, current, tree, placed, true, after);
+      walkBlock(fieldOf(statement, "then") as SemanticBlock, loops, current, tree, placed, true, after);
+      const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+      if (otherwise !== null) {
+        walkBlock(otherwise, loops, current, tree, placed, true, after);
       }
       continue;
     }
     if (statement.k === "block") {
-      walkBlock(statement.body, loops, current, tree, placed, guarded, after);
+      walkBlock(fieldOf(statement, "body") as SemanticBlock, loops, current, tree, placed, guarded, after);
       continue;
     }
     if (statement.k === "loop") {
-      const frame: LoopFrame = { loop: statement.loop, container: block, body: null };
-      tree.loops.push(frame);
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      const frame: LoopFrame = { loop, container: block, body: null };
+      treeLoops[treeLoops.length] = frame;
+      const nextLoops: LoopFrame[] = [];
+      for (const one of loops) nextLoops[nextLoops.length] = one;
+      nextLoops[nextLoops.length] = frame;
       frame.body = walkBlock(
-        statement.loop.body,
-        [...loops, frame],
-        innerScope(current, loopSlots(statement.loop)),
+        fieldOf(loop, "body") as SemanticBlock,
+        nextLoops,
+        innerScope(current, loopSlots(loop)),
         tree,
         placed,
         true,
@@ -465,7 +489,7 @@ function walkBlock(
       );
     }
   }
-  placed.final = current;
+  setFieldOn(placed, "final", current);
 
   return placed;
 }
@@ -473,7 +497,7 @@ function walkBlock(
 /** The whole program as a tree, each block placed in the blocks around it. */
 function readTree(program: SemanticProgram): Tree {
   const tree: Tree = { blocks: [], statements: [], loops: [] };
-  walkBlock(program.entry, [], { slots: new Map(), visible: new Set() }, tree);
+  walkBlock(fieldOf(program, "entry") as SemanticBlock, [], { slots: new Map(), visible: new Set() }, tree, null, false, 0);
   return tree;
 }
 
@@ -484,14 +508,14 @@ function readTree(program: SemanticProgram): Tree {
  */
 function readFunctionTree(fn: SemanticFunction, entry: SemanticBlock): Tree {
   const tree: Tree = { blocks: [], statements: [], loops: [] };
-  walkBlock(entry, [], innerScope({ slots: new Map(), visible: new Set() }, fn.params), tree);
+  walkBlock(entry, [], innerScope({ slots: new Map(), visible: new Set() }, fieldOf(fn, "params") as SemanticSlot[]), tree, null, false, 0);
   return tree;
 }
 
 /** The name a body hands its caller back, where it hands back a name at all. */
 function returnedName(value: SemanticValue | null): string | null {
   if (value === null) return null;
-  return value.k === "local" ? value.name : null;
+  return value.k === "local" ? String(fieldOf(value, "name")) : null;
 }
 
 /**
@@ -512,30 +536,37 @@ function statementValues(statement: SemanticStatement): SemanticValue[] {
     case "printText":
     case "printNumber":
     case "retain":
-      return [statement.value];
     case "fill":
-      return [statement.value];
+      return [fieldOf(statement, "value") as SemanticValue];
     case "raise":
-      return [statement.message];
+      return [fieldOf(statement, "message") as SemanticValue];
     case "setElement":
-      return [statement.index, statement.value];
+      return [fieldOf(statement, "index") as SemanticValue, fieldOf(statement, "value") as SemanticValue];
     case "if":
-      return [statement.condition];
+      return [fieldOf(statement, "condition") as SemanticValue];
     case "storeField":
-      return [statement.object, statement.value];
-    case "call":
+      return [fieldOf(statement, "object") as SemanticValue, fieldOf(statement, "value") as SemanticValue];
+    case "call": {
       // The arguments are what the call is made of, and a call written into one
       // is a call the body makes. The call itself is checked where it is
       // written rather than here, so it is not listed again.
-      return [...statement.call.args];
-    case "loop":
-      if (statement.loop.kind === "while" || statement.loop.kind === "doWhile") return [statement.loop.condition];
-      if (statement.loop.kind === "counted") {
-        return statement.loop.step === null
-          ? [statement.loop.from, statement.loop.to]
-          : [statement.loop.from, statement.loop.to, statement.loop.step];
+      const call = fieldOf(statement, "call") as SemanticCall;
+      const args = fieldOf(call, "args") as readonly SemanticValue[];
+      const values: SemanticValue[] = [];
+      for (const one of args) values.push(one);
+      return values;
+    }
+    case "loop": {
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      if (loop.kind === "while" || loop.kind === "doWhile") return [fieldOf(loop, "condition") as SemanticValue];
+      if (loop.kind === "counted") {
+        const from = fieldOf(loop, "from") as SemanticValue;
+        const to = fieldOf(loop, "to") as SemanticValue;
+        const step = fieldOf(loop, "step") as SemanticValue | null;
+        return step === null ? [from, to] : [from, to, step];
       }
-      return [statement.loop.length];
+      return [fieldOf(loop, "length") as SemanticValue];
+    }
     default:
       return [];
   }
@@ -546,10 +577,10 @@ function statementCalls(statement: SemanticStatement): SemanticCall[] {
   const calls: SemanticCall[] = [];
   for (const value of statementValues(statement)) {
     walked(value, (inner) => {
-      if (inner.k === "call") calls.push(inner.call);
+      if (inner.k === "call") calls.push(fieldOf(inner, "call") as SemanticCall);
     });
   }
-  if (statement.k === "call") calls.push(statement.call);
+  if (statement.k === "call") calls.push(fieldOf(statement, "call") as SemanticCall);
   return calls;
 }
 
