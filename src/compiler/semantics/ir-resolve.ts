@@ -2981,13 +2981,14 @@ class ProgramResolver {
       case "isNull":
         return declare({ kind: "number", mutable, type: "bool", text: "" });
       case "call": {
-        const promise = fieldOf(value.call, "promise");
+        const call = fieldOf(value, "call") as DraftCall;
+        const promise = fieldOf(call, "promise");
         if (promise !== undefined) {
           // A promise is a handle the program holds, and what it carries is
           // what `await` reads out of it: the name keeps both.
-          return declare({ kind: "object", mutable, type: fieldOf(value.call, "returns") as SemanticType, promise });
+          return declare({ kind: "object", mutable, type: fieldOf(call, "returns") as SemanticType as SemanticType, promise });
         }
-        const returns = primitive(fieldOf(value.call, "returns") as SemanticType);
+        const returns = primitive(fieldOf(call, "returns") as SemanticType as SemanticType);
         if (returns !== null) {
           // A `u256` is the compiler's own spelling of a bigint, and a call that
           // hands one back is a bigint when everything it was made of was: the
@@ -2999,15 +3000,15 @@ class ProgramResolver {
         }
         // A block of bytes is what the views over it are taken of, and a
         // program holds one as the reference it is.
-        if ((fieldOf(value.call, "returns") as SemanticType).kind === "text") {
+        if ((fieldOf(call, "returns") as SemanticType as SemanticType).kind === "text") {
           // A name bound to a call that hands back a string holds the string
           // it answered: a text is what the program holds, and the calls the
           // compiler provides answer the texts a program reads apart.
           return declare({ kind: "text", mutable, value: null });
         }
-        const callReturns = fieldOf(value.call, "returns") as SemanticType;
+        const callReturns = fieldOf(call, "returns") as SemanticType as SemanticType;
         if (callReturns.kind === "ref" || callReturns.kind === "ptr") {
-          return declare({ kind: "object", mutable, type: fieldOf(value.call, "returns") as SemanticType });
+          return declare({ kind: "object", mutable, type: fieldOf(call, "returns") as SemanticType as SemanticType });
         }
         // A list a call answers is the block the call handed back: a program
         // holds it as a name with a length, and the length is the one the
@@ -3027,7 +3028,7 @@ class ProgramResolver {
           });
         }
         throw programError(
-          `${String(fieldOf(value.call, "name"))} returns ${contractText(fieldOf(value.call, "returns") as SemanticType)}`,
+          `${String(fieldOf(value.call, "name"))} returns ${contractText(fieldOf(call, "returns") as SemanticType as SemanticType)}`,
           this.body,
           declLine,
           `line ${declLine} of ${String(fieldOf(this.body, "file"))}: a program holds numbers, strings and references`,
