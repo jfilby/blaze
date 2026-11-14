@@ -81,9 +81,18 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import type { TypeExpr } from "../core/types.ts";
+import type { AssignOperator } from "../core/ir.ts";
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
+function setFieldOnType(value: unknown, type: unknown): void {
+  (value as Record<string, unknown>)["type"] = type;
 }
 
 /** The type a whole number is held at. */
@@ -919,15 +928,22 @@ function initialOf(value: SemanticValue): Known {
  * program's buffers. So a function the checker runs with vectors is left as the
  * source wrote it.
  */
+function freshLimbName(named: Map<string, number>, fn: string | null): string {
+  const key = fn === null ? "" : fn;
+  const at = (named.get(key) ?? 0) + 1;
+  named.set(key, at);
+  return `blaze_limb_${at}`;
+}
+
 export function wholeElementArithmetic(
   functions: readonly SemanticFunction[],
   entry: SemanticBlock | null,
-  leave: ReadonlySet<string> = new Set(),
+  leave: ReadonlySet<string>,
 ): SemanticBlock | null {
   if (functions.length === 0 && entry === null) return entry;
   const sequencesByCallee = sequencesOf(functions);
   const bodies: Body[] = [];
-  for (const fn of functions) bodies.push(bodyOf(fn, fn.entry, sequencesByCallee));
+  for (const fn of functions) bodies.push(bodyOf(fn, fieldOf(fn, "entry") as SemanticBlock, sequencesByCallee));
   if (entry !== null) bodies.push(bodyOf(null, entry, sequencesByCallee));
   const facts = elementFacts(bodies);
   // The elements of a program are walked under names this pass makes up, and the
@@ -935,39 +951,42 @@ export function wholeElementArithmetic(
   // given the same one.
   const named = new Map<string, number>();
   for (const body of bodies) {
-    if (body.fn !== null && leave.has(body.fn)) continue;
-    const fresh = (): string => {
-      const at = (named.get(body.fn ?? "") ?? 0) + 1;
-      named.set(body.fn ?? "", at);
-      return `blaze_limb_${at}`;
-    };
-    rewriteBody(body, facts, fresh);
+    const fnName = fieldOf(body, "fn") as string | null;
+    if (fnName !== null && leave.has(fnName)) continue;
+    rewriteBody(body, facts, named);
   }
   return entry;
 }
 
 /** One body, with the names it declares and what they hold. */
-function rewriteBody(body: Body, facts: Facts, fresh: () => string): void {
+function rewriteBody(body: Body, facts: Facts, named: Map<string, number>): void {
   const slots = new Map<string, SemanticSlot>();
   const locals = new Map<string, Known>();
-  const where: Where = { locals, fn: body.fn, facts: facts.held };
+  const bodyFn = fieldOf(body, "fn") as string | null;
+  const factsHeld = fieldOf(facts, "held") as ReadonlyMap<string, Known>;
+  const where: Where = { locals, fn: bodyFn, facts: factsHeld };
   // A parameter of a sequence type is a buffer, and what it holds is what the
   // facts say about it; a parameter of any other type is a number this pass only
   // claims what the source declared about it.
-  for (const one of body.sequences) locals.set(one.name, facts.held.get(nameOf(one.name, body.fn)) ?? unknown);
-  walk(body.entry, where, slots, fresh);
+  for (const one of fieldOf(body, "sequences") as readonly Sequence[]) locals.set(one.name, factsHeld.get(nameOf(one.name, bodyFn)) ?? unknown);
+  walk(fieldOf(body, "entry") as SemanticBlock, where, slots, named);
 }
 
 /** Every block of a body, with the names and the slots the blocks above declared. */
-function walk(block: SemanticBlock, where: Where, slots: Map<string, SemanticSlot>, fresh: () => string): void {
-  for (const statement of block.statements) {
-    if (statement.k === "let" && statement.slot.kind === "value") {
-      slots.set(statement.slot.name, statement.slot);
-      where.locals.set(statement.slot.name, knownOf(statement.value, where));
-    } else if (statement.k === "loop" && statement.loop.kind === "counted") {
-      rewriteLoop(statement.loop, where, slots, fresh);
+function walk(block: SemanticBlock, where: Where, slots: Map<string, SemanticSlot>, named: Map<string, number>): void {
+  const locals = fieldOf(where, "locals") as Map<string, Known>;
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    if (statement.k === "let") {
+      const slot = fieldOf(statement, "slot") as SemanticSlot;
+      if (slot.kind === "value") {
+        slots.set(String(fieldOf(slot, "name")), slot);
+        locals.set(String(fieldOf(slot, "name")), knownOf(fieldOf(statement, "value") as SemanticValue, where));
+      }
+    } else if (statement.k === "loop") {
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      if (loop.kind === "counted") rewriteLoop(loop as Extract<SemanticStatement, { k: "loop" }>["loop"] & { kind: "counted" }, where, slots, named);
     }
-    for (const nested of blocksOf(statement)) walk(nested, where, slots, fresh);
+    for (const nested of blocksOf(statement)) walk(nested, where, slots, named);
   }
 }
 
@@ -987,7 +1006,7 @@ function wholeNumbersOf(
   whole: Set<string>,
   slots: ReadonlyMap<string, SemanticSlot>,
 ): boolean {
-  for (const statement of body.statements) {
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     if (statement.k === "if") {
       // A reduction's conditional arms are each one chain and write the same
       // whole number along either path. Tallying them here puts the borrow loop
@@ -1061,9 +1080,9 @@ function rewriteLoop(
   loop: Extract<SemanticStatement, { k: "loop" }>["loop"] & { kind: "counted" },
   where: Where,
   slots: Map<string, SemanticSlot>,
-  fresh: () => string,
+  named: Map<string, number>,
 ): void {
-  const body = loop.body;
+  const body = fieldOf(loop, "body") as SemanticBlock;
   // A counter this pass reads as a whole number has to hold whole numbers: a
   // loop that counts in fractions — `for (let i = 0.5; i < n; i++)` — holds a
   // counter that is not a whole number, and reading it as one answered with a
@@ -1071,20 +1090,28 @@ function rewriteLoop(
   // it starts at and the value it moves by say, and not the width it is
   // declared at: a counter a program counts in fractions with is a double and
   // holds whole numbers all the same.
-  if (!knownOf(loop.from, where).whole) return;
-  if (loop.step !== null && !knownOf(loop.step, where).whole) return;
+  if (fieldOf(knownOf(fieldOf(loop, "from") as SemanticValue, where), "whole") !== true) return;
+  const loopStep = fieldOf(loop, "step") as SemanticValue | null;
+  if (loopStep !== null && fieldOf(knownOf(loopStep, where), "whole") !== true) return;
   // A name the body declares is one binding here, and a name the blocks above it
   // declared is one this pass would have to write the whole-number form of on
   // the far side of a boundary — so a loop over a name it shadows is left alone.
   const declaredHere = new Set<string>();
-  for (const statement of body.statements) {
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     if (statement.k !== "let") continue;
-    if (declaredHere.has(statement.slot.name) || slots.has(statement.slot.name)) return;
-    declaredHere.add(statement.slot.name);
+    const slot = fieldOf(statement, "slot") as SemanticSlot;
+    const slotName = String(fieldOf(slot, "name"));
+    if (declaredHere.has(slotName) || slots.has(slotName)) return;
+    declaredHere.add(slotName);
   }
-  const inside: Where = { locals: new Map(where.locals), fn: where.fn, facts: where.facts };
-  inside.locals.set(loop.variable, { whole: true, reach: REACH, reduced: null });
-  const whole = new Set<string>([loop.variable]);
+  const inside: Where = {
+    locals: new Map(fieldOf(where, "locals") as Map<string, Known>),
+    fn: fieldOf(where, "fn") as string | null,
+    facts: fieldOf(where, "facts") as ReadonlyMap<string, Known>,
+  };
+  const loopVariable = String(fieldOf(loop, "variable"));
+  (fieldOf(inside, "locals") as Map<string, Known>).set(loopVariable, { whole: true, reach: REACH, reduced: null });
+  const whole = new Set<string>([loopVariable]);
 
   // The loop is read once over what the facts hold before anything of it is
   // rewritten, and the read is what decides both things: every value the body
@@ -1099,15 +1126,15 @@ function rewriteLoop(
   // writes has to have held for the loop to write it in whole numbers: a slot
   // that held a fraction holds it still, and reading it as a whole number is a
   // number the program never wrote.
-  const before = new Map(where.locals);
+  const before = new Map(fieldOf(where, "locals") as Map<string, Known>);
   // The slots the loop writes as whole numbers, which are re-typed once the
   // whole loop has been rewritten: a loop that could not be rewritten leaves
   // every slot as it was.
   const retype: ValueSlot[] = [];
-  if (!rewriteChain(body, inside, whole, slots, fresh, before, introduced, retype)) return;
+  if (!rewriteChain(body, inside, whole, slots, named, before, introduced, retype)) return;
 
-  for (const slot of retype) slot.type = WHOLE;
-  for (const slot of introduced) if (!slots.has(slot.name)) slots.set(slot.name, slot);
+  for (const slot of retype) setFieldOnType(slot, WHOLE);
+  for (const slot of introduced) if (!slots.has(String(fieldOf(slot, "name")))) slots.set(String(fieldOf(slot, "name")), slot);
 }
 
 /**
@@ -1130,7 +1157,7 @@ function rewriteChain(
   inside: Where,
   whole: ReadonlySet<string>,
   slots: Map<string, SemanticSlot>,
-  fresh: () => string,
+  named: Map<string, number>,
   before: ReadonlyMap<string, Known>,
   introduced: SemanticSlot[],
   retype: ValueSlot[],
@@ -1142,17 +1169,16 @@ function rewriteChain(
     const bindings: SemanticStatement[] = [];
     switch (statement.k) {
       case "let": {
-        const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
+        const form = wholeForm(fieldOf(statement, "value") as SemanticValue, inside, whole, named, bindings, introduced);
         if (form === null) return false;
-        rewritten.push(...bindings, {
-          ...statement,
-          slot: { kind: "value", name: statement.slot.name, mutable: statement.slot.mutable, type: WHOLE },
-          value: form,
-        });
+        const oldSlot = fieldOf(statement, "slot") as SemanticSlot;
+        const slot: SemanticSlot = { kind: "value", name: String(fieldOf(oldSlot, "name")), mutable: fieldOf(oldSlot, "mutable") === true, type: WHOLE };
+        for (const one of bindings) rewritten[rewritten.length] = one;
+        rewritten[rewritten.length] = { k: "let", slot, value: form, line: Number(fieldOf(statement, "line")) };
         continue;
       }
       case "set": {
-        const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
+        const form = wholeForm(fieldOf(statement, "value") as SemanticValue, inside, whole, named, bindings, introduced);
         if (form === null) return false;
         // The slot is the one the block above declared, and re-typing it is what
         // makes every read of the name anywhere in the function a whole number —
@@ -1162,37 +1188,56 @@ function rewriteChain(
         // It may only be re-typed when the name held a whole number before the
         // loop: a slot that held a fraction holds it still, and a slot read as
         // a whole number is a number the program never wrote.
-        const slot = slots.get(statement.name);
+        const name = String(fieldOf(statement, "name"));
+        const slot = slots.get(name);
         if (slot === undefined || slot.kind !== "value") return false;
-        const held = before.get(statement.name);
-        if (held === undefined || !held.whole) return false;
-        retype.push(slot);
-        rewritten.push(...bindings, { ...statement, value: form });
+        const held = before.get(name);
+        if (held === undefined || fieldOf(held, "whole") !== true) return false;
+        retype[retype.length] = slot as ValueSlot;
+        for (const one of bindings) rewritten[rewritten.length] = one;
+        rewritten[rewritten.length] = { k: "set", name, op: String(fieldOf(statement, "op")) as AssignOperator, value: form, line: Number(fieldOf(statement, "line")) };
         continue;
       }
       case "setElement": {
-        const form = wholeForm(statement.value, inside, whole, fresh, bindings, introduced);
+        const form = wholeForm(fieldOf(statement, "value") as SemanticValue, inside, whole, named, bindings, introduced);
         if (form === null) return false;
-        rewritten.push(...bindings, { ...statement, value: form });
+        for (const one of bindings) rewritten[rewritten.length] = one;
+        rewritten[rewritten.length] = {
+          k: "setElement",
+          buffer: String(fieldOf(statement, "buffer")),
+          index: fieldOf(statement, "index") as SemanticValue,
+          op: String(fieldOf(statement, "op")) as AssignOperator,
+          value: form,
+          line: Number(fieldOf(statement, "line")),
+        };
         continue;
       }
       case "if": {
         if (reductionOf(statement) === null) return false;
-        const then = { ...statement.then, statements: [...statement.then.statements] };
-        const otherwise =
-          statement.otherwise === null ? null : { ...statement.otherwise, statements: [...statement.otherwise.statements] };
-        if (!rewriteChain(then, inside, whole, slots, fresh, before, introduced, retype)) return false;
-        if (otherwise !== null && !rewriteChain(otherwise, inside, whole, slots, fresh, before, introduced, retype)) {
+        const oldThen = fieldOf(statement, "then") as SemanticBlock;
+        const oldOtherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+        const thenStatements: SemanticStatement[] = [];
+        for (const one of fieldOf(oldThen, "statements") as readonly SemanticStatement[]) thenStatements[thenStatements.length] = one;
+        const then: SemanticBlock = { id: String(fieldOf(oldThen, "id")), releases: fieldOf(oldThen, "releases") as string[], statements: thenStatements, terminator: fieldOf(oldThen, "terminator") as SemanticBlock["terminator"] };
+        let otherwise: SemanticBlock | null = null;
+        if (oldOtherwise !== null) {
+          const otherwiseStatements: SemanticStatement[] = [];
+          for (const one of fieldOf(oldOtherwise, "statements") as readonly SemanticStatement[]) otherwiseStatements[otherwiseStatements.length] = one;
+          otherwise = { id: String(fieldOf(oldOtherwise, "id")), releases: fieldOf(oldOtherwise, "releases") as string[], statements: otherwiseStatements, terminator: fieldOf(oldOtherwise, "terminator") as SemanticBlock["terminator"] };
+        }
+        if (!rewriteChain(then, inside, whole, slots, named, before, introduced, retype)) return false;
+        if (otherwise !== null && !rewriteChain(otherwise, inside, whole, slots, named, before, introduced, retype)) {
           return false;
         }
-        rewritten.push(...bindings, { ...statement, then, otherwise });
+        for (const one of bindings) rewritten[rewritten.length] = one;
+        rewritten[rewritten.length] = { k: "if", condition: fieldOf(statement, "condition") as SemanticValue, then, otherwise, line: Number(fieldOf(statement, "line")) };
         continue;
       }
       default:
         return false;
     }
   }
-  body.statements = rewritten;
+  setFieldOn(body, "statements", rewritten);
   return true;
 }
 
@@ -1208,11 +1253,12 @@ function isName(value: SemanticValue): boolean {
  */
 function narrowBinding(
   value: SemanticValue,
-  fresh: () => string,
+  where: Where,
+  named: Map<string, number>,
   bindings: SemanticStatement[],
   introduced: SemanticSlot[],
 ): SemanticValue {
-  const name = fresh();
+  const name = freshLimbName(named, fieldOf(where, "fn") as string | null);
   const slot: SemanticSlot = { kind: "value", name, mutable: false, type: WHOLE };
   bindings.push({ k: "let", slot, value, line: 0 });
   introduced.push(slot);
@@ -1234,7 +1280,7 @@ function wholeForm(
   value: SemanticValue,
   where: Where,
   whole: ReadonlySet<string>,
-  fresh: () => string,
+  named: Map<string, number>,
   bindings: SemanticStatement[],
   introduced: SemanticSlot[],
 ): SemanticValue | null {
@@ -1247,18 +1293,18 @@ function wholeForm(
     case "local":
       return whole.has(value.name) ? { ...value, type: WHOLE } : null;
     case "element": {
-      return value.of.k === "local" ? narrowBinding(value, fresh, bindings, introduced) : null;
+      return value.of.k === "local" ? narrowBinding(value, where, named, bindings, introduced) : null;
     }
     case "unary": {
       if (value.op !== "neg" && value.op !== "pos") return null;
-      const operand = wholeForm(value.operand, where, whole, fresh, bindings, introduced);
+      const operand = wholeForm(fieldOf(value, "operand") as SemanticValue, where, whole, named, bindings, introduced);
       return operand === null ? null : { ...value, type: WHOLE, operand };
     }
     case "arith": {
       if (value.op === "shr" || value.op === "shl") {
         // A shift is written at the type of what it shifts, so only that side is
         // rewritten; the count is the machine's to mask.
-        const left = wholeForm(value.left, where, whole, fresh, bindings, introduced);
+        const left = wholeForm(fieldOf(value, "left") as SemanticValue, where, whole, named, bindings, introduced);
         return left === null ? null : { ...value, type: WHOLE, left };
       }
       if (value.op !== "add" && value.op !== "sub" && value.op !== "mul") return null;
@@ -1270,11 +1316,11 @@ function wholeForm(
       // one addition needs: the sum is computed the way the source computed it,
       // and only the addition that carries the carry down is a whole number.
       if (!isName(value.left) && !isName(value.right) && knownOf(value, where).whole) {
-        return narrowBinding(value, fresh, bindings, introduced);
+        return narrowBinding(value, where, named, bindings, introduced);
       }
-      const left = wholeForm(value.left, where, whole, fresh, bindings, introduced);
+      const left = wholeForm(fieldOf(value, "left") as SemanticValue, where, whole, named, bindings, introduced);
       if (left === null) return null;
-      const right = wholeForm(value.right, where, whole, fresh, bindings, introduced);
+      const right = wholeForm(fieldOf(value, "right") as SemanticValue, where, whole, named, bindings, introduced);
       return right === null ? null : { ...value, type: WHOLE, left, right };
     }
     case "call": {
@@ -1299,7 +1345,7 @@ function wholeForm(
       if (value.call.callee === "Math.floor") {
         const divided = quotientOf(argument);
         if (divided !== null) {
-          const left = wholeForm(divided.dividend, where, whole, fresh, bindings, introduced);
+          const left = wholeForm(fieldOf(divided, "dividend") as SemanticValue, where, whole, named, bindings, introduced);
           if (left === null) return null;
           const count: SemanticValue = { k: "const", type: WHOLE, text: String(divided.places) };
           return { k: "arith", type: WHOLE, op: "shr", left, right: count };
@@ -1308,7 +1354,7 @@ function wholeForm(
       // A whole number is its own floor, its own truncation and its own
       // rounding, so all three answer the value they were given.
       if (value.call.callee === "Math.floor" || value.call.callee === "Math.round" || value.call.callee === "Math.trunc") {
-        return wholeForm(argument, where, whole, fresh, bindings, introduced);
+        return wholeForm(argument, where, whole, named, bindings, introduced);
       }
       return null;
     }
