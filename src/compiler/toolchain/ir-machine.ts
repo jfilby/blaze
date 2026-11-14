@@ -145,51 +145,51 @@ type DictionaryAnswer = "number" | "text" | "pointer" | "dynamic";
  * dictionary's own. `dynamic` is an answer the runtime hands back as the double
  * a handle is, which this backend holds as the bits of that double.
  */
-const DICTIONARY_SERVICES: Readonly<Record<string, DictionaryAnswer>> = {
-  "blaze_rt_dict_new": "number",
-  "blaze_rt_dict_get": "number",
-  "blaze_rt_dict_set": "number",
-  "blaze_rt_dict_get_ref": "dynamic",
-  "blaze_rt_dict_set_ref": "number",
-  "blaze_rt_dict_get_text": "text",
-  "blaze_rt_dict_set_text": "number",
-  "blaze_rt_dict_has": "number",
-  "blaze_rt_own_key": "number",
-  "blaze_rt_dict_len": "number",
-  "blaze_rt_dict_delete": "number",
-  "blaze_rt_dict_set_seq": "number",
-  "blaze_rt_dict_get_seq": "pointer",
-  "blaze_rt_dict_set_seq_numkey": "number",
-  "blaze_rt_dict_get_seq_numkey": "pointer",
-  "blaze_rt_dict_key_at": "text",
-  "blaze_rt_dict_value_at": "number",
-  "blaze_rt_dict_value_at_ref": "dynamic",
-  "blaze_rt_dict_value_at_text": "text",
-  "blaze_rt_dict_set_refkey": "number",
-  "blaze_rt_dict_get_refkey": "number",
-  "blaze_rt_dict_get_refkey_text": "text",
-  "blaze_rt_dict_get_refkey_ref": "dynamic",
-  "blaze_rt_dict_set_refkey_text": "number",
-  "blaze_rt_dict_set_refkey_ref": "number",
-  "blaze_rt_dict_has_refkey": "number",
-  "blaze_rt_dict_delete_refkey": "number",
-  "blaze_rt_dict_key_ref_at": "dynamic",
-  "blaze_rt_dict_set_numkey": "number",
-  "blaze_rt_dict_get_numkey": "number",
-  "blaze_rt_dict_get_numkey_text": "text",
-  "blaze_rt_dict_get_numkey_ref": "dynamic",
-  "blaze_rt_dict_set_numkey_text": "number",
-  "blaze_rt_dict_set_numkey_ref": "number",
-  "blaze_rt_dict_has_numkey": "number",
-  "blaze_rt_dict_delete_numkey": "number",
-  "blaze_rt_dict_key_num_at": "number",
-  "blaze_rt_dict_values": "pointer",
-  "map.values": "pointer",
-  "blaze_rt_json_field_key": "text",
-  "blaze_rt_json_field_value": "dynamic",
-  "array.copy": "pointer",
-  "array.join": "pointer",
-};
+const DICTIONARY_SERVICES: ReadonlyMap<string, DictionaryAnswer> = new Map<string, DictionaryAnswer>([
+  ["blaze_rt_dict_new", "number"],
+  ["blaze_rt_dict_get", "number"],
+  ["blaze_rt_dict_set", "number"],
+  ["blaze_rt_dict_get_ref", "dynamic"],
+  ["blaze_rt_dict_set_ref", "number"],
+  ["blaze_rt_dict_get_text", "text"],
+  ["blaze_rt_dict_set_text", "number"],
+  ["blaze_rt_dict_has", "number"],
+  ["blaze_rt_own_key", "number"],
+  ["blaze_rt_dict_len", "number"],
+  ["blaze_rt_dict_delete", "number"],
+  ["blaze_rt_dict_set_seq", "number"],
+  ["blaze_rt_dict_get_seq", "pointer"],
+  ["blaze_rt_dict_set_seq_numkey", "number"],
+  ["blaze_rt_dict_get_seq_numkey", "pointer"],
+  ["blaze_rt_dict_key_at", "text"],
+  ["blaze_rt_dict_value_at", "number"],
+  ["blaze_rt_dict_value_at_ref", "dynamic"],
+  ["blaze_rt_dict_value_at_text", "text"],
+  ["blaze_rt_dict_set_refkey", "number"],
+  ["blaze_rt_dict_get_refkey", "number"],
+  ["blaze_rt_dict_get_refkey_text", "text"],
+  ["blaze_rt_dict_get_refkey_ref", "dynamic"],
+  ["blaze_rt_dict_set_refkey_text", "number"],
+  ["blaze_rt_dict_set_refkey_ref", "number"],
+  ["blaze_rt_dict_has_refkey", "number"],
+  ["blaze_rt_dict_delete_refkey", "number"],
+  ["blaze_rt_dict_key_ref_at", "dynamic"],
+  ["blaze_rt_dict_set_numkey", "number"],
+  ["blaze_rt_dict_get_numkey", "number"],
+  ["blaze_rt_dict_get_numkey_text", "text"],
+  ["blaze_rt_dict_get_numkey_ref", "dynamic"],
+  ["blaze_rt_dict_set_numkey_text", "number"],
+  ["blaze_rt_dict_set_numkey_ref", "number"],
+  ["blaze_rt_dict_has_numkey", "number"],
+  ["blaze_rt_dict_delete_numkey", "number"],
+  ["blaze_rt_dict_key_num_at", "number"],
+  ["blaze_rt_dict_values", "pointer"],
+  ["map.values", "pointer"],
+  ["blaze_rt_json_field_key", "text"],
+  ["blaze_rt_json_field_value", "dynamic"],
+  ["array.copy", "pointer"],
+  ["array.join", "pointer"],
+]);
 
 /**
  * The host services a module function may call: the builtin the source names,
@@ -201,49 +201,46 @@ const DICTIONARY_SERVICES: Readonly<Record<string, DictionaryAnswer>> = {
  * read of a file answers the value the runtime holds, which a text use unboxes,
  * exactly as the dictionary services answer a value of another kind.
  */
-const HOST_SERVICES: Readonly<
-  Record<
-    string,
-    { symbol: string; args: readonly ("text" | "number")[]; extra?: readonly number[]; returns: "number" | "text" | "dynamic" | "void" }
-  >
-> = {
-  "fs.readFileSync": { symbol: "blaze_rt_file_read", args: ["text", "text"], returns: "dynamic" },
-  "fs.writeFileSync": { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [0], returns: "number" },
-  "fs.appendFileSync": { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [1], returns: "number" },
-  "fs.existsSync": { symbol: "blaze_rt_file_exists", args: ["text"], returns: "number" },
-  "fs.fileSizeSync": { symbol: "blaze_rt_file_size", args: ["text"], returns: "number" },
-  "fs.fileKindSync": { symbol: "blaze_rt_file_kind", args: ["text"], returns: "number" },
-  "fs.mkdirSync": { symbol: "blaze_rt_dir_make", args: ["text", "number"], returns: "number" },
-  "fs.rmSync": { symbol: "blaze_rt_file_remove", args: ["text", "number"], returns: "number" },
-  "fs.renameSync": { symbol: "blaze_rt_file_rename", args: ["text", "text"], returns: "number" },
-  "fs.copyFileSync": { symbol: "blaze_rt_file_copy", args: ["text", "text"], returns: "number" },
-  "fs.dirCountSync": { symbol: "blaze_rt_dir_count", args: ["text"], returns: "number" },
-  "fs.dirNameSync": { symbol: "blaze_rt_dir_name", args: ["text", "number"], returns: "text" },
-  "fs.dirIsDirSync": { symbol: "blaze_rt_dir_is_dir", args: ["text", "number"], returns: "number" },
-  "process.cwd": { symbol: "blaze_rt_current_dir", args: [], returns: "text" },
-  "process.pid": { symbol: "blaze_rt_process_id", args: [], returns: "number" },
-  "os.tmpdir": { symbol: "blaze_rt_temp_dir", args: [], returns: "text" },
-  "os.platform": { symbol: "blaze_rt_host_platform", args: [], returns: "text" },
-  "os.arch": { symbol: "blaze_rt_host_arch", args: [], returns: "text" },
-  "crypto.randomUUID": { symbol: "blaze_rt_random_uuid", args: [], returns: "text" },
-  "fs.fsyncPath": { symbol: "blaze_rt_file_sync", args: ["text"], returns: "number" },
-  "timers.sleepMs": { symbol: "blaze_rt_sleep_ms", args: ["number"], returns: "number" },
-  "exec.new": { symbol: "blaze_rt_command_new", args: [], returns: "number" },
-  "exec.arg": { symbol: "blaze_rt_command_arg", args: ["number", "text"], returns: "number" },
-  "exec.cwd": { symbol: "blaze_rt_command_cwd", args: ["number", "text"], returns: "number" },
-  "exec.env": { symbol: "blaze_rt_command_env", args: ["number", "text", "text"], returns: "number" },
-  "exec.input": { symbol: "blaze_rt_command_input", args: ["number", "text"], returns: "number" },
-  "exec.run": { symbol: "blaze_rt_command_run", args: ["number", "number"], returns: "number" },
-  "exec.signal": { symbol: "blaze_rt_command_signal", args: ["number"], returns: "number" },
-  "exec.errno": { symbol: "blaze_rt_command_errno", args: ["number"], returns: "number" },
-  "exec.timedOut": { symbol: "blaze_rt_command_timed_out", args: ["number"], returns: "number" },
-  "exec.stdout": { symbol: "blaze_rt_command_stdout", args: ["number"], returns: "text" },
-  "exec.stderr": { symbol: "blaze_rt_command_stderr", args: ["number"], returns: "text" },
-  "exec.free": { symbol: "blaze_rt_command_free", args: ["number"], returns: "void" },
-  "env.count": { symbol: "blaze_rt_env_count", args: [], returns: "number" },
-  "env.at": { symbol: "blaze_rt_env_at", args: ["number"], returns: "text" },
-  "os.cpuCount": { symbol: "blaze_rt_cpu_count", args: [], returns: "number" },
-};
+type HostService = { symbol: string; args: readonly ("text" | "number")[]; extra?: readonly number[]; returns: "number" | "text" | "dynamic" | "void" };
+
+const HOST_SERVICES: ReadonlyMap<string, HostService> = new Map<string, HostService>([
+  ["fs.readFileSync", { symbol: "blaze_rt_file_read", args: ["text", "text"], returns: "dynamic" }],
+  ["fs.writeFileSync", { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [0], returns: "number" }],
+  ["fs.appendFileSync", { symbol: "blaze_rt_file_write", args: ["text", "text"], extra: [1], returns: "number" }],
+  ["fs.existsSync", { symbol: "blaze_rt_file_exists", args: ["text"], returns: "number" }],
+  ["fs.fileSizeSync", { symbol: "blaze_rt_file_size", args: ["text"], returns: "number" }],
+  ["fs.fileKindSync", { symbol: "blaze_rt_file_kind", args: ["text"], returns: "number" }],
+  ["fs.mkdirSync", { symbol: "blaze_rt_dir_make", args: ["text", "number"], returns: "number" }],
+  ["fs.rmSync", { symbol: "blaze_rt_file_remove", args: ["text", "number"], returns: "number" }],
+  ["fs.renameSync", { symbol: "blaze_rt_file_rename", args: ["text", "text"], returns: "number" }],
+  ["fs.copyFileSync", { symbol: "blaze_rt_file_copy", args: ["text", "text"], returns: "number" }],
+  ["fs.dirCountSync", { symbol: "blaze_rt_dir_count", args: ["text"], returns: "number" }],
+  ["fs.dirNameSync", { symbol: "blaze_rt_dir_name", args: ["text", "number"], returns: "text" }],
+  ["fs.dirIsDirSync", { symbol: "blaze_rt_dir_is_dir", args: ["text", "number"], returns: "number" }],
+  ["process.cwd", { symbol: "blaze_rt_current_dir", args: [], returns: "text" }],
+  ["process.pid", { symbol: "blaze_rt_process_id", args: [], returns: "number" }],
+  ["os.tmpdir", { symbol: "blaze_rt_temp_dir", args: [], returns: "text" }],
+  ["os.platform", { symbol: "blaze_rt_host_platform", args: [], returns: "text" }],
+  ["os.arch", { symbol: "blaze_rt_host_arch", args: [], returns: "text" }],
+  ["crypto.randomUUID", { symbol: "blaze_rt_random_uuid", args: [], returns: "text" }],
+  ["fs.fsyncPath", { symbol: "blaze_rt_file_sync", args: ["text"], returns: "number" }],
+  ["timers.sleepMs", { symbol: "blaze_rt_sleep_ms", args: ["number"], returns: "number" }],
+  ["exec.new", { symbol: "blaze_rt_command_new", args: [], returns: "number" }],
+  ["exec.arg", { symbol: "blaze_rt_command_arg", args: ["number", "text"], returns: "number" }],
+  ["exec.cwd", { symbol: "blaze_rt_command_cwd", args: ["number", "text"], returns: "number" }],
+  ["exec.env", { symbol: "blaze_rt_command_env", args: ["number", "text", "text"], returns: "number" }],
+  ["exec.input", { symbol: "blaze_rt_command_input", args: ["number", "text"], returns: "number" }],
+  ["exec.run", { symbol: "blaze_rt_command_run", args: ["number", "number"], returns: "number" }],
+  ["exec.signal", { symbol: "blaze_rt_command_signal", args: ["number"], returns: "number" }],
+  ["exec.errno", { symbol: "blaze_rt_command_errno", args: ["number"], returns: "number" }],
+  ["exec.timedOut", { symbol: "blaze_rt_command_timed_out", args: ["number"], returns: "number" }],
+  ["exec.stdout", { symbol: "blaze_rt_command_stdout", args: ["number"], returns: "text" }],
+  ["exec.stderr", { symbol: "blaze_rt_command_stderr", args: ["number"], returns: "text" }],
+  ["exec.free", { symbol: "blaze_rt_command_free", args: ["number"], returns: "void" }],
+  ["env.count", { symbol: "blaze_rt_env_count", args: [], returns: "number" }],
+  ["env.at", { symbol: "blaze_rt_env_at", args: ["number"], returns: "text" }],
+  ["os.cpuCount", { symbol: "blaze_rt_cpu_count", args: [], returns: "number" }],
+]);
 
 /**
  * The type a walk's index is held at. The IR does not name one: counting over
@@ -254,6 +251,22 @@ const HOST_SERVICES: Readonly<
 const INDEX: SemanticType = { kind: "primitive", name: "u64" };
 
 /** The C library a lowered function calls, which the linker resolves. */
+function isLibrarySymbol(symbol: string): boolean {
+  switch (symbol) {
+    case "strlen":
+    case "memcpy":
+    case "strcmp":
+    case "pow":
+    case "fabs":
+    case "floor":
+    case "trunc":
+    case "sqrt":
+      return true;
+    default:
+      return false;
+  }
+}
+
 const LIBRARY: Record<string, true> = {
   strlen: true,
   memcpy: true,
@@ -352,7 +365,7 @@ function oppositeOf(op: CompareOp): CompareOp {
 
 /** A comparison the machine answers from the flags, which is one over anything but text. */
 function flagComparison(value: SemanticValue): (SemanticValue & { k: "compare" }) | null {
-  return value.k === "compare" && !isTextType(value.operand) ? value : null;
+  return value.k === "compare" && !isTextType(fieldOf(value, "operand") as SemanticType) ? value : null;
 }
 
 /**
@@ -575,7 +588,10 @@ const WHOLE_FLOATS = 2 ** 52;
  * — which on a loop that rounds once per element is the difference between an
  * array read costing a move out of the frame and costing an address.
  */
-const INLINE_BUILTINS: Record<string, true> = { "Math.floor": true, "Math.round": true };
+function isInlineBuiltin(name: string): boolean {
+  return name === "Math.floor" || name === "Math.round";
+}
+
 
 /** How wide a value of this type is, which is the width a slot holds it at. */
 /**
@@ -644,9 +660,10 @@ function signedOf(type: SemanticType): boolean {
  * signed number and the logical one over everything else.
  */
 function shiftOf(operation: "shl" | "shr" | "ushr" | "sar", type: SemanticType): "shl" | "shr" | "sar" {
-  if (operation === "ushr") return "shr";
-  if (operation === "shr" && signedOf(type)) return "sar";
-  return operation;
+  const op = String(operation);
+  if (op === "ushr") return "shr";
+  if (op === "shr" && signedOf(type)) return "sar";
+  return op as "shl" | "shr" | "sar";
 }
 
 /**
@@ -740,11 +757,16 @@ export function assertMachineTarget(target: TargetSpec): void {
 /**
  * What the machine backend said when it refused to lower a function.
  */
-export interface MachineRefusal {
+export class MachineRefusal {
   /** What it said. */
   readonly reason: string;
   /** What it said about it, when it said more. */
   readonly detail: string | undefined;
+
+  constructor(reason: string, detail: string | undefined) {
+    this.reason = reason;
+    this.detail = detail;
+  }
 }
 
 /**
@@ -767,21 +789,29 @@ export function machineRefusal(
   request: Omit<MachineRequest, "objectPath" | "candidate">,
 ): MachineRefusal | null {
   try {
-    assertMachineTarget(request.target);
-    const functionName = symbolOf(request.contract ?? ({ function: { name: request.fn.name, symbol: request.fn.symbol } } as FunctionContract));
+    const contract = fieldOf(request, "contract") as FunctionContract | undefined;
+    const fn = fieldOf(request, "fn") as SemanticFunction;
+    const target = fieldOf(request, "target") as TargetSpec;
+    assertMachineTarget(target);
+    const functionName = symbolOf(contract ?? ({
+      function: {
+        name: String(fieldOf(fn, "name")),
+        symbol: String(fieldOf(fn, "symbol")),
+      },
+    } as FunctionContract));
     lowerFunction(
-      request.fn,
-      request.contract,
+      fn,
+      contract,
       functionName,
-      request.callable,
-      request.target,
-      request.powerOfTwoParams,
-      request.foreign,
+      fieldOf(request, "callable") as ReadonlySet<string>,
+      target,
+      fieldOf(request, "powerOfTwoParams") as ReadonlySet<number>,
+      fieldOf(request, "foreign") as ReadonlySet<string>,
     );
     return null;
   } catch (cause) {
     const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", "", "", "");
-    return { reason: error.message, detail: error.detail };
+    return new MachineRefusal(error.message, error.detail);
   }
 }
 
@@ -795,19 +825,30 @@ export function machineRefusal(
  * had been asked what to do about it.
  */
 export async function buildObject(request: MachineRequest): Promise<MachineResult> {
-  assertMachineTarget(request.target);
-  const functionName = symbolOf(request.contract ?? ({ function: { name: request.fn.name, symbol: request.fn.symbol } } as FunctionContract));
+  const contract = fieldOf(request, "contract") as FunctionContract | undefined;
+  const fn = fieldOf(request, "fn") as SemanticFunction;
+  const target = fieldOf(request, "target") as TargetSpec;
+  const callable = fieldOf(request, "callable") as ReadonlySet<string>;
+  const foreign = fieldOf(request, "foreign") as ReadonlySet<string> | undefined;
+  const objectPath = String(fieldOf(request, "objectPath"));
+  assertMachineTarget(target);
+  const functionName = symbolOf(contract ?? ({
+    function: {
+      name: String(fieldOf(fn, "name")),
+      symbol: String(fieldOf(fn, "symbol")),
+    },
+  } as FunctionContract));
   const object = lowerFunction(
-    request.fn,
-    request.contract,
+    fn,
+    contract,
     functionName,
-    request.callable,
-    request.target,
-    request.powerOfTwoParams,
-    request.foreign,
+    callable,
+    target,
+    fieldOf(request, "powerOfTwoParams") as ReadonlySet<number>,
+    foreign,
   );
-  await writeFile(request.objectPath, object.bytes);
-  const written = inspectWrittenObject(request.objectPath, functionName);
+  await writeFile(objectPath, object.bytes, "utf8");
+  const written = inspectWrittenObject(objectPath, functionName);
   if (written.defined.length !== 1 || written.defined[0] !== functionName) {
     throw machineError(
       `the object of ${functionName} defines [${written.defined.join(", ")}] instead of only "${functionName}"`,
@@ -815,13 +856,13 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
       functionName,
     );
   }
-  const outside = written.undefined.filter(
-    (symbol) =>
-      !isRuntimeSymbol(symbol) &&
-      LIBRARY[symbol] !== true &&
-      !request.callable.has(symbol) &&
-      request.foreign?.has(symbol) !== true,
-  );
+  const outside = written.undefined.filter((symbol) => {
+    if (isRuntimeSymbol(symbol)) return false;
+    if (isLibrarySymbol(symbol)) return false;
+    if (callable.has(symbol)) return false;
+    if (foreign !== undefined && foreign.has(symbol)) return false;
+    return true;
+  });
   if (outside.length > 0) {
     throw machineError(
       `${functionName} refers to symbols outside the runtime ABI and the C library: ${outside.join(", ")}`,
@@ -830,8 +871,8 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
     );
   }
   return {
-    objectPath: request.objectPath,
-    objectSizeBytes: (await stat(request.objectPath)).size,
+    objectPath,
+    objectSizeBytes: (await stat(objectPath)).size,
     textSizeBytes: object.textSizeBytes,
     threads: object.threads,
   };
@@ -853,12 +894,16 @@ function everyBlockAtDepth(
   into: { block: SemanticBlock; depth: number }[] = [],
 ): { block: SemanticBlock; depth: number }[] {
   into.push({ block, depth });
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     if (statement.k === "if") {
-      everyBlockAtDepth(statement.then, depth, into);
-      if (statement.otherwise !== null) everyBlockAtDepth(statement.otherwise, depth, into);
-    } else if (statement.k === "loop") everyBlockAtDepth(statement.loop.body, depth + 1, into);
-    else if (statement.k === "block") everyBlockAtDepth(statement.body, depth, into);
+      everyBlockAtDepth(fieldOf(statement, "then") as SemanticBlock, depth, into);
+      const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+      if (String(otherwise) !== "null") everyBlockAtDepth(otherwise as SemanticBlock, depth, into);
+    } else if (statement.k === "loop") {
+      everyBlockAtDepth(fieldOf(fieldOf(statement, "loop"), "body") as SemanticBlock, depth + 1, into);
+    } else if (statement.k === "block") {
+      everyBlockAtDepth(fieldOf(statement, "body") as SemanticBlock, depth, into);
+    }
   }
   return into;
 }
@@ -918,34 +963,41 @@ function wholeConst(value: SemanticValue): number | null {
  */
 function packedDotOf(loop: SemanticLoop): PackedDot | null {
   if (loop.kind !== "counted") return null;
-  if (loop.inclusive || loop.down || loop.step !== null) return null;
-  if (loop.body.statements.length !== 1) return null;
-  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
-  const statement = loop.body.statements[0];
-  if (statement.k !== "set" || statement.op !== "+=") return null;
-  if (statement.name === loop.variable) return null;
-  const product = statement.value;
-  if (product.k !== "arith" || product.op !== "mul") return null;
-  const left = readOf(product.left, loop.variable);
-  const right = readOf(product.right, loop.variable);
+  if (String(fieldOf(loop, "inclusive")) === "true" ||
+      String(fieldOf(loop, "down")) === "true" ||
+      String(fieldOf(loop, "step")) !== "null") return null;
+  const loopBody = fieldOf(loop, "body") as SemanticBlock;
+  const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
+  if (statements.length !== 1) return null;
+  if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
+      String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
+  const statement = statements[0];
+  if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+  const variable = String(fieldOf(loop, "variable"));
+  if (String(fieldOf(statement, "name")) === variable) return null;
+  const product = fieldOf(statement, "value") as SemanticValue;
+  if (product.k !== "arith" || String(fieldOf(product, "op")) !== "mul") return null;
+  const left = readOf(fieldOf(product, "left") as SemanticValue, variable);
+  const right = readOf(fieldOf(product, "right") as SemanticValue, variable);
   if (left === null || right === null) return null;
   if (left.element !== "f64" || right.element !== "f64") return null;
   if (left.of === right.of) return null;
-  const from = wholeConst(loop.from);
+  const from = wholeConst(fieldOf(loop, "from") as SemanticValue);
   // A negative start makes the byte cursor a negative number of bytes, which the
   // shift that turns it back into an index would read as a very large one.
   if (from === null || from < 0) return null;
   // A bound that is the accumulator or the counter is a value the turns change,
   // and one read before the loop would be read once where the loop reads it
   // again.
-  if (namesIn(loop.to).some((name) => name === statement.name || name === loop.variable)) return null;
+  const to = fieldOf(loop, "to") as SemanticValue;
+  if (namesIn(to).some((name) => name === String(fieldOf(statement, "name")) || name === variable)) return null;
   return {
-    counter: loop.variable,
-    accumulator: statement.name,
+    counter: variable,
+    accumulator: String(fieldOf(statement, "name")),
     left: left.of,
     right: right.of,
     from,
-    bound: loop.to,
+    bound: to,
   };
 }
 
@@ -957,17 +1009,20 @@ function readOf(
   value: SemanticValue,
   counter: string,
 ): { readonly of: string; readonly element: string } | null {
-  if (value.k !== "element" || value.of.k !== "local") return null;
-  if (value.index.k !== "local" || value.index.name !== counter) return null;
-  if (value.type.kind !== "primitive") return null;
-  return { of: value.of.name, element: value.type.name };
+  const of = fieldOf(value, "of") as SemanticValue;
+  const index = fieldOf(value, "index") as SemanticValue;
+  const type = fieldOf(value, "type") as SemanticType;
+  if (value.k !== "element" || of.k !== "local") return null;
+  if (index.k !== "local" || String(fieldOf(index, "name")) !== counter) return null;
+  if (type.kind !== "primitive") return null;
+  return { of: String(fieldOf(of, "name")), element: type.name };
 }
 
 /** The names a value reads. */
 function namesIn(value: SemanticValue): string[] {
   const found: string[] = [];
   walkValues(value, (one) => {
-    if (one.k === "local") found.push(one.name);
+    if (one.k === "local") found.push(String(fieldOf(one, "name")));
   });
   return found;
 }
@@ -1024,24 +1079,33 @@ interface PackedSum {
  */
 function packedSumOf(loop: SemanticLoop): PackedSum | null {
   if (loop.kind !== "counted") return null;
-  if (loop.inclusive || loop.down || loop.step !== null) return null;
-  if (loop.body.statements.length !== 1) return null;
-  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
-  const statement = loop.body.statements[0];
-  if (statement.k !== "set" || statement.op !== "+=") return null;
-  if (statement.name === loop.variable) return null;
-  const from = wholeConst(loop.from);
+  if (String(fieldOf(loop, "inclusive")) === "true" ||
+      String(fieldOf(loop, "down")) === "true" ||
+      String(fieldOf(loop, "step")) !== "null") return null;
+  const loopBody = fieldOf(loop, "body") as SemanticBlock;
+  const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
+  if (statements.length !== 1) return null;
+  if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
+      String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
+  const statement = statements[0];
+  if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+  const variable = String(fieldOf(loop, "variable"));
+  const accumulator = String(fieldOf(statement, "name"));
+  if (accumulator === variable) return null;
+  const from = wholeConst(fieldOf(loop, "from") as SemanticValue);
   if (from === null || from < 0) return null;
-  if (namesIn(loop.to).some((name) => name === statement.name || name === loop.variable)) return null;
-  const census = new Census(statement.value, loop.variable, statement.name);
-  if (census.calls || !census.packable) return null;
+  const to = fieldOf(loop, "to") as SemanticValue;
+  if (namesIn(to).some((name) => name === accumulator || name === variable)) return null;
+  const added = fieldOf(statement, "value") as SemanticValue;
+  const census = new Census(added, variable, accumulator);
+  if (census.hasCalls || !census.isPackable) return null;
   return {
-    counter: loop.variable,
-    accumulator: statement.name,
-    added: statement.value,
+    counter: variable,
+    accumulator,
+    added,
     from,
-    bound: loop.to,
-    arrays: census.arrays,
+    bound: to,
+    arrays: census.arrayNames,
   };
 }
 
@@ -1082,43 +1146,63 @@ interface PackedWeighted {
  */
 function packedWeightedOf(loop: SemanticLoop): PackedWeighted | null {
   if (loop.kind !== "counted") return null;
-  if (loop.type.kind !== "primitive" || loop.type.name !== "i64") return null;
-  if (loop.down) return null;
-  if (loop.step !== null) {
-    const written = wholeLiteral(loop.step);
+  const loopType = fieldOf(loop, "type") as SemanticType;
+  if (loopType.kind !== "primitive" || loopType.name !== "i64") return null;
+  if (String(fieldOf(loop, "down")) === "true") return null;
+  const stepValue = fieldOf(loop, "step");
+  if (String(stepValue) !== "null") {
+    const written = wholeLiteral(stepValue as SemanticValue);
     if (written === null || written !== 1) return null;
   }
-  const from = wholeLiteral(loop.from);
+  const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
   if (from === null || from < 0) return null;
-  if (loop.body.releases.length > 0 || loop.body.terminator.k !== "next") return null;
-  const statements = loop.body.statements;
+  const loopBody = fieldOf(loop, "body") as SemanticBlock;
+  if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
+      String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
+  const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
   // `total += array[j] / weight; weight += step; step += 1`, nothing else.
   if (statements.length !== 3) return null;
+  const variable = String(fieldOf(loop, "variable"));
   const division = statements[0];
-  if (division.k !== "set" || division.op !== "+=" || division.name === loop.variable) return null;
-  const value = division.value;
-  if (value.k !== "arith" || value.op !== "div") return null;
-  if (value.type.kind !== "primitive" || value.type.name !== "f64") return null;
-  const element = value.left;
-  const divisor = value.right;
-  if (element.k !== "element" || element.of.k !== "local") return null;
-  if (element.index.k !== "local" || element.index.name !== loop.variable) return null;
-  if (element.type.kind !== "primitive" || element.type.name !== "f64") return null;
+  if (division.k !== "set" || String(fieldOf(division, "op")) !== "+=" ||
+      String(fieldOf(division, "name")) === variable) return null;
+  const value = fieldOf(division, "value") as SemanticValue;
+  if (value.k !== "arith" || String(fieldOf(value, "op")) !== "div") return null;
+  const valueType = fieldOf(value, "type") as SemanticType;
+  if (valueType.kind !== "primitive" || valueType.name !== "f64") return null;
+  const element = fieldOf(value, "left") as SemanticValue;
+  const divisor = fieldOf(value, "right") as SemanticValue;
+  const elementOf = fieldOf(element, "of") as SemanticValue;
+  const elementIndex = fieldOf(element, "index") as SemanticValue;
+  const elementType = fieldOf(element, "type") as SemanticType;
+  if (element.k !== "element" || elementOf.k !== "local") return null;
+  if (elementIndex.k !== "local" || String(fieldOf(elementIndex, "name")) !== variable) return null;
+  if (elementType.kind !== "primitive" || elementType.name !== "f64") return null;
   if (divisor.k !== "local") return null;
-  const weight = divisor.name;
-  const accumulator = division.name;
+  const weight = String(fieldOf(divisor, "name"));
+  const accumulator = String(fieldOf(division, "name"));
   // `weight += step`
   const stepped = statements[1];
-  if (stepped.k !== "set" || stepped.op !== "+=" || stepped.name !== weight) return null;
-  if (stepped.value.k !== "local") return null;
-  const step = stepped.value.name;
+  if (stepped.k !== "set" || String(fieldOf(stepped, "op")) !== "+=" ||
+      String(fieldOf(stepped, "name")) !== weight) return null;
+  const steppedValue = fieldOf(stepped, "value") as SemanticValue;
+  if (steppedValue.k !== "local") return null;
+  const step = String(fieldOf(steppedValue, "name"));
   // `step += 1`
   const advanced = statements[2];
-  if (advanced.k !== "set" || advanced.op !== "+=" || advanced.name !== step) return null;
-  if (advanced.value.k !== "const") return null;
-  const one = wholeLiteral(advanced.value);
+  if (advanced.k !== "set" || String(fieldOf(advanced, "op")) !== "+=" ||
+      String(fieldOf(advanced, "name")) !== step) return null;
+  const advancedValue = fieldOf(advanced, "value") as SemanticValue;
+  if (advancedValue.k !== "const") return null;
+  const one = wholeLiteral(advancedValue);
   if (one === null || one !== 1) return null;
-  return { counter: loop.variable, accumulator, array: element.of.name, weight, step };
+  return {
+    counter: variable,
+    accumulator,
+    array: String(fieldOf(elementOf, "name")),
+    weight,
+    step,
+  };
 }
 
 /**
@@ -1174,11 +1258,11 @@ function shallow(value: SemanticValue, depth = PACKED_RIGHT_DEPTH): boolean {
  */
 class Census {
   /** Whether anything under the addition calls, which a lane cannot do once. */
-  calls = false;
+  hasCalls = false;
   /** Whether every operation in the value has a packed form of the same value. */
-  packable = true;
+  isPackable = true;
   /** The arrays the value reads elements of, which a pair load reads beside. */
-  readonly arrays: string[] = [];
+  readonly arrayNames: string[] = [];
 
   /** The counter the value under the addition reads, which is the loop's own. */
   readonly counter: string;
@@ -1190,8 +1274,8 @@ class Census {
     this.counter = counter;
     this.accumulator = accumulator;
     walkValues(value, (one) => {
-      if (one.k === "call" || one.k === "newObject") this.calls = true;
-      if (!this.fits(one)) this.packable = false;
+      if (one.k === "call" || one.k === "newObject") this.hasCalls = true;
+      if (!this.fits(one)) this.isPackable = false;
     });
   }
 
@@ -1237,7 +1321,7 @@ class Census {
     if (value.of.k !== "local") return false;
     if (value.index.k !== "local" || value.index.name !== this.counter) return false;
     if (value.type.kind !== "primitive" || value.type.name !== "f64") return false;
-    if (!this.arrays.includes(value.of.name)) this.arrays.push(value.of.name);
+    if (!this.arrayNames.includes(String(fieldOf(fieldOf(value, "of"), "name")))) this.arrayNames.push(String(fieldOf(fieldOf(value, "of"), "name")));
     return true;
   }
 
@@ -1320,7 +1404,7 @@ class Census {
  * whole function is taken across.
  */
 function everyBlock(block: SemanticBlock, into: SemanticBlock[] = []): SemanticBlock[] {
-  for (const entry of everyBlockAtDepth(block)) into.push(entry.block);
+  for (const entry of everyBlockAtDepth(block, 0, [])) into.push(fieldOf(entry, "block") as SemanticBlock);
   return into;
 }
 
@@ -1336,30 +1420,41 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
     into.push(value);
     walkValues(value, (one) => { into.push(one); });
   };
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     switch (statement.k) {
       case "let":
       case "set":
       case "printText":
       case "printNumber":
       case "retain":
-      case "storeField": add(statement.value); break;
-      case "setElement": add(statement.index); add(statement.value); break;
-      case "if": add(statement.condition); break;
-      case "raise": add(statement.message); break;
-      case "call": add({ k: "call", type: statement.call.returns, call: statement.call }); break;
+      case "storeField": add(fieldOf(statement, "value") as SemanticValue); break;
+      case "setElement": add(fieldOf(statement, "index") as SemanticValue); add(fieldOf(statement, "value") as SemanticValue); break;
+      case "if": add(fieldOf(statement, "condition") as SemanticValue); break;
+      case "raise": add(fieldOf(statement, "message") as SemanticValue); break;
+      case "call": {
+        const call = fieldOf(statement, "call") as SemanticCall;
+        add({ k: "call", type: fieldOf(call, "returns") as SemanticType, call });
+        break;
+      }
       case "loop": {
-        const loop = statement.loop;
-        if (loop.kind === "counted") { add(loop.from); add(loop.to); add(loop.step); }
-        else if (loop.kind === "each") add(loop.length);
-        else add(loop.condition);
-        for (const nested of everyBlock(loop.body)) everyValue(nested, into);
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        if (loop.kind === "counted") {
+          add(fieldOf(loop, "from") as SemanticValue);
+          add(fieldOf(loop, "to") as SemanticValue);
+          add(fieldOf(loop, "step") as SemanticValue);
+        } else if (loop.kind === "each") {
+          add(fieldOf(loop, "length") as SemanticValue);
+        } else {
+          add(fieldOf(loop, "condition") as SemanticValue);
+        }
+        for (const nested of everyBlock(fieldOf(loop, "body") as SemanticBlock, [])) everyValue(nested, into);
         break;
       }
       default: break;
     }
   }
-  if (block.terminator.k === "return") add(block.terminator.value);
+  const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+  if (terminator.k === "return") add(fieldOf(terminator, "value") as SemanticValue);
   return into;
 }
 
@@ -1391,40 +1486,42 @@ function namesAViewReads(loop: SemanticLoop): Set<string> {
   // What the body declares, which is the turn's own: a name on this list is
   // read out of the register it was initialized in, not out of the frame.
   const own = new Set<string>();
-  for (const block of everyBlock(loop.body)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") own.add(statement.slot.name);
+  for (const block of everyBlock(fieldOf(loop, "body") as SemanticBlock, [])) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") own.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
       if (statement.k === "loop") {
-        const inner = statement.loop;
-        if (inner.kind === "counted") own.add(inner.variable);
+        const inner = fieldOf(statement, "loop") as SemanticLoop;
+        if (inner.kind === "counted") own.add(String(fieldOf(inner, "variable")));
         else if (inner.kind === "each") {
-          own.add(inner.index);
-          own.add(inner.element);
+          own.add(String(fieldOf(inner, "index")));
+          own.add(String(fieldOf(inner, "element")));
         }
       }
     }
   }
-  for (const block of everyBlock(loop.body)) {
-    for (const statement of block.statements) {
+  for (const block of everyBlock(fieldOf(loop, "body") as SemanticBlock, [])) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k === "set" || statement.k === "step") {
-        if (!own.has(statement.name)) names.add(statement.name);
+        const name = String(fieldOf(statement, "name"));
+        if (!own.has(name)) names.add(name);
       }
-      if (statement.k === "setElement") names.add(statement.buffer);
-      if (statement.k === "fill") names.add(statement.buffer);
-      if (statement.k === "loop" && statement.loop.kind === "each") names.add(statement.loop.of);
+      if (statement.k === "setElement") names.add(String(fieldOf(statement, "buffer")));
+      if (statement.k === "fill") names.add(String(fieldOf(statement, "buffer")));
+      if (statement.k === "loop" && String(fieldOf(fieldOf(statement, "loop"), "kind")) === "each") names.add(String(fieldOf(fieldOf(statement, "loop"), "of")));
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "local" && !own.has(inner.name)) names.add(inner.name);
+          if (inner.k === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
         });
       }
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
-      walkValues(block.terminator.value, (inner) => {
-        if (inner.k === "local" && !own.has(inner.name)) names.add(inner.name);
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    if (terminator.k === "return" && String(fieldOf(terminator, "value")) !== "null") {
+      walkValues(fieldOf(terminator, "value") as SemanticValue, (inner) => {
+        if (inner.k === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
       });
     }
   }
-  if (loop.kind === "each") names.add(loop.of);
+  if (loop.kind === "each") names.add(String(fieldOf(loop, "of")));
   return names;
 }
 
@@ -1435,11 +1532,12 @@ function namesAViewReads(loop: SemanticLoop): Set<string> {
  * the caller a function that has not returned at all.
  */
 function returnsFromItsBody(body: SemanticBlock): boolean {
-  for (const block of everyBlock(body)) {
+  for (const block of everyBlock(body, [])) {
     // A block nothing arrives at is one whose every path has already returned,
     // so a turn that reaches it returns out of the function on every one of them
     // — which is what this rule is about.
-    if (block.terminator.k === "return" || block.terminator.k === "unreachable") return true;
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    if (terminator.k === "return" || terminator.k === "unreachable") return true;
   }
   return false;
 }
@@ -1581,26 +1679,28 @@ const UNROLLABLE_STATEMENTS = 6;
  * somewhere else is a turn the unrolled loop cannot have written.
  */
 function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor: number; step: number } | null {
-  if (loop.region === true || loop.parallel !== undefined) return null;
-  if (loop.body.terminator.k !== "next") return null;
+  if (String(fieldOf(loop, "region")) === "true" || String(fieldOf(loop, "parallel")) !== "undefined") return null;
+  const loopBody = fieldOf(loop, "body") as SemanticBlock;
+  if (String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
   // A `continue` in a nested arm is the same early leave as one at the foot of
   // the body, and the body's own terminator does not show it: written out, the
   // turns of one trip stand one after another with nothing between them, and the
   // branch a `continue` takes lands on the trip counter this loop counts down
   // rather than on the next turn — so the counter never moves and the trip ends
   // after its first turn. `semantics/optimize-ir.ts` refuses the same body.
-  let earlyLeave = false;
-  const walkBlocks = (block: SemanticBlock): void => {
-    for (const statement of block.statements) {
-      for (const inner of statementBlocksOf(statement)) walkBlocks(inner);
+  function jumpsOut(block: SemanticBlock): boolean {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      for (const inner of statementBlocksOf(statement)) {
+        if (jumpsOut(inner)) return true;
+      }
     }
-    if (block.terminator.k === "jump") earlyLeave = true;
-  };
-  walkBlocks(loop.body);
-  if (earlyLeave) return null;
-  if (loop.body.statements.length > UNROLLABLE_STATEMENTS) return null;
-  if (bodyCalls(loop.body)) return null;
-  if (writesCounter(loop.body, loop.variable)) return null;
+    return String(fieldOf(fieldOf(block, "terminator"), "k")) === "jump";
+  }
+  if (jumpsOut(loopBody)) return null;
+  const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
+  if (statements.length > UNROLLABLE_STATEMENTS) return null;
+  if (bodyCalls(loopBody)) return null;
+  if (writesCounter(loopBody, String(fieldOf(loop, "variable")))) return null;
   // A body that is nothing but conditionals is left rolled, which is the one
   // shape writing it out does not pay for. Unrolling buys the removal of a
   // loop's test and step, and what it removes them from is the body's own work.
@@ -1615,20 +1715,22 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
   // cannot: `fCmp` over eleven limbs is a single `if` whose arms assign to one
   // name, and unrolling it put 284 instructions of duplicated guard into the
   // middle of an `fAddMod` called 1.7 million times per scalar multiplication.
-  if (loop.body.statements.length > 0 && loop.body.statements.every((statement) => statement.k === "if")) return null;
-  const from = wholeLiteral(loop.from);
-  const to = wholeLiteral(loop.to);
+  if (statements.length > 0 && statements.every((statement) => statement.k === "if")) return null;
+  const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
+  const to = wholeLiteral(fieldOf(loop, "to") as SemanticValue);
   if (from === null || to === null) return null;
   // A step written out carries its own sign, and a step left out is one turn in
   // the direction the loop counts in: both are what the rolled loop steps by.
-  const written = loop.step === null ? null : wholeLiteral(loop.step);
-  if (loop.step !== null && written === null) return null;
-  const step = written ?? (loop.down ? -1 : 1);
+  const stepValue = fieldOf(loop, "step");
+  const written = String(stepValue) === "null" ? null : wholeLiteral(stepValue as SemanticValue);
+  if (String(stepValue) !== "null" && written === null) return null;
+  const down = String(fieldOf(loop, "down")) === "true";
+  const step = written ?? (down ? -1 : 1);
   if (step === 0) return null;
-  const span = loop.down ? from - to : to - from;
-  const towards = loop.down ? -step : step;
+  const span = down ? from - to : to - from;
+  const towards = down ? -step : step;
   if (towards <= 0 || span < 0) return null;
-  const turns = loop.inclusive ? Math.floor(span / towards) + 1 : Math.ceil(span / towards);
+  const turns = String(fieldOf(loop, "inclusive")) === "true" ? Math.floor(span / towards) + 1 : Math.ceil(span / towards);
   if (!Number.isSafeInteger(turns) || turns < 2) return null;
   // A loop small enough to write out whole is written out whole: every turn
   // carries its own counter in the instruction and there is no trip counter,
@@ -1646,7 +1748,9 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
 /** The number a whole literal writes down, or null when it is not one. */
 function wholeLiteral(value: SemanticValue): number | null {
   if (value.k !== "const") return null;
-  const number = isFloatType(value.type) ? Number(decimalText(value.text)) : Number(integerText(value.text));
+  const type = fieldOf(value, "type") as SemanticType;
+  const text = String(fieldOf(value, "text"));
+  const number = isFloatType(type) ? Number(decimalText(text)) : Number(integerText(text));
   return Number.isSafeInteger(number) ? number : null;
 }
 
@@ -1701,25 +1805,36 @@ function isValueNode(node: unknown): node is SemanticValue {
  */
 function replaceOnce<T>(node: T, match: SemanticValue, replacement: SemanticValue): T {
   const found = valueKey(match);
-  let replaced = false;
-  let again = false;
-  function walk(node: unknown): unknown {
-    if (isValueNode(node) && valueKey(node) === found) {
-      if (replaced) again = true;
-      replaced = true;
-      return structuredClone(replacement);
-    }
-    if (Array.isArray(node)) return node.map((entry) => walk(entry));
-    if (node !== null && typeof node === "object") {
-      return Object.fromEntries(
-        Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, walk(entry)]),
-      );
-    }
-    return node;
-  }
-  const written = walk(node);
-  if (!replaced || again) throw machineError("a value a rewrite asks for once is not in it, or is in it twice");
+  const state: [boolean, boolean] = [false, false];
+  const written = walkReplace(node, found, replacement, state);
+  if (!state[0] || state[1]) throw machineError("a value a rewrite asks for once is not in it, or is in it twice");
   return written as T;
+}
+
+function walkReplace(
+  node: unknown,
+  found: string,
+  replacement: SemanticValue,
+  state: [boolean, boolean],
+): unknown {
+  if (isValueNode(node) && valueKey(node) === found) {
+    if (state[0]) state[1] = true;
+    state[0] = true;
+    return structuredClone(replacement);
+  }
+  if (Array.isArray(node)) {
+    const written: unknown[] = [];
+    for (const entry of node) written.push(walkReplace(entry, found, replacement, state));
+    return written;
+  }
+  if (node !== null && typeof node === "object") {
+    const pairs: [string, unknown][] = [];
+    for (const [name, entry] of Object.entries(node as Record<string, unknown>)) {
+      pairs.push([name, walkReplace(entry, found, replacement, state)]);
+    }
+    return Object.fromEntries(pairs);
+  }
+  return node;
 }
 
 /**
@@ -1796,6 +1911,17 @@ function readsLocal(value: SemanticValue, name: string): boolean {
  * width holds, so a run whose ends both hold is a run that holds between
  * them, and one whose first end does not hold is refused here.
  */
+function compareWithSides(compare: SemanticValue, left: SemanticValue, right: SemanticValue): SemanticValue {
+  return {
+    k: "compare",
+    type: fieldOf(compare, "type") as TypeExpr,
+    op: String(fieldOf(compare, "op")) as CompareOp,
+    operand: fieldOf(compare, "operand") as SemanticType,
+    left,
+    right,
+  };
+}
+
 function hoistableLeaf(
   leaf: SemanticValue,
   counter: string,
@@ -1804,33 +1930,35 @@ function hoistableLeaf(
   to: SemanticValue,
 ): SemanticValue | null {
   if (leaf.k === "local") {
-    if (!isBoolean(leaf.type) || writes(leaf.name)) return null;
+    if (!isBoolean(fieldOf(leaf, "type") as SemanticType) || writes(String(fieldOf(leaf, "name")))) return null;
     return structuredClone(leaf);
   }
   if (leaf.k !== "compare") return null;
-  if (leaf.op !== "le" && leaf.op !== "lt" && leaf.op !== "ge" && leaf.op !== "gt") return null;
+  if (String(fieldOf(leaf, "op")) !== "le" && String(fieldOf(leaf, "op")) !== "lt" && String(fieldOf(leaf, "op")) !== "ge" && String(fieldOf(leaf, "op")) !== "gt") return null;
   // The comparison is read at the widest unsigned width, where the side that
   // moves cannot pass the top of the width more than once over the whole run.
   // Anything narrower wraps at four billion, and a shape that wraps twice is
   // not one the ends answer for.
-  if (!isUnsigned(leaf.operand) || widthOf(leaf.operand) !== 8) return null;
-  const left = growthOf(leaf.left, counter, writes);
-  const right = growthOf(leaf.right, counter, writes);
+  if (!isUnsigned(fieldOf(leaf, "operand") as SemanticType) || widthOf(fieldOf(leaf, "operand") as SemanticType) !== 8) return null;
+  const left = growthOf(fieldOf(leaf, "left") as SemanticValue, counter, writes);
+  const right = growthOf(fieldOf(leaf, "right") as SemanticValue, counter, writes);
   if (left === null || right === null) return null;
   if (left !== 0 && right !== 0) return null;
   if (left === 0 && right === 0) return structuredClone(leaf);
   const growth = left !== 0 ? left : right;
   if (growth !== 1 && growth !== -1) return null;
   const growing = left !== 0;
-  const moving = growing ? leaf.left : leaf.right;
-  const standing = growing ? leaf.right : leaf.left;
+  const leafLeft = fieldOf(leaf, "left") as SemanticValue;
+  const leafRight = fieldOf(leaf, "right") as SemanticValue;
+  const moving = growing ? leafLeft : leafRight;
+  const standing = growing ? leafRight : leafLeft;
   const at = (end: SemanticValue): SemanticValue =>
     substituteLocals(
       structuredClone(moving),
       new Map([[counter, structuredClone(end) as SemanticValue]]),
     );
-  const atFrom = { ...leaf, left: growing ? at(from) : standing, right: growing ? standing : at(from) } as SemanticValue;
-  const atTo = { ...leaf, left: growing ? at(to) : standing, right: growing ? standing : at(to) } as SemanticValue;
+  const atFrom = compareWithSides(leaf, growing ? at(from) : standing, growing ? standing : at(from));
+  const atTo = compareWithSides(leaf, growing ? at(to) : standing, growing ? standing : at(to));
   // The certificate that the turns read the side in the order its arithmetic
   // says: the side moves by one per turn, so between the ends it moves in the
   // direction it moves in and by no more than the width holds — unless the
@@ -1840,17 +1968,23 @@ function hoistableLeaf(
   // did not fall, and with it the comparison holds where the ends hold.
   const certificate = {
     k: "compare",
-    type: leaf.type,
+    type: fieldOf(leaf, "type") as TypeExpr,
     op: growing ? "gt" : "lt",
-    operand: leaf.operand,
+    operand: fieldOf(leaf, "operand") as SemanticType,
     left: at(to),
     right: at(from),
   } as SemanticValue;
   return {
     k: "logical",
-    type: leaf.type,
+    type: fieldOf(leaf, "type") as SemanticType,
     op: "and",
-    left: { k: "logical", type: leaf.type, op: "and", left: atFrom, right: atTo } as SemanticValue,
+    left: {
+      k: "logical",
+      type: fieldOf(leaf, "type") as SemanticType,
+      op: "and",
+      left: atFrom,
+      right: atTo,
+    } as SemanticValue,
     right: certificate,
   };
 }
@@ -1872,21 +2006,21 @@ function growthOf(
       // A name the loop writes is not a number the turns keep: it is whatever
       // the body makes of it, and no shape of one makes it a step this pass
       // may count.
-      if (value.name === counter) return 1;
-      return writes(value.name) ? null : 0;
+      if (String(fieldOf(value, "name")) === counter) return 1;
+      return writes(String(fieldOf(value, "name"))) ? null : 0;
     case "arith": {
-      const left = growthOf(value.left, counter, writes);
-      const right = growthOf(value.right, counter, writes);
+      const left = growthOf(fieldOf(value, "left") as SemanticValue, counter, writes);
+      const right = growthOf(fieldOf(value, "right") as SemanticValue, counter, writes);
       if (left === null || right === null) return null;
-      if (value.op === "add") return left + right;
-      if (value.op === "sub") return left - right;
-      if (value.op === "mul") {
+      if (String(fieldOf(value, "op")) === "add") return left + right;
+      if (String(fieldOf(value, "op")) === "sub") return left - right;
+      if (String(fieldOf(value, "op")) === "mul") {
         // A product of two movers is a mover of the turns squared, which is no one
         // amount: only a move times a written number is a move the weight may
         // count.
         const amount =
-          left === 0 ? wholeLiteral(value.right)
-          : right === 0 ? wholeLiteral(value.left)
+          left === 0 ? wholeLiteral(fieldOf(value, "right") as SemanticValue)
+          : right === 0 ? wholeLiteral(fieldOf(value, "left") as SemanticValue)
           : null;
         const moving = left === 0 ? right : right === 0 ? left : null;
         if (amount === null || moving === null) return null;
@@ -1923,7 +2057,8 @@ function triangularOf(
   // shape of the arithmetic, and a chain of declarations is what the walk
   // chases through. One round of that per level is what a chain stands for.
   let resolved = arm;
-  for (let round = 0; round < 8 && lets.size > 0; round += 1) {
+  for (let round = 0; round < 8; round += 1) {
+    if (lets.size === 0) break;
     resolved = substituteLocals(resolved, lets);
   }
   const addends: SemanticValue[] = [];
@@ -1982,7 +2117,7 @@ function triangularOf(
  * eleven copies of nothing but a test and a step.
  */
 function bodyCalls(body: SemanticBlock): boolean {
-  for (const statement of body.statements) {
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     if (statementValues(statement).some(callsOut)) return true;
     for (const inner of statementBlocksOf(statement)) {
       if (bodyCalls(inner)) return true;
@@ -1996,7 +2131,10 @@ function callsOut(value: SemanticValue): boolean {
   let called = false;
   walkValues(value, (inner) => {
     if (called) return;
-    if (inner.k === "call" && INLINE_BUILTINS[inner.call.callee] === true) return;
+    if (inner.k === "call") {
+      const call = fieldOf(inner, "call") as SemanticCall;
+      if (isInlineBuiltin(String(fieldOf(call, "callee")))) return;
+    }
     if (hasCall(inner)) called = true;
   });
   return called;
@@ -2019,68 +2157,93 @@ function callsOut(value: SemanticValue): boolean {
  * its value, and a loop with one of those keeps the double it was given.
  */
 function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
-  // The walk is written out rather than taken from `walkValues` because that one
-  // steps into the index of an element, and the index of an element is the one
-  // place a counter turns up without its value being asked for. A walk built on
-  // it cannot leave an index alone: `walkValues` recurses into the index itself
-  // and calls the visitor with whatever it finds there.
-  function wants(value: SemanticValue): boolean {
-    switch (value.k) {
-      case "local":
-        return value.name === name;
-      case "element":
-        return wants(value.of);
-      case "text":
-        return value.parts.some((part) => part.k === "value" && wants(part.value));
-      case "length":
-      case "toText":
-        return wants(value.of);
-      case "isNull":
-      case "unary":
-        return wants(value.operand);
-      case "argv":
-        return value.index !== null && wants(value.index);
-      case "call":
-        return value.call.args.some((one) => wants(one));
-      case "arith":
-      case "compare":
-      case "logical":
-      case "coalesce":
-        return wants(value.left) || wants(value.right);
-      case "buffer":
-        return (
-          (value.count !== null && wants(value.count)) ||
-          (value.view !== null && (wants(value.view.of) || wants(value.view.offset))) ||
-          value.values.some((one) => wants(one))
-        );
-      case "loadField":
-        return wants(value.object);
-      case "newObject":
-        return value.fields.some((field) => wants(field.value));
-      case "select":
-        return wants(value.condition) || wants(value.then) || wants(value.otherwise);
-      default:
-        return false;
-    }
-  }
-  function walk(block: SemanticBlock): boolean {
-    for (const statement of block.statements) {
-      // The index of an element write is left out, and everything else the
-      // statement carries is walked.
-      if (statement.k === "setElement") {
-        if (wants(statement.value)) return true;
-      } else {
-        for (const value of statementValues(statement)) {
-          if (wants(value)) return true;
-        }
-      }
-      for (const inner of statementBlocksOf(statement)) {
-        if (walk(inner)) return true;
+  return blockReadsCounterAsValue(body, name);
+}
+
+function blockReadsCounterAsValue(block: SemanticBlock, name: string): boolean {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    // The index of an element write is left out, and everything else the
+    // statement carries is walked.
+    if (statement.k === "setElement") {
+      if (valueWantsName(fieldOf(statement, "value") as SemanticValue, name)) return true;
+    } else {
+      for (const value of statementValues(statement)) {
+        if (valueWantsName(value, name)) return true;
       }
     }
-    return false;
+    for (const inner of statementBlocksOf(statement)) {
+      if (blockReadsCounterAsValue(inner, name)) return true;
+    }
   }
-  return walk(body);
+  return false;
+}
+
+function valueWantsName(value: SemanticValue, name: string): boolean {
+  switch (value.k) {
+    case "local":
+      return String(fieldOf(value, "name")) === name;
+    case "element":
+      return valueWantsName(fieldOf(value, "of") as SemanticValue, name);
+    case "text": {
+      const parts = fieldOf(value, "parts") as readonly
+        ({ k: "text"; value: string } | { k: "value"; value: SemanticValue })[];
+      for (const part of parts) {
+        if (part.k === "value" && valueWantsName(fieldOf(part, "value") as SemanticValue, name)) return true;
+      }
+      return false;
+    }
+    case "length":
+    case "toText":
+      return valueWantsName(fieldOf(value, "of") as SemanticValue, name);
+    case "isNull":
+    case "unary":
+      return valueWantsName(fieldOf(value, "operand") as SemanticValue, name);
+    case "argv": {
+      const index = fieldOf(value, "index");
+      return String(index) !== "null" && valueWantsName(index as SemanticValue, name);
+    }
+    case "call": {
+      const call = fieldOf(value, "call") as SemanticCall;
+      for (const one of fieldOf(call, "args") as readonly SemanticValue[]) {
+        if (valueWantsName(one, name)) return true;
+      }
+      return false;
+    }
+    case "arith":
+    case "compare":
+    case "logical":
+    case "coalesce":
+      return valueWantsName(fieldOf(value, "left") as SemanticValue, name) ||
+        valueWantsName(fieldOf(value, "right") as SemanticValue, name);
+    case "buffer": {
+      const count = fieldOf(value, "count");
+      if (String(count) !== "null" && valueWantsName(count as SemanticValue, name)) return true;
+      const view = fieldOf(value, "view");
+      if (String(view) !== "null") {
+        const viewRecord = view as { of: SemanticValue; offset: SemanticValue };
+        if (valueWantsName(fieldOf(viewRecord, "of") as SemanticValue, name)) return true;
+        if (valueWantsName(fieldOf(viewRecord, "offset") as SemanticValue, name)) return true;
+      }
+      for (const one of fieldOf(value, "values") as readonly SemanticValue[]) {
+        if (valueWantsName(one, name)) return true;
+      }
+      return false;
+    }
+    case "loadField":
+      return valueWantsName(fieldOf(value, "object") as SemanticValue, name);
+    case "newObject": {
+      for (const field of fieldOf(value, "fields") as readonly { value: SemanticValue }[]) {
+        if (valueWantsName(fieldOf(field, "value") as SemanticValue, name)) return true;
+      }
+      return false;
+    }
+    case "select":
+      return valueWantsName(fieldOf(value, "condition") as SemanticValue, name) ||
+        valueWantsName(fieldOf(value, "then") as SemanticValue, name) ||
+        valueWantsName(fieldOf(value, "otherwise") as SemanticValue, name);
+    default:
+      return false;
+  }
 }
 
 /**
@@ -2101,16 +2264,18 @@ function readsCounterAsValue(body: SemanticBlock, name: string): boolean {
  */
 function wholeCountable(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
   const fits = (value: number): boolean => value >= -0x8000_0000 && value <= 0x7fff_ffff;
-  const from = wholeLiteral(loop.from);
-  const to = wholeLiteral(loop.to);
-  const step = loop.step === null ? (loop.down ? -1 : 1) : wholeLiteral(loop.step);
+  const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
+  const to = wholeLiteral(fieldOf(loop, "to") as SemanticValue);
+  const stepValue = fieldOf(loop, "step");
+  const down = String(fieldOf(loop, "down")) === "true";
+  const step = String(stepValue) === "null" ? (down ? -1 : 1) : wholeLiteral(stepValue as SemanticValue);
   return from !== null && to !== null && step !== null && fits(from) && fits(to) && fits(step);
 }
 
 /** Whether a loop's body writes the name the loop counts by, which the loop owns. */
 function writesCounter(body: SemanticBlock, name: string): boolean {
-  for (const statement of body.statements) {
-    if ((statement.k === "set" || statement.k === "step") && statement.name === name) return true;
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
+    if ((statement.k === "set" || statement.k === "step") && String(fieldOf(statement, "name")) === name) return true;
     for (const inner of statementBlocksOf(statement)) {
       if (writesCounter(inner, name)) return true;
     }
@@ -2205,14 +2370,17 @@ function bmi2OnItsOwn(target: TargetSpec): boolean {
  * as the two constructors that build one from its 64 bit limbs. Both are
  * values the compiler knows, so both count. */
 function wideConstantOf(value: SemanticValue): bigint | null {
-  if (value.k === "const") return isWideType(value.type) ? integerLiteral(value.text) : null;
-  if (value.k !== "call" || !isWideType(value.type)) return null;
-  const callee = value.call.callee;
+  const type = fieldOf(value, "type") as SemanticType;
+  if (value.k === "const") return isWideType(type) ? integerLiteral(String(fieldOf(value, "text"))) : null;
+  if (value.k !== "call" || !isWideType(type)) return null;
+  const call = fieldOf(value, "call") as SemanticCall;
+  const callee = String(fieldOf(call, "callee"));
   if (callee !== "u256_from_u64x2" && callee !== "u256_from_u64x4") return null;
+  const args = fieldOf(call, "args") as readonly SemanticValue[];
   let whole = 0n;
-  for (let at = 0; at < value.call.args.length; at += 1) {
-    const limb = value.call.args[at] as SemanticValue;
-    const part = limb.k === "const" ? integerLiteral(limb.text) : null;
+  for (let at = 0; at < args.length; at += 1) {
+    const limb = args[at];
+    const part = limb.k === "const" ? integerLiteral(String(fieldOf(limb, "text"))) : null;
     if (part === null || part < 0n || part >= (1n << 64n)) return null;
     whole |= part << BigInt(at * 64);
   }
@@ -2262,7 +2430,7 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
   // it holds what was meant: the symbol table it wrote is the whole answer, and
   // `nm` was two processes per function asked to repeat it.
   try {
-    return objectSymbols(readFileSync(objectPath));
+    return objectSymbols(readFileSync(objectPath, undefined as never));
   } catch (reason) {
     throw machineError(
       `cannot inspect the object of ${functionName}`,
@@ -2412,11 +2580,10 @@ function countedWithBody(
     header: String(fieldOf(loop, "header")),
     exit: String(fieldOf(loop, "exit")),
     body,
+    parallel: String(fieldOf(loop, "parallel")) === "true" ? true : undefined,
+    region: String(fieldOf(loop, "region")) === "true" ? true : undefined,
+    reductions: fieldOf(loop, "reductions") as Extract<SemanticLoop, { kind: "counted" }>["reductions"],
   };
-  if (String(fieldOf(loop, "parallel")) === "true") next.parallel = true;
-  if (String(fieldOf(loop, "region")) === "true") next.region = true;
-  const reductions = fieldOf(loop, "reductions");
-  if (String(reductions) !== "undefined") next.reductions = reductions as typeof next.reductions;
   return next;
 }
 
@@ -2580,7 +2747,7 @@ class Machine {
    * The slot whose value the accumulator holds, and where the code stood when
    * it last did — which is what `load` reads, and what nothing else may.
    */
-  private accumulator: { id: number; at: number } | null = null;
+  private accumulatorNote: { id: number; at: number } | null = null;
 
   /** The next identity a bound value is given, which no other value has. */
   private heldCount = 0;
@@ -2683,7 +2850,7 @@ class Machine {
     // fact about the path that fell through and about no other. That is what
     // makes a note about the accumulator safe to read on the far side of one.
     this.code.onBind = () => {
-      this.accumulator = null;
+      this.accumulatorNote = null;
     };
   }
 
@@ -2790,17 +2957,19 @@ class Machine {
     // saves three and an epilogue that reads them back are worth a few
     // instructions per call, and a function that computes a sum once has one
     // call to spend them on.
-    let arithmetic = 0;
-    const turning = (block: SemanticBlock, depth: number): void => {
-      for (const statement of block.statements) {
-        for (const inner of statementBlocksOf(statement)) turning(inner, depth + (statement.k === "loop" ? 1 : 0));
+    function turning(block: SemanticBlock, depth: number): number {
+      let count = 0;
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+        for (const inner of statementBlocksOf(statement)) count += turning(inner, depth + (statement.k === "loop" ? 1 : 0));
         if (depth === 0) continue;
         for (const value of statementValues(statement)) {
-          if (isFloatType(value.type) && (value.k === "arith" || value.k === "compare")) arithmetic += 1;
+          if (isFloatType(fieldOf(value, "type") as SemanticType) &&
+              (value.k === "arith" || value.k === "compare")) count += 1;
         }
       }
-    };
-    turning(this.fn.entry, 0);
+      return count;
+    }
+    const arithmetic = turning(fieldOf(this.fn, "entry") as SemanticBlock, 0);
     if (arithmetic === 0) return [];
     const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(arithmetic, TEMPORARY_VECTORS), 0));
@@ -2822,26 +2991,33 @@ class Machine {
    * than it counts a loop inside a loop.
    */
   private reserveBoundRegisters(taken: ReadonlySet<number>): number[] {
-    let deepest = 0;
-    const counting = (body: SemanticBlock, depth: number): void => {
-      for (const statement of body.statements) {
-        if (statement.k === "loop") {
-          if (statement.loop.kind === "counted" && this.holdsBound(statement.loop)) {
-            deepest = Math.max(deepest, depth + 1);
-          }
-          counting(statement.loop.body, depth + 1);
-        } else if (statement.k === "if") {
-          counting(statement.then, depth);
-          if (statement.otherwise !== null) counting(statement.otherwise, depth);
-        } else if (statement.k === "block") {
-          counting(statement.body, depth);
-        }
-      }
-    };
-    counting(this.fn.entry, 0);
+    const deepest = this.boundDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0);
     if (deepest === 0) return [];
     const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - deepest, 0));
+  }
+
+  /** How deeply bounds are held at once in a body. */
+  private boundDepth(body: SemanticBlock, depth: number): number {
+    let deepest = depth;
+    for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        if (loop.kind === "counted" && this.holdsBound(loop)) {
+          deepest = Math.max(deepest, depth + 1);
+        }
+        deepest = Math.max(deepest, this.boundDepth(fieldOf(loop, "body") as SemanticBlock, depth + 1));
+      } else if (statement.k === "if") {
+        deepest = Math.max(deepest, this.boundDepth(fieldOf(statement, "then") as SemanticBlock, depth));
+        const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+        if (String(otherwise) !== "null") {
+          deepest = Math.max(deepest, this.boundDepth(otherwise as SemanticBlock, depth));
+        }
+      } else if (statement.k === "block") {
+        deepest = Math.max(deepest, this.boundDepth(fieldOf(statement, "body") as SemanticBlock, depth));
+      }
+    }
+    return deepest;
   }
 
   /**
@@ -2872,29 +3048,32 @@ class Machine {
    * from the wrong number.
    */
   private reserveIndexRegisters(taken: ReadonlySet<number>): number[] {
-    let deepest = 0;
-    const counting = (body: SemanticBlock, depth: number): void => {
-      for (const statement of body.statements) {
-        if (statement.k === "loop") {
-          const loop = statement.loop;
-          if (
-            loop.kind === "counted" &&
-            isFloatType(loop.type) &&
-            wholeLiteral(loop.from) !== null &&
-            !writesCounter(loop.body, loop.variable)
-          ) {
-            deepest = Math.max(deepest, depth + 1);
-          }
-          counting(statement.loop.body, depth + 1);
-          continue;
-        }
-        for (const inner of statementBlocksOf(statement)) counting(inner, depth);
-      }
-    };
-    counting(this.fn.entry, 0);
+    const deepest = this.indexDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0);
     if (deepest === 0) return [];
     const free = [3, 12, 13, 14].filter((register) => !taken.has(register));
     return free.slice(0, Math.min(deepest, INDEX_REGISTERS));
+  }
+
+  /** How many index counters are open at once in a body. */
+  private indexDepth(body: SemanticBlock, depth: number): number {
+    let deepest = depth;
+    for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        if (loop.kind === "counted" &&
+            isFloatType(fieldOf(loop, "type") as SemanticType) &&
+            wholeLiteral(fieldOf(loop, "from") as SemanticValue) !== null &&
+            !writesCounter(fieldOf(loop, "body") as SemanticBlock, String(fieldOf(loop, "variable")))) {
+          deepest = Math.max(deepest, depth + 1);
+        }
+        deepest = Math.max(deepest, this.indexDepth(fieldOf(loop, "body") as SemanticBlock, depth + 1));
+        continue;
+      }
+      for (const inner of statementBlocksOf(statement)) {
+        deepest = Math.max(deepest, this.indexDepth(inner, depth));
+      }
+    }
+    return deepest;
   }
 
   /**
@@ -2907,22 +3086,29 @@ class Machine {
    * still being stepped while the inner loop turns.
    */
   private reserveWeightedRegisters(taken: ReadonlySet<number>): number[] {
-    let deepest = 0;
-    const turning = (body: SemanticBlock, depth: number): void => {
-      for (const statement of body.statements) {
-        if (statement.k === "loop") {
-          const loop = statement.loop;
-          if (loop.kind === "counted" && this.weightedPlan(loop) !== null) deepest = Math.max(deepest, depth + 1);
-          turning(loop.body, depth + 1);
-          continue;
-        }
-        for (const inner of statementBlocksOf(statement)) turning(inner, depth);
-      }
-    };
-    turning(this.fn.entry, 0);
+    const deepest = this.weightedDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0);
     if (deepest === 0) return [];
     const free = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].filter((register) => !taken.has(register));
     return free.slice(Math.max(free.length - Math.min(deepest * 2, free.length), 0));
+  }
+
+  /** How many weighted loops are open at once in a body. */
+  private weightedDepth(body: SemanticBlock, depth: number): number {
+    let deepest = depth;
+    for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        if (loop.kind === "counted" && this.weightedPlan(loop) !== null) {
+          deepest = Math.max(deepest, depth + 1);
+        }
+        deepest = Math.max(deepest, this.weightedDepth(fieldOf(loop, "body") as SemanticBlock, depth + 1));
+        continue;
+      }
+      for (const inner of statementBlocksOf(statement)) {
+        deepest = Math.max(deepest, this.weightedDepth(inner, depth));
+      }
+    }
+    return deepest;
   }
 
   /** One of the registers kept above, or null when none is left. */
@@ -3226,7 +3412,7 @@ class Machine {
     // The accumulator note is a claim about the register, and the address
     // arithmetic the walk takes it through is a claim nothing backs: it is
     // read back out of the frame again rather than believed.
-    this.accumulator = null;
+    this.accumulatorNote = null;
     const index = this.holdAcross(USIZE, "blaze_fill_index");
     this.code.movRegImm(RAX, 0n);
     this.store(index);
@@ -3241,7 +3427,7 @@ class Machine {
     this.code.lea(RCX, indexed(RCX, RAX, widthOf(element)));
     this.load(written);
     this.storeInto(element, RCX);
-    this.accumulator = null;
+    this.accumulatorNote = null;
     // The index is stepped before the test, the way every loop of this
     // lowering counts: the first turn runs at zero and the one after it at the
     // next number, and the test is where the walk comes back to.
@@ -3464,7 +3650,7 @@ class Machine {
       // A rounding is written here as instructions rather than as a call, so a
       // name live across one of them is live across arithmetic and not across
       // a callee writing over the registers the convention does not preserve.
-      (callee) => INLINE_BUILTINS[callee] !== true,
+      (callee) => !isInlineBuiltin(callee),
     );
     // The register each parameter arrives in, and the ones the parameters after
     // it arrive in. The prologue moves a parameter out of the register it
@@ -3654,7 +3840,7 @@ class Machine {
     const declarations = new Map<string, number>();
     const shared = new Set<string>();
     const walkCounters = (block: SemanticBlock, depth: number, enclosing: ReadonlySet<string>): void => {
-      for (const statement of block.statements) {
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         const declare = (name: string, type: SemanticType, asIndex = false, wholly = false): void => {
           declarations.set(name, (declarations.get(name) ?? 0) + 1);
           // A counter inside a loop of the same name is stepped while the
@@ -3663,16 +3849,17 @@ class Machine {
           const found = counters.get(name);
           // Nor can two that count in different types: the register one is
           // given is the register both are read out of.
-          if (found !== undefined && !typeEquals(found.type, type)) shared.add(name);
+          if (found !== undefined && !typeEquals(fieldOf(found, "type") as SemanticType, type)) shared.add(name);
           // A name one loop counts as a whole number and another counts as a
           // value is two different counters under one spelling.
-          if (found !== undefined && found.asIndex !== asIndex) shared.add(name);
+          if (found !== undefined && (String(fieldOf(found, "asIndex")) === "true") !== asIndex) shared.add(name);
           // Nor can two of which only one is counted in whole numbers: the one
           // that is has no double beside it and the other has.
-          if (found !== undefined && found.wholly !== wholly) shared.add(name);
+          if (found !== undefined && (String(fieldOf(found, "wholly")) === "true") !== wholly) shared.add(name);
           // The inner loop of a nested pair turns the most, so depth is what
           // says which counter is worth a register first.
-          counters.set(name, { depth: Math.max(found?.depth ?? 0, depth), type, asIndex, wholly });
+          const foundDepth = found === undefined ? 0 : Number(fieldOf(found, "depth"));
+          counters.set(name, { depth: Math.max(foundDepth, depth), type, asIndex, wholly });
         };
         if (statement.k !== "loop") {
           // A loop in an arm of an `if` is a loop like any other, and the
@@ -3681,7 +3868,7 @@ class Machine {
           for (const inner of statementBlocksOf(statement)) walkCounters(inner, depth, enclosing);
           continue;
         }
-        const loop = statement.loop;
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
         let inside: Set<string> | null = null;
         if (loop.kind === "counted") {
           // A counter the body reaches only as an index is counted in whole
@@ -3694,34 +3881,38 @@ class Machine {
           // That is a value the loop reads as often as anything else, and the
           // frame round trip of keeping it there is a load and a store on every
           // turn of it.
+          const variable = String(fieldOf(loop, "variable"));
+          const loopType = fieldOf(loop, "type") as SemanticType;
           declare(
-            loop.variable,
-            loop.type,
-            isFloatType(loop.type) && !readsCounterAsValue(loop.body, loop.variable),
+            variable,
+            loopType,
+            isFloatType(loopType) && !readsCounterAsValue(fieldOf(loop, "body") as SemanticBlock, variable),
             countsWholly(loop),
           );
-          inside = new Set(enclosing).add(loop.variable);
+          inside = new Set(enclosing).add(variable);
         } else if (loop.kind === "each") {
-          declarations.set(loop.element, (declarations.get(loop.element) ?? 0) + 1);
+          const element = String(fieldOf(loop, "element"));
+          declarations.set(element, (declarations.get(element) ?? 0) + 1);
           // A walk over an array steps its index once per turn and reads it
           // twice — once for the address and once for whatever the body does
           // with it — which is the same shape as a counted loop's counter and is
           // given a register for the same reason. Only the index is a candidate:
           // the element is the loop's own value and is written once per turn
           // from whatever the address produced.
-          declare(loop.index, INDEX);
-          inside = new Set(enclosing).add(loop.index);
+          const index = String(fieldOf(loop, "index"));
+          declare(index, INDEX);
+          inside = new Set(enclosing).add(index);
         }
-        walkCounters(loop.body, depth + 1, inside ?? enclosing);
+        walkCounters(fieldOf(loop, "body") as SemanticBlock, depth + 1, inside ?? enclosing);
       }
     };
-    walkCounters(this.fn.entry, 0, new Set());
+    walkCounters(fieldOf(this.fn, "entry") as SemanticBlock, 0, new Set());
     // A name anything other than a loop declares is left out as it was: it is
     // two bindings under one spelling, and which register either of them is in
     // cannot be said from here.
     const ordered = [...counters.entries()]
       .filter(([name]) => !shared.has(name) && declarationCount.get(name) === declarations.get(name))
-      .sort((left, right) => right[1].depth - left[1].depth);
+      .sort((left, right) => Number(fieldOf(right[1], "depth")) - Number(fieldOf(left[1], "depth")));
     // A counter nothing reads as a value is not pinned, where the loop is
     // counted in whole numbers. It is written into the whole-number register the
     // loop's index is read out of, so the vector register the general form would
@@ -3736,8 +3927,8 @@ class Machine {
     // load and a store on every turn, and the load is on the path the loop
     // carries its counter along.
     for (const [name, counter] of ordered) {
-      if (counter.asIndex && counter.wholly) continue;
-      assign(name, counter.type);
+      if (String(fieldOf(counter, "asIndex")) === "true" && String(fieldOf(counter, "wholly")) === "true") continue;
+      assign(name, fieldOf(counter, "type") as SemanticType);
     }
     // The register an object is filled in is claimed after every name that could
     // be pinned to one, so that a function which builds an object keeps the
@@ -3859,9 +4050,10 @@ class Machine {
    */
   private planTeams(): void {
     const visit = (block: SemanticBlock, inside: boolean): void => {
-      for (const statement of block.statements) {
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         if (statement.k === "loop") {
-          const team = inside ? null : this.teamFor(statement.loop);
+          const loop = fieldOf(statement, "loop") as SemanticLoop;
+          const team = inside ? null : this.teamFor(loop);
           if (team !== null) {
             this.teamed.add(team);
             // Everything the turn reads that is not its own is in the frame:
@@ -3869,20 +4061,21 @@ class Machine {
             // because a name read inside them is read inside this one — and
             // the names they declare are not, which is what leaves a turn's
             // own accumulator and counter worth a register.
-            for (const name of namesAViewReads(statement.loop)) this.turnNames.add(name);
+            for (const name of namesAViewReads(loop)) this.turnNames.add(name);
           }
-          visit(statement.loop.body, inside || team !== null);
+          visit(fieldOf(loop, "body") as SemanticBlock, inside || team !== null);
           continue;
         }
         if (statement.k === "if") {
-          visit(statement.then, inside);
-          if (statement.otherwise !== null) visit(statement.otherwise, inside);
+          visit(fieldOf(statement, "then") as SemanticBlock, inside);
+          const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+          if (String(otherwise) !== "null") visit(otherwise as SemanticBlock, inside);
           continue;
         }
-        if (statement.k === "block") visit(statement.body, inside);
+        if (statement.k === "block") visit(fieldOf(statement, "body") as SemanticBlock, inside);
       }
     };
-    visit(this.fn.entry, false);
+    visit(fieldOf(this.fn, "entry") as SemanticBlock, false);
   }
 
 
@@ -4154,7 +4347,7 @@ class Machine {
       // what the first read of that parameter is answered by.
       if (isFloatType(type)) {
         this.code.movsStore(frame(offset), register as number, widthOf(type) === 4);
-        if (register === XMM0) this.accumulator = { id: heldId, at: this.code.written };
+        if (register === XMM0) this.accumulatorNote = { id: heldId, at: this.code.written };
       }
     }
   }
@@ -4182,14 +4375,14 @@ class Machine {
     const register = fieldOf(held, "register") as number | null;
     const type = fieldOf(held, "type") as SemanticType;
     const offset = fieldOf(held, "offset") as number;
-    const accumulator = this.accumulator;
+    const accumulator = this.accumulatorNote;
     if (accumulator !== null &&
         (fieldOf(accumulator, "id") as number) === id &&
         (fieldOf(accumulator, "at") as number) === this.code.written) return;
     if (String(register) !== "null") {
       if (isFloatType(type)) this.code.movsMove(XMM0, register as number, widthOf(type) === 4);
       else this.code.movRegReg(RAX, register as number);
-      this.accumulator = { id, at: this.code.written };
+      this.accumulatorNote = { id, at: this.code.written };
       return;
     }
     if (isFloatType(type)) {
@@ -4197,7 +4390,7 @@ class Machine {
     } else {
       this.code.movRegMemSized(RAX, frame(offset), widthOf(type), signedOf(type));
     }
-    this.accumulator = { id, at: this.code.written };
+    this.accumulatorNote = { id, at: this.code.written };
   }
 
   /**
@@ -4274,7 +4467,7 @@ class Machine {
     if (String(register) !== "null") {
       if (isFloatType(type)) this.code.movsMove(register as number, XMM0, widthOf(type) === 4);
       else this.code.movRegReg(register as number, RAX);
-      this.accumulator = { id, at: this.code.written };
+      this.accumulatorNote = { id, at: this.code.written };
       return;
     }
     if (isFloatType(type)) {
@@ -4291,7 +4484,7 @@ class Machine {
     // of it, and reading it back would widen it again, so the accumulator after
     // the read is not the accumulator before it.
     if (widthOf(type) === 8 && !isWideType(type)) {
-      this.accumulator = { id, at: this.code.written };
+      this.accumulatorNote = { id, at: this.code.written };
     }
   }
 
@@ -4322,7 +4515,7 @@ class Machine {
     }
     if (isFloatType(type)) this.code.movsStore(frame(offset), register, widthOf(type) === 4);
     else this.code.movMemRegSized(frame(offset), register, widthOf(type));
-    this.accumulator = null;
+    this.accumulatorNote = null;
   }
 
   /**
@@ -4519,21 +4712,22 @@ class Machine {
   private localReads(name: string): number {
     let count = 0;
     const walk = (block: SemanticBlock): void => {
-      for (const statement of block.statements) {
+      for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         for (const value of statementValues(statement)) {
           walkValues(value, (one) => {
-            if (one.k === "local" && one.name === name) count += 1;
+            if (one.k === "local" && String(fieldOf(one, "name")) === name) count += 1;
           });
         }
         for (const nested of statementBlocksOf(statement)) walk(nested);
       }
-      if (block.terminator.k === "return" && block.terminator.value !== null) {
-        walkValues(block.terminator.value, (one) => {
-          if (one.k === "local" && one.name === name) count += 1;
+      const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+      if (terminator.k === "return" && String(fieldOf(terminator, "value")) !== "null") {
+        walkValues(fieldOf(terminator, "value") as SemanticValue, (one) => {
+          if (one.k === "local" && String(fieldOf(one, "name")) === name) count += 1;
         });
       }
     };
-    walk(this.fn.entry);
+    walk(fieldOf(this.fn, "entry") as SemanticBlock);
     return count;
   }
 
@@ -4583,7 +4777,7 @@ class Machine {
     const nextOtherwise = fieldOf(next, "otherwise") as SemanticBlock | null;
     this.code.jcc("e", String(nextOtherwise) === "null" ? end : otherwise);
     // The accumulator no longer holds anything meaningful past the test.
-    this.accumulator = null;
+    this.accumulatorNote = null;
     this.block(nextThen);
     if (String(nextOtherwise) !== "null") {
       const otherwiseBlock = nextOtherwise as SemanticBlock;
@@ -4667,7 +4861,7 @@ class Machine {
         this.at(value, type);
         const held = this.bind(name, type);
         if (name.startsWith("blaze_limb_")) {
-          this.accumulator = { id: fieldOf(held, "id") as number, at: this.code.written };
+          this.accumulatorNote = { id: fieldOf(held, "id") as number, at: this.code.written };
           return;
         }
         this.store(held);
@@ -5112,7 +5306,7 @@ class Machine {
       else this.code.alu(operation as "add" | "sub" | "and" | "or" | "xor", register, RAX, wide);
     }
     this.normalizeArithmetic(type, register);
-    this.accumulator = null;
+    this.accumulatorNote = null;
   }
 
   /**
@@ -5152,7 +5346,7 @@ class Machine {
     // The answer went into the register the name is kept in, so nothing the
     // accumulator was noted as holding at the turn of this statement is what it
     // holds now.
-    this.accumulator = null;
+    this.accumulatorNote = null;
     return true;
   }
 
@@ -5392,10 +5586,10 @@ class Machine {
       const outer = this.used;
       const spares = this.spareSlots.length;
       const borrowed = this.borrowed.length;
-      const accumulator = this.accumulator;
+      const accumulator = this.accumulatorNote;
       this.spareSlots.length = 0;
       this.borrowed.length = 0;
-      this.accumulator = null;
+      this.accumulatorNote = null;
       this.code.bind(String(fieldOf(turn, "label")));
       // The names the turn reads out of the frame, hot enough that a register
       // of its own is worth having: the turn reads the frame it copied, so the
@@ -5468,7 +5662,7 @@ class Machine {
       this.used = outer;
       this.spareSlots.length = spares;
       this.borrowed.length = borrowed;
-      this.accumulator = accumulator;
+      this.accumulatorNote = accumulator;
     }
     this.turns.length = 0;
   }
@@ -6679,7 +6873,7 @@ class Machine {
         (entry) =>
           entry.k === "let" &&
           String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
-          !everyValue(guardedBody).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
+          !everyValue(guardedBody, []).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
       );
       if (dead.length === 0) break;
       const gone = new Set(dead);
@@ -6715,7 +6909,7 @@ class Machine {
           (entry) =>
             entry.k === "let" &&
             String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
-            !everyValue(tryBody).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
+            !everyValue(tryBody, []).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
         );
         if (dead.length === 0) break;
         const gone = new Set(dead);
@@ -6872,7 +7066,13 @@ class Machine {
     // A loop whose turns are known before the first of them is written out as
     // the turns it is, each with the counter at the value that turn has.
     const plan = unrollPlan(loop);
-    if (plan !== null && this.unrolledCounted(loop, labels, plan.factor, plan.step)) return;
+    if (plan !== null &&
+        this.unrolledCounted(
+          loop,
+          labels,
+          fieldOf(plan, "factor") as number,
+          fieldOf(plan, "step") as number,
+        )) return;
     // The variable is bound before the loop's own values are read, because
     // whether it has a register decides whether the value the loop starts from
     // needs a slot of its own: a counter in a register is written straight from
@@ -7570,10 +7770,10 @@ class Machine {
     const held = this.slot(String(fieldOf(side, "name")));
     // The accumulator is asked whether it holds this slot rather than told, so
     // a form that moved it on the way to the comparison leaves nothing behind.
-    const accumulator = this.accumulator;
+    const accumulator = this.accumulatorNote;
     const id = fieldOf(held, "id") as number;
     if (accumulator === null || (fieldOf(accumulator, "id") as number) !== id) return;
-    this.accumulator = { id, at: this.code.written };
+    this.accumulatorNote = { id, at: this.code.written };
   }
 
   /**
@@ -8769,7 +8969,7 @@ class Machine {
    * read the accumulator can answer.
    */
   private heldByAccumulator(value: SemanticValue): boolean {
-    const accumulator = this.accumulator;
+    const accumulator = this.accumulatorNote;
     if (value.k !== "local" || accumulator === null) return false;
     if ((fieldOf(accumulator, "at") as number) !== this.code.written) return false;
     const held = this.slots.get(this.names.read(String(fieldOf(value, "name"))));
@@ -8840,7 +9040,7 @@ class Machine {
    * and nothing downstream may read it from there.
    */
   private wideLoad(held: Held): void {
-    const limbs = this.limbsOf(held.type);
+    const limbs = this.limbsOf(fieldOf(held, "type") as SemanticType);
     for (let limb = 0; limb < limbs; limb += 1) {
       this.code.movRegMemSized([8, 9, 10, 11][limb], this.limbOf(held.offset, limb), 8, false);
     }
@@ -10903,8 +11103,8 @@ class Machine {
   private callValue(call: SemanticCall, wanted: SemanticType | null, sret: Held | null = null): void {
     const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
     const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
-    const signature = fieldOf(call, "signature") as { params: readonly { name: string; type: string }[]; symbol: string };
     const returns = fieldOf(call, "returns") as SemanticType;
+    const signature = fieldOf(call, "signature") as { params: readonly { name: string; type: string }[]; symbol: string };
     if (String(fieldOf(call, "through")) !== "undefined") {
       // A call through a closure is a call of an address the value holds, and
       // this backend makes every call a call of a symbol it names.
@@ -11177,56 +11377,59 @@ class Machine {
    * A call the compiler itself provides. Each is what the C library has by the
    */
   private builtin(call: SemanticCall): void {
+    const args = fieldOf(call, "args") as readonly SemanticValue[];
+    const callee = String(fieldOf(call, "callee"));
+    const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
     // The HTTP calls carry their handles and their text in the runtime's own
     // way, so they are written before the generic path: a handle is a pointer
     // and a text is a pointer to the bytes, and neither is a number the
     // convention would carry in a vector register.
     if (this.httpBuiltin(call)) return;
-    const argument = call.args[0];
-    if (call.callee === ARGV_LENGTH) {
+    const argument = args[0];
+    if (callee === ARGV_LENGTH) {
       this.runtime("_argv_count");
       return;
     }
-    if (call.callee === "argv") {
+    if (callee === "argv") {
       this.at(argument, USIZE);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_argv");
       return;
     }
-    if (call.callee === "Math.fround" && call.args[0] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "Math.fround" && args[0] !== undefined) {
+      this.at(args[0], NUMBER);
       this.runtime("_fround");
       return;
     }
-    if (call.callee === "Math.floor") {
+    if (callee === "Math.floor") {
       this.at(argument, NUMBER);
       this.roundDown();
       return;
     }
-    if (call.callee === "tl.program_id") {
+    if (callee === "tl.program_id") {
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
-    if (call.callee === "tl.math.exp") {
-      this.at(call.args[0], NUMBER);
+    if (callee === "tl.math.exp") {
+      this.at(args[0], NUMBER);
       this.external("exp");
       this.callForeign("exp");
       return;
     }
-    if (call.callee === "tl.arange") {
+    if (callee === "tl.arange") {
       // Block range: a single program instance covers one block, so the
       // range is [0, end) on the CPU fallback.
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
-    if (call.callee === "tl.load") {
-      this.at(call.args[0], NUMBER);
+    if (callee === "tl.load") {
+      this.at(args[0], NUMBER);
       return;
     }
-    if (call.callee === "tl.store") {
+    if (callee === "tl.store") {
       return;
     }
-    if (call.callee === "array.new") {
+    if (callee === "array.new") {
       this.code.movRegImm(RDI, 0n);
       this.code.movRegImm(RSI, 8n);
       this.runtime("_array_new");
@@ -11244,10 +11447,10 @@ class Machine {
     // A record copied, and a field of it written: the runtime copies the block
     // the handle names and sets the field the layout describes. Every argument
     // is a number the handle is carried in but the field's name, which is text.
-    if (call.callee === "object.copy" || call.callee.startsWith("object.set.")) {
+    if (callee === "object.copy" || callee.startsWith("object.set.")) {
       const held: Held[] = [];
-      for (const [at, argument] of call.args.entries()) {
-        const type = call.argTypes[at] ?? argument.type;
+      for (const [at, argument] of args.entries()) {
+        const type = argTypes[at] ?? (fieldOf(argument, "type") as SemanticType);
         const carries = isTextType(type) || isSequence(type) ? POINTER : NUMBER;
         // An unshaped reference is a double here, exactly as it is when a
         // promise settles a value.
@@ -11257,24 +11460,24 @@ class Machine {
         this.store(slot);
         held.push(slot);
       }
-      this.callSymbol(`blaze_rt_${call.callee.replace(/\./g, "_")}`, held, NUMBER);
+      this.callSymbol(`blaze_rt_${callee.replace(/\./g, "_")}`, held, NUMBER);
       return;
     }
-    if (call.callee === "JSON.stringify.pretty") {
+    if (callee === "JSON.stringify.pretty") {
       const held = this.hold(NUMBER, "blaze_json_value");
       // An unshaped reference is a double here, exactly as it is when a
       // promise settles a value.
-      const valueType = call.argTypes[0] ?? NUMBER;
+      const valueType = argTypes[0] ?? NUMBER;
       const carries = valueType.kind === "ref" && valueType.of === null && valueType.name === undefined ? NUMBER : valueType;
-      this.at(call.args[0] as never, carries);
+      this.at(args[0] as never, carries);
       this.store(held);
       const spaces = this.hold(NUMBER, "blaze_json_indent");
-      this.at(call.args[1] as never, call.argTypes[1] ?? NUMBER);
+      this.at(args[1] as never, argTypes[1] ?? NUMBER);
       this.store(spaces);
       this.callSymbol("blaze_rt_json_object", [held, spaces], TEXT);
       return;
     }
-    if (call.callee === "JSON.stringify" && argument !== undefined) {
+    if (callee === "JSON.stringify" && argument !== undefined) {
       const held = this.dynamicArgument(argument);
       this.callSymbol("blaze_rt_json_stringify", [held], NUMBER);
       const json = this.hold(NUMBER, "blaze_json");
@@ -11282,7 +11485,7 @@ class Machine {
       this.callSymbol("blaze_rt_to_text", [json], TEXT);
       return;
     }
-    if (call.callee === "Date.parse" && argument !== undefined) {
+    if (callee === "Date.parse" && argument !== undefined) {
       // The text goes down as the box it is, and the runtime reads it at the
       // box; the answer is the fraction the language holds it as.
       this.at(argument, TEXT);
@@ -11291,37 +11494,37 @@ class Machine {
       this.callSymbol("blaze_rt_date_parse", [text], NUMBER);
       return;
     }
-    if (call.callee === "fs.readFileSync" && call.args[0] !== undefined && call.args[1] !== undefined) {
+    if (callee === "fs.readFileSync" && args[0] !== undefined && args[1] !== undefined) {
       // The path and the mode are the texts they are written as, and the answer
       // is the handle the runtime carries the text in: this backend keeps a
       // dynamic value as the bits of the double the handle is.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_file_path");
       this.store(path);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const mode = this.hold(TEXT, "blaze_file_mode");
       this.store(mode);
       this.callSymbol("blaze_rt_file_read", [path, mode], NUMBER);
       this.dynamicResult();
       return;
     }
-    if (call.callee === "blaze_rt_sha256_create") {
+    if (callee === "blaze_rt_sha256_create") {
       // The hasher is a handle the runtime made and keeps: it answers the
       // double that names one, and the chain hands it back to the next call.
       this.callSymbol("blaze_rt_sha256_create", [], NUMBER);
       return;
     }
-    if (call.callee === "blaze_rt_sha256_update" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "blaze_rt_sha256_update" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], NUMBER);
       const hasher = this.hold(NUMBER, "blaze_hasher");
       this.store(hasher);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_hash_text");
       this.store(text);
       this.callSymbol("blaze_rt_sha256_update", [hasher, text], NUMBER);
       return;
     }
-    if (call.callee === "blaze_rt_sha256_digest" && argument !== undefined) {
+    if (callee === "blaze_rt_sha256_digest" && argument !== undefined) {
       this.at(argument, NUMBER);
       const hasher = this.hold(NUMBER, "blaze_hasher");
       this.store(hasher);
@@ -11332,56 +11535,56 @@ class Machine {
       this.runtime("_to_text");
       return;
     }
-    if (call.callee === "posix.dirname" && argument !== undefined) {
+    if (callee === "posix.dirname" && argument !== undefined) {
       this.at(argument, TEXT);
       const text = this.hold(TEXT, "blaze_path_text");
       this.store(text);
       this.callSymbol("blaze_rt_path_dirname", [text], TEXT);
       return;
     }
-    if (call.callee === "posix.normalize" && argument !== undefined) {
+    if (callee === "posix.normalize" && argument !== undefined) {
       this.at(argument, TEXT);
       const text = this.hold(TEXT, "blaze_path_text");
       this.store(text);
       this.callSymbol("blaze_rt_path_normalize", [text], TEXT);
       return;
     }
-    if (call.callee === "posix.join" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "posix.join" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const left = this.hold(TEXT, "blaze_path_left");
       this.store(left);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const right = this.hold(TEXT, "blaze_path_right");
       this.store(right);
       this.callSymbol("blaze_rt_path_join", [left, right], TEXT);
       return;
     }
-    if (call.callee === "blaze_rt_object_has_field" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], POINTER);
+    if (callee === "blaze_rt_object_has_field" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], POINTER);
       const object = this.hold(POINTER, "blaze_has_object");
       this.store(object);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const field = this.hold(TEXT, "blaze_has_field");
       this.store(field);
       this.callSymbol("blaze_rt_object_has_field", [object, field], NUMBER);
       return;
     }
-    if (call.callee === "JSON.parse" && argument !== undefined) {
+    if (callee === "JSON.parse" && argument !== undefined) {
       const text = this.dynamicArgument(argument);
       this.callSymbol("blaze_rt_json_parse", [text], NUMBER);
       this.dynamicResult();
       return;
     }
-    if (call.callee === "JSON.get" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      const object = this.dynamicArgument(call.args[0]);
-      this.at(call.args[1], TEXT);
+    if (callee === "JSON.get" && args[0] !== undefined && args[1] !== undefined) {
+      const object = this.dynamicArgument(args[0]);
+      this.at(args[1], TEXT);
       const field = this.hold(TEXT, "blaze_field");
       this.store(field);
       this.callSymbol("blaze_rt_json_get", [object, field], NUMBER);
       this.dynamicResult();
       return;
     }
-    if (call.callee === "JSON.typeof" && argument !== undefined) {
+    if (callee === "JSON.typeof" && argument !== undefined) {
       // The name `typeof` answers for a value the read could not type. The
       // value goes down as the handle or the number it is, and the runtime
       // answers the text that names its kind.
@@ -11389,7 +11592,7 @@ class Machine {
       this.callSymbol("blaze_rt_type_of", [value], TEXT);
       return;
     }
-    if (call.callee === SHARED) {
+    if (callee === SHARED) {
       // A block of bytes the program lays out is the allocator's answer: the
       // count is read as a size and the block is handed back, which is what
       // the C driver writes the same call as.
@@ -11398,7 +11601,7 @@ class Machine {
       this.runtime("_allocate");
       return;
     }
-    if (call.callee === "Promise") {
+    if (callee === "Promise") {
       this.external("blaze_promise_new");
       this.callForeign("blaze_promise_new");
       // The runtime answers the promise as the address it holds, and the
@@ -11412,32 +11615,34 @@ class Machine {
       this.code.movRegReg(RDI, RAX);
       this.external("blaze_promise_set_current");
       this.callForeign("blaze_promise_set_current");
-      const cb = call.args[0];
+      const cb = args[0];
       if (cb.k === "functionRef") {
-        const captures = Array.isArray(cb.captures) ? cb.captures : [];
-        const args = captures.map((capture) => this.slot(capture.name));
-        this.external(cb.name);
-        this.callSymbol(cb.name, args, { kind: "void" });
+        const captures = Array.isArray(fieldOf(cb, "captures"))
+          ? fieldOf(cb, "captures") as readonly { name: string }[]
+          : [];
+        const captureArgs = captures.map((capture) => this.slot(String(fieldOf(capture, "name"))));
+        this.external(String(fieldOf(cb, "name")));
+        this.callSymbol(String(fieldOf(cb, "name")), captureArgs, { kind: "void" });
       }
       this.external("blaze_promise_clear_current");
       this.callForeign("blaze_promise_clear_current");
       this.load(slot);
       this.code.zeroFloat(XMM0);
       this.code.cvtIntToFloat(XMM0, RAX, false);
-      this.accumulator = null;
+      this.accumulatorNote = null;
       return;
     }
-    if (call.callee === "Promise.failed" || call.callee === "Promise.message") {
+    if (callee === "Promise.failed" || callee === "Promise.message") {
       // The handle is the number the promise's address is, and the runtime
       // reads the promise that address points at: a failed promise answers 1
       // and the message it failed with, which is a text the runtime holds.
       this.at(argument, NUMBER);
       this.code.cvtFloatToInt(RAX, XMM0, false, true);
       this.code.movRegReg(RDI, RAX);
-      const symbol = call.callee === "Promise.failed" ? "blaze_promise_failed" : "blaze_promise_message";
+      const symbol = callee === "Promise.failed" ? "blaze_promise_failed" : "blaze_promise_message";
       this.external(symbol);
       this.callForeign(symbol);
-      if (call.callee === "Promise.message") {
+      if (callee === "Promise.message") {
         // Reading the message is what handles the failure: the pending error
         // flag is what an async function's promise settles on, so it is
         // cleared here while the message is held.
@@ -11449,24 +11654,24 @@ class Machine {
       }
       return;
     }
-    if (call.callee === "Promise.await" || call.callee === "Promise.await.whole" || call.callee === "Promise.await.text" || call.callee === "Promise.await.bool" || call.callee === "Promise.await.value" || call.callee === "Promise.await.nothing") {
-      this.at(call.args[0], NUMBER);
+    if (callee === "Promise.await" || callee === "Promise.await.whole" || callee === "Promise.await.text" || callee === "Promise.await.bool" || callee === "Promise.await.value" || callee === "Promise.await.nothing") {
+      this.at(args[0], NUMBER);
       // The handle is the number the promise's address is, and the runtime
       // reads the promise that address points at.
       this.code.cvtFloatToInt(RAX, XMM0, false, true);
       this.code.movRegReg(RDI, RAX);
-      if (call.callee === "Promise.await.text") {
+      if (callee === "Promise.await.text") {
         this.external("blaze_promise_await_text");
         this.callForeign("blaze_promise_await_text");
         return;
       }
-      if (call.callee === "Promise.await.whole") {
+      if (callee === "Promise.await.whole") {
         this.external("blaze_promise_await");
         this.callForeign("blaze_promise_await");
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
         return;
       }
-      if (call.callee === "Promise.await.bool") {
+      if (callee === "Promise.await.bool") {
         this.external("blaze_promise_await");
         this.callForeign("blaze_promise_await");
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
@@ -11474,12 +11679,12 @@ class Machine {
         this.code.setcc("ne", RAX);
         return;
       }
-      if (call.callee === "Promise.await.value") {
+      if (callee === "Promise.await.value") {
         this.external("blaze_promise_await_value");
         this.callForeign("blaze_promise_await_value");
         return;
       }
-      if (call.callee === "Promise.await.nothing") {
+      if (callee === "Promise.await.nothing") {
         this.external("blaze_promise_await_nothing");
         this.callForeign("blaze_promise_await_nothing");
         this.code.xorFloat(XMM0, XMM0);
@@ -11489,22 +11694,22 @@ class Machine {
       this.callForeign("blaze_promise_await");
       return;
     }
-    if (call.callee.startsWith("Promise.resolve") || call.callee.startsWith("Promise.settle")) {
-      const settled = call.callee.startsWith("Promise.settle");
+    if (callee.startsWith("Promise.resolve") || callee.startsWith("Promise.settle")) {
+      const settled = callee.startsWith("Promise.settle");
       const symbol = settled ? "blaze_promise_settled" : "blaze_promise_resolved";
-      if (call.callee.endsWith(".text")) {
-        this.at(call.args[0], TEXT);
+      if (callee.endsWith(".text")) {
+        this.at(args[0], TEXT);
         this.code.movRegReg(RDI, RAX);
         this.external(`${symbol}_text`);
         this.callForeign(`${symbol}_text`);
-      } else if (call.callee.endsWith(".bool")) {
-        this.at(call.args[0], TRUTH);
+      } else if (callee.endsWith(".bool")) {
+        this.at(args[0], TRUTH);
         this.code.cvtIntToFloat(XMM0, RAX, false);
         this.external(`${symbol}_number`);
         this.callForeign(`${symbol}_number`);
       } else {
-        this.at(call.args[0], NUMBER);
-        const name = call.callee.endsWith(".value") ? `${symbol}_value` : `${symbol}_number`;
+        this.at(args[0], NUMBER);
+        const name = callee.endsWith(".value") ? `${symbol}_value` : `${symbol}_number`;
         this.external(name);
         this.callForeign(name);
       }
@@ -11513,15 +11718,15 @@ class Machine {
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return;
     }
-    if (call.callee === "Promise.resolve.nothing" || call.callee === "Promise.settle.nothing") {
-      const name = call.callee === "Promise.settle.nothing" ? "blaze_promise_settled_null" : "blaze_promise_resolved_null";
+    if (callee === "Promise.resolve.nothing" || callee === "Promise.settle.nothing") {
+      const name = callee === "Promise.settle.nothing" ? "blaze_promise_settled_null" : "blaze_promise_resolved_null";
       this.external(name);
       this.callForeign(name);
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return;
     }
-    if (call.callee === "Promise.reject") {
-      const message = call.args[0];
+    if (callee === "Promise.reject") {
+      const message = args[0];
       if (message !== undefined && isTextType(message.type)) {
         this.at(message, TEXT);
         this.code.movRegReg(RDI, RAX);
@@ -11538,8 +11743,8 @@ class Machine {
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return;
     }
-    if (call.callee === "resolve") {
-      const value = call.args[0];
+    if (callee === "resolve") {
+      const value = args[0];
       if (value !== undefined && isTextType(value.type)) {
         this.at(value, TEXT);
         this.code.movRegReg(RDI, RAX);
@@ -11553,15 +11758,15 @@ class Machine {
         this.external("blaze_promise_resolve_current_value");
         this.callForeign("blaze_promise_resolve_current_value");
       } else {
-        this.at(call.args[0], call.argTypes[0] ?? NUMBER);
+        this.at(args[0], argTypes[0] ?? NUMBER);
         this.external("blaze_promise_resolve_current");
         this.callForeign("blaze_promise_resolve_current");
       }
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
-    if (call.callee === "reject") {
-      const message = call.args[0];
+    if (callee === "reject") {
+      const message = args[0];
       if (message !== undefined && isTextType(message.type)) {
         this.at(message, TEXT);
         this.code.movRegReg(RDI, RAX);
@@ -11578,7 +11783,7 @@ class Machine {
       this.code.xorFloat(XMM0, XMM0);
       return;
     }
-    if (call.callee === "Math.round") {
+    if (callee === "Math.round") {
       this.at(argument, NUMBER);
       const operand = this.holdSlot(NUMBER, "blaze_rounded");
       this.store(operand);
@@ -11611,22 +11816,22 @@ class Machine {
       this.code.bind(end);
       return;
     }
-    if (call.callee === "blaze_rt_view_load_float" || call.callee === "blaze_rt_view_store_float") {
+    if (callee === "blaze_rt_view_load_float" || callee === "blaze_rt_view_store_float") {
       // The float a window of bytes holds, and the bytes a float is written
       // into: the block goes down as the address it is, and the offset, the
       // value and the width as the numbers they are.
       const block = this.hold(POINTER, "blaze_view_block");
-      this.at(call.args[0], POINTER);
+      this.at(args[0], POINTER);
       this.store(block);
       const held: Held[] = [block];
-      const numbers = call.callee === "blaze_rt_view_load_float" ? [1, 2] : [1, 2, 3];
+      const numbers = callee === "blaze_rt_view_load_float" ? [1, 2] : [1, 2, 3];
       for (const at of numbers) {
-        this.at(call.args[at], NUMBER);
+        this.at(args[at], NUMBER);
         const one = this.hold(POINTER, "blaze_view_number");
         this.store(one);
         held.push(one);
       }
-      this.callSymbol(call.callee, held, call.callee === "blaze_rt_view_load_float" ? NUMBER : VOID_TYPE);
+      this.callSymbol(callee, held, callee === "blaze_rt_view_load_float" ? NUMBER : VOID_TYPE);
       return;
     }
     // The text the program reads apart. The arguments are written down one
@@ -11634,18 +11839,18 @@ class Machine {
     // read into, and the runtime is called with the two of them where the
     // convention puts them.
     if (
-      call.callee === "text.indexOf" ||
-      call.callee === "TextEncoder.encode" ||
-      call.callee === "text.codePointAt" ||
-      call.callee === "text.slice" ||
-      call.callee === "text.trim" ||
-      call.callee === "text.trimStart" ||
-      call.callee === "text.trimEnd" ||
-      call.callee === "text.toLowerCase" ||
-      call.callee === "text.toUpperCase"
+      callee === "text.indexOf" ||
+      callee === "TextEncoder.encode" ||
+      callee === "text.codePointAt" ||
+      callee === "text.slice" ||
+      callee === "text.trim" ||
+      callee === "text.trimStart" ||
+      callee === "text.trimEnd" ||
+      callee === "text.toLowerCase" ||
+      callee === "text.toUpperCase"
     ) {
       const text = (at: number): Held => {
-        const value = call.args[at];
+        const value = args[at];
         if (isTextType(value.type)) {
           this.at(value, TEXT);
         } else {
@@ -11665,28 +11870,28 @@ class Machine {
       // it is: the fraction is read down into the accumulator's whole half,
       // and the call takes it where the convention puts a whole number.
       const index = (at: number): Held => {
-        this.at(call.args[at], NUMBER);
+        this.at(args[at], NUMBER);
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
         const held = this.hold(POINTER, "blaze_text_index");
         this.store(held);
         return held;
       };
-      if (call.callee === "TextEncoder.encode") {
+      if (callee === "TextEncoder.encode") {
         // The bytes a text is written as: the block the service lays the bytes
         // out in, which is the address a byte array is read at.
         const bytes = text(0);
         this.callSymbol("blaze_rt_text_bytes", [bytes], POINTER);
         return;
       }
-      if (call.callee === "text.codePointAt") {
+      if (callee === "text.codePointAt") {
         const sliced = text(0);
-        this.at(call.args[1], NUMBER);
+        this.at(args[1], NUMBER);
         const held = this.hold(POINTER, "blaze_code_point_at");
         this.store(held);
         this.callSymbol("blaze_rt_text_code_point_at", [sliced, held], TEXT);
         return;
       }
-      if (call.callee === "text.indexOf") {
+      if (callee === "text.indexOf") {
         const left = text(0);
         const right = text(1);
         this.callSymbol("blaze_rt_text_index_of", [left, right], TEXT);
@@ -11696,13 +11901,13 @@ class Machine {
         this.code.cvtIntToFloat(XMM0, RAX, false);
         return;
       }
-      if (call.callee === "text.slice") {
+      if (callee === "text.slice") {
         const sliced = text(0);
         const start = index(1);
         // The runtime's entry takes the stop always: a slice written with one
         // index runs to the end, which is a stop no text reaches.
         let stop: Held;
-        if (call.args.length > 2) {
+        if (args.length > 2) {
           stop = index(2);
         } else {
           this.code.movRegImm(RAX, 0x7fff_ffff_ffff_ffffn);
@@ -11713,31 +11918,31 @@ class Machine {
         return;
       }
       const folded = text(0);
-      if (call.callee === "text.trimStart") {
+      if (callee === "text.trimStart") {
         this.callSymbol("blaze_rt_text_trim_start", [folded], TEXT);
         return;
       }
-      if (call.callee === "text.trimEnd") {
+      if (callee === "text.trimEnd") {
         this.callSymbol("blaze_rt_text_trim_end", [folded], TEXT);
         return;
       }
-      if (call.callee === "text.toLowerCase") {
+      if (callee === "text.toLowerCase") {
         this.callSymbol("blaze_rt_text_lower", [folded], TEXT);
         return;
       }
-      if (call.callee === "text.toUpperCase") {
+      if (callee === "text.toUpperCase") {
         this.callSymbol("blaze_rt_text_upper", [folded], TEXT);
         return;
       }
       this.callSymbol("blaze_rt_text_trim", [folded], TEXT);
       return;
     }
-    if (call.callee.startsWith("blaze_rt_regex_")) {
+    if (callee.startsWith("blaze_rt_regex_")) {
       // The pattern, the flags and the text are texts, and the replacement of
       // a replace is one too. Each is held before the next is read: reading one
       // takes the accumulator the next is read into.
       const text = (at: number): Held => {
-        const value = call.args[at];
+        const value = args[at];
         if (isTextType(value.type)) {
           this.at(value, TEXT);
         } else {
@@ -11748,7 +11953,7 @@ class Machine {
         this.store(held);
         return held;
       };
-      if (call.callee === "blaze_rt_regex_replace") {
+      if (callee === "blaze_rt_regex_replace") {
         const pattern = text(0);
         const flags = text(1);
         const subject = text(2);
@@ -11759,136 +11964,136 @@ class Machine {
       const pattern = text(0);
       const flags = text(1);
       const subject = text(2);
-      if (call.callee === "blaze_rt_regex_test" || call.callee === "blaze_rt_regex_search") {
-        this.callSymbol(call.callee, [pattern, flags, subject], NUMBER);
+      if (callee === "blaze_rt_regex_test" || callee === "blaze_rt_regex_search") {
+        this.callSymbol(callee, [pattern, flags, subject], NUMBER);
         return;
       }
-      this.callSymbol(call.callee, [pattern, flags, subject], POINTER);
+      this.callSymbol(callee, [pattern, flags, subject], POINTER);
       return;
     }
-    if (call.callee === "envGet" && call.args[0] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "envGet" && args[0] !== undefined) {
+      this.at(args[0], TEXT);
       const name = this.hold(TEXT, "blaze_env_name");
       this.store(name);
       this.callSymbol("blaze_rt_env_get", [name], TEXT);
       return;
     }
-    if (call.callee === "readTextFile" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "readTextFile" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_read_text_path");
       this.store(path);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const mode = this.hold(TEXT, "blaze_read_text_mode");
       this.store(mode);
       this.callSymbol("blaze_rt_file_read_text", [path, mode], TEXT);
       return;
     }
-    if (call.callee === "syncFile" && call.args[0] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "syncFile" && args[0] !== undefined) {
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_sync_path");
       this.store(path);
       this.callSymbol("blaze_rt_file_sync", [path], NUMBER);
       return;
     }
-    if (call.callee === "hostPlatformName" || call.callee === "hostArchName") {
-      this.callSymbol(call.callee === "hostPlatformName" ? "blaze_rt_host_platform" : "blaze_rt_host_architecture", [], TEXT);
+    if (callee === "hostPlatformName" || callee === "hostArchName") {
+      this.callSymbol(callee === "hostPlatformName" ? "blaze_rt_host_platform" : "blaze_rt_host_architecture", [], TEXT);
       return;
     }
     if (
-      call.callee === "runCommand" &&
-      call.args[0] !== undefined &&
-      call.args[1] !== undefined &&
-      call.args[2] !== undefined &&
-      call.args[3] !== undefined
+      callee === "runCommand" &&
+      args[0] !== undefined &&
+      args[1] !== undefined &&
+      args[2] !== undefined &&
+      args[3] !== undefined
     ) {
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const command = this.hold(TEXT, "blaze_run_command");
       this.store(command);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const input = this.hold(TEXT, "blaze_run_input");
       this.store(input);
-      this.at(call.args[2], NUMBER);
+      this.at(args[2], NUMBER);
       const timeout = this.hold(NUMBER, "blaze_run_timeout");
       this.store(timeout);
-      this.at(call.args[3], TEXT);
+      this.at(args[3], TEXT);
       const cwd = this.hold(TEXT, "blaze_run_cwd");
       this.store(cwd);
       this.callSymbol("blaze_rt_process_run", [command, input, timeout, cwd], TEXT);
       return;
     }
-    if (call.callee === "streamIsTTY" && call.args[0] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "streamIsTTY" && args[0] !== undefined) {
+      this.at(args[0], NUMBER);
       const stream = this.hold(NUMBER, "blaze_tty_stream");
       this.store(stream);
       this.callSymbol("blaze_rt_stream_is_tty", [stream], NUMBER);
       return;
     }
-    if (call.callee === "setExitCode" && call.args[0] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "setExitCode" && args[0] !== undefined) {
+      this.at(args[0], NUMBER);
       const code = this.hold(NUMBER, "blaze_exit_code");
       this.store(code);
       this.callSymbol("blaze_rt_set_exit_code", [code], NUMBER);
       return;
     }
-    if (call.callee === "exitCode") {
+    if (callee === "exitCode") {
       this.callSymbol("blaze_rt_exit_code", [], NUMBER);
       return;
     }
-    if (call.callee === "readLine") {
+    if (callee === "readLine") {
       this.callSymbol("blaze_rt_read_line", [], TEXT);
       return;
     }
-    if (call.callee === "cwdPath" || call.callee === "processId" || call.callee === "hostProcessId" || call.callee === "cpuCount") {
+    if (callee === "cwdPath" || callee === "processId" || callee === "hostProcessId" || callee === "cpuCount") {
       // The host answers each with a value and takes nothing: the path is a
       // text and the two counts are numbers.
       const symbol =
-        call.callee === "cwdPath"
+        callee === "cwdPath"
           ? "blaze_rt_cwd"
-          : call.callee === "processId" || call.callee === "hostProcessId"
+          : callee === "processId" || callee === "hostProcessId"
             ? "blaze_rt_process_id"
             : "blaze_rt_cpu_count";
-      this.callSymbol(symbol, [], call.callee === "cwdPath" ? TEXT : NUMBER);
+      this.callSymbol(symbol, [], callee === "cwdPath" ? TEXT : NUMBER);
       return;
     }
-    if (call.callee === "sleepMs" && call.args[0] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "sleepMs" && args[0] !== undefined) {
+      this.at(args[0], NUMBER);
       const milliseconds = this.hold(NUMBER, "blaze_sleep_ms");
       this.store(milliseconds);
       this.callSymbol("blaze_rt_sleep_ms", [milliseconds], NUMBER);
       return;
     }
-    if (call.callee === "removePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "removePath" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_remove_path");
       this.store(path);
-      this.at(call.args[1], NUMBER);
+      this.at(args[1], NUMBER);
       const recursive = this.hold(NUMBER, "blaze_remove_recursive");
       this.store(recursive);
       this.callSymbol("blaze_rt_path_remove", [path, recursive], NUMBER);
       return;
     }
-    if (call.callee === "appendPath" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "appendPath" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_append_path");
       this.store(path);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_append_text");
       this.store(text);
       this.callSymbol("blaze_rt_file_append", [path, text], NUMBER);
       return;
     }
-    if (call.callee === "copyPath" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "copyPath" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const from = this.hold(TEXT, "blaze_copy_from");
       this.store(from);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const to = this.hold(TEXT, "blaze_copy_to");
       this.store(to);
       this.callSymbol("blaze_rt_file_copy", [from, to], NUMBER);
       return;
     }
-    if (call.callee === "makeDir" && call.args[0] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "makeDir" && args[0] !== undefined) {
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_make_path");
       this.store(path);
       this.at({ k: "const", type: NUMBER, text: "1" }, NUMBER);
@@ -11897,50 +12102,50 @@ class Machine {
       this.callSymbol("blaze_rt_dir_make", [path, recursive], NUMBER);
       return;
     }
-    if (call.callee === "renamePath" && call.args[0] !== undefined && call.args[1] !== undefined) {
-      this.at(call.args[0], TEXT);
+    if (callee === "renamePath" && args[0] !== undefined && args[1] !== undefined) {
+      this.at(args[0], TEXT);
       const from = this.hold(TEXT, "blaze_rename_from");
       this.store(from);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const to = this.hold(TEXT, "blaze_rename_to");
       this.store(to);
       this.callSymbol("blaze_rt_path_rename", [from, to], NUMBER);
       return;
     }
-    if (call.callee === "dirList" && call.args[0] !== undefined) {
+    if (callee === "dirList" && args[0] !== undefined) {
       // The directory's path is the text it is, and the runtime answers the
       // JSON of its entries as a text.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_dir_path");
       this.store(path);
       this.callSymbol("blaze_rt_dir_list", [path], TEXT);
       return;
     }
-    if ((call.callee === "pathKind" || call.callee === "fileSize") && call.args[0] !== undefined) {
+    if ((callee === "pathKind" || callee === "fileSize") && args[0] !== undefined) {
       // The path is the text it is; the runtime reads it and answers the kind
       // the entry is or the bytes the file holds.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_stat_path");
       this.store(path);
-      this.callSymbol(call.callee === "pathKind" ? "blaze_rt_path_kind" : "blaze_rt_file_size", [path], NUMBER);
+      this.callSymbol(callee === "pathKind" ? "blaze_rt_path_kind" : "blaze_rt_file_size", [path], NUMBER);
       return;
     }
-    if (call.callee === "fs.existsSync" && call.args[0] !== undefined) {
+    if (callee === "fs.existsSync" && args[0] !== undefined) {
       // The path is the text it is, and the runtime answers whether it names
       // anything.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_exists_path");
       this.store(path);
       this.callSymbol("blaze_rt_path_exists", [path], NUMBER);
       return;
     }
-    if (call.callee === "fs.writeFileSync" && call.args[0] !== undefined && call.args[1] !== undefined) {
+    if (callee === "fs.writeFileSync" && args[0] !== undefined && args[1] !== undefined) {
       // The path and the text go down as the texts they are, and the answer is
       // the bytes written, which a statement drops.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_file_path");
       this.store(path);
-      this.at(call.args[1], TEXT);
+      this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_file_text");
       this.store(text);
       this.at({ k: "const", type: NUMBER, text: "0" }, NUMBER);
@@ -11949,46 +12154,46 @@ class Machine {
       this.callSymbol("blaze_rt_file_write", [path, text, append], NUMBER);
       return;
     }
-    if (call.callee === "process.env") {
+    if (callee === "process.env") {
       // The environment variable is read by its name, and the answer is the
       // text it is set to: a pointer to the bytes, which is what a text is.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_env_get");
       return;
     }
-    if (call.callee === "process.stderr.write") {
+    if (callee === "process.stderr.write") {
       // The error stream is the runtime's own, and the text is handed over as
       // a pointer to the bytes it is.
-      this.at(call.args[0], TEXT);
+      this.at(args[0], TEXT);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_print_error_text");
       return;
     }
-    if (call.callee === "stdoutWrite") {
-      this.at(call.args[0], TEXT);
+    if (callee === "stdoutWrite") {
+      this.at(args[0], TEXT);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_print_text");
       return;
     }
-    if (call.callee === "hostArgumentCount") {
+    if (callee === "hostArgumentCount") {
       this.runtime("_host_argument_count");
       return;
     }
-    if (call.callee === "hostArgument" && call.args[0] !== undefined) {
-      this.at(call.args[0], NUMBER);
+    if (callee === "hostArgument" && args[0] !== undefined) {
+      this.at(args[0], NUMBER);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_host_argument");
       return;
     }
-    if (call.callee === "process.hrtime.bigint") {
+    if (callee === "process.hrtime.bigint") {
       // The runtime holds the clock, and the reading is the whole number of
       // nanoseconds it answers in.
       this.runtime("_monotonic_ns");
       return;
     }
-    if (call.callee === "Number" && call.args[0] !== undefined) {
-      const wide = call.args[0];
+    if (callee === "Number" && args[0] !== undefined) {
+      const wide = args[0];
       const wideType = wide.type;
       if (wideType.kind === "primitive" && (wideType.name === "u256" || wideType.name === "i256")) {
         // A wide whole number is the decimal the runtime's formatter writes,
@@ -12001,26 +12206,26 @@ class Machine {
         return;
       }
     }
-    if (call.callee === "Number.parseInt") {
-      this.at(call.args[0], TEXT);
+    if (callee === "Number.parseInt") {
+      this.at(args[0], TEXT);
       const text = this.hold(TEXT, "blaze_parse_int_text");
       this.store(text);
-      this.at(call.args[1], NUMBER);
+      this.at(args[1], NUMBER);
       const held = this.hold(POINTER, "blaze_parse_int_radix");
       this.store(held);
       this.callSymbol("blaze_rt_parse_int", [text, held], TEXT);
       return;
     }
-    if (call.callee === "String.fromCodePoint") {
+    if (callee === "String.fromCodePoint") {
       this.at(argument, NUMBER);
       const held = this.hold(POINTER, "blaze_from_code_point");
       this.store(held);
       this.callSymbol("blaze_rt_from_code_point", [held], TEXT);
       return;
     }
-    const library = MATH_LIBRARY[call.callee];
-    if (library === undefined || builtinFor(call.callee) === null) {
-      throw machineError(`${String(fieldOf(this.fn, "symbol"))} calls ${call.callee}, which this backend does not lower`);
+    const library = MATH_LIBRARY[callee];
+    if (library === undefined || builtinFor(callee) === null) {
+      throw machineError(`${String(fieldOf(this.fn, "symbol"))} calls ${callee}, which this backend does not lower`);
     }
     this.at(argument, NUMBER);
     this.library(library);
@@ -12045,13 +12250,18 @@ class Machine {
    * flag a write takes — is a constant the table hands over beside them.
    */
   private hostBuiltin(call: SemanticCall): boolean {
-    const service = HOST_SERVICES[call.callee];
+    const callee = String(fieldOf(call, "callee"));
+    const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+    const service = HOST_SERVICES.get(callee) as
+      | { symbol: string; args: readonly ("text" | "number")[]; extra?: readonly number[]; returns: "number" | "text" | "dynamic" | "void" }
+      | undefined;
     if (service === undefined) return false;
     const held: Held[] = [];
-    for (const [at, kind] of service.args.entries()) {
-      const argument = call.args[at];
-      if (argument === undefined) throw machineError(`${call.callee} is called with fewer arguments than the host takes`);
-      if (kind === "text") {
+    const serviceArgs = fieldOf(service, "args") as readonly ("text" | "number")[];
+    for (const [at, kind] of serviceArgs.entries()) {
+      const argument = callArgs[at];
+      if (argument === undefined) throw machineError(`${callee} is called with fewer arguments than the host takes`);
+      if (String(kind) === "text") {
         this.at(argument, TEXT);
         const slot = this.hold(TEXT, "blaze_host_text");
         this.store(slot);
@@ -12063,34 +12273,37 @@ class Machine {
         held.push(slot);
       }
     }
-    for (const value of service.extra ?? []) {
+    for (const value of (fieldOf(service, "extra") as readonly number[] | undefined) ?? []) {
       const constant: SemanticValue = { k: "const", type: NUMBER, text: String(value) };
       this.at(constant, NUMBER);
       const slot = this.hold(NUMBER, "blaze_host_constant");
       this.store(slot);
       held.push(slot);
     }
-    if (service.returns === "void") {
+    if (String(fieldOf(service, "returns")) === "void") {
       // A service that answers nothing still answers this language a number:
       // the call is made, and the one it hands back is what a statement reads.
-      this.callSymbol(service.symbol, held, VOID_TYPE);
+      this.callSymbol(String(fieldOf(service, "symbol")), held, VOID_TYPE);
       this.code.movRegImm(RAX, 1n);
       this.code.zeroFloat(XMM0);
       this.code.cvtIntToFloat(XMM0, RAX, false);
       return true;
     }
-    const answer = service.returns === "text" ? TEXT : NUMBER;
-    this.callSymbol(service.symbol, held, answer);
-    if (service.returns === "dynamic") this.dynamicResult();
+    const answer = String(fieldOf(service, "returns")) === "text" ? TEXT : NUMBER;
+    this.callSymbol(String(fieldOf(service, "symbol")), held, answer);
+    if (String(fieldOf(service, "returns")) === "dynamic") this.dynamicResult();
     return true;
   }
 
   private dictionaryBuiltin(call: SemanticCall): boolean {
-    const answer = DICTIONARY_SERVICES[call.callee];
+    const callee = String(fieldOf(call, "callee"));
+    const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+    const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+    const answer = DICTIONARY_SERVICES.get(String(fieldOf(call, "callee")));
     if (answer === undefined) return false;
     const held: Held[] = [];
-    for (const [at, argument] of call.args.entries()) {
-      const type = call.argTypes[at] ?? argument.type;
+    for (const [at, argument] of callArgs.entries()) {
+      const type = argTypes[at] ?? (fieldOf(argument, "type") as SemanticType);
       // A block is handed over as the pointer it is, a text as the bytes it
       // says, and everything else — the handle, a key, a value — as the number
       // the convention carries a double in. A value read at a reference the
@@ -12110,7 +12323,7 @@ class Machine {
         // the bits of the pointer are not the value it is asked for. Every
         // other reference is the handle the value was written as, and its bits
         // are what the runtime keeps.
-        if (call.callee.includes("_refkey") && at === 1) {
+        if (callee.includes("_refkey") && at === 1) {
           this.code.zeroFloat(XMM0);
           this.code.cvtIntToFloat(XMM0, RAX, false);
         } else {
@@ -12126,10 +12339,10 @@ class Machine {
     const returns = answer === "text" ? TEXT : answer === "pointer" ? POINTER : NUMBER;
     // `map.values` is the name the IR gives the service, and the runtime's own
     // entry is the one it calls.
-    const symbol = call.callee === "map.values" ? "blaze_rt_dict_values" : call.callee;
+    const symbol = callee === "map.values" ? "blaze_rt_dict_values" : callee;
     this.callSymbol(symbol, held, returns);
     if (answer === "dynamic") {
-      if (call.callee === "blaze_rt_dict_key_ref_at") {
+      if (callee === "blaze_rt_dict_key_ref_at") {
         // The key is the address as a number again, so it is the integer the
         // double says rather than the bits of the double.
         this.code.cvtFloatToInt(RAX, XMM0, false, true);
@@ -12215,8 +12428,10 @@ class Machine {
     // is what every function the C library was compiled for assumes of the call
     // it is entered by.
     const slots = Math.ceil(stack / 2) * 2;
-    for (const { held, slot: at } of onStack) {
-      if (isWideType(held.type)) {
+    for (const entry of onStack) {
+      const held = fieldOf(entry, "held") as Held;
+      const at = fieldOf(entry, "slot") as number;
+      if (isWideType(fieldOf(held, "type") as SemanticType)) {
         // A wide argument is four limbs the callee reads out of four slots, and
         // there is no instruction that moves four words: each limb is written
         // where the callee's own copy of it reads.
@@ -12228,8 +12443,8 @@ class Machine {
       }
       this.load(held);
       const address = mem(RSP, at * 8 - slots * 8);
-      if (isFloatType(held.type)) {
-        this.code.movsStore(address, XMM0, widthOf(held.type) === 4);
+      if (isFloatType(fieldOf(held, "type") as SemanticType)) {
+        this.code.movsStore(address, XMM0, widthOf(fieldOf(held, "type") as SemanticType) === 4);
         continue;
       }
       this.code.movMemReg(address, RAX);
@@ -12242,7 +12457,10 @@ class Machine {
     // the value down in the first place.
     type Move = { register: number; held: Held; source: number | null };
     const moves: Move[] = [];
-    for (const { register, held, at } of registers) {
+    for (const entry of registers) {
+      const register = fieldOf(entry, "register") as number;
+      const held = fieldOf(entry, "held") as Held;
+      const at = fieldOf(entry, "at") as number;
       if (at === placed) continue;
       // An argument the caller left where it is was never written down, so it is
       // in the accumulator and nowhere else. The slot it is named by may still
@@ -12254,11 +12472,11 @@ class Machine {
       // array answered the register instead of the element it read.
       const source =
         at === fresh && onStack.length === 0
-          ? isFloatType(held.type)
+          ? isFloatType(fieldOf(held, "type") as SemanticType)
             ? XMM0
             : RAX
-          : held.register !== null
-            ? held.register
+          : String(fieldOf(held, "register")) !== "null"
+            ? fieldOf(held, "register") as number
             : null;
       if (source === register) continue;
       moves.push({ register, held, source });
@@ -12267,18 +12485,20 @@ class Machine {
     // register cannot be written yet: one is being read by one of them.
     const reading = new Map<number, number>();
     for (const move of moves) {
-      if (move.source === null) continue;
-      reading.set(move.source, (reading.get(move.source) ?? 0) + 1);
+      const moveSource = fieldOf(move, "source") as number | null;
+      if (String(moveSource) === "null") continue;
+      reading.set(moveSource as number, (reading.get(moveSource as number) ?? 0) + 1);
     }
     const done = (move: Move): void => {
-      if (move.source === null) return;
-      const left = (reading.get(move.source) ?? 1) - 1;
-      if (left === 0) reading.delete(move.source);
-      else reading.set(move.source, left);
+      const moveSource = fieldOf(move, "source") as number | null;
+      if (String(moveSource) === "null") return;
+      const left = (reading.get(moveSource as number) ?? 1) - 1;
+      if (left === 0) reading.delete(moveSource as number);
+      else reading.set(moveSource as number, left);
     };
     const ordered: Move[] = [];
     while (moves.length > 0) {
-      const at = moves.findIndex((move) => !reading.has(move.register));
+      const at = moves.findIndex((move) => !reading.has(fieldOf(move, "register") as number));
       // Every register left is read by one of the moves left, which is a cycle
       // two or three of them go round. One value is written into the frame and
       // read back from there, which is a store and a load paid once to break
@@ -12286,13 +12506,22 @@ class Machine {
       // from anyway.
       if (at === -1) {
         const move = moves[0] as Move;
-        const source = move.source as number;
-        const parked = this.holdSlot(move.held.type, "blaze_call_argument");
-        if (isFloatType(move.held.type)) this.code.movsStore(frame(parked.offset), source, widthOf(move.held.type) === 4);
-        else this.code.movMemRegSized(frame(parked.offset), source, widthOf(move.held.type));
-        move.held = parked;
-        move.source = null;
-        done(move);
+        const source = fieldOf(move, "source") as number;
+        const moveHeld = fieldOf(move, "held") as Held;
+        const moveType = fieldOf(moveHeld, "type") as SemanticType;
+        const parked = this.holdSlot(moveType, "blaze_call_argument");
+        if (isFloatType(moveType)) {
+          this.code.movsStore(frame(fieldOf(parked, "offset") as number), source, widthOf(moveType) === 4);
+        } else {
+          this.code.movMemRegSized(frame(fieldOf(parked, "offset") as number), source, widthOf(moveType));
+        }
+        const replacement: Move = {
+          register: fieldOf(move, "register") as number,
+          held: parked,
+          source: null,
+        };
+        moves[0] = replacement;
+        done(replacement);
         continue;
       }
       const [move] = moves.splice(at, 1);
@@ -12300,16 +12529,25 @@ class Machine {
       ordered.push(move as Move);
     }
     for (const move of ordered) {
-      if (move.source !== null) {
-        if (isFloatType(move.held.type)) this.code.movsMove(move.register, move.source, widthOf(move.held.type) === 4);
-        else this.code.movRegReg(move.register, move.source);
+      const moveHeld = fieldOf(move, "held") as Held;
+      const moveType = fieldOf(moveHeld, "type") as SemanticType;
+      const moveRegister = fieldOf(move, "register") as number;
+      const moveSource = fieldOf(move, "source") as number | null;
+      if (String(moveSource) !== "null") {
+        if (isFloatType(moveType)) this.code.movsMove(moveRegister, moveSource as number, widthOf(moveType) === 4);
+        else this.code.movRegReg(moveRegister, moveSource as number);
         continue;
       }
-      if (isFloatType(move.held.type)) {
-        this.code.movsLoad(move.register, frame(move.held.offset), widthOf(move.held.type) === 4);
+      if (isFloatType(moveType)) {
+        this.code.movsLoad(moveRegister, frame(fieldOf(moveHeld, "offset") as number), widthOf(moveType) === 4);
         continue;
       }
-      this.code.movRegMemSized(move.register, frame(move.held.offset), widthOf(move.held.type), signedOf(move.held.type));
+      this.code.movRegMemSized(
+        moveRegister,
+        frame(fieldOf(moveHeld, "offset") as number),
+        widthOf(moveType),
+        signedOf(moveType),
+      );
     }
     // The stack a call pushes onto has to leave the stack sixteen byte aligned,
     // which is what every function the C library was compiled for assumes of the
@@ -12335,7 +12573,9 @@ class Machine {
    * arguments of this one are waiting in.
    */
   private httpBuiltin(call: SemanticCall): boolean {
-    switch (call.callee) {
+    const callee = String(fieldOf(call, "callee"));
+    const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+    switch (callee) {
       case "http.requestPath":
       case "http.requestMethod":
       case "http.requestHeader":
@@ -12349,7 +12589,7 @@ class Machine {
         return false;
     }
     const handle = this.httpArgument(call, 0, ANY_TYPE);
-    switch (call.callee) {
+    switch (callee) {
       case "http.requestPath":
         this.callSymbol("blaze_http_req_path", [handle], TEXT);
         return true;
@@ -12388,7 +12628,7 @@ class Machine {
         return true;
       }
       case "http.responseEnd": {
-        if (call.args.length < 2) {
+        if (callArgs.length < 2) {
           this.callSymbol("blaze_http_resp_complete", [handle], VOID_TYPE);
           return true;
         }
@@ -12404,7 +12644,8 @@ class Machine {
 
   /** One argument of an HTTP call, written down before the call is made. */
   private httpArgument(call: SemanticCall, at: number, type: SemanticType): Held {
-    this.at(call.args[at], type);
+    const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+    this.at(callArgs[at], type);
     const held = this.hold(type, "blaze_http_argument");
     this.store(held);
     return held;
@@ -12502,11 +12743,23 @@ class Machine {
   }
 
   private saveVectorsForCall(): void {
-    for (const saved of this.callSaves) this.code.saveVector(saved.register, saved.offset, saved.single);
+    for (const saved of this.callSaves) {
+      this.code.saveVector(
+        fieldOf(saved, "register") as number,
+        fieldOf(saved, "offset") as number,
+        fieldOf(saved, "single") as boolean,
+      );
+    }
   }
 
   private reloadVectorsAfterCall(): void {
-    for (const saved of this.callSaves) this.code.movsLoad(saved.register, frame(saved.offset), saved.single);
+    for (const saved of this.callSaves) {
+      this.code.movsLoad(
+        fieldOf(saved, "register") as number,
+        frame(fieldOf(saved, "offset") as number),
+        fieldOf(saved, "single") as boolean,
+      );
+    }
   }
 
   private external(symbol: string): void {
