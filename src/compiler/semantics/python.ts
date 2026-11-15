@@ -2490,7 +2490,7 @@ export function describeValue(value: PyValue): string {
     case "text":
       return "a string";
     case "boolean":
-      return value.value ? "True" : "False";
+      return fieldOf(value, "value") === true ? "True" : "False";
     case "none":
       return "None";
     case "name":
@@ -2553,8 +2553,8 @@ function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: n
         break;
       case "if":
         eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
-        eachValue(statement.then, visit);
-        eachValue(statement.otherwise, visit);
+        eachValue(fieldOf(statement, "then"), visit);
+        eachValue(fieldOf(statement, "otherwise"), visit);
         break;
       case "while":
         eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
@@ -2598,7 +2598,7 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       eachValueIn(fieldOf(value, "right"), visit, line);
       return;
     case "unary":
-      eachValueIn(value.operand, visit, line);
+      eachValueIn(fieldOf(value, "operand") as PyValue, visit, line);
       return;
     case "conditional":
       eachValueIn(value.condition, visit, line);
@@ -3832,7 +3832,7 @@ export function lowerValue(value: PyValue): Expression {
     case "text":
       return { k: "text", parts: (fieldOf(value, "parts") as PyTextPart[]).map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(part.value) })) };
     case "boolean":
-      return { k: "literal", text: value.value ? "1" : "0" };
+      return { k: "literal", text: fieldOf(value, "value") === true ? "1" : "0" };
     case "none":
       return { k: "null" };
     case "name":
@@ -4882,9 +4882,10 @@ function contractTextOf(value: PyValue): string | null {
       }
       return null;
     case "unary":
-      if (value.op !== "-" && value.op !== "+") return null;
-      const operand = contractTextOf(value.operand);
-      return operand === null ? null : `(${value.op}${operand})`;
+      const unaryOp = String(fieldOf(value, "op"));
+      if (unaryOp !== "-" && unaryOp !== "+") return null;
+      const operand = contractTextOf(fieldOf(value, "operand") as PyValue);
+      return operand === null ? null : `(${unaryOp}${operand})`;
     case "binary": {
       if (!CONTRACT_OPERATORS.includes(value.op)) return null;
       const left = contractTextOf(fieldOf(value, "left"));
@@ -4964,7 +4965,7 @@ function conversionInValue(value: PyValue): string | null {
     case "binary":
       return conversionInValue(fieldOf(value, "left")) ?? conversionInValue(fieldOf(value, "right"));
     case "unary":
-      return conversionInValue(value.operand);
+      return conversionInValue(fieldOf(value, "operand") as PyValue);
     case "conditional":
       return (
         conversionInValue(value.condition) ??

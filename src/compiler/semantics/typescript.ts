@@ -3442,6 +3442,36 @@ interface ArrowParameterType {
   shape: ResolvedType | null;
 }
 
+/** One parameter an arrow is written with, before its body is read. */
+type ArrowParam = {
+  name: string;
+  type: TypeExpr;
+  typeName: string;
+  functionType: FunctionType | null;
+  shape: ResolvedType | null;
+  /** The parameter is the rest of the call's arguments, as one list. */
+  rest?: boolean;
+  /** The value a call writes when it leaves the parameter out. */
+  default?: Expression;
+};
+
+/** One arrow parameter, built once so every call site writes the same fields. */
+function arrowParameter(
+  name: string,
+  type: TypeExpr,
+  typeName: string,
+  functionType: FunctionType | null,
+  shape: ResolvedType | null,
+): ArrowParam {
+  return {
+    name: name,
+    type: type,
+    typeName: typeName,
+    functionType: functionType,
+    shape: shape,
+  };
+}
+
 /**
  * What a name holds when it is a map or a set.
  *
@@ -13357,11 +13387,13 @@ class TypeScriptParser {
           const declared = named === null ? undefined : this.shapes.get(named);
           let fieldNames: readonly string[] | undefined = fieldOfOptional(declared, "names") as readonly string[] | undefined;
           if (receiver !== undefined && receiver.k === "object") {
-            fieldNames = receiver.fields.map((field) => field.name);
+            const writtenFields = fieldOf(receiver, "fields") as { name: string }[];
+            fieldNames = writtenFields.map((field) => String(fieldOf(field, "name")));
           }
-          if (constant?.fields !== undefined) {
+          const constantFields = fieldOfOptional(constant, "fields") as ReadonlyMap<string, unknown> | undefined;
+          if (constantFields !== undefined) {
             const written: string[] = [];
-            for (const name of constant.fields.keys()) written.push(name);
+            for (const name of constantFields.keys()) written.push(name);
             fieldNames = written;
           }
           if (fieldNames !== undefined && key !== undefined) {
@@ -13618,7 +13650,8 @@ class TypeScriptParser {
           if (owner !== undefined && !this.valueClasses.has(target.base.name)) {
             const found = this.methodOwner(owner.name, target.field, true);
             if (found !== null) {
-              const params = this.methodParams(found.method.params);
+              const method = fieldOf(found, "method") as ClassMethod;
+              const params = this.methodParams(fieldOf(method, "params") as readonly ClassParam[]);
               const args = this.readCallArguments(
                 params.map((param) => param.type),
                 null,
@@ -13627,7 +13660,13 @@ class TypeScriptParser {
                 null,
                 params.map((param) => (fieldOf(param, "shape") as ResolvedType | null)),
               );
-              replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), args, found.method.returnTypeName, found.method.line, found.method.returnsShape));
+              replace(this.typedCall(
+                methodFunctionName(String(fieldOf(found, "owner")), method, args.length),
+                args,
+                String(fieldOf(method, "returnTypeName")),
+                Number(fieldOf(method, "line")),
+                fieldOf(method, "returnsShape") as ResolvedType | undefined,
+              ));
               continue;
             }
           }
@@ -13642,48 +13681,52 @@ class TypeScriptParser {
           // is read at.
           const heldFunction = this.memberFunctionType(target);
           if (heldFunction !== null) {
-            const args = this.readCallArguments(heldFunction.params);
-            const invoke: Expression = { k: "invoke", callee: target, args, params: heldFunction.params, returns: heldFunction.returns };
-            if (heldFunction.shape !== undefined) {
-              const held = this.shapeForRead(heldFunction.shape);
+            const heldParams = fieldOf(heldFunction, "params") as TypeExpr[];
+            const args = this.readCallArguments(heldParams);
+            const invoke: Expression = { k: "invoke", callee: target, args, params: heldParams, returns: fieldOf(heldFunction, "returns") as TypeExpr };
+            const heldShape = fieldOfOptional(heldFunction, "shape") as ResolvedType | undefined;
+            if (heldShape !== undefined) {
+              const held = this.shapeForRead(heldShape);
               if (held !== null) this.expressionShapes.set(invoke, held);
             }
             replace(invoke);
             continue;
           }
           const callLine = Number(fieldOf(this.peek(), "line"));
-          const callback = this.collectionCallbackParameters(target.base, target.field);
-          const promiseCallbacks = this.promiseCallbackParameters(target.base, target.field);
+          const targetBase = fieldOf(target, "base") as Expression;
+          const targetField = String(fieldOf(target, "field"));
+          const callback = this.collectionCallbackParameters(targetBase, targetField);
+          const promiseCallbacks = this.promiseCallbackParameters(targetBase, targetField);
           // A callback handed to a method of a value whose type this read does
           // not hold is handed the element of a list whose element type is in
           // a module the graph has not linked: a parameter the use does not fix
           // waits for that link too. An element the read holds as a reference
           // with no name is one the link will name.
           const waitsForLink = this.importsArePending();
-          const expectedParams = this.expectedMethodParams(target.base, target.field);
+          const expectedParams = this.expectedMethodParams(targetBase, targetField);
           // `m.set(k, v)` writes one key and one value, so the arguments are
           // read at the key and value types the map was declared with: an empty
           // list written as the value is built at the element type the map
           // holds, and an object literal written there keeps its fields.
-          const heldCollectionHere = this.collectionOfExpression(target.base);
-          const setTypes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && target.field === "set"
+          const heldCollectionHere = this.collectionOfExpression(targetBase);
+          const setTypes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && targetField === "set"
             ? [heldCollectionHere.key, heldCollectionHere.value]
             : expectedParams.map((param) => param.type);
-          const setShapes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && target.field === "set"
+          const setShapes = heldCollectionHere !== null && heldCollectionHere.kind === "map" && targetField === "set"
             ? [null, heldCollectionHere.valueShape ?? this.shapeOfTypeExpr(heldCollectionHere.value)]
             : expectedParams.map((param) => (fieldOf(param, "shape") as ResolvedType | null));
           const args = this.readCallArguments(
             setTypes,
             callback,
-            target.field === "push" || target.field === "splice" || target.field === "unshift",
+            targetField === "push" || targetField === "splice" || targetField === "unshift",
             waitsForLink,
-            this.writtenElementType(target.base, target.field),
+            this.writtenElementType(targetBase, targetField),
             setShapes,
-            this.writtenElementShape(target.base, target.field),
+            this.writtenElementShape(targetBase, targetField),
             promiseCallbacks,
           );
-          const spreads = target.field === "push" || target.field === "splice" || target.field === "unshift" ? this.argumentSpreads : null;
-          const receiver = target.base;
+          const spreads = targetField === "push" || targetField === "splice" || targetField === "unshift" ? this.argumentSpreads : null;
+          const receiver = targetBase;
           // A push on a value the read cannot name is the runtime's dynamic
           // array append: the list is the entry or the name the source wrote,
           // and the append answers the list it grew, which is written back.
@@ -13718,10 +13761,11 @@ class TypeScriptParser {
           }
           // `Date.now()` is the clock, and a date's time is the number it is
           // held as; its stamp is the text `blaze_rt_timestamp_iso` writes.
+          const dateTargetBase = fieldOf(target, "base") as Expression;
           if (
-            target.base.k === "ident" &&
-            target.base.name === "Date" &&
-            target.field === "now" &&
+            dateTargetBase.k === "ident" &&
+            String(fieldOf(dateTargetBase, "name")) === "Date" &&
+            String(fieldOf(target, "field")) === "now" &&
             args.length === 0
           ) {
             const now: Expression = { k: "call", name: "blaze_rt_now_ms", args: [] };
@@ -13816,8 +13860,9 @@ class TypeScriptParser {
           // comparisons it is, and `TABLE.get(k)` over a map of written entries
           // the conditional chain. The name is not a value the runtime holds,
           // so there is nothing to call the dictionary with.
-          const writtenCollection = receiver.k === "ident" ? this.constants.get(receiver.name) : undefined;
-          if (writtenCollection?.keys !== undefined) {
+          const receiverName = receiver.k === "ident" ? String(fieldOf(receiver, "name")) : "";
+          const writtenCollection = receiver.k === "ident" ? this.constants.get(receiverName) : undefined;
+          if (writtenCollection !== undefined && fieldOfOptional(writtenCollection, "keys") !== undefined) {
             const lowered = this.writtenCollectionMethod(receiver, writtenCollection, target.field, args);
             if (lowered !== null) {
               replace(lowered);
@@ -14157,7 +14202,8 @@ class TypeScriptParser {
             );
             return this.hole();
           }
-          replace(this.typedCall(methodFunctionName(found.owner, found.method, args.length), [receiver, ...args], found.method.returnTypeName, found.method.line, found.method.returnsShape));
+          const foundMethod = fieldOf(found, "method") as ClassMethod;
+          replace(this.typedCall(methodFunctionName(String(fieldOf(found, "owner")), foundMethod, args.length), [receiver, ...args], String(fieldOf(foundMethod, "returnTypeName")), Number(fieldOf(foundMethod, "line")), ((fieldOfOptional(foundMethod, "returnsShape") as ResolvedType | null) ?? undefined)));
           continue;
         }
         // `make()(x)`: a call of what an expression answered is a call through
@@ -14175,10 +14221,12 @@ class TypeScriptParser {
           }
           const held = this.expressionFunctionType(target);
           if (held !== null) {
-            const args = this.readCallArguments(held.params);
-            const invoke: Expression = { k: "invoke", callee: target, args, params: held.params, returns: held.returns };
-            if (held.shape !== undefined) {
-              const answered = this.shapeForRead(held.shape);
+            const heldParams = fieldOf(held, "params") as TypeExpr[];
+            const args = this.readCallArguments(heldParams);
+            const invoke: Expression = { k: "invoke", callee: target, args, params: heldParams, returns: fieldOf(held, "returns") as TypeExpr };
+            const heldShape = fieldOfOptional(held, "shape") as ResolvedType | undefined;
+            if (heldShape !== undefined) {
+              const answered = this.shapeForRead(heldShape);
               if (answered !== null) this.expressionShapes.set(invoke, answered);
             }
             replace(invoke);
@@ -14291,10 +14339,12 @@ class TypeScriptParser {
         // `createHash("sha256")` is the runtime's SHA-256 hasher: a program
         // hashes a text with sha256, and the hasher is the handle the chain
         // reads. An algorithm the runtime does not carry is refused by name.
-        if (target.name === "createHash") {
+        if (String(fieldOf(target, "name")) === "createHash") {
           const algorithm = args[0];
-          const named = algorithm !== undefined && algorithm.k === "text" && algorithm.parts.length === 1 && algorithm.parts[0]?.k === "text";
-          if (!named || (algorithm as { parts: { value: string }[] }).parts[0]?.value !== "sha256") {
+          const algorithmParts = algorithm === undefined ? undefined : (fieldOfOptional(algorithm, "parts") as TextPart[] | undefined);
+          const firstPart = algorithmParts === undefined ? undefined : algorithmParts[0];
+          const named = algorithm !== undefined && algorithm.k === "text" && algorithmParts !== undefined && algorithmParts.length === 1 && firstPart !== undefined && firstPart.k === "text";
+          if (!named || String(fieldOf(firstPart, "value")) !== "sha256") {
             this.report("a hash of this program is sha256", "write createHash(`sha256`)", this.peek());
             replace(this.hole());
             continue;
@@ -14467,7 +14517,8 @@ class TypeScriptParser {
         // asks for is one the source already answered.
         if (target.k === "ident") {
           const constant = this.constants.get(target.name);
-          const expanded = this.constantValue(target.name, constant?.fields?.get(field.text));
+          const heldConstantFields = fieldOfOptional(constant, "fields") as ReadonlyMap<string, ConstantValue> | undefined;
+          const expanded = this.constantValue(target.name, heldConstantFields?.get(field.text));
           if (expanded !== null) {
             replace(expanded);
             continue;
@@ -14475,7 +14526,7 @@ class TypeScriptParser {
           // A field the constant does not write is the absence the optional
           // property is: `DEFAULT_GENERATION.timeoutSeconds` names a field the
           // default object leaves unset, and the value of it is nothing.
-          if (constant?.fields !== undefined && !constant.fields.has(field.text)) {
+          if (heldConstantFields !== undefined && !heldConstantFields.has(field.text)) {
             replace({ k: "null" });
             continue;
           }
@@ -14513,10 +14564,12 @@ class TypeScriptParser {
             continue;
           }
         }
-        if (field.text === "size") {
-          const written = target.k === "ident" ? this.constants.get(target.name) : undefined;
-          if (written?.keys !== undefined) {
-            const count: Expression = { k: "literal", text: String(written.keys.length) };
+        if (String(fieldOf(field, "text")) === "size") {
+          const sizeName = target.k === "ident" ? String(fieldOf(target, "name")) : "";
+          const written = target.k === "ident" ? this.constants.get(sizeName) : undefined;
+          const writtenKeys = written === undefined ? undefined : (fieldOfOptional(written, "keys") as unknown[] | undefined);
+          if (written !== undefined && writtenKeys !== undefined) {
+            const count: Expression = { k: "literal", text: String(writtenKeys.length) };
             this.expressionTypes.set(count, NUMBER_RESULT);
             replace(count);
             continue;
@@ -14625,17 +14678,21 @@ class TypeScriptParser {
 
         // `Point.ZERO`: a static field is a function of the class, so reading
         // it is a call that answers the value the source declared.
-        if (target.k === "ident" && !this.valueClasses.has(target.name)) {
-          const owner = this.classNamed(target.name);
+        if (target.k === "ident" && !this.valueClasses.has(String(fieldOf(target, "name")))) {
+          const owner = this.classNamed(String(fieldOf(target, "name")));
           if (owner !== undefined) {
-            const found = findField(this.classTable, owner.name, field.text, true);
+            const ownerName = String(fieldOf(owner, "name"));
+            const fieldName = String(fieldOf(field, "text"));
+            const found = findField(this.classTable, ownerName, fieldName, true);
             if (found !== null) {
-              replace(this.typedCall(`${found.owner}_${found.field.name}`, [], found.field.typeName, found.field.line));
+              const foundField = fieldOf(found, "field") as ClassField;
+              replace(this.typedCall(`${String(fieldOf(found, "owner"))}_${String(fieldOf(foundField, "name"))}`, [], String(fieldOf(foundField, "typeName")), Number(fieldOf(foundField, "line"))));
               continue;
             }
-            const getter = findGetter(this.classTable, owner.name, field.text, true);
+            const getter = findGetter(this.classTable, ownerName, fieldName, true);
             if (getter !== null) {
-              replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [], getter.getter.returnTypeName, getter.getter.line, getter.getter.returnsShape));
+              const getterField = fieldOf(getter, "getter") as ClassMethod;
+              replace(this.typedCall(`${String(fieldOf(getter, "owner"))}_${String(fieldOf(getterField, "name"))}`, [], String(fieldOf(getterField, "returnTypeName")), Number(fieldOf(getterField, "line")), fieldOfOptional(getterField, "returnsShape") as ResolvedType | undefined));
               continue;
             }
           }
@@ -14656,16 +14713,17 @@ class TypeScriptParser {
         // getter is, and the instance it reads is the receiver.
         const getterOwner = this.classOfExpression(target);
         if (getterOwner !== null) {
-          const getter = findGetter(this.classTable, getterOwner, field.text, false);
+          const getter = findGetter(this.classTable, getterOwner, String(fieldOf(field, "text")), false);
           if (getter !== null) {
-            replace(this.typedCall(`${getter.owner}_${getter.getter.name}`, [target], getter.getter.returnTypeName, getter.getter.line, getter.getter.returnsShape));
+            const getterMethod = fieldOf(getter, "getter") as ClassMethod;
+            replace(this.typedCall(`${String(fieldOf(getter, "owner"))}_${String(fieldOf(getterMethod, "name"))}`, [target], String(fieldOf(getterMethod, "returnTypeName")), Number(fieldOf(getterMethod, "line")), fieldOfOptional(getterMethod, "returnsShape") as ResolvedType | undefined));
             continue;
           }
         }
         // `process.execPath` names the running program, which is a host
         // service and not a field of a value: it is the call the runtime
         // answers, read where it is written.
-        if (target.k === "ident" && target.name === "process" && field.text === "execPath") {
+        if (target.k === "ident" && String(fieldOf(target, "name")) === "process" && String(fieldOf(field, "text")) === "execPath") {
           const read: Expression = { k: "call", name: "process.execPath", args: [], returns: TEXT_RESULT };
           this.expressionTypes.set(read, TEXT_RESULT);
           replace(read);
@@ -15147,18 +15205,7 @@ class TypeScriptParser {
     // Whether the element this callback is handed is one the link will name.
     const waitsForLink = this.pendingArrow;
     this.pendingArrow = false;
-    interface ArrowParam {
-      name: string;
-      type: TypeExpr;
-      typeName: string;
-      functionType: FunctionType | null;
-      shape: ResolvedType | null;
-      /** The parameter is the rest of the call's arguments, as one list. */
-      rest?: boolean;
-      /** The value a call writes when it leaves the parameter out. */
-      default?: Expression;
-    }
-    const params: ArrowParam[] = [];
+    const arrowParams: ArrowParam[] = [];
     /** What a parameter written as a pattern binds, read where the body starts. */
     const prelude: Statement[] = [];
     if (this.accept("(")) {
@@ -15169,7 +15216,7 @@ class TypeScriptParser {
         if (pattern !== null) {
           // A pattern read at the type the use fixes it at: `([a, b]) => ...`
           // handed a list of pairs binds its names at the fields of the pair.
-          const hinted = hints?.[params.length] ?? null;
+          const hinted = hints?.[arrowParams.length] ?? null;
           let type: TypeExpr = hinted?.type ?? ANY_TYPE;
           let shape: ResolvedType | null = (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null;
           if (this.accept(":")) {
@@ -15192,7 +15239,7 @@ class TypeScriptParser {
               : binding);
           }
           const temp = `__param${this.destructureCount++}`;
-          params.push({ name: temp, type, typeName: "", functionType: null, shape });
+          arrowParams.push({ name: temp, type: type, typeName: "", functionType: null, shape: shape });
           prelude.push(...this.patternPrelude(bindings, temp, type, line, shape));
           if (!this.accept(",")) break;
           continue;
@@ -15213,7 +15260,7 @@ class TypeScriptParser {
         // A callback's parameter is the element the collection method walks
         // where the method says so, and the annotation still wins where the
         // source writes one.
-        const hinted = hints?.[params.length] ?? null;
+        const hinted = hints?.[arrowParams.length] ?? null;
         let type: TypeExpr = hinted?.type ?? ANY_TYPE;
         let typeName = type.kind === "ref" && type.name !== undefined ? type.name : "";
         let functionType: FunctionType | null = null;
@@ -15253,10 +15300,10 @@ class TypeScriptParser {
             );
           }
         }
-        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape };
+        const parameter: ArrowParam = arrowParameter(name.text, type, typeName, functionType, shape);
         if (fallback !== undefined) setFieldOn(parameter, "default", fallback);
         if (rest) setFieldOn(parameter, "rest", true);
-        params.push(parameter);
+        arrowParams.push(parameter);
         if (!this.accept(",")) break;
         // A list of parameters may end with a comma, as it may on a function.
         if (this.at(")")) break;
@@ -15268,14 +15315,14 @@ class TypeScriptParser {
         return this.missing("expected a parameter name", name);
       }
       const hinted = hints?.[0] ?? null;
-      const type: TypeExpr = (fieldOfOptional(hinted, "type") as TypeExpr | null) ?? ANY_TYPE;
-      params.push({
-        name: name.text,
-        type,
-        typeName: type.kind === "ref" && type.name !== undefined ? type.name : "",
-        functionType: null,
-        shape: (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null,
-      });
+      const parameterType: TypeExpr = (fieldOfOptional(hinted, "type") as TypeExpr | null) ?? ANY_TYPE;
+      arrowParams.push(arrowParameter(
+        name.text,
+        parameterType,
+        parameterType.kind === "ref" && parameterType.name !== undefined ? parameterType.name : "",
+        null,
+        (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null,
+      ));
     }
     let stated: TypeExpr | null = null;
     let statedShape: ResolvedType | null = null;
@@ -15337,7 +15384,7 @@ class TypeScriptParser {
         function: liftedName,
         captures: [],
         captureTypes: [],
-        params: params.map((param) => ({
+        params: arrowParams.map((param) => ({
           name: param.name,
           type: param.type,
           shape: (fieldOf(param, "shape") as ResolvedType | null),
@@ -15346,7 +15393,7 @@ class TypeScriptParser {
         returns: stated ?? ANY_TYPE,
         returnsShape: statedShape,
       };
-      const restAt = params.findIndex((param) => (fieldOf(param, "rest") as boolean | undefined) === true);
+      const restAt = arrowParams.findIndex((param) => (fieldOf(param, "rest") as boolean | undefined) === true);
       if (restAt >= 0) provisional.rest = restAt;
       this.valueArrows.set(declared, provisional);
     }
@@ -15360,7 +15407,7 @@ class TypeScriptParser {
     // really is not one.
     const savedPendingValues = this.pendingValues;
     this.pendingValues = new Set(savedPendingValues);
-    params.forEach((param, at) => {
+    arrowParams.forEach((param, at) => {
       this.valueTypes.set(param.name, param.type);
       if ((fieldOf(param, "shape") as ResolvedType | null) !== null) (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(param.name, (fieldOf(param, "shape") as ResolvedType));
       if (param.functionType !== null) this.valueFunctions.set(param.name, param.functionType);
@@ -15409,7 +15456,7 @@ class TypeScriptParser {
       stated ??
       inferredResult(
         body,
-        params.map((param) => ({ name: param.name, type: param.type })),
+        arrowParams.map((param) => ({ name: param.name, type: param.type })),
         (value) => {
           const known = this.valueTypeOf(value);
           // An unshaped reference is no type the contract can name, and a body
@@ -15450,7 +15497,7 @@ class TypeScriptParser {
     const selfCalls = this.arrowSelfCalls;
     this.arrowDeclared = savedDeclared;
     this.arrowSelfCalls = savedSelfCalls;
-    const captures = arrowCaptures(params, body);
+    const captures = arrowCaptures(arrowParams, body);
     // The name the arrow is bound to is the arrow, not a value of the function
     // around it: a body that only calls the arrow is not capturing something to
     // hand to itself.
@@ -15502,14 +15549,14 @@ class TypeScriptParser {
     }
     // A name an arrow inside this one wrote, and this body declares, is boxed
     // here: the box belongs to the nearest body that holds the name.
-    this.finishBoxes(body, params, false);
+    this.finishBoxes(body, arrowParams, false);
     // A box written into this body is a name the body declares, so it is not a
     // name the arrow captures from around it, whatever the inner arrow's own
     // capture list said before the box existed.
     captures.captures = captures.captures.filter(
-      (capture) => !params.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
+      (capture) => !arrowParams.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
     );
-    const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
+    const binding = this.liftArrow(liftedName, arrowParams, returns, body, captures.captures, line);
     // An arrow a declaration binds calls itself by the name it was written
     // under, and the function it became takes the values it captured in front
     // of its own. The calls were read before the values were known — and a box
@@ -15520,7 +15567,7 @@ class TypeScriptParser {
       if (lifted !== undefined) {
         let rewritten = fieldOf(lifted, "body") as Statement[];
         if (declared !== null) rewritten = callsRewritten(rewritten, declared, binding.function, binding.captures);
-        setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, params));
+        setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, arrowParams));
       }
       // A closure written inside this arrow calls it too. The values this arrow
       // captured are that closure's own only where it captured them itself, so
@@ -15537,7 +15584,7 @@ class TypeScriptParser {
         if (!holdsAll) continue;
         let innerBody = fieldOf(closure, "body") as Statement[];
         if (declared !== null) innerBody = callsRewritten(innerBody, declared, binding.function, binding.captures);
-        setFieldOn(closure, "body", callsPrepended(innerBody, binding.function, binding.captures, params));
+        setFieldOn(closure, "body", callsPrepended(innerBody, binding.function, binding.captures, arrowParams));
       }
     }
     // The shape the arrow's declaration writes is what a call of it answers,
@@ -15909,13 +15956,16 @@ class TypeScriptParser {
     const params = fieldOf(closure, "params") as { name: string; type: TypeExpr }[];
     const scope = fieldOf(closure, "scopeNames") as string[] | undefined;
     const body = fieldOf(closure, "body") as Statement[];
-    for (const called of this.calledConverted(body)) {
-      const callee = this.liftedArrows.get(String(called));
+    const callees = this.calledConverted(body);
+    for (let at = 0; at < callees.length; at += 1) {
+      const calleeName = String(callees[at]);
+      const callee = this.liftedArrows.get(calleeName);
       if (callee === undefined) continue;
       if (!this.holdsCaptureInvariant(callee)) continue;
       const calleeCaptures = fieldOf(callee, "captures") as string[];
       if (!this.canConvertCall(closure, calleeCaptures)) continue;
-      for (const needed of calleeCaptures) {
+      for (let index = 0; index < calleeCaptures.length; index += 1) {
+        const needed = String(calleeCaptures[index]);
         if (needed === self) continue;
         const held = fieldOf(closure, "captures") as string[] | undefined;
         if (held === undefined || held.includes(needed)) continue;
@@ -17981,7 +18031,7 @@ class TypeScriptParser {
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const shift = (places: number): Expression => whole
-      ? { k: "bigint", text: `${BigInt(2) ** BigInt(places * 8)}n` }
+      ? { k: "bigint", text: `${BigInt(2 ** (places * 8))}n` }
       : number(String(2 ** (places * 8)));
     const at = (offset: number): Expression => offset === 0
       ? ident("at")
@@ -18023,7 +18073,7 @@ class TypeScriptParser {
     const ident = (value: string): Expression => ({ k: "ident", name: value });
     const number = (text: string): Expression => ({ k: "literal", text });
     const weight = (places: number): Expression => whole
-      ? { k: "bigint", text: `${BigInt(2) ** BigInt(places * 8)}n` }
+      ? { k: "bigint", text: `${BigInt(2 ** (places * 8))}n` }
       : number(String(2 ** (places * 8)));
     const at = (offset: number): Expression => offset === 0
       ? ident("at")
