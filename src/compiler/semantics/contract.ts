@@ -912,8 +912,8 @@ function wrapWholeBits(bits: bigint, name: PrimitiveTypeName): Whole {
 }
 
 /** The whole number an external test or harness value names. */
-function wholeOfValue(value: unknown): Whole {
-  if (isWhole(value)) return value;
+function wholeOfValue(value: bigint | Whole): Whole {
+  if (typeof value === "object" && value !== null) return value;
   const number = value as bigint;
   if (number < 0n) return { negative: true, magnitude: (0n - number) & WHOLE_MASK };
   return { negative: false, magnitude: number & WHOLE_MASK };
@@ -934,7 +934,7 @@ function compareWhole(left: Whole, right: Whole): number {
 
 /** Whether a whole number is the zero. */
 function wholeIsZero(value: Whole): boolean {
-  return (value as unknown as Record<string, unknown>)["magnitude"] === 0n;
+  return value.magnitude === 0n;
 }
 
 /** The bits the sum, difference or product of two whole numbers has. */
@@ -953,10 +953,8 @@ function wholeMultiply(left: Whole, right: Whole): bigint {
 /** The quotient two whole numbers have, truncating toward zero as the language does. */
 function wholeDivide(left: Whole, right: Whole): Whole {
   if (wholeIsZero(right)) throw contractError("division by zero");
-  const leftFields = left as unknown as Record<string, unknown>;
-  const rightFields = right as unknown as Record<string, unknown>;
-  const magnitude = (leftFields["magnitude"] as bigint) / (rightFields["magnitude"] as bigint);
-  const negative = magnitude !== 0n && leftFields["negative"] !== rightFields["negative"];
+  const magnitude = left.magnitude / right.magnitude;
+  const negative = magnitude !== 0n && left.negative !== right.negative;
   return { negative, magnitude };
 }
 
