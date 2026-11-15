@@ -72,30 +72,30 @@ const STDINT_WIDTHS: readonly number[] = [8, 16, 32, 64];
  */
 export function cHeaderNames(): Record<string, true> {
   const names: Record<string, true> = {};
-  const take = (...taken: string[]): void => {
+  const take = (taken: readonly string[]): void => {
     for (const name of taken) names[name] = true;
   };
   // <stdbool.h>, and the typedefs of <stddef.h> and <stdint.h>.
-  take("bool", "true", "false", "__bool_true_false_are_defined");
-  take("size_t", "ssize_t", "ptrdiff_t", "wchar_t", "max_align_t", "nullptr_t");
-  take("intmax_t", "uintmax_t", "intptr_t", "uintptr_t");
+  take(["bool", "true", "false", "__bool_true_false_are_defined"]);
+  take(["size_t", "ssize_t", "ptrdiff_t", "wchar_t", "max_align_t", "nullptr_t"]);
+  take(["intmax_t", "uintmax_t", "intptr_t", "uintptr_t"]);
   // <stdio.h>, <stdlib.h> and <string.h>.
-  take("NULL", "EOF", "stdin", "stdout", "stderr");
-  take("BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "TMP_MAX", "L_tmpnam");
-  take("SEEK_SET", "SEEK_CUR", "SEEK_END", "_IOFBF", "_IOLBF", "_IONBF");
-  take("EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX");
+  take(["NULL", "EOF", "stdin", "stdout", "stderr"]);
+  take(["BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "TMP_MAX", "L_tmpnam"]);
+  take(["SEEK_SET", "SEEK_CUR", "SEEK_END", "_IOFBF", "_IOLBF", "_IONBF"]);
+  take(["EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX"]);
   // <math.h>.
-  take("M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI", "M_PI_2", "M_PI_4");
-  take("M_1_PI", "M_2_PI", "M_2_SQRTPI", "M_SQRT2", "M_SQRT1_2");
-  take("INFINITY", "NAN", "HUGE_VAL", "HUGE_VALF", "HUGE_VALL");
-  take("FP_NAN", "FP_INFINITE", "FP_ZERO", "FP_SUBNORMAL", "FP_NORMAL", "MATH_ERRNO", "MATH_ERREXCEPT");
+  take(["M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI", "M_PI_2", "M_PI_4"]);
+  take(["M_1_PI", "M_2_PI", "M_2_SQRTPI", "M_SQRT2", "M_SQRT1_2"]);
+  take(["INFINITY", "NAN", "HUGE_VAL", "HUGE_VALF", "HUGE_VALL"]);
+  take(["FP_NAN", "FP_INFINITE", "FP_ZERO", "FP_SUBNORMAL", "FP_NORMAL", "MATH_ERRNO", "MATH_ERREXCEPT"]);
   // <stdint.h>: the limits that do not follow the width, and the families
   // that are named after it.
-  take("SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX");
-  take("INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX");
-  take("WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX");
+  take(["SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX"]);
+  take(["INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX"]);
+  take(["WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX"]);
   for (const width of STDINT_WIDTHS) {
-    take(
+    take([
       `int${width}_t`,
       `uint${width}_t`,
       `int_least${width}_t`,
@@ -115,7 +115,7 @@ export function cHeaderNames(): Record<string, true> {
       `INT_FAST${width}_MAX`,
       `UINT_FAST${width}_MIN`,
       `UINT_FAST${width}_MAX`,
-    );
+    ]);
   }
   return names;
 }
@@ -132,26 +132,26 @@ export function cHeaderNames(): Record<string, true> {
  */
 export function cMacroNames(): Record<string, true> {
   const names: Record<string, true> = {};
-  const take = (...taken: string[]): void => {
+  const take = (taken: readonly string[]): void => {
     for (const name of taken) names[name] = true;
   };
   // <stdbool.h> defines all of these.
-  take("bool", "true", "false", "__bool_true_false_are_defined");
+  take(["bool", "true", "false", "__bool_true_false_are_defined"]);
   // <stdio.h>, <stdlib.h> and <math.h>.
-  take("NULL", "EOF", "stdin", "stdout", "stderr");
-  take("BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "TMP_MAX", "L_tmpnam");
-  take("SEEK_SET", "SEEK_CUR", "SEEK_END", "_IOFBF", "_IOLBF", "_IONBF");
-  take("EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX");
-  take("M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI", "M_PI_2", "M_PI_4");
-  take("M_1_PI", "M_2_PI", "M_2_SQRTPI", "M_SQRT2", "M_SQRT1_2");
-  take("INFINITY", "NAN", "HUGE_VAL", "HUGE_VALF", "HUGE_VALL");
-  take("FP_NAN", "FP_INFINITE", "FP_ZERO", "FP_SUBNORMAL", "FP_NORMAL", "MATH_ERRNO", "MATH_ERREXCEPT");
+  take(["NULL", "EOF", "stdin", "stdout", "stderr"]);
+  take(["BUFSIZ", "FILENAME_MAX", "FOPEN_MAX", "TMP_MAX", "L_tmpnam"]);
+  take(["SEEK_SET", "SEEK_CUR", "SEEK_END", "_IOFBF", "_IOLBF", "_IONBF"]);
+  take(["EXIT_SUCCESS", "EXIT_FAILURE", "RAND_MAX", "MB_CUR_MAX"]);
+  take(["M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI", "M_PI_2", "M_PI_4"]);
+  take(["M_1_PI", "M_2_PI", "M_2_SQRTPI", "M_SQRT2", "M_SQRT1_2"]);
+  take(["INFINITY", "NAN", "HUGE_VAL", "HUGE_VALF", "HUGE_VALL"]);
+  take(["FP_NAN", "FP_INFINITE", "FP_ZERO", "FP_SUBNORMAL", "FP_NORMAL", "MATH_ERRNO", "MATH_ERREXCEPT"]);
   // <stdint.h>: the limits are macros and the width-named types are typedefs.
-  take("SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX");
-  take("INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX");
-  take("WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX");
+  take(["SIZE_MAX", "PTRDIFF_MIN", "PTRDIFF_MAX", "INTPTR_MIN", "INTPTR_MAX", "UINTPTR_MAX"]);
+  take(["INTMAX_MIN", "INTMAX_MAX", "UINTMAX_MAX", "SIG_ATOMIC_MIN", "SIG_ATOMIC_MAX"]);
+  take(["WCHAR_MIN", "WCHAR_MAX", "WINT_MIN", "WINT_MAX"]);
   for (const width of STDINT_WIDTHS) {
-    take(
+    take([
       `INT${width}_MIN`,
       `INT${width}_MAX`,
       `UINT${width}_MAX`,
@@ -165,7 +165,7 @@ export function cMacroNames(): Record<string, true> {
       `INT_FAST${width}_MAX`,
       `UINT_FAST${width}_MIN`,
       `UINT_FAST${width}_MAX`,
-    );
+    ]);
   }
   return names;
 }

@@ -2585,7 +2585,7 @@ function unsupportedUpdateIn(statements: readonly Statement[], name: string): bo
         if (
           expressionReadsUpdate((fieldOf(statement, "from") as Expression), name) ||
           expressionReadsUpdate((fieldOf(statement, "to") as Expression), name) ||
-          (statement.step !== null && expressionReadsUpdate(statement.step, name)) ||
+          (fieldOf(statement, "step") !== null && expressionReadsUpdate(fieldOf(statement, "step") as Expression, name)) ||
           unsupportedUpdateIn((fieldOf(statement, "body") as Statement[]), name)
         ) return true;
         break;
@@ -5585,14 +5585,21 @@ class TypeScriptParser {
 
   /** The parameters of a method, where a class-typed one is a reference. */
   private methodParams(params: readonly ClassParam[]): { name: string; type: TypeExpr; shape: ResolvedType | null }[] {
-    return params.map((param) => ({
-      name: param.name,
-      type:fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(param.typeName) ? this.referenceTo(param.typeName) : this.typeForName(param.typeName, (fieldOf(param, "line") as number)),
-      // The annotation is what an argument written at the parameter is read at:
-      // a method takes the same records a function takes, and the shape of one
-      // is not a type the contract can spell.
-      shape: this.shapeForName(param.typeName),
-    }));
+    const out: { name: string; type: TypeExpr; shape: ResolvedType | null }[] = [];
+    const classNames = fieldOf(fieldOf(this, "classTable"), "names") as Set<string>;
+    for (const param of params) {
+      const paramName = String(fieldOf(param, "name"));
+      const typeName = String(fieldOf(param, "typeName"));
+      out[out.length] = {
+        name: paramName,
+        type: classNames.has(typeName) ? this.referenceTo(typeName) : this.typeForName(typeName, Number(fieldOf(param, "line"))),
+        // The annotation is what an argument written at the parameter is read at:
+        // a method takes the same records a function takes, and the shape of one
+        // is not a type the contract can spell.
+        shape: this.shapeForName(typeName),
+      };
+    }
+    return out;
   }
 
   /**
@@ -6664,7 +6671,7 @@ class TypeScriptParser {
         );
         continue;
       }
-      const rename = this.localExportRenames.find((one) => (fieldOf(one, "local") as string) === name);
+      const rename = this.localExportRenames.find((one) => String(fieldOf(one, "local")) === name);
       this.reexports.push({
         specifier,
         names: [name],
@@ -9544,11 +9551,11 @@ class TypeScriptParser {
     }
     const temporaries: string[] = [];
     const head: Statement[] = [];
-    values.forEach((value) => {
+    for (const value of values) {
       const temp = `__tuple${this.destructureCount++}`;
-      temporaries.push(temp);
-      head.push({ kind: "declare", name: temp, type: null, init: value, line });
-    });
+      temporaries[temporaries.length] = temp;
+      head[head.length] = { kind: "declare", name: temp, type: null, init: value, line };
+    }
     names.forEach((name, index) => {
       const temp = temporaries[index];
       if (temp === undefined) return;
@@ -10700,10 +10707,12 @@ class TypeScriptParser {
       const body: Statement[] = [];
       let breaks = false;
       this.breakTargets.push("switch");
-      const settled = onlyByItsOwnMatch && test !== null
+      const settled: { types: Map<string, TypeExpr>; shapes: Map<string, ResolvedType> } = onlyByItsOwnMatch && test !== null
         ? this.narrowingOf({ k: "binary", op: "===", left: discriminant, right: test }, true)
         : { types: new Map<string, TypeExpr>(), shapes: new Map<string, ResolvedType>() };
-      this.withNarrowing(settled, () => {
+      const read: { statements: Statement[]; leaves: boolean } = this.withNarrowing(settled, () => {
+        const collected: Statement[] = [];
+        let leaves = false;
         while (!this.at("case") && !this.at("default") && !this.at("}") && this.peek().kind !== "end") {
           // A `break` at the level of the case leaves the switch. A labelled one
           // is left to the statement reader, which refuses the label where it is
@@ -10711,7 +10720,7 @@ class TypeScriptParser {
           if (this.at("break") && this.peek(1).kind !== "ident") {
             this.next();
             this.accept(";");
-            breaks = true;
+            leaves = true;
             break;
           }
           // A case may write its statements in a block, which is the statements
@@ -10724,14 +10733,17 @@ class TypeScriptParser {
             const last = scoped[scoped.length - 1];
             if (last !== undefined && String(fieldOf(last, "kind")) === "break") {
               scoped.pop();
-              breaks = true;
+              leaves = true;
             }
-            body.push(...scoped);
+            for (const statement of scoped) collected[collected.length] = statement;
             continue;
           }
-          body.push(...this.guardedStatement());
+          for (const statement of this.guardedStatement()) collected[collected.length] = statement;
         }
+        return { statements: collected, leaves };
       });
+      breaks = fieldOf(read, "leaves") === true;
+      for (const statement of fieldOf(read, "statements") as Statement[]) body[body.length] = statement;
       this.breakTargets.pop();
       // The statements after a break are unreachable. They are read past so
       // the next case starts where the source wrote it.
@@ -10754,16 +10766,27 @@ class TypeScriptParser {
     cases: { test: Expression | null; body: Statement[]; breaks: boolean; line: number }[],
     innerBreaks: boolean,
   ): Statement {
-    const executions = cases.map((_one, index) => {
+    const executions: Statement[][] = [];
+    for (let index = 0; index < cases.length; index += 1) {
       const body: Statement[] = [];
       for (let at = index; at < cases.length; at += 1) {
-        body.push(...cases[at].body);
-        if (cases[at].breaks) break;
+        const one = cases[at] as { test: Expression | null; body: Statement[]; breaks: boolean; line: number };
+        for (const statement of fieldOf(one, "body") as Statement[]) body[body.length] = statement;
+        if (fieldOf(one, "breaks") === true) break;
       }
-      return body;
-    });
-    const defaultIndex = cases.findIndex((one) => (fieldOf(one, "test") as Expression | null) === null);
-    let chain: Statement[] = defaultIndex >= 0 ? [...executions[defaultIndex]] : [];
+      executions[executions.length] = body;
+    }
+    let defaultIndex = -1;
+    for (let index = 0; index < cases.length; index += 1) {
+      if (fieldOf(cases[index], "test") === null) {
+        defaultIndex = index;
+        break;
+      }
+    }
+    let chain: Statement[] = [];
+    if (defaultIndex >= 0) {
+      for (const statement of executions[defaultIndex] as Statement[]) chain[chain.length] = statement;
+    }
     const temporary = `__switch${this.switchCount}`;
     this.switchCount += 1;
     for (let index = cases.length - 1; index >= 0; index -= 1) {
@@ -10775,7 +10798,7 @@ class TypeScriptParser {
           condition: { k: "binary", op: "===", left: { k: "ident", name: temporary }, right: (fieldOf(one, "test") as Expression) },
           then: executions[index] as Statement[],
           otherwise: chain,
-          line: one.line,
+          line: Number(fieldOf(one, "line")),
         },
       ];
     }
@@ -10788,13 +10811,16 @@ class TypeScriptParser {
     if (!innerBreaks) {
       if (chain.length === 0) return { kind: "expression", value: { k: "literal", text: "0" }, line };
       if (chain.length === 1) return chain[0] as Statement;
-      this.pendingBefore.push(...(chain.slice(0, -1) as Statement[]));
+      for (const statement of chain.slice(0, -1)) this.pendingBefore[this.pendingBefore.length] = statement;
       return chain[chain.length - 1] as Statement;
     }
+    const loopBody: Statement[] = [];
+    for (const statement of chain) loopBody[loopBody.length] = statement;
+    loopBody[loopBody.length] = { kind: "break", line };
     return {
       kind: "while",
       condition: { k: "literal", text: "1" },
-      body: [...(chain.length === 0 ? [] : chain), { kind: "break", line }],
+      body: loopBody,
       line,
     };
   }
@@ -11047,10 +11073,13 @@ class TypeScriptParser {
       this.valueTypes.set(name, type);
       if (shape.kind !== "any") (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(name, shape);
       else (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).delete(name);
-      if (type.kind === "ref" && type.name !== undefined &&fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(type.name)) {
-        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, type.name);
-      } else if (shape.kind === "ref" && shape.name !== null &&fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(shape.name)) {
-        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, shape.name);
+      const typeName = fieldOf(type, "name") as string | undefined;
+      const shapeName = fieldOf(shape, "name") as string | null;
+      const classNames = fieldOf(fieldOf(this, "classTable"), "names") as Set<string>;
+      if (type.kind === "ref" && typeName !== undefined && classNames.has(typeName)) {
+        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, typeName);
+      } else if (shape.kind === "ref" && shapeName !== null && classNames.has(shapeName)) {
+        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, shapeName);
       } else {
         (fieldOf(this, "valueClasses") as Map<string, string>).delete(name);
       }
@@ -11164,10 +11193,13 @@ class TypeScriptParser {
       this.valueTypes.set(name, type);
       if (shape.kind !== "any") (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(name, shape);
       else (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).delete(name);
-      if (type.kind === "ref" && type.name !== undefined &&fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(type.name)) {
-        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, type.name);
-      } else if (shape.kind === "ref" && shape.name !== null &&fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(shape.name)) {
-        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, shape.name);
+      const typeName = fieldOf(type, "name") as string | undefined;
+      const shapeName = fieldOf(shape, "name") as string | null;
+      const classNames = fieldOf(fieldOf(this, "classTable"), "names") as Set<string>;
+      if (type.kind === "ref" && typeName !== undefined && classNames.has(typeName)) {
+        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, typeName);
+      } else if (shape.kind === "ref" && shapeName !== null && classNames.has(shapeName)) {
+        (fieldOf(this, "valueClasses") as Map<string, string>).set(name, shapeName);
       } else {
         (fieldOf(this, "valueClasses") as Map<string, string>).delete(name);
       }
@@ -15311,7 +15343,8 @@ class TypeScriptParser {
       const hinted = hints?.[0] ?? null;
       const parameterType: TypeExpr = (fieldOfOptional(hinted, "type") as TypeExpr | null) ?? ANY_TYPE;
       arrowParams.push({ name: name.text, type: parameterType });
-      paramTypeNames[paramTypeNames.length] = parameterType.kind === "ref" && parameterType.name !== undefined ? parameterType.name : "";
+      const parameterTypeName = fieldOf(parameterType, "name") as string | undefined;
+      paramTypeNames[paramTypeNames.length] = parameterType.kind === "ref" && parameterTypeName !== undefined ? String(parameterTypeName) : "";
       paramFunctions[paramFunctions.length] = null;
       paramShapes[paramShapes.length] = (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null;
     }
@@ -15467,7 +15500,7 @@ class TypeScriptParser {
     // writes values says it.
     if (stated === null && (returns.kind === "slice" || returns.kind === "array")) {
       const written: Expression[] = [];
-      collectResults(body, written);
+      collectResults(body, written, undefined);
       for (const value of written) this.applyExpected(value, returns, null);
     }
     // An arrow that answers an object literal names no result type, but the
@@ -15513,7 +15546,7 @@ class TypeScriptParser {
     // this body writes it: the value the arrow is handed is the box.
     for (const capture of captures.captures) {
       const entry = this.arrowBoxes.get(capture);
-      if (entry !== undefined) boxStatements(body, capture, { name: entry.box, list: entry.list });
+      if (entry !== undefined) boxStatements(body, capture, { name: String(fieldOf(entry, "box")), list: fieldOf(entry, "list") === true });
     }
     if (captures.written.length > 0 && captures.written.every((written) => this.arrowBoxes.has(written))) {
       // The box of a name the body only writes is a value the body reads, so it
@@ -15599,7 +15632,10 @@ class TypeScriptParser {
     // them. A body that only calls itself captures nothing and is unchanged.
     for (const call of selfCalls) {
       if (call.k !== "call") continue;
-      call.args = [...binding.captures.map((name): Expression => ({ k: "ident", name })), ...call.args];
+      const completedArgs: Expression[] = [];
+      for (const name of binding.captures) completedArgs[completedArgs.length] = { k: "ident", name };
+      for (const argument of fieldOf(call, "args") as Expression[]) completedArgs[completedArgs.length] = argument;
+      setFieldOn(call, "args", completedArgs);
     }
     return { k: "arrow", name: binding.function, captures: binding.captures };
   }
@@ -15614,7 +15650,7 @@ class TypeScriptParser {
    */
   private boxTypeOf(name: string): TypeExpr | null {
     for (const entry of this.arrowBoxes.values()) {
-      if (entry.box !== name) continue;
+      if (String(fieldOf(entry, "box")) !== name) continue;
       // A list box is an object the IR lays out from the literal it was built
       // with, so what the arrow is handed is the reference it is.
       return (fieldOf(entry, "list") as boolean) ? ANY_TYPE : { kind: "slice", of: entry.element };
@@ -15669,7 +15705,7 @@ class TypeScriptParser {
   ): void {
     if (this.arrowBoxes.size === 0) return;
     for (const [name, entry] of [...this.arrowBoxes]) {
-      const box = entry.box;
+      const box = String(fieldOf(entry, "box"));
       const held = findDeclaration(body, name);
       const parameter = params.find((one) => one.name === name);
       if (held === null && parameter === undefined) {
