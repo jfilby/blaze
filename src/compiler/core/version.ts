@@ -23,7 +23,11 @@
  * object that may be linked as it stands.
  */
 
-import { compilerSourceRoot, createHash, readFile, readdirEntries, join, relative, sep } from "./platform.ts";
+import { compilerSourceRoot, createHash, isDirectoryPath, isFilePath, readFile, readdirEntries, join, relative, sep } from "./platform.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 export const COMPILER_VERSION = "0.1.0";
 
@@ -119,13 +123,14 @@ export async function fingerprintSources(root: string): Promise<Fingerprints> {
   const found = new Map<string, string>();
   const walk = async (directory: string): Promise<void> => {
     const entries = await readdirEntries(directory);
-    entries.sort((left, right) => (left.name < right.name ? -1 : 1));
+    entries.sort((left, right) => (String(fieldOf(left, "name")) < String(fieldOf(right, "name")) ? -1 : 1));
     for (const entry of entries) {
-      if (NOT_COMPILER[entry.name] === true) continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
+      const name = String(fieldOf(entry, "name"));
+      if (NOT_COMPILER[name] === true) continue;
+      const path = join(directory, name);
+      if (isDirectoryPath(path)) {
         await walk(path);
-      } else if (entry.isFile() && entry.name.endsWith(".ts")) {
+      } else if (isFilePath(path) && name.endsWith(".ts")) {
         found.set(relative(root, path).split(sep).join("/"), await readFile(path, "utf8"));
       }
     }
@@ -171,5 +176,5 @@ export async function toolchainFingerprints(): Promise<Fingerprints> {
  * is nothing to ask about. Every other edit is in here.
  */
 export function engineStamp(fingerprints: Fingerprints): string {
-  return `${COMPILER_VERSION}+${fingerprints.review.slice(0, 8)}`;
+  return `${COMPILER_VERSION}+${String(fieldOf(fingerprints, "review")).slice(0, 8)}`;
 }

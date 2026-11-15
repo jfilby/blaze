@@ -29,9 +29,14 @@
 import { parseType, typeToString, isBufferType } from "../semantics/contract.ts";
 import { describeSites, inlineRefusal, repairRules } from "../semantics/repair.ts";
 import type { SemanticFunction } from "../core/semantic-ir.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 import type {
   FunctionContract,
   OutputKind,
+  FileContract,
   ProgramContract,
   ProgramFailure,
   TargetSpec,
@@ -90,19 +95,23 @@ function asBullet(entry: string): string {
 }
 
 function renderMemory(contract: FunctionContract): string {
-  const aliasing = contract.memory.aliasing;
+  const memory = fieldOf(contract, "memory") as { readonly aliasing: readonly string[]; readonly reads: readonly string[]; readonly writes: readonly string[]; readonly alignment?: unknown };
+  const aliasing = fieldOf(memory, "aliasing") as readonly string[];
+  const reads = fieldOf(memory, "reads") as readonly string[];
+  const writes = fieldOf(memory, "writes") as readonly string[];
   const lines = [
-    `reads: ${contract.memory.reads.length === 0 ? "nothing" : contract.memory.reads.join(", ")}`,
-    `writes: ${contract.memory.writes.length === 0 ? "nothing" : contract.memory.writes.join(", ")}`,
+    `reads: ${reads.length === 0 ? "nothing" : reads.join(", ")}`,
+    `writes: ${writes.length === 0 ? "nothing" : writes.join(", ")}`,
     `aliasing: ${
       aliasing.length === 0
-        ? contract.memory.writes.length === 0
+        ? writes.length === 0
           ? "not constrained (the function writes nothing)"
           : "not constrained"
         : aliasing.join(", ")
     }`,
   ];
-  if (contract.memory.alignment !== undefined) lines.push(`alignment: ${JSON.stringify(contract.memory.alignment)}`);
+  const alignment = fieldOf(memory, "alignment");
+  if (alignment !== undefined) lines.push(`alignment: ${JSON.stringify(alignment)}`);
   return lines.join("\n");
 }
 
@@ -112,34 +121,56 @@ function renderMemory(contract: FunctionContract): string {
  * passed beside it, so it is one of the other parameters.
  */
 function renderTypes(contract: FunctionContract): string {
-  const entries = contract.function.params.map((param) => {
-    const type = parseType(param.type);
-    if (!isBufferType(type)) return `${param.name}: ${param.type} (scalar)`;
+  const entries: string[] = [];
+  for (const param of fieldOf(fieldOf(contract, "function"), "params") as readonly { readonly name: string; readonly type: string }[]) {
+    const type = parseType(String(fieldOf(param, "type")));
+    if (!isBufferType(type)) {
+      entries.push(`${String(fieldOf(param, "name"))}: ${String(fieldOf(param, "type"))} (scalar)`);
+      continue;
+    }
     const wire = `buffer of ${typeToString(type.of)}, passed as a bare pointer to the first element; no length arrives with it`;
-    return `${param.name}: ${param.type} (${wire})`;
-  });
-  entries.push(`result: ${contract.function.returns}`);
+    entries.push(`${String(fieldOf(param, "name"))}: ${String(fieldOf(param, "type"))} (${wire})`);
+  }
+  entries.push(`result: ${String(fieldOf(fieldOf(contract, "function"), "returns"))}`);
   return entries.join("\n");
 }
 
 /** The contract, as a review reads it. The body is the artifact, not part of it. */
 function renderContract(contract: FunctionContract): string {
-  const { statements, ...whatItDoes } = contract.definition;
-  return JSON.stringify({ ...contract, definition: whatItDoes }, null, 2);
+  const definition = fieldOf(contract, "definition") as { readonly objects: Record<string, unknown> };
+  return JSON.stringify({
+    version: fieldOf(contract, "version"),
+    function: fieldOf(contract, "function"),
+    promise: fieldOf(contract, "promise"),
+    requires: fieldOf(contract, "requires"),
+    ensures: fieldOf(contract, "ensures"),
+    memory: fieldOf(contract, "memory"),
+    effects: fieldOf(contract, "effects"),
+    numeric: fieldOf(contract, "numeric"),
+    optimize: fieldOf(contract, "optimize"),
+    definition: { objects: fieldOf(definition, "objects") },
+  }, null, 2);
 }
 
 /** The program the function belongs to: what else it is, and what it may call. */
 function renderProgram(request: ReviewRequest): string {
-  const lines = [`language: ${request.program.language}`, `function under review: ${request.unit.function} in ${request.unit.file}`];
-  for (const file of request.program.files) {
-    if (file.path === request.unit.file) continue;
-    lines.push(`${file.path} exports ${Object.keys(file.functions).join(", ") || "nothing"}`);
-    for (const [name, contract] of Object.entries(file.functions)) {
-      lines.push(
-        `  ${name}(${contract.function.params.map((param) => `${param.name}: ${param.type}`).join(", ")}) -> ${contract.function.returns}`,
-        ...contract.requires.map((requirement) => `    requires ${requirement}`),
-        ...contract.ensures.map((condition) => `    ensures ${condition}`),
-      );
+  const program = fieldOf(request, "program") as ProgramContract;
+  const unit = fieldOf(request, "unit") as { readonly function: string; readonly file: string };
+  const unitFile = String(fieldOf(unit, "file"));
+  const lines = [`language: ${String(fieldOf(program, "language"))}`, `function under review: ${String(fieldOf(unit, "function"))} in ${unitFile}`];
+  for (const file of fieldOf(program, "files") as readonly FileContract[]) {
+    const path = String(fieldOf(file, "path"));
+    if (path === unitFile) continue;
+    const table = fieldOf(file, "functions") as Record<string, FunctionContract>;
+    lines.push(`${path} exports ${Object.keys(table).join(", ") || "nothing"}`);
+    for (const name of Object.keys(table)) {
+      const contract = table[name];
+      const params = fieldOf(fieldOf(contract, "function"), "params") as readonly { readonly name: string; readonly type: string }[];
+      const written: string[] = [];
+      for (const param of params) written[written.length] = `${String(fieldOf(param, "name"))}: ${String(fieldOf(param, "type"))}`;
+      lines.push(`  ${name}(${written.join(", ")}) -> ${String(fieldOf(fieldOf(contract, "function"), "returns"))}`);
+      for (const requirement of fieldOf(contract, "requires") as readonly string[]) lines.push(`    requires ${requirement}`);
+      for (const condition of fieldOf(contract, "ensures") as readonly string[]) lines.push(`    ensures ${condition}`);
     }
   }
   return section("PROGRAM", lines);
@@ -147,16 +178,19 @@ function renderProgram(request: ReviewRequest): string {
 
 /** The target, as the machine the artifact has to run on. */
 function renderTarget(target: TargetSpec): string {
+  const arch = String(fieldOf(target, "arch"));
+  const features = fieldOf(target, "features") as readonly string[];
   return section("TARGET", [
-    `architecture: ${target.arch}, operating system: ${target.os}, ABI: ${target.abi}`,
-    `instruction set: ${target.features.length === 0 ? `the ${target.arch} baseline` : target.features.join(", ")}`,
+    `architecture: ${arch}, operating system: ${String(fieldOf(target, "os"))}, ABI: ${String(fieldOf(target, "abi"))}`,
+    `instruction set: ${features.length === 0 ? `the ${arch} baseline` : features.join(", ")}`,
   ]);
 }
 
 function renderObjective(contract: FunctionContract): string[] {
+  const optimize = fieldOf(contract, "optimize") as { readonly primary: string; readonly secondary?: string };
   return [
-    `primary: ${contract.optimize.primary}`,
-    `secondary: ${contract.optimize.secondary ?? "none"}`,
+    `primary: ${String(fieldOf(optimize, "primary"))}`,
+    `secondary: ${fieldOf(optimize, "secondary") === undefined ? "none" : String(fieldOf(optimize, "secondary"))}`,
     "",
     "Judge the artifact against the primary objective, and propose only what moves it. A change that makes",
     "the artifact smaller and slower, or faster and larger, is not one the objective asks for.",
@@ -164,12 +198,14 @@ function renderObjective(contract: FunctionContract): string[] {
 }
 
 function renderNumerical(contract: FunctionContract): string[] {
+  const numeric = fieldOf(contract, "numeric") as { readonly floatingPoint: string; readonly rounding: string; readonly fastMath: boolean };
+  const fastMath = fieldOf(numeric, "fastMath") === true;
   return [
-    `floating point: ${contract.numeric.floatingPoint}`,
-    `rounding: ${contract.numeric.rounding}`,
-    `fast math: ${contract.numeric.fastMath}`,
+    `floating point: ${String(fieldOf(numeric, "floatingPoint"))}`,
+    `rounding: ${String(fieldOf(numeric, "rounding"))}`,
+    `fast math: ${fastMath}`,
     "",
-    contract.numeric.fastMath === false
+    fastMath === false
       ? "Reassociation, contraction and value changes are not allowed: the result must be reproducible within the accumulated rounding error of a sequential sum."
       : "Rounding changes are permitted, but the result must still satisfy the postconditions.",
   ];
@@ -179,16 +215,17 @@ function renderNumerical(contract: FunctionContract): string[] {
 function renderCatalogue(): string[] {
   const lines: string[] = [];
   for (const rule of repairRules()) {
-    lines.push(`- ${rule.name}: ${rule.summary}`, `  applies: ${rule.applies}`);
+    const args = fieldOf(rule, "args") as readonly { readonly name: string; readonly description: string }[];
+    lines.push(`- ${String(fieldOf(rule, "name"))}: ${String(fieldOf(rule, "summary"))}`, `  applies: ${String(fieldOf(rule, "applies"))}`);
     // What a rule takes is said either way. Listing only the arguments a rule
     // has leaves a rule that takes none looking like one whose arguments were
     // forgotten, and the proposal that follows is refused for carrying one.
     lines.push(
-      rule.args.length === 0
+      args.length === 0
         ? "  takes no arguments: a proposal naming it is the rule and the block id, and nothing after them"
-        : `  takes one argument: ${rule.args.map((argument) => argument.name).join(", ")}`,
+        : `  takes one argument: ${args.map((argument) => String(fieldOf(argument, "name"))).join(", ")}`,
     );
-    for (const argument of rule.args) lines.push(`  ${argument.name}: ${argument.description}`);
+    for (const argument of args) lines.push(`  ${String(fieldOf(argument, "name"))}: ${String(fieldOf(argument, "description"))}`);
   }
   return lines;
 }
@@ -283,41 +320,50 @@ export function buildSystemPrompt(): string {
 
 function renderDiagnostics(request: ReviewRequest): string[] {
   const lines: string[] = [];
-  if (request.feedback.length > 0) {
-    lines.push("### WHAT THE COMPILER FOUND BY RUNNING IT, OLDEST FIRST", "", ...request.feedback.map(asBullet));
+  const feedback = fieldOf(request, "feedback") as readonly string[];
+  if (feedback.length > 0) {
+    lines.push("### WHAT THE COMPILER FOUND BY RUNNING IT, OLDEST FIRST", "");
+    for (const entry of feedback) lines.push(asBullet(entry));
   }
-  if (request.programFailure !== undefined) {
-    const { mismatch } = request.programFailure;
+  const programFailure = fieldOf(request, "programFailure") as ProgramFailure | undefined;
+  if (programFailure !== undefined) {
+    const mismatch = fieldOf(programFailure, "mismatch") as { readonly actualOutput: string; readonly expectedOutput: string; readonly failureOutput?: string; readonly line: number; readonly expected: string; readonly actual: string; readonly failure?: unknown };
     lines.push(
       "",
       "### WHAT THE PROGRAM IT BELONGS TO PRINTED",
       "",
       "```",
-      mismatch.actualOutput.trimEnd(),
+      String(fieldOf(mismatch, "actualOutput")).trimEnd(),
       "```",
-      ...(mismatch.failureOutput === undefined
-        ? []
-        : ["", "### WHAT IT WROTE TO STANDARD ERROR", "", "```", mismatch.failureOutput.trimEnd(), "```"]),
+    );
+    const failureOutput = fieldOf(mismatch, "failureOutput") as string | undefined;
+    if (failureOutput !== undefined) {
+      lines.push("", "### WHAT IT WROTE TO STANDARD ERROR", "", "```", failureOutput.trimEnd(), "```");
+    }
+    lines.push(
       "",
       "### WHAT THE SOURCE PRINTS",
       "",
       "```",
-      mismatch.expectedOutput.trimEnd(),
+      String(fieldOf(mismatch, "expectedOutput")).trimEnd(),
       "```",
       "",
-      mismatch.failure === undefined
-        ? `The outputs are the same until line ${mismatch.line}, where they differ:`
-        : `The program stopped before it printed line ${mismatch.line}:`,
-      `  the source prints ${JSON.stringify(mismatch.expected)}`,
-      `  the program ${mismatch.failure === undefined ? "prints" : "printed"} ${JSON.stringify(mismatch.actual)}`,
+      fieldOf(mismatch, "failure") === undefined
+        ? `The outputs are the same until line ${String(fieldOf(mismatch, "line"))}, where they differ:`
+        : `The program stopped before it printed line ${String(fieldOf(mismatch, "line"))}:`,
+      `  the source prints ${JSON.stringify(fieldOf(mismatch, "expected"))}`,
+      `  the program ${fieldOf(mismatch, "failure") === undefined ? "prints" : "printed"} ${JSON.stringify(fieldOf(mismatch, "actual"))}`,
     );
   }
-  if (request.refusals.length > 0) {
+  const refusals = fieldOf(request, "refusals") as readonly string[];
+  if (refusals.length > 0) {
     lines.push(
       "",
       "### PROPOSALS OF THE ROUND BEFORE THIS ONE THAT WERE REFUSED",
       "",
-      ...request.refusals.map(asBullet),
+    );
+    for (const entry of refusals) lines.push(asBullet(entry));
+    lines.push(
       "",
       "Each of these named a rule and a block, and the rule does not hold there. Propose something else, or",
       "a rule that does hold somewhere else.",
@@ -380,11 +426,13 @@ const CANDIDATE_READINGS: readonly string[] = [
  * candidate and there is no second reading to differ from.
  */
 function renderReading(request: ReviewRequest): readonly string[] {
-  if (request.candidates < 2) return [];
-  const reading = CANDIDATE_READINGS[(request.candidate - 1) % CANDIDATE_READINGS.length];
+  const candidate = Number(fieldOf(request, "candidate"));
+  const candidates = Number(fieldOf(request, "candidates"));
+  if (candidates < 2) return [];
+  const reading = CANDIDATE_READINGS[(candidate - 1) % CANDIDATE_READINGS.length];
   return [
     section("WHERE THIS READING STARTS", [
-      `This is candidate ${request.candidate} of ${request.candidates}. The others are reading the same artifact`,
+      `This is candidate ${candidate} of ${candidates}. The others are reading the same artifact`,
       "independently and none of them can see this one, so nothing here has been said to you before and nothing",
       "you find is expected to match.",
       "",
@@ -410,90 +458,95 @@ function inlineRefusable(callee: SemanticFunction | undefined): boolean {
 }
 
 function renderReview(request: ReviewRequest, lead: readonly string[]): string {
-  const semantic = request.semantics[request.contract.function.name];
-  // The worked examples in the answer format name a block and a callee this
-  // artifact really has, so a model copying the shape copies an id the IR
-  // prints rather than the name of a placeholder. The callee is one the body
-  // reaches other than itself — an example that inlines a function into itself
-  // is an example of a rule being refused — and it is one whose body the rule
-  // can actually put where the call was. An example of a callee that calls
-  // something is an example of a refusal, and a model that copies the shape
-  // spends the round on it: `pDouble` reaches `fMulMod`, whose body holds four
-  // calls, and the proposal the prompt showed there was refused every time a
-  // build asked. Where the body reaches nothing the rule may write, there is no
-  // example to give and the line is left out.
-  const callee =
-    semantic === undefined
-      ? null
-      : (semantic.calls.find((edge) => edge.callee !== semantic.name && inlineRefusable(request.semantics[edge.callee]))
-          ?.callee ?? null);
-  // The sites are the whole list the review is handed, walked once: the worked
-  // example names a block out of it and the section further down prints it. The
-  // block named is the last one, so the example is a block inside the body
-  // rather than the body itself.
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const semantics = fieldOf(request, "semantics") as Readonly<Record<string, SemanticFunction>>;
+  const functionName = String(fieldOf(fieldOf(contract, "function"), "name"));
+  const semantic = semantics[functionName];
+  const calls = semantic === undefined ? [] : fieldOf(semantic, "calls") as readonly { readonly callee: string }[];
+  let chosenCallee: string | null = null;
+  if (semantic !== undefined) {
+    const selfName = String(fieldOf(semantic, "name"));
+    for (const edge of calls) {
+      const calleeName = String(fieldOf(edge, "callee"));
+      if (calleeName === selfName) continue;
+      if (!inlineRefusable(semantics[calleeName])) continue;
+      chosenCallee = calleeName;
+      break;
+    }
+  }
   const sites = semantic === undefined ? null : describeSites(semantic);
-  const site =
-    sites === null
-      ? null
-      : (sites
-          .map((entry) => /^block (\S+):/.exec(entry)?.[1])
-          .filter((id): id is string => id !== undefined)
-          .at(-1) ?? semantic.entry.id);
+  let site: string | null = null;
+  if (sites !== null) {
+    for (const entry of sites) {
+      const found = /^block (\S+):/.exec(entry);
+      if (found !== null) site = found[1];
+    }
+    if (site === null) site = String(fieldOf(fieldOf(semantic, "entry"), "id"));
+  }
   const artifactTitle =
-    request.stage === "ir"
+    String(fieldOf(request, "stage")) === "ir"
       ? "THE SEMANTIC IR THE COMPILER RESOLVED THE SOURCE INTO"
       : "THE TARGET CODE THE COMPILER LOWERED THE IR INTO";
-  return [
-    section("CONTRACT", renderContract(request.contract)),
-    renderProgram(request),
-    renderTarget(request.target),
-    section("SIGNATURE", [
-      `function under review: ${request.contract.function.name}`,
-      "",
-      "parameter types:",
-      "",
-      renderTypes(request.contract),
-    ]),
-    ...(sites === null ? [] : [section("SITES A PROPOSAL MAY NAME", sites)]),
-    section(artifactTitle, [
-      "```",
-      request.artifact.trimEnd(),
-      "```",
-      ...(request.artifactNote === null ? [] : ["", request.artifactNote]),
-    ]),
-    section("WHAT THE RESULT MUST SATISFY", [
-      "preconditions on entry:",
-      "",
-      ...request.contract.requires.map((requirement) => `- ${requirement}`),
-      "",
-      ...(request.contract.ensures.length === 0
-        ? [
-            "There is no postcondition: the result is not one expression, so what the function returns is",
-            "checked by running the program it is part of and comparing what it prints with what the source",
-            "program prints.",
-          ]
-        : ["postconditions on return:", "", ...request.contract.ensures.map((condition) => `- ${condition}`)]),
-    ]),
-    section("MEMORY REQUIREMENTS", renderMemory(request.contract)),
-    section("NUMERICAL SEMANTICS", renderNumerical(request.contract)),
-    section("OPTIMIZATION OBJECTIVE", renderObjective(request.contract)),
-    section("WHAT THIS REVIEW IS FOR", lead),
-    ...renderReading(request),
-    ...(renderDiagnostics(request).length === 0 ? [] : [section("WHAT THE COMPILER ALREADY FOUND", renderDiagnostics(request))]),
-    section("WHAT YOU MAY PROPOSE", [
-      "Every fix is one of these rewrites, applied by the compiler to its own tree. There is nothing else a",
-      "proposal may ask for.",
-      "",
-      ...renderCatalogue(),
-    ]),
-    section("YOUR ANSWER", renderAnswerFormat(site, callee)),
-  ].join("\n\n");
+  const requires = fieldOf(contract, "requires") as readonly string[];
+  const ensures = fieldOf(contract, "ensures") as readonly string[];
+  const artifact = String(fieldOf(request, "artifact")).trimEnd();
+  const artifactNote = fieldOf(request, "artifactNote") as string | null;
+  const sections: string[] = [];
+  sections.push(section("CONTRACT", renderContract(contract)));
+  sections.push(renderProgram(request));
+  sections.push(renderTarget(fieldOf(request, "target") as TargetSpec));
+  sections.push(section("SIGNATURE", [
+    `function under review: ${functionName}`,
+    "",
+    "parameter types:",
+    "",
+    renderTypes(contract),
+  ]));
+  if (sites !== null) sections.push(section("SITES A PROPOSAL MAY NAME", sites));
+  const artifactSection: string[] = ["```", artifact, "```"];
+  if (artifactNote !== null) {
+    artifactSection.push("", artifactNote);
+  }
+  sections.push(section(artifactTitle, artifactSection));
+  const requirements: string[] = [
+    "preconditions on entry:",
+    "",
+  ];
+  for (const requirement of requires) requirements.push(`- ${requirement}`);
+  requirements.push("");
+  if (ensures.length === 0) {
+    requirements.push(
+      "There is no postcondition: the result is not one expression, so what the function returns is",
+      "checked by running the program it is part of and comparing what it prints with what the source",
+      "program prints.",
+    );
+  } else {
+    requirements.push("postconditions on return:", "");
+    for (const condition of ensures) requirements.push(`- ${condition}`);
+  }
+  sections.push(section("WHAT THE RESULT MUST SATISFY", requirements));
+  sections.push(section("MEMORY REQUIREMENTS", renderMemory(contract)));
+  sections.push(section("NUMERICAL SEMANTICS", renderNumerical(contract)));
+  sections.push(section("OPTIMIZATION OBJECTIVE", renderObjective(contract)));
+  sections.push(section("WHAT THIS REVIEW IS FOR", lead));
+  for (const one of renderReading(request)) sections.push(one);
+  const diagnostics = renderDiagnostics(request);
+  if (diagnostics.length > 0) sections.push(section("WHAT THE COMPILER ALREADY FOUND", diagnostics));
+  sections.push(section("WHAT YOU MAY PROPOSE", [
+    "Every fix is one of these rewrites, applied by the compiler to its own tree. There is nothing else a",
+    "proposal may ask for.",
+    "",
+    ...renderCatalogue(),
+  ]));
+  sections.push(section("YOUR ANSWER", renderAnswerFormat(site, chosenCallee)));
+  return sections.join("\n\n");
 }
 
 /** The review of the IR, before anything has been lowered from it. */
 export function buildIrReviewPrompt(request: ReviewRequest): string {
+  const feedback = fieldOf(request, "feedback") as readonly string[];
   const lead =
-    request.feedback.length === 0 && request.programFailure === undefined
+    feedback.length === 0 && fieldOf(request, "programFailure") === undefined
       ? [
           "The IR below is what the compiler resolved from the source. It is about to be lowered, assembled,",
           "linked and run against the contract above, and what it produces is what the build delivers. Read",
@@ -510,7 +563,7 @@ export function buildIrReviewPrompt(request: ReviewRequest): string {
 /** The review of the target the IR was lowered into. */
 export function buildTargetReviewPrompt(request: ReviewRequest): string {
   return renderReview(request, [
-    `The text below is what the compiler lowered the IR into for a ${request.output} build, on the target above.`,
+    `The text below is what the compiler lowered the IR into for a ${String(fieldOf(request, "output"))} build, on the target above.`,
     "The IR it was lowered from is not shown here: read the target, and where a change to it would have to be",
     "made in the IR that produces it, name the rule that makes it.",
     "",

@@ -20,6 +20,19 @@
 import type { PrimitiveTypeName } from "../core/types.ts";
 import type { Token } from "./typescript.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
+/** A mutable copy of an optional arm list, which the record type holds mutably. */
+function copyArms(value: readonly ResolvedType[] | undefined): ResolvedType[] | undefined {
+  return value === undefined ? undefined : [...value];
+}
+
 /** One property an interface declares, with the type the source wrote for it. */
 export interface TypeField {
   name: string;
@@ -93,10 +106,10 @@ interface ExpansionStore {
 }
 
 function expansionsOf(table: TypeTable): ExpansionStore {
-  const known = table.expansions;
+  const known = fieldOf(table, "expansions") as ExpansionStore | undefined;
   if (known !== undefined) return known;
   const made: ExpansionStore = { entries: new WeakMap(), generation: 0 };
-  table.expansions = made;
+  setFieldOn(table, "expansions", made);
   return made;
 }
 
@@ -198,20 +211,34 @@ const TYPED_ARRAYS: Record<string, PrimitiveTypeName> = {
 /* -------------------------------------------------------------------------- */
 
 function isPunct(token: Token | undefined, text: string): boolean {
-  return token !== undefined && token.kind === "punct" && token.text === text;
+  return token !== undefined && String(fieldOf(token, "kind")) === "punct" && String(fieldOf(token, "text")) === text;
+}
+
+/** The text of the token at `at`, or the empty text where none stands. */
+function tokenTextAt(tokens: readonly Token[], at: number): string {
+  const token: Token | undefined = tokens[at];
+  return token === undefined ? "" : String(fieldOf(token, "text"));
+}
+
+/** The kind of the token at `at`, or the empty kind where none stands. */
+function tokenKindAt(tokens: readonly Token[], at: number): string {
+  const token: Token | undefined = tokens[at];
+  return token === undefined ? "" : String(fieldOf(token, "kind"));
 }
 
 /** The token after the `}` or `)` at `open`, or -1 where it is unterminated. */
 function matching(tokens: readonly Token[], open: number): number {
-  const opener = tokens[open]?.text;
+  const openToken = tokens[open];
+  const opener = openToken === undefined ? "" : String(fieldOf(openToken, "text"));
   const closer = opener === "{" ? "}" : opener === "(" ? ")" : opener === "[" ? "]" : "";
   if (closer === "") return -1;
   let depth = 0;
   for (let index = open; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token.kind !== "punct") continue;
-    if (token.text === opener) depth += 1;
-    else if (token.text === closer) {
+    if (String(fieldOf(token, "kind")) !== "punct") continue;
+    const text = String(fieldOf(token, "text"));
+    if (text === opener) depth += 1;
+    else if (text === closer) {
       depth -= 1;
       if (depth === 0) return index;
     }
@@ -224,15 +251,16 @@ function matchingAngles(tokens: readonly Token[], open: number): number {
   let depth = 0;
   for (let index = open; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token.kind !== "punct") continue;
-    if (token.text === "<") depth += 1;
-    else if (token.text === ">") {
+    if (String(fieldOf(token, "kind")) !== "punct") continue;
+    const text = String(fieldOf(token, "text"));
+    if (text === "<") depth += 1;
+    else if (text === ">") {
       depth -= 1;
       if (depth === 0) return index;
-    } else if (token.text === ">>") {
+    } else if (text === ">>") {
       depth -= 2;
       if (depth <= 0) return index;
-    } else if (token.text === ">>>") {
+    } else if (text === ">>>") {
       depth -= 3;
       if (depth <= 0) return index;
     }
@@ -241,8 +269,8 @@ function matchingAngles(tokens: readonly Token[], open: number): number {
 }
 
 function needsSpace(previous: Token, next: Token): boolean {
-  const before = previous.text.slice(-1);
-  const after = next.text.charAt(0);
+  const before = String(fieldOf(previous, "text")).slice(-1);
+  const after = String(fieldOf(next, "text")).charAt(0);
   return /[A-Za-z0-9_$>]/.test(before) && /[A-Za-z0-9_$]/.test(after);
 }
 
@@ -260,11 +288,12 @@ export function typeText(tokens: readonly Token[], from: number, to: number): st
   for (let index = from; index < to; index += 1) {
     const token = tokens[index];
     if (token === undefined) continue;
-    if (token.kind === "string") {
-      const quote = token.quote === "'" ? "'" : '"';
+    if (String(fieldOf(token, "kind")) === "string") {
+      const quote = /^\x27$/.test(String(fieldOf(token, "quote"))) ? "\x27" : '"';
+      const text = String(fieldOf(token, "text"));
       let escaped = "";
-      for (let at = 0; at < token.text.length; at += 1) {
-        const char = token.text[at] as string;
+      for (let at = 0; at < text.length; at += 1) {
+        const char = text.slice(at, at + 1);
         if (char === "\\" || char === quote) escaped += "\\";
         escaped += char;
       }
@@ -273,7 +302,7 @@ export function typeText(tokens: readonly Token[], from: number, to: number): st
       continue;
     }
     if (previous !== undefined && needsSpace(previous, token)) out += " ";
-    out += token.text;
+    out += String(fieldOf(token, "text"));
     previous = token;
   }
   return out;
@@ -284,8 +313,8 @@ function memberEnd(tokens: readonly Token[], from: number, close: number): numbe
   let depth = 0;
   for (let index = from; index < close; index += 1) {
     const token = tokens[index];
-    if (token.kind !== "punct") continue;
-    const text = token.text;
+    if (String(fieldOf(token, "kind")) !== "punct") continue;
+    const text = String(fieldOf(token, "text"));
     if (text === "(" || text === "[" || text === "{" || text === "<") depth += 1;
     else if (text === ")" || text === "]" || text === "}" || text === ">") depth -= 1;
     else if (text === ">>") depth -= 2;
@@ -306,17 +335,18 @@ function typeParameters(tokens: readonly Token[], at: number): { names: string[]
   let expectName = true;
   for (let index = at + 1; index < close; index += 1) {
     const token = tokens[index];
-    if (token.kind === "punct") {
-      if (token.text === "<" || token.text === "(" || token.text === "[") depth += 1;
-      else if (token.text === ">" || token.text === ")" || token.text === "]") depth -= 1;
-      else if (token.text === ">>") depth -= 2;
-      else if (token.text === ">>>") depth -= 3;
-      else if (depth === 1 && token.text === ",") expectName = true;
-      else if (depth === 1 && (token.text === "extends" || token.text === "=")) expectName = false;
+    if (String(fieldOf(token, "kind")) === "punct") {
+      const text = String(fieldOf(token, "text"));
+      if (text === "<" || text === "(" || text === "[") depth += 1;
+      else if (text === ">" || text === ")" || text === "]") depth -= 1;
+      else if (text === ">>") depth -= 2;
+      else if (text === ">>>") depth -= 3;
+      else if (depth === 1 && text === ",") expectName = true;
+      else if (depth === 1 && (text === "extends" || text === "=")) expectName = false;
       continue;
     }
-    if (depth === 1 && expectName && token.kind === "ident") {
-      names.push(token.text);
+    if (depth === 1 && expectName && String(fieldOf(token, "kind")) === "ident") {
+      names.push(String(fieldOf(token, "text")));
       expectName = false;
     }
   }
@@ -335,7 +365,7 @@ function interfaceMembers(
   while (at < close) {
     while (at < close && (isPunct(tokens[at], ";") || isPunct(tokens[at], ","))) at += 1;
     if (at >= close) break;
-    if (tokens[at].text === "readonly") at += 1;
+    if (String(fieldOf(tokens[at], "text")) === "readonly") at += 1;
     // An index signature names the type a key reads as, not a field.
     if (isPunct(tokens[at], "[")) {
       const bracket = matching(tokens, at);
@@ -344,7 +374,7 @@ function interfaceMembers(
       if (isPunct(tokens[at], ":")) {
         const start = at + 1;
         const end = memberEnd(tokens, start, close);
-        index.value = typeText(tokens, start, end);
+        setFieldOn(index, "value", typeText(tokens, start, end));
         at = end;
       }
       continue;
@@ -368,10 +398,13 @@ function interfaceMembers(
       continue;
     }
     const name = tokens[at];
-    if (name.kind !== "ident" && name.kind !== "string" && name.kind !== "number") {
+    const nameKind = String(fieldOf(name, "kind"));
+    if (nameKind !== "ident" && nameKind !== "string" && nameKind !== "number") {
       at += 1;
       continue;
     }
+    const nameText = String(fieldOf(name, "text"));
+    const nameLine = Number(fieldOf(name, "line"));
     at += 1;
     let optional = false;
     if (isPunct(tokens[at], "?")) {
@@ -391,23 +424,23 @@ function interfaceMembers(
         returns = typeText(tokens, start, end);
         at = end;
       }
-      fields.set(name.text, {
-        name: name.text,
+      fields.set(nameText, {
+        name: nameText,
         typeName: `${params} => ${returns}`,
         optional,
-        line: name.line,
+        line: nameLine,
       });
       continue;
     }
     if (isPunct(tokens[at], ":")) {
       const start = at + 1;
       const end = memberEnd(tokens, start, close);
-      fields.set(name.text, { name: name.text, typeName: typeText(tokens, start, end), optional, line: name.line });
+      fields.set(nameText, { name: nameText, typeName: typeText(tokens, start, end), optional, line: nameLine });
       at = end;
       continue;
     }
     // A property with no annotation is the opaque reference.
-    fields.set(name.text, { name: name.text, typeName: "any", optional, line: name.line });
+    fields.set(nameText, { name: nameText, typeName: "any", optional, line: nameLine });
     if (isPunct(tokens[at], ";") || isPunct(tokens[at], ",")) at += 1;
   }
 }
@@ -428,16 +461,18 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
     exported: new Map(),
     reexported: new Set(),
     classes: new Set(),
+    expansions: undefined,
   };
   let depth = 0;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token.kind === "punct") {
-      if (token.text === "{") {
+    if (String(fieldOf(token, "kind")) === "punct") {
+      const text = String(fieldOf(token, "text"));
+      if (text === "{") {
         depth += 1;
         continue;
       }
-      if (token.text === "}") {
+      if (text === "}") {
         depth = Math.max(0, depth - 1);
         continue;
       }
@@ -445,32 +480,35 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
     if (depth !== 0) continue;
     let at = index;
     let exported = false;
-    if (tokens[at]?.text === "export") {
+    if (tokenTextAt(tokens, at) === "export") {
       exported = true;
       at += 1;
-      if (tokens[at]?.text === "declare") at += 1;
-    } else if (tokens[at]?.text === "declare") {
+      if (tokenTextAt(tokens, at) === "declare") at += 1;
+    } else if (tokenTextAt(tokens, at) === "declare") {
       at += 1;
     }
-    if (tokens[at]?.text === "interface" && tokens[at + 1]?.kind === "ident") {
-      const name = tokens[at + 1] as Token;
+    if (tokenTextAt(tokens, at) === "interface" && tokenKindAt(tokens, at + 1) === "ident") {
+      const name = tokens[at + 1];
+      const nameText = String(fieldOf(name, "text"));
+      const nameLine = Number(fieldOf(name, "line"));
       at += 2;
       const params = typeParameters(tokens, at);
       at = params.end;
       const extends_: string[] = [];
-      if (tokens[at]?.text === "extends") {
+      if (tokenTextAt(tokens, at) === "extends") {
         at += 1;
         const start = at;
         let nested = 0;
         while (at < tokens.length) {
-          const one = tokens[at] as Token;
-          if (one.kind === "punct") {
-            if (one.text === "<" || one.text === "(" || one.text === "[") nested += 1;
-            else if (one.text === ">") nested -= 1;
-            else if (one.text === ">>") nested -= 2;
-            else if (one.text === ">>>") nested -= 3;
-            else if (one.text === ")" || one.text === "]") nested -= 1;
-            else if (nested === 0 && one.text === "{") break;
+          const one = tokens[at];
+          const text = String(fieldOf(one, "text"));
+          if (String(fieldOf(one, "kind")) === "punct") {
+            if (text === "<" || text === "(" || text === "[") nested += 1;
+            else if (text === ">") nested -= 1;
+            else if (text === ">>") nested -= 2;
+            else if (text === ">>>") nested -= 3;
+            else if (text === ")" || text === "]") nested -= 1;
+            else if (nested === 0 && text === "{") break;
           }
           at += 1;
         }
@@ -478,7 +516,7 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
         let depth = 0;
         let from = 0;
         for (let index = 0; index <= written.length; index += 1) {
-          const char = written[index];
+          const char = written.slice(index, index + 1);
           if (char === "<" || char === "(" || char === "[") depth += 1;
           else if (char === ">" || char === ")" || char === "]") depth -= 1;
           else if ((char === "," && depth === 0) || index === written.length) {
@@ -488,7 +526,7 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
           }
         }
       }
-      while (at < tokens.length && tokens[at]?.text !== "{") at += 1;
+      while (at < tokens.length && tokenTextAt(tokens, at) !== "{") at += 1;
       if (at >= tokens.length) break;
       const close = matching(tokens, at);
       if (close < 0) break;
@@ -496,49 +534,53 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
       const indexType = { value: null as string | null };
       interfaceMembers(tokens, at, close, fields, indexType);
       const decl: TypeDecl = {
-        name: name.text,
+        name: nameText,
         kind: "interface",
         params: params.names,
         extends: extends_.filter((entry) => entry.trim() !== ""),
         fields,
-        index: indexType.value,
+        index: fieldOf(indexType, "value") as string | null,
         target: null,
         exported,
-        line: name.line,
+        line: nameLine,
         scope: table,
       };
-      table.declarations.set(decl.name, decl);
-      if (exported) table.exported.set(decl.name, decl);
+      const declarations = fieldOf(table, "declarations") as Map<string, TypeDecl>;
+      declarations.set(nameText, decl);
+      if (exported) (fieldOf(table, "exported") as Map<string, TypeDecl>).set(nameText, decl);
       index = close;
       depth = 0;
       continue;
     }
-    if (tokens[at]?.text === "type" && tokens[at + 1]?.kind === "ident") {
-      const name = tokens[at + 1] as Token;
+    if (tokenTextAt(tokens, at) === "type" && tokenKindAt(tokens, at + 1) === "ident") {
+      const name = tokens[at + 1];
+      const nameText = String(fieldOf(name, "text"));
+      const nameLine = Number(fieldOf(name, "line"));
       // `type { A, B } from "./x.ts"` names types another module declares and
       // is not an alias this one writes.
-      if (tokens[at + 2]?.text === "{") continue;
-      if (tokens[at + 2]?.text !== "=" && tokens[at + 2]?.text !== "<") continue;
+      if (tokenTextAt(tokens, at + 2) === "{") continue;
+      if (tokenTextAt(tokens, at + 2) !== "=" && tokenTextAt(tokens, at + 2) !== "<") continue;
       at += 2;
       const params = typeParameters(tokens, at);
       at = params.end;
-      if (tokens[at]?.text !== "=") continue;
+      if (tokenTextAt(tokens, at) !== "=") continue;
       const start = at + 1;
       let end = start;
       let nested = 0;
       while (end < tokens.length) {
-        const one = tokens[end] as Token;
-        if (one.kind === "punct") {
-          if (one.text === "(" || one.text === "[" || one.text === "{" || one.text === "<") nested += 1;
-          else if (one.text === ")" || one.text === "]" || one.text === "}" || one.text === ">") nested -= 1;
-          else if (one.text === ">>") nested -= 2;
-          else if (one.text === ">>>") nested -= 3;
-          else if (nested <= 0 && one.text === ";") break;
+        const one = tokens[end];
+        const text = String(fieldOf(one, "text"));
+        if (String(fieldOf(one, "kind")) === "punct") {
+          if (text === "(" || text === "[" || text === "{" || text === "<") nested += 1;
+          else if (text === ")" || text === "]" || text === "}" || text === ">") nested -= 1;
+          else if (text === ">>") nested -= 2;
+          else if (text === ">>>") nested -= 3;
+          else if (nested <= 0 && text === ";") break;
         }
         end += 1;
       }
       const decl: TypeDecl = {
-        name: name.text,
+        name: nameText,
         kind: "alias",
         params: params.names,
         extends: [],
@@ -546,11 +588,12 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
         index: null,
         target: typeText(tokens, start, end),
         exported,
-        line: name.line,
+        line: nameLine,
         scope: table,
       };
-      table.declarations.set(decl.name, decl);
-      if (exported) table.exported.set(decl.name, decl);
+      const declarations = fieldOf(table, "declarations") as Map<string, TypeDecl>;
+      declarations.set(nameText, decl);
+      if (exported) (fieldOf(table, "exported") as Map<string, TypeDecl>).set(nameText, decl);
       index = end;
       depth = 0;
     }
@@ -565,34 +608,37 @@ export function scanTypeTable(tokens: readonly Token[]): TypeTable {
 /** Marks the declarations an `export { ... }` list offers. */
 function exportTypeLists(tokens: readonly Token[], table: TypeTable): void {
   for (let index = 0; index < tokens.length; index += 1) {
-    if (tokens[index]?.text !== "export") continue;
+    if (tokenTextAt(tokens, index) !== "export") continue;
     let at = index + 1;
-    if (tokens[at]?.text === "type") at += 1;
-    if (tokens[at]?.text !== "{") continue;
+    if (tokenTextAt(tokens, at) === "type") at += 1;
+    if (tokenTextAt(tokens, at) !== "{") continue;
     const close = matching(tokens, at);
     if (close < 0) continue;
     for (let one = at + 1; one < close; one += 1) {
-      let local = tokens[one];
-      if (local?.text === "type") local = tokens[++one];
-      if (local?.kind !== "ident") continue;
+      let local: Token | undefined = tokens[one];
+      if (local !== undefined && String(fieldOf(local, "text")) === "type") local = tokens[++one];
+      if (local === undefined || String(fieldOf(local, "kind")) !== "ident") continue;
       // `X as Y` offers X under the name Y, which is the name an importer
       // writes; a list of plain names offers each under its own.
-      let offered = local.text;
-      if (tokens[one + 1]?.text === "as" && tokens[one + 2]?.kind === "ident") {
-        offered = (tokens[one + 2] as Token).text;
+      let offered = String(fieldOf(local, "text"));
+      if (tokenTextAt(tokens, one + 1) === "as" && tokenKindAt(tokens, one + 2) === "ident") {
+        offered = tokenTextAt(tokens, one + 2);
         one += 2;
       }
-      const decl = table.declarations.get(local.text);
+      const declarations = fieldOf(table, "declarations") as Map<string, TypeDecl>;
+      const exported = fieldOf(table, "exported") as Map<string, TypeDecl>;
+      const reexported = fieldOf(table, "reexported") as Set<string>;
+      const decl = declarations.get(String(fieldOf(local, "text")));
       if (decl !== undefined) {
-        decl.exported = true;
-        table.exported.set(offered, decl);
+        setFieldOn(decl, "exported", true);
+        exported.set(offered, decl);
         continue;
       }
       // A name the module did not write is one its imports bind: the export
       // list offers it under the name it writes, and what it stands for is the
       // declaration the module's own import resolves to. The module graph binds
       // those after the file is read, so the offer is resolved at the link.
-      table.reexported.add(offered);
+      reexported.add(offered);
     }
   }
 }
@@ -608,9 +654,11 @@ export function typeDeclared(table: TypeTable, name: string): TypeDecl | undefin
   // module's still.
   let at: TypeTable | undefined = table;
   while (at !== undefined) {
-    const found = at.declarations.get(name) ?? at.imported.get(name);
+    const declarations = fieldOf(at, "declarations") as Map<string, TypeDecl>;
+    const imported = fieldOf(at, "imported") as Map<string, TypeDecl>;
+    const found = declarations.get(name) ?? imported.get(name);
     if (found !== undefined) return found;
-    at = at.parent;
+    at = fieldOf(at, "parent") as TypeTable | undefined;
   }
   return undefined;
 }
@@ -656,13 +704,15 @@ function instantiate(
   // A generic declaration is expanded once per list of arguments, and this
   // table does not key that list, so it is expanded where it is asked for.
   const store = expansionsOf(table);
-  const cacheable = seen.size === 0 && decl.params.length === 0;
+  const cacheable = seen.size === 0 && (fieldOf(decl, "params") as readonly string[]).length === 0;
+  const entries = fieldOf(store, "entries") as WeakMap<TypeDecl, { readonly generation: number; readonly type: ResolvedType }>;
+  const generation = Number(fieldOf(store, "generation"));
   if (cacheable) {
-    const kept = store.entries.get(decl);
-    if (kept !== undefined && kept.generation === store.generation) return kept.type;
+    const kept = entries.get(decl);
+    if (kept !== undefined && Number(fieldOf(kept, "generation")) === generation) return fieldOf(kept, "type") as ResolvedType;
   }
   const built = instantiateUncached(decl, args, seen);
-  if (cacheable) store.entries.set(decl, { generation: store.generation, type: built });
+  if (cacheable) entries.set(decl, { generation, type: built });
   return built;
 }
 
@@ -671,39 +721,46 @@ function instantiateUncached(
   args: readonly ResolvedType[],
   seen: Set<TypeDecl>,
 ): ResolvedType {
-  const scope = decl.scope;
+  const scope = fieldOf(decl, "scope") as TypeTable;
+  const declParams = fieldOf(decl, "params") as readonly string[];
   const params = new Map<string, ResolvedType>();
-  for (let index = 0; index < decl.params.length; index += 1) {
-    params.set(decl.params[index] as string, args[index] ?? ANY_TYPE);
+  for (let index = 0; index < declParams.length; index += 1) {
+    params.set(declParams[index], args[index] ?? ANY_TYPE);
   }
-  if (decl.kind === "alias") {
-    if (seen.has(decl)) return { kind: "ref", name: decl.name };
+  const name = String(fieldOf(decl, "name"));
+  if (String(fieldOf(decl, "kind")) === "alias") {
+    if (seen.has(decl)) return { kind: "ref", name };
     seen.add(decl);
     try {
-      return resolveTypeText(scope, decl.target ?? "any", params, seen);
+      return resolveTypeText(scope, String(fieldOf(decl, "target") ?? "any"), params, seen);
     } finally {
       seen.delete(decl);
     }
   }
-  if (seen.has(decl)) return { kind: "ref", name: decl.name };
+  if (seen.has(decl)) return { kind: "ref", name };
   seen.add(decl);
   try {
     const fields = new Map<string, ResolvedField>();
     let index: ResolvedType | null = null;
-    for (const base of decl.extends) {
+    for (const base of fieldOf(decl, "extends") as readonly string[]) {
       const parent = resolveTypeText(scope, base, params, seen);
       mergeInto(fields, parent, seen);
-      if (parent.kind === "record" && parent.index !== null) index = parent.index;
+      const parentIndex = fieldOf(parent, "index") as ResolvedType | null;
+      if (String(fieldOf(parent, "kind")) === "record" && parentIndex !== null) index = parentIndex;
     }
-    for (const field of decl.fields.values()) {
-      const unlinked = namesNotDeclared(scope, field.typeName, params);
-      fields.set(field.name, {
-        type: resolveTypeText(scope, field.typeName, params, seen),
-        optional: field.optional,
-        ...(unlinked.length > 0 ? { unlinked } : {}),
-      });
+    for (const field of (fieldOf(decl, "fields") as ReadonlyMap<string, { readonly name: string; readonly typeName: string; readonly optional: boolean }>).values()) {
+      const fieldName = String(fieldOf(field, "name"));
+      const typeName = String(fieldOf(field, "typeName"));
+      const unlinked = namesNotDeclared(scope, typeName, params);
+      const optional = fieldOf(field, "optional") === true;
+      if (unlinked.length > 0) {
+        fields.set(fieldName, { type: resolveTypeText(scope, typeName, params, seen), optional, unlinked });
+      } else {
+        fields.set(fieldName, { type: resolveTypeText(scope, typeName, params, seen), optional });
+      }
     }
-    if (decl.index !== null) index = resolveTypeText(scope, decl.index, params, seen);
+    const declIndex = fieldOf(decl, "index") as string | null;
+    if (declIndex !== null) index = resolveTypeText(scope, declIndex, params, seen);
     return { kind: "record", fields, index };
   } finally {
     seen.delete(decl);
@@ -727,7 +784,7 @@ function namesNotDeclared(
   const names: string[] = [];
   for (const name of text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
     if (params.has(name)) continue;
-    if (typeDeclared(scope, name) !== undefined || scope.classes.has(name)) continue;
+    if (typeDeclared(scope, name) !== undefined || (fieldOf(scope, "classes") as Set<string>).has(name)) continue;
     if (!names.includes(name)) names.push(name);
   }
   return names;
@@ -735,8 +792,8 @@ function namesNotDeclared(
 
 /** Lays a parent's fields into a child's, as `extends` does. */
 function mergeInto(fields: Map<string, ResolvedField>, parent: ResolvedType, _seen: Set<TypeDecl>): void {
-  if (parent.kind !== "record") return;
-  for (const [name, field] of parent.fields) {
+  if (String(fieldOf(parent, "kind")) !== "record") return;
+  for (const [name, field] of fieldOf(parent, "fields") as ReadonlyMap<string, ResolvedField>) {
     if (!fields.has(name)) fields.set(name, field);
   }
 }
@@ -758,16 +815,18 @@ function fieldOfTypeSeen(
   field: string,
   seen: Set<TypeDecl>,
 ): ResolvedField | null {
-  if (base.kind === "record") return base.fields.get(field) ?? null;
-  if (base.kind === "ref" && base.name !== null) {
-    const decl = typeDeclared(table, base.name);
+  const baseKind = String(fieldOf(base, "kind"));
+  if (baseKind === "record") return (fieldOf(base, "fields") as ReadonlyMap<string, ResolvedField>).get(field) ?? null;
+  const refName = fieldOf(base, "name") as string | null;
+  if (baseKind === "ref" && refName !== null) {
+    const decl = typeDeclared(table, refName);
     // The declaration is not marked as seen before it is instantiated: the
     // expansion marks the declaration itself, and a name marked here reads as
     // the recursive reference the expansion answers with a `ref` before it has
     // written a field.
     if (decl !== undefined && !seen.has(decl)) {
       const resolved = instantiate(decl, [], seen, table);
-      if (resolved.kind === "record") return resolved.fields.get(field) ?? null;
+      if (String(fieldOf(resolved, "kind")) === "record") return (fieldOf(resolved, "fields") as ReadonlyMap<string, ResolvedField>).get(field) ?? null;
     }
   }
   return null;
@@ -776,8 +835,10 @@ function fieldOfTypeSeen(
 /** Every literal a field names, from its one literal or its list. */
 function literalsOf(field: ResolvedField | undefined): readonly string[] {
   if (field === undefined) return [];
-  if (field.literals !== undefined) return field.literals;
-  return field.literal === undefined ? [] : [field.literal];
+  const literals = fieldOf(field, "literals") as readonly string[] | undefined;
+  if (literals !== undefined) return literals;
+  const literal = fieldOf(field, "literal") as string | undefined;
+  return literal === undefined ? [] : [literal];
 }
 
 /** The fields of a record with the ones another record adds. */
@@ -793,11 +854,21 @@ function unionOfArms(arms: readonly ResolvedType[]): ResolvedType {
   const fields = new Map<string, ResolvedField>();
   let index: ResolvedType | null = null;
   for (const member of arms) {
-    if (member.kind !== "record") continue;
-    for (const [name, field] of member.fields) {
-      if (!fields.has(name)) fields.set(name, { ...field, optional: true });
+    if (String(fieldOf(member, "kind")) !== "record") continue;
+    for (const [name, field] of fieldOf(member, "fields") as ReadonlyMap<string, ResolvedField>) {
+      if (!fields.has(name)) {
+        const optional: ResolvedField = { type: fieldOf(field, "type") as ResolvedType, optional: true };
+        const literal = fieldOf(field, "literal") as string | undefined;
+        if (literal !== undefined) setFieldOn(optional, "literal", literal);
+        const literals = fieldOf(field, "literals") as readonly string[] | undefined;
+        if (literals !== undefined) setFieldOn(optional, "literals", literals);
+        const unlinked = fieldOf(field, "unlinked") as readonly string[] | undefined;
+        if (unlinked !== undefined) setFieldOn(optional, "unlinked", unlinked);
+        fields.set(name, optional);
+      }
     }
-    if (member.index !== null) index = member.index;
+    const memberIndex = fieldOf(member, "index") as ResolvedType | null;
+    if (memberIndex !== null) index = memberIndex;
   }
   return { kind: "record", fields, index, arms: [...arms] };
 }
@@ -810,39 +881,79 @@ function unionOfArms(arms: readonly ResolvedType[]): ResolvedType {
  * arms, not the whole union. A record with no arms is the fields of both, which
  * is what an intersection of two plain records is.
  */
-function intersectRecords(left: ResolvedType & { kind: "record" }, right: ResolvedType & { kind: "record" }): ResolvedType {
-  if (left.arms !== undefined) {
+function intersectRecords(left: ResolvedType, right: ResolvedType): ResolvedType {
+  const leftFields = fieldOf(left, "fields") as ReadonlyMap<string, ResolvedField>;
+  const rightFields = fieldOf(right, "fields") as ReadonlyMap<string, ResolvedField>;
+  const leftArms = fieldOf(left, "arms") as readonly ResolvedType[] | undefined;
+  if (leftArms !== undefined) {
     let tagName: string | null = null;
-    for (const [name, field] of right.fields) {
+    for (const [name, field] of rightFields) {
       if (literalsOf(field).length === 0) continue;
       tagName = name;
       break;
     }
     if (tagName !== null) {
-      const allowed = literalsOf(right.fields.get(tagName));
-      const kept = left.arms.filter((arm) => {
-        if (arm.kind !== "record") return false;
-        return literalsOf(arm.fields.get(tagName)).some((literal) => allowed.includes(literal));
-      });
+      const allowed = literalsOf(rightFields.get(tagName));
+      const kept: ResolvedType[] = [];
+      for (const arm of leftArms) {
+        if (String(fieldOf(arm, "kind")) !== "record") continue;
+        const armFields = fieldOf(arm, "fields") as ReadonlyMap<string, ResolvedField>;
+        const literals = literalsOf(armFields.get(tagName));
+        let matches = false;
+        for (const literal of literals) if (allowed.includes(literal)) matches = true;
+        if (matches) kept[kept.length] = arm;
+      }
       if (kept.length > 0) {
-        return unionOfArms(kept.map((arm) => arm.kind === "record" ? { ...arm, fields: withFields(arm.fields, right.fields) } : arm));
+        const widened: ResolvedType[] = [];
+        for (const arm of kept) {
+          if (String(fieldOf(arm, "kind")) !== "record") {
+            widened[widened.length] = arm;
+            continue;
+          }
+          widened[widened.length] = {
+            kind: "record",
+            fields: withFields(fieldOf(arm, "fields") as ReadonlyMap<string, ResolvedField>, rightFields),
+            index: fieldOf(arm, "index") as ResolvedType | null,
+            arms: copyArms(fieldOf(arm, "arms") as readonly ResolvedType[] | undefined),
+          };
+        }
+        return unionOfArms(widened);
       }
     }
-    const fields = withFields(left.fields, right.fields);
-    return { ...left, fields, arms: left.arms.map((arm) => arm.kind === "record" ? { ...arm, fields: withFields(arm.fields, right.fields) } : arm) };
+    const fields = withFields(leftFields, rightFields);
+    const arms: ResolvedType[] = [];
+    for (const arm of leftArms) {
+      if (String(fieldOf(arm, "kind")) !== "record") {
+        arms[arms.length] = arm;
+        continue;
+      }
+      arms[arms.length] = {
+        kind: "record",
+        fields: withFields(fieldOf(arm, "fields") as ReadonlyMap<string, ResolvedField>, rightFields),
+        index: fieldOf(arm, "index") as ResolvedType | null,
+        arms: copyArms(fieldOf(arm, "arms") as readonly ResolvedType[] | undefined),
+      };
+    }
+    return { kind: "record", fields, index: fieldOf(left, "index") as ResolvedType | null, arms };
   }
-  return { kind: "record", fields: withFields(left.fields, right.fields), index: left.index ?? right.index };
+  return { kind: "record", fields: withFields(leftFields, rightFields), index: (fieldOf(left, "index") as ResolvedType | null) ?? (fieldOf(right, "index") as ResolvedType | null) };
 }
 
 /** What an index read of a type answers, or null where the type names none. */
 export function elementOfType(table: TypeTable, base: ResolvedType): ResolvedType | null {
-  if (base.kind === "list") return base.of;
-  if (base.kind === "record" && base.index !== null) return base.index;
-  if (base.kind === "ref" && base.name !== null) {
-    const decl = typeDeclared(table, base.name);
+  const baseKind = String(fieldOf(base, "kind"));
+  if (baseKind === "list") return fieldOf(base, "of") as ResolvedType;
+  if (baseKind === "record") {
+    const recordIndex = fieldOf(base, "index") as ResolvedType | null;
+    if (recordIndex !== null) return recordIndex;
+  }
+  const refName = fieldOf(base, "name") as string | null;
+  if (baseKind === "ref" && refName !== null) {
+    const decl = typeDeclared(table, refName);
     if (decl !== undefined) {
       const resolved = instantiate(decl, [], new Set(), table);
-      if (resolved.kind === "record" && resolved.index !== null) return resolved.index;
+      const resolvedIndex = fieldOf(resolved, "index") as ResolvedType | null;
+      if (String(fieldOf(resolved, "kind")) === "record" && resolvedIndex !== null) return resolvedIndex;
     }
   }
   return null;
@@ -850,8 +961,9 @@ export function elementOfType(table: TypeTable, base: ResolvedType): ResolvedTyp
 
 /** The `Map` or `Set` a type names, or null where it names neither. */
 export function collectionOfType(type: ResolvedType): { kind: "map"; key: ResolvedType; value: ResolvedType } | { kind: "set"; of: ResolvedType } | null {
-  if (type.kind === "map") return { kind: "map", key: type.key, value: type.value };
-  if (type.kind === "set") return { kind: "set", of: type.of };
+  const kind = String(fieldOf(type, "kind"));
+  if (kind === "map") return { kind: "map", key: fieldOf(type, "key") as ResolvedType, value: fieldOf(type, "value") as ResolvedType };
+  if (kind === "set") return { kind: "set", of: fieldOf(type, "of") as ResolvedType };
   return null;
 }
 
@@ -865,8 +977,9 @@ export function collectionOfType(type: ResolvedType): { kind: "map"; key: Resolv
  */
 function indexedFieldOf(table: TypeTable, type: ResolvedType, field: string): ResolvedType {
   const found = fieldOfType(table, type, field);
-  if (found !== null) return found.type;
-  if (type.kind === "list" || type.kind === "map" || type.kind === "set") return elementOfType(table, type) ?? ANY_TYPE;
+  if (found !== null) return fieldOf(found, "type") as ResolvedType;
+  const kind = String(fieldOf(type, "kind"));
+  if (kind === "list" || kind === "map" || kind === "set") return elementOfType(table, type) ?? ANY_TYPE;
   return ANY_TYPE;
 }
 
@@ -918,7 +1031,7 @@ class TypeText {
     // name was the whole union: a field only another member writes was a field
     // of nothing, and the arm a value is could not be named.
     const named = members.map((member) => this.resolveNamedMember(member));
-    const present = named.filter((member) => member.kind !== "absent");
+    const present = named.filter((member) => String(fieldOf(member, "kind")) !== "absent");
     if (present.length === 0) return { kind: "absent" };
     if (present.length === 1) return present[0] as ResolvedType;
     // A union of records names the fields both write; a union that mixes
@@ -930,19 +1043,20 @@ class TypeText {
     // `typeof` guard asks at run time. Reading it as the first member made a
     // list method a method of a text; the value is left untyped so the method
     // is deferred and a guard is what names the member it holds.
-    if (present.some((member) => member.kind === "record")) {
+    if (present.some((member) => String(fieldOf(member, "kind")) === "record")) {
       const fields = new Map<string, ResolvedField>();
       let index: ResolvedType | null = null;
       for (const member of present) {
-        if (member.kind !== "record") continue;
-        for (const [name, field] of member.fields) {
-          if (!fields.has(name)) fields.set(name, { type: field.type, optional: true });
+        if (String(fieldOf(member, "kind")) !== "record") continue;
+        for (const [name, field] of fieldOf(member, "fields") as ReadonlyMap<string, { readonly type: ResolvedType }>) {
+          if (!fields.has(name)) fields.set(name, { type: fieldOf(field, "type") as ResolvedType, optional: true });
         }
-        if (member.index !== null) index = member.index;
+        const memberIndex = fieldOf(member, "index") as ResolvedType | null;
+        if (memberIndex !== null) index = memberIndex;
       }
       return { kind: "record", fields, index, arms: present };
     }
-    const mixed = present.some((member) => member.kind === "list") && present.some((member) => member.kind !== "list");
+    const mixed = present.some((member) => String(fieldOf(member, "kind")) === "list") && present.some((member) => String(fieldOf(member, "kind")) !== "list");
     if (mixed) return ANY_TYPE;
     return present[0] as ResolvedType;
   }
@@ -955,11 +1069,12 @@ class TypeText {
    * member it was, and a name this table does not hold is left for the link.
    */
   private resolveNamedMember(member: ResolvedType): ResolvedType {
-    if (member.kind !== "ref" || member.name === null) return member;
-    const decl = typeDeclared(this.table, member.name);
+    const name = fieldOf(member, "name") as string | null;
+    if (String(fieldOf(member, "kind")) !== "ref" || name === null) return member;
+    const decl = typeDeclared(this.table, name);
     if (decl === undefined || this.seen.has(decl)) return member;
     const resolved = instantiate(decl, [], this.seen, this.table);
-    return resolved.kind === "record" ? resolved : member;
+    return String(fieldOf(resolved, "kind")) === "record" ? resolved : member;
   }
 
   /** What one parameter of a function type holds, from the text it is written. */
@@ -985,9 +1100,9 @@ class TypeText {
       // field only those arms write is read through.
       const left = this.resolveNamedMember(type);
       const other = this.resolveNamedMember(right);
-      if (left.kind === "record" && other.kind === "record") {
+      if (String(fieldOf(left, "kind")) === "record" && String(fieldOf(other, "kind")) === "record") {
         type = intersectRecords(left, other);
-      } else if (left.kind === "any") {
+      } else if (String(fieldOf(left, "kind")) === "any") {
         type = other;
       } else {
         type = left;
@@ -1003,7 +1118,7 @@ class TypeText {
       if (!this.take("[")) return type;
       this.space();
       if (this.take("]")) type = { kind: "list", of: type };
-      else if (this.text[this.at] === '"' || this.text[this.at] === "'" || this.text[this.at] === "`") {
+      else if (this.text.slice(this.at, this.at + 1) === '"' || this.text.slice(this.at, this.at + 1) === "'" || this.text.slice(this.at, this.at + 1) === "`") {
         // `T["field"]` is what the field holds: the declaration the name stands
         // for is read first, because the field is written on it and not on the
         // name.
@@ -1022,7 +1137,7 @@ class TypeText {
         const members = [first];
         while (this.take(",")) members.push(this.union());
         this.take("]");
-        if (members.length === 2 && first.kind === "text") {
+        if (members.length === 2 && String(fieldOf(first, "kind")) === "text") {
           const fields = new Map<string, ResolvedField>([
             ["first", { type: first, optional: false }],
             ["second", { type: members[1] as ResolvedType, optional: false }],
@@ -1040,7 +1155,7 @@ class TypeText {
     if (this.at >= this.text.length) return ANY_TYPE;
     // `readonly T[]` is the list `T[]` is.
     if (this.word("readonly")) return this.postfix();
-    if (this.text[this.at] === "(") {
+    if (this.text.slice(this.at, this.at + 1) === "(") {
       const close = this.findBalanced(this.at, "(", ")");
       const inner = close < 0 ? "" : this.text.slice(this.at + 1, close);
       this.at = close < 0 ? this.text.length : close + 1;
@@ -1057,14 +1172,14 @@ class TypeText {
       }
       return inner.trim() === "" ? ANY_TYPE : resolveTypeText(this.table, inner, this.params, this.seen);
     }
-    if (this.text[this.at] === "{") {
+    if (this.text.slice(this.at, this.at + 1) === "{") {
       const close = this.findBalanced(this.at, "{", "}");
       if (close < 0) return ANY_TYPE;
       const inner = this.text.slice(this.at + 1, close);
       this.at = close + 1;
       return this.record(inner);
     }
-    if (this.text[this.at] === "[") {
+    if (this.text.slice(this.at, this.at + 1) === "[") {
       const save = this.at;
       this.skipBalanced("[", "]");
       // A tuple text only reaches here when the postfix reader did not see it;
@@ -1077,7 +1192,7 @@ class TypeText {
       this.take("]");
       // A tuple whose first value is a text is the pair record `first`/`second`
       // the entry of a map or `Object.entries` is.
-      if (members.length === 2 && first.kind === "text") {
+      if (members.length === 2 && String(fieldOf(first, "kind")) === "text") {
         return {
           kind: "record",
           fields: new Map<string, ResolvedField>([
@@ -1090,7 +1205,7 @@ class TypeText {
       }
       return { kind: "list", of: first };
     }
-    if (this.text[this.at] === "'" || this.text[this.at] === '"' || this.text[this.at] === "`") {
+    if (this.text.slice(this.at, this.at + 1) === "'" || this.text.slice(this.at, this.at + 1) === '"' || this.text.slice(this.at, this.at + 1) === "`") {
       this.stringLiteral();
       return { kind: "text" };
     }
@@ -1115,7 +1230,7 @@ class TypeText {
     // left out or kept. The keys are written as string literals, so they are
     // read from the text of the argument list rather than through the type
     // reader, which keeps a string literal as the text it is.
-    if ((lower === "Omit" || lower === "Pick") && this.text[this.at] === "<") {
+    if ((lower === "Omit" || lower === "Pick") && this.text.slice(this.at, this.at + 1) === "<") {
       const close = this.findBalanced(this.at, "<", ">");
       if (close < 0) {
         this.at += 1;
@@ -1131,12 +1246,12 @@ class TypeText {
           if (key !== "") keys.add(key);
         }
       }
-      if (base.kind !== "record") return base;
+      if (String(fieldOf(base, "kind")) !== "record") return base;
       const fields = new Map<string, ResolvedField>();
-      for (const [name, field] of base.fields) {
+      for (const [name, field] of fieldOf(base, "fields") as ReadonlyMap<string, ResolvedField>) {
         if (lower === "Omit" ? !keys.has(name) : keys.has(name)) fields.set(name, field);
       }
-      return { kind: "record", fields, index: base.index };
+      return { kind: "record", fields, index: fieldOf(base, "index") as ResolvedType | null };
     }
     const args = this.arguments();
     const first = args[0] ?? ANY_TYPE;
@@ -1185,7 +1300,7 @@ class TypeText {
     if (param !== undefined) return param;
     const decl = typeDeclared(this.table, lower);
     if (decl !== undefined) return instantiate(decl, args, this.seen, this.table);
-    if (this.table.classes.has(lower)) return { kind: "ref", name: lower };
+    if ((fieldOf(this.table, "classes") as Map<string, unknown>).has(lower)) return { kind: "ref", name: lower };
     return ANY_TYPE;
   }
 
@@ -1254,8 +1369,8 @@ class TypeText {
           let angles = 0;
           let at = 0;
           for (; at < scan.length; at += 1) {
-            if (scan[at] === "<") angles += 1;
-            else if (scan[at] === ">") {
+            if (scan.slice(at, at + 1) === "<") angles += 1;
+            else if (scan.slice(at, at + 1) === ">") {
               angles -= 1;
               if (angles === 0) break;
             }
@@ -1267,8 +1382,8 @@ class TypeText {
         let depth = 0;
         let at = 0;
         for (; at < scan.length; at += 1) {
-          if (scan[at] === "(") depth += 1;
-          else if (scan[at] === ")") {
+          if (scan.slice(at, at + 1) === "(") depth += 1;
+          else if (scan.slice(at, at + 1) === ")") {
             depth -= 1;
             if (depth === 0) break;
           }
@@ -1305,9 +1420,9 @@ class TypeText {
     let quote = "";
     let start = 0;
     for (let index = 0; index < text.length; index += 1) {
-      const char = text[index] as string;
+      const char = text.slice(index, index + 1);
       if (quote !== "") {
-        if (char === quote && text[index - 1] !== "\\") quote = "";
+        if (char === quote && text.slice(index - 1, index) !== "\\") quote = "";
         continue;
       }
       if (char === "'" || char === '"' || char === "`") {
@@ -1343,7 +1458,7 @@ class TypeText {
     let depth = 0;
     let start = 0;
     for (let index = 0; index < text.length; index += 1) {
-      const char = text[index] as string;
+      const char = text.slice(index, index + 1);
       if (char === "{" || char === "(" || char === "[" || char === "<") depth += 1;
       else if (char === "}" || char === ")" || char === "]" || char === ">") depth -= 1;
       else if ((char === ";" || char === ",") && depth === 0) {
@@ -1358,7 +1473,7 @@ class TypeText {
   private name(): string | null {
     this.space();
     const start = this.at;
-    while (this.at < this.text.length && /[A-Za-z0-9_$.]/.test(this.text[this.at] as string)) this.at += 1;
+    while (this.at < this.text.length && /[A-Za-z0-9_$.]/.test(this.text.slice(this.at, this.at + 1) as string)) this.at += 1;
     if (this.at === start) return null;
     return this.text.slice(start, this.at);
   }
@@ -1366,17 +1481,17 @@ class TypeText {
   private word(word: string): boolean {
     this.space();
     if (!this.text.startsWith(word, this.at)) return false;
-    const after = this.text[this.at + word.length];
+    const after = this.text.slice(this.at + word.length, this.at + word.length + 1);
     if (after !== undefined && /[A-Za-z0-9_$]/.test(after)) return false;
     this.at += word.length;
     return true;
   }
 
   private stringLiteral(): void {
-    const quote = this.text[this.at] as string;
+    const quote = this.text.slice(this.at, this.at + 1) as string;
     this.at += 1;
     while (this.at < this.text.length) {
-      const char = this.text[this.at] as string;
+      const char = this.text.slice(this.at, this.at + 1) as string;
       if (char === "\\") this.at += 2;
       else if (char === quote) {
         this.at += 1;
@@ -1393,7 +1508,7 @@ class TypeText {
   private findBalanced(from: number, open: string, close: string): number {
     let depth = 0;
     for (let index = from; index < this.text.length; index += 1) {
-      const char = this.text[index] as string;
+      const char = this.text.slice(index, index + 1) as string;
       if (char === open) depth += 1;
       else if (char === close) {
         depth -= 1;
@@ -1404,7 +1519,7 @@ class TypeText {
   }
 
   private space(): void {
-    while (this.at < this.text.length && /\s/.test(this.text[this.at] as string)) this.at += 1;
+    while (this.at < this.text.length && /\s/.test(this.text.slice(this.at, this.at + 1) as string)) this.at += 1;
   }
 
   private take(text: string): boolean {
@@ -1423,7 +1538,7 @@ class TypeText {
  * the same text.
  */
 export function resolveAnnotation(tokens: readonly Token[], from: number, to: number, table: TypeTable): ResolvedType {
-  return resolveTypeText(table, typeText(tokens, from, to));
+  return resolveTypeText(table, typeText(tokens, from, to), new Map(), new Set());
 }
 
 /** Resolves an annotation already written as one text, as a class field is. */
@@ -1442,7 +1557,7 @@ export function promisePayloadText(text: string): string | null {
 }
 
 export function resolveTypeName(table: TypeTable, typeName: string): ResolvedType {
-  return resolveTypeText(table, typeName);
+  return resolveTypeText(table, typeName, new Map(), new Set());
 }
 
 /**
@@ -1458,21 +1573,28 @@ export function bindImportedTypes(
   imports: readonly { specifier: string; names: readonly { local: string; imported: string }[] }[],
   targets: ReadonlyMap<string, TypeTable>,
 ): boolean {
-  expansionsOf(table).generation += 1;
+  const store = expansionsOf(table);
+  setFieldOn(store, "generation", Number(fieldOf(store, "generation")) + 1);
   let added = false;
   for (const entry of imports) {
-    const target = targets.get(entry.specifier);
+    const target = targets.get(String(fieldOf(entry, "specifier")));
     if (target === undefined) continue;
-    for (const name of entry.names) {
-      const decl = target.exported.get(name.imported) ??
-        target.declarations.get(name.imported) ??
-        // A module that re-exports a type writes no declaration for it: the
-        // name stands for the declaration its own import bound, which the graph
-        // binds before this file when the two are linked more than once.
-        (target.reexported.has(name.imported) ? target.imported.get(name.imported) : undefined);
+    const exported = fieldOf(target, "exported") as Map<string, TypeDecl>;
+    const declarations = fieldOf(target, "declarations") as Map<string, TypeDecl>;
+    const reexported = fieldOf(target, "reexported") as Set<string>;
+    const imported = fieldOf(target, "imported") as Map<string, TypeDecl>;
+    const ownImported = fieldOf(table, "imported") as Map<string, TypeDecl>;
+    for (const name of fieldOf(entry, "names") as readonly { readonly local: string; readonly imported: string }[]) {
+      const local = String(fieldOf(name, "local"));
+      const importedName = String(fieldOf(name, "imported"));
+      let decl = exported.get(importedName) ?? declarations.get(importedName);
+      // A module that re-exports a type writes no declaration for it: the
+      // name stands for the declaration its own import bound, which the graph
+      // binds before this file when the two are linked more than once.
+      if (decl === undefined && reexported.has(importedName)) decl = imported.get(importedName);
       if (decl === undefined) continue;
-      if (table.imported.get(name.local) === decl) continue;
-      table.imported.set(name.local, decl);
+      if (ownImported.get(local) === decl) continue;
+      ownImported.set(local, decl);
       added = true;
     }
   }

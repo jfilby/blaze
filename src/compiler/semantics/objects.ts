@@ -372,6 +372,19 @@ class BodyTypes {
       case "break":
       case "continue":
         return;
+      case "try": {
+        // A try body is a block the source wrote and every value in it is a
+        // value the body stores: walking only the statements outside it left
+        // the object literals a try wrote unregistered, so the IR that lowered
+        // them named a layout the program never laid out.
+        this.branch(fieldOf(statement,"body") as readonly Statement[], undefined, undefined);
+        const caught = fieldOf(statement,"catchParam") as string | null;
+        const catchBody = fieldOf(statement,"catchBody") as readonly Statement[] | null;
+        if (catchBody !== null) this.branch(catchBody, caught ?? undefined, { kind: "type", type: ANY_REF });
+        const finallyBody = fieldOf(statement,"finallyBody") as readonly Statement[] | null;
+        if (finallyBody !== null) this.branch(finallyBody, undefined, undefined);
+        return;
+      }
       default:
         return;
     }

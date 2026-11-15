@@ -16,16 +16,20 @@
  * does not hide every file that imports it and no error is thrown here.
  */
 
-import { posix } from "../core/platform.ts";
+import { dirname, extname, join, normalize } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import type { SourceModule, TypeExpr } from "../core/types.ts";
 import { refusalError, type Diagnostic } from "./diagnostics.ts";
-import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport } from "./module.ts";
+import type { DeclaredFunction, Frontend, ModuleAnalysis, ModuleImport, ModuleTypeImport } from "./module.ts";
 import type { ImportedFunction } from "./typescript.ts";
 import { bindImportedClasses } from "./typescript-classes.ts";
 import type { ClassInfo, ClassMethod, ClassTable } from "./typescript-classes.ts";
 import { bindImportedTypes, promisePayloadText, resolveTypeName } from "./typescript-types.ts";
 import type { ResolvedType, TypeTable } from "./typescript-types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 /** An error of the contract phase, which is where the graph is read. */
 export function contractPhaseError(message: string, detail?: string): CompilerError {
@@ -133,11 +137,13 @@ export function offeredValues(records: readonly ModuleRecord[]): OfferedValues[]
   const offered: OfferedValues[] = [];
   const byPath = new Map<string, OfferedValues>();
   for (const record of records) {
-    const values = record.analysis.constants as ReadonlyMap<string, unknown> | undefined;
-    const shapes = record.analysis.valueShapes as ReadonlyMap<string, unknown> | undefined;
-    const entry: OfferedValues = { path: record.path, values: new Map(values ?? []), shapes: new Map(shapes ?? []) };
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const values = fieldOf(analysis, "constants") as ReadonlyMap<string, unknown> | undefined;
+    const shapes = fieldOf(analysis, "valueShapes") as ReadonlyMap<string, unknown> | undefined;
+    const path = String(fieldOf(record, "path"));
+    const entry: OfferedValues = { path, values: new Map(values ?? []), shapes: new Map(shapes ?? []) };
     offered.push(entry);
-    byPath.set(record.path, entry);
+    byPath.set(path, entry);
   }
   // A module that re-exports a value offers what the module that declares it
   // offers: `export { host } from "#host/platform"` is the value, under the
@@ -147,68 +153,86 @@ export function offeredValues(records: readonly ModuleRecord[]): OfferedValues[]
   while (linked) {
     linked = false;
     for (const record of records) {
-      const own = byPath.get(record.path);
+      const own = byPath.get(String(fieldOf(record, "path")));
       if (own === undefined) continue;
-      for (const entry of record.analysis.reexports ?? []) {
-        const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+      const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+      const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+      const resolved = fieldOf(record, "resolved") as readonly string[];
+      const reexports = fieldOf(analysis, "reexports") as readonly { readonly specifier: string; readonly names: readonly string[]; readonly renames?: readonly { readonly local: string; readonly exported: string }[] }[] | undefined;
+      for (const entry of reexports ?? []) {
+        let index = -1;
+        for (let at = 0; at < imports.length; at += 1) {
+          if (String(fieldOf(imports[at], "specifier")) === String(fieldOf(entry, "specifier"))) index = at;
+        }
         if (index < 0) continue;
-        const target = byPath.get(record.resolved[index] ?? "");
+        const target = byPath.get(resolved[index] ?? "");
         if (target === undefined) continue;
-        for (const name of entry.names) {
-          const renamed = entry.renames?.find((one) => one.local === name);
-          const exported = renamed === undefined ? name : renamed.exported;
-          const value = target.values.get(name);
-          if (value !== undefined && !own.values.has(exported)) {
-            own.values.set(exported, value);
+        for (const name of fieldOf(entry, "names") as readonly string[]) {
+          let exported = name;
+          const renames = fieldOf(entry, "renames") as readonly { readonly local: string; readonly exported: string }[] | undefined;
+          for (const renamed of renames ?? []) {
+            if (String(fieldOf(renamed, "local")) === String(name)) exported = String(fieldOf(renamed, "exported"));
+          }
+          const targetValues = fieldOf(target, "values") as Map<string, unknown>;
+          const targetShapes = fieldOf(target, "shapes") as Map<string, unknown>;
+          const ownValues = fieldOf(own, "values") as Map<string, unknown>;
+          const ownShapes = fieldOf(own, "shapes") as Map<string, unknown>;
+          const value = targetValues.get(name);
+          if (value !== undefined && !ownValues.has(exported)) {
+            ownValues.set(exported, value);
             linked = true;
           }
-          const shape = target.shapes.get(name);
-          if (shape !== undefined && !own.shapes.has(exported)) {
-            own.shapes.set(exported, shape);
+          const shape = targetShapes.get(name);
+          if (shape !== undefined && !ownShapes.has(exported)) {
+            ownShapes.set(exported, shape);
             linked = true;
           }
         }
       }
     }
   }
-  return offered.filter((one) => one.values.size > 0 || one.shapes.size > 0);
+  return offered.filter((one) => (fieldOf(one, "values") as Map<string, unknown>).size > 0 || (fieldOf(one, "shapes") as Map<string, unknown>).size > 0);
 }
 
 /** The names a contract type names, which are the declarations it links. */
 function linkedTypeNames(type: TypeExpr, into: Set<string>): void {
   if (type.kind === "ref") {
-    if (typeof type.name === "string") into.add(type.name);
-    if (type.of !== null) linkedTypeNames(type.of, into);
+    const name = fieldOf(type, "name");
+    if (typeof name === "string") into.add(name);
+    const of = fieldOf(type, "of") as TypeExpr | null;
+    if (of !== null) linkedTypeNames(of, into);
     return;
   }
   if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
-    linkedTypeNames(type.of, into);
+    linkedTypeNames(fieldOf(type, "of") as TypeExpr, into);
   }
 }
 
 /** The names a value's shape names, which are the declarations it links. */
 function linkedShapeNames(shape: ResolvedType, into: Set<string>): void {
   if (shape.kind === "ref") {
-    if (shape.name !== null) into.add(shape.name);
+    const name = fieldOf(shape, "name") as string | null;
+    if (name !== null) into.add(name);
     return;
   }
   if (shape.kind === "list" || shape.kind === "set") {
-    linkedShapeNames(shape.of, into);
+    linkedShapeNames(fieldOf(shape, "of") as ResolvedType, into);
     return;
   }
   if (shape.kind === "map") {
-    linkedShapeNames(shape.key, into);
-    linkedShapeNames(shape.value, into);
+    linkedShapeNames(fieldOf(shape, "key") as ResolvedType, into);
+    linkedShapeNames(fieldOf(shape, "value") as ResolvedType, into);
     return;
   }
   if (shape.kind === "record") {
-    for (const field of shape.fields.values()) linkedShapeNames(field.type, into);
-    if (shape.index !== null) linkedShapeNames(shape.index, into);
+    for (const field of (fieldOf(shape, "fields") as ReadonlyMap<string, { readonly type: ResolvedType }>).values()) linkedShapeNames(fieldOf(field, "type") as ResolvedType, into);
+    const index = fieldOf(shape, "index") as ResolvedType | null;
+    if (index !== null) linkedShapeNames(index, into);
     return;
   }
   if (shape.kind === "function") {
-    for (const param of shape.params) linkedShapeNames(param, into);
-    linkedShapeNames(shape.returns, into);
+    for (const param of fieldOf(shape, "params") as readonly ResolvedType[]) linkedShapeNames(param, into);
+    linkedShapeNames(fieldOf(shape, "returns") as ResolvedType, into);
   }
 }
 
@@ -240,8 +264,9 @@ function bindLinkedDeclarations(
   names: ReadonlySet<string>,
   records: ReadonlyMap<string, ModuleRecord>,
 ): void {
-  const ownTypes = record.analysis.types;
-  const ownClasses = record.analysis.classes;
+  const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+  const ownTypes = fieldOf(analysis, "types") as TypeTable | undefined;
+  const ownClasses = fieldOf(analysis, "classes") as ClassTable | undefined;
   // A declaration names other declarations: an interface's fields, a base it
   // extends, an alias's target, a class's fields and methods. A value of the
   // interface read in this file needs those names too, because a field is read
@@ -251,17 +276,23 @@ function bindLinkedDeclarations(
   const seen = new Set<string>(pending);
   while (pending.length > 0) {
     const name = pending.pop() as string;
-    if (ownTypes !== undefined && !ownTypes.declarations.has(name) && !ownTypes.imported.has(name)) {
+    const declarations = ownTypes === undefined ? new Map<string, unknown>() : fieldOf(ownTypes, "declarations") as Map<string, unknown>;
+    const imported = ownTypes === undefined ? new Map<string, unknown>() : fieldOf(ownTypes, "imported") as Map<string, unknown>;
+    if (ownTypes !== undefined && !declarations.has(name) && !imported.has(name)) {
       for (const source of records.values()) {
-        const types = source.analysis.types;
+        const types = fieldOf(fieldOf(source, "analysis"), "types") as TypeTable | undefined;
         if (types === undefined) continue;
-        const declared = types.declarations.get(name) ?? types.exported.get(name) ?? types.imported.get(name);
+        const sourceDeclarations = fieldOf(types, "declarations") as Map<string, unknown>;
+        const sourceExported = fieldOf(types, "exported") as Map<string, unknown>;
+        const sourceImported = fieldOf(types, "imported") as Map<string, unknown>;
+        const declared = sourceDeclarations.get(name) ?? sourceExported.get(name) ?? sourceImported.get(name);
         if (declared === undefined) continue;
-        ownTypes.imported.set(name, declared);
+        imported.set(name, declared);
         const named = new Set<string>();
-        for (const field of declared.fields.values()) linkedNamesInText(field.typeName, named);
-        for (const base of declared.extends) linkedNamesInText(base, named);
-        if (declared.target !== null) linkedNamesInText(declared.target, named);
+        for (const field of (fieldOf(declared, "fields") as ReadonlyMap<string, { readonly typeName: string }>).values()) linkedNamesInText(String(fieldOf(field, "typeName")), named);
+        for (const base of fieldOf(declared, "extends") as readonly string[]) linkedNamesInText(base, named);
+        const targetText = fieldOf(declared, "target") as string | null;
+        if (targetText !== null) linkedNamesInText(targetText, named);
         for (const next of named) {
           if (seen.has(next)) continue;
           seen.add(next);
@@ -270,17 +301,21 @@ function bindLinkedDeclarations(
         break;
       }
     }
-    if (ownClasses !== undefined && !ownClasses.names.has(name)) {
+    const classNames = ownClasses === undefined ? new Set<string>() : fieldOf(ownClasses, "names") as Set<string>;
+    if (ownClasses !== undefined && !classNames.has(name)) {
       for (const source of records.values()) {
         const offered = classOffered(source, name, records, new Set());
         if (offered === undefined) continue;
-        ownClasses.names.add(name);
-        ownClasses.classes.set(name, offered);
+        classNames.add(name);
+        (fieldOf(ownClasses, "classes") as Map<string, unknown>).set(name, offered);
         const named = new Set<string>();
-        for (const field of offered.fields) linkedNamesInText(field.typeName, named);
-        for (const method of [...offered.methods, ...offered.getters]) {
-          linkedNamesInText(method.returnTypeName, named);
-          for (const param of method.params) linkedNamesInText(param.typeName, named);
+        for (const field of fieldOf(offered, "fields") as readonly { readonly typeName: string }[]) linkedNamesInText(String(fieldOf(field, "typeName")), named);
+        const callables: { readonly typeName: string; readonly returnTypeName: string; readonly params: readonly { readonly typeName: string }[] }[] = [];
+        for (const one of fieldOf(offered, "methods") as readonly { readonly typeName: string; readonly returnTypeName: string; readonly params: readonly { readonly typeName: string }[] }[]) callables[callables.length] = one;
+        for (const one of fieldOf(offered, "getters") as readonly { readonly typeName: string; readonly returnTypeName: string; readonly params: readonly { readonly typeName: string }[] }[]) callables[callables.length] = one;
+        for (const method of callables) {
+          linkedNamesInText(String(fieldOf(method, "returnTypeName")), named);
+          for (const param of fieldOf(method, "params") as readonly { readonly typeName: string }[]) linkedNamesInText(String(fieldOf(param, "typeName")), named);
         }
         for (const next of named) {
           if (seen.has(next)) continue;
@@ -315,17 +350,31 @@ function valueGetterOf(
   records: ReadonlyMap<string, ModuleRecord>,
   seen: Set<string>,
 ): { path: string; name: string } | undefined {
-  if (seen.has(record.path)) return undefined;
-  seen.add(record.path);
-  const direct = record.analysis.valueGetters?.get(name);
-  if (direct !== undefined) return { path: record.path, name: direct };
-  for (const entry of record.analysis.reexports ?? []) {
-    const renamed = entry.renames?.find((one) => one.exported === name);
-    const wanted = renamed === undefined ? name : renamed.local;
-    if (!entry.names.includes(wanted)) continue;
-    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+  const recordPath = String(fieldOf(record, "path"));
+  if (seen.has(recordPath)) return undefined;
+  seen.add(recordPath);
+  const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+  const getters = fieldOf(analysis, "valueGetters") as Map<string, string> | undefined;
+  const direct = getters?.get(name);
+  if (direct !== undefined) return { path: recordPath, name: direct };
+  const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+  const resolved = fieldOf(record, "resolved") as readonly string[];
+  const reexports = fieldOf(analysis, "reexports") as readonly { readonly specifier: string; readonly names: readonly string[]; readonly renames?: readonly { readonly local: string; readonly exported: string }[] }[] | undefined;
+  for (const entry of reexports ?? []) {
+    let wanted = name;
+    for (const one of fieldOf(entry, "renames") as readonly { readonly local: string; readonly exported: string }[] | undefined ?? []) {
+      if (String(fieldOf(one, "exported")) === name) wanted = String(fieldOf(one, "local"));
+    }
+    const names = fieldOf(entry, "names") as readonly string[];
+    let listed = false;
+    for (const one of names) if (String(one) === wanted) listed = true;
+    if (!listed) continue;
+    let index = -1;
+    for (let at = 0; at < imports.length; at += 1) {
+      if (String(fieldOf(imports[at], "specifier")) === String(fieldOf(entry, "specifier"))) index = at;
+    }
     if (index < 0) continue;
-    const target = records.get(record.resolved[index] ?? "");
+    const target = records.get(resolved[index] ?? "");
     if (target === undefined) continue;
     const found = valueGetterOf(target, wanted, records, seen);
     if (found !== undefined) return found;
@@ -338,16 +387,23 @@ function importedFunctionsOf(
   records: ReadonlyMap<string, ModuleRecord>,
 ): Map<string, ImportedFunction> {
   const functions = new Map<string, ImportedFunction>();
-  record.analysis.imports.forEach((entry, index) => {
-    if (entry.default || entry.names === null) return;
-    const target = records.get(record.resolved[index] ?? "");
-    if (target === undefined) return;
+  const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+  const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+  const resolved = fieldOf(record, "resolved") as readonly string[];
+  for (let index = 0; index < imports.length; index += 1) {
+    const entry = imports[index];
+    if (fieldOf(entry, "default") === true || fieldOf(entry, "names") === null) continue;
+    const target = records.get(resolved[index] ?? "");
+    if (target === undefined) continue;
     // A name the file imports under another name is seeded under the name this
     // file writes: a call is read against that name and emitted under the one
     // the other module exports.
-    const named: { local: string; imported: string }[] = entry.names.map((name) => ({ local: name, imported: name }));
-    for (const rename of entry.renames ?? []) named.push(rename);
-    for (const { local, imported } of named) {
+    const named: { local: string; imported: string }[] = [];
+    for (const name of fieldOf(entry, "names") as readonly string[]) named[named.length] = { local: String(name), imported: String(name) };
+    for (const rename of fieldOf(entry, "renames") as readonly { readonly local: string; readonly imported: string }[] | undefined ?? []) named[named.length] = rename;
+    for (const naming of named) {
+      const local = String(fieldOf(naming, "local"));
+      const imported = String(fieldOf(naming, "imported"));
       // A file whose body could not be held still offers the signatures of what
       // it exports: the declaration is refused where it is written, and the
       // calls a file writes to it are read against the parameters and result
@@ -357,46 +413,64 @@ function importedFunctionsOf(
         // A value the exporting module holds is offered under the value's name
         // and read through the getter function the module wrote for it.
         const getterName = valueGetterOf(target, imported, records, new Set());
-        const getter =
-          getterName === undefined
-            ? undefined
-            : records.get(getterName.path)?.analysis.functions.find((entry) => entry.name === getterName.name);
+        let getter: DeclaredFunction | undefined;
+        if (getterName !== undefined) {
+          const getterRecord = records.get(String(fieldOf(getterName, "path")));
+          if (getterRecord !== undefined) {
+            const getterAnalysis = fieldOf(getterRecord, "analysis") as ModuleAnalysis;
+            for (const entry of fieldOf(getterAnalysis, "functions") as readonly DeclaredFunction[]) {
+              if (String(fieldOf(entry, "name")) === String(fieldOf(getterName, "name"))) getter = entry;
+            }
+          }
+        }
         if (getter !== undefined) {
+          const getterParams = fieldOf(getter, "params") as readonly { readonly type: TypeExpr }[];
+          const params: TypeExpr[] = [];
+          for (const param of getterParams) params[params.length] = fieldOf(param, "type") as TypeExpr;
           const signature: ImportedFunction = {
-            params: getter.params.map((param) => param.type),
-            returns: getter.returns,
+            params,
+            returns: fieldOf(getter, "returns") as TypeExpr,
             valueGetter: true,
           };
           const linked = new Set<string>();
-          for (const param of getter.params) linkedTypeNames(param.type, linked);
-          linkedTypeNames(getter.returns, linked);
+          for (const param of getterParams) linkedTypeNames(fieldOf(param, "type") as TypeExpr, linked);
+          linkedTypeNames(fieldOf(getter, "returns") as TypeExpr, linked);
           bindLinkedDeclarations(record, linked, records);
           functions.set(local, signature);
         }
         continue;
       }
+      const declaredParams = fieldOf(declared, "params") as readonly { readonly type: TypeExpr }[];
+      const params: TypeExpr[] = [];
+      for (const param of declaredParams) params[params.length] = fieldOf(param, "type") as TypeExpr;
       const signature: ImportedFunction = {
-        params: declared.params.map((param) => param.type),
-        returns: declared.returns,
+        params,
+        returns: fieldOf(declared, "returns") as TypeExpr,
       };
-      const handle = declared.handle as {
-        returnsShape?: ImportedFunction["shape"];
-        collection?: ImportedFunction["collection"];
-        params?: readonly { shape?: ResolvedType | null }[];
-        async?: boolean;
+      const handle = fieldOf(declared, "handle") as {
+        readonly returnsShape?: ImportedFunction["shape"];
+        readonly collection?: ImportedFunction["collection"];
+        readonly params?: readonly { readonly shape?: ResolvedType | null }[];
+        readonly async?: boolean;
       } | undefined;
-      if (handle?.async === true) signature.async = true;
-      if (handle?.returnsShape !== undefined) signature.shape = handle.returnsShape;
-      if (handle?.collection !== undefined) signature.collection = handle.collection;
-      const paramShapes = handle?.params?.map((param) => param.shape ?? null);
-      if (paramShapes !== undefined) signature.paramShapes = paramShapes;
+      if (fieldOf(handle, "async") === true) signature.async = true;
+      const returnsShape = fieldOf(handle, "returnsShape") as ImportedFunction["shape"] | undefined;
+      if (returnsShape !== undefined) signature.shape = returnsShape;
+      const collection = fieldOf(handle, "collection") as ImportedFunction["collection"] | undefined;
+      if (collection !== undefined) signature.collection = collection;
+      const handleParams = fieldOf(handle, "params") as readonly { readonly shape?: ResolvedType | null }[] | undefined;
+      if (handleParams !== undefined) {
+        const shapes: (ResolvedType | null)[] = [];
+        for (const param of handleParams) shapes[shapes.length] = (fieldOf(param, "shape") as ResolvedType | undefined) ?? null;
+        signature.paramShapes = shapes;
+      }
       const linked = new Set<string>();
-      for (const param of declared.params) linkedTypeNames(param.type, linked);
-      linkedTypeNames(declared.returns, linked);
+      for (const param of declaredParams) linkedTypeNames(fieldOf(param, "type") as TypeExpr, linked);
+      linkedTypeNames(fieldOf(declared, "returns") as TypeExpr, linked);
       bindLinkedDeclarations(record, linked, records);
       functions.set(local, signature);
     }
-  });
+  }
   return functions;
 }
 
@@ -413,16 +487,35 @@ function importedFunctionsOf(
 function bindingOrder(records: ReadonlyMap<string, ModuleRecord>): ModuleRecord[] {
   const order: ModuleRecord[] = [];
   const seen = new Set<string>();
-  const visit = (record: ModuleRecord): void => {
-    if (seen.has(record.path)) return;
-    seen.add(record.path);
-    for (const path of [...record.resolved, ...record.typeResolved]) {
-      const imported = records.get(path);
-      if (imported !== undefined) visit(imported);
+  for (const root of records.values()) {
+    const stackRecords: ModuleRecord[] = [];
+    const stackExpanded: boolean[] = [];
+    stackRecords.push(root);
+    stackExpanded.push(false);
+    while (stackRecords.length > 0) {
+      const current = stackRecords.pop() as ModuleRecord;
+      const expanded = stackExpanded.pop() as boolean;
+      const currentPath = String(fieldOf(current, "path"));
+      if (expanded) {
+        order.push(current);
+        continue;
+      }
+      if (seen.has(currentPath)) continue;
+      seen.add(currentPath);
+      stackRecords.push(current);
+      stackExpanded.push(true);
+      const paths: string[] = [];
+      for (const one of fieldOf(current, "resolved") as readonly string[]) paths[paths.length] = one;
+      for (const one of fieldOf(current, "typeResolved") as readonly string[]) paths[paths.length] = one;
+      for (let at = paths.length - 1; at >= 0; at -= 1) {
+        const imported = records.get(paths[at]);
+        if (imported !== undefined) {
+          stackRecords.push(imported);
+          stackExpanded.push(false);
+        }
+      }
     }
-    order.push(record);
-  };
-  for (const record of records.values()) visit(record);
+  }
   return order;
 }
 
@@ -439,25 +532,52 @@ function declaredOffered(
   records: ReadonlyMap<string, ModuleRecord>,
   seen: Set<string>,
 ): DeclaredFunction | undefined {
-  if (seen.has(record.path)) return undefined;
-  seen.add(record.path);
-  // `export { f as g }` offers `f` under the name `g`: the declaration is the
-  // one `f` names, and the caller writes `g`.
-  const renamed = record.analysis.exportNames?.find((one) => one.exported === name);
-  const local = renamed === undefined ? name : renamed.local;
-  const held = record.analysis.functions.find((one) => one.name === local && (one.exported || renamed !== undefined)) ??
-    (record.analysis.signatures ?? []).find((one) => one.name === local);
-  if (held !== undefined) {
-    return renamed === undefined ? held : { ...held, name };
+  const recordPath = String(fieldOf(record, "path"));
+  if (seen.has(recordPath)) return undefined;
+  seen.add(recordPath);
+  const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+  const exportNames = fieldOf(analysis, "exportNames") as readonly { readonly local: string; readonly exported: string }[] | undefined;
+  let renamed: { readonly local: string; readonly exported: string } | undefined;
+  for (const one of exportNames ?? []) if (String(fieldOf(one, "exported")) === name) renamed = one;
+  const local = renamed === undefined ? name : String(fieldOf(renamed, "local"));
+  let held: DeclaredFunction | undefined;
+  for (const one of fieldOf(analysis, "functions") as readonly DeclaredFunction[]) {
+    if (String(fieldOf(one, "name")) !== local) continue;
+    if (fieldOf(one, "exported") === true || renamed !== undefined) held = one;
   }
-  for (const entry of record.analysis.reexports ?? []) {
+  if (held === undefined) {
+    for (const one of (fieldOf(analysis, "signatures") as readonly DeclaredFunction[] | undefined) ?? []) {
+      if (String(fieldOf(one, "name")) === local) held = one;
+    }
+  }
+  if (held !== undefined) {
+    if (renamed === undefined) return held;
+    const copy: DeclaredFunction = {
+      name,
+      exported: fieldOf(held, "exported") === true,
+      params: fieldOf(held, "params") as { name: string; type: TypeExpr }[],
+      returns: fieldOf(held, "returns") as TypeExpr,
+      handle: fieldOf(held, "handle"),
+    };
+    if (fieldOf(held, "internal") === true) copy.internal = true;
+    return copy;
+  }
+  const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+  const resolved = fieldOf(record, "resolved") as readonly string[];
+  const reexports = fieldOf(analysis, "reexports") as readonly { readonly specifier: string; readonly names: readonly string[]; readonly renames?: readonly { readonly local: string; readonly exported: string }[] }[] | undefined;
+  for (const entry of reexports ?? []) {
     // A re-export may offer the other module's name under another name here.
-    const offered = entry.renames?.find((one) => one.exported === name);
-    const wanted = offered === undefined ? name : offered.local;
-    if (!entry.names.includes(wanted)) continue;
-    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+    let wanted = name;
+    for (const one of fieldOf(entry, "renames") as readonly { readonly local: string; readonly exported: string }[] | undefined ?? []) {
+      if (String(fieldOf(one, "exported")) === name) wanted = String(fieldOf(one, "local"));
+    }
+    let listed = false;
+    for (const one of fieldOf(entry, "names") as readonly string[]) if (String(one) === wanted) listed = true;
+    if (!listed) continue;
+    let index = -1;
+    for (let at = 0; at < imports.length; at += 1) if (String(fieldOf(imports[at], "specifier")) === String(fieldOf(entry, "specifier"))) index = at;
     if (index < 0) continue;
-    const target = records.get(record.resolved[index] ?? "");
+    const target = records.get(resolved[index] ?? "");
     if (target === undefined) continue;
     const found = declaredOffered(target, wanted, records, seen);
     if (found !== undefined) return found;
@@ -479,19 +599,33 @@ function classOffered(
   records: ReadonlyMap<string, ModuleRecord>,
   seen: Set<string>,
 ): ClassInfo | undefined {
-  if (seen.has(record.path)) return undefined;
-  seen.add(record.path);
-  const renamed = record.analysis.exportNames?.find((one) => one.exported === name);
-  const local = renamed === undefined ? name : renamed.local;
-  const held = record.analysis.classes?.classes.get(local);
+  const recordPath = String(fieldOf(record, "path"));
+  if (seen.has(recordPath)) return undefined;
+  seen.add(recordPath);
+  const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+  const exportNames = fieldOf(analysis, "exportNames") as readonly { readonly local: string; readonly exported: string }[] | undefined;
+  let renamed: { readonly local: string; readonly exported: string } | undefined;
+  for (const one of exportNames ?? []) if (String(fieldOf(one, "exported")) === name) renamed = one;
+  const local = renamed === undefined ? name : String(fieldOf(renamed, "local"));
+  const classes = fieldOf(analysis, "classes") as ClassTable | undefined;
+  const classMap = classes === undefined ? new Map<string, ClassInfo>() : fieldOf(classes, "classes") as Map<string, ClassInfo>;
+  const held = classMap.get(local);
   if (held !== undefined) return withMethodShapes(held, record);
-  for (const entry of record.analysis.reexports ?? []) {
-    const offered = entry.renames?.find((one) => one.exported === name);
-    const wanted = offered === undefined ? name : offered.local;
-    if (!entry.names.includes(wanted)) continue;
-    const index = record.analysis.imports.findIndex((one) => one.specifier === entry.specifier);
+  const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+  const resolved = fieldOf(record, "resolved") as readonly string[];
+  const reexports = fieldOf(analysis, "reexports") as readonly { readonly specifier: string; readonly names: readonly string[]; readonly renames?: readonly { readonly local: string; readonly exported: string }[] }[] | undefined;
+  for (const entry of reexports ?? []) {
+    let wanted = name;
+    for (const one of fieldOf(entry, "renames") as readonly { readonly local: string; readonly exported: string }[] | undefined ?? []) {
+      if (String(fieldOf(one, "exported")) === name) wanted = String(fieldOf(one, "local"));
+    }
+    let listed = false;
+    for (const one of fieldOf(entry, "names") as readonly string[]) if (String(one) === wanted) listed = true;
+    if (!listed) continue;
+    let index = -1;
+    for (let at = 0; at < imports.length; at += 1) if (String(fieldOf(imports[at], "specifier")) === String(fieldOf(entry, "specifier"))) index = at;
     if (index < 0) continue;
-    const target = records.get(record.resolved[index] ?? "");
+    const target = records.get(resolved[index] ?? "");
     if (target === undefined) continue;
     const found = classOffered(target, wanted, records, seen);
     if (found !== undefined) return found;
@@ -509,25 +643,25 @@ function classOffered(
  * resolved where the declaration is, and it crosses the link with the class.
  */
 function withMethodShapes(info: ClassInfo, record: ModuleRecord): ClassInfo {
-  const types = record.analysis.types;
+  const types = fieldOf(fieldOf(record, "analysis"), "types") as TypeTable | undefined;
   if (types === undefined) return info;
-  const shaped = (method: ClassMethod): ClassMethod => {
-    if (method.returnsShape !== undefined || method.returnTypeName.trim() === "" || method.returnTypeName.trim() === "void") return method;
+  const shaped = (method: ClassMethod): void => {
+    const typeName = String(fieldOf(method, "returnTypeName"));
+    if (fieldOf(method, "returnsShape") !== undefined || typeName.trim() === "" || typeName.trim() === "void") return;
     try {
-      const shape = resolveTypeName(types, promisePayloadText(method.returnTypeName) ?? method.returnTypeName.trim());
-      return shape.kind === "any" ? method : { ...method, returnsShape: shape };
+      const shape = resolveTypeName(types, promisePayloadText(typeName) ?? typeName.trim());
+      if (String(fieldOf(shape, "kind")) !== "any") (method as unknown as Record<string, unknown>)["returnsShape"] = shape;
     } catch {
-      return method;
+      return;
     }
   };
-  return {
-    ...info,
-    constructor: info.constructor === null ? null : shaped(info.constructor),
-    methods: info.methods.map(shaped),
-    staticMethods: info.staticMethods.map(shaped),
-    getters: info.getters.map(shaped),
-    staticGetters: info.staticGetters.map(shaped),
-  };
+  const constructorMethod = fieldOf(info, "constructor") as ClassMethod | null;
+  if (constructorMethod !== null) shaped(constructorMethod);
+  for (const method of fieldOf(info, "methods") as readonly ClassMethod[]) shaped(method);
+  for (const method of fieldOf(info, "staticMethods") as readonly ClassMethod[]) shaped(method);
+  for (const method of fieldOf(info, "getters") as readonly ClassMethod[]) shaped(method);
+  for (const method of fieldOf(info, "staticGetters") as readonly ClassMethod[]) shaped(method);
+  return info;
 }
 
 /** Reads each file at most once, so a diamond import costs one read. */
@@ -556,14 +690,19 @@ function importedValuesOf(
 ): { values: Map<string, unknown>; shapes: Map<string, unknown> } {
   const values = new Map<string, unknown>();
   const shapes = new Map<string, unknown>();
-  imports.forEach((entry, index) => {
-    if (entry.default) return;
-    const target = offered.find((one) => one.path === resolved[index]);
-    if (target === undefined) return;
-    for (const name of entry.names ?? []) {
-      const held = target.values.get(name);
-      if (held !== undefined) values.set(name, held);
-      const shape = target.shapes.get(name);
+  for (let index = 0; index < imports.length; index += 1) {
+    const entry = imports[index];
+    if (fieldOf(entry, "default") === true) continue;
+    let target: OfferedValues | undefined;
+    for (const one of offered) if (String(fieldOf(one, "path")) === resolved[index]) target = one;
+    if (target === undefined) continue;
+    const names = fieldOf(entry, "names") as readonly string[] | null;
+    for (const name of names ?? []) {
+      const targetValues = fieldOf(target, "values") as Map<string, unknown>;
+      const targetShapes = fieldOf(target, "shapes") as Map<string, unknown>;
+      const held = targetValues.get(String(name));
+      if (held !== undefined) values.set(String(name), held);
+      const shape = targetShapes.get(String(name));
       if (shape !== undefined) {
         shapes.set(name, shape);
         const linked = new Set<string>();
@@ -574,13 +713,16 @@ function importedValuesOf(
     // A value the file reads under another name is bound under that name: the
     // exported name is what the other module offers, and the alias is what this
     // file writes in the functions that read it.
-    for (const rename of entry.renames ?? []) {
-      const held = target.values.get(rename.imported);
-      if (held !== undefined) values.set(rename.local, held);
-      const shape = target.shapes.get(rename.imported);
-      if (shape !== undefined) shapes.set(rename.local, shape);
+    const renames = fieldOf(entry, "renames") as readonly { readonly local: string; readonly imported: string }[] | undefined;
+    for (const rename of renames ?? []) {
+      const targetValues = fieldOf(target, "values") as Map<string, unknown>;
+      const targetShapes = fieldOf(target, "shapes") as Map<string, unknown>;
+      const held = targetValues.get(String(fieldOf(rename, "imported")));
+      if (held !== undefined) values.set(String(fieldOf(rename, "local")), held);
+      const shape = targetShapes.get(String(fieldOf(rename, "imported")));
+      if (shape !== undefined) shapes.set(String(fieldOf(rename, "local")), shape);
     }
-  });
+  }
   return { values, shapes };
 }
 
@@ -617,11 +759,11 @@ function packageNameOf(request: ModuleGraphRequest, specifier: string): string |
 /** The directories `node_modules` may hold a package in, nearest first. */
 function packageDirectories(from: string, name: string): string[] {
   const directories: string[] = [];
-  let directory = posix.dirname(from);
+  let directory = dirname(from);
   while (true) {
-    directories.push(posix.join(directory, "node_modules", name));
+    directories.push(join(join(directory, "node_modules"), name));
     if (directory === ".") return directories;
-    const parent = posix.dirname(directory);
+    const parent = dirname(directory);
     if (parent === directory) return directories;
     directory = parent;
   }
@@ -695,9 +837,9 @@ function packageEntry(manifest: string, subpath: string): string | null {
 
 /** The file an entry names: the entry itself, or the extension it left out. */
 function packageFile(read: (path: string) => string | null, path: string): string | null {
-  const normalized = posix.normalize(path);
+  const normalized = normalize(path);
   const candidates =
-    posix.extname(normalized) === "" ? [`${normalized}.js`, `${normalized}.mjs`, `${normalized}.ts`] : [normalized];
+    extname(normalized) === "" ? [`${normalized}.js`, `${normalized}.mjs`, `${normalized}.ts`] : [normalized];
   for (const candidate of [...candidates, `${normalized}/index.js`]) {
     if (read(candidate) !== null) return candidate;
   }
@@ -739,12 +881,14 @@ function candidatePaths(
   from: string,
   entry: { specifier: string },
 ): string[] {
-  if (isPackageSpecifier(request, entry.specifier)) {
-    if (request.resolvePackages === false) return [];
-    const found = resolvePackage(request, read, from, entry.specifier);
+  const specifier = String(fieldOf(entry, "specifier"));
+  if (isPackageSpecifier(request, specifier)) {
+    if (fieldOf(request, "resolvePackages") === false) return [];
+    const found = resolvePackage(request, read, from, specifier);
     return found === null ? [] : [found];
   }
-  return request.frontend.resolveImport(entry.specifier).map((candidate) => modulePath(candidate, from));
+  const frontend = fieldOf(request, "frontend") as Frontend;
+  return frontend.resolveImport(specifier).map((candidate) => modulePath(candidate, from));
 }
 
 /** The file an import names, resolved against the project, or null. */
@@ -756,11 +900,13 @@ function resolveImport(
 ): string | null {
   // A project that pastes its source has no directory to resolve against.
   if (from === INLINE_MODULE) return null;
-  const mapped = request.modules?.[entry.specifier];
+  const specifier = String(fieldOf(entry, "specifier"));
+  const modules = fieldOf(request, "modules") as Readonly<Record<string, string>> | undefined;
+  const mapped = modules === undefined ? undefined : modules[specifier];
   if (mapped !== undefined) return read(mapped) === null ? null : mapped;
-  if (isHostSpecifier(entry.specifier)) return null;
-  if (isPackageSpecifier(request, entry.specifier)) {
-    return request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
+  if (isHostSpecifier(specifier)) return null;
+  if (isPackageSpecifier(request, specifier)) {
+    return fieldOf(request, "resolvePackages") === false ? null : resolvePackage(request, read, from, specifier);
   }
   let candidates: string[];
   try {
@@ -798,27 +944,30 @@ function requireImport(
   from: string,
   entry: { specifier: string; line: number },
 ): string | null {
+  const specifier = String(fieldOf(entry, "specifier"));
+  const line = Number(fieldOf(entry, "line"));
   if (from === INLINE_MODULE) {
     throw contractPhaseError(
-      `an inline source cannot import "${entry.specifier}"`,
+      `an inline source cannot import "${specifier}"`,
       'set "sourceFile" to a file beside the project file so its imports can be resolved',
     );
   }
-  const mapped = request.modules?.[entry.specifier];
+  const modules = fieldOf(request, "modules") as Readonly<Record<string, string>> | undefined;
+  const mapped = modules === undefined ? undefined : modules[specifier];
   if (mapped !== undefined) {
     if (read(mapped) !== null) return mapped;
     throw contractPhaseError(
-      `${from} imports "${entry.specifier}" (line ${entry.line}), which the project maps to ${mapped}`,
-      `the mapped module is not a file of the project; fix the "${entry.specifier}" entry in the project file`,
+      `${from} imports "${specifier}" (line ${line}), which the project maps to ${mapped}`,
+      `the mapped module is not a file of the project; fix the "${specifier}" entry in the project file`,
     );
   }
-  if (isHostSpecifier(entry.specifier)) return null;
-  if (isPackageSpecifier(request, entry.specifier)) {
-    const resolved = request.resolvePackages === false ? null : resolvePackage(request, read, from, entry.specifier);
+  if (isHostSpecifier(specifier)) return null;
+  if (isPackageSpecifier(request, specifier)) {
+    const resolved = fieldOf(request, "resolvePackages") === false ? null : resolvePackage(request, read, from, specifier);
     if (resolved !== null) return resolved;
-    const name = packageNameOf(request, entry.specifier) ?? entry.specifier;
+    const name = packageNameOf(request, specifier) ?? specifier;
     throw contractPhaseError(
-      `${from} imports "${entry.specifier}" (line ${entry.line}), which is not an installed package`,
+      `${from} imports "${specifier}" (line ${line}), which is not an installed package`,
       `looked for ${packageDirectories(from, name).join(", ")}; a package is read from the entry its package.json names`,
     );
   }
@@ -826,14 +975,14 @@ function requireImport(
   const resolved = candidates.find((path) => read(path) !== null);
   if (resolved !== undefined) return resolved;
   throw contractPhaseError(
-    `${from} imports "${entry.specifier}" (line ${entry.line}), which is not a module of this project`,
+    `${from} imports "${specifier}" (line ${line}), which is not a module of this project`,
     `looked for ${candidates.join(", ")}`,
   );
 }
 
 /** Joins a file name an import may name onto the importing file. */
 function modulePath(candidate: string, from: string): string {
-  return posix.normalize(posix.join(posix.dirname(from), candidate));
+  return normalize(join(dirname(from), candidate));
 }
 
 /**
@@ -847,25 +996,33 @@ function modulePath(candidate: string, from: string): string {
  * makes once the graph is whole.
  */
 export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
-  const read = cachingReader(request.read);
+  const read = cachingReader(fieldOf(request, "read") as (path: string) => string | null);
   // A frontend that answers its refusals is read through that answer, so the
   // first analysis survives a construct that only waits for the link. The
   // verdict is written after the second read, where a build reports it.
-  const reporting = request.frontend.read;
+  const frontend = fieldOf(request, "frontend") as Frontend;
+  const reporting = fieldOf(frontend, "read") as ModuleReader | undefined;
+  const givenReader = fieldOf(request, "reader") as ModuleReader | undefined;
   let reader: ModuleReader;
-  if (request.reader !== undefined) {
-    reader = request.reader;
+  if (givenReader !== undefined) {
+    reader = givenReader;
   } else if (reporting !== undefined) {
-    reader = (source, path, entry, context) => reporting(source, path, entry, context);
+    reader = (source, path, entry, context) => (fieldOf(frontend, "read") as ModuleReader)(source, path, entry, context);
   } else {
-    reader = (source, path, entry, context) => ({
-      analysis: request.frontend.analyze(source, path, entry, context),
-      refused: [],
-      count: 0,
-    });
+    reader = (source, path, entry, context) => {
+      const analysis = (fieldOf(frontend, "analyze") as (source: string, path: string, entry: boolean, context: unknown) => ModuleAnalysis)(source, path, entry, context);
+      return {
+        analysis,
+        refused: [],
+        count: 0,
+      };
+    };
   }
   const records = new Map<string, ModuleRecord>();
-  const pending = [request.entry.path, ...(request.roots ?? [])];
+  const entry = fieldOf(request, "entry") as { readonly path: string; readonly source: string };
+  const entryPath = String(fieldOf(entry, "path"));
+  const pending: string[] = [entryPath];
+  for (const one of (fieldOf(request, "roots") as readonly string[] | undefined) ?? []) pending[pending.length] = one;
 
   while (pending.length > 0) {
     const path = pending.shift() as string;
@@ -874,27 +1031,29 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // the module keeps the name the import gave it. What the replacement
     // imports resolves beside the file it was written in, not beside the name
     // it answers for.
-    const sourcePath = request.host?.[path] ?? path;
-    const source = path === request.entry.path ? request.entry.source : read(sourcePath);
+    const hostTable = fieldOf(request, "host") as Readonly<Record<string, string>> | undefined;
+    const sourcePath = hostTable === undefined || hostTable[path] === undefined ? path : hostTable[path];
+    const source = path === entryPath ? String(fieldOf(entry, "source")) : read(sourcePath);
     if (source === null) throw contractPhaseError(`cannot read module ${path}`);
     if (source.trim() === "") throw contractPhaseError(`module ${path} is empty`);
 
-    const first = reader(source, path, path === request.entry.path);
+    const first = reader(source, path, path === entryPath, undefined);
     const record: ModuleRecord = {
       path,
       source,
-      analysis: first.analysis,
+      analysis: fieldOf(first, "analysis") as ModuleAnalysis,
       resolved: [],
       typeResolved: [],
-      refused: first.refused,
-      refusedCount: first.count,
+      refused: fieldOf(first, "refused") as Diagnostic[],
+      refusedCount: Number(fieldOf(first, "count")),
     };
     records.set(path, record);
-    const strict = request.requireImports !== false;
-    for (const entry of record.analysis.imports) {
+    const strict = fieldOf(request, "requireImports") !== false;
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    for (const imported of fieldOf(analysis, "imports") as readonly ModuleImport[]) {
       const resolved = strict
-        ? requireImport(request, read, sourcePath, entry)
-        : resolveImport(request, read, sourcePath, entry);
+        ? requireImport(request, read, sourcePath, imported)
+        : resolveImport(request, read, sourcePath, imported);
       // An import left unbound keeps its place, so the resolved list still
       // answers by the index the imports are written at.
       record.resolved.push(resolved ?? "");
@@ -903,10 +1062,10 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // A type import names a file the program may not otherwise reach, and the
     // file that writes the declaration is where its fields resolve. It is
     // followed beside the runtime imports but is never checked for a symbol.
-    for (const entry of record.analysis.typeImports ?? []) {
+    for (const imported of (fieldOf(analysis, "typeImports") as readonly ModuleTypeImport[] | undefined) ?? []) {
       const resolved = strict
-        ? requireImport(request, read, sourcePath, entry)
-        : resolveImport(request, read, sourcePath, entry);
+        ? requireImport(request, read, sourcePath, imported)
+        : resolveImport(request, read, sourcePath, imported);
       record.typeResolved.push(resolved ?? "");
       if (resolved !== null) pending.push(resolved);
     }
@@ -921,18 +1080,22 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   // importer already holds keeps resolving through the module that wrote it.
   const tables = new Map<string, TypeTable>();
   for (const record of records.values()) {
-    if (record.analysis.types !== undefined) tables.set(record.path, record.analysis.types);
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const types = fieldOf(analysis, "types") as TypeTable | undefined;
+    if (types !== undefined) tables.set(String(fieldOf(record, "path")), types);
   }
   for (let linked = true; linked; ) {
     linked = false;
     for (const record of records.values()) {
-      const types = record.analysis.types;
-      const imports = record.analysis.typeImports;
+      const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+      const types = fieldOf(analysis, "types") as TypeTable | undefined;
+      const imports = fieldOf(analysis, "typeImports") as readonly ModuleTypeImport[] | undefined;
       if (types === undefined || imports === undefined) continue;
+      const typeResolved = fieldOf(record, "typeResolved") as readonly string[];
       const targets = new Map<string, TypeTable>();
       for (let index = 0; index < imports.length; index += 1) {
-        const target = tables.get(record.typeResolved[index] as string);
-        if (target !== undefined) targets.set((imports[index] as { specifier: string }).specifier, target);
+        const target = tables.get(typeResolved[index] as string);
+        if (target !== undefined) targets.set(String(fieldOf(imports[index], "specifier")), target);
       }
       if (bindImportedTypes(types, imports, targets)) linked = true;
     }
@@ -942,7 +1105,9 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   // compiled. The table is the first read's, so the second read sees them.
   const classTables = new Map<string, ClassTable>();
   for (const record of records.values()) {
-    if (record.analysis.classes !== undefined) classTables.set(record.path, record.analysis.classes);
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const classes = fieldOf(analysis, "classes") as ClassTable | undefined;
+    if (classes !== undefined) classTables.set(String(fieldOf(record, "path")), classes);
   }
   // A class a module re-exports under a name it imports is bound in that
   // module's own table, and a file that imports it from there reads it. Which
@@ -952,29 +1117,37 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   while (classesLinked) {
     classesLinked = false;
     for (const record of records.values()) {
-    const table = record.analysis.classes;
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const table = fieldOf(analysis, "classes") as ClassTable | undefined;
     if (table === undefined) continue;
+    const imports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+    const resolved = fieldOf(record, "resolved") as readonly string[];
     const targets = new Map<string, ModuleRecord>();
-    for (let index = 0; index < record.analysis.imports.length; index += 1) {
-      const target = records.get(record.resolved[index] as string);
-      const entry = record.analysis.imports[index] as { specifier: string };
-      if (target !== undefined) targets.set(entry.specifier, target);
+    for (let index = 0; index < imports.length; index += 1) {
+      const target = records.get(resolved[index] as string);
+      if (target !== undefined) targets.set(String(fieldOf(imports[index], "specifier")), target);
     }
     // A type-only import names a class the file reads through a value it was
     // handed — `private readonly diagnostics: Diagnostics` — and the methods
     // written on that value are the class's. Nothing is imported at run time
     // either way: what crosses is the description.
-    for (let index = 0; index < (record.analysis.typeImports?.length ?? 0); index += 1) {
-      const target = records.get(record.typeResolved[index] as string);
-      const entry = record.analysis.typeImports?.[index] as { specifier: string } | undefined;
-      if (target !== undefined && entry !== undefined) targets.set(entry.specifier, target);
+    const typeImports = fieldOf(analysis, "typeImports") as readonly ModuleTypeImport[] | undefined;
+    const typeResolved = fieldOf(record, "typeResolved") as readonly string[];
+    for (let index = 0; index < (typeImports?.length ?? 0); index += 1) {
+      const target = records.get(typeResolved[index] as string);
+      const entry = typeImports?.[index];
+      if (target !== undefined && entry !== undefined) targets.set(String(fieldOf(entry, "specifier")), target);
     }
-    const typeNames = (record.analysis.typeImports ?? []).map((entry) => ({
-      specifier: entry.specifier,
-      names: null as string[] | null,
-      renames: entry.names.map((name) => ({ local: name.local, imported: name.imported })),
-    }));
-    if (bindImportedClasses(table, [...record.analysis.imports, ...typeNames], (specifier, name) => {
+    const typeNames: { specifier: string; names: string[] | null; renames?: readonly { local: string; imported: string }[] }[] = [];
+    for (const entry of typeImports ?? []) {
+      const renames: { local: string; imported: string }[] = [];
+      for (const name of fieldOf(entry, "names") as readonly { readonly local: string; readonly imported: string }[]) renames[renames.length] = name;
+      typeNames[typeNames.length] = { specifier: String(fieldOf(entry, "specifier")), names: null, renames };
+    }
+    const allImports: { specifier: string; names: string[] | null; renames?: readonly { local: string; imported: string }[] }[] = [];
+    for (const one of imports) allImports[allImports.length] = one;
+    for (const one of typeNames) allImports[allImports.length] = one;
+    if (bindImportedClasses(table, allImports, (specifier, name) => {
       const target = targets.get(specifier);
       return target === undefined ? undefined : classOffered(target, name, records, new Set());
     })) classesLinked = true;
@@ -990,9 +1163,13 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
   // declares the type its result names states no shape for that result, and
   // the field a caller reads through it is the opaque reference.
   for (const record of bindingOrder(records)) {
-    if (record.analysis.types === undefined) continue;
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    if (fieldOf(analysis, "types") === undefined) continue;
     const offered = offeredValues([...records.values()]);
-    const imports = record.analysis.typeImports ?? [];
+    const imports = fieldOf(analysis, "typeImports") as readonly ModuleTypeImport[] | undefined ?? [];
+    const typeResolved = fieldOf(record, "typeResolved") as readonly string[];
+    const runtimeImports = fieldOf(analysis, "imports") as readonly ModuleImport[];
+    const resolved = fieldOf(record, "resolved") as readonly string[];
     // A second read is only needed when an import names a module that actually
     // declares a type or a class, or offers a value. A runtime import binds
     // none of them, and most files have one: reading every file twice for
@@ -1001,70 +1178,80 @@ export function readModuleGraph(request: ModuleGraphRequest): ModuleRecord[] {
     // what it deferred is the link's to answer one way or the other.
     let namesAType = false;
     for (let index = 0; index < imports.length; index += 1) {
-      const target = tables.get(record.typeResolved[index] as string);
-      if (target !== undefined && target.declarations.size > 0) {
+      const target = tables.get(typeResolved[index] as string);
+      if (target !== undefined && (fieldOf(target, "declarations") as Map<string, unknown>).size > 0) {
         namesAType = true;
         break;
       }
     }
     let namesAClass = false;
     if (!namesAType) {
-      for (let index = 0; index < record.analysis.imports.length; index += 1) {
-        const target = classTables.get(record.resolved[index] as string);
-        if (target !== undefined && target.classes.size > 0) {
+      for (let index = 0; index < runtimeImports.length; index += 1) {
+        const target = classTables.get(resolved[index] as string);
+        if (target !== undefined && (fieldOf(target, "classes") as Map<string, unknown>).size > 0) {
           namesAClass = true;
           break;
         }
       }
     }
-    const imported = importedValuesOf(record, records, record.analysis.imports, record.resolved, offered);
-    const values = imported.values;
+    const imported = importedValuesOf(record, records, runtimeImports, resolved, offered);
+    const values = fieldOf(imported, "values") as Map<string, unknown>;
     // The signatures of the functions this file calls are what a call answers,
     // and the graph has read the modules that write them by now.
     const functions = importedFunctionsOf(record, records);
-    if (!namesAType && !namesAClass && values.size === 0 && imported.shapes.size === 0 && functions.size === 0 && record.analysis.awaitingLink !== true) continue;
-    const second = reader(record.source, record.path, record.path === request.entry.path, {
-      table: record.analysis.types,
-      classes: record.analysis.classes,
+    const importedShapes = fieldOf(imported, "shapes") as Map<string, unknown>;
+    if (!namesAType && !namesAClass && values.size === 0 && importedShapes.size === 0 && functions.size === 0 && fieldOf(analysis, "awaitingLink") !== true) continue;
+    const second = reader(String(fieldOf(record, "source")), String(fieldOf(record, "path")), String(fieldOf(record, "path")) === entryPath, {
+      table: fieldOf(analysis, "types") as TypeTable | undefined,
+      classes: fieldOf(analysis, "classes") as ClassTable | undefined,
       values,
-      valueShapes: imported.shapes,
+      valueShapes: importedShapes,
       functions,
       linked: true,
     });
-    record.analysis = second.analysis;
-    record.refused = second.refused;
-    record.refusedCount = second.count;
+    (record as unknown as Record<string, unknown>)["analysis"] = fieldOf(second, "analysis");
+    (record as unknown as Record<string, unknown>)["refused"] = fieldOf(second, "refused");
+    (record as unknown as Record<string, unknown>)["refusedCount"] = fieldOf(second, "count");
     // The linked read names the imports again, and a file that re-exports a
     // name adds an import the first read may have written after it: the paths
     // are resolved against the analysis the contract is built from, so every
     // import is paired with the module it names.
-    const strict = request.requireImports !== false;
+    const strict = fieldOf(request, "requireImports") !== false;
     // A replacement's own imports resolve beside the file it is written in,
     // in the linked read as in the first: the module keeps the name the
     // import gave it, and the host table names the file that answers for it.
-    const sourcePath = request.host?.[record.path] ?? record.path;
-    record.resolved = record.analysis.imports.map((entry) => {
-      const resolved = strict ? requireImport(request, read, sourcePath, entry) : resolveImport(request, read, sourcePath, entry);
-      return resolved ?? "";
-    });
-    record.typeResolved = (record.analysis.typeImports ?? []).map((entry) => {
-      const resolved = strict ? requireImport(request, read, sourcePath, entry) : resolveImport(request, read, sourcePath, entry);
-      return resolved ?? "";
-    });
+    const hostTable = fieldOf(request, "host") as Readonly<Record<string, string>> | undefined;
+    const recordPath = String(fieldOf(record, "path"));
+    const sourcePath = hostTable === undefined || hostTable[recordPath] === undefined ? recordPath : hostTable[recordPath];
+    const linkedAnalysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const nextResolved: string[] = [];
+    for (const imported of fieldOf(linkedAnalysis, "imports") as readonly ModuleImport[]) {
+      const found = strict ? requireImport(request, read, sourcePath, imported) : resolveImport(request, read, sourcePath, imported);
+      nextResolved[nextResolved.length] = found ?? "";
+    }
+    (record as unknown as Record<string, unknown>)["resolved"] = nextResolved;
+    const nextTypeResolved: string[] = [];
+    for (const imported of (fieldOf(linkedAnalysis, "typeImports") as readonly ModuleTypeImport[] | undefined) ?? []) {
+      const found = strict ? requireImport(request, read, sourcePath, imported) : resolveImport(request, read, sourcePath, imported);
+      nextTypeResolved[nextTypeResolved.length] = found ?? "";
+    }
+    (record as unknown as Record<string, unknown>)["typeResolved"] = nextTypeResolved;
   }
   // A file is read to the end whatever it holds, and the linked read is the
   // one whose refusals are the file's: a construct that waited for an import is
   // settled by now, and what is left is what the build names. A measurement
   // supplies its own reader and counts the refusals itself, so it is not
   // stopped here.
-  if (request.reader === undefined) {
+  if (fieldOf(request, "reader") === undefined) {
     for (const record of records.values()) {
-      if (record.refused.length === 0 && record.refusedCount === 0) continue;
-      throw refusalError(record.path, record.refused, record.refusedCount);
+      const refused = fieldOf(record, "refused") as readonly Diagnostic[];
+      const refusedCount = Number(fieldOf(record, "refusedCount"));
+      if (refused.length === 0 && refusedCount === 0) continue;
+      throw refusalError(String(fieldOf(record, "path")), refused, refusedCount);
     }
   }
 
-  markReachableHelpers([...records.values()], request.entry.path);
+  markReachableHelpers([...records.values()], String(fieldOf(entry, "path")));
   return [...records.values()];
 }
 
@@ -1103,31 +1290,41 @@ function callNamesIn(node: unknown, names: Set<string>, seen: Set<object> = new 
  */
 function markReachableHelpers(records: readonly ModuleRecord[], entryPath: string): void {
   for (const record of records) {
-    const declared = new Map(record.analysis.functions.map((entry) => [entry.name, entry]));
+    const analysis = fieldOf(record, "analysis") as ModuleAnalysis;
+    const functions = fieldOf(analysis, "functions") as readonly DeclaredFunction[];
+    const declared = new Map<string, DeclaredFunction>();
+    for (const entry of functions) declared.set(String(fieldOf(entry, "name")), entry);
     const reached = new Set<string>();
-    const queue = record.analysis.functions.filter((entry) => entry.exported || entry.internal === true);
+    const worklist: DeclaredFunction[] = [];
+    for (const entry of functions) {
+      const exported = fieldOf(entry, "exported") === true;
+      const internal = fieldOf(entry, "internal") === true;
+      if (exported || internal) {
+        worklist.push(entry);
+      }
+    }
     const visit = (names: ReadonlySet<string>): void => {
       for (const name of names) {
         const entry = declared.get(name);
         if (entry === undefined || reached.has(name)) continue;
         reached.add(name);
-        queue.push(entry);
+        worklist.push(entry);
       }
     };
-    if (record.path === entryPath) {
+    if (String(fieldOf(record, "path")) === entryPath) {
       const bodyCalls = new Set<string>();
-      callNamesIn(record.analysis.body ?? [], bodyCalls);
+      callNamesIn(fieldOf(analysis, "body") ?? [], bodyCalls, undefined);
       visit(bodyCalls);
     }
-    while (queue.length > 0) {
-      const entry = queue.pop() as (typeof record.analysis.functions)[number];
+    while (worklist.length > 0) {
+      const entry = worklist.pop() as DeclaredFunction;
       const calls = new Set<string>();
-      callNamesIn(entry.handle, calls);
+      callNamesIn(fieldOf(entry, "handle"), calls, undefined);
       visit(calls);
     }
     for (const name of reached) {
       const entry = declared.get(name);
-      if (entry !== undefined && !entry.exported) entry.internal = true;
+      if (entry !== undefined && fieldOf(entry, "exported") !== true) (entry as unknown as Record<string, unknown>)["internal"] = true;
     }
   }
 }

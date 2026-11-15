@@ -27,6 +27,10 @@
  */
 
 import { hashValue, type JsonStore, storeReadIfValid } from "./core/json-store.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 import { contractsByName } from "./semantics/calls.ts";
 import type { TestVector } from "./toolchain/verifier.ts";
 import type {
@@ -36,7 +40,12 @@ import type {
   BenchmarkConfig,
   CandidateOutcome,
   GenerationConfig,
+  FileContract,
   FunctionContract,
+  FunctionDefinition,
+  FunctionSignature,
+  Effect,
+  ObjectLayout,
   OutputKind,
   ProgramContract,
   RuntimeKind,
@@ -163,8 +172,9 @@ function abiOf(contract: FunctionContract, holdsTheBody: boolean): unknown {
   // body therefore removed the thread from this function's loops while every
   // input hashed here stayed the same, and the stored object — the one with the
   // loop threaded — is the one that gets linked.
-  const abi = { function: contract.function, objects: contract.definition.objects, effects: contract.effects };
-  return holdsTheBody ? { ...abi, definition: contract.definition } : abi;
+  const abi = { function: fieldOf(contract, "function") as FunctionSignature, objects: fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>, effects: fieldOf(contract, "effects") as Effect[] };
+  if (!holdsTheBody) return abi;
+  return { function: abi.function, objects: abi.objects, effects: abi.effects, definition: fieldOf(contract, "definition") as FunctionDefinition };
 }
 
 /**
@@ -176,10 +186,11 @@ function bodiesRead(contracts: ReadonlyMap<string, FunctionContract>, contract: 
   const stack = [contract];
   while (stack.length > 0) {
     const current = stack.pop() as FunctionContract;
-    if (read.has(current.function.name)) continue;
-    read.add(current.function.name);
-    for (const edge of current.definition.calls) {
-      const reached = contracts.get(edge.callee);
+    const name = String(fieldOf(fieldOf(current, "function"), "name"));
+    if (read.has(name)) continue;
+    read.add(name);
+    for (const edge of fieldOf(fieldOf(current, "definition"), "calls") as readonly { readonly callee: string }[]) {
+      const reached = contracts.get(String(fieldOf(edge, "callee")));
       if (reached !== undefined) stack.push(reached);
     }
   }
@@ -192,8 +203,10 @@ function bodiesRead(contracts: ReadonlyMap<string, FunctionContract>, contract: 
  * them, and two that also agree on the object key can share the object itself.
  */
 export function unitKeys(input: UnitKeyInput): UnitKeys {
-  const own = input.contract.function.name;
-  const contracts = contractsByName(input.program.files);
+  const contract = fieldOf(input, "contract") as FunctionContract;
+  const program = fieldOf(input, "program") as ProgramContract;
+  const own = String(fieldOf(fieldOf(contract, "function"), "name"));
+  const contracts = contractsByName(fieldOf(program, "files") as FileContract[]);
   // Every body this function's own IR is decided against, and not only the ones
   // whose text lands inside this object: `parallel.ts` and `region.ts` read the
   // bodies a function calls to decide whether its loops may be threaded and
@@ -201,29 +214,37 @@ export function unitKeys(input: UnitKeyInput): UnitKeys {
   // emitted here even though its text is nowhere in this object. Keying on the
   // ABI alone left the stored object of a caller holding a loop that is threaded
   // over a callee that no longer can be.
-  const read = bodiesRead(contracts, input.contract);
-  const others = input.program.files
-    .flatMap((file) => Object.entries(file.functions))
-    .filter(([name]) => name !== own)
-    .map(([name, contract]): readonly [string, unknown] => [name, abiOf(contract, read.has(name))])
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-  const review = hashValue({
-    contract: input.contract,
-    abi: others,
-    file: input.file,
-    target: input.target,
-    backend: input.backend,
-    mode: input.mode,
-    output: input.output,
-    runtime: input.runtime,
-    test: input.test,
-    benchmark: input.benchmark,
-    generation: input.generation,
-    model: input.model,
-    compilerVersion: input.compilerVersion,
-    toolchain: input.review,
+  const read = bodiesRead(contracts, contract);
+  const others: (readonly [string, unknown])[] = [];
+  for (const file of fieldOf(program, "files") as readonly FileContract[]) {
+    const table = fieldOf(file, "functions") as Record<string, FunctionContract>;
+    for (const name of Object.keys(table)) {
+      if (name === own) continue;
+      others[others.length] = [name, abiOf(table[name], read.has(name))];
+    }
+  }
+  others.sort((left, right) => {
+    const a = left[0];
+    const b = right[0];
+    return a < b ? -1 : a > b ? 1 : 0;
   });
-  return { review, object: hashValue({ review, lowering: input.lowering }) };
+  const review = hashValue({
+    contract,
+    abi: others,
+    file: fieldOf(input, "file"),
+    target: fieldOf(input, "target"),
+    backend: fieldOf(input, "backend"),
+    mode: fieldOf(input, "mode"),
+    output: fieldOf(input, "output"),
+    runtime: fieldOf(input, "runtime"),
+    test: fieldOf(input, "test"),
+    benchmark: fieldOf(input, "benchmark"),
+    generation: fieldOf(input, "generation"),
+    model: fieldOf(input, "model"),
+    compilerVersion: fieldOf(input, "compilerVersion"),
+    toolchain: fieldOf(input, "review"),
+  });
+  return { review, object: hashValue({ review, lowering: fieldOf(input, "lowering") }) };
 }
 
 /**
@@ -279,24 +300,26 @@ export async function readIncremental(store: JsonStore, path: string): Promise<I
   for (const [functionName, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry !== "object" || entry === null) continue;
     const candidate = entry as Partial<IncrementalEntry>;
-    if (
-      typeof candidate.reviewKey !== "string" ||
-      typeof candidate.objectKey !== "string" ||
-      typeof candidate.file !== "string" ||
-      typeof candidate.selected !== "string" ||
-      !Array.isArray(candidate.candidates) ||
-      !Array.isArray(candidate.outcomes)
-    ) {
-      continue;
-    }
+    const reviewKey = fieldOf(candidate, "reviewKey");
+    const objectKey = fieldOf(candidate, "objectKey");
+    const file = fieldOf(candidate, "file");
+    const selected = fieldOf(candidate, "selected");
+    const candidates = fieldOf(candidate, "candidates");
+    const outcomes = fieldOf(candidate, "outcomes");
+    if (typeof reviewKey !== "string") continue;
+    if (typeof objectKey !== "string") continue;
+    if (typeof file !== "string") continue;
+    if (typeof selected !== "string") continue;
+    if (!Array.isArray(candidates)) continue;
+    if (!Array.isArray(outcomes)) continue;
     record[functionName] = {
-      reviewKey: candidate.reviewKey,
-      objectKey: candidate.objectKey,
-      file: candidate.file,
-      selected: candidate.selected,
-      candidates: candidate.candidates as Candidate[],
-      outcomes: candidate.outcomes as CandidateOutcome[],
-      benchmarkVector: (candidate.benchmarkVector ?? null) as TestVector | null,
+      reviewKey,
+      objectKey,
+      file,
+      selected,
+      candidates: candidates as Candidate[],
+      outcomes: outcomes as CandidateOutcome[],
+      benchmarkVector: (fieldOf(candidate, "benchmarkVector") ?? null) as TestVector | null,
     };
   }
   return record;

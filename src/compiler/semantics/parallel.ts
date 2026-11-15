@@ -43,6 +43,14 @@
  */
 
 import { isWholeNumberText } from "./objects.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
 import {
   isInteger,
   isWhole,
@@ -53,10 +61,13 @@ import {
   type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
+  type SemanticSlot,
+  type SemanticType,
   type SemanticStatement,
   type SemanticReduction,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
+import type { PrimitiveTypeName } from "../core/types.ts";
 
 /** Why a loop may not have its turns run at once, in terms of what its body does. */
 export type Refusal = string;
@@ -87,10 +98,14 @@ export type Callees = ReadonlyMap<string, SemanticFunction>;
  */
 function blocksWithin(block: SemanticBlock): SemanticBlock[] {
   const nested: SemanticBlock[] = [];
-  for (const statement of block.statements) {
-    for (const one of statementBlocksOf(statement)) nested.push(...blocksWithin(one));
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    for (const one of statementBlocksOf(statement)) {
+      for (const inner of blocksWithin(one)) nested[nested.length] = inner;
+    }
   }
-  return [block, ...nested];
+  const all: SemanticBlock[] = [block];
+  for (const one of nested) all[all.length] = one;
+  return all;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -107,19 +122,21 @@ function blocksWithin(block: SemanticBlock): SemanticBlock[] {
  */
 export function markParallelLoops(entry: SemanticBlock, callees: Callees = new Map()): void {
   for (const block of blocksWithin(entry)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k !== "loop") continue;
-      const loop = statement.loop;
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
       if (loop.kind !== "counted" && loop.kind !== "each") continue;
-      if (loop.parallel === true) continue;
+      if (fieldOf(loop, "parallel") === true) continue;
       if (refusalFor(loop, callees) !== null) continue;
       // The accumulators go on the loop beside the mark, because that is where
       // a backend reads what to combine: a mark with nothing to combine is a
       // loop whose turns share nothing, and one whose accumulators are named is
       // a loop whose turns share exactly those.
-      const combined = [...reductionsFor(loop.body, loop.kind === "counted" ? loop.variable : loop.index).values()];
-      if (combined.length > 0) loop.reductions = combined;
-      loop.parallel = true;
+      const loopBody = fieldOf(loop, "body") as SemanticBlock;
+      const combined: SemanticReduction[] = [];
+      for (const one of reductionsFor(loopBody, loop.kind === "counted" ? String(fieldOf(loop, "variable")) : String(fieldOf(loop, "index"))).values()) combined[combined.length] = one;
+      if (combined.length > 0) setFieldOn(loop, "reductions", combined);
+      setFieldOn(loop, "parallel", true);
     }
   }
 }
@@ -149,7 +166,7 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Re
     return "the counter is not a whole number counting up one at a time, which is the only shape a parallel loop takes";
   }
   const reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() };
-  if (turnIsTooCheapIn(loop.body, reach)) {
+  if (turnIsTooCheapIn(fieldOf(loop, "body") as SemanticBlock, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
   // A turn that leaves the loop early is a turn that decides whether the next
@@ -164,13 +181,14 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Re
   if (returnsOutOfIt(loop)) {
     return "the body returns out of the function, and a turn that returns returns from the team";
   }
-  const counter = loop.kind === "counted" ? loop.variable : loop.index;
+  const counter = loop.kind === "counted" ? String(fieldOf(loop, "variable")) : String(fieldOf(loop, "index"));
   // What the turns combine is worked out before the body is read, because it is
   // the one shared write the body is allowed and everything else about the body
   // is read against it: a write the loop combines is a write the turns do not
   // share, and a write it does not is refused as it was.
-  const combined = reductionsFor(loop.body, counter);
-  return bodyRefusal(loop.body, counter, callees, reach, combined);
+  const loopBody = fieldOf(loop, "body") as SemanticBlock;
+  const combined = reductionsFor(loopBody, counter);
+  return bodyRefusal(loopBody, counter, callees, reach, combined, []);
 }
 
 /**
@@ -182,17 +200,20 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Re
  * when the rule reaches it, so the one that may not be parallel is refused there.
  */
 function leavesItself(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): boolean {
+  const exit = String(fieldOf(loop, "exit"));
   const inside = (block: SemanticBlock): boolean => {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k === "loop") continue;
       for (const nested of statementBlocksOf(statement)) {
-        if (nested.terminator.k === "jump" && nested.terminator.target === loop.exit) return true;
+        const nestedEnd = fieldOf(nested, "terminator") as SemanticBlock["terminator"];
+        if (String(fieldOf(nestedEnd, "k")) === "jump" && String(fieldOf(nestedEnd, "target")) === exit) return true;
         if (inside(nested)) return true;
       }
     }
-    return block.terminator.k === "jump" && block.terminator.target === loop.exit;
+    const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    return String(fieldOf(blockEnd, "k")) === "jump" && String(fieldOf(blockEnd, "target")) === exit;
   };
-  return inside(loop.body);
+  return inside(fieldOf(loop, "body") as SemanticBlock);
 }
 
 /**
@@ -206,7 +227,7 @@ function leavesItself(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>)
  * so a loop anywhere above it has the same turn to lose.
  */
 function returnsOutOfIt(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): boolean {
-  return blocksWithin(loop.body).some((block) => block.terminator.k === "return");
+  return blocksWithin(fieldOf(loop, "body") as SemanticBlock).some((block) => String(fieldOf(fieldOf(block, "terminator"), "k")) === "return");
 }
 
 /**
@@ -234,8 +255,8 @@ function returnsOutOfIt(loop: Extract<SemanticLoop, { kind: "counted" | "each" }
 export function reductionsFor(body: SemanticBlock, counter: string): Map<string, SemanticReduction> {
   const declared = new Set<string>();
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") declared.add(statement.slot.name);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") declared.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
     }
   }
   // What a turn reads, which is the other half of what a reduction has to be.
@@ -251,37 +272,40 @@ export function reductionsFor(body: SemanticBlock, counter: string): Map<string,
   // reordering of it is the same array.
   const read = new Set<string>();
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "local") read.add(inner.name);
+          if (inner.k === "local") read.add(String(fieldOf(inner, "name")));
         });
       }
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
-      walkValues(block.terminator.value, (inner) => {
-        if (inner.k === "local") read.add(inner.name);
+    const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(blockEnd, "k")) === "return" && fieldOf(blockEnd, "value") !== null) {
+      walkValues(fieldOf(blockEnd, "value") as SemanticValue, (inner) => {
+        if (inner.k === "local") read.add(String(fieldOf(inner, "name")));
       });
     }
   }
 
   const combined = new Map<string, SemanticReduction>();
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k !== "set") continue;
-      if (declared.has(statement.name) || statement.name === counter) continue;
-      if (statement.op !== "+=" && statement.op !== "*=") continue;
-      if (read.has(statement.name)) continue;
+      const name = String(fieldOf(statement, "name"));
+      const op = String(fieldOf(statement, "op"));
+      if (declared.has(name) || name === counter) continue;
+      if (op !== "+=" && op !== "*=") continue;
+      if (read.has(name)) continue;
       // A name two turns both accumulate into with the same operator combines;
       // one written `+=` in a turn and `*=` in another does not, so the first
       // operator seen is the one that must hold for all of them.
-      const seen = combined.get(statement.name);
-      const op = statement.op === "+=" ? "+" : "*";
-      if (seen !== undefined && seen.op !== op) {
-        combined.delete(statement.name);
+      const seen = combined.get(name);
+      const reductionOp = op === "+=" ? "+" : "*";
+      if (seen !== undefined && String(fieldOf(seen, "op")) !== reductionOp) {
+        combined.delete(name);
         continue;
       }
-      combined.set(statement.name, { name: statement.name, op, exact: true });
+      combined.set(name, { name, op: reductionOp, exact: true });
     }
   }
   return combined;
@@ -323,16 +347,18 @@ interface Reach {
  * where the write is.
  */
 function calleeRefusal(name: string, reach: Reach): Refusal | null {
-  const known = reach.verdicts.get(name);
+  const verdicts = fieldOf(reach, "verdicts") as Map<string, Refusal | null>;
+  const reading = fieldOf(reach, "reading") as Set<string>;
+  const known = verdicts.get(name);
   if (known !== undefined) return known;
-  if (reach.reading.has(name)) return null;
-  const callee = reach.callees.get(name);
+  if (reading.has(name)) return null;
+  const callee = (fieldOf(reach, "callees") as Callees).get(name);
   if (callee === undefined) {
     const refusal = `the body calls ${name}, whose body this build does not hold`;
-    reach.verdicts.set(name, refusal);
+    verdicts.set(name, refusal);
     return refusal;
   }
-  reach.reading.add(name);
+  reading.add(name);
   // The parameters belong to one call of the callee, which is what a turn is:
   // every turn that calls this gets its own copy of each, so a write to one is
   // a write to that turn's own frame and reaches nobody else. A callee that
@@ -340,9 +366,11 @@ function calleeRefusal(name: string, reach: Reach): Refusal | null {
   // `createTree` spends the depth it was given — was refused here as a write to
   // a name the turn only found, which refused nearly every loop that calls a
   // function written the ordinary way.
-  const refusal = bodyRefusal(callee.entry, null, reach.callees, reach, new Map(), callee.params.map((param) => param.name));
-  reach.reading.delete(name);
-  reach.verdicts.set(name, refusal);
+  const paramNames: string[] = [];
+  for (const param of fieldOf(callee, "params") as readonly SemanticSlot[]) paramNames[paramNames.length] = String(fieldOf(param, "name"));
+  const refusal = bodyRefusal(fieldOf(callee, "entry") as SemanticBlock, null, fieldOf(reach, "callees") as Callees, reach, new Map(), paramNames);
+  reading.delete(name);
+  verdicts.set(name, refusal);
   return refusal;
 }
 
@@ -353,25 +381,28 @@ function callRefusal(call: SemanticCall, reach: Reach): Refusal | null {
   // two cursors and that is a program rather than a corruption. A retained
   // result is different in kind: it is a reference count written through a
   // reference, which is one number every turn of the loop shares.
-  if (call.retain) {
-    return `the body calls ${call.callee} and counts the reference it hands back, which is one number every turn shares`;
+  const callee = String(fieldOf(call, "callee"));
+  if (fieldOf(call, "retain") === true) {
+    return `the body calls ${callee} and counts the reference it hands back, which is one number every turn shares`;
   }
-  const effect = call.effects.find((one) => one !== "memory");
-  if (effect !== undefined) {
-    return `the body calls ${call.callee}, which has the effect ${effect}`;
+  let effect: string | null = null;
+  for (const one of fieldOf(call, "effects") as readonly string[]) if (String(one) !== "memory" && effect === null) effect = String(one);
+  if (effect !== null) {
+    return `the body calls ${callee}, which has the effect ${effect}`;
   }
-  return calleeRefusal(call.callee, reach);
+  return calleeRefusal(callee, reach);
 }
 
 /** Whether a counted loop counts the way a parallel loop has to count. */
 function canonicalCounted(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
-  if (!isInteger(loop.type)) return false;
-  if (loop.down) return false;
+  if (!isInteger(fieldOf(loop, "type") as SemanticType)) return false;
+  if (fieldOf(loop, "down") === true) return false;
   // `<=` is the second canonical bound OpenMP allows, and a step that is not
   // one is not a canonical loop whatever the counter is.
-  if (loop.step !== null) {
-    if (loop.step.k !== "const") return false;
-    if (Number(loop.step.text) !== 1) return false;
+  const step = fieldOf(loop, "step") as SemanticValue | null;
+  if (step !== null) {
+    if (step.k !== "const") return false;
+    if (Number(fieldOf(step, "text")) !== 1) return false;
   }
   return true;
 }
@@ -428,7 +459,7 @@ export function turnIsTooCheap(body: SemanticBlock, callees: Callees = new Map()
 function turnIsTooCheapIn(body: SemanticBlock, reach: Reach): boolean {
   const cost: TurnCost = { values: 0, unbounded: false };
   measureTurn(body, reach, cost);
-  return !cost.unbounded && cost.values < MINIMUM_VALUES_PER_TURN;
+  return fieldOf(cost, "unbounded") !== true && Number(fieldOf(cost, "values")) < MINIMUM_VALUES_PER_TURN;
 }
 
 /** What one turn is measured to be: how many values it computes, and whether it calls itself. */
@@ -443,18 +474,19 @@ function measureTurn(body: SemanticBlock, reach: Reach, cost: TurnCost): void {
   for (const block of blocksWithin(body)) {
     // What a block ends in is as much of its work as what it does before it, and
     // for a function that computes an answer that answer is nearly all of it.
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
-      walkValues(block.terminator.value, (inner) => {
-        cost.values += 1;
-        if (inner.k === "call") measureCall(inner.call.callee, reach, cost);
+    const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(blockEnd, "k")) === "return" && fieldOf(blockEnd, "value") !== null) {
+      walkValues(fieldOf(blockEnd, "value") as SemanticValue, (inner) => {
+        setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + 1);
+        if (inner.k === "call") measureCall(String(fieldOf(fieldOf(inner, "call"), "callee")), reach, cost);
       });
     }
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          cost.values += 1;
+          setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + 1);
           if (inner.k !== "call") return;
-          measureCall(inner.call.callee, reach, cost);
+          measureCall(String(fieldOf(fieldOf(inner, "call"), "callee")), reach, cost);
         });
       }
     }
@@ -463,17 +495,19 @@ function measureTurn(body: SemanticBlock, reach: Reach, cost: TurnCost): void {
 
 /** What a call a turn makes adds to what the turn is measured to be. */
 function measureCall(name: string, reach: Reach, cost: TurnCost): void {
-  const callee = reach.callees.get(name);
+  const callee = (fieldOf(reach, "callees") as Callees).get(name);
   if (callee === undefined) return;
+  const calleeName = String(fieldOf(callee, "name"));
+  const reading = fieldOf(reach, "reading") as Set<string>;
   // A call already being read is this callee reaching itself, and how many
   // turns that is nobody can say from what the IR holds.
-  if (reach.reading.has(callee.name)) {
-    cost.unbounded = true;
+  if (reading.has(calleeName)) {
+    setFieldOn(cost, "unbounded", true);
     return;
   }
-  reach.reading.add(callee.name);
-  measureTurn(callee.entry, reach, cost);
-  reach.reading.delete(callee.name);
+  reading.add(calleeName);
+  measureTurn(fieldOf(callee, "entry") as SemanticBlock, reach, cost);
+  reading.delete(calleeName);
 }
 
 /** One element of an array the body reaches, and whether the body writes it. */
@@ -522,8 +556,8 @@ function bodyRefusal(
   // same moment.
   const declared = new Set<string>(perCall);
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") declared.add(statement.slot.name);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") declared.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
     }
   }
   // A name a turn binds to another name is the same buffer under two names, and
@@ -532,9 +566,10 @@ function bodyRefusal(
   // turns could write `out[i]` through one name and read what the other wrote.
   const aliases = new Map<string, string>();
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let" && statement.value.k === "local" && statement.value.name !== statement.slot.name) {
-        aliases.set(statement.slot.name, statement.value.name);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      const value = fieldOf(statement, "value") as SemanticValue;
+      if (statement.k === "let" && value.k === "local" && String(fieldOf(value, "name")) !== String(fieldOf(fieldOf(statement, "slot"), "name"))) {
+        aliases.set(String(fieldOf(fieldOf(statement, "slot"), "name")), String(fieldOf(value, "name")));
       }
     }
   }
@@ -554,27 +589,30 @@ function bodyRefusal(
     // its return is a body whose call was never read: the turns of a loop that
     // calls such a body then print over each other. It is read here for the same
     // reason `measureTurn` reads it there.
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
+    const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(blockEnd, "k")) === "return" && fieldOf(blockEnd, "value") !== null) {
       let refusal: Refusal | null = null;
-      walkValues(block.terminator.value, (inner) => {
-        if (refusal === null && inner.k === "call") refusal = callRefusal(inner.call, reach);
+      walkValues(fieldOf(blockEnd, "value") as SemanticValue, (inner) => {
+        if (refusal === null && inner.k === "call") refusal = callRefusal(fieldOf(inner, "call") as SemanticCall, reach);
       });
       if (refusal !== null) return refusal;
-      walkValues(block.terminator.value, (inner) => {
-        if (inner.k === "element" && inner.of.k === "local") {
-          accesses.push({ buffer: inner.of.name, index: inner.index, written: false });
+      walkValues(fieldOf(blockEnd, "value") as SemanticValue, (inner) => {
+        const of = fieldOf(inner, "of") as SemanticValue;
+        if (inner.k === "element" && of.k === "local") {
+          accesses.push({ buffer: String(fieldOf(of, "name")), index: fieldOf(inner, "index") as SemanticValue, written: false });
         }
       });
     }
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       const nestedRefusal = valueRefusal(statement, reach);
       if (nestedRefusal !== null) return nestedRefusal;
       const written = writeRefusal(statement, accesses, declared, reach, combined);
       if (written !== null) return written;
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "element" && inner.of.k === "local") {
-            accesses.push({ buffer: inner.of.name, index: inner.index, written: false });
+          const of = fieldOf(inner, "of") as SemanticValue;
+          if (inner.k === "element" && of.k === "local") {
+            accesses.push({ buffer: String(fieldOf(of, "name")), index: fieldOf(inner, "index") as SemanticValue, written: false });
           }
         });
       }
@@ -585,10 +623,10 @@ function bodyRefusal(
   // one buffer rather than two.
   for (let at = 0; at < accesses.length; at += 1) {
     const access = accesses[at];
-    access.buffer = bufferOf(access.buffer);
+    setFieldOn(access, "buffer", bufferOf(String(fieldOf(access, "buffer"))));
   }
   if (counter === null) {
-    return accesses.some((access) => access.written)
+    return accesses.some((access) => fieldOf(access, "written") === true)
       ? "the body writes an element of an array, and nothing here says which turn writes which"
       : null;
   }
@@ -611,7 +649,7 @@ function valueRefusal(statement: SemanticStatement, reach: Reach): Refusal | nul
     let heldRefusal: Refusal | null = null;
     walkValues(value, (inner) => {
       if (heldRefusal !== null || inner.k !== "call") return;
-      heldRefusal = callRefusal(inner.call, reach);
+      heldRefusal = callRefusal(fieldOf(inner, "call") as SemanticCall, reach);
     });
     if (heldRefusal !== null) return heldRefusal;
   }
@@ -620,21 +658,21 @@ function valueRefusal(statement: SemanticStatement, reach: Reach): Refusal | nul
 
 /** Why the array elements a body reaches may not be reached by two turns at once. */
 function elementRefusal(accesses: readonly ElementAccess[], counter: string): Refusal | null {
-  const atCounter = (index: SemanticValue): boolean => index.k === "local" && index.name === counter;
+  const atCounter = (index: SemanticValue): boolean => index.k === "local" && String(fieldOf(index, "name")) === counter;
   const written = new Set<string>();
   for (const access of accesses) {
-    if (!access.written) continue;
-    if (!atCounter(access.index)) {
-      return `the body writes an element of ${access.buffer} at an index that is not this turn's counter, so two turns may write the same one`;
+    if (fieldOf(access, "written") !== true) continue;
+    if (!atCounter(fieldOf(access, "index") as SemanticValue)) {
+      return `the body writes an element of ${String(fieldOf(access, "buffer"))} at an index that is not this turn's counter, so two turns may write the same one`;
     }
-    if (written.has(access.buffer)) {
-      return `the body writes ${access.buffer} more than once a turn, and only one write a turn is a write the turns cannot share`;
+    if (written.has(String(fieldOf(access, "buffer")))) {
+      return `the body writes ${String(fieldOf(access, "buffer"))} more than once a turn, and only one write a turn is a write the turns cannot share`;
     }
-    written.add(access.buffer);
+    written.add(String(fieldOf(access, "buffer")));
   }
   for (const access of accesses) {
-    if (written.has(access.buffer) && !atCounter(access.index)) {
-      return `the body reads ${access.buffer} at an index that is not this turn's counter, and another turn may be writing that element`;
+    if (written.has(String(fieldOf(access, "buffer"))) && !atCounter(fieldOf(access, "index") as SemanticValue)) {
+      return `the body reads ${String(fieldOf(access, "buffer"))} at an index that is not this turn's counter, and another turn may be writing that element`;
     }
   }
   return null;
@@ -663,33 +701,38 @@ function writeRefusal(
     // one accumulator the turns combine once the loop is done, which is the
     // same number as a turn writing it, so long as combining is exact.
     case "set": {
-      if (declared.has(statement.name)) return null;
-      const reduction = combined.get(statement.name);
+      const statementName = String(fieldOf(statement, "name"));
+      const statementOp = String(fieldOf(statement, "op"));
+      if (declared.has(statementName)) return null;
+      const reduction = combined.get(statementName);
       if (reduction === undefined) {
-        return `the body writes "${statement.name}", which every turn of it shares`;
+        return `the body writes "${statementName}", which every turn of it shares`;
       }
       // A name a turn assigns outright is not a reduction at all — it decided
       // the total rather than adding to it — and one written a different way in
       // another turn is not a combination either.
-      if (statement.op !== (reduction.op === "+" ? "+=" : "*=")) {
-        return `the body writes "${statement.name}" with ${statement.op}, which is not the ${reduction.op} the turns combine it with`;
+      const reductionOp = String(fieldOf(reduction, "op"));
+      if (statementOp !== (reductionOp === "+" ? "+=" : "*=")) {
+        return `the body writes "${statementName}" with ${statementOp}, which is not the ${reductionOp} the turns combine it with`;
       }
-      if (!valueIsWhole(statement.value, reach)) {
-        return `the body combines "${statement.name}" from a value that is not a whole number, and a sum of doubles is not the same number however it is grouped`;
+      if (!valueIsWhole(fieldOf(statement, "value") as SemanticValue, reach)) {
+        return `the body combines "${statementName}" from a value that is not a whole number, and a sum of doubles is not the same number however it is grouped`;
       }
       return null;
     }
-    case "step":
-      return declared.has(statement.name)
+    case "step": {
+      const stepName = String(fieldOf(statement, "name"));
+      return declared.has(stepName)
         ? null
-        : `the body steps "${statement.name}", which every turn of it shares`;
+        : `the body steps "${stepName}", which every turn of it shares`;
+    }
     case "setElement":
-      accesses.push({ buffer: statement.buffer, index: statement.index, written: true });
+      accesses.push({ buffer: String(fieldOf(statement, "buffer")), index: fieldOf(statement, "index") as SemanticValue, written: true });
       return null;
     case "fill":
-      return `the body fills ${statement.buffer}, which is every element of it at once`;
+      return `the body fills ${String(fieldOf(statement, "buffer"))}, which is every element of it at once`;
     case "storeField":
-      return `the body writes the field ${statement.layout}.${statement.field}, which every turn of it shares`;
+      return `the body writes the field ${String(fieldOf(statement, "layout"))}.${String(fieldOf(statement, "field"))}, which every turn of it shares`;
     case "printText":
     case "printNumber":
     case "printNewline":
@@ -701,7 +744,7 @@ function writeRefusal(
     // A call kept for what it does is read like any other: a callee that writes
     // nothing is a call two turns may both make.
     case "call":
-      return callRefusal(statement.call, reach);
+      return callRefusal(fieldOf(statement, "call") as SemanticCall, reach);
     // A declared name is the turn's own, so declaring one writes nothing shared.
     // A buffer and an object are each an allocation, and the runtime's
     // allocator keeps a pool of its own per thread, so two turns allocating at
@@ -735,19 +778,20 @@ function valueIsWhole(value: SemanticValue, reach: Reach): boolean {
   // the whole number 1, and adding it a whole number of times is exact in the
   // same way `1` at `i64` is. What is not safe is a number with a point in it,
   // because that one is a fraction however it is held.
-  if (value.k === "const") return isWholeNumberText(value.text);
+  if (value.k === "const") return isWholeNumberText(String(fieldOf(value, "text")));
   if (value.k === "arith") {
     // A division and a remainder over whole numbers are not whole numbers, and
     // neither is a power: `100 / i` is a double whatever both of its sides are.
-    if (DIVIDING.has(value.op)) return false;
-    return valueIsWhole(value.left, reach) && valueIsWhole(value.right, reach);
+    if (DIVIDING.has(String(fieldOf(value, "op")))) return false;
+    return valueIsWhole(fieldOf(value, "left") as SemanticValue, reach) && valueIsWhole(fieldOf(value, "right") as SemanticValue, reach);
   }
   // A call answers whatever the body it calls answers, so what the body hands
   // back is the question — not the width the answer is held at, which is what
   // stops a function that returns `1 + 1 + 1` from being read as a double and
   // refused for it.
-  if (value.k === "call") return calleeAnswersWhole(value.call.callee, reach);
-  return value.type.kind === "primitive" && isWhole(value.type.name);
+  if (value.k === "call") return calleeAnswersWhole(String(fieldOf(fieldOf(value, "call"), "callee")), reach);
+  const valueType = fieldOf(value, "type") as SemanticType;
+  return String(fieldOf(valueType, "kind")) === "primitive" && isWhole(String(fieldOf(valueType, "name")) as PrimitiveTypeName);
 }
 
 /**
@@ -767,23 +811,26 @@ function valueIsWhole(value: SemanticValue, reach: Reach): boolean {
  * the call being there at all.
  */
 function calleeAnswersWhole(name: string, reach: Reach): boolean {
-  const known = reach.wholes.get(name);
+  const wholes = fieldOf(reach, "wholes") as Map<string, boolean>;
+  const reading = fieldOf(reach, "reading") as Set<string>;
+  const known: boolean | undefined = wholes.get(name);
   if (known !== undefined) return known;
-  if (reach.reading.has(name)) return true;
-  const callee = reach.callees.get(name);
+  if (reading.has(name)) return true;
+  const callee = (fieldOf(reach, "callees") as Callees).get(name);
   if (callee === undefined) return false;
-  reach.reading.add(name);
+  reading.add(name);
   let whole = true;
-  for (const block of blocksWithin(callee.entry)) {
-    if (block.terminator.k !== "return") continue;
-    const value = block.terminator.value;
+  for (const block of blocksWithin(fieldOf(callee, "entry") as SemanticBlock)) {
+    const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
+    if (String(fieldOf(blockEnd, "k")) !== "return") continue;
+    const value = fieldOf(blockEnd, "value") as SemanticValue | null;
     if (value !== null && !valueIsWhole(value, reach)) {
       whole = false;
       break;
     }
   }
-  reach.reading.delete(name);
-  reach.wholes.set(name, whole);
+  reading.delete(name);
+  wholes.set(name, whole);
   return whole;
 }
 
@@ -804,17 +851,17 @@ const DIVIDING: ReadonlySet<string> = new Set(["div", "mod", "pow"]);
  */
 export function programIsParallel(entry: SemanticBlock, bodies: readonly { entry: SemanticBlock }[]): boolean {
   if (entryIsParallel(entry)) return true;
-  return bodies.some((fn) => entryIsParallel(fn.entry));
+  return bodies.some((fn) => entryIsParallel(fieldOf(fn, "entry") as SemanticBlock));
 }
 
 
 /** Whether any loop of a body was marked parallel. */
 export function entryIsParallel(entry: SemanticBlock): boolean {
   for (const block of blocksWithin(entry)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k !== "loop") continue;
-      const loop = statement.loop;
-      if ((loop.kind === "counted" || loop.kind === "each") && loop.parallel === true) return true;
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      if ((loop.kind === "counted" || loop.kind === "each") && fieldOf(loop, "parallel") === true) return true;
     }
   }
   return false;

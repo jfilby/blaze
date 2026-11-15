@@ -66,8 +66,9 @@ export function createCommentStripper(): (line: string) => string {
         result += " ";
         continue;
       }
-      if (line[index] === "#" || line.startsWith("//", index)) break;
-      result += line[index];
+      const character = line.slice(index, index + 1);
+      if (character === "#" || line.startsWith("//", index)) break;
+      result += character;
       index += 1;
     }
     return result;
@@ -88,8 +89,8 @@ export function readAssemblyLines(assembly: string): AssemblyLine[] {
     let label: string | null = null;
     const match = /^([A-Za-z_.$][A-Za-z0-9_.$]*|\d+):\s*(.*)$/.exec(text);
     if (match !== null) {
-      label = match[1];
-      text = match[2].trim();
+      label = String(match[1]);
+      text = String(match[2]).trim();
       if (text === "") {
         lines.push({ kind: "label", line: lineNumber, label });
         return;

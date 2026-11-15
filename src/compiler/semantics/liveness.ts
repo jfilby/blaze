@@ -26,7 +26,11 @@
  * one value is carried.
  */
 
-import { isFloat, isTextType, isWideType, type SemanticBlock, type SemanticStatement, type SemanticValue } from "../core/semantic-ir.ts";
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+import { isFloat, isTextType, isWideType, type SemanticBlock, type SemanticCall, type SemanticLoop, type SemanticStatement, type SemanticTerminator, type SemanticType, type SemanticValue } from "../core/semantic-ir.ts";
 
 /**
  * The arithmetic whose two sides are written left one first, by the name the
@@ -170,7 +174,8 @@ class Graph {
   }
 
   private link(from: Node, to: Node): void {
-    from.successors.push(to);
+    const successors = fieldOf(from, "successors") as Node[];
+    successors.push(to);
   }
 
   /** A body, and the place control reaches it from — what it falls out to. */
@@ -178,58 +183,67 @@ class Graph {
     const terminator = this.terminator(body, after);
     let flow: Node = terminator;
     let entry: Node | null = null;
-    for (let at = body.statements.length - 1; at >= 0; at -= 1) {
-      const statement = body.statements[at];
+    const statements = fieldOf(body, "statements") as readonly SemanticStatement[];
+    for (let at = statements.length - 1; at >= 0; at -= 1) {
+      const statement = statements[at];
       const events: Event[] = [];
       // Where control goes once this statement is done, which is what the
       // arms of an `if`, the body of a block and the exit of a loop fall out to.
       const after = flow;
       let node: Node;
       switch (statement.k) {
-        case "let":
-          this.value(events, statement.value);
-          events.push({ k: "def", name: statement.slot.name });
+        case "let": {
+          const value = fieldOf(statement, "value") as SemanticValue;
+          this.value(events, value);
+          events.push({ k: "def", name: String(fieldOf(fieldOf(statement, "slot"), "name")) });
           node = this.make(events);
           break;
-        case "set":
-          this.value(events, statement.value);
+        }
+        case "set": {
+          const value = fieldOf(statement, "value") as SemanticValue;
+          const name = String(fieldOf(statement, "name"));
+          this.value(events, value);
           // Every operator but `=` reads what the name holds as well as the
           // value it is given, and it reads it after the value: the old value is
           // wanted once the new one has been computed, so a call inside the
           // value is a call the name has to survive.
-          if (statement.op !== "=") events.push({ k: "read", name: statement.name });
-          events.push({ k: "def", name: statement.name });
+          if (!/^=$/.test(String(fieldOf(statement, "op")))) events.push({ k: "read", name });
+          events.push({ k: "def", name });
           node = this.make(events);
           break;
-        case "setElement":
-          // The value and the place are written before the buffer is named, and
-          // the buffer keeps the pointer it had: what changes is what the
-          // pointer reaches, not the pointer, so nothing here is a definition.
-          this.value(events, statement.value);
-          this.value(events, statement.index);
-          events.push({ k: "read", name: statement.buffer });
+        }
+        case "setElement": {
+          const value = fieldOf(statement, "value") as SemanticValue;
+          const index = fieldOf(statement, "index") as SemanticValue;
+          this.value(events, value);
+          this.value(events, index);
+          events.push({ k: "read", name: String(fieldOf(statement, "buffer")) });
           node = this.make(events);
           break;
-        case "step":
+        }
+        case "step": {
+          const name = String(fieldOf(statement, "name"));
           // `x++` reads the value it hands back and then writes the next one;
           // `++x` the other way round. Either way it is a read and a write, and
           // the read is put first because a postfix step is what carries the
           // old value into the expression it stands in.
-          events.push({ k: "read", name: statement.name });
-          events.push({ k: "def", name: statement.name });
+          events.push({ k: "read", name });
+          events.push({ k: "def", name });
           node = this.make(events);
           break;
+        }
         case "if": {
-          this.value(events, statement.condition);
+          this.value(events, fieldOf(statement, "condition") as SemanticValue);
           node = this.make(events);
-          const otherwise = statement.otherwise === null ? null : this.block(statement.otherwise, flow);
+          const otherwiseBlock = fieldOf(statement, "otherwise") as SemanticBlock | null;
+          const otherwise = otherwiseBlock === null ? null : this.block(otherwiseBlock, flow);
           // The arm that is taken falls out to the code after the whole `if`,
           // and not into the other arm: an arm is entered on the turn the
           // condition decided it, and the other arm runs on a turn this one
           // does not. Linking the two arms made every name the else arm reads
           // live across the then arm, which is a register or a spill the
           // program did not ask for.
-          const thenEntry = this.block(statement.then, flow);
+          const thenEntry = this.block(fieldOf(statement, "then") as SemanticBlock, flow);
           // The arms are linked in the order they are written, which is what
           // fixes the order the nodes are numbered in below.
           this.link(node, thenEntry);
@@ -237,16 +251,18 @@ class Graph {
           break;
         }
         case "loop": {
-          const loop = statement.loop;
-          if (loop.kind === "counted") {
-            this.value(events, loop.from);
-            this.value(events, loop.to);
-            this.value(events, loop.step);
-            events.push({ k: "def", name: loop.variable });
-          } else if (loop.kind === "each") {
-            this.value(events, loop.length);
-            events.push({ k: "def", name: loop.index });
-            events.push({ k: "def", name: loop.element });
+          const loop = fieldOf(statement, "loop") as SemanticLoop;
+          const kind = String(fieldOf(loop, "kind"));
+          if (kind === "counted") {
+            this.value(events, fieldOf(loop, "from") as SemanticValue);
+            this.value(events, fieldOf(loop, "to") as SemanticValue);
+            const step = fieldOf(loop, "step") as SemanticValue | null;
+            if (step !== null) this.value(events, step);
+            events.push({ k: "def", name: String(fieldOf(loop, "variable")) });
+          } else if (kind === "each") {
+            this.value(events, fieldOf(loop, "length") as SemanticValue);
+            events.push({ k: "def", name: String(fieldOf(loop, "index")) });
+            events.push({ k: "def", name: String(fieldOf(loop, "element")) });
           }
           // A loop the backend writes as a call into a runtime is a call here
           // too, and it is made after the bound has been read: what is live
@@ -259,22 +275,26 @@ class Graph {
           // writes it — and a walk's index is read for the address and stepped,
           // while the element is written from whatever the address produced.
           const headerEvents: Event[] = [];
-          if (loop.kind === "while" || loop.kind === "doWhile") this.value(headerEvents, loop.condition);
-          else if (loop.kind === "counted") headerEvents.push({ k: "read", name: loop.variable }, { k: "def", name: loop.variable });
-          else headerEvents.push(
-            // The sequence a walk steps through is read on every turn to reach
-            // the element at the index, so it is live across every call the
-            // body makes — and across the call a length read off it makes
-            // before the first turn.
-            { k: "read", name: loop.of },
-            { k: "read", name: loop.index },
-            { k: "def", name: loop.index },
-            { k: "def", name: loop.element },
-          );
+          if (kind === "while" || kind === "doWhile") this.value(headerEvents, fieldOf(loop, "condition") as SemanticValue);
+          else if (kind === "counted") {
+            events.push({ k: "read", name: String(fieldOf(loop, "variable")) }, { k: "def", name: String(fieldOf(loop, "variable")) });
+            headerEvents.push({ k: "read", name: String(fieldOf(loop, "variable")) }, { k: "def", name: String(fieldOf(loop, "variable")) });
+          } else {
+            headerEvents.push(
+              // The sequence a walk steps through is read on every turn to reach
+              // the element at the index, so it is live across every call the
+              // body makes — and across the call a length read off it makes
+              // before the first turn.
+              { k: "read", name: String(fieldOf(loop, "of")) },
+              { k: "read", name: String(fieldOf(loop, "index")) },
+              { k: "def", name: String(fieldOf(loop, "index")) },
+              { k: "def", name: String(fieldOf(loop, "element")) },
+            );
+          }
           const headerNode = this.make(headerEvents);
           const exitNode = this.make([]);
-          this.open.push({ header: loop.header, exit: loop.exit, headerNode, exitNode });
-          const bodyEntry = this.block(loop.body, headerNode);
+          this.open.push({ header: String(fieldOf(loop, "header")), exit: String(fieldOf(loop, "exit")), headerNode, exitNode });
+          const bodyEntry = this.block(fieldOf(loop, "body") as SemanticBlock, headerNode);
           this.open.pop();
           this.link(headerNode, bodyEntry);
           this.link(headerNode, exitNode);
@@ -284,46 +304,49 @@ class Graph {
         }
         case "block":
           node = this.make(events);
-          this.link(node, this.block(statement.body, flow));
+          this.link(node, this.block(fieldOf(statement, "body") as SemanticBlock, flow));
           break;
         case "printText":
         case "printNumber":
-          this.value(events, statement.value);
+          this.value(events, fieldOf(statement, "value") as SemanticValue);
           events.push({ k: "call" });
           node = this.make(events);
           break;
         case "printNewline":
         case "retain":
-          if (statement.k === "retain") this.value(events, statement.value);
+          if (statement.k === "retain") this.value(events, fieldOf(statement, "value") as SemanticValue);
           events.push({ k: "call" });
           node = this.make(events);
           break;
-        case "call":
-          if (statement.call.through !== undefined) this.value(events, statement.call.through);
-          for (const argument of statement.call.args) this.value(events, argument);
+        case "call": {
+          const call = fieldOf(statement, "call") as SemanticCall;
+          const through = fieldOf(call, "through") as SemanticValue | undefined;
+          if (through !== undefined) this.value(events, through);
+          for (const argument of fieldOf(call, "args") as readonly SemanticValue[]) this.value(events, argument);
           // A name handed to the call is used where the call is made, after
           // every argument has been evaluated. Its read above is before a call
           // another argument makes, so it is read again here: a value the
           // callee is handed is live across every call between the two.
-          for (const argument of statement.call.args) {
-            if (argument.k === "local") events.push({ k: "read", name: argument.name });
+          for (const argument of fieldOf(call, "args") as readonly SemanticValue[]) {
+            if (argument.k === "local") events.push({ k: "read", name: String(fieldOf(argument, "name")) });
           }
           // A call made through a value reads that value where the call is
           // made, for the same reason an argument is read there.
-          if (statement.call.through?.k === "local") {
-            events.push({ k: "read", name: statement.call.through.name });
+          if (through !== undefined && through.k === "local") {
+            events.push({ k: "read", name: String(fieldOf(through, "name")) });
           }
-          if (this.valueCalls(statement.call.callee)) events.push({ k: "call" });
+          if (this.valueCalls(String(fieldOf(call, "callee")))) events.push({ k: "call" });
           node = this.make(events);
           break;
+        }
         case "raise":
-          this.value(events, statement.message);
+          this.value(events, fieldOf(statement, "message") as SemanticValue);
           events.push({ k: "call" });
           node = this.make(events);
           break;
         case "storeField":
-          this.value(events, statement.object);
-          this.value(events, statement.value);
+          this.value(events, fieldOf(statement, "object") as SemanticValue);
+          this.value(events, fieldOf(statement, "value") as SemanticValue);
           node = this.make(events);
           break;
         case "fill":
@@ -333,8 +356,8 @@ class Graph {
           // here is a definition. The index is a counter the backend binds
           // for itself, which no use of the body reads and no use of it
           // crosses.
-          this.value(events, statement.value);
-          events.push({ k: "read", name: statement.buffer });
+          this.value(events, fieldOf(statement, "value") as SemanticValue);
+          events.push({ k: "read", name: String(fieldOf(statement, "buffer")) });
           node = this.make(events);
           break;
         default: {
@@ -342,8 +365,7 @@ class Graph {
           // where it is not, and the register it is put in would be one the
           // missing read or write is carried across. Refusing it here says so
           // at the point the kind was added rather than as a miscompile.
-          const unmodelled: never = statement;
-          throw new Error(`liveness does not model the statement ${JSON.stringify(unmodelled)}`);
+          throw new Error(`liveness does not model the statement ${JSON.stringify(statement)}`);
         }
       }
       // What runs next is what this statement leaves for. Every statement links
@@ -361,47 +383,45 @@ class Graph {
   }
 
   private terminator(body: SemanticBlock, after: Node | null): Node {
+    const terminator = fieldOf(body, "terminator") as SemanticTerminator;
+    const releases = fieldOf(body, "releases") as readonly string[];
+    const terminatorReleases = fieldOf(terminator, "releases") as readonly string[] | undefined;
     // Whatever the block owns is handed back to the runtime as it is left, and
     // the runtime call comes after everything the block computes and before
     // whatever runs next, so it sits in the terminator with the two of them.
-    const freeing =
-      body.releases.length > 0 || (body.terminator.k === "jump" && body.terminator.releases.length > 0);
-    switch (body.terminator.k) {
-      case "next": {
-        const events: Event[] = freeing ? [{ k: "call" }] : [];
-        const node = this.make(events);
-        if (after !== null) this.link(node, after);
-        return node;
+    const freeing = releases.length > 0 || (String(fieldOf(terminator, "k")) === "jump" && (terminatorReleases?.length ?? 0) > 0);
+    const kind = String(fieldOf(terminator, "k"));
+    if (kind === "next") {
+      const events: Event[] = freeing ? [{ k: "call" }] : [];
+      const node = this.make(events);
+      if (after !== null) this.link(node, after);
+      return node;
+    }
+    if (kind === "return") {
+      const events: Event[] = [];
+      this.value(events, fieldOf(terminator, "value") as SemanticValue | null);
+      if (freeing) events.push({ k: "call" });
+      return this.make(events);
+    }
+    // A block nothing arrives at links to nothing: it holds no name live
+    // across a call, because no call runs after it and nothing reads what it
+    // would have held.
+    if (kind === "unreachable") return this.make([]);
+    const node = this.make(freeing ? [{ k: "call" }] : []);
+    // A jump names the header or the exit of a loop it is inside, and the
+    // innermost one that answers to the name is the one it leaves for.
+    for (let at = this.open.length - 1; at >= 0; at -= 1) {
+      const loop = this.open[at];
+      if (String(fieldOf(loop, "header")) === String(fieldOf(terminator, "target"))) {
+        this.link(node, fieldOf(loop, "headerNode") as Node);
+        break;
       }
-      case "return": {
-        const events: Event[] = [];
-        this.value(events, body.terminator.value);
-        if (freeing) events.push({ k: "call" });
-        return this.make(events);
-      }
-      // A block nothing arrives at links to nothing: it holds no name live
-      // across a call, because no call runs after it and nothing reads what it
-      // would have held.
-      case "unreachable":
-        return this.make([]);
-      case "jump": {
-        const node = this.make(freeing ? [{ k: "call" }] : []);
-        // A jump names the header or the exit of a loop it is inside, and the
-        // innermost one that answers to the name is the one it leaves for.
-        for (let at = this.open.length - 1; at >= 0; at -= 1) {
-          const loop = this.open[at] as (typeof this.open)[number];
-          if (loop.header === body.terminator.target) {
-            this.link(node, loop.headerNode);
-            break;
-          }
-          if (loop.exit === body.terminator.target) {
-            this.link(node, loop.exitNode);
-            break;
-          }
-        }
-        return node;
+      if (String(fieldOf(loop, "exit")) === String(fieldOf(terminator, "target"))) {
+        this.link(node, fieldOf(loop, "exitNode") as Node);
+        break;
       }
     }
+    return node;
   }
 
   /** One value, in the order the lowering evaluates it in. */
@@ -409,50 +429,56 @@ class Graph {
     if (value === null) return;
     switch (value.k) {
       case "local":
-        events.push({ k: "read", name: value.name });
+        events.push({ k: "read", name: String(fieldOf(value, "name")) });
         return;
-      case "call":
-        if (value.call.through !== undefined) this.value(events, value.call.through);
-        for (const argument of value.call.args) this.value(events, argument);
+      case "call": {
+        const call = fieldOf(value, "call") as SemanticCall;
+        const through = fieldOf(call, "through") as SemanticValue | undefined;
+        if (through !== undefined) this.value(events, through);
+        const args = fieldOf(call, "args") as readonly SemanticValue[];
+        for (const argument of args) this.value(events, argument);
         // A name handed to the call is used where the call is made, after every
         // argument has been evaluated. Its read above is before a call another
         // argument makes, so it is read again here: a value the callee is handed
         // is live across every call between the two.
-        for (const argument of value.call.args) {
-          if (argument.k === "local") events.push({ k: "read", name: argument.name });
+        for (const argument of args) {
+          if (argument.k === "local") events.push({ k: "read", name: String(fieldOf(argument, "name")) });
         }
-        if (value.call.through?.k === "local") {
-          events.push({ k: "read", name: value.call.through.name });
+        if (through !== undefined && through.k === "local") {
+          events.push({ k: "read", name: String(fieldOf(through, "name")) });
         }
         // A builtin the backend answers with instructions is a call the IR
         // states and the code does not make, and a name live across one of
         // those is live across arithmetic.
-        if (this.valueCalls(value.call.callee)) events.push({ k: "call" });
+        if (this.valueCalls(String(fieldOf(call, "callee")))) events.push({ k: "call" });
         return;
+      }
       case "newObject":
       case "buffer": {
         // The allocation comes first and the fields are written into what it
         // answered, so the call is before every value that fills the object.
         events.push({ k: "call" });
-        const fields = value.k === "newObject" ? value.fields.map((field) => field.value) : value.values;
-        for (const field of fields) this.value(events, field);
+        const fields = value.k === "newObject"
+          ? fieldOf(value, "fields") as readonly { readonly value: SemanticValue }[]
+          : fieldOf(value, "values") as readonly SemanticValue[];
+        for (const field of fields) this.value(events, value.k === "newObject" ? fieldOf(field, "value") as SemanticValue : field as SemanticValue);
         return;
       }
       case "loadField":
-        this.value(events, value.object);
+        this.value(events, fieldOf(value, "object") as SemanticValue);
         return;
       case "closure":
         // The block is allocated before the values it captures are read into it,
         // so the allocation is a call the captured values are live across.
         events.push({ k: "call" });
-        for (const capture of value.captures) this.value(events, capture);
+        for (const capture of fieldOf(value, "captures") as readonly SemanticValue[]) this.value(events, capture);
         return;
       case "capture":
-        this.value(events, value.closure);
+        this.value(events, fieldOf(value, "closure") as SemanticValue);
         return;
       case "element":
-        this.value(events, value.of);
-        this.value(events, value.index);
+        this.value(events, fieldOf(value, "of") as SemanticValue);
+        this.value(events, fieldOf(value, "index") as SemanticValue);
         return;
       case "arith": {
         // The two sides are written in the order the lowering writes them in,
@@ -473,18 +499,26 @@ class Graph {
         // after reading it, and hands it a register the callee is free to
         // overwrite first. Being wrong that way is a miscompile; being right
         // costs a register a callee would have preserved.
-        const commutative = value.op === "add" || value.op === "mul";
-        const wide = isWideType(value.type);
-        const leftFirst =
-          LEFT_FIRST_ARITH[value.op] === true ||
-          (commutative && isFloat(value.type)) ||
-          (wide && (value.op === "mul" || value.op === "div" || value.op === "shl" || value.op === "shr"));
+        const op = String(fieldOf(value, "op"));
+        const type = fieldOf(value, "type") as SemanticType;
+        const left = fieldOf(value, "left") as SemanticValue;
+        const right = fieldOf(value, "right") as SemanticValue;
+        const commutative = op === "add" || op === "mul";
+        const wide = isWideType(type);
+        let leftFirst = false;
+        if (Object.hasOwn(LEFT_FIRST_ARITH, op)) leftFirst = true;
+        if (commutative) {
+          if (isFloat(type)) leftFirst = true;
+        }
+        if (wide) {
+          if (op === "mul" || op === "div" || op === "shl" || op === "shr") leftFirst = true;
+        }
         if (leftFirst) {
-          this.value(events, value.left);
-          this.value(events, value.right);
+          this.value(events, left);
+          this.value(events, right);
         } else {
-          this.value(events, value.right);
-          this.value(events, value.left);
+          this.value(events, right);
+          this.value(events, left);
         }
         // A power is `pow` and a concatenation is the runtime building a string
         // out of its two sides; every other arithmetic on a number the machine
@@ -495,9 +529,9 @@ class Graph {
         // kernel, which is a real call and clobbers every register the caller
         // saved. Leaving these out pins the names around them to registers that
         // the kernel overwrites.
-        if (value.op === "pow" || value.op === "concat" || value.op === "arrayConcat") {
+        if (op === "pow" || op === "concat" || op === "arrayConcat") {
           events.push({ k: "call" });
-        } else if ((value.op === "mul" || value.op === "div") && isWideType(value.type)) {
+        } else if ((op === "mul" || op === "div") && isWideType(type)) {
           events.push({ k: "call" });
         }
         return;
@@ -509,62 +543,70 @@ class Graph {
         // word are written left side first, so where the two orders disagree
         // this is the order the lowering writes the one that is not a number
         // in.
-        if (isWideType(value.operand) || isTextType(value.operand)) {
-          this.value(events, value.left);
-          this.value(events, value.right);
+        const operand = fieldOf(value, "operand") as SemanticType;
+        const left = fieldOf(value, "left") as SemanticValue;
+        const right = fieldOf(value, "right") as SemanticValue;
+        if (isWideType(operand) || isTextType(operand)) {
+          this.value(events, left);
+          this.value(events, right);
         } else {
-          this.value(events, value.right);
-          this.value(events, value.left);
+          this.value(events, right);
+          this.value(events, left);
         }
         // Two numbers are compared by the machine itself; anything else is
         // compared by the C library, which is a call.
-        if (value.operand.kind !== "primitive") events.push({ k: "call" });
+        if (operand.kind !== "primitive") events.push({ k: "call" });
         return;
       }
       case "logical":
       case "coalesce":
-        this.value(events, value.left);
-        this.value(events, value.right);
+        this.value(events, fieldOf(value, "left") as SemanticValue);
+        this.value(events, fieldOf(value, "right") as SemanticValue);
         return;
       case "select":
         // The condition is asked before either arm, and only one arm runs, so
         // a name read by the condition alone is dead before either of them.
-        this.value(events, value.condition);
-        this.value(events, value.then);
-        this.value(events, value.otherwise);
+        this.value(events, fieldOf(value, "condition") as SemanticValue);
+        this.value(events, fieldOf(value, "then") as SemanticValue);
+        this.value(events, fieldOf(value, "otherwise") as SemanticValue);
         return;
       case "unary":
       case "isNull":
-        this.value(events, value.operand);
+        this.value(events, fieldOf(value, "operand") as SemanticValue);
         return;
-      case "toText":
+      case "toText": {
+        const of = fieldOf(value, "of") as SemanticValue;
         // A number written as text is formatted by the runtime, which is a call
         // that writes the argument registers; a string written as text is not.
-        this.value(events, value.of);
-        if (!isTextType(value.of.type)) events.push({ k: "call" });
+        this.value(events, of);
+        if (!isTextType(fieldOf(of, "type") as SemanticType)) events.push({ k: "call" });
         return;
+      }
       case "length":
-        this.value(events, value.of);
+        this.value(events, fieldOf(value, "of") as SemanticValue);
         events.push({ k: "call" });
         return;
       case "text":
-        for (const part of value.parts) {
-          if (part.k === "value") this.value(events, part.value);
+        for (const part of fieldOf(value, "parts") as readonly { readonly k: string; readonly value: SemanticValue }[]) {
+          if (String(fieldOf(part, "k")) === "value") this.value(events, fieldOf(part, "value") as SemanticValue);
         }
         // A text is built by the runtime: the buffer is allocated and every
         // part copied into it by a library call.
         events.push({ k: "call" });
         return;
-      case "argv":
-        this.value(events, value.index);
+      case "argv": {
+        const index = fieldOf(value, "index") as SemanticValue | null;
+        if (index !== null) this.value(events, index);
         events.push({ k: "call" });
         return;
+      }
       case "const":
       case "bool":
       case "nothing":
         return;
     }
   }
+
 }
 
 /* -------------------------------------------------------------------------- */
@@ -674,7 +716,7 @@ export function nameLiveness(
     for (let index = node.events.length - 1; index >= 0; index -= 1) {
       const event = node.events[index] as Event;
       if (event.k === "call") {
-        for (const name of out) if (across.get(name) !== true) across.set(name, true);
+        for (const name of out) if (across.has(name) === false) across.set(name, true);
       } else if (event.k === "read") {
         note(event.name, at + index);
       }
@@ -713,7 +755,7 @@ export function nameLiveness(
     // exactly that reason, and reading the places it is touched as if they
     // were separate runs would let another name take the register over the
     // stretch between them.
-    result.set(name, { live: [[first, last + 1]], acrossCall: across.get(name) === true });
+    result.set(name, { live: [[first, Number(last) + 1]], acrossCall: across.has(name) });
   }
   return result;
 }

@@ -246,11 +246,14 @@ function fieldOf(value: unknown, key: string): any {
 
 /** The C header a program that uses SQLite includes. */
 export function sqliteHeaderSource(): string {
-  const declarations = SQLITE_ABI.map((item) => {
+  const lines: string[] = [];
+  for (const item of SQLITE_ABI) {
+    const ret = String(fieldOf(item, "returns"));
     const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
-    return `${String(fieldOf(item, "returns"))} ${String(fieldOf(item, "symbol"))}(${
-      params.length === 0 ? "void" : params.map(([name, type]) => `${type} ${name}`).join(", ")
-    });`;
-  }).join("\n");
+    const written: string[] = [];
+    for (const param of params) written[written.length] = `${String(param[1])} ${String(param[0])}`;
+    lines[lines.length] = `${ret} ${String(fieldOf(item, "symbol"))}(${written.length === 0 ? "void" : written.join(", ")});`;
+  }
+  const declarations = lines.join("\n");
   return `${SQLITE_HEADER_PREAMBLE}\n${declarations}\n${SQLITE_HEADER_EPILOGUE}`;
 }

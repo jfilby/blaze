@@ -25,8 +25,12 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { RUNTIME_NAME, runtimeHeaderSource, runtimeSourceSource } from "./abi.ts";
 import { cTargetOptions } from "../core/target.ts";
-import { compileCommand, objectOptions, toolchainFor, type Toolchain } from "../core/toolchain.ts";
+import { compileCommand, objectOptions, toolchainForTarget, type Toolchain } from "../core/toolchain.ts";
 import type { BuildMode, TargetSpec } from "../core/types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 export interface StandaloneRuntime {
   headerPath: string;
@@ -67,20 +71,27 @@ let temporary = 0;
 const compilerIdentities = new Map<string, Promise<string>>();
 
 export function identifyCompiler(toolchain: Toolchain): Promise<string> {
-  const known = compilerIdentities.get(toolchain.id);
+  const id = String(fieldOf(toolchain, "id"));
+  const known = compilerIdentities.get(id);
   if (known !== undefined) return known;
   const identity = (async (): Promise<string> => {
     const command = compileCommand(toolchain, ["--version"]);
-    const version = run(command.command, command.args, { timeoutMs: 30_000 });
-    if (version.spawnError !== undefined) {
-      throw new CompilerError("TargetError", "compile", "the C compiler is not available", version.spawnError, "", "", "");
+    const version = run(
+      String(fieldOf(command, "command")),
+      fieldOf(command, "args") as readonly string[],
+      { timeoutMs: 30_000 },
+    );
+    if (fieldOf(version, "spawnError") !== undefined) {
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", String(fieldOf(version, "spawnError")), "", "", "");
     }
-    if (version.code !== 0) {
-      throw new CompilerError("TargetError", "compile", "the C compiler did not say what it is", version.stderr.trim(), "", "", "");
+    const exitCode = fieldOf(version, "code") as number | null;
+    if (exitCode !== 0) {
+      throw new CompilerError("TargetError", "compile", "the C compiler did not say what it is", String(fieldOf(version, "stderr")).trim(), "", "", "");
     }
-    return version.stdout.split("\n")[0]?.trim() ?? "";
+    const lines = String(fieldOf(version, "stdout")).split("\n");
+    return String(lines[0]).trim();
   })();
-  compilerIdentities.set(toolchain.id, identity);
+  compilerIdentities.set(id, identity);
   return identity;
 }
 
@@ -98,10 +109,13 @@ function cacheKey(
   toolchain: Toolchain,
   compiler: string,
 ): string {
-  const machine = `${hostArchitecture()}/${cpus()[0]?.model ?? "unknown"}`;
+  const processors = cpus();
+  const model = processors.length === 0 ? "unknown" : String(fieldOf(processors[0], "model") ?? "unknown");
+  const machine = `${hostArchitecture()}/${model}`;
+  const flags = fieldOf(request, "flags") as readonly string[];
   return createHash("sha256")
     .update(
-      [CACHE_SCHEMA, toolchain.id, compiler, machine, request.name, ...request.flags, request.source].join("\u0000"),
+      [CACHE_SCHEMA, String(fieldOf(toolchain, "id")), compiler, machine, String(fieldOf(request, "name")), ...flags, String(fieldOf(request, "source"))].join("\u0000"),
       "utf8",
     )
     .digest("hex")
@@ -139,18 +153,23 @@ export async function compileRuntimeSource(request: {
   /** The machine the runtime is built for, which selects the compiler. */
   target: TargetSpec;
 }): Promise<{ sourcePath: string; objectPath: string }> {
-  const sourcePath = `${request.workDirectory}/${request.name}.c`;
-  const objectPath = `${request.workDirectory}/${request.name}.o`;
-  await writeFile(sourcePath, request.source, "utf8");
+  const workDirectory = String(fieldOf(request, "workDirectory"));
+  const name = String(fieldOf(request, "name"));
+  const source = String(fieldOf(request, "source"));
+  const flags = fieldOf(request, "flags") as readonly string[];
+  const target = fieldOf(request, "target") as TargetSpec;
+  const sourcePath = `${workDirectory}/${name}.c`;
+  const objectPath = `${workDirectory}/${name}.o`;
+  await writeFile(sourcePath, source, "utf8");
 
-  const toolchain = toolchainFor(request.target);
+  const toolchain = toolchainForTarget(target);
   const compiler = await identifyCompiler(toolchain);
-  const key = cacheKey(request, toolchain, compiler);
-  const directory = `${request.workDirectory}/${RUNTIME_CACHE_DIRECTORY}`;
+  const key = cacheKey({ name, source, flags }, toolchain, compiler);
+  const directory = `${workDirectory}/${RUNTIME_CACHE_DIRECTORY}`;
   const cached = `${directory}/${key}.o`;
 
   const present = await stat(cached).then(
-    (entry) => entry.isFile() && entry.size > 0,
+    (entry) => (fieldOf(entry, "isFile") as () => boolean).call(entry) && Number(fieldOf(entry, "size")) > 0,
     () => false,
   );
   if (present) {
@@ -161,15 +180,20 @@ export async function compileRuntimeSource(request: {
   await mkdir(directory, { recursive: true });
   temporary += 1;
   const building = `${directory}/${key}.${processId()}-${temporary}.tmp`;
-  const command = compileCommand(toolchain, ["-std=c11", ...request.flags, "-c", "-o", building, sourcePath]);
-  const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
-  if (compiled.spawnError !== undefined) {
+  const command = compileCommand(toolchain, ["-std=c11", ...flags, "-c", "-o", building, sourcePath]);
+  const compiled = run(
+    String(fieldOf(command, "command")),
+    fieldOf(command, "args") as readonly string[],
+    { timeoutMs: 120_000 },
+  );
+  if (fieldOf(compiled, "spawnError") !== undefined) {
     await discard(building);
-    throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
+    throw new CompilerError("TargetError", "compile", "the C compiler is not available", String(fieldOf(compiled, "spawnError")), "", "", "");
   }
-  if (compiled.code !== 0) {
+  const exitCode = fieldOf(compiled, "code") as number | null;
+  if (exitCode !== 0) {
     await discard(building);
-    throw new CompilerError("LinkError", "compile", "the compiler runtime did not build", `${sourcePath}\n${compiled.stderr.trim()}`, "", "", "");
+    throw new CompilerError("LinkError", "compile", "the compiler runtime did not build", `${sourcePath}\n${String(fieldOf(compiled, "stderr")).trim()}`, "", "", "");
   }
 
   // Two builds of one project can miss the same key at once, so the rename can
@@ -211,13 +235,13 @@ export async function buildStandaloneRuntime(
   // machinery. `-ffunction-sections` gives each entry point a section of its
   // own, and the `-Wl,--gc-sections` at the link then drops the ones this
   // program never reached. A section is only collectable if it is one.
-  const toolchain = toolchainFor(target);
+  const toolchain = toolchainForTarget(target);
   const compiled = await compileRuntimeSource({
     workDirectory,
     name: RUNTIME_NAME,
     source: runtimeSourceSource(mode),
     flags: [
-      ...objectOptions(toolchain, mode),
+      ...objectOptions(toolchain, mode, undefined),
       ...cTargetOptions(target),
       "-ffunction-sections",
       "-fdata-sections",

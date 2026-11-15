@@ -72,6 +72,8 @@ import {
   isSequence,
   statementValues,
   type SemanticBlock,
+  type ArithOp,
+  type UnaryOp,
   type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
@@ -668,9 +670,9 @@ function elementFacts(bodies: readonly Body[]): Facts {
           if (names === undefined) continue;
           const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
           for (const one of names) {
-            const argument = callArgs[one.at];
+            const argument = callArgs[Number(fieldOf(one, "at"))];
             if (argument === undefined || argument.k !== "local") continue;
-            const given = nameOf(one.name, callee);
+            const given = nameOf(String(fieldOf(one, "name")), callee);
             const found = handed.get(given) ?? new Set<string>();
             found.add(nameOf(String(fieldOf(argument, "name")), fieldOf(body, "fn") as string | null));
             handed.set(given, found);
@@ -869,8 +871,8 @@ function readBody(
         if (names === undefined) continue;
         const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
         for (const one of names) {
-          const argument = callArgs[one.at];
-          answer(nameOf(one.name, callCallee), argument === undefined ? unknown : knownOf(argument, where));
+          const argument = callArgs[Number(fieldOf(one, "at"))];
+          answer(nameOf(String(fieldOf(one, "name")), callCallee), argument === undefined ? unknown : knownOf(argument, where));
         }
       }
       for (const nested of blocksOf(statement)) walk(nested, skip);
@@ -1006,6 +1008,7 @@ function wholeNumbersOf(
   whole: Set<string>,
   slots: ReadonlyMap<string, SemanticSlot>,
 ): boolean {
+  const insideLocals = fieldOf(inside, "locals") as Map<string, Known>;
   for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     if (statement.k === "if") {
       // A reduction's conditional arms are each one chain and write the same
@@ -1016,23 +1019,23 @@ function wholeNumbersOf(
       // `knownOf`, which returns false for anything the `where` cannot hold
       // whole.
       if (reductionOf(statement) === null) return false;
-      const condKnown = knownOf(statement.condition, inside);
-      if (!condKnown.whole || !(condKnown.reach <= REACH)) return false;
+      const condKnown = knownOf(fieldOf(statement, "condition") as SemanticValue, inside);
+      if (fieldOf(condKnown, "whole") !== true || !(Number(fieldOf(condKnown, "reach")) <= REACH)) return false;
       for (const arm of blocksOf(statement)) {
-        for (const nested of arm.statements) {
+        for (const nested of fieldOf(arm, "statements") as readonly SemanticStatement[]) {
           if (nested.k !== "let" && nested.k !== "set" && nested.k !== "setElement") return false;
-          const nestedKnown = knownOf(nested.value, inside);
-          if (!nestedKnown.whole || !(nestedKnown.reach <= REACH)) return false;
+          const nestedKnown = knownOf(fieldOf(nested, "value") as SemanticValue, inside);
+          if (fieldOf(nestedKnown, "whole") !== true || !(Number(fieldOf(nestedKnown, "reach")) <= REACH)) return false;
           const nestedName = nameWrittenBy(nested);
           if (nestedName === null) continue;
           whole.add(nestedName);
-          const before = inside.locals.get(nestedName);
+          const before = insideLocals.get(nestedName);
           const slot = slots.get(nestedName);
-          const across = slot !== undefined && slot.kind === "value" && !isFloat(slot.type);
-          inside.locals.set(
+          const across = slot !== undefined && String(fieldOf(slot, "kind")) === "value" && !isFloat(fieldOf(slot, "type") as TypeExpr);
+          insideLocals.set(
             nestedName,
-            before !== undefined && before.whole && across
-              ? { whole: true, reach: Math.max(before.reach, nestedKnown.reach), reduced: null }
+            before !== undefined && fieldOf(before, "whole") === true && across
+              ? { whole: true, reach: Math.max(Number(fieldOf(before, "reach")), Number(fieldOf(nestedKnown, "reach"))), reduced: null }
               : nestedKnown,
           );
         }
@@ -1042,17 +1045,17 @@ function wholeNumbersOf(
     if (statement.k !== "let" && statement.k !== "set" && statement.k !== "setElement") return false;
     const name = nameWrittenBy(statement);
     if (name === null && statement.k !== "setElement") return false;
-    const known = knownOf(statement.value, inside);
-    if (!known.whole || !(known.reach <= REACH)) return false;
+    const known = knownOf(fieldOf(statement, "value") as SemanticValue, inside);
+    if (fieldOf(known, "whole") !== true || !(Number(fieldOf(known, "reach")) <= REACH)) return false;
     if (name === null) continue;
     whole.add(name);
-    const before = inside.locals.get(name);
+    const before = insideLocals.get(name);
     const slot = slots.get(name);
-    const across = slot !== undefined && slot.kind === "value" && !isFloat(slot.type);
-    inside.locals.set(
+    const across = slot !== undefined && String(fieldOf(slot, "kind")) === "value" && !isFloat(fieldOf(slot, "type") as TypeExpr);
+    insideLocals.set(
       name,
-      before !== undefined && before.whole && across
-        ? { whole: true, reach: Math.max(before.reach, known.reach), reduced: null }
+      before !== undefined && fieldOf(before, "whole") === true && across
+        ? { whole: true, reach: Math.max(Number(fieldOf(before, "reach")), Number(fieldOf(known, "reach"))), reduced: null }
         : known,
     );
   }
@@ -1061,8 +1064,11 @@ function wholeNumbersOf(
 
 /** The name a statement writes in the body of a loop, or null where it writes none. */
 function nameWrittenBy(statement: SemanticStatement): string | null {
-  if (statement.k === "let" && statement.slot.kind === "value" && isFloat(statement.slot.type)) return statement.slot.name;
-  if (statement.k === "set") return statement.name;
+  if (statement.k === "let") {
+    const slot = fieldOf(statement, "slot") as SemanticSlot;
+    if (String(fieldOf(slot, "kind")) === "value" && isFloat(fieldOf(slot, "type") as TypeExpr)) return String(fieldOf(slot, "name"));
+  }
+  if (statement.k === "set") return String(fieldOf(statement, "name"));
   return null;
 }
 
@@ -1163,7 +1169,7 @@ function rewriteChain(
   retype: ValueSlot[],
 ): boolean {
   const rewritten: SemanticStatement[] = [];
-  for (const statement of body.statements) {
+  for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
     // The bindings one statement's whole form needs, which are written where
     // that statement reads them.
     const bindings: SemanticStatement[] = [];
@@ -1287,27 +1293,30 @@ function wholeForm(
   switch (value.k) {
     case "const": {
       const literal = literalOf(value);
-      if (literal === null || !literal.whole) return null;
-      return { k: "const", type: WHOLE, text: String(literal.value) };
+      if (literal === null || fieldOf(literal, "whole") !== true) return null;
+      return { k: "const", type: WHOLE, text: String(fieldOf(literal, "value")) };
     }
     case "local":
-      return whole.has(value.name) ? { ...value, type: WHOLE } : null;
+      return whole.has(String(fieldOf(value, "name"))) ? { k: "local", type: WHOLE, name: String(fieldOf(value, "name")) } : null;
     case "element": {
-      return value.of.k === "local" ? narrowBinding(value, where, named, bindings, introduced) : null;
+      const of = fieldOf(value, "of") as SemanticValue;
+      return of.k === "local" ? narrowBinding(value, where, named, bindings, introduced) : null;
     }
     case "unary": {
-      if (value.op !== "neg" && value.op !== "pos") return null;
+      const op = String(fieldOf(value, "op"));
+      if (op !== "neg" && op !== "pos") return null;
       const operand = wholeForm(fieldOf(value, "operand") as SemanticValue, where, whole, named, bindings, introduced);
-      return operand === null ? null : { ...value, type: WHOLE, operand };
+      return operand === null ? null : { k: "unary", type: WHOLE, op: op as UnaryOp, operand };
     }
     case "arith": {
-      if (value.op === "shr" || value.op === "shl") {
+      const op = String(fieldOf(value, "op"));
+      if (op === "shr" || op === "shl") {
         // A shift is written at the type of what it shifts, so only that side is
         // rewritten; the count is the machine's to mask.
         const left = wholeForm(fieldOf(value, "left") as SemanticValue, where, whole, named, bindings, introduced);
-        return left === null ? null : { ...value, type: WHOLE, left };
+        return left === null ? null : { k: "arith", type: WHOLE, op: op as ArithOp, left, right: fieldOf(value, "right") as SemanticValue };
       }
-      if (value.op !== "add" && value.op !== "sub" && value.op !== "mul") return null;
+      if (op !== "add" && op !== "sub" && op !== "mul") return null;
       // An operation whose two sides are neither a whole number nor a literal is
       // left as the source wrote it and read at the whole width by the binding
       // that holds it. That is one conversion where converting each side would be
@@ -1315,45 +1324,50 @@ function wholeForm(
       // — which is the whole of what an operation two element reads followed by
       // one addition needs: the sum is computed the way the source computed it,
       // and only the addition that carries the carry down is a whole number.
-      if (!isName(value.left) && !isName(value.right) && knownOf(value, where).whole) {
+      const leftValue = fieldOf(value, "left") as SemanticValue;
+      const rightValue = fieldOf(value, "right") as SemanticValue;
+      if (!isName(leftValue) && !isName(rightValue) && fieldOf(knownOf(value, where), "whole") === true) {
         return narrowBinding(value, where, named, bindings, introduced);
       }
-      const left = wholeForm(fieldOf(value, "left") as SemanticValue, where, whole, named, bindings, introduced);
+      const left = wholeForm(leftValue, where, whole, named, bindings, introduced);
       if (left === null) return null;
-      const right = wholeForm(fieldOf(value, "right") as SemanticValue, where, whole, named, bindings, introduced);
-      return right === null ? null : { ...value, type: WHOLE, left, right };
+      const right = wholeForm(rightValue, where, whole, named, bindings, introduced);
+      return right === null ? null : { k: "arith", type: WHOLE, op: op as ArithOp, left, right };
     }
     case "call": {
-      if (!value.call.builtin) {
+      const call = fieldOf(value, "call") as SemanticCall;
+      if (fieldOf(call, "builtin") !== true) {
         // A call this pass cannot read is a value it cannot claim to know, so it
         // is read at the whole width only where the facts say the whole number is
         // a whole number whatever the call answered — which is nothing here.
         return null;
       }
-      const argument = value.call.args[0];
+      const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+      const argument = callArgs[0];
       if (argument === undefined) return null;
+      const callee = String(fieldOf(call, "callee"));
       // The magnitude of a value is the value itself only where the value is
       // not below zero, and nothing here says that it is not: a buffer holds
       // whatever was written into it, and a negative one is a number the
       // program wrote. The whole-number form of a magnitude is therefore not
       // the magnitude of the whole number, and the call is left as it was.
-      if (value.call.callee === "Math.abs") return null;
+      if (callee === "Math.abs") return null;
       // The one rewriting that changes an operation: a whole number divided by a
       // power of two and floored is that whole number shifted down, because the
       // floor of a quotient and the shift down agree for every whole number and
       // differ only over doubles.
-      if (value.call.callee === "Math.floor") {
+      if (callee === "Math.floor") {
         const divided = quotientOf(argument);
         if (divided !== null) {
           const left = wholeForm(fieldOf(divided, "dividend") as SemanticValue, where, whole, named, bindings, introduced);
           if (left === null) return null;
-          const count: SemanticValue = { k: "const", type: WHOLE, text: String(divided.places) };
+          const count: SemanticValue = { k: "const", type: WHOLE, text: String(fieldOf(divided, "places")) };
           return { k: "arith", type: WHOLE, op: "shr", left, right: count };
         }
       }
       // A whole number is its own floor, its own truncation and its own
       // rounding, so all three answer the value they were given.
-      if (value.call.callee === "Math.floor" || value.call.callee === "Math.round" || value.call.callee === "Math.trunc") {
+      if (callee === "Math.floor" || callee === "Math.round" || callee === "Math.trunc") {
         return wholeForm(argument, where, whole, named, bindings, introduced);
       }
       return null;

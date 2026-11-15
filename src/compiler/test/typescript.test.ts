@@ -1175,6 +1175,34 @@ test("a switch is lowered to the comparisons and the fallthrough it writes", () 
   );
 });
 
+test("a break written inside a case block leaves the switch", () => {
+  // A break below the level of a case is still the switch's break. The switch
+  // is then one loop that runs once, so the arm can leave from inside an `if`
+  // without the statements after it running.
+  const analysis = typescript.analyze(
+    [
+      "export function label(x: number): number {",
+      "  let total = 0;",
+      "  switch (x) {",
+      "    case 1: {",
+      "      if (x > 0) break;",
+      "      total = 3;",
+      "    }",
+      "    default: total = 2;",
+      "  }",
+      "  return total;",
+      "}",
+      "",
+    ].join("\n"),
+    "main.ts",
+  );
+  const body = ((analysis.functions[0]?.handle ?? { body: [] }) as {
+    body: { kind: string }[];
+  }).body;
+  assert.equal(body[2]?.kind, "while", "the switch is lowered as one loop it can leave");
+  assert.equal(body[body.length - 1]?.kind, "result");
+});
+
 test("`??=` writes only where the target is null", () => {
   // It is a conditional write, not a compound assignment: the value is not
   // evaluated where the target already holds one.

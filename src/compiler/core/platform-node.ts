@@ -27,6 +27,16 @@ import {
   writeFile,
 } from "node:fs/promises";
 import type { BoundedCommand, DirectoryEntry, FileInfo, HostChild, HostSignal, HostSpawnOptions, WebAssemblyEngine } from "./platform.ts";
+
+/** Puts a file on the disk rather than in the page cache. */
+export async function syncFile(path: string): Promise<void> {
+  const handle = await nodeOpen(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
 import { createHash, randomUUID } from "node:crypto";
 import {
   basename as nodeBasename,

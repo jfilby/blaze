@@ -109,18 +109,29 @@ const COMMENT = /^\s*(?:#|\/\/)/;
  * there. A refusal that only says the answer was wrong leaves the model with
  * nothing to change, and it answers the same way again.
  */
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 export function parseReview(text: string): ParsedReview {
-  const lines = text
-    .split("\n")
-    .map((line, at) => ({ line, at: at + 1 }))
-    .filter((entry) => entry.line.trim() !== "" && !FENCE.test(entry.line) && !COMMENT.test(entry.line));
+  const lines: { line: string; at: number }[] = [];
+  const raw = text.split("\n");
+  for (let index = 0; index < raw.length; index += 1) {
+    const line = raw[index];
+    if (line.trim() === "") continue;
+    if (FENCE.test(line)) continue;
+    if (COMMENT.test(line)) continue;
+    lines[lines.length] = { line, at: index + 1 };
+  }
   let verdict: Verdict | null = null;
   let verdictAt = 0;
   let reason: string | null = null;
   let reasonAt = 0;
   const proposals: Proposal[] = [];
 
-  for (const { line, at } of lines) {
+  for (const entry of lines) {
+    const line = String(fieldOf(entry, "line"));
+    const at = Number(fieldOf(entry, "at"));
     const field = /^([a-z]+):[ \t]*(.*)$/.exec(line);
     if (field === null) {
       return { unusable: `line ${at} is neither a verdict, a reason nor a proposal: ${JSON.stringify(line)}` };
@@ -154,12 +165,14 @@ export function parseReview(text: string): ParsedReview {
       }
       case "proposal": {
         const proposal = readProposal(value, at);
-        if ("unusable" in proposal) return proposal;
+        const unusable = fieldOf(proposal, "unusable") as string | undefined;
+        if (unusable !== undefined) return { unusable };
         // A line that says it proposes nothing is a review with no proposals,
         // and the verdict decides whether that is a whole answer: `sound` and
         // `unsound` are both asked for with no proposal, and `repaired` is
         // asked for with at least one.
-        if (!("nothing" in proposal)) proposals.push(proposal.proposal);
+        const read = fieldOf(proposal, "proposal") as Proposal | undefined;
+        if (read !== undefined) proposals.push(read);
         break;
       }
       default:
@@ -169,10 +182,10 @@ export function parseReview(text: string): ParsedReview {
 
   if (verdict === null) return { unusable: "the answer gives no verdict" };
   if (reason === null) return { unusable: "the answer gives no reason" };
-  if (verdict === "sound" && proposals.length > 0) {
+  if (/^sound$/.test(String(verdict)) && proposals.length > 0) {
     return { unusable: "the answer calls the artifact sound and proposes a fix to it" };
   }
-  if (verdict === "repaired" && proposals.length === 0) {
+  if (/^repaired$/.test(String(verdict)) && proposals.length === 0) {
     return { unusable: "the answer calls the artifact wrong and proposes no fix for it" };
   }
   return { review: { verdict, reason, proposals } };
@@ -207,7 +220,7 @@ function readProposal(
       return { unusable: `line ${line} proposes ${JSON.stringify(written)}, which is neither a rule nor a name=value argument` };
     }
     const [, name, argumentValue] = argument;
-    if (name in args) return { unusable: `line ${line} gives ${name} twice` };
+    if (args[name] !== undefined) return { unusable: `line ${line} gives ${name} twice` };
     if (argumentValue === "") return { unusable: `line ${line} gives ${name} no value` };
     args[name] = argumentValue;
   }

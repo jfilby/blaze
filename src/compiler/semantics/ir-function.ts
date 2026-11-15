@@ -2734,6 +2734,21 @@ class FunctionBody {
         this.layouts.set(key, name);
         return name;
       }
+      // A body that writes more fields into the object after the literal wrote
+      // it has a layout the literal only starts: the fields the literal wrote
+      // are the first fields of that layout, at the offsets the literal wrote
+      // them at. The literal is that object and the writes go into the rest.
+      for (const [name, layout] of Object.entries(objects)) {
+        const held = this.fieldNames(fieldOfValue(layout, "fields") as readonly { name: string }[]);
+        if (held.length < literalNames.length) continue;
+        let prefix = true;
+        for (let at = 0; at < literalNames.length; at += 1) {
+          if (held[at] !== literalNames[at]) prefix = false;
+        }
+        if (!prefix) continue;
+        this.layouts.set(key, name);
+        return name;
+      }
     }
     if (found.length > 1) {
       console.log(`LAYOUT3 ${key} exact=${objectNames[key] ?? "none"} found=${found.join(",")}`);

@@ -15,6 +15,10 @@
 
 import type { SemanticType } from "../core/semantic-ir.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * The scope of declarations a backend is writing, and the names they are
  * written as. Escaping belongs to the target, so it is passed in: the C driver
@@ -75,8 +79,8 @@ export class NameScope {
   /** The declaration a name is read as, or null where nothing declares it. */
   declared(name: string): { emitted: string; type: SemanticType | null } | null {
     for (let index = this.scopes.length - 1; index >= 0; index -= 1) {
-      const found = this.scopes[index].find((entry) => entry.name === name);
-      if (found !== undefined) return { emitted: found.emitted, type: found.type };
+      const found = this.scopes[index].find((entry) => String(fieldOf(entry, "name")) === name);
+      if (found !== undefined) return { emitted: String(fieldOf(found, "emitted")), type: fieldOf(found, "type") as SemanticType | null };
     }
     return null;
   }
@@ -84,11 +88,12 @@ export class NameScope {
   /** The name the target knows a declared name by, or the name itself if none. */
   read(name: string): string {
     const declared = this.declared(name);
-    return this.escape(declared === null ? name : declared.emitted);
+    return this.escape(declared === null ? name : String(fieldOf(declared, "emitted")));
   }
 
   /** The type a name is declared at, where a use has to be written at that type. */
   typeOf(name: string, otherwise: SemanticType): SemanticType {
-    return this.declared(name)?.type ?? otherwise;
+    const declared = this.declared(name);
+    return declared === null ? otherwise : ((fieldOf(declared, "type") as SemanticType | null) ?? otherwise);
   }
 }

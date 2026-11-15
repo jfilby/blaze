@@ -27,6 +27,15 @@
  *   inline-call          put a callee's body where the call was
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+/** Writes one field of a value the frontend can only type as `ref<any>`. */
+function setField(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 import {
   hasCall,
   isInteger,
@@ -39,6 +48,7 @@ import {
   type SemanticLoop,
   type SemanticSlot,
   type SemanticStatement,
+  type SemanticTerminator,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
@@ -158,36 +168,40 @@ export function applyProposal(
   proposal: Proposal,
   context: RepairContext,
 ): RepairOutcome {
-  const rule = REPAIR_RULES.find((entry) => entry.name === proposal.rule);
+  const ruleName = String(fieldOf(proposal, "rule"));
+  let rule: RepairRule | undefined;
+  const ruleNames: string[] = [];
+  for (const entry of REPAIR_RULES) {
+    ruleNames[ruleNames.length] = String(fieldOf(entry, "name"));
+    if (String(fieldOf(entry, "name")) === ruleName) rule = entry;
+  }
   if (rule === undefined) {
     return {
-      refused: `there is no rule named "${proposal.rule}": the rules are ${REPAIR_RULES.map((entry) => entry.name).join(", ")}`,
+      refused: `there is no rule named "${ruleName}": the rules are ${ruleNames.join(", ")}`,
     };
   }
-  const unknown = Object.keys(proposal.args).filter(
-    (name) => !rule.args.some((argument) => argument.name === name),
-  );
+  const ruleArgs = fieldOf(rule, "args") as readonly { readonly name: string }[];
+  const givenArgs = fieldOf(proposal, "args") as Record<string, string>;
+  const unknown: string[] = [];
+  for (const name of Object.keys(givenArgs)) {
+    let known = false;
+    for (const argument of ruleArgs) if (String(fieldOf(argument, "name")) === name) known = true;
+    if (known === false) unknown[unknown.length] = name;
+  }
   if (unknown.length > 0) {
+    const takes: string[] = [];
+    for (const argument of ruleArgs) takes[takes.length] = String(fieldOf(argument, "name"));
     return {
-      refused: `${rule.name} takes no ${unknown.join(" and no ")}: it takes ${
-        rule.args.length === 0 ? "nothing at all" : rule.args.map((argument) => argument.name).join(", ")
-      }`,
+      refused: `${ruleName} takes no ${unknown.join(" and no ")}: it takes ${takes.length === 0 ? "nothing at all" : takes.join(", ")}`,
     };
   }
 
   const revised = structuredClone(fn);
-  switch (proposal.rule) {
-    case "hoist-invariant":
-      return hoistInvariant(revised, proposal.site);
-    case "common-subexpression":
-      return commonSubexpression(revised, proposal.site);
-    case "reciprocal-multiply":
-      return reciprocalMultiply(revised, proposal.site);
-    case "inline-call":
-      return inlineCall(revised, proposal.site, proposal.args.callee ?? "", context);
-    default:
-      return { refused: `there is no rule named "${proposal.rule}"` };
-  }
+  if (ruleName === "hoist-invariant") return hoistInvariant(revised, String(fieldOf(proposal, "site")));
+  if (ruleName === "common-subexpression") return commonSubexpression(revised, String(fieldOf(proposal, "site")));
+  if (ruleName === "reciprocal-multiply") return reciprocalMultiply(revised, String(fieldOf(proposal, "site")));
+  if (ruleName === "inline-call") return inlineCall(revised, String(fieldOf(proposal, "site")), String(givenArgs["callee"] ?? ""), context);
+  return { refused: `there is no rule named "${ruleName}"` };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -203,50 +217,52 @@ interface LoopSite {
 
 /** The blocks a statement is made of, which is what a walk of a body follows. */
 function statementBlocks(statement: SemanticStatement): readonly SemanticBlock[] {
-  switch (statement.k) {
-    case "if":
-      return statement.otherwise === null ? [statement.then] : [statement.then, statement.otherwise];
-    case "loop":
-      return [statement.loop.body];
-    case "block":
-      return [statement.body];
-    default:
-      return [];
+  if (statement.k === "if") {
+    const then = fieldOf(statement, "then") as SemanticBlock;
+    const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+    const blocks: SemanticBlock[] = [then];
+    if (otherwise !== null) blocks[blocks.length] = otherwise;
+    return blocks;
   }
+  if (statement.k === "loop") return [fieldOf(fieldOf(statement, "loop"), "body") as SemanticBlock];
+  if (statement.k === "block") return [fieldOf(statement, "body") as SemanticBlock];
+  return [];
 }
 
 /** A block and every block nested inside it, itself included. */
 function nestedBlocks(block: SemanticBlock): SemanticBlock[] {
   const blocks: SemanticBlock[] = [block];
-  for (const statement of block.statements) {
-    for (const nested of statementBlocks(statement)) blocks.push(...nestedBlocks(nested));
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    for (const nested of statementBlocks(statement)) {
+      for (const one of nestedBlocks(nested)) blocks[blocks.length] = one;
+    }
   }
   return blocks;
 }
 
 /** Every block of a function, the entry first, then each one nested inside it. */
 function blocksOf(fn: SemanticFunction): SemanticBlock[] {
-  return nestedBlocks(fn.entry);
+  return nestedBlocks(fieldOf(fn, "entry") as SemanticBlock);
 }
 
 /** Every loop of a function, with the block each one is written in. */
 function loopsOf(fn: SemanticFunction): LoopSite[] {
   const loops: LoopSite[] = [];
   for (const block of blocksOf(fn)) {
-    for (const statement of block.statements) {
-      if (statement.k === "loop") loops.push({ owner: block, statement, loop: statement.loop });
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "loop") loops[loops.length] = { owner: block, statement: statement as SemanticStatement & { k: "loop" }, loop: fieldOf(statement, "loop") as SemanticLoop };
     }
   }
   return loops;
 }
 
 function blockAt(fn: SemanticFunction, site: string): SemanticBlock | null {
-  return blocksOf(fn).find((block) => block.id === site) ?? null;
+  return blocksOf(fn).find((block) => String(fieldOf(block, "id")) === site) ?? null;
 }
 
 function blockNames(fn: SemanticFunction): string {
   return blocksOf(fn)
-    .map((block) => block.id)
+    .map((block) => String(fieldOf(block, "id")))
     .join(", ");
 }
 
@@ -259,14 +275,14 @@ function blockNames(fn: SemanticFunction): string {
  */
 function loopAt(fn: SemanticFunction, site: string): { found: LoopSite } | { refused: string } {
   const loops = loopsOf(fn);
-  const byHeader = loops.filter((entry) => entry.loop.header === site);
+  const byHeader = loops.filter((entry) => String(fieldOf(fieldOf(entry, "loop"), "header")) === site);
   if (byHeader.length === 1) return { found: byHeader[0] };
   if (byHeader.length > 1) return { refused: `${byHeader.length} loops leave for block ${site}, so it names none of them` };
-  const inBlock = loops.filter((entry) => entry.owner.id === site);
+  const inBlock = loops.filter((entry) => String(fieldOf(fieldOf(entry, "owner"), "id")) === site);
   if (inBlock.length === 1) return { found: inBlock[0] };
   if (inBlock.length > 1) {
     return {
-      refused: `block ${site} holds ${inBlock.length} loops (${inBlock.map((entry) => entry.loop.header).join(", ")}); name the one you mean by the block it leaves for`,
+      refused: `block ${site} holds ${inBlock.length} loops (${inBlock.map((entry) => String(fieldOf(fieldOf(entry, "loop"), "header"))).join(", ")}); name the one you mean by the block it leaves for`,
     };
   }
   return { refused: `no loop is written in block ${site} or leaves for it; the blocks are ${blockNames(fn)}` };
@@ -279,10 +295,10 @@ function loopAt(fn: SemanticFunction, site: string): { found: LoopSite } | { ref
 /** Every name the function has a slot for, which a rewrite may not reuse. */
 function slotNames(fn: SemanticFunction): Set<string> {
   const names = new Set<string>();
-  for (const param of fn.params) names.add(param.name);
+  for (const param of fieldOf(fn, "params") as readonly { readonly name: string }[]) names.add(String(fieldOf(param, "name")));
   for (const block of blocksOf(fn)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") names.add(statement.slot.name);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") names.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
     }
   }
   return names;
@@ -301,7 +317,11 @@ export function freshName(taken: Set<string>, prefix: string): string {
 
 /** Every name a block declares of its own, which a rewrite renames beside it. */
 export function declaredNames(block: SemanticBlock): string[] {
-  return block.statements.flatMap((statement) => (statement.k === "let" ? [statement.slot.name] : []));
+  const names: string[] = [];
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+    if (statement.k === "let") names[names.length] = String(fieldOf(fieldOf(statement, "slot"), "name"));
+  }
+  return names;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -310,41 +330,35 @@ export function declaredNames(block: SemanticBlock): string[] {
 
 /** The values a value is made of, in the order they are read. */
 function valueChildren(value: SemanticValue): readonly SemanticValue[] {
-  switch (value.k) {
-    case "text":
-      return value.parts.flatMap((part) => (part.k === "value" ? [part.value] : []));
-    case "length":
-    case "toText":
-      return [value.of];
-    case "isNull":
-    case "unary":
-      return [value.operand];
-    case "element":
-      return [value.of, value.index];
-    case "call":
-      return value.call.args;
-    case "arith":
-    case "compare":
-    case "logical":
-    case "coalesce":
-      return [value.left, value.right];
-    case "buffer":
-      return value.values;
-    case "loadField":
-      return [value.object];
-    case "newObject":
-      return value.fields.map((field) => field.value);
-    case "select":
-      return [value.condition, value.then, value.otherwise];
-    case "closure":
-      // The values a closure captured are read where the closure is built, so
-      // a name one of them reads is a name the value reads.
-      return value.captures;
-    case "capture":
-      return [value.closure];
-    default:
-      return [];
+  if (value.k === "text") {
+    const parts = fieldOf(value, "parts") as readonly { readonly k: string; readonly value: SemanticValue }[];
+    const children: SemanticValue[] = [];
+    for (const part of parts) if (String(fieldOf(part, "k")) === "value") children[children.length] = fieldOf(part, "value") as SemanticValue;
+    return children;
   }
+  if (value.k === "length" || value.k === "toText") return [fieldOf(value, "of") as SemanticValue];
+  if (value.k === "isNull" || value.k === "unary") return [fieldOf(value, "operand") as SemanticValue];
+  if (value.k === "element") return [fieldOf(value, "of") as SemanticValue, fieldOf(value, "index") as SemanticValue];
+  if (value.k === "call") return fieldOf(fieldOf(value, "call"), "args") as readonly SemanticValue[];
+  if (value.k === "arith" || value.k === "compare" || value.k === "logical" || value.k === "coalesce") {
+    return [fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue];
+  }
+  if (value.k === "buffer") return fieldOf(value, "values") as readonly SemanticValue[];
+  if (value.k === "loadField") return [fieldOf(value, "object") as SemanticValue];
+  if (value.k === "newObject") {
+    const fields = fieldOf(value, "fields") as readonly { readonly value: SemanticValue }[];
+    const children: SemanticValue[] = [];
+    for (const field of fields) children[children.length] = fieldOf(field, "value") as SemanticValue;
+    return children;
+  }
+  if (value.k === "select") return [fieldOf(value, "condition") as SemanticValue, fieldOf(value, "then") as SemanticValue, fieldOf(value, "otherwise") as SemanticValue];
+  if (value.k === "closure") {
+    // The values a closure captured are read where the closure is built, so
+    // a name one of them reads is a name the value reads.
+    return fieldOf(value, "captures") as readonly SemanticValue[];
+  }
+  if (value.k === "capture") return [fieldOf(value, "closure") as SemanticValue];
+  return [];
 }
 
 /** A walk of a value that stops descending once the visitor says so. */
@@ -357,7 +371,7 @@ function walkValues(value: SemanticValue, visit: (value: SemanticValue) => boole
 function namesRead(value: SemanticValue): string[] {
   const names: string[] = [];
   walkValues(value, (inner) => {
-    if (inner.k === "local") names.push(inner.name);
+    if (inner.k === "local") names.push(String(fieldOf(inner, "name")));
   });
   return names;
 }
@@ -436,57 +450,55 @@ const DIVIDING: RegExp = /^(?:div|mod|floorDiv|floorMod)$/;
  * or a choice between two of them, and a choice is as lazy as it was.
  */
 export function isSafeToCompute(value: SemanticValue): boolean {
-  switch (value.k) {
-    case "element":
-    case "loadField":
-    case "length":
-      return false;
-    case "arith": {
-      if (!DIVIDING.test(value.op)) return isSafeToCompute(value.left) && isSafeToCompute(value.right);
-      // A whole number answers a division by zero with a fault and a double
-      // answers it with an infinity, so only the whole number is the hazard. A
-      // divisor written out is a divisor whose value is known.
-      if (!isInteger(value.left.type) || !isInteger(value.right.type)) return true;
-      if (value.right.k === "const") return Number(value.right.text) !== 0;
-      return false;
-    }
-    case "compare":
-      return isSafeToCompute(value.left) && isSafeToCompute(value.right);
-    // The operand of these is read on the same turn the whole is, so it has to
-    // pass the same test: `-a[i]` is an element read under a negation, and
-    // answering true here bound it to a name, which put the read above the
-    // guard the source performed it under.
-    case "unary":
-    case "isNull":
-      return isSafeToCompute(value.operand);
-    case "logical":
-    case "coalesce":
-      return isSafeToCompute(value.left) && isSafeToCompute(value.right);
-    case "select":
-      return (
-        isSafeToCompute(value.condition) && isSafeToCompute(value.then) && isSafeToCompute(value.otherwise)
-      );
-    // An object is allocated and its fields are written, so it is not a value
-    // to move: a `let node = { left: ..., right: ... }` bound to another place
-    // would run its allocation on a turn it was not written on, and a block
-    // that released the name would release it twice.
-    case "newObject":
-      return false;
-    case "call":
-      // A call that has an effect is not a value: it reads the world, so
-      // computing it twice reads the world twice, and computing it on a turn
-      // that did not read it reads the world on a turn the source did not.
-      return value.call.effects.length === 0;
-    case "toText":
-      return isSafeToCompute(value.of);
-    case "text":
-      // An interpolated part is read on the same turn the whole is, so a part
-      // that reads through an object fails the test the read itself fails.
-      return value.parts.every((part) => part.k !== "value" || isSafeToCompute(part.value));
-    default:
-      // A name, a literal, a truth and a null read nothing and compute nothing.
-      return true;
+  if (value.k === "element" || value.k === "loadField" || value.k === "length") return false;
+  if (value.k === "arith") {
+    const op = String(fieldOf(value, "op"));
+    const left = fieldOf(value, "left") as SemanticValue;
+    const right = fieldOf(value, "right") as SemanticValue;
+    if (!DIVIDING.test(op)) return isSafeToCompute(left) && isSafeToCompute(right);
+    // A whole number answers a division by zero with a fault and a double
+    // answers it with an infinity, so only the whole number is the hazard. A
+    // divisor written out is a divisor whose value is known.
+    const leftType = fieldOf(left, "type") as SemanticType;
+    const rightType = fieldOf(right, "type") as SemanticType;
+    if (!isInteger(leftType) || !isInteger(rightType)) return true;
+    if (right.k === "const") return Number(fieldOf(right, "text")) !== 0;
+    return false;
   }
+  if (value.k === "compare") return isSafeToCompute(fieldOf(value, "left") as SemanticValue) && isSafeToCompute(fieldOf(value, "right") as SemanticValue);
+  // The operand of these is read on the same turn the whole is, so it has to
+  // pass the same test: `-a[i]` is an element read under a negation, and
+  // answering true here bound it to a name, which put the read above the
+  // guard the source performed it under.
+  if (value.k === "unary" || value.k === "isNull") return isSafeToCompute(fieldOf(value, "operand") as SemanticValue);
+  if (value.k === "logical" || value.k === "coalesce") return isSafeToCompute(fieldOf(value, "left") as SemanticValue) && isSafeToCompute(fieldOf(value, "right") as SemanticValue);
+  if (value.k === "select") {
+    return isSafeToCompute(fieldOf(value, "condition") as SemanticValue)
+      && isSafeToCompute(fieldOf(value, "then") as SemanticValue)
+      && isSafeToCompute(fieldOf(value, "otherwise") as SemanticValue);
+  }
+  // An object is allocated and its fields are written, so it is not a value
+  // to move: a `let node = { left: ..., right: ... }` bound to another place
+  // would run its allocation on a turn it was not written on, and a block
+  // that released the name would release it twice.
+  if (value.k === "newObject") return false;
+  if (value.k === "call") {
+    // A call that has an effect is not a value: it reads the world, so
+    // computing it twice reads the world twice, and computing it on a turn
+    // that did not read it reads the world on a turn the source did not.
+    return (fieldOf(fieldOf(value, "call"), "effects") as readonly string[]).length === 0;
+  }
+  if (value.k === "toText") return isSafeToCompute(fieldOf(value, "of") as SemanticValue);
+  if (value.k === "text") {
+    // An interpolated part is read on the same turn the whole is, so a part
+    // that reads through an object fails the test the read itself fails.
+    for (const part of fieldOf(value, "parts") as readonly { readonly k: string; readonly value: SemanticValue }[]) {
+      if (String(fieldOf(part, "k")) === "value" && !isSafeToCompute(fieldOf(part, "value") as SemanticValue)) return false;
+    }
+    return true;
+  }
+  // A name, a literal, a truth and a null read nothing and compute nothing.
+  return true;
 }
 
 /**
@@ -498,15 +510,17 @@ export function isSafeToCompute(value: SemanticValue): boolean {
  * to the copy it was given — has to be a name that can be written.
  */
 export function slotFor(value: SemanticValue, name: string, mutable = false): SemanticSlot {
-  if (isTextType(value.type)) return { kind: "text", name, mutable };
-  if (isReference(value.type)) return { kind: "object", name, mutable, type: value.type };
-  return { kind: "value", name, mutable, type: value.type };
+  const type = fieldOf(value, "type") as SemanticType;
+  if (isTextType(type)) return { kind: "text", name, mutable };
+  if (isReference(type)) return { kind: "object", name, mutable, type };
+  return { kind: "value", name, mutable, type };
 }
 
 /** A type, as a diagnostic names it. */
 export function typeLabel(type: SemanticType): string {
-  if (type.kind === "primitive") return type.name;
-  return type.kind === "text" ? "text" : "a reference";
+  const kind = String(fieldOf(type, "kind"));
+  if (kind === "primitive") return String(fieldOf(type, "name"));
+  return kind === "text" ? "text" : "a reference";
 }
 
 /**
@@ -514,14 +528,22 @@ export function typeLabel(type: SemanticType): string {
  * canonical, so a value built one way is found wherever an equal one is built
  * another, which is what makes a repeated expression a repeated expression.
  */
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    for (const one of value) items[items.length] = canonicalValue(one);
+    return items;
+  }
+  if (value === null || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source).sort();
+  const made: Record<string, unknown> = {};
+  for (const key of keys) made[key] = canonicalValue(source[key]);
+  return made;
+}
+
 export function valueKey(value: SemanticValue): string {
-  return JSON.stringify(value, (_name, entry: unknown) =>
-    entry !== null && typeof entry === "object" && !Array.isArray(entry)
-      ? Object.fromEntries(
-          Object.entries(entry as Record<string, unknown>).sort(([left], [right]) => (left < right ? -1 : 1)),
-        )
-      : entry,
-  );
+  return JSON.stringify(canonicalValue(value));
 }
 
 function isValueNode(node: unknown): node is SemanticValue {
@@ -551,14 +573,16 @@ export function replaceValues<T>(
       return structuredClone(hit) as T;
     }
   }
-  if (Array.isArray(node)) return node.map((entry) => replaceValues(entry, replacements, once, replaced)) as T;
+  if (Array.isArray(node)) {
+    const entries: unknown[] = [];
+    for (const entry of node) entries[entries.length] = replaceValues(entry, replacements, once, replaced);
+    return entries as T;
+  }
   if (node !== null && typeof node === "object") {
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [
-        name,
-        replaceValues(entry, replacements, once, replaced),
-      ]),
-    ) as T;
+    const source = node as Record<string, unknown>;
+    const made: Record<string, unknown> = {};
+    for (const name of Object.keys(source)) made[name] = replaceValues(source[name], replacements, once, replaced);
+    return made as T;
   }
   return node;
 }
@@ -580,67 +604,85 @@ export function replaceValues<T>(
  */
 export function substituteLocals<T>(node: T, bindings: ReadonlyMap<string, SemanticValue>, writes: ReadonlyMap<string, string> = new Map()): T {
   if (typeof node === "string") return (writes.get(node) ?? node) as T;
-  if (isValueNode(node) && node.k === "local") {
-    const bound = bindings.get(node.name);
+  if (isValueNode(node) && String(fieldOf(node, "k")) === "local") {
+    const bound = bindings.get(String(fieldOf(node, "name")));
     if (bound !== undefined) return structuredClone(bound) as T;
   }
-  if (Array.isArray(node)) return node.map((entry) => substituteLocals(entry, bindings, writes)) as T;
+  if (Array.isArray(node)) {
+    const entries: unknown[] = [];
+    for (const entry of node) entries[entries.length] = substituteLocals(entry, bindings, writes);
+    return entries as T;
+  }
   if (node !== null && typeof node === "object") {
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, substituteLocals(entry, bindings, writes)]),
-    ) as T;
+    const source = node as Record<string, unknown>;
+    const made: Record<string, unknown> = {};
+    for (const name of Object.keys(source)) made[name] = substituteLocals(source[name], bindings, writes);
+    return made as T;
   }
   return node;
 }
 
 /** Rewrites every value of a block, and of every block nested inside it. */
 function rewriteBlock(block: SemanticBlock, replacements: ReadonlyMap<string, SemanticValue>): void {
-  block.statements = block.statements.map((statement) => replaceValues(statement, replacements));
-  for (const statement of block.statements) {
+  const rewritten: SemanticStatement[] = [];
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) rewritten[rewritten.length] = replaceValues(statement, replacements);
+  (block as unknown as Record<string, unknown>)["statements"] = rewritten;
+  for (const statement of rewritten) {
     for (const nested of statementBlocks(statement)) rewriteBlock(nested, replacements);
   }
-  if (block.terminator.k === "return" && block.terminator.value !== null) {
-    block.terminator = { ...block.terminator, value: replaceValues(block.terminator.value, replacements) };
+  const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+  if (String(fieldOf(terminator, "k")) === "return") {
+    const value = fieldOf(terminator, "value") as SemanticValue | null;
+    if (value !== null) {
+      const updated: SemanticTerminator = { k: "return", value: replaceValues(value, replacements) };
+      (block as unknown as Record<string, unknown>)["terminator"] = updated;
+    }
   }
 }
 
 /** The values a statement computes in its own right, without its nested blocks. */
 function statementValues(statement: SemanticStatement): readonly SemanticValue[] {
-  switch (statement.k) {
-    case "let":
-    case "set":
-    case "printText":
-    case "printNumber":
-    case "retain": return [statement.value];
-    // A field is written through an object, and the object is read to find which
-    // one: a binding that is read only that way is one this would drop, leaving
-    // the write naming a name the block never declared.
-    case "storeField": return [statement.object, statement.value];
-    case "setElement":
-      return [statement.index, statement.value];
-    case "if":
-      return [statement.condition];
-    case "raise":
-      return [statement.message];
-    case "call":
-      return [{ k: "call", type: statement.call.returns, call: statement.call }];
-    case "loop": {
-      const loop = statement.loop;
-      if (loop.kind === "counted") return [loop.from, loop.to, ...(loop.step === null ? [] : [loop.step])];
-      if (loop.kind === "each") return [loop.length];
-      return [loop.condition];
-    }
-    default:
-      return [];
+  if (statement.k === "let" || statement.k === "set" || statement.k === "printText" || statement.k === "printNumber" || statement.k === "retain") {
+    return [fieldOf(statement, "value") as SemanticValue];
   }
+  // A field is written through an object, and the object is read to find which
+  // one: a binding that is read only that way is one this would drop, leaving
+  // the write naming a name the block never declared.
+  if (statement.k === "storeField") return [fieldOf(statement, "object") as SemanticValue, fieldOf(statement, "value") as SemanticValue];
+  if (statement.k === "setElement") return [fieldOf(statement, "index") as SemanticValue, fieldOf(statement, "value") as SemanticValue];
+  if (statement.k === "if") return [fieldOf(statement, "condition") as SemanticValue];
+  if (statement.k === "raise") return [fieldOf(statement, "message") as SemanticValue];
+  if (statement.k === "call") {
+    const call = fieldOf(statement, "call") as SemanticCall;
+    return [{ k: "call", type: fieldOf(call, "returns") as SemanticType, call }];
+  }
+  if (statement.k === "loop") {
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
+    const kind = String(fieldOf(loop, "kind"));
+    if (kind === "counted") {
+      const values: SemanticValue[] = [fieldOf(loop, "from") as SemanticValue, fieldOf(loop, "to") as SemanticValue];
+      const step = fieldOf(loop, "step") as SemanticValue | null;
+      if (step !== null) values[values.length] = step;
+      return values;
+    }
+    if (kind === "each") return [fieldOf(loop, "length") as SemanticValue];
+    return [fieldOf(loop, "condition") as SemanticValue];
+  }
+  return [];
 }
 
 /** Every value a set of blocks computes, themselves included. */
 function blockValues(blocks: readonly SemanticBlock[]): SemanticValue[] {
   const values: SemanticValue[] = [];
   for (const block of blocks) {
-    for (const statement of block.statements) values.push(...statementValues(statement));
-    if (block.terminator.k === "return" && block.terminator.value !== null) values.push(block.terminator.value);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      for (const one of statementValues(statement)) values[values.length] = one;
+    }
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    if (String(fieldOf(terminator, "k")) === "return") {
+      const value = fieldOf(terminator, "value") as SemanticValue | null;
+      if (value !== null) values[values.length] = value;
+    }
   }
   return values;
 }
@@ -659,30 +701,23 @@ function blockValues(blocks: readonly SemanticBlock[]): SemanticValue[] {
 function writtenIn(blocks: readonly SemanticBlock[], declarations: boolean): Set<string> {
   const written = new Set<string>();
   for (const block of blocks) {
-    for (const statement of block.statements) {
-      switch (statement.k) {
-        case "set":
-        case "step":
-          written.add(statement.name);
-          break;
-        case "setElement":
-          written.add(statement.buffer);
-          break;
-        case "storeField":
-          for (const name of namesRead(statement.object)) written.add(name);
-          break;
-        case "let":
-          if (declarations) written.add(statement.slot.name);
-          break;
-        case "loop":
-          if (statement.loop.kind === "counted") written.add(statement.loop.variable);
-          else if (statement.loop.kind === "each") {
-            written.add(statement.loop.index);
-            written.add(statement.loop.element);
-          }
-          break;
-        default:
-          break;
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "set" || statement.k === "step") {
+        written.add(String(fieldOf(statement, "name")));
+      } else if (statement.k === "setElement") {
+        written.add(String(fieldOf(statement, "buffer")));
+      } else if (statement.k === "storeField") {
+        for (const name of namesRead(fieldOf(statement, "object") as SemanticValue)) written.add(name);
+      } else if (statement.k === "let") {
+        if (declarations) written.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+      } else if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        const kind = String(fieldOf(loop, "kind"));
+        if (kind === "counted") written.add(String(fieldOf(loop, "variable")));
+        else if (kind === "each") {
+          written.add(String(fieldOf(loop, "index")));
+          written.add(String(fieldOf(loop, "element")));
+        }
       }
     }
   }
@@ -698,12 +733,17 @@ function writtenIn(blocks: readonly SemanticBlock[], declarations: boolean): Set
 function shadowedIn(blocks: readonly SemanticBlock[]): ReadonlySet<string> {
   const shadowed = new Set<string>();
   for (const block of blocks.slice(1)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") shadowed.add(statement.slot.name);
-      else if (statement.k === "loop" && statement.loop.kind === "counted") shadowed.add(statement.loop.variable);
-      else if (statement.k === "loop" && statement.loop.kind === "each") {
-        shadowed.add(statement.loop.index);
-        shadowed.add(statement.loop.element);
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (statement.k === "let") {
+        shadowed.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+      } else if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop") as SemanticLoop;
+        const kind = String(fieldOf(loop, "kind"));
+        if (kind === "counted") shadowed.add(String(fieldOf(loop, "variable")));
+        else if (kind === "each") {
+          shadowed.add(String(fieldOf(loop, "index")));
+          shadowed.add(String(fieldOf(loop, "element")));
+        }
       }
     }
   }
@@ -718,7 +758,11 @@ function shadowedIn(blocks: readonly SemanticBlock[]): ReadonlySet<string> {
  * is not among them.
  */
 function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<string>): Map<string, SemanticValue> {
-  const counts = new Map<string, { value: SemanticValue; count: number }>();
+  // The count of a spelling and the value it was first seen as, in two maps
+  // rather than one: a number is what a count is, and a record holding one
+  // would be another object laid out in the program for no reason.
+  const counts = new Map<string, number>();
+  const held = new Map<string, SemanticValue>();
   // Every occurrence counts: a value computed twice in the same expression is
   // computed twice just as much as one computed in two statements.
   for (const root of blockValues(blocks)) {
@@ -733,14 +777,17 @@ function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<s
       // out of date if it reads what was written.
       if (!isSafeToCompute(value)) return;
       const key = valueKey(value);
-      const entry = counts.get(key);
-      if (entry === undefined) counts.set(key, { value, count: 1 });
-      else entry.count += 1;
+      const seen = counts.get(key);
+      if (seen === undefined) held.set(key, value);
+      counts.set(key, (seen ?? 0) + 1);
     });
   }
   const repeated = new Map<string, SemanticValue>();
-  for (const [key, entry] of counts) {
-    if (entry.count > 1) repeated.set(key, entry.value);
+  for (const [key, count] of counts) {
+    if (count > 1) {
+      const value = held.get(key);
+      if (value !== undefined) repeated.set(key, value);
+    }
   }
   return repeated;
 }
@@ -757,13 +804,14 @@ function repeatedValues(blocks: readonly SemanticBlock[], written: ReadonlySet<s
  * that refused it cannot come to disagree.
  */
 function nothingToBind(blocks: readonly SemanticBlock[], written: ReadonlySet<string>, verb: string): string {
-  const counts = new Map<string, { value: SemanticValue; count: number }>();
+  const counts = new Map<string, number>();
+  const held = new Map<string, SemanticValue>();
   for (const root of blockValues(blocks)) {
     walkValues(root, (value) => {
       const key = valueKey(value);
-      const entry = counts.get(key);
-      if (entry === undefined) counts.set(key, { value, count: 1 });
-      else entry.count += 1;
+      const seen = counts.get(key);
+      if (seen === undefined) held.set(key, value);
+      counts.set(key, (seen ?? 0) + 1);
     });
   }
   // The value a reader of the IR would have named comes first. A name and a
@@ -773,11 +821,13 @@ function nothingToBind(blocks: readonly SemanticBlock[], written: ReadonlySet<st
   // left is a computed value, and the outermost of those is the one a reader
   // would have pointed at: it is the whole of the expression, not a part of it.
   const computed = (value: SemanticValue): boolean => isBindable(value) && !hasCall(value) && value.k !== "newObject";
-  const repeated = [...counts.values()]
-    .filter((entry) => entry.count > 1)
+  const repeated = [...counts.keys()]
+    .filter((key) => (counts.get(key) ?? 0) > 1)
     .sort((left, right) => {
-      const byKind = Number(computed(right.value)) - Number(computed(left.value));
-      return byKind !== 0 ? byKind : valueKey(right.value).length - valueKey(left.value).length;
+      const leftValue = held.get(left) as SemanticValue;
+      const rightValue = held.get(right) as SemanticValue;
+      const byKind = Number(computed(rightValue)) - Number(computed(leftValue));
+      return byKind !== 0 ? byKind : valueKey(rightValue).length - valueKey(leftValue).length;
     });
   const reason = (value: SemanticValue): string | null => {
     if (hasCall(value)) return "it calls something, and running a call once instead of twice is not the same program";
@@ -791,13 +841,26 @@ function nothingToBind(blocks: readonly SemanticBlock[], written: ReadonlySet<st
     }
     return null;
   };
-  const named = repeated
-    .map((entry) => ({ ...entry, reason: reason(entry.value) }))
-    .filter((entry): entry is { value: SemanticValue; count: number; reason: string } => entry.reason !== null);
-  const [first] = named;
+  // The repeated values a reason can be stated for, one list per thing said
+  // about them: the value, how many times it is computed, and why it cannot be
+  // bound. A record holding the three would be another layout in the program.
+  const named: SemanticValue[] = [];
+  const namedCounts: number[] = [];
+  const namedReasons: string[] = [];
+  for (const key of repeated) {
+    const value = held.get(key) as SemanticValue;
+    const why = reason(value);
+    if (why === null) continue;
+    named[named.length] = value;
+    namedCounts[namedCounts.length] = counts.get(key) ?? 0;
+    namedReasons[namedReasons.length] = why;
+  }
+  const first = named[0];
   if (first === undefined) return `computes nothing more than once that can be ${verb}, so there is nothing to do`;
+  const firstCount = namedCounts[0] ?? 0;
+  const firstReason = namedReasons[0] ?? "";
   return (
-    `computes \`${printSemanticValue(first.value)}\` ${first.count} times, but ${first.reason}` +
+    `computes \`${printSemanticValue(first)}\` ${firstCount} times, but ${firstReason}` +
     (named.length === 1
       ? ""
       : `; it also computes ${named.length - 1} other repeated value(s), none of which can be ${verb} either`)
@@ -812,9 +875,19 @@ function hoistInvariant(fn: SemanticFunction, site: string): RepairOutcome {
   const located = loopAt(fn, site);
   if ("refused" in located) return located;
   const target = located.found;
+  const owner = fieldOf(target, "owner") as SemanticBlock;
+  const statement = fieldOf(target, "statement") as SemanticStatement & { k: "loop" };
+  const loop = fieldOf(target, "loop") as SemanticLoop;
+  const body = fieldOf(loop, "body") as SemanticBlock;
   // The condition is read once per iteration like the body is, and a value it
   // shares with the body is hoisted above the loop, where both of them read it.
-  const region = [...nestedBlocks(target.loop.body), { ...target.owner, statements: [target.statement] }];
+  const regionBlock: SemanticBlock = {
+    id: String(fieldOf(owner, "id")),
+    statements: [statement],
+    releases: fieldOf(owner, "releases") as string[],
+    terminator: fieldOf(owner, "terminator") as SemanticTerminator,
+  };
+  const region = [...nestedBlocks(body), regionBlock];
   const written = writtenIn(region, true);
   const repeated = repeatedValues(region, written);
 
@@ -828,19 +901,21 @@ function hoistInvariant(fn: SemanticFunction, site: string): RepairOutcome {
   const taken = slotNames(fn);
   const bound = new Map<string, SemanticValue>();
   const hoisted: SemanticStatement[] = [];
+  const line = fieldOf(statement, "line") as number;
   for (const value of ordered) {
     const name = freshName(taken, "hoisted");
-    bound.set(valueKey(value), { k: "local", type: value.type, name });
-    hoisted.push({ k: "let", slot: slotFor(value, name), value: structuredClone(value), line: target.statement.line });
+    bound.set(valueKey(value), { k: "local", type: fieldOf(value, "type") as SemanticType, name });
+    hoisted.push({ k: "let", slot: slotFor(value, name), value: structuredClone(value), line });
   }
-  const at = target.owner.statements.indexOf(target.statement);
-  target.owner.statements[at] = replaceValues(target.statement, bound);
-  rewriteBlock(target.loop.body, bound);
-  target.owner.statements.splice(at, 0, ...hoisted);
+  const statements = fieldOf(owner, "statements") as SemanticStatement[];
+  const at = statements.indexOf(statement);
+  statements[at] = replaceValues(statement, bound);
+  rewriteBlock(body, bound);
+  statements.splice(at, 0, ...hoisted);
   return {
     applied: fn,
-    note: `hoisted ${hoisted.length} value(s) out of ${target.loop.header} as ${hoisted
-      .map((statement) => (statement.k === "let" ? statement.slot.name : ""))
+    note: `hoisted ${hoisted.length} value(s) out of ${String(fieldOf(loop, "header"))} as ${hoisted
+      .map((one) => (String(fieldOf(one, "k")) === "let" ? String(fieldOf(fieldOf(one, "slot"), "name")) : ""))
       .join(", ")}`,
   };
 }
@@ -857,8 +932,8 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   // from being refused on the spelling the reader of the IR actually saw.
   let block = blockAt(fn, site);
   if (block === null) {
-    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
-    if (loop !== undefined) block = loop.loop.body;
+    const loop = loopsOf(fn).find((entry) => String(fieldOf(fieldOf(entry, "loop"), "header")) === site);
+    if (loop !== undefined) block = fieldOf(fieldOf(loop, "loop"), "body") as SemanticBlock;
   }
   if (block === null) return { refused: `no block is named ${site}; the blocks are ${blockNames(fn)}` };
 
@@ -886,7 +961,7 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   for (const value of ordered) {
     const name = freshName(taken, "shared");
     names.push(name);
-    bound.set(valueKey(value), { k: "local", type: value.type, name });
+    bound.set(valueKey(value), { k: "local", type: fieldOf(value, "type") as SemanticType, name });
   }
   // Every use is rewritten before the binding is written, so a binding never
   // reads the name it declares.
@@ -899,21 +974,32 @@ function commonSubexpression(fn: SemanticFunction, site: string): RepairOutcome 
   // value repeated across a name the block itself binds. Sitting under the last
   // such declaration is as high as it may go and every use is still below it.
   const declared = new Set(ordered.flatMap((value) => namesRead(value)));
+  const statements = fieldOf(block, "statements") as SemanticStatement[];
   let at = 0;
-  block.statements.forEach((statement, index) => {
-    if (statement.k === "let" && declared.has(statement.slot.name)) at = index + 1;
+  statements.forEach((statement, index) => {
+    if (String(fieldOf(statement, "k")) === "let" && declared.has(String(fieldOf(fieldOf(statement, "slot"), "name")))) {
+      at = index + 1;
+    }
   });
-  const line = block.statements[at]?.line ?? block.statements[0]?.line ?? 0;
-  block.statements.splice(
-    at,
-    0,
-    ...ordered.map((value, index) => ({
-      k: "let" as const,
+  const bondAt = statements[at] as SemanticStatement | undefined;
+  const firstAt = statements[0] as SemanticStatement | undefined;
+  const line =
+    bondAt !== undefined
+      ? (fieldOf(bondAt, "line") as number)
+      : firstAt !== undefined
+        ? (fieldOf(firstAt, "line") as number)
+        : 0;
+  const bindings: SemanticStatement[] = [];
+  for (let index = 0; index < ordered.length; index += 1) {
+    const value = ordered[index] as SemanticValue;
+    bindings[bindings.length] = {
+      k: "let",
       slot: slotFor(value, names[index] ?? ""),
       value: structuredClone(value),
       line,
-    })),
-  );
+    };
+  }
+  statements.splice(at, 0, ...bindings);
   return { applied: fn, note: `bound ${names.length} repeated value(s) in ${site} as ${names.join(", ")}` };
 }
 
@@ -937,7 +1023,9 @@ function powerOfTwoExponent(text: string): number | null {
 
 /** A float type, which is the only one the two forms are the same number in. */
 function isFloatType(type: SemanticType): boolean {
-  return type.kind === "primitive" && (type.name === "f32" || type.name === "f64");
+  if (String(fieldOf(type, "kind")) !== "primitive") return false;
+  const name = String(fieldOf(type, "name"));
+  return name === "f32" || name === "f64";
 }
 
 function reciprocalMultiply(fn: SemanticFunction, site: string): RepairOutcome {
@@ -948,8 +1036,8 @@ function reciprocalMultiply(fn: SemanticFunction, site: string): RepairOutcome {
   // from being refused on the spelling the reader of the IR actually saw.
   let block = blockAt(fn, site);
   if (block === null) {
-    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
-    if (loop !== undefined) block = loop.loop.body;
+    const loop = loopsOf(fn).find((entry) => String(fieldOf(fieldOf(entry, "loop"), "header")) === site);
+    if (loop !== undefined) block = fieldOf(fieldOf(loop, "loop"), "body") as SemanticBlock;
   }
   if (block === null) return { refused: `no block is named ${site}; the blocks are ${blockNames(fn)}` };
 
@@ -958,16 +1046,19 @@ function reciprocalMultiply(fn: SemanticFunction, site: string): RepairOutcome {
   // by the time the division around it is rewritten.
   const collect = (value: SemanticValue): void => {
     for (const child of valueChildren(value)) collect(child);
-    if (value.k !== "arith" || value.op !== "div") return;
-    if (!isFloatType(value.type) || value.right.k !== "const" || !isFloatType(value.right.type)) return;
-    const exponent = powerOfTwoExponent(value.right.text);
+    if (String(fieldOf(value, "k")) !== "arith" || String(fieldOf(value, "op")) !== "div") return;
+    const type = fieldOf(value, "type") as SemanticType;
+    const right = fieldOf(value, "right") as SemanticValue;
+    const rightType = fieldOf(right, "type") as SemanticType;
+    if (!isFloatType(type) || String(fieldOf(right, "k")) !== "const" || !isFloatType(rightType)) return;
+    const exponent = powerOfTwoExponent(String(fieldOf(right, "text")));
     if (exponent === null) return;
     replacements.set(valueKey(value), {
       k: "arith",
-      type: value.type,
+      type,
       op: "mul",
-      left: replaceValues(value.left, replacements),
-      right: { k: "const", type: value.right.type, text: String(2 ** -exponent) },
+      left: replaceValues(fieldOf(value, "left") as SemanticValue, replacements),
+      right: { k: "const", type: rightType, text: String(2 ** -exponent) },
     });
   };
   for (const value of blockValues(nestedBlocks(block))) collect(value);
@@ -999,7 +1090,9 @@ function callValueIn(value: SemanticValue | null, callee: string): SemanticCall 
   if (value === null) return null;
   let found: SemanticCall | null = null;
   walkValues(value, (inner) => {
-    if (inner.k === "call" && inner.call.callee === callee) found ??= inner.call;
+    if (String(fieldOf(inner, "k")) === "call" && String(fieldOf(fieldOf(inner, "call"), "callee")) === callee) {
+      found ??= fieldOf(inner, "call") as SemanticCall;
+    }
   });
   return found;
 }
@@ -1027,11 +1120,15 @@ function callIn(statement: SemanticStatement, callee: string): FoundCall | null 
  */
 function callsInBlock(block: SemanticBlock, callee: string): FoundCall[] {
   const found: FoundCall[] = [];
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     const entry = callIn(statement, callee);
     if (entry !== null) found.push(entry);
   }
-  const returned = block.terminator.k === "return" ? callValueIn(block.terminator.value, callee) : null;
+  const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+  const returned =
+    String(fieldOf(terminator, "k")) === "return"
+      ? callValueIn(fieldOf(terminator, "value") as SemanticValue | null, callee)
+      : null;
   if (returned !== null) found.push({ statement: null, call: returned });
   return found;
 }
@@ -1055,13 +1152,14 @@ export function inlineCall(fn: SemanticFunction, site: string, calleeName: strin
   // valid on the body from being refused on the spelling the reader saw.
   let block = blockAt(fn, site);
   if (block === null) {
-    const loop = loopsOf(fn).find((entry) => entry.loop.header === site);
-    if (loop !== undefined) block = loop.loop.body;
+    const loop = loopsOf(fn).find((entry) => String(fieldOf(fieldOf(entry, "loop"), "header")) === site);
+    if (loop !== undefined) block = fieldOf(fieldOf(loop, "loop"), "body") as SemanticBlock;
   }
   if (block === null) return { refused: `cannot be written into block ${site}: there is no such block, and the blocks are ${blockNames(fn)}` };
-  const callee = context.functions.get(calleeName);
+  const functions = fieldOf(context, "functions") as ReadonlyMap<string, SemanticFunction>;
+  const callee = functions.get(calleeName);
   if (callee === undefined) {
-    const names = [...context.functions.keys()].join(", ");
+    const names = [...functions.keys()].join(", ");
     return { refused: `${calleeName} is not a function of this program: the program has ${names}` };
   }
 
@@ -1102,7 +1200,7 @@ export function inlineCall(fn: SemanticFunction, site: string, calleeName: strin
   if (inlined === 0) return { refused: partial[0] ?? `${calleeName} is not called in block ${site}` };
   const times = inlined === 1 ? "" : ` ${inlined} times`;
   const bound =
-    callee.returns.kind === "void"
+    String(fieldOf(fieldOf(callee, "returns"), "kind")) === "void"
       ? ""
       : inlined === 1
         ? " and bound what it returns"
@@ -1133,13 +1231,15 @@ function inlineOne(
   calleeName: string,
   target: FoundCall,
 ): { applied: SemanticFunction } | { refused: string } {
-  const call = target.call;
-  const statement = target.statement;
-  const line = statement?.line ?? 0;
-  if (statement !== null && statement.k === "call" && callee.returns.kind !== "void") {
-    return { refused: `${calleeName} returns ${typeLabel(callee.returns)} and is called here only for what it does, so inlining it would bind a result to a name nothing reads` };
+  const call = fieldOf(target, "call") as SemanticCall;
+  const statement = fieldOf(target, "statement") as SemanticStatement | null;
+  const line = statement === null ? 0 : (fieldOf(statement, "line") as number);
+  const returns = fieldOf(callee, "returns") as SemanticType;
+  if (statement !== null && String(fieldOf(statement, "k")) === "call" && String(fieldOf(returns, "kind")) !== "void") {
+    return { refused: `${calleeName} returns ${typeLabel(returns)} and is called here only for what it does, so inlining it would bind a result to a name nothing reads` };
   }
-  if (call.args.some((argument) => hasCall(argument))) {
+  const callArgs = fieldOf(call, "args") as readonly SemanticValue[];
+  if (callArgs.some((argument) => hasCall(argument))) {
     return { refused: `${calleeName} is called with an argument that is itself a call, which would be evaluated after the body inlined in front of it` };
   }
 
@@ -1148,7 +1248,7 @@ function inlineOne(
   // runs a round per call, so a later round that renamed a block onto an id an
   // earlier round had already left behind put two blocks under one name, which
   // is a function the compiler cannot read back.
-  const taken = new Set([...slotNames(fn), ...blocksOf(fn).map((block) => block.id)]);
+  const taken = new Set([...slotNames(fn), ...blocksOf(fn).map((block) => String(fieldOf(block, "id")))]);
   // Every name the callee declares is renamed into this function, and its
   // parameters become the arguments the call was made with, so nothing it was
   // written as can be read here as something of this function's. What each
@@ -1162,16 +1262,17 @@ function inlineOne(
   // the callee was given.
   const scope: Scope = { reads: new Map(), targets: new Map() };
   const before: SemanticStatement[] = [];
-  callee.params.forEach((param, index) => {
-    const argument = call.args[index];
+  (fieldOf(callee, "params") as readonly SemanticSlot[]).forEach((param, index) => {
+    const spelling = String(fieldOf(param, "name"));
+    const argument = callArgs[index];
     if (argument === undefined) return;
-    scope.reads.set(param.name, structuredClone(argument));
-    if (!writesName(callee, param.name)) return;
+    (fieldOf(scope, "reads") as Map<string, SemanticValue>).set(spelling, structuredClone(argument));
+    if (!writesName(callee, spelling)) return;
     const name = freshName(taken, "inlined");
     const slot = slotFor(argument, name, true);
     before.push({ k: "let", slot, value: structuredClone(argument), line });
-    scope.reads.set(param.name, { k: "local", type: slotType(slot), name });
-    scope.targets.set(param.name, name);
+    (fieldOf(scope, "reads") as Map<string, SemanticValue>).set(spelling, { k: "local", type: slotType(slot), name });
+    (fieldOf(scope, "targets") as Map<string, string>).set(spelling, name);
   });
   // The renaming walks the scopes the callee declares its names in, rather
   // than the spellings: two blocks of one body very often declare one spelling
@@ -1185,8 +1286,10 @@ function inlineOne(
   // refused, because a name answers for one binding and the walk would be
   // renaming the shadow over the very reads the parameter's own binding
   // answers for.
-  const body = structuredClone(callee.entry);
-  const shadowed = renameBindings(body, scope, taken, callee.name);
+  const entry = fieldOf(callee, "entry") as SemanticBlock;
+  const entryId = String(fieldOf(entry, "id"));
+  const body = structuredClone(entry);
+  const shadowed = renameBindings(body, scope, taken, String(fieldOf(callee, "name")));
   if (shadowed !== null) return { refused: shadowed };
 
   // A block id is a name like any other, and the callee's are its own: its
@@ -1203,17 +1306,19 @@ function inlineOne(
   // block leaves for is that block, which after the splice is the block the
   // call was written in — so it is the caller's id it is written as here.
   const blocks = new Map<string, string>();
-  for (const inner of nestedBlocks(callee.entry)) {
+  for (const inner of nestedBlocks(entry)) {
     // The prefix is part of what `freshName` counts, not something added to
     // what it chose: a name it picked as free is free under its own spelling,
     // and `inlined_block1` is the spelling the earlier round left behind.
-    if (inner.id !== callee.entry.id) blocks.set(inner.id, freshName(taken, "inlined_block"));
+    const id = String(fieldOf(inner, "id"));
+    if (id !== entryId) blocks.set(id, freshName(taken, "inlined_block"));
   }
-  for (const inner of nestedBlocks(callee.entry)) {
-    for (const statement of inner.statements) {
-      if (statement.k !== "loop") continue;
-      for (const id of [statement.loop.header, statement.loop.exit]) {
-        if (id === callee.entry.id) blocks.set(id, block.id);
+  for (const inner of nestedBlocks(entry)) {
+    for (const one of fieldOf(inner, "statements") as readonly SemanticStatement[]) {
+      if (String(fieldOf(one, "k")) !== "loop") continue;
+      const loop = fieldOf(one, "loop") as SemanticLoop;
+      for (const id of [String(fieldOf(loop, "header")), String(fieldOf(loop, "exit"))]) {
+        if (id === entryId) blocks.set(id, String(fieldOf(block, "id")));
         else if (!blocks.has(id)) blocks.set(id, freshName(taken, "inlined_block"));
       }
     }
@@ -1223,8 +1328,12 @@ function inlineOne(
   // and the block a nested statement carries are all just strings, and each is
   // the callee's own spelling. The statements themselves were renamed by the
   // walk above, one scope at a time, so what is left here is the ids.
-  const spliced = body.statements.map((entry) => replaceBlockIds(entry, blocks) as SemanticStatement);
-  const result = body.terminator.k === "return" ? body.terminator.value : null;
+  const spliced = (fieldOf(body, "statements") as readonly SemanticStatement[]).map(
+    (one) => replaceBlockIds(one, blocks) as SemanticStatement,
+  );
+  const bodyTerminator = fieldOf(body, "terminator") as SemanticTerminator;
+  const result =
+    String(fieldOf(bodyTerminator, "k")) === "return" ? (fieldOf(bodyTerminator, "value") as SemanticValue | null) : null;
   const added: SemanticStatement[] = [...before, ...spliced];
   // The result is bound to a name of its own, so the value that was the call
   // reads that name and the call is gone.
@@ -1232,32 +1341,37 @@ function inlineOne(
   if (result !== null) {
     const slot = slotFor(result, freshName(taken, "inlined"));
     added.push({ k: "let", slot, value: result, line });
-    temp = { k: "local", type: slotType(slot), name: slot.name };
+    temp = { k: "local", type: slotType(slot), name: String(fieldOf(slot, "name")) };
   }
   // One call at a time: a block may make the same call twice, and each is a
   // body of its own with a result of its own. Replacing every equal call would
   // write one body and answer with its result twice, which is one turn where
   // the source takes two.
   const atCall = <T>(node: T): T =>
-    temp === null ? node : replaceValues(node, new Map([[valueKey({ k: "call", type: call.returns, call }), temp]]), true);
+    temp === null ? node : replaceValues(node, new Map([[valueKey({ k: "call", type: returns, call }), temp]]), true);
+  const statements = fieldOf(block, "statements") as SemanticStatement[];
   if (statement !== null) {
-    const at = block.statements.indexOf(statement);
+    const at = statements.indexOf(statement);
     // A statement the call was the whole of is replaced by the body, which is
     // the one shape a callee that hands back nothing can be written in: an
     // argument is a value, and no value holds a void. Where the call was
     // written inside the statement — `shell(twice(t))` inlining `twice` — the
     // statement stays and only the call inside it becomes the name, so losing
     // a statement would lose the call around it.
-    const whole = statement.k === "call" && statement.call === call;
+    const whole = String(fieldOf(statement, "k")) === "call" && fieldOf(statement, "call") === call;
     const kept = whole ? [] : [atCall(statement)];
-    block.statements.splice(at, 1, ...added, ...kept);
+    statements.splice(at, 1, ...added, ...kept);
   } else {
     // A block whose terminator makes the call has no statement to write in
     // front of: the body goes at the end of the block's statements, and the
     // call the terminator reads is the name the body bound.
-    block.statements.push(...added);
-    if (temp !== null && block.terminator.k === "return") {
-      block.terminator = { ...block.terminator, value: atCall(block.terminator.value) };
+    for (const one of added) statements[statements.length] = one;
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    if (temp !== null && String(fieldOf(terminator, "k")) === "return") {
+      (block as unknown as Record<string, unknown>)["terminator"] = {
+        k: "return",
+        value: atCall(fieldOf(terminator, "value") as SemanticValue),
+      };
     }
   }
   dropUnusedEdge(fn, calleeName);
@@ -1276,11 +1390,17 @@ function inlineOne(
  */
 export function replaceBlockIds<T>(node: T, blocks: ReadonlyMap<string, string>): T {
   if (typeof node === "string") return (blocks.get(node) ?? node) as T;
-  if (Array.isArray(node)) return node.map((entry) => replaceBlockIds(entry, blocks)) as T;
+  if (Array.isArray(node)) {
+    const replaced: unknown[] = [];
+    for (const entry of node) replaced[replaced.length] = replaceBlockIds(entry, blocks);
+    return replaced as T;
+  }
   if (node !== null && typeof node === "object") {
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, replaceBlockIds(entry, blocks)]),
-    ) as T;
+    const replaced: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(node as Record<string, unknown>)) {
+      replaced[name] = replaceBlockIds(entry, blocks);
+    }
+    return replaced as T;
   }
   return node;
 }
@@ -1321,16 +1441,22 @@ function isBlockNode(node: unknown): node is SemanticBlock {
  */
 function substituteShallow<T>(node: T, scope: Scope): T {
   if (isBlockNode(node)) return node;
-  if (typeof node === "string") return (scope.targets.get(node) ?? node) as T;
-  if (isValueNode(node) && node.k === "local") {
-    const bound = scope.reads.get(node.name);
+  if (typeof node === "string") return ((fieldOf(scope, "targets") as Map<string, string>).get(node) ?? node) as T;
+  if (isValueNode(node) && String(fieldOf(node, "k")) === "local") {
+    const bound = (fieldOf(scope, "reads") as Map<string, SemanticValue>).get(String(fieldOf(node, "name")));
     if (bound !== undefined) return structuredClone(bound) as T;
   }
-  if (Array.isArray(node)) return node.map((entry) => substituteShallow(entry, scope)) as T;
+  if (Array.isArray(node)) {
+    const replaced: unknown[] = [];
+    for (const entry of node) replaced[replaced.length] = substituteShallow(entry, scope);
+    return replaced as T;
+  }
   if (node !== null && typeof node === "object") {
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [name, substituteShallow(entry, scope)]),
-    ) as T;
+    const replaced: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(node as Record<string, unknown>)) {
+      replaced[name] = substituteShallow(entry, scope);
+    }
+    return replaced as T;
   }
   return node;
 }
@@ -1344,23 +1470,26 @@ function substituteShallow<T>(node: T, scope: Scope): T {
  * one, and its own slot is written under a name of its own.
  */
 function substituteStatement(statement: SemanticStatement, scope: Scope): void {
-  if (statement.k === "let") {
-    statement.value = substituteShallow(statement.value, scope);
+  if (String(fieldOf(statement, "k")) === "let") {
+    setField(statement, "value", substituteShallow(fieldOf(statement, "value") as SemanticValue, scope));
     return;
   }
-  if (statement.k === "loop") {
-    const loop = statement.loop;
-    if (loop.kind === "counted") {
-      statement.loop = {
-        ...loop,
-        from: substituteShallow(loop.from, scope),
-        to: substituteShallow(loop.to, scope),
-        step: loop.step === null ? null : substituteShallow(loop.step, scope),
-      };
-    } else if (loop.kind === "each") {
-      statement.loop = { ...loop, length: substituteShallow(loop.length, scope) };
+  if (String(fieldOf(statement, "k")) === "loop") {
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
+    const kind = String(fieldOf(loop, "kind"));
+    // The loop is rewritten where it is: the tree this walks is already a copy
+    // of the callee's body, and a spread of it would read every field of a
+    // value the frontend types as `ref<any>`, which is a field no backend can
+    // pick a layout for.
+    if (kind === "counted") {
+      setField(loop, "from", substituteShallow(fieldOf(loop, "from") as SemanticValue, scope));
+      setField(loop, "to", substituteShallow(fieldOf(loop, "to") as SemanticValue, scope));
+      const step = fieldOf(loop, "step") as SemanticValue | null;
+      if (step !== null) setField(loop, "step", substituteShallow(step, scope));
+    } else if (kind === "each") {
+      setField(loop, "length", substituteShallow(fieldOf(loop, "length") as SemanticValue, scope));
     } else {
-      statement.loop = { ...loop, condition: substituteShallow(loop.condition, scope) };
+      setField(loop, "condition", substituteShallow(fieldOf(loop, "condition") as SemanticValue, scope));
     }
     return;
   }
@@ -1370,7 +1499,9 @@ function substituteStatement(statement: SemanticStatement, scope: Scope): void {
 /** Every statement kind that neither declares nor carries a body of its own. */
 function blockStatement(statement: SemanticStatement, scope: Scope): void {
   const rewritten = substituteShallow(statement, scope);
-  if (rewritten !== statement) Object.assign(statement, rewritten);
+  if (rewritten === statement) return;
+  const source = rewritten as unknown as Record<string, unknown>;
+  for (const [name, value] of Object.entries(source)) setField(statement, name, value);
 }
 
 /**
@@ -1396,14 +1527,19 @@ function blockStatement(statement: SemanticStatement, scope: Scope): void {
  * counter, the same temporary — and each of those is a binding of its own.
  */
 export function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<string>, callee: string): string | null {
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     substituteStatement(statement, scope);
     // A loop's counter is declared for its body alone, so the body is renamed
     // with a copy of the scope and the block's own never holds it: the
     // statement after the loop reads whatever answered before the loop, and a
     // second loop counted by the same spelling is a binding of its own.
-    const counting = statement.k === "loop" && statement.loop.kind !== "while" && statement.loop.kind !== "doWhile";
-    const inner: Scope = counting ? { reads: new Map(scope.reads), targets: new Map(scope.targets) } : scope;
+    let counting = false;
+    if (String(fieldOf(statement, "k")) === "loop") {
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      const kind = String(fieldOf(loop, "kind"));
+      counting = kind !== "while" && kind !== "doWhile";
+    }
+    const inner: Scope = counting ? { reads: new Map(fieldOf(scope, "reads") as Map<string, SemanticValue>), targets: new Map(fieldOf(scope, "targets") as Map<string, string>) } : scope;
     const refused = declareStatement(statement, inner, taken, callee);
     if (refused !== null) return refused;
     for (const nested of statementBlocks(statement)) {
@@ -1411,12 +1547,15 @@ export function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<st
       if (refused !== null) return refused;
     }
   }
-  if (block.terminator.k === "return" && block.terminator.value !== null) {
-    block.terminator = { ...block.terminator, value: substituteShallow(block.terminator.value, scope) };
+  const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+  const returned = fieldOf(terminator, "value") as SemanticValue | null;
+  if (String(fieldOf(terminator, "k")) === "return" && returned !== null) {
+    setField(terminator, "value", substituteShallow(returned, scope));
   } else {
-    block.terminator = substituteShallow(block.terminator, scope);
+    setField(block, "terminator", substituteShallow(terminator, scope));
   }
-  block.releases = block.releases.map((name) => scope.targets.get(name) ?? name);
+  const releases = fieldOf(block, "releases") as readonly string[];
+  setField(block, "releases", releases.map((name) => (fieldOf(scope, "targets") as Map<string, string>).get(name) ?? name));
   return null;
 }
 
@@ -1431,33 +1570,36 @@ export function renameBindings(block: SemanticBlock, scope: Scope, taken: Set<st
 function declareStatement(statement: SemanticStatement, scope: Scope, taken: Set<string>, callee: string): string | null {
   const declare = (spelling: string, type: SemanticType): string => {
     const renamed = freshName(taken, "inlined");
-    scope.reads.set(spelling, { k: "local", type, name: renamed });
-    scope.targets.set(spelling, renamed);
+    (fieldOf(scope, "reads") as Map<string, SemanticValue>).set(spelling, { k: "local", type, name: renamed });
+    (fieldOf(scope, "targets") as Map<string, string>).set(spelling, renamed);
     return renamed;
   };
   const refuse = (spelling: string): string =>
     `${callee} declares "${spelling}" in a block of its own, which shadows another name of the function, and a name answers for one binding`;
-  if (statement.k === "let") {
-    const spelling = statement.slot.name;
-    if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
-    statement.slot = { ...statement.slot, name: declare(spelling, slotType(statement.slot)) };
+  if (String(fieldOf(statement, "k")) === "let") {
+    const slot = fieldOf(statement, "slot") as SemanticSlot;
+    const spelling = String(fieldOf(slot, "name"));
+    if ((fieldOf(scope, "reads") as Map<string, SemanticValue>).has(spelling) || (fieldOf(scope, "targets") as Map<string, string>).has(spelling)) return refuse(spelling);
+    setField(slot, "name", declare(spelling, slotType(slot)));
     return null;
   }
-  if (statement.k === "loop") {
-    const loop = statement.loop;
-    if (loop.kind === "counted") {
-      const spelling = loop.variable;
-      if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
-      statement.loop = { ...loop, variable: declare(spelling, loop.type) };
+  if (String(fieldOf(statement, "k")) === "loop") {
+    const loop = fieldOf(statement, "loop") as SemanticLoop;
+    const kind = String(fieldOf(loop, "kind"));
+    if (kind === "counted") {
+      const spelling = String(fieldOf(loop, "variable"));
+      if ((fieldOf(scope, "reads") as Map<string, SemanticValue>).has(spelling) || (fieldOf(scope, "targets") as Map<string, string>).has(spelling)) return refuse(spelling);
+      setField(loop, "variable", declare(spelling, fieldOf(loop, "type") as SemanticType));
       return null;
     }
-    if (loop.kind === "each") {
-      for (const spelling of [loop.index, loop.element]) {
-        if (scope.reads.has(spelling) || scope.targets.has(spelling)) return refuse(spelling);
+    if (kind === "each") {
+      const indexSpelling = String(fieldOf(loop, "index"));
+      const elementSpelling = String(fieldOf(loop, "element"));
+      for (const spelling of [indexSpelling, elementSpelling]) {
+        if ((fieldOf(scope, "reads") as Map<string, SemanticValue>).has(spelling) || (fieldOf(scope, "targets") as Map<string, string>).has(spelling)) return refuse(spelling);
       }
-      const index = declare(loop.index, { kind: "primitive", name: "usize" });
-      const element = declare(loop.element, loop.elementType);
-      statement.loop = { ...loop, index, element };
+      setField(loop, "index", declare(indexSpelling, { kind: "primitive", name: "usize" }));
+      setField(loop, "element", declare(elementSpelling, fieldOf(loop, "elementType") as SemanticType));
       return null;
     }
   }
@@ -1477,14 +1619,24 @@ function declareStatement(statement: SemanticStatement, scope: Scope, taken: Set
  * the key asks this one.
  */
 export function inlineRefusal(callee: SemanticFunction): string | null {
-  if (callee.entry.terminator.k !== "return") return "ends by leaving for another block, which is not this function's control flow";
-  if (callee.allocates) return "allocates an object, whose ownership the blocks it is put into would have to account for";
-  if (callee.prints) return "prints, which is an effect the contract of the function it is put into does not state";
-  if (callee.readsArgv) return "reads the command line, which is an effect the contract of the function it is put into does not state";
-  if (callee.effects.length > 0) return `has the effects ${callee.effects.join(", ")}, which the contract of the function it is put into does not state`;
-  if (callee.calls.length > 0) return `calls ${callee.calls.map((edge) => edge.callee).join(", ")}, and inlining one call would put two of them there`;
-  if (isReference(callee.returns)) return "hands back a reference, whose ownership the caller would have to take over";
-  if (callee.entry.releases.length > 0) return "frees what it owns on the way out, which belongs to its own blocks";
+  const entry = fieldOf(callee, "entry") as SemanticBlock;
+  const entryTerminator = fieldOf(entry, "terminator") as SemanticTerminator;
+  if (String(fieldOf(entryTerminator, "k")) !== "return") {
+    return "ends by leaving for another block, which is not this function's control flow";
+  }
+  if (fieldOf(callee, "allocates") === true) return "allocates an object, whose ownership the blocks it is put into would have to account for";
+  if (fieldOf(callee, "prints") === true) return "prints, which is an effect the contract of the function it is put into does not state";
+  if (fieldOf(callee, "readsArgv") === true) return "reads the command line, which is an effect the contract of the function it is put into does not state";
+  const effects = fieldOf(callee, "effects") as readonly string[];
+  if (effects.length > 0) return `has the effects ${effects.join(", ")}, which the contract of the function it is put into does not state`;
+  const edges = fieldOf(callee, "calls") as readonly { readonly callee: string }[];
+  if (edges.length > 0) {
+    return `calls ${edges.map((edge) => String(fieldOf(edge, "callee"))).join(", ")}, and inlining one call would put two of them there`;
+  }
+  if (isReference(fieldOf(callee, "returns") as SemanticType)) return "hands back a reference, whose ownership the caller would have to take over";
+  if ((fieldOf(entry, "releases") as readonly string[]).length > 0) {
+    return "frees what it owns on the way out, which belongs to its own blocks";
+  }
   // A write is no longer refused. It used to be, and the reason was a real
   // defect: a `set`, a `step` and a `setElement` name what they write as a bare
   // string, and a substitution that only looked for values carried the callee's
@@ -1508,19 +1660,21 @@ export function inlineRefusal(callee: SemanticFunction): string | null {
   // than control flow the caller does not own. A jump whose target is not one
   // of them is not one the IR writes at all.
   const loops = new Set<string>();
-  for (const block of nestedBlocks(callee.entry)) {
-    for (const statement of block.statements) {
-      if (statement.k !== "loop") continue;
-      loops.add(statement.loop.header);
-      loops.add(statement.loop.exit);
+  for (const block of nestedBlocks(entry)) {
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      if (String(fieldOf(statement, "k")) !== "loop") continue;
+      const loop = fieldOf(statement, "loop") as SemanticLoop;
+      loops.add(String(fieldOf(loop, "header")));
+      loops.add(String(fieldOf(loop, "exit")));
     }
   }
-  for (const block of nestedBlocks(callee.entry)) {
-    if (block === callee.entry) continue;
-    if (block.terminator.k === "return") {
+  for (const block of nestedBlocks(entry)) {
+    if (block === entry) continue;
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    if (String(fieldOf(terminator, "k")) === "return") {
       return "returns from a block of its own, which would return from the function it is put into";
     }
-    if (block.terminator.k === "jump" && !loops.has(block.terminator.target)) {
+    if (String(fieldOf(terminator, "k")) === "jump" && !loops.has(String(fieldOf(terminator, "target")))) {
       return "leaves a block for another one, which is control flow the function it is put into does not own";
     }
   }
@@ -1530,14 +1684,12 @@ export function inlineRefusal(callee: SemanticFunction): string | null {
 /** Whether a body writes the name it was given, which is what a parameter is. */
 function writesName(fn: SemanticFunction, name: string): boolean {
   for (const block of blocksOf(fn)) {
-    for (const statement of block.statements) {
-      const target =
-        statement.k === "set" || statement.k === "step"
-          ? statement.name
-          : statement.k === "setElement"
-            ? statement.buffer
-            : null;
-      if (target === name) return true;
+    for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
+      const kind = String(fieldOf(statement, "k"));
+      let target = "";
+      if (kind === "set" || kind === "step") target = String(fieldOf(statement, "name"));
+      else if (kind === "setElement") target = String(fieldOf(statement, "buffer"));
+      if (target !== "" && target === name) return true;
     }
   }
   return false;
@@ -1556,11 +1708,16 @@ function dropUnusedEdge(fn: SemanticFunction, callee: string): void {
   for (const block of blocksOf(fn)) {
     for (const value of blockValues([block])) {
       walkValues(value, (inner) => {
-        if (inner.k === "call" && inner.call.callee === callee) called = true;
+        if (String(fieldOf(inner, "k")) === "call" && String(fieldOf(fieldOf(inner, "call"), "callee")) === callee) {
+          called = true;
+        }
       });
     }
   }
-  if (!called) fn.calls = fn.calls.filter((edge) => edge.callee !== callee);
+  if (called === false) {
+    const edges = fieldOf(fn, "calls") as readonly { readonly callee: string }[];
+    setField(fn, "calls", edges.filter((edge) => String(fieldOf(edge, "callee")) !== callee));
+  }
 }
 
 /**
@@ -1575,7 +1732,9 @@ function calleesInBlock(block: SemanticBlock): string[] {
   const names: string[] = [];
   for (const value of blockValues([block])) {
     walkValues(value, (inner) => {
-      if (inner.k === "call" && !names.includes(inner.call.callee)) names.push(inner.call.callee);
+      if (String(fieldOf(inner, "k")) !== "call") return;
+      const callee = String(fieldOf(fieldOf(inner, "call"), "callee"));
+      if (!names.includes(callee)) names.push(callee);
     });
   }
   return names;
@@ -1605,7 +1764,8 @@ function calleesInBlock(block: SemanticBlock): string[] {
  */
 export function inlineCalls(fn: SemanticFunction, context: RepairContext): SemanticFunction {
   let current = fn;
-  for (let round = 0; round <= fn.calls.length; round += 1) {
+  const edges = fieldOf(fn, "calls") as readonly unknown[];
+  for (let round = 0; round <= edges.length; round += 1) {
     const inlined = inlineOnce(current, context);
     if (inlined === null) return current;
     current = inlined;
@@ -1621,7 +1781,7 @@ function inlineOnce(fn: SemanticFunction, context: RepairContext): SemanticFunct
   for (const block of blocksOf(fn)) {
     for (const callee of calleesInBlock(block)) {
       const attempt = structuredClone(fn);
-      const outcome = inlineCall(attempt, block.id, callee, context);
+      const outcome = inlineCall(attempt, String(fieldOf(block, "id")), callee, context);
       if ("applied" in outcome) return outcome.applied;
     }
   }
@@ -1633,16 +1793,11 @@ function inlineOnce(fn: SemanticFunction, context: RepairContext): SemanticFunct
 /* -------------------------------------------------------------------------- */
 
 function loopDescription(loop: SemanticLoop): string {
-  switch (loop.kind) {
-    case "counted":
-      return `a counted loop over ${loop.variable}`;
-    case "each":
-      return `a loop over the elements of ${loop.of}`;
-    case "while":
-      return "a while loop";
-    default:
-      return "a do-while loop";
-  }
+  const kind = String(fieldOf(loop, "kind"));
+  if (kind === "counted") return `a counted loop over ${String(fieldOf(loop, "variable"))}`;
+  if (kind === "each") return `a loop over the elements of ${String(fieldOf(loop, "of"))}`;
+  if (kind === "while") return "a while loop";
+  return "a do-while loop";
 }
 
 /**
@@ -1652,15 +1807,25 @@ function loopDescription(loop: SemanticLoop): string {
  */
 export function describeSites(fn: SemanticFunction): string[] {
   const loops = loopsOf(fn);
-  const bodies = new Set(loops.map((entry) => entry.loop.body.id));
-  const lines: string[] = loops.map((entry) => {
-    const { loop, owner } = entry;
-    return `loop ${loop.header}: ${loopDescription(loop)}, written in block ${owner.id}, leaves for block ${loop.exit}, body is block ${loop.body.id}`;
-  });
+  const bodies = new Set<string>();
+  for (const entry of loops) {
+    const loop = fieldOf(entry, "loop") as SemanticLoop;
+    bodies.add(String(fieldOf(fieldOf(loop, "body"), "id")));
+  }
+  const lines: string[] = [];
+  for (const entry of loops) {
+    const loop = fieldOf(entry, "loop") as SemanticLoop;
+    const owner = fieldOf(entry, "owner") as SemanticBlock;
+    lines.push(
+      `loop ${String(fieldOf(loop, "header"))}: ${loopDescription(loop)}, written in block ${String(fieldOf(owner, "id"))}, leaves for block ${String(fieldOf(loop, "exit"))}, body is block ${String(fieldOf(fieldOf(loop, "body"), "id"))}`,
+    );
+  }
+  const entry = fieldOf(fn, "entry") as SemanticBlock;
   for (const block of blocksOf(fn)) {
-    if (bodies.has(block.id)) continue;
-    const where = block === fn.entry ? "the function body" : "a block inside it";
-    lines.push(`block ${block.id}: ${where}, ${block.statements.length} statement(s)`);
+    const id = String(fieldOf(block, "id"));
+    if (bodies.has(id)) continue;
+    const where = block === entry ? "the function body" : "a block inside it";
+    lines.push(`block ${id}: ${where}, ${(fieldOf(block, "statements") as readonly SemanticStatement[]).length} statement(s)`);
   }
   return lines;
 }

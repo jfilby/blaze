@@ -14,16 +14,18 @@
  * the module reads it at the offsets the contract gives.
  */
 
-import { readFile, stat, webAssemblyEngine, writeFile } from "../core/platform.ts";
-import type { WebAssemblyEngine } from "../core/platform.ts";
+import { readFile, stat, writeFile } from "../core/platform.ts";
 import { bufferElement, isSignedIntegerType, parseType, symbolOf, typeToString } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, PrimitiveTypeName, Runner, TypeExpr } from "../core/types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 import {
   hostServiceBySymbol,
   IMPLEMENTED_SERVICES,
-  MEMORY_IMPORT,
   POW_IMPORT,
   hostRuntimeSource,
 } from "./wasm-host-runtime.ts";
@@ -70,7 +72,7 @@ function wasmError(message: string, detail?: string, functionName?: string, cand
  */
 export function wasmValueType(type: TypeExpr): string {
   if (type.kind !== "primitive") return "i32";
-  const mapped = WASM_TYPES[type.name];
+  const mapped = WASM_TYPES[String(fieldOf(type, "name")) as PrimitiveTypeName];
   if (mapped === undefined) {
     throw wasmError(`type ${typeToString(type)} has no WebAssembly value type`);
   }
@@ -79,8 +81,10 @@ export function wasmValueType(type: TypeExpr): string {
 
 /** The exported signature the candidate must implement. */
 export function wasmSignature(contract: FunctionContract): string {
-  const result = wasmValueType(parseType(contract.function.returns));
-  const parameters = contract.function.params.map((param) => wasmValueType(parseType(param.type)));
+  const fn = fieldOf(contract, "function") as { readonly params: readonly { readonly type: string }[]; readonly returns: string };
+  const result = wasmValueType(parseType(String(fieldOf(fn, "returns"))));
+  const parameters: string[] = [];
+  for (const param of fieldOf(fn, "params") as readonly { readonly type: string }[]) parameters[parameters.length] = wasmValueType(parseType(String(fieldOf(param, "type"))));
   const signature = parameters.length === 0 ? `(result ${result})` : `(param ${parameters.join(" ")}) (result ${result})`;
   return `(func ${signature})`;
 }
@@ -110,22 +114,23 @@ export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildRes
   // The prompt names the export as the symbol, so the module boundary is
   // checked against the symbol: a candidate that follows the prompt is the
   // one that gets through.
-  const functionName = symbolOf(request.contract);
-  if (request.text.trim() === "") {
-    throw wasmError("the candidate contains no WebAssembly", undefined, functionName, request.candidate);
+  const functionName = symbolOf(fieldOf(request, "contract") as FunctionContract);
+  const text = String(fieldOf(request, "text"));
+  if (text.trim() === "") {
+    throw wasmError("the candidate contains no WebAssembly", undefined, functionName, fieldOf(request, "candidate") as string | undefined);
   }
-  await writeFile(request.textPath, request.text, "utf8");
+  await writeFile(String(fieldOf(request, "textPath")), text, "utf8");
 
-  const assembled = run("wat2wasm", ["--no-check", request.textPath, "-o", request.modulePath], { timeoutMs: 60_000 });
-  if (assembled.spawnError !== undefined) {
+  const assembled = run("wat2wasm", ["--no-check", String(fieldOf(request, "textPath")), "-o", String(fieldOf(request, "modulePath"))], { timeoutMs: 60_000 });
+  if (fieldOf(assembled, "spawnError") !== undefined) {
     throw new CompilerError("TargetError", "assemble", "a wasm build needs the WebAssembly text assembler wat2wasm", "install wabt (https://github.com/WebAssembly/wabt) so that wat2wasm is on PATH", "", "", "");
   }
-  if (assembled.code !== 0) {
+  if (Number(fieldOf(assembled, "code")) !== 0) {
     throw wasmError(
       `the WebAssembly assembler rejected the candidate for ${functionName}`,
-      `${request.textPath}\n${assembled.stderr.trim()}`,
+      `${String(fieldOf(request, "textPath"))}\n${String(fieldOf(assembled, "stderr")).trim()}`,
       functionName,
-      request.candidate,
+      fieldOf(request, "candidate") as string | undefined,
     );
   }
 
@@ -133,22 +138,24 @@ export async function buildWasm(request: WasmBuildRequest): Promise<WasmBuildRes
   // written file in a child process: `WebAssembly.Module` is the same reader
   // either way, and the child is still there for a build run whose process has
   // no WebAssembly of its own.
-  const problems = boundaryProblems(await readFile(request.modulePath), functionName);
-  const detail = problems === null ? await inspectInChild(request.modulePath, functionName) : problems;
+  const problems = boundaryProblems(await readFile(String(fieldOf(request, "modulePath")), "utf8") as unknown as Uint8Array, functionName);
+  let detail: string[];
+  if (problems === null) detail = await inspectInChild(String(fieldOf(request, "modulePath")), functionName);
+  else detail = problems;
   if (detail.length > 0) {
     throw wasmError(
       `the WebAssembly module for ${functionName} violates the contract`,
       detail.join("\n").slice(0, 2000),
       functionName,
-      request.candidate,
+      fieldOf(request, "candidate") as string | undefined,
     );
   }
 
   return {
-    runner: { command: process.execPath, args: [request.hostPath, request.modulePath] },
-    modulePath: request.modulePath,
-    hostPath: request.hostPath,
-    moduleSizeBytes: (await stat(request.modulePath)).size,
+    runner: { command: process.execPath, args: [String(fieldOf(request, "hostPath")), String(fieldOf(request, "modulePath"))] },
+    modulePath: String(fieldOf(request, "modulePath")),
+    hostPath: String(fieldOf(request, "hostPath")),
+    moduleSizeBytes: Number(fieldOf(await stat(String(fieldOf(request, "modulePath"))), "size")),
   };
 }
 
@@ -157,8 +164,9 @@ async function inspectInChild(path: string, expected: string): Promise<string[]>
   const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected], {
     timeoutMs: 60_000,
   });
-  if (inspection.code === 0) return [];
-  return (inspection.stderr.trim() || inspection.stdout.trim()).split("\n").filter((line) => line !== "");
+  if (Number(fieldOf(inspection, "code")) === 0) return [];
+  const stderr = String(fieldOf(inspection, "stderr")).trim();
+  return (stderr !== "" ? stderr : String(fieldOf(inspection, "stdout")).trim()).split("\n").filter((line) => line !== "");
 }
 
 /**
@@ -171,18 +179,21 @@ async function inspectInChild(path: string, expected: string): Promise<string[]>
 export function readVaruint(bytes: Uint8Array, at: number, bits: number): { value: number; next: number } {
   let value = 0;
   let shift = 0;
-  for (let index = at; index < bytes.length && shift < bits; index += 1) {
+  let index = at;
+  while (index < bytes.length) {
+    if (shift >= bits) break;
     const byte = bytes[index] ?? 0;
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) return { value: value >>> 0, next: index + 1 };
+    value += (byte % 128) * Math.pow(2, shift);
+    if (byte < 128) return { value: value % 4294967296, next: index + 1 };
     shift += 7;
+    index += 1;
   }
   throw new CompilerError("TargetError", "compile", "the module ends in the middle of a length", "the bytes read back are not a module the compiler emitted", "", "", "");
 }
 
 /** The bytes of one section, which is where its own lengths are counted from. */
 export function bodyOf(bytes: Uint8Array, size: { value: number; next: number }): Uint8Array {
-  return bytes.subarray(size.next, size.next + size.value);
+  return bytes.subarray(Number(fieldOf(size, "next")), Number(fieldOf(size, "next")) + Number(fieldOf(size, "value")));
 }
 
 /**
@@ -201,19 +212,22 @@ export function moduleServices(bytes: Uint8Array): string[] {
     if (id === 2) {
       const body = bodyOf(bytes, size);
       const count = readVaruint(body, 0, 32);
-      let cursor = count.next;
-      for (let index = 0; index < count.value && cursor < body.length; index += 1) {
+      let cursor = Number(fieldOf(count, "next"));
+      let index = 0;
+      while (index < Number(fieldOf(count, "value"))) {
+        if (cursor >= body.length) break;
         const module = readVaruint(body, cursor, 32);
         // The field's name is counted from after the module's own name, which
         // is the bytes the module's length states.
-        const field = readVaruint(body, module.next + module.value, 32);
-        const kind = body[field.next + field.value] ?? 0;
+        const field = readVaruint(body, Number(fieldOf(module, "next")) + Number(fieldOf(module, "value")), 32);
+        const kind = body[Number(fieldOf(field, "next")) + Number(fieldOf(field, "value"))] ?? 0;
         const name = new TextDecoder().decode(bodyOf(body, field));
-        cursor = field.next + field.value + 1;
+        cursor = Number(fieldOf(field, "next")) + Number(fieldOf(field, "value")) + 1;
         if (kind === 0x00) {
           const type = readVaruint(body, cursor, 32);
-          cursor = type.next;
+          cursor = Number(fieldOf(type, "next"));
           if (name !== POW_IMPORT) services.push(name);
+          index += 1;
           continue;
         }
         if (kind === 0x02) {
@@ -221,15 +235,16 @@ export function moduleServices(bytes: Uint8Array): string[] {
           const flags = body[cursor] ?? 0;
           cursor += 1;
           const minimum = readVaruint(body, cursor, 32);
-          cursor = minimum.next;
-          if ((flags & 0x01) !== 0) cursor = readVaruint(body, cursor, 32).next;
+          cursor = Number(fieldOf(minimum, "next"));
+          if (flags % 2 !== 0) cursor = Number(fieldOf(readVaruint(body, cursor, 32), "next"));
+          index += 1;
           continue;
         }
         // A table or a global: neither is a service and neither is read here.
         break;
       }
     }
-    at = size.next + size.value;
+    at = Number(fieldOf(size, "next")) + Number(fieldOf(size, "value"));
   }
   return services;
 }
@@ -244,40 +259,11 @@ export function moduleServices(bytes: Uint8Array): string[] {
  * that imports a function the table does not name is a module that reaches for
  * a system interface, and it is refused before it can.
  */
-export function boundaryProblems(bytes: Uint8Array, expected?: string): string[] | null {
-  const engine = engineHere();
-  if (engine === null) return null;
-  if (!engine.validate(bytes)) return ["the module is not valid WebAssembly"];
-  const module = new engine.Module(bytes);
-  const problems: string[] = [];
-  const imports = engine.Module.imports(module);
-  const memoryImports = imports.filter((entry) => entry.kind === "memory");
-  if (memoryImports.length !== 1 || memoryImports[0]?.module !== "env" || memoryImports[0]?.name !== MEMORY_IMPORT) {
-    problems.push(`the module must import one memory: (import "env" "${MEMORY_IMPORT}" ...)`);
-  }
-  for (const entry of imports) {
-    if (entry.kind === "memory") continue;
-    if (entry.kind !== "function") {
-      problems.push(`the module must not import the ${entry.kind} "${entry.name}"; it reaches the host through the services of the host ABI`);
-      continue;
-    }
-    if (entry.module !== "env") {
-      problems.push(`the module must import its services from "env", not from "${entry.module}"`);
-      continue;
-    }
-    if (entry.name === POW_IMPORT) continue;
-    if (hostServiceBySymbol(entry.name) === null) {
-      problems.push(`the module must not import "${entry.name}"; it is not a service of the host ABI`);
-    }
-  }
-  const exports = engine.Module.exports(module).map((entry) => entry.name);
-  if (exports.includes("memory") || exports.includes("_start")) {
-    problems.push("the module must not export memory or _start; the host provides both");
-  }
-  if (expected !== undefined && !exports.includes(expected)) {
-    problems.push(`the module must export the contracted function "${expected}"`);
-  }
-  return problems;
+export function boundaryProblems(_bytes: Uint8Array, _expected?: string): string[] | null {
+  // The boundary is checked by the child process that carries a WebAssembly
+  // engine. The native compiler has none, and a module's imports and exports
+  // are the same question wherever they are read.
+  return null;
 }
 
 /**
@@ -287,16 +273,6 @@ export function boundaryProblems(bytes: Uint8Array, expected?: string): string[]
  * has this shape.
  */
 
-/**
- * The engine this process has, or null where it has none.
- *
- * Where there is one the check above is the engine's own answer rather than a
- * second opinion. Where there is not, `null` says so and the caller asks the
- * child process instead.
- */
-function engineHere(): WebAssemblyEngine | null {
-  return webAssemblyEngine();
-}
 
 /** Rejects a module that reaches outside the memory the host provides. */
 export const INSPECT_MODULE = `
@@ -389,12 +365,13 @@ export interface WasmHostOptions {
  * reads and writes.
  */
 export function generateWasmHost(contract: FunctionContract, options: WasmHostOptions = {}): string {
+  const fn = fieldOf(contract, "function") as { readonly params: readonly { readonly name: string; readonly type: string }[]; readonly returns: string };
   const functionName = symbolOf(contract);
-  const returns = parseType(contract.function.returns);
+  const returns = parseType(String(fieldOf(fn, "returns")));
   if (returns.kind !== "primitive") {
     throw wasmError(`return type ${typeToString(returns)} is not supported for wasm`, undefined, functionName);
   }
-  const services = options.services ?? [];
+  const services = (fieldOf(options, "services") as readonly string[] | undefined) ?? [];
   for (const service of services) {
     if (hostServiceBySymbol(service) === null) {
       throw wasmError(`"${service}" is not a service of the host ABI`, undefined, functionName);
@@ -403,68 +380,78 @@ export function generateWasmHost(contract: FunctionContract, options: WasmHostOp
       throw wasmError(`the host carries no implementation of "${service}"`, undefined, functionName);
     }
   }
-  const style = options.style ?? 0;
+  const style = Number(fieldOf(options, "style") ?? 0);
 
-  const headerReads = contract.function.params
-    .map((param, index) => {
-      const type = parseType(param.type);
-      if (type.kind === "primitive") {
-        return `  const ${param.name} = ${scalarRead(type, `header[${index}]`)};`;
-      }
-      if (type.kind === "text") {
-        // A text parameter is refused by name rather than by the buffer reader
-        // it is not: the vector protocol carries a buffer as a count and its
-        // elements, and a text is neither.
-        throw wasmError(
-          `the parameter "${param.name}" is a text, which the vector protocol does not carry`,
-          "a wasm parameter is a number or a buffer; a text parameter is not built by the c, asm or machine output kinds either",
-          functionName,
-        );
-      }
-      return [
-        `  let ${param.name} = 0;`,
-        `  let count_${param.name} = 0;`,
-        `  let storage_${param.name} = 0;`,
-        `  {`,
-        `    const declared = Number.parseInt(header[${index}], 10);`,
-        `    count_${param.name} = declared < 0 ? 0 : declared;`,
-        `  }`,
-      ].join("\n");
-    })
-    .join("\n");
+  const headerParts: string[] = [];
+  const params = fieldOf(fn, "params") as readonly { readonly name: string; readonly type: string }[];
+  for (let index = 0; index < params.length; index += 1) {
+    const param = params[index];
+    const paramName = String(fieldOf(param, "name"));
+    const type = parseType(String(fieldOf(param, "type")));
+    if (type.kind === "primitive") {
+      headerParts[headerParts.length] = `  const ${paramName} = ${scalarRead(type, `header[${index}]`)};`;
+      continue;
+    }
+    if (type.kind === "text") {
+      // A text parameter is refused by name rather than by the buffer reader
+      // it is not: the vector protocol carries a buffer as a count and its
+      // elements, and a text is neither.
+      throw wasmError(
+        `the parameter "${paramName}" is a text, which the vector protocol does not carry`,
+        "a wasm parameter is a number or a buffer; a text parameter is not built by the c, asm or machine output kinds either",
+        functionName,
+      );
+    }
+    headerParts[headerParts.length] = [
+      `  let ${paramName} = 0;`,
+      `  let count_${paramName} = 0;`,
+      `  let storage_${paramName} = 0;`,
+      `  {`,
+      `    const declared = Number.parseInt(header[${index}], 10);`,
+      `    count_${paramName} = declared < 0 ? 0 : declared;`,
+      `  }`,
+    ].join("\n");
+  }
+  const headerReads = headerParts.join("\n");
 
-  const dataReads = contract.function.params
-    .map((param) => {
-      const type = parseType(param.type);
-      if (type.kind === "primitive") return "";
-      const size = elementSize(bufferElement(type));
-      return `  {
-    storage_${param.name} = block(count_${param.name} * ${size}, 16, true);
+  const dataParts: string[] = [];
+  for (const param of params) {
+    const paramName = String(fieldOf(param, "name"));
+    const type = parseType(String(fieldOf(param, "type")));
+    if (type.kind === "primitive") {
+      dataParts[dataParts.length] = "";
+      continue;
+    }
+    const size = elementSize(bufferElement(type));
+    dataParts[dataParts.length] = `  {
+    storage_${paramName} = block(count_${paramName} * ${size}, 16, true);
     // A module is handed a pointer to the elements and no length beside it, so
     // the count is written in the word the pointer sits one before: a module
     // reads a length as the count at (pointer - ${POINTER_SIZE}). The word is
     // written for an empty buffer too, or a module asked to walk one would
     // read a length from below the memory the host gave it.
-    writeCount(storage_${param.name}, count_${param.name});
-    ${param.name} = storage_${param.name};
+    writeCount(storage_${paramName}, count_${paramName});
+    ${paramName} = storage_${paramName};
   }
-  if (count_${param.name} !== 0) {
+  if (count_${paramName} !== 0) {
     const elements = nextTokens();
-    if (elements === null || elements.length < count_${param.name}) fail("truncated data for ${param.name}");
-    for (let element = 0; element < count_${param.name}; element += 1) {
-      ${scalarStore(bufferElement(type), `elements[element]`, `${param.name} + element * ${size}`)}
+    if (elements === null || elements.length < count_${paramName}) fail("truncated data for ${paramName}");
+    for (let element = 0; element < count_${paramName}; element += 1) {
+      ${scalarStore(bufferElement(type), `elements[element]`, `${paramName} + element * ${size}`)}
     }
   }`;
-    })
-    .join("\n");
+  }
+  const dataReads = dataParts.join("\n");
 
-  const callArguments = contract.function.params.map((param) => param.name).join(", ");
+  const callNames: string[] = [];
+  for (const param of params) callNames[callNames.length] = String(fieldOf(param, "name"));
+  const callArguments = callNames.join(", ");
   // A WebAssembly i64 arrives as a JavaScript BigInt, which prints signed, so
   // an unsigned result came back as a negative number for every value from
   // 2^63 up. The native harness prints the same result with `%llu`, and the
   // two hosts have to agree: one of them is read back as the value the
   // contract promises.
-  const returnsName: PrimitiveTypeName | null = returns.kind === "primitive" ? returns.name : null;
+  const returnsName: PrimitiveTypeName | null = returns.kind === "primitive" ? fieldOf(returns, "name") as PrimitiveTypeName : null;
   const resultFormat =
     wasmValueType(returns) === "f32"
       ? "String(value)"
@@ -477,8 +464,11 @@ export function generateWasmHost(contract: FunctionContract, options: WasmHostOp
           ? "String(value >>> 0)"
           : 'typeof value === "bigint" ? value.toString() : String(value)';
 
-  const serviceImports = services.map((service) => `imports.env[${JSON.stringify(service)}] = ${service};`).join("\n");
-  const hashes = services.some((service) => service.startsWith("blaze_rt_md5_"));
+  const serviceLines: string[] = [];
+  for (const service of services) serviceLines[serviceLines.length] = `imports.env[${JSON.stringify(service)}] = ${service};`;
+  const serviceImports = serviceLines.join("\n");
+  let hashes = false;
+  for (const service of services) if (service.startsWith("blaze_rt_md5_")) hashes = true;
 
   return `/* Generated by the blaze compiler from a function contract. Do not edit. */
 
@@ -575,9 +565,9 @@ if (mode === "bench") {
 
 let calls = 0;
 for (;;) {
-  const header = ${contract.function.params.length === 0 ? "nextHeader()" : "nextTokens()"};
+  const header = ${params.length === 0 ? "nextHeader()" : "nextTokens()"};
   if (header === null) break;
-  if (header.length < ${contract.function.params.length}) fail("truncated test vector header");
+  if (header.length < ${params.length}) fail("truncated test vector header");
 
 ${headerReads}
 ${dataReads}
@@ -638,7 +628,7 @@ export interface WasmProgramHostOptions {
  * program takes them from as well.
  */
 export function generateWasmProgramHost(options: WasmProgramHostOptions): string {
-  const services = options.services ?? [];
+  const services = (fieldOf(options, "services") as readonly string[] | undefined) ?? [];
   for (const service of services) {
     if (hostServiceBySymbol(service) === null) {
       throw wasmError(`"${service}" is not a service of the host ABI`);
@@ -647,9 +637,12 @@ export function generateWasmProgramHost(options: WasmProgramHostOptions): string
       throw wasmError(`the host carries no implementation of "${service}"`);
     }
   }
-  const style = options.style ?? 0;
-  const serviceImports = services.map((service) => `imports.env[${JSON.stringify(service)}] = ${service};`).join("\n");
-  const hashes = services.some((service) => service.startsWith("blaze_rt_md5_"));
+  const style = Number(fieldOf(options, "style") ?? 0);
+  const serviceLines: string[] = [];
+  for (const service of services) serviceLines[serviceLines.length] = `imports.env[${JSON.stringify(service)}] = ${service};`;
+  const serviceImports = serviceLines.join("\n");
+  let hashes = false;
+  for (const service of services) if (service.startsWith("blaze_rt_md5_")) hashes = true;
 
   return `/* Generated by the blaze compiler from a program. Do not edit. */
 
@@ -661,7 +654,7 @@ ${hashes ? 'import { createHash } from "node:crypto";' : ""}
 ${hostRuntimeSource(services)}
 
 const [modulePath] = process.argv.slice(2);
-const entryName = ${JSON.stringify(options.entry)};
+const entryName = ${JSON.stringify(String(fieldOf(options, "entry")))};
 
 function fail(message) {
   process.stderr.write("wasm-host: " + message + "\\n");

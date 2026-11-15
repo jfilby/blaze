@@ -22,9 +22,13 @@
  */
 
 import { parseType, preconditionFailures, type ParsedContract, type Value } from "../semantics/contract.ts";
-import type { FunctionContract, ObjectLayout, TypeExpr } from "../core/types.ts";
+import type { FunctionContract, FunctionParam, FunctionSignature, ObjectLayout, TypeExpr } from "../core/types.ts";
 import { cLiteral, cMemberName } from "./c-names.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 /** The C statements that build one argument, and the expression the call passes. */
 export interface ProbeArgument {
@@ -70,29 +74,34 @@ function cType(type: TypeExpr): string {
       usize: "size_t",
       isize: "intptr_t",
     };
-    return scalars[type.name];
+    return scalars[String(fieldOf(type, "name"))];
   }
   if (type.kind === "ref") {
     // A reference with no shape is the dynamic handle the C side carries as a
     // double, which is what the contract's C declaration says too.
-    if (type.of === null && type.name === undefined) return "double";
-    return type.name === undefined ? "void*" : `struct ${type.name}*`;
+    const of = fieldOf(type, "of") as TypeExpr | null;
+    const name = fieldOf(type, "name") as string | undefined;
+    if (of === null && name === undefined) return "double";
+    return name === undefined ? "void*" : `struct ${name}*`;
   }
   // A buffer of a type is a pointer to the elements, so a probe hands the
   // candidate a block whose element is the one the contract names: a buffer of
   // text is a block of string pointers and not a block of `void*`.
-  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") return `${cType(type.of)}*`;
+  if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") return `${cType(fieldOf(type, "of") as TypeExpr)}*`;
   return "void*";
 }
 
 /** The value a scalar of the type holds when nothing is known about it. */
 function defaultScalar(type: TypeExpr): string {
-  if (type.kind === "primitive" && type.name === "bool") return "false";
-  // A wide number is four limbs and no C scalar, so the zero it defaults to is
-  // the initializer list that says which limb is which. Written as `0` it is
-  // `passing argument 1 of 'wide' from incompatible pointer type`, and the
-  // candidate was faulted for a call the harness wrote.
-  if (type.kind === "primitive" && (type.name === "u256" || type.name === "i256")) return cLiteral("0", type.name);
+  if (type.kind === "primitive") {
+    const name = String(fieldOf(type, "name"));
+    if (name === "bool") return "false";
+    // A wide number is four limbs and no C scalar, so the zero it defaults to is
+    // the initializer list that says which limb is which. Written as `0` it is
+    // `passing argument 1 of 'wide' from incompatible pointer type`, and the
+    // candidate was faulted for a call the harness wrote.
+    if (name === "u256" || name === "i256") return cLiteral("0", name);
+  }
   return "0";
 }
 
@@ -108,7 +117,8 @@ function defaultScalar(type: TypeExpr): string {
  */
 /** Whether a reference points at an object the contract lays out, and so has a shape. */
 function laidOut(type: Extract<TypeExpr, { kind: "ref" }>, objects: Record<string, ObjectLayout>): boolean {
-  return type.name !== undefined && objects[type.name] !== undefined;
+  const name = fieldOf(type, "name") as string | undefined;
+  return name !== undefined && objects[name] !== undefined;
 }
 
 function buildValue(
@@ -119,17 +129,19 @@ function buildValue(
   depth: number,
 ): string {
   if (type.kind === "ref" && laidOut(type, objects)) {
-    const object = objects[type.name as string];
+    const objectName = String(fieldOf(type, "name"));
+    const object = objects[objectName];
     if (depth >= MAX_OBJECT_DEPTH) return "NULL";
     const pointer = `${name}_probe`;
     statements.push(
-      `struct ${type.name}* ${pointer} = (struct ${type.name}*)${RUNTIME_NAME}_object_new(${object.size}, ${object.align});`,
+      `struct ${objectName}* ${pointer} = (struct ${objectName}*)${RUNTIME_NAME}_object_new(${String(fieldOf(object, "size"))}, ${String(fieldOf(object, "align"))});`,
     );
     statements.push(`if (${pointer} == NULL) { fprintf(stderr, "probe: out of memory\\n"); exit(2); }`);
-    for (const field of object.fields) {
-      const fieldType = parseType(field.type);
+    for (const field of fieldOf(object, "fields") as readonly { readonly name: string; readonly type: string; readonly offset: number }[]) {
+      const fieldName = String(fieldOf(field, "name"));
+      const fieldType = parseType(String(fieldOf(field, "type")));
       statements.push(
-        `${pointer}->${cMemberName(field.name)} = (${cType(fieldType)})(${buildValue(fieldType, `${name}_${field.name}`, objects, statements, depth + 1)});`,
+        `${pointer}->${cMemberName(fieldName)} = (${cType(fieldType)})(${buildValue(fieldType, `${name}_${fieldName}`, objects, statements, depth + 1)});`,
       );
     }
     return pointer;
@@ -137,8 +149,10 @@ function buildValue(
   if (type.kind === "ref") {
     // An unshaped reference is the dynamic handle the C side carries as a
     // double, so its default is the number zero. Only a pointer is null.
-    if (type.of === null && type.name === undefined) return "0.0";
-    return type.name === undefined ? "NULL" : `(struct ${type.name}*)NULL`;
+    const refOf = fieldOf(type, "of") as TypeExpr | null;
+    const refName = fieldOf(type, "name") as string | undefined;
+    if (refOf === null && refName === undefined) return "0.0";
+    return refName === undefined ? "NULL" : `(struct ${refName}*)NULL`;
   }
   if (type.kind === "primitive") return defaultScalar(type);
   if (type.kind === "void") return "NULL";
@@ -163,11 +177,12 @@ function buildValue(
   // written to do, and a whole function's candidates were rejected for it. The
   // count is the one the contract states, so a precondition that needs
   // elements to be there refuses the call before it is made.
-  const element = cType(type.of);
+  const element = cType(fieldOf(type, "of") as TypeExpr);
   // A pointer of any type is the size of a pointer, which is written the way
   // C spells it rather than through a type that is a GNU extension.
   const elementSize = element.endsWith("*") ? "sizeof(void*)" : `sizeof(${element})`;
-  const count = type.kind === "array" ? (type.length ?? 0) : 0;
+  const length = fieldOf(type, "length") as number | null;
+  const count = type.kind === "array" ? (length ?? 0) : 0;
   const pointer = `${name}_probe_buffer`;
   statements.push(`void* ${pointer} = ${RUNTIME_NAME}_array_new(${count}, ${elementSize});`);
   statements.push(`if (${pointer} == NULL) { fprintf(stderr, "probe: out of memory\\n"); exit(2); }`);
@@ -176,7 +191,7 @@ function buildValue(
 
 /** The contract-level value a default argument has, for reading preconditions. */
 function probeValue(type: TypeExpr): Value {
-  if (type.kind === "primitive") return type.name === "bool" ? false : 0;
+  if (type.kind === "primitive") return String(fieldOf(type, "name")) === "bool" ? false : 0;
   if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
     return { type, values: [] };
   }
@@ -193,14 +208,20 @@ function probeValue(type: TypeExpr): Value {
  * there is nothing to run, not that the candidate is wrong.
  */
 export function planProbe(contract: FunctionContract, parsed: ParsedContract): ProbePlan {
-  if (contract.ensures.length > 0) {
+  const ensures = fieldOf(contract, "ensures") as readonly string[];
+  if (ensures.length > 0) {
     return {
       kind: "skip",
       reason: "the contract states what the function returns, so the candidate is verified against its own vectors",
     };
   }
-  const parameters = contract.function.params.map((param) => ({ name: param.name, type: parseType(param.type) }));
-  const objects = contract.definition.objects;
+  const signature = fieldOf(contract, "function") as FunctionSignature;
+  const params = fieldOf(signature, "params") as readonly FunctionParam[];
+  const parameters = params.map((param) => ({
+    name: String(fieldOf(param, "name")),
+    type: parseType(String(fieldOf(param, "type"))),
+  }));
+  const objects = fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>;
   const values = new Map<string, Value>(parameters.map((param) => [param.name, probeValue(param.type)]));
   const failures = preconditionFailures(parsed, values);
   if (failures.length > 0) {
@@ -227,7 +248,8 @@ export function planProbe(contract: FunctionContract, parsed: ParsedContract): P
   const callArguments = parameters.flatMap((param) => {
     const base = buildValue(param.type, param.name, objects, statements, 0);
     if (param.type.kind === "array" || param.type.kind === "slice" || param.type.kind === "ptr") {
-      const count = param.type.kind === "array" ? (param.type.length ?? 0) : 0;
+      const length = fieldOf(param.type, "length") as number | null;
+      const count = param.type.kind === "array" ? (length ?? 0) : 0;
       return [base, String(count)];
     }
     return [base];
@@ -257,27 +279,31 @@ export function wasmProbeInput(
   if (plan.kind === "skip") return plan;
   const header: string[] = [];
   const data: string[] = [];
-  for (const param of contract.function.params) {
-    const type = parseType(param.type);
+  const params = fieldOf(fieldOf(contract, "function"), "params") as readonly FunctionParam[];
+  for (const param of params) {
+    const paramName = String(fieldOf(param, "name"));
+    const type = parseType(String(fieldOf(param, "type")));
     if (type.kind === "primitive") {
+      const scalar = String(fieldOf(type, "name"));
       // A whole number of thirty-two bits or more is a number the protocol
       // carries as a decimal, and a wide one is thirty-two bytes the protocol
       // does not carry at all.
-      if (type.name === "u256" || type.name === "i256") {
-        return { kind: "skip", reason: `the parameter "${param.name}" is a wide number, which the vector protocol does not carry` };
+      if (scalar === "u256" || scalar === "i256") {
+        return { kind: "skip", reason: `the parameter "${paramName}" is a wide number, which the vector protocol does not carry` };
       }
-      header.push(type.name === "bool" ? "0" : "0");
+      header.push(scalar === "bool" ? "0" : "0");
       continue;
     }
     if (type.kind === "text") {
-      return { kind: "skip", reason: `the parameter "${param.name}" is a text, which the vector protocol does not carry` };
+      return { kind: "skip", reason: `the parameter "${paramName}" is a text, which the vector protocol does not carry` };
     }
     if (type.kind === "ref") {
-      return { kind: "skip", reason: `the parameter "${param.name}" is a reference, which the vector protocol does not carry` };
+      return { kind: "skip", reason: `the parameter "${paramName}" is a reference, which the vector protocol does not carry` };
     }
     // A buffer is a count and its elements, and the count is the one the
     // contract states.
-    const count = type.kind === "array" ? (type.length ?? 0) : 0;
+    const length = fieldOf(type, "length") as number | null;
+    const count = type.kind === "array" ? (length ?? 0) : 0;
     header.push(String(count));
     data.push(new Array(count).fill("0").join(" "));
   }

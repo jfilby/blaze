@@ -13,27 +13,31 @@ import { TRITON_ABI } from "./triton.ts";
 import { MODEL_ABI } from "./model.ts";
 import { SGLANG_ABI } from "./sglang.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /** True when generated code is allowed to reference a symbol. */
 export function isRuntimeSymbol(symbol: string): boolean {
   for (const item of RUNTIME_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   if (WIDE_SYMBOLS[symbol] === true) return true;
   if (TEXT_SYMBOLS[symbol] === true) return true;
   for (const item of HTTP_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   for (const item of SQLITE_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   for (const item of TRITON_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   for (const item of MODEL_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   for (const item of SGLANG_ABI) {
-    if (item.symbol === symbol) return true;
+    if (String(fieldOf(item, "symbol")) === symbol) return true;
   }
   return false;
 }

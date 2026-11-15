@@ -179,6 +179,11 @@ export async function readFile(path: string, _mode?: string): Promise<string> {
   return readTextFile(path, "utf8");
 }
 
+/** Puts a file on the disk rather than in the page cache. */
+export async function syncFile(path: string): Promise<void> {
+  fs.fsyncPath(path);
+}
+
 /** A file written with the text, replacing what it held. */
 export async function writeFile(path: string, text: string, _mode?: string): Promise<void> {
   writeFileSync(path, text, "utf8");

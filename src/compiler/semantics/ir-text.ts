@@ -188,6 +188,10 @@ import { contractText, parseType, typeToString } from "./contract.ts";
 import { builtinFor } from "./builtins.ts";
 import { unescape } from "./typescript.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Vocabulary                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -311,7 +315,11 @@ const ESCAPES: Record<string, string> = {
 /** A string as JavaScript writes one, so what a value carries survives a round trip. */
 function stringLiteral(value: string): string {
   let text = '"';
-  for (const character of value) text += ESCAPES[character] ?? character;
+  for (let at = 0; at < value.length; at += 1) {
+    const character = value.slice(at, at + 1);
+    const escaped = ESCAPES[character];
+    text += escaped === undefined ? character : escaped;
+  }
   return `${text}"`;
 }
 
@@ -326,39 +334,46 @@ function mutabilityText(mutable: boolean): Mutability {
 
 /** A function as the contract states it, under the name a call reaches it by. */
 function signatureText(signature: FunctionSignature): string {
-  const alias = signature.symbol === signature.name ? "" : ` as ${signature.symbol}`;
-  const params = signature.params.map((param) => `${param.name}: ${typeToString(parseType(param.type))}`).join(", ");
-  return `function ${signature.name}${alias}(${params}) -> ${typeToString(parseType(signature.returns))}`;
+  const name = String(fieldOf(signature, "symbol"));
+  const written = String(fieldOf(signature, "name"));
+  const alias = name === written ? "" : ` as ${name}`;
+  const params = (fieldOf(signature, "params") as readonly { readonly name: string; readonly type: string }[])
+    .map((param) => `${String(fieldOf(param, "name"))}: ${typeToString(parseType(String(fieldOf(param, "type"))))}`)
+    .join(", ");
+  return `function ${written}${alias}(${params}) -> ${typeToString(parseType(String(fieldOf(signature, "returns"))))}`;
 }
 
 /** An object layout, with every field it holds on the line under it. */
 function objectLines(name: string, layout: ObjectLayout, indent = 0): string[] {
   const pad = " ".repeat(indent);
-  const lines = [`${pad}object ${name} size ${layout.size} align ${layout.align}`];
-  for (const field of layout.fields) {
-    lines.push(`${pad}  field ${field.name}: ${typeToString(parseType(field.type))} at ${field.offset}`);
+  const lines = [`${pad}object ${name} size ${String(fieldOf(layout, "size"))} align ${String(fieldOf(layout, "align"))}`];
+  for (const field of fieldOf(layout, "fields") as readonly { readonly name: string; readonly type: string; readonly offset: number }[]) {
+    lines.push(`${pad}  field ${String(fieldOf(field, "name"))}: ${typeToString(parseType(String(fieldOf(field, "type"))))} at ${String(fieldOf(field, "offset"))}`);
   }
   return lines;
 }
 
 /** What a declared name holds, and whether the program may change it. */
 function slotText(slot: SemanticSlot): string {
-  const state = mutabilityText(slot.mutable);
+  const state = mutabilityText(fieldOf(slot, "mutable") === true);
+  const name = String(fieldOf(slot, "name"));
   switch (slot.kind) {
     case "value":
-      return `value[${typeText(slot.type)}] ${slot.name} ${state}`;
+      return `value[${typeText(fieldOf(slot, "type") as SemanticType)}] ${name} ${state}`;
     case "text":
-      return `text ${slot.name} ${state}`;
-    case "buffer":
-      return `buffer ${slot.name} ${state} element[${typeText(slot.element)}] ${slot.length ?? "runtime"}`;
+      return `text ${name} ${state}`;
+    case "buffer": {
+      const length = fieldOf(slot, "length") as number | null;
+      return `buffer ${name} ${state} element[${typeText(fieldOf(slot, "element") as SemanticType)}] ${length === null ? "runtime" : String(length)}`;
+    }
     case "object":
-      return `object[${typeText(slot.type)}] ${slot.name} ${state}`;
+      return `object[${typeText(fieldOf(slot, "type") as SemanticType)}] ${name} ${state}`;
   }
 }
 
 /** One piece of a string: text as written, or a value put into it. */
 function partText(part: SemanticTextPart): string {
-  return part.k === "text" ? stringLiteral(part.value) : printSemanticValue(part.value);
+  return part.k === "text" ? stringLiteral(String(fieldOf(part, "value"))) : printSemanticValue(fieldOf(part, "value") as SemanticValue);
 }
 
 /**
@@ -367,7 +382,7 @@ function partText(part: SemanticTextPart): string {
  * what decides how the value is carried to the callback.
  */
 function captureText(capture: CaptureRef): string {
-  return `${capture.name}[${typeText(capture.type)}]`;
+  return `${String(fieldOf(capture, "name"))}[${typeText(fieldOf(capture, "type") as SemanticType)}]`;
 }
 
 /**
@@ -376,87 +391,120 @@ function captureText(capture: CaptureRef): string {
  * and a call the text names is bound to the contract that declares it.
  */
 function callText(call: SemanticCall): string {
-  const args = call.args
-    .map((argument, position) => `arg[${typeText(call.argTypes[position])}] ${printSemanticValue(argument)}`)
+  const callee = String(fieldOf(call, "callee"));
+  const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+  const args = (fieldOf(call, "args") as readonly SemanticValue[])
+    .map((argument, position) => `arg[${typeText(argTypes[position])}] ${printSemanticValue(argument)}`)
     .join(" ");
-  const retain = call.retain ? "yes" : "no";
+  const retain = fieldOf(call, "retain") === true ? "yes" : "no";
   // A kernel launch carries the grid it is launched on, and an ordinary call
   // carries nothing: the text states which of the two the call is, so reading
   // it back answers the call the program made.
-  const grid = call.grid === undefined ? "" : ` grid[${printSemanticValue(call.grid)}]`;
+  const gridValue = fieldOf(call, "grid") as SemanticValue | undefined;
+  const grid = gridValue === undefined ? "" : ` grid[${printSemanticValue(gridValue)}]`;
   // A call through a closure names the closure instead of a callee: the value
   // is what is called, and every type the call is made against is written on
   // its arguments.
-  if (call.through !== undefined) {
-    return `through ${printSemanticValue(call.through)} [${args}] ownership=${call.ownership} retain=${retain}${grid}`;
+  const through = fieldOf(call, "through") as SemanticValue | undefined;
+  const ownership = String(fieldOf(call, "ownership"));
+  if (through !== undefined) {
+    return `through ${printSemanticValue(through)} [${args}] ownership=${ownership} retain=${retain}${grid}`;
   }
-  return `${call.callee} [${args}] ownership=${call.ownership} retain=${retain}${grid}`;
+  return `${callee} [${args}] ownership=${ownership} retain=${retain}${grid}`;
 }
 
 /** A value as the IR states it: the operation, the type, and what it is made of. */
 export function printSemanticValue(value: SemanticValue): string {
   switch (value.k) {
     case "const":
-      return `const[${typeText(value.type)}] ${value.text}`;
-    case "text":
-      return `[text ${value.parts.map(partText).join(" ")}]`;
+      return `const[${typeText(fieldOf(value, "type") as SemanticType)}] ${String(fieldOf(value, "text"))}`;
+    case "text": {
+      const parts = fieldOf(value, "parts") as readonly SemanticTextPart[];
+      return `[text ${parts.map(partText).join(" ")}]`;
+    }
     case "bool":
-      return `bool[${typeText(value.type)}] ${value.value ? "true" : "false"}`;
+      return `bool[${typeText(fieldOf(value, "type") as SemanticType)}] ${fieldOf(value, "value") === true ? "true" : "false"}`;
     case "nothing":
-      return `nothing[${typeText(value.type)}]`;
-    case "functionRef":
-      return `functionRef[${value.name}${value.captures.length ? ":" + value.captures.map(captureText).join(",") : ""}]`;
+      return `nothing[${typeText(fieldOf(value, "type") as SemanticType)}]`;
+    case "functionRef": {
+      const captures = fieldOf(value, "captures") as readonly CaptureRef[];
+      const held = captures.length > 0 ? ":" + captures.map(captureText).join(",") : "";
+      return `functionRef[${String(fieldOf(value, "name"))}${held}]`;
+    }
     case "local":
-      return `local[${typeText(value.type)}] ${value.name}`;
+      return `local[${typeText(fieldOf(value, "type") as SemanticType)}] ${String(fieldOf(value, "name"))}`;
     case "length":
-      return `[length[${typeText(value.type)}] ${printSemanticValue(value.of)}]`;
+      return `[length[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)}]`;
     case "element":
-      return `[element[${typeText(value.type)}] ${printSemanticValue(value.of)} ${printSemanticValue(value.index)}]`;
-    case "buffer":
-      if (value.view !== null) {
-        return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] view ${printSemanticValue(value.view.offset)} ${printSemanticValue(value.view.of)} ${printSemanticValue(value.count as SemanticValue)}]`;
+      return `[element[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)} ${printSemanticValue(fieldOf(value, "index") as SemanticValue)}]`;
+    case "buffer": {
+      const type = typeText(fieldOf(value, "type") as SemanticType);
+      const element = typeText(fieldOf(value, "element") as SemanticType);
+      const view = fieldOf(value, "view") as { readonly offset: SemanticValue; readonly of: SemanticValue } | null;
+      const count = fieldOf(value, "count") as SemanticValue | null;
+      if (view !== null) {
+        return `[buffer[${type}] element[${element}] view ${printSemanticValue(fieldOf(view, "offset") as SemanticValue)} ${printSemanticValue(fieldOf(view, "of") as SemanticValue)} ${printSemanticValue(count as SemanticValue)}]`;
       }
-      if (value.count !== null) {
-        return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] runtime ${printSemanticValue(value.count)}]`;
+      if (count !== null) {
+        return `[buffer[${type}] element[${element}] runtime ${printSemanticValue(count)}]`;
       }
-      return `[buffer[${typeText(value.type)}] element[${typeText(value.element)}] ${value.length} ${value.values.map(printSemanticValue).join(" ")}]`;
-    case "newObject":
-      return `[new_object[${typeText(value.type)}] ${value.layout} ${value.fields.map((field) => `${field.name} ${printSemanticValue(field.value)}`).join(" ")}]`;
+      const values = fieldOf(value, "values") as readonly SemanticValue[];
+      return `[buffer[${type}] element[${element}] ${String(fieldOf(value, "length"))} ${values.map(printSemanticValue).join(" ")}]`;
+    }
+    case "newObject": {
+      const fields = fieldOf(value, "fields") as readonly { readonly name: string; readonly value: SemanticValue }[];
+      return `[new_object[${typeText(fieldOf(value, "type") as SemanticType)}] ${String(fieldOf(value, "layout"))} ${fields.map((field) => `${String(fieldOf(field, "name"))} ${printSemanticValue(fieldOf(field, "value") as SemanticValue)}`).join(" ")}]`;
+    }
     case "loadField":
-      return `[load_field[${typeText(value.type)}] ${printSemanticValue(value.object)} ${value.layout} ${value.field}]`;
+      return `[load_field[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "object") as SemanticValue)} ${String(fieldOf(value, "layout"))} ${String(fieldOf(value, "field"))}]`;
     case "call":
-      return `[call[${typeText(value.type)}] ${callText(value.call)}]`;
+      return `[call[${typeText(fieldOf(value, "type") as SemanticType)}] ${callText(fieldOf(value, "call") as SemanticCall)}]`;
     case "arith":
-      return `[${value.op}[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
+      return `[${String(fieldOf(value, "op"))}[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "left") as SemanticValue)} ${printSemanticValue(fieldOf(value, "right") as SemanticValue)}]`;
     case "compare":
-      return `[${value.op}[${typeText(value.type)}] ${typeText(value.operand)} ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
+      return `[${String(fieldOf(value, "op"))}[${typeText(fieldOf(value, "type") as SemanticType)}] ${typeText(fieldOf(value, "operand") as SemanticType)} ${printSemanticValue(fieldOf(value, "left") as SemanticValue)} ${printSemanticValue(fieldOf(value, "right") as SemanticValue)}]`;
     case "logical": {
-      const word = value.op === "and" ? "logical_and" : "logical_or";
-      return `[${word}[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
+      const word = String(fieldOf(value, "op")) === "and" ? "logical_and" : "logical_or";
+      return `[${word}[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "left") as SemanticValue)} ${printSemanticValue(fieldOf(value, "right") as SemanticValue)}]`;
     }
     case "coalesce":
-      return `[coalesce[${typeText(value.type)}] ${printSemanticValue(value.left)} ${printSemanticValue(value.right)}]`;
+      return `[coalesce[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "left") as SemanticValue)} ${printSemanticValue(fieldOf(value, "right") as SemanticValue)}]`;
     case "select":
-      return `[select[${typeText(value.type)}] ${printSemanticValue(value.condition)} ${printSemanticValue(value.then)} ${printSemanticValue(value.otherwise)}]`;
+      return `[select[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "condition") as SemanticValue)} ${printSemanticValue(fieldOf(value, "then") as SemanticValue)} ${printSemanticValue(fieldOf(value, "otherwise") as SemanticValue)}]`;
     case "unary":
-      return `[unary ${value.op}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
+      return `[unary ${String(fieldOf(value, "op"))}[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "operand") as SemanticValue)}]`;
     case "isNull":
-      return `[${value.negate ? "is_not_null" : "is_null"}[${typeText(value.type)}] ${printSemanticValue(value.operand)}]`;
-    case "toText":
-      return `[to_text${value.digits === null ? "" : value.precision === true ? `@p${value.digits}` : value.digits === -2 ? "@bin" : value.digits < 0 ? "@hex" : `@${value.digits}`} ${printSemanticValue(value.of)}]`;
-    case "argv":
-      return value.index === null
-        ? `argv[${typeText(value.type)}]`
-        : `[argv[${typeText(value.type)}] ${printSemanticValue(value.index)}]`;
+      return `[${fieldOf(value, "negate") === true ? "is_not_null" : "is_null"}[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "operand") as SemanticValue)}]`;
+    case "toText": {
+      const digits = fieldOf(value, "digits") as number | null;
+      let mark = "";
+      if (digits !== null) {
+        if (fieldOf(value, "precision") === true) mark = `@p${digits}`;
+        else if (digits === -2) mark = "@bin";
+        else if (digits < 0) mark = "@hex";
+        else mark = `@${digits}`;
+      }
+      return `[to_text${mark} ${printSemanticValue(fieldOf(value, "of") as SemanticValue)}]`;
+    }
+    case "argv": {
+      const index = fieldOf(value, "index") as SemanticValue | null;
+      return index === null
+        ? `argv[${typeText(fieldOf(value, "type") as SemanticType)}]`
+        : `[argv[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(index)}]`;
+    }
     case "closure": {
-      const params = value.signature.params.map((param) => `[${typeText(parseType(param.type))}]`).join(" ");
+      const signature = fieldOf(value, "signature") as FunctionSignature;
+      const params = (fieldOf(signature, "params") as readonly { readonly type: string }[])
+        .map((param) => `[${typeText(parseType(String(fieldOf(param, "type"))))}]`)
+        .join(" ");
+      const captures = fieldOf(value, "captures") as readonly SemanticValue[];
       return (
-        `[closure[${typeText(value.type)}] result[${typeText(parseType(value.signature.returns))}] ` +
-        `code ${value.code} params[${params}] ${value.captures.map(printSemanticValue).join(" ")}]`
+        `[closure[${typeText(fieldOf(value, "type") as SemanticType)}] result[${typeText(parseType(String(fieldOf(signature, "returns"))))}] ` +
+        `code ${String(fieldOf(value, "code"))} params[${params}] ${captures.map(printSemanticValue).join(" ")}]`
       );
     }
     case "capture":
-      return `[capture[${typeText(value.type)}] ${printSemanticValue(value.closure)} at ${value.index}]`;
+      return `[capture[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "closure") as SemanticValue)} at ${String(fieldOf(value, "index"))}]`;
   }
 }
 
@@ -469,10 +517,12 @@ function terminatorText(terminator: SemanticTerminator, indent: number): string 
   // block nothing reaches are different programs.
   if (terminator.k === "unreachable") return `${pad}unreachable`;
   if (terminator.k === "return") {
-    return terminator.value === null ? `${pad}return` : `${pad}return ${printSemanticValue(terminator.value)}`;
+    const returned = fieldOf(terminator, "value") as SemanticValue | null;
+    return returned === null ? `${pad}return` : `${pad}return ${printSemanticValue(returned)}`;
   }
-  const releases = terminator.releases.length === 0 ? "" : ` [${terminator.releases.join(" ")}]`;
-  return `${pad}jump ${terminator.target}${releases}`;
+  const releases = fieldOf(terminator, "releases") as readonly string[];
+  const freed = releases.length === 0 ? "" : ` [${releases.join(" ")}]`;
+  return `${pad}jump ${String(fieldOf(terminator, "target"))}${freed}`;
 }
 
 /** A run of statements, each on its own line, two spaces in. */
@@ -483,9 +533,10 @@ function statementLines(statements: readonly SemanticStatement[], indent: number
 /** A block, and the way it ends. The source line is written on a block statement. */
 function blockLines(block: SemanticBlock, indent: number, source: number | null): string[] {
   const mark = source === null ? "" : ` @${source}`;
-  const lines = [`${" ".repeat(indent)}block ${block.id}: releases[${block.releases.join(" ")}]${mark}`];
-  lines.push(...statementLines(block.statements, indent + 2));
-  const end = terminatorText(block.terminator, indent);
+  const releases = (fieldOf(block, "releases") as readonly string[]).join(" ");
+  const lines = [`${" ".repeat(indent)}block ${String(fieldOf(block, "id"))}: releases[${releases}]${mark}`];
+  lines.push(...statementLines(fieldOf(block, "statements") as readonly SemanticStatement[], indent + 2));
+  const end = terminatorText(fieldOf(block, "terminator") as SemanticTerminator, indent);
   if (end !== null) lines.push(end);
   return lines;
 }
@@ -493,28 +544,22 @@ function blockLines(block: SemanticBlock, indent: number, source: number | null)
 /** A loop, the block it owns, and the blocks a `break` and a `continue` leave for. */
 function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
   const pad = " ".repeat(indent);
-  const mark = ` header ${loop.header} exit ${loop.exit} @${line}`;
-  let head: string;
-  switch (loop.kind) {
-    case "while":
-      head = `${pad}while ${printSemanticValue(loop.condition)}`;
-      break;
-    case "doWhile":
-      head = `${pad}do_while ${printSemanticValue(loop.condition)}`;
-      break;
-    case "counted": {
-      const bound = loop.inclusive ? "inclusive" : "exclusive";
-      const direction = loop.down ? "down" : "up";
-      const step = loop.step === null ? "default" : printSemanticValue(loop.step);
-      head = `${pad}for[${typeText(loop.type)}] ${loop.variable} from ${printSemanticValue(loop.from)} to ${printSemanticValue(loop.to)} ${bound} ${direction} step ${step}${loopMark(loop)}`;
-      break;
-    }
-    case "each": {
-      head = `${pad}for_of[${typeText(loop.elementType)}] ${loop.element} of ${loop.of} index ${loop.index} length ${printSemanticValue(loop.length)}${loopMark(loop)}`;
-      break;
-    }
+  const mark = ` header ${String(fieldOf(loop, "header"))} exit ${String(fieldOf(loop, "exit"))} @${line}`;
+  let head = "";
+  if (loop.kind === "while") {
+    head = `${pad}while ${printSemanticValue(fieldOf(loop, "condition") as SemanticValue)}`;
+  } else if (loop.kind === "doWhile") {
+    head = `${pad}do_while ${printSemanticValue(fieldOf(loop, "condition") as SemanticValue)}`;
+  } else if (loop.kind === "counted") {
+    const bound = fieldOf(loop, "inclusive") === true ? "inclusive" : "exclusive";
+    const direction = fieldOf(loop, "down") === true ? "down" : "up";
+    const stepValue = fieldOf(loop, "step") as SemanticValue | null;
+    const step = stepValue === null ? "default" : printSemanticValue(stepValue);
+    head = `${pad}for[${typeText(fieldOf(loop, "type") as SemanticType)}] ${String(fieldOf(loop, "variable"))} from ${printSemanticValue(fieldOf(loop, "from") as SemanticValue)} to ${printSemanticValue(fieldOf(loop, "to") as SemanticValue)} ${bound} ${direction} step ${step}${loopMark(loop)}`;
+  } else {
+    head = `${pad}for_of[${typeText(fieldOf(loop, "elementType") as SemanticType)}] ${String(fieldOf(loop, "element"))} of ${String(fieldOf(loop, "of"))} index ${String(fieldOf(loop, "index"))} length ${printSemanticValue(fieldOf(loop, "length") as SemanticValue)}${loopMark(loop)}`;
   }
-  return [head + mark, ...blockLines(loop.body, indent + 2, null)];
+  return [head + mark, ...blockLines(fieldOf(loop, "body") as SemanticBlock, indent + 2, null)];
 }
 
 /**
@@ -529,11 +574,11 @@ function loopLines(loop: SemanticLoop, indent: number, line: number): string[] {
  */
 function loopMark(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
   const marks: string[] = [];
-  if (loop.parallel === true) marks.push("parallel");
-  if (loop.region === true) marks.push("region");
+  if (fieldOf(loop, "parallel") === true) marks.push("parallel");
+  if (fieldOf(loop, "region") === true) marks.push("region");
   if (marks.length === 0) return "";
-  const reductions = loop.reductions ?? [];
-  const reductionsWord = reductions.length === 0 ? "" : ` reduction ${reductions.map((one) => `${one.name} ${one.op}`).join(" ")}`;
+  const reductions = (fieldOf(loop, "reductions") as readonly SemanticReduction[] | null) ?? [];
+  const reductionsWord = reductions.length === 0 ? "" : ` reduction ${reductions.map((one) => `${String(fieldOf(one, "name"))} ${String(fieldOf(one, "op"))}`).join(" ")}`;
   return ` ${marks.join(" ")}${reductionsWord}`;
 }
 
@@ -588,72 +633,78 @@ function isMarkOrHeader(scanner: IrScanner): boolean {
 /** One statement, and the blocks it owns. */
 function statementText(statement: SemanticStatement, indent: number): string[] {
   const pad = " ".repeat(indent);
-  const mark = ` @${statement.line}`;
+  const mark = ` @${String(fieldOf(statement, "line"))}`;
   switch (statement.k) {
     case "let":
-      return [`${pad}let ${slotText(statement.slot)} = ${printSemanticValue(statement.value)}${mark}`];
+      return [`${pad}let ${slotText(fieldOf(statement, "slot") as SemanticSlot)} = ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`];
     case "fill":
       return [
-        `${pad}fill ${statement.buffer} ${statement.index} element[${typeText(statement.type)}] ${printSemanticValue(statement.value)}${mark}`,
+        `${pad}fill ${String(fieldOf(statement, "buffer"))} ${String(fieldOf(statement, "index"))} element[${typeText(fieldOf(statement, "type") as SemanticType)}] ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`,
       ];
     case "set":
-      return [`${pad}set ${statement.name} ${statement.op} ${printSemanticValue(statement.value)}${mark}`];
+      return [`${pad}set ${String(fieldOf(statement, "name"))} ${String(fieldOf(statement, "op"))} ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`];
     case "setElement":
       return [
-        `${pad}set_element ${statement.buffer} ${printSemanticValue(statement.index)} ${statement.op} ${printSemanticValue(statement.value)}${mark}`,
+        `${pad}set_element ${String(fieldOf(statement, "buffer"))} ${printSemanticValue(fieldOf(statement, "index") as SemanticValue)} ${String(fieldOf(statement, "op"))} ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`,
       ];
     case "step": {
-      const side: Side = statement.prefix ? "pre" : "post";
-      return [`${pad}step ${statement.name} ${statement.op} ${side}${mark}`];
+      const side: Side = fieldOf(statement, "prefix") === true ? "pre" : "post";
+      return [`${pad}step ${String(fieldOf(statement, "name"))} ${String(fieldOf(statement, "op"))} ${side}${mark}`];
     }
     case "if": {
-      const lines = [`${pad}if ${printSemanticValue(statement.condition)}${mark}`, ...blockLines(statement.then, indent + 2, null)];
-      if (statement.otherwise !== null) {
-        lines.push(`${pad}else`, ...blockLines(statement.otherwise, indent + 2, null));
+      const lines = [`${pad}if ${printSemanticValue(fieldOf(statement, "condition") as SemanticValue)}${mark}`, ...blockLines(fieldOf(statement, "then") as SemanticBlock, indent + 2, null)];
+      const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+      if (otherwise !== null) {
+        lines.push(`${pad}else`, ...blockLines(otherwise, indent + 2, null));
       }
       return lines;
     }
     case "loop":
-      return loopLines(statement.loop, indent, statement.line);
+      return loopLines(fieldOf(statement, "loop") as SemanticLoop, indent, Number(fieldOf(statement, "line")));
     case "block":
-      return blockLines(statement.body, indent, statement.line);
+      return blockLines(fieldOf(statement, "body") as SemanticBlock, indent, Number(fieldOf(statement, "line")));
     case "printText":
-      return [`${pad}print_text ${printSemanticValue(statement.value)}${mark}`];
+      return [`${pad}print_text ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`];
     case "printNumber": {
       // The word `bigint` is what a printed number is when the language writes
       // an `n` after it, and a number no word is written is one of its own.
-      const bigint = statement.bigint ? " bigint" : "";
-      return [`${pad}print_number ${printSemanticValue(statement.value)}${bigint}${mark}`];
+      const bigint = fieldOf(statement, "bigint") === true ? " bigint" : "";
+      return [`${pad}print_number ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${bigint}${mark}`];
     }
     case "printNewline":
       return [`${pad}print_newline${mark}`];
     case "retain":
-      return [`${pad}retain ${printSemanticValue(statement.value)}${mark}`];
-    case "call":
-      return [`${pad}call[${typeText(statement.call.returns)}] ${callText(statement.call)}${mark}`];
+      return [`${pad}retain ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`];
+    case "call": {
+      const call = fieldOf(statement, "call") as SemanticCall;
+      return [`${pad}call[${typeText(fieldOf(call, "returns") as SemanticType)}] ${callText(call)}${mark}`];
+    }
     case "raise":
-      return [`${pad}raise ${printSemanticValue(statement.message)}${mark}`];
+      return [`${pad}raise ${printSemanticValue(fieldOf(statement, "message") as SemanticValue)}${mark}`];
     case "storeField":
       return [
-        `${pad}store_field ${printSemanticValue(statement.object)} ${statement.layout} ${statement.field} ${printSemanticValue(statement.value)}${mark}`,
+        `${pad}store_field ${printSemanticValue(fieldOf(statement, "object") as SemanticValue)} ${String(fieldOf(statement, "layout"))} ${String(fieldOf(statement, "field"))} ${printSemanticValue(fieldOf(statement, "value") as SemanticValue)}${mark}`,
       ];
   }
 }
 
 /** The IR as text: what a person reads and a model writes. */
 export function printSemanticProgram(program: SemanticProgram): string {
-  const lines: string[] = [`ir ${VERSION}`, `file ${stringLiteral(program.file)}`];
+  const lines: string[] = [`ir ${VERSION}`, `file ${stringLiteral(String(fieldOf(program, "file")))}`];
+  const functions = fieldOf(program, "functions") as readonly FunctionSignature[];
+  const bodies = fieldOf(program, "bodies") as readonly SemanticFunction[];
+  const objects = fieldOf(program, "objects") as Record<string, ObjectLayout>;
   // A function the program calls from another file is a signature: its body is
   // in that file's object. A function the program declares is a body here, and
   // is written whole.
-  const declared = new Set(program.bodies.map((fn) => fn.name));
-  for (const signature of program.functions) {
-    if (!declared.has(signature.name)) lines.push(signatureText(signature));
+  const declared = new Set<string>(bodies.map((fn) => String(fieldOf(fn, "name"))));
+  for (const signature of functions) {
+    if (!declared.has(String(fieldOf(signature, "name")))) lines.push(signatureText(signature));
   }
-  for (const name of Object.keys(program.objects)) lines.push(...objectLines(name, program.objects[name]));
-  for (const fn of program.bodies) lines.push("", ...functionLines(fn));
+  for (const name of Object.keys(objects)) lines.push(...objectLines(name, objects[name], 0));
+  for (const fn of bodies) lines.push("", ...functionLines(fn));
   lines.push("");
-  lines.push(...blockLines(program.entry, 0, null));
+  lines.push(...blockLines(fieldOf(program, "entry") as SemanticBlock, 0, null));
   return `${lines.join("\n")}\n`;
 }
 
@@ -663,9 +714,11 @@ export function printSemanticProgram(program: SemanticProgram): string {
 
 /** A function as the contract states it, under the name a call reaches it by. */
 function functionText(fn: SemanticFunction): string {
-  const alias = fn.symbol === fn.name ? "" : ` as ${fn.symbol}`;
-  const params = fn.params.map((param) => `${param.name}: ${typeText(slotType(param))}`).join(", ");
-  return `function ${fn.name}${alias}(${params}) -> ${typeText(fn.returns)}`;
+  const name = String(fieldOf(fn, "name"));
+  const symbol = String(fieldOf(fn, "symbol"));
+  const alias = symbol === name ? "" : ` as ${symbol}`;
+  const params = (fieldOf(fn, "params") as readonly SemanticSlot[]).map((param) => `${String(fieldOf(param, "name"))}: ${typeText(slotType(param))}`).join(", ");
+  return `function ${name}${alias}(${params}) -> ${typeText(fieldOf(fn, "returns") as SemanticType)}`;
 }
 
 /** What a flag of a function is stated as, which is the word a call states one with. */
@@ -692,16 +745,18 @@ function conditionLines(keyword: "requires" | "ensures", conditions: readonly st
  */
 function functionLines(fn: SemanticFunction): string[] {
   const lines = [functionText(fn)];
-  lines.push(...conditionLines("requires", fn.requires));
-  lines.push(...conditionLines("ensures", fn.ensures));
-  lines.push(`  allocates ${flagText(fn.allocates)}`);
-  lines.push(`  prints ${flagText(fn.prints)}`);
-  lines.push(`  reads_argv ${flagText(fn.readsArgv)}`);
-  lines.push(`  effects ${fn.effects.length === 0 ? "none" : fn.effects.join(" ")}`);
-  for (const name of Object.keys(fn.objects)) lines.push(...objectLines(name, fn.objects[name], 2));
-  for (const edge of fn.calls) lines.push(`  call ${edge.callee}`);
-  for (const param of fn.params) lines.push(`  param ${slotText(param)}`);
-  lines.push(...blockLines(fn.entry, 2, null));
+  lines.push(...conditionLines("requires", fieldOf(fn, "requires") as readonly string[]));
+  lines.push(...conditionLines("ensures", fieldOf(fn, "ensures") as readonly string[]));
+  lines.push(`  allocates ${flagText(fieldOf(fn, "allocates") === true)}`);
+  lines.push(`  prints ${flagText(fieldOf(fn, "prints") === true)}`);
+  lines.push(`  reads_argv ${flagText(fieldOf(fn, "readsArgv") === true)}`);
+  const effects = fieldOf(fn, "effects") as readonly Effect[];
+  lines.push(`  effects ${effects.length === 0 ? "none" : effects.join(" ")}`);
+  const objects = fieldOf(fn, "objects") as Record<string, ObjectLayout>;
+  for (const name of Object.keys(objects)) lines.push(...objectLines(name, objects[name], 2));
+  for (const edge of fieldOf(fn, "calls") as readonly CallEdge[]) lines.push(`  call ${String(fieldOf(edge, "callee"))}`);
+  for (const param of fieldOf(fn, "params") as readonly SemanticSlot[]) lines.push(`  param ${slotText(param)}`);
+  lines.push(...blockLines(fieldOf(fn, "entry") as SemanticBlock, 2, null));
   return lines;
 }
 
@@ -712,8 +767,8 @@ export function printSemanticFunction(fn: SemanticFunction): string {
 
 /** Every function of a file, as text. */
 export function printSemanticModule(module: SemanticModule): string {
-  const lines = [`ir ${VERSION}`, `module ${stringLiteral(module.path)}`];
-  for (const fn of module.functions) lines.push("", ...functionLines(fn));
+  const lines = [`ir ${VERSION}`, `module ${stringLiteral(String(fieldOf(module, "path")))}`];
+  for (const fn of fieldOf(module, "functions") as readonly SemanticFunction[]) lines.push("", ...functionLines(fn));
   return `${lines.join("\n")}\n`;
 }
 
@@ -746,13 +801,16 @@ class ContractBinder {
   private readonly declared = new Map<string, BoundCall>();
 
   constructor(contract: ProgramContract) {
-    for (const file of contract.files) {
-      for (const [name, declared] of Object.entries(file.functions)) {
+    for (const file of fieldOf(contract, "files") as readonly { functions: Record<string, FunctionContract> }[]) {
+      const table = fieldOf(file, "functions") as Record<string, FunctionContract>;
+      for (const name of Object.keys(table)) {
+        const declared = table[name];
         this.functions.set(name, declared);
-        this.functions.set(declared.function.name, declared);
-        this.functions.set(declared.function.symbol, declared);
-        for (const [layout, shape] of Object.entries(declared.definition.objects)) {
-          this.layouts.set(layout, shape);
+        this.functions.set(String(fieldOf(fieldOf(declared, "function"), "name")), declared);
+        this.functions.set(String(fieldOf(fieldOf(declared, "function"), "symbol")), declared);
+        const objects = fieldOf(fieldOf(declared, "definition"), "objects") as Record<string, ObjectLayout>;
+        for (const layout of Object.keys(objects)) {
+          this.layouts.set(layout, objects[layout]);
         }
       }
     }
@@ -780,7 +838,7 @@ class ContractBinder {
     // function of every file that wrote it. The symbol the header states is
     // therefore what the header is read against.
     const declared = builtinFor(name) === null ? this.functions.get(symbol) ?? this.functions.get(name) : undefined;
-    if (declared !== undefined && declared.function.name === name) return declared;
+    if (declared !== undefined && String(fieldOf(fieldOf(declared, "function"), "name")) === name) return declared;
     const compiled = this.names().join(", ") || "no functions";
     fail(line, `a function this program declares, one of: ${compiled}`, name);
   }
@@ -801,7 +859,10 @@ class ContractBinder {
    * into the caller, so a reader closing a call graph asks here.
    */
   callsOf(name: string): string[] {
-    return this.functions.get(name)?.definition.calls.map((call) => call.callee) ?? [];
+    const declared = this.functions.get(name);
+    if (declared === undefined) return [];
+    const calls = fieldOf(fieldOf(declared, "definition"), "calls") as readonly SemanticCall[];
+    return calls.map((call) => String(fieldOf(call, "callee")));
   }
 
   /** The layout a contract hands back, which the text only names. */
@@ -825,12 +886,12 @@ class ContractBinder {
     if (own !== undefined) return own;
     const declared = this.functions.get(name);
     if (declared !== undefined) {
-      return { signature: declared.function, effects: declared.effects, builtin: false };
+      return { signature: fieldOf(declared, "function") as FunctionSignature, effects: fieldOf(declared, "effects") as Effect[], builtin: false };
     }
     const builtin = builtinFor(name);
     if (builtin !== null) {
-      const params = builtin.params.map((type, index) => ({ name: `argument${index}`, type: contractText(type) }));
-      return { signature: { name, symbol: name, params, returns: contractText(builtin.returns) }, effects: [], builtin: true };
+      const params = (fieldOf(builtin, "params") as readonly TypeExpr[]).map((type, index) => ({ name: `argument${index}`, type: contractText(type) }));
+      return { signature: { name, symbol: name, params, returns: contractText(fieldOf(builtin, "returns") as TypeExpr) }, effects: [], builtin: true };
     }
     return null;
   }
@@ -847,7 +908,7 @@ class ContractBinder {
 
   /** The declaration of a function the program declares, for a body that names it. */
   declarationOf(name: string): FunctionSignature | null {
-    return this.declared.get(name)?.signature ?? null;
+    return (fieldOf(this.declared.get(name), "signature") as FunctionSignature | undefined) ?? null;
   }
 }
 
@@ -857,11 +918,12 @@ class ContractBinder {
 
 /** What a function the program declares is called by. */
 function functionSignature(fn: SemanticFunction): FunctionSignature {
+  const params = (fieldOf(fn, "params") as readonly SemanticSlot[]).map((param) => ({ name: String(fieldOf(param, "name")), type: typeText(slotType(param)) }));
   return {
-    name: fn.name,
-    symbol: fn.symbol,
-    params: fn.params.map((param) => ({ name: param.name, type: typeText(slotType(param)) })),
-    returns: typeText(fn.returns),
+    name: String(fieldOf(fn, "name")),
+    symbol: String(fieldOf(fn, "symbol")),
+    params,
+    returns: typeText(fieldOf(fn, "returns") as SemanticType),
   };
 }
 
@@ -906,7 +968,7 @@ class IrScanner {
 
   /** What the next character is, or nothing where the line has ended. */
   peek(): string {
-    return this.at >= this.text.length ? "" : this.text[this.at];
+    return this.text.slice(this.at, this.at + 1);
   }
 
   /** Spaces between the parts of a line say nothing. */
@@ -978,7 +1040,13 @@ class IrScanner {
    * word the set does not hold is an error, and never a name read past.
    */
   oneOf<T extends string>(word: string, options: readonly T[]): T {
-    const found = options.find((option) => option === word);
+    let found: T | undefined;
+    for (let at = 0; at < options.length; at += 1) {
+      if (String(options[at]) === word) {
+        found = options[at];
+        break;
+      }
+    }
     if (found === undefined) this.refuse(`one of ${options.join(", ")}`, word);
     return found;
   }
@@ -1330,14 +1398,29 @@ class IrScanner {
         // `to_text@9` is a number written at nine digits, `to_text@hex` is one
         // written in base sixteen and `to_text@bin` one written in base two.
         // `to_text@p17` is one written at seventeen significant digits.
-        const precision = asked !== null && /^p\d+$/.test(asked) ? Number(asked.slice(1)) : null;
-        if (asked !== null && precision === null && asked !== "hex" && asked !== "bin" && !/^\d+$/.test(asked)) this.refuse("the digits a number is written at", asked);
+        let digits: number | null = null;
+        let precision = false;
+        const askedText: string = asked === null ? "" : asked;
+        if (askedText.length > 0) {
+          if (/^p\d+$/.test(askedText)) {
+            digits = Number(askedText.slice(1));
+            precision = true;
+          } else if (/^hex$/.test(askedText)) {
+            digits = -1;
+          } else if (/^bin$/.test(askedText)) {
+            digits = -2;
+          } else if (/^\d+$/.test(askedText)) {
+            digits = Number(askedText);
+          } else {
+            this.refuse("the digits a number is written at", askedText);
+          }
+        }
         return this.closing(bracketed, {
           k: "toText",
           type: TEXT,
           of: this.value(),
-          digits: asked === null ? null : asked === "hex" ? -1 : asked === "bin" ? -2 : precision ?? Number(asked),
-          ...(precision === null ? {} : { precision: true as const }),
+          digits,
+          ...(precision ? { precision: true as const } : {}),
         });
       }
       case "length":
@@ -1461,7 +1544,8 @@ class IrScanner {
       const ownership = this.oneOf(this.word(), OWNERSHIPS);
       this.keyword("retain");
       this.expect("=");
-      const retain = this.oneOf(this.word(), FLAGS);
+      const retainWord = this.word();
+      this.oneOf(retainWord, FLAGS);
       const signature: FunctionSignature = {
         name: "(closure)",
         symbol: "(closure)",
@@ -1477,7 +1561,7 @@ class IrScanner {
         returns,
         effects: [],
         ownership,
-        retain: retain === "yes",
+        retain: retainWord === "yes",
         builtin: false,
       };
     }
@@ -1488,7 +1572,7 @@ class IrScanner {
     // body that reaches for `Math.floor` to a list of the program's own
     // functions is refusing arithmetic over a number for no reason. `bind`
     // above has already said whether the name is one the compiler provides.
-    if (this.declaredCallees !== null && !bound.builtin && !this.declaredCallees.includes(callee)) {
+    if (this.declaredCallees !== null && fieldOf(bound, "builtin") !== true && !this.declaredCallees.includes(callee)) {
       const declared = this.declaredCallees.join(", ") || "no calls";
       fail(this.line, `a call this function declared, one of: ${declared}`, callee);
     }
@@ -1506,7 +1590,8 @@ class IrScanner {
     const ownership = this.oneOf(this.word(), OWNERSHIPS);
     this.keyword("retain");
     this.expect("=");
-    const retain = this.oneOf(this.word(), FLAGS);
+    const retainWord = this.word();
+    this.oneOf(retainWord, FLAGS);
     // A grid launch is written after the ownership flags, and an ordinary call
     // says nothing more: the grid is what the kernel is launched on, and a call
     // without one is a call.
@@ -1519,14 +1604,14 @@ class IrScanner {
     }
     return {
       callee,
-      signature: bound.signature,
+      signature: fieldOf(bound, "signature") as FunctionSignature,
       args,
       argTypes,
       returns,
-      effects: bound.effects,
+      effects: fieldOf(bound, "effects") as Effect[],
       ownership,
-      retain: retain === "yes",
-      builtin: bound.builtin,
+      retain: retainWord === "yes",
+      builtin: fieldOf(bound, "builtin") === true,
       ...(grid === undefined ? {} : { grid }),
     };
   }
@@ -1593,9 +1678,9 @@ function readLines(text: string): IrLine[] {
     const raw = source[index].endsWith("\r") ? source[index].slice(0, -1) : source[index];
     if (raw.trim() === "") continue;
     let indent = 0;
-    while (raw[indent] === " ") indent += 1;
+    while (raw.slice(indent, indent + 1) === " ") indent += 1;
     const number = index + 1;
-    if (raw[indent] === "\t") fail(number, "indentation made of spaces", "\t");
+    if (raw.slice(indent, indent + 1) === "\t") fail(number, "indentation made of spaces", "\t");
     if (indent % 2 !== 0) fail(number, "indentation of two spaces per level", `${indent} spaces`);
     lines.push({ number, indent, text: raw.slice(indent) });
   }
@@ -2190,7 +2275,8 @@ class ProgramReader extends BlockReader {
     this.at += 1;
     if (headOf(line) !== keyword) fail(line.number, `"${keyword}"`, line.text);
     const scanner = this.scanner(line);
-    const word = scanner.oneOf(scanner.word(), FLAGS);
+    const word = scanner.word();
+    scanner.oneOf(word, FLAGS);
     scanner.end();
     return word === "yes";
   }
@@ -2263,7 +2349,7 @@ class ProgramReader extends BlockReader {
       const compiled = this.binder.names().join(", ") || "no functions";
       fail(line.number, `a function this program declares, one of: ${compiled}`, line.text);
     }
-    return bound.signature;
+    return fieldOf(bound, "signature") as FunctionSignature;
   }
 
   /**
@@ -2365,33 +2451,39 @@ class FunctionReader extends BlockReader {
     scanner.end();
 
     const declared = this.binder.declaration(name, symbol, line.number);
-    const signature = declared.function;
-    if (symbol !== signature.symbol) {
-      fail(line.number, `the symbol the contract declares, "${signature.symbol}"`, symbol);
+    const signature = fieldOf(declared, "function") as FunctionSignature;
+    const signatureSymbol = String(fieldOf(signature, "symbol"));
+    const declaredParams = fieldOf(signature, "params") as readonly { readonly name: string; readonly type: string }[];
+    if (symbol !== signatureSymbol) {
+      fail(line.number, `the symbol the contract declares, "${signatureSymbol}"`, symbol);
     }
-    if (written.length !== signature.params.length) {
-      const named = signature.params.map((param) => param.name).join(", ") || "no parameters";
+    if (written.length !== declaredParams.length) {
+      const named = declaredParams.map((param) => String(fieldOf(param, "name"))).join(", ") || "no parameters";
       fail(line.number, `the parameters the contract declares: ${named}`, line.text);
     }
     for (let index = 0; index < written.length; index += 1) {
-      const expected = signature.params[index];
-      if (written[index].name !== expected.name) {
-        fail(line.number, `the parameter the contract declares, "${expected.name}"`, written[index].name);
+      const expected = declaredParams[index];
+      const declaredName = String(fieldOf(expected, "name"));
+      const declaredType = String(fieldOf(expected, "type"));
+      if (String(fieldOf(written[index], "name")) !== declaredName) {
+        fail(line.number, `the parameter the contract declares, "${declaredName}"`, String(fieldOf(written[index], "name")));
       }
-      if (!typeEquals(written[index].type, parseType(expected.type))) {
-        fail(line.number, `the type the contract declares for "${expected.name}", "${expected.type}"`, typeText(written[index].type));
+      if (!typeEquals(fieldOf(written[index], "type") as SemanticType, parseType(declaredType))) {
+        fail(line.number, `the type the contract declares for "${declaredName}", "${declaredType}"`, typeText(fieldOf(written[index], "type") as SemanticType));
       }
     }
-    if (!typeEquals(returns, parseType(signature.returns))) {
-      fail(line.number, `the return type the contract declares, "${signature.returns}"`, typeText(returns));
+    const declaredReturns = String(fieldOf(signature, "returns"));
+    if (!typeEquals(returns, parseType(declaredReturns))) {
+      fail(line.number, `the return type the contract declares, "${declaredReturns}"`, typeText(returns));
     }
 
-    const requires = this.conditions("requires", declared.requires);
-    const ensures = this.conditions("ensures", declared.ensures);
-    const allocates = this.flag("allocates", declared.definition.allocates);
-    const prints = this.flag("prints", declared.definition.prints);
-    const readsArgv = this.flag("reads_argv", declared.definition.readsArgv);
-    const effects = this.effects(declared.effects);
+    const definition = fieldOf(declared, "definition") as Record<string, unknown>;
+    const requires = this.conditions("requires", fieldOf(declared, "requires") as readonly string[]);
+    const ensures = this.conditions("ensures", fieldOf(declared, "ensures") as readonly string[]);
+    const allocates = this.flag("allocates", fieldOf(definition, "allocates") === true);
+    const prints = this.flag("prints", fieldOf(definition, "prints") === true);
+    const readsArgv = this.flag("reads_argv", fieldOf(definition, "readsArgv") === true);
+    const effects = this.effects(fieldOf(declared, "effects") as readonly Effect[]);
     const objects = this.objects();
     const calls = this.calls(declared);
     const params = this.params(signature);
@@ -2440,7 +2532,8 @@ class FunctionReader extends BlockReader {
     const line = this.line(2);
     this.at += 1;
     const scanner = this.scanner(line);
-    const word = scanner.oneOf(scanner.word(), FLAGS);
+    const word = scanner.word();
+    scanner.oneOf(word, FLAGS);
     scanner.end();
     if ((word === "yes") !== declared) {
       fail(line.number, `${keyword} ${flagText(declared)}, which the contract states`, word);
@@ -2511,15 +2604,15 @@ class FunctionReader extends BlockReader {
 
   /** The calls the body makes, each of them an edge the contract records. */
   private calls(declared: FunctionContract): CallEdge[] {
-    const recorded = declared.definition.calls;
+    const recorded = fieldOf(fieldOf(declared, "definition"), "calls") as readonly CallEdge[];
     // What this body may name is not only what this body names. A candidate is
     // handed the body of any callee it is told to write out, and a body written
     // out brings the calls that body makes with it — so `report` writing out
     // `leaf` may call `twice`, because `leaf` is what calls it. Anything past
     // that is not this function's to reach: the set is closed over written-out
     // callees only, so a call behind a real call is still somebody else's.
-    this.reachable = new Set<string>(recorded.map((call) => call.callee));
-    const queue = recorded.filter((call) => call.strategy === "inline").map((call) => call.callee);
+    this.reachable = new Set<string>(recorded.map((call) => String(fieldOf(call, "callee"))));
+    const queue = recorded.filter((call) => String(fieldOf(call, "strategy")) === "inline").map((call) => String(fieldOf(call, "callee")));
     for (let at = 0; at < queue.length; at += 1) {
       for (const call of this.binder.callsOf(queue[at])) {
         if (this.reachable.has(call)) continue;
@@ -2534,9 +2627,9 @@ class FunctionReader extends BlockReader {
       const callee = scanner.word();
       scanner.end();
       this.binder.bind(callee, line.number);
-      const edge = recorded.find((call) => call.callee === callee);
+      const edge = recorded.find((call) => String(fieldOf(call, "callee")) === callee);
       if (edge !== undefined) {
-        calls.push({ callee: edge.callee, strategy: edge.strategy });
+        calls.push({ callee: String(fieldOf(edge, "callee")), strategy: fieldOf(edge, "strategy") as CallEdge["strategy"] });
         continue;
       }
       // A callee this function does not name but may, because it sits behind a
@@ -2554,13 +2647,14 @@ class FunctionReader extends BlockReader {
     // What it may not do is declare a call twice, which would be a body whose
     // reach the list does not describe.
     for (const edge of calls) {
-      if (calls.filter((other) => other.callee === edge.callee).length > 1) {
-        fail(this.where(null).number, `each callee declared once, and ${edge.callee} is declared twice`, edge.callee);
+      const edgeCallee = String(fieldOf(edge, "callee"));
+      if (calls.filter((other) => String(fieldOf(other, "callee")) === edgeCallee).length > 1) {
+        fail(this.where(null).number, `each callee declared once, and ${edgeCallee} is declared twice`, edgeCallee);
       }
     }
     // The body is checked against this list as it is read, so the list is where
     // the reader learns what the body is allowed to reach.
-    this.declaredCallees = calls.map((edge) => edge.callee);
+    this.declaredCallees = calls.map((edge) => String(fieldOf(edge, "callee")));
     return calls;
   }
 
@@ -2577,16 +2671,18 @@ class FunctionReader extends BlockReader {
       const scanner = this.scanner(line);
       const slot = this.slot(scanner);
       scanner.end();
-      const expected = declared.params[params.length];
-      if (expected === undefined || expected.name !== slot.name) {
-        const named = declared.params.map((param) => param.name).join(", ") || "no parameters";
-        fail(line.number, `a parameter the signature declares, one of: ${named}`, slot.name);
+      const declaredParams = fieldOf(declared, "params") as readonly { readonly name: string }[];
+      const expected = declaredParams[params.length];
+      if (expected === undefined || String(fieldOf(expected, "name")) !== String(fieldOf(slot, "name"))) {
+        const named = declaredParams.map((param) => String(fieldOf(param, "name"))).join(", ") || "no parameters";
+        fail(line.number, `a parameter the signature declares, one of: ${named}`, String(fieldOf(slot, "name")));
       }
       params.push(slot);
     }
-    if (params.length !== declared.params.length) {
+    const declaredParams = fieldOf(declared, "params") as readonly { readonly name: string }[];
+    if (params.length !== declaredParams.length) {
       const at = this.where(null);
-      const named = declared.params.map((param) => param.name).join(", ") || "no parameters";
+      const named = declaredParams.map((param) => String(fieldOf(param, "name"))).join(", ") || "no parameters";
       fail(at.number, `a slot for every parameter the signature declares, one of: ${named}`, at.text);
     }
     return params;

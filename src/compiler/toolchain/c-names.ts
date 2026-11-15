@@ -10,6 +10,10 @@ import { CompilerError } from "../core/errors.ts";
  * driver and the test harness do it the same way.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /** The keywords C reserves, complete: a generated source that writes a name down needs one. */
 export const C_KEYWORDS: Record<string, true> = {
   _Alignas: true,
@@ -202,7 +206,7 @@ export function cSymbolLabel(symbol: string): string {
 
 export function cEscape(name: string, reserved: Readonly<Record<string, true>>): string {
   let escaped = name;
-  while (reserved[escaped] === true) escaped += "_";
+  while (Object.hasOwn(reserved, escaped)) escaped += "_";
   return escaped;
 }
 
@@ -223,7 +227,8 @@ export function cMemberName(name: string): string {
     // A member is an identifier: a name the source quoted writes its characters
     // a C name cannot carry as the digit or dot they stand for, so every one of
     // them is an underscore the declaration and the access agree on.
-    escaped += /[A-Za-z0-9_]/.test(name[index]) ? name[index] : "_";
+    const character = name.slice(index, index + 1);
+    escaped += /[A-Za-z0-9_]/.test(character) ? character : "_";
   }
   if (escaped === "" || /^[0-9]/.test(escaped)) escaped = `_${escaped}`;
   return cEscape(escaped, { ...C_KEYWORDS, ...cMacroNames() });
@@ -330,14 +335,14 @@ export function cLiteral(text: string, type: string): string {
     // The digits the value is, not the text it was written with: a literal the
     // language writes as a bigint carries the `n` that says so, and that is not
     // a suffix C knows.
-    if (value !== null && value >= wide.low && value <= wide.high) return `${value.toString()}${wide.suffix}`;
+    if (value !== null && value >= (fieldOf(wide, "low") as bigint) && value <= (fieldOf(wide, "high") as bigint)) return `${value.toString()}${String(fieldOf(wide, "suffix"))}`;
     // A value the type cannot hold as a magnitude is written as the bits it
     // is rather than as that magnitude: a decimal constant too large for any
     // signed type is not something C will read, and the bits are what the
     // width is about.
     if (value !== null) {
       const bits = value < 0n ? (1n << 64n) + value : value;
-      return `(${wide.type})0x${bits.toString(16)}ULL`;
+      return `(${String(fieldOf(wide, "type"))})0x${bits.toString(16)}ULL`;
     }
   }
   if (type !== "f32" && type !== "f64") return text;

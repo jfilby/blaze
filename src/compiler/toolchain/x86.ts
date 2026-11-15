@@ -16,6 +16,14 @@
 
 import { CompilerError } from "../core/errors.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Registers                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -302,7 +310,7 @@ export class Encoder {
    * anything else. `bind` reads it to take out a jump that lands where it
    * already is, which is the one jump no reader of the code expects to find.
    */
-  private pendingJump: string | null = null;
+  pendingJump: string | null = null;
   /**
    * How many labels were bound when that jump was written. Taking the jump out
    * moves every address after it down by two, which is safe only while no
@@ -311,8 +319,8 @@ export class Encoder {
    * the jump leaves that label pointing two bytes into the instruction it was
    * meant to begin.
    */
-  private pendingBinds = 0;
-  private binds = 0;
+  pendingBinds = 0;
+  binds = 0;
 
   /**
    * Told that a name has been bound to the place the code has reached.
@@ -328,7 +336,7 @@ export class Encoder {
    * a closed loop as though nothing had happened on it, and a jump is exactly
    * what closes one.
    */
-  onBind: (() => void) | null = null;
+  onBind: ((ignored?: unknown) => void) | null = null;
 
   /** Binds a name to the place the code has reached. */
   bind(name: string): void {
@@ -340,14 +348,14 @@ export class Encoder {
     // label of its own and then falls out of itself into the end is the one
     // case where the two are not the same place: the jump skips that arm, so
     // it is written even though nothing follows it.
-    if (this.pendingJump === name && this.binds === this.pendingBinds) {
-      this.pendingJump = null;
+    if (String(fieldOf(this, "pendingJump")) === name && Number(fieldOf(this, "binds")) === Number(fieldOf(this, "pendingBinds"))) {
+      setFieldOn(this, "pendingJump", null);
       this.fixups.pop();
       this.code.length -= 2;
     }
-    this.binds += 1;
+    setFieldOn(this, "binds", Number(fieldOf(this, "binds")) + 1);
     this.labels.set(name, this.code.length);
-    this.onBind?.();
+    if (this.onBind !== null) this.onBind(undefined);
   }
 
   /**
@@ -357,7 +365,7 @@ export class Encoder {
    * of itself into whatever happened to be written next.
    */
   sealJump(): void {
-    this.pendingJump = null;
+    setFieldOn(this, "pendingJump", null);
   }
 
   /**
@@ -378,13 +386,15 @@ export class Encoder {
    */
   finish(): Uint8Array {
     for (const fixup of this.fixups) {
-      if (!this.labels.has(fixup.label)) {
-        throw new CompilerError("AssemblyError", "assemble", `the machine code jumps to ${fixup.label}, which is never bound`, "", "", "", "");
+      const label = String(fieldOf(fixup, "label"));
+      if (!this.labels.has(label)) {
+        throw new CompilerError("AssemblyError", "assemble", `the machine code jumps to ${label}, which is never bound`, "", "", "", "");
       }
     }
     for (const place of this.places) {
-      if (!this.labels.has(place.label)) {
-        throw new CompilerError("AssemblyError", "assemble", `the machine code takes the address of ${place.label}, which is never bound`, "", "", "", "");
+      const label = String(fieldOf(place, "label"));
+      if (!this.labels.has(label)) {
+        throw new CompilerError("AssemblyError", "assemble", `the machine code takes the address of ${label}, which is never bound`, "", "", "", "");
       }
     }
     // Widening one jump moves everything after it, which can put a later jump
@@ -394,54 +404,58 @@ export class Encoder {
       const shift = this.layout();
       let widened = false;
       for (const fixup of this.fixups) {
-        if (fixup.wide) continue;
-        const target = this.labels.get(fixup.label) as number;
-        const distance = shift.at(target) - (shift.at(fixup.at) + 1);
+        if (fieldOf(fixup, "wide") === true) continue;
+        const target = this.labels.get(String(fieldOf(fixup, "label"))) as number;
+        const at = Number(fieldOf(fixup, "at"));
+        const distance = shift[target] - (shift[at] + 1);
         if (distance < -128 || distance > 127) {
-          fixup.wide = true;
+          setFieldOn(fixup, "wide", true);
           widened = true;
         }
       }
       if (!widened) break;
     }
     const shift = this.layout();
-    const code = new Uint8Array(shift.length);
-    for (let at = 0; at < this.code.length; at += 1) code[shift.at(at)] = this.code[at];
+    const code = new Uint8Array(shift[this.code.length]);
+    for (let at = 0; at < this.code.length; at += 1) code[shift[at]] = this.code[at];
     for (const fixup of this.fixups) {
-      const at = shift.at(fixup.at);
+      const at = shift[Number(fieldOf(fixup, "at"))];
+      const condition = fieldOf(fixup, "condition") as Condition | null;
+      const wide = fieldOf(fixup, "wide") === true;
       // The wide form of a conditional jump carries an extra opcode byte, so
       // its displacement field starts one byte later than a plain jump's.
-      const field = fixup.wide ? at + (fixup.condition === null ? 0 : 1) : at;
-      if (fixup.wide) {
+      const field = wide ? at + (condition === null ? 0 : 1) : at;
+      if (wide) {
         // The short opcode and its one byte field become the long opcode and
         // a four byte field, which is where the extra bytes came from.
-        if (fixup.condition === null) code[at - 1] = 0xe9;
+        if (condition === null) code[at - 1] = 0xe9;
         else {
           code[at - 1] = 0x0f;
-          code[at] = 0x80 + CONDITION[fixup.condition];
+          code[at] = 0x80 + Number(fieldOf(CONDITION, String(condition)));
         }
       }
       // A displacement is measured from the end of the field it is written in.
-      const distance = shift.at(this.labels.get(fixup.label) as number) - (field + (fixup.wide ? 4 : 1));
-      for (let index = 0; index < (fixup.wide ? 4 : 1); index += 1) {
+      const distance = shift[this.labels.get(String(fieldOf(fixup, "label"))) as number] - (field + (wide ? 4 : 1));
+      for (let index = 0; index < (wide ? 4 : 1); index += 1) {
         code[field + index] = (distance >> (index * 8)) & 0xff;
       }
     }
     for (const patch of this.patches) {
-      const at = shift.at(patch.at);
-      for (let index = 0; index < 4; index += 1) code[at + index] = (patch.value >> (index * 8)) & 0xff;
+      const at = shift[Number(fieldOf(patch, "at"))];
+      for (let index = 0; index < 4; index += 1) code[at + index] = (Number(fieldOf(patch, "value")) >> (index * 8)) & 0xff;
     }
     for (const place of this.places) {
-      const at = shift.at(place.at);
+      const at = shift[Number(fieldOf(place, "at"))];
       // An address is measured from the end of its own field, the same place a
       // jump's displacement is, because the encoding is the relative one.
-      const distance = shift.at(this.labels.get(place.label) as number) - (at + 4);
+      const distance = shift[this.labels.get(String(fieldOf(place, "label"))) as number] - (at + 4);
       for (let index = 0; index < 4; index += 1) {
         code[at + index] = (distance >> (index * 8)) & 0xff;
       }
     }
     for (const relocation of this.relocations) {
-      relocation.offset = shift.at(relocation.offset);
+      const offset = Number(fieldOf(relocation, "offset"));
+      setFieldOn(relocation, "offset", shift[offset]);
     }
     return code;
   }
@@ -455,24 +469,27 @@ export class Encoder {
    * instruction, so every byte from the second field onwards moves by the
    * bytes that were added: three for a jump, four for a conditional one,
    * which is the extra opcode byte `0F` that comes with the four byte form.
+   *
+   * The table is indexed by a place in the optimistic code and holds the place
+   * that byte ends up at; the entry at `code.length` is where the end of the
+   * code ends up, which is the length of the finished code.
    */
-  private layout(): { at: (offset: number) => number; length: number } {
+  private layout(): Int32Array {
     const widened = this.fixups
-      .filter((fixup) => fixup.wide)
-      .map((fixup) => ({ at: fixup.at, extra: fixup.condition === null ? 3 : 4 }))
-      .sort((a, b) => a.at - b.at);
-    const extra = new Int32Array(this.code.length + 1);
+      .filter((fixup) => fieldOf(fixup, "wide") === true)
+      .map((fixup) => ({ at: Number(fieldOf(fixup, "at")), extra: fieldOf(fixup, "condition") === null ? 3 : 4 }))
+      .sort((a, b) => Number(fieldOf(a, "at")) - Number(fieldOf(b, "at")));
+    const shift = new Int32Array(this.code.length + 1);
     let running = 0;
     let next = 0;
     for (let at = 0; at <= this.code.length; at += 1) {
-      while (next < widened.length && widened[next].at + 1 <= at) {
-        running += widened[next].extra;
+      while (next < widened.length && Number(fieldOf(widened[next], "at")) + 1 <= at) {
+        running += Number(fieldOf(widened[next], "extra"));
         next += 1;
       }
-      extra[at] = running;
+      shift[at] = at + running;
     }
-    const length = this.code.length + widened.reduce((total, entry) => total + entry.extra, 0);
-    return { at: (offset: number) => offset + extra[offset], length };
+    return shift;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -482,7 +499,7 @@ export class Encoder {
   byte(value: number): void {
     // Anything written at all means the last instruction has ended, so a jump
     // is no longer the last thing in the code.
-    this.pendingJump = null;
+    setFieldOn(this, "pendingJump", null);
     this.code.push(value & 0xff);
   }
 
@@ -495,11 +512,12 @@ export class Encoder {
 
   private rex(w: boolean, reg: number, rm: number | { base: number | null; index: number | null }): void {
     const memory = typeof rm === "number" ? null : rm;
-    const base = typeof rm === "number" ? rm : (rm.base ?? 0);
+    const base = typeof rm === "number" ? rm : Number(fieldOf(rm, "base") ?? 0);
+    const index = memory === null ? 0 : Number(fieldOf(memory, "index") ?? 0);
     const bits =
       (w ? 0b1000 : 0) |
       (reg >= 8 ? 0b100 : 0) |
-      ((memory?.index ?? 0) >= 8 ? 0b10 : 0) |
+      (index >= 8 ? 0b10 : 0) |
       (base >= 8 ? 0b1 : 0);
     if (bits !== 0) this.byte(0x40 | bits);
   }
@@ -525,11 +543,15 @@ export class Encoder {
       this.byte(0xc0 | ((reg & 7) << 3) | (rm & 7));
       return;
     }
-    const needsSib = rm.index !== null || (rm.base !== null && (rm.base & 7) === RSP);
-    const low = rm.base ?? 0;
+    const base = fieldOf(rm, "base") as number | null;
+    const index = fieldOf(rm, "index") as number | null;
+    const scale = Number(fieldOf(rm, "scale"));
+    const disp = Number(fieldOf(rm, "disp"));
+    const needsSib = index !== null || (base !== null && (base & 7) === RSP);
+    const low = base ?? 0;
     let mod = 0;
-    if (rm.disp !== 0 || (rm.base !== null && (rm.base & 7) === RBP)) {
-      mod = rm.disp >= -128 && rm.disp <= 127 ? 1 : 2;
+    if (disp !== 0 || (base !== null && (base & 7) === RBP)) {
+      mod = disp >= -128 && disp <= 127 ? 1 : 2;
     }
     // An address whose displacement is a function of a frame size the body has
     // not filled yet is written as the four byte form whatever its value is
@@ -542,7 +564,7 @@ export class Encoder {
     }
     this.byte((mod << 6) | ((reg & 7) << 3) | (needsSib ? 4 : low & 7));
     if (needsSib) {
-      const scale = rm.scale === 1 ? 0 : rm.scale === 2 ? 1 : rm.scale === 4 ? 2 : 3;
+      const scaleBits = scale === 1 ? 0 : scale === 2 ? 1 : scale === 4 ? 2 : 3;
       // The scale is in the highest two bits, the index register in the three
       // below them and the base register in the lowest three. An address with
       // no index says so with 100 in the index field: 000 is `rax`, the
@@ -550,13 +572,13 @@ export class Encoder {
       // every unindexed address that needs a SIB read one register further than
       // it was written. Only `rsp` needs a SIB without an index, because its
       // low three bits are the SIB escape, so this is the stack.
-      const index = rm.index === null ? 4 : rm.index & 7;
-      this.byte((scale << 6) | (index << 3) | (low & 7));
+      const indexBits = index === null ? 4 : index & 7;
+      this.byte((scaleBits << 6) | (indexBits << 3) | (low & 7));
     }
-    if (mod === 1) this.byte(rm.disp & 0xff);
+    if (mod === 1) this.byte(disp & 0xff);
     if (mod === 2) {
       if (deferred !== -1) this.deferred[deferred] = this.code.length;
-      this.word(rm.disp);
+      this.word(disp);
     }
   }
 
@@ -589,7 +611,7 @@ export class Encoder {
    */
   epilogue(pinned: readonly number[], vectors: readonly VectorSave[], frameBytes: number): void {
     for (const saved of vectors) {
-      this.movsLoad(saved.register, frame(saved.offset), saved.single);
+      this.movsLoad(Number(fieldOf(saved, "register")), frame(Number(fieldOf(saved, "offset"))), fieldOf(saved, "single") === true);
     }
     if (frameBytes > 0) this.aluImm("add", RSP, frameBytes);
     for (let index = pinned.length - 1; index >= 0; index -= 1) this.pop(pinned[index]);
@@ -672,13 +694,31 @@ export class Encoder {
     this.code.splice(from, bytes);
     for (const [name, where] of this.labels) this.labels.set(name, where > from ? where - bytes : where);
     for (const [index, fixup] of this.fixups.entries()) {
-      if (fixup.at > from) this.fixups[index] = { ...fixup, at: fixup.at - bytes };
+      const at = Number(fieldOf(fixup, "at"));
+      if (at > from) {
+        this.fixups[index] = {
+          at: at - bytes,
+          label: String(fieldOf(fixup, "label")),
+          condition: fieldOf(fixup, "condition") as Condition | null,
+          wide: fieldOf(fixup, "wide") === true,
+        };
+      }
     }
     for (const [index, patch] of this.patches.entries()) {
-      if (patch.at > from) this.patches[index] = { ...patch, at: patch.at - bytes };
+      const at = Number(fieldOf(patch, "at"));
+      if (at > from) {
+        this.patches[index] = { at: at - bytes, value: Number(fieldOf(patch, "value")) };
+      }
     }
     for (const [index, relocation] of this.relocations.entries()) {
-      if (relocation.offset > from) this.relocations[index] = { ...relocation, offset: relocation.offset - bytes };
+      const offset = Number(fieldOf(relocation, "offset"));
+      if (offset > from) {
+        this.relocations[index] = {
+          offset: offset - bytes,
+          symbol: String(fieldOf(relocation, "symbol")),
+          kind: fieldOf(relocation, "kind") as "call" | "address",
+        };
+      }
     }
   }
 
@@ -852,8 +892,8 @@ export class Encoder {
   jmp(label: string): void {
     this.byte(0xeb);
     this.displacement(label, null);
-    this.pendingJump = label;
-    this.pendingBinds = this.binds;
+    setFieldOn(this, "pendingJump", label);
+    setFieldOn(this, "pendingBinds", Number(fieldOf(this, "binds")));
   }
 
   jcc(condition: Condition, label: string): void {
@@ -1016,8 +1056,8 @@ export class Encoder {
     if (typeof rm === "number") {
       bBit = (rm >= 8) ? 0 : 1;
     } else {
-      xBit = ((rm.index ?? 0) >= 8) ? 0 : 1;
-      bBit = ((rm.base ?? 0) >= 8) ? 0 : 1;
+      xBit = (Number(fieldOf(rm, "index") ?? 0) >= 8) ? 0 : 1;
+      bBit = (Number(fieldOf(rm, "base") ?? 0) >= 8) ? 0 : 1;
     }
     const byte2 = (rBit << 7) | (xBit << 6) | (bBit << 5) | map;
     this.byte(byte2);
@@ -1581,8 +1621,10 @@ export class Encoder {
     let xBit = 1;
     let bBit = 1;
     if (typeof rm !== "number") {
-      xBit = rm.index !== null && rm.index >= 8 ? 0 : 1;
-      bBit = rm.base !== null && rm.base >= 8 ? 0 : 1;
+      const index = fieldOf(rm, "index") as number | null;
+      const base = fieldOf(rm, "base") as number | null;
+      xBit = index !== null && index >= 8 ? 0 : 1;
+      bBit = base !== null && base >= 8 ? 0 : 1;
     }
     this.byte((rBit << 7) | (xBit << 6) | (bBit << 5) | 0x10 | map);
     const byte3 =

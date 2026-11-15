@@ -12,7 +12,7 @@
  * into a single relocatable object that the program driver links.
  */
 
-import { readdirEntries, stat, writeFile, availableParallelism, compilerDataRoot, join, resolveFrom } from "../core/platform.ts";
+import { readdirEntries, isDirectoryPath, isFilePath, writeFile, availableParallelism, compilerDataRoot, join, resolveFrom } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run, runAsync } from "../core/process.ts";
 import { mapConcurrent } from "../core/concurrency.ts";
@@ -27,6 +27,18 @@ import {
   relocatableLinkCommand,
   toolchainFor,
 } from "../core/toolchain.ts";
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+/** What a failed run said: its standard error, or the reason it never started. */
+function failureText(result: unknown): string {
+  const stderr = String(fieldOf(result, "stderr")).trim();
+  if (stderr !== "") return stderr;
+  const spawnError = fieldOf(result, "spawnError");
+  return spawnError === undefined ? "" : String(spawnError);
+}
+
 import type { BuildMode, TargetSpec } from "../core/types.ts";
 
 export interface FacilRuntime {
@@ -49,7 +61,7 @@ export function facilIoLibraries(tls: boolean, target?: TargetSpec): readonly st
   const libraries: string[] = [];
   if (tls) libraries.push("-lssl", "-lcrypto");
   // QNX keeps its socket calls in libsocket rather than in libc.
-  if (target?.os === "qnx") libraries.push("-lsocket");
+  if (target !== undefined && String(fieldOf(target, "os")) === "qnx") libraries.push("-lsocket");
   return libraries;
 }
 
@@ -117,11 +129,12 @@ export async function walkFacilIoTree(root: string): Promise<FacilIoTree> {
   const directories: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdirEntries(directory)) {
-      const full = join(directory, entry.name);
-      if (entry.isDirectory()) {
+      const name = String(fieldOf(entry, "name"));
+      const full = join(directory, name);
+      if (isDirectoryPath(full)) {
         directories.push(full);
         await walk(full);
-      } else if (entry.isFile() && entry.name.endsWith(".c")) {
+      } else if (isFilePath(full) && name.endsWith(".c")) {
         sources.push(full);
       }
     }
@@ -1924,12 +1937,7 @@ export async function buildFacilRuntime(
   await writeFile(adapterSource, facilAdapterSource(), "utf8");
 
   const sourceDir = facilIoSourceDir();
-  let sourceDirOk = false;
-  try {
-    sourceDirOk = (await stat(sourceDir)).isDirectory();
-  } catch {
-    sourceDirOk = false;
-  }
+  const sourceDirOk = isDirectoryPath(sourceDir);
   if (!sourceDirOk) {
     throw new CompilerError("LinkError", "link", "facil.io is not available", `the facil.io HTTP runtime requires its vendored source at ${sourceDir}, pinned to ${FACIL_IO_VERSION}`, "", "", "");
   }
@@ -1945,12 +1953,12 @@ export async function buildFacilRuntime(
   try {
     tree = await walkFacilIoTree(sourceDir);
   } catch (cause) {
-    throw new CompilerError("LinkError", "compile", "could not enumerate facil.io sources", cause instanceof Error ? cause.message : String(cause), "", "", "");
+    throw new CompilerError("LinkError", "compile", "could not enumerate facil.io sources", cause instanceof Error ? String(fieldOf(cause, "message")) : String(cause), "", "", "");
   }
   const tlsBackend = needs.tls ? join(sourceDir, "tls/fio_tls_openssl.c") : join(sourceDir, "tls/fio_tls_missing.c");
-  const facilSources = tree.sources
-    .filter((line) => !excluded.some((e) => line.includes(e)))
-    .filter((line) => !line.includes("/tls/fio_tls_openssl.c") && !line.includes("/tls/fio_tls_missing.c"))
+  const facilSources = (fieldOf(tree, "sources") as readonly string[])
+    .filter((line) => !excluded.some((e) => String(line).includes(String(e))))
+    .filter((line) => !String(line).includes("/tls/fio_tls_openssl.c") && !String(line).includes("/tls/fio_tls_missing.c"))
     .concat(tlsBackend);
   if (facilSources.length === 0) {
     throw new CompilerError("LinkError", "compile", "no facil.io sources found", sourceDir, "", "", "");
@@ -1960,8 +1968,9 @@ export async function buildFacilRuntime(
      subdirectory as an include path (fio.h itself includes <http.h>,
      <fiobj.h>, etc., and http.c needs <http1_parser.h> one level deeper). The
      walk that listed the sources already visited every directory. */
-  const includeDirs = [sourceDir, ...tree.directories];
-  const toolchain = toolchainFor(target);
+  const includeDirs: string[] = [sourceDir];
+  for (const directory of fieldOf(tree, "directories") as readonly string[]) includeDirs[includeDirs.length] = String(directory);
+  const toolchain = toolchainFor(target, undefined, undefined);
   const cFlags = [
     "-std=gnu11",
     "-D_GNU_SOURCE",
@@ -1990,16 +1999,16 @@ export async function buildFacilRuntime(
        waits for its server to end, and it is paid on every run of a program
        that starts a server and closes it again. */
     `-DFIO_POLL_TICK=${FACIL_IO_POLL_TICK_MS}`,
-    ...objectOptions(toolchain, mode),
+    ...objectOptions(toolchain, mode, undefined),
     ...cTargetOptions(target),
     /* QNX has no `SA_RESTART`; the signal setup treats its absence as zero.
        The poll engine is the one QNX uses, and naming it avoids the file's
        own redefinition of the default. */
-    ...(target.os === "qnx" ? ["-DSA_RESTART=0", "-DFIO_ENGINE_POLL=1", "-D__LITTLE_ENDIAN__=1"] : []),
+    ...(String(fieldOf(target, "os")) === "qnx" ? ["-DSA_RESTART=0", "-DFIO_ENGINE_POLL=1", "-D__LITTLE_ENDIAN__=1"] : []),
     "-ffunction-sections",
     "-fdata-sections",
     "-pthread",
-    ...includeDirs.map((dir) => `-I${dir}`),
+    ...includeDirs.map((dir) => `-I${String(dir)}`),
   ];
 
   /* The core compiler runtime and the adapter are what the units are bundled
@@ -2026,9 +2035,10 @@ export async function buildFacilRuntime(
       adapterObject,
       adapterSource,
     ]);
-    const compiled = await runAsync(command.command, command.args, { timeoutMs: 300_000 });
-    if (compiled.spawnError !== undefined || compiled.code !== 0) {
-      throw new CompilerError("LinkError", "compile", "the HTTP adapter did not compile", `${adapterSource}\n${compiled.stderr.trim() || compiled.spawnError || ""}`, "", "", "");
+    const compiled = await runAsync(String(fieldOf(command, "command")), fieldOf(command, "args") as string[], { timeoutMs: 300_000 });
+    const exitStatus = fieldOf(compiled, "code");
+    if (fieldOf(compiled, "spawnError") !== undefined || exitStatus === null || Number(exitStatus) !== 0) {
+      throw new CompilerError("LinkError", "compile", "the HTTP adapter did not compile", `${adapterSource}\n${failureText(compiled)}`, "", "", "");
     }
   })();
   // A build that stops on a unit must not leave the two promises above to fail
@@ -2043,25 +2053,28 @@ export async function buildFacilRuntime(
      assembled is the same objects either way, so this is one compile per unit
      with as many in flight as the machine can run. */
   const facilObjects = await mapConcurrent(facilSources, compileJobs(), async (source, index) => {
-    const objectPath = `${workDirectory}/facil_${index}.o`;
-    const command = compileCommand(toolchain, [...cFlags, "-c", "-o", objectPath, source]);
-    const compiled = await runAsync(command.command, command.args, {
+    const unitSource = String(source);
+    const objectPath = `${workDirectory}/facil_${Number(index)}.o`;
+    const command = compileCommand(toolchain, [...cFlags, "-c", "-o", objectPath, unitSource]);
+    const compiled = await runAsync(String(fieldOf(command, "command")), fieldOf(command, "args") as string[], {
       timeoutMs: 300_000,
     });
-    if (compiled.spawnError !== undefined || compiled.code !== 0) {
-      throw new CompilerError("LinkError", "compile", "facil.io did not compile", `${source}\n${compiled.stderr.trim() || compiled.spawnError || ""}`, "", "", "");
+    const exitStatus = fieldOf(compiled, "code");
+    if (fieldOf(compiled, "spawnError") !== undefined || exitStatus === null || Number(exitStatus) !== 0) {
+      throw new CompilerError("LinkError", "compile", "facil.io did not compile", `${unitSource}\n${failureText(compiled)}`, "", "", "");
     }
     return objectPath;
   });
   await adapter;
-  const rtObject = (await core).objectPath;
+  const rtObject = String(fieldOf(await core, "objectPath"));
 
   /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links.
      OpenSSL symbols stay undefined here and are resolved when the final program is linked with -lssl -lcrypto. */
   const bundle = relocatableLinkCommand(toolchain, bundledObject, [adapterObject, rtObject, ...facilObjects]);
-  const linked = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
-  if (linked.spawnError !== undefined || linked.code !== 0) {
-    throw new CompilerError("LinkError", "link", "the HTTP runtime did not bundle", `${linked.stderr.trim() ?? linked.spawnError ?? ""}`, "", "", "");
+  const linked = run(String(fieldOf(bundle, "command")), fieldOf(bundle, "args") as string[], { timeoutMs: 120_000 });
+  const linkStatus = fieldOf(linked, "code");
+  if (fieldOf(linked, "spawnError") !== undefined || linkStatus === null || Number(linkStatus) !== 0) {
+    throw new CompilerError("LinkError", "link", "the HTTP runtime did not bundle", String(fieldOf(linked, "stderr")).trim(), "", "", "");
   }
 
   return { headerPath, objectPath: bundledObject };

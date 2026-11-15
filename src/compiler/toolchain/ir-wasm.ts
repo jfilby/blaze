@@ -504,22 +504,23 @@ function facts(type: SemanticType): TypeFacts {
   //
   // Refusing keeps that unreachable: nothing below has to know what a wide
   // number is, because no value of one ever arrives.
-  if (type.kind === "primitive" && isWide(type.name)) return WIDE;
+  if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) return WIDE;
   // A dynamic value is the runtime's own handle rather than a pointer into the
   // memory, and the runtime carries it as a double.
-  if (type.kind === "ref" && type.of === null && type.name === undefined) return DYNAMIC;
-  if (type.kind !== "primitive") return REFERENCE;
+  if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) return DYNAMIC;
+  if (String(fieldOf(type,"kind")) !== "primitive") return REFERENCE;
   const wasm = wasmValueType(type);
   const held = wasm === "i64" ? I64 : wasm === "f32" ? F32 : wasm === "f64" ? F64 : I32;
-  const isUnsigned = type.name === "u8" || type.name === "u16" || type.name === "u32" || type.name === "u64" || type.name === "usize";
-  const size = WIDTHS[type.name] ?? 8;
+  const name = String(fieldOf(type,"name"));
+  const isUnsigned = name === "u8" || name === "u16" || name === "u32" || name === "u64" || name === "usize";
+  const size = WIDTHS[name] ?? 8;
   const computed: TypeFacts = {
     held,
     unsigned: isUnsigned,
     size,
     shift: size <= 1 ? -1 : size === 2 ? 1 : size === 4 ? 2 : 3,
-    load: loadAt(held, size, isUnsigned) ?? REFERENCE.load,
-    store: storeAt(held, size) ?? REFERENCE.store,
+    load: loadAt(held, size, isUnsigned) ?? fieldOf(REFERENCE,"load"),
+    store: storeAt(held, size) ?? fieldOf(REFERENCE,"store"),
   };
   return computed;
 }
@@ -1553,7 +1554,7 @@ class Body {
         }
         // The elements written out are laid down one at a time, at the address
         // the index names.
-        const total = fieldOf(value,"values").length;
+        const total = (fieldOf(value,"values") as readonly SemanticValue[]).length;
         this.i64(BigInt(total));
         this.i64(BigInt(size));
         this.callService("blaze_rt_array_new");
@@ -2676,14 +2677,14 @@ class Body {
     let started = false;
     for (const part of parts) {
       if (!started) {
-        if (part.k === "text") this.i32(this.poolText(part.value));
-        else this.asText(part.value, null);
+        if (String(fieldOf(part, "k")) === "text") this.i32(this.poolText(String(fieldOf(part, "value"))));
+        else this.asText(fieldOf(part, "value") as SemanticValue, null, false);
         started = true;
         continue;
       }
       this.localAt(answer);
-      if (part.k === "text") this.i32(this.poolText(part.value));
-      else this.asText(part.value, null);
+      if (String(fieldOf(part, "k")) === "text") this.i32(this.poolText(String(fieldOf(part, "value"))));
+      else this.asText(fieldOf(part, "value") as SemanticValue, null, false);
       this.callService("blaze_rt_string_append");
     }
     if (!started) this.i32(this.poolText(""));
@@ -2705,7 +2706,7 @@ class Body {
       this.text(value);
       return;
     }
-    if (type.kind === "primitive" && type.name === "bool") {
+    if (String(fieldOf(type,"kind")) === "primitive" && String(fieldOf(type,"name")) === "bool") {
       // A truth is written as the word the language writes it in, and which of
       // the two words it is depends on the value, so the two are chosen
       // between rather than picked at build time.
@@ -2719,19 +2720,19 @@ class Body {
       this.release(I32, truth);
       return;
     }
-    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+    if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
       // A dynamic value is written by the runtime, which knows what it holds.
       this.value(value, DYNAMIC_TYPE);
       this.callService("blaze_rt_to_text");
       return;
     }
-    if (type.kind === "primitive" && isWide(type.name)) {
+    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) {
       // A wide number is written by the runtime's own formatter.
       this.value(value, type);
       this.callService("blaze_rt_print_u256");
       return;
     }
-    if (value.k === "nothing") {
+    if (String(fieldOf(value,"k")) === "nothing") {
       this.i32(this.poolText(this.style === 1 ? "None" : "null"));
       return;
     }
@@ -2805,12 +2806,12 @@ class Body {
    */
   private printNumber(value: SemanticValue, bigint: boolean): void {
     const type = fieldOf(value,"type") as SemanticType;
-    if (type.kind === "primitive" && isWide(type.name)) {
+    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) {
       this.value(value, type);
       this.callService("blaze_rt_print_u256");
       return;
     }
-    if (type.kind === "primitive" && isWholeNumber(type.name)) {
+    if (String(fieldOf(type,"kind")) === "primitive" && isWholeNumber(String(fieldOf(type,"name")))) {
       this.value(value, type);
       this.convert(type, I64_TYPE);
       this.i32(bigint ? 1 : 0);
@@ -2876,7 +2877,7 @@ class Body {
         return;
       }
       case "set": {
-        const type = this.resolve(String(fieldOf(statement, "name"))).type;
+        const type = fieldOf(this.resolve(String(fieldOf(statement, "name"))), "type") as SemanticType;
         const held = fieldOf(facts(type),"held");
         // A plain `=` computes nothing from what the slot holds, so the old
         // value is never pushed. Pushing it and emitting no operator left it
@@ -2930,11 +2931,11 @@ class Body {
         // and the value written at — a name's own type is a reference, and a
         // reference has no width.
         const buffer = this.resolve(String(fieldOf(statement, "buffer")));
-        const element = elementTypeOf(buffer.type);
+        const element = elementTypeOf(fieldOf(buffer, "type") as SemanticType);
         if (element === null) {
           unreachable(`write an element of "${String(fieldOf(statement, "buffer"))}"`, this.name, this.candidate);
         }
-        this.address({ k: "local", type: buffer.type, name: String(fieldOf(statement, "buffer")) }, (fieldOf(statement, "index") as SemanticValue), element);
+        this.address({ k: "local", type: fieldOf(buffer, "type") as SemanticType, name: String(fieldOf(statement, "buffer")) }, (fieldOf(statement, "index") as SemanticValue), element);
         // A compound operator takes the old element and the new value, while
         // the store that follows takes the address first and the value on top
         // of it. Pushing the address and then the new value and emitting the
@@ -2951,7 +2952,7 @@ class Body {
           this.keep(address);
           this.read(address);
           const old = fieldOf(facts(element),"load");
-          this.op(old.code);
+          this.op(fieldOf(old,"code") as number);
           this.code.varuint(0);
           this.code.varuint(0);
           if (String(fieldOf(statement, "op")) === "**=") {
@@ -3073,7 +3074,7 @@ class Body {
           this.programCall(call, callee, null);
           // Nothing reads the answer, so it is dropped rather than left for the
           // statement after it to take as one of its own operands.
-          if (callee.result !== null) this.op(0x1a);
+          if (fieldOf(callee, "result") !== null) this.op(0x1a);
           return;
         }
         const args = fieldOf(call, "args") as readonly SemanticValue[];
@@ -3120,7 +3121,7 @@ class Body {
         const element = (fieldOf(statement, "type") as SemanticType);
         const index = this.borrow(I32);
         const count = this.borrow(I32);
-        this.localAt(buffer.index);
+        this.localAt(fieldOf(buffer,"index") as number);
         this.i32(8);
         this.op(fieldOf(BINARY[String(I32)],"sub") as number);
         this.op(0x29); // `i64.load`
@@ -3145,7 +3146,7 @@ class Body {
         this.op(0x0d); // `br_if`
         this.code.varuint(1);
         // The element is written at the address the index names.
-        this.localAt(buffer.index);
+        this.localAt(fieldOf(buffer,"index") as number);
         this.localAt(index);
         const shift = fieldOf(facts(element),"shift");
         if (shift > 0) {
@@ -3245,9 +3246,9 @@ class Body {
       // loop that never ends. The turn before the first is a turn of its own,
       // so the index starts one step short of the value the source wrote.
       if (startConstant === null) this.read(start);
-      else this.constant(startConstant.text, startConstant.type, (fieldOf(loop, "type") as SemanticType));
+      else this.constant(String(fieldOf(startConstant, "text")), fieldOf(startConstant, "type") as SemanticType, (fieldOf(loop, "type") as SemanticType));
       if (stepConstant === null) this.read(step);
-      else this.constant(stepConstant.text, stepConstant.type, (fieldOf(loop, "type") as SemanticType));
+      else this.constant(String(fieldOf(stepConstant, "text")), fieldOf(stepConstant, "type") as SemanticType, (fieldOf(loop, "type") as SemanticType));
       this.op(fieldOf(BINARY[String(held)],"sub") as number);
       this.set(String(fieldOf(loop, "variable")));
       if (start !== -1) this.release(held, start);
@@ -3312,14 +3313,14 @@ class Body {
     } else if (String(fieldOf(loop, "kind")) === "counted") {
       const counter = this.get(String(fieldOf(loop, "variable")));
       if (stepConstant === null) this.read(step);
-      else this.constant(stepConstant.text, stepConstant.type, (fieldOf(loop, "type") as SemanticType));
+      else this.constant(String(fieldOf(stepConstant, "text")), fieldOf(stepConstant, "type") as SemanticType, (fieldOf(loop, "type") as SemanticType));
       // The step is the signed amount the index moves by, so a loop counting
       // down carries a negative one and adds it like any other.
       this.op(fieldOf(BINARY[String(fieldOf(facts((fieldOf(loop, "type") as SemanticType)),"held"))],"add") as number);
       // The value the counter moves to is the value the test below reads, so
       // it is written down and left on the stack: a `local.tee` is one
       // instruction where a write and a read are two.
-      if (this.optimize) this.tee(counter.index);
+      if (this.optimize) this.tee(fieldOf(counter,"index") as number);
       else {
         this.set(String(fieldOf(loop, "variable")));
         this.get(String(fieldOf(loop, "variable")));
@@ -3347,7 +3348,7 @@ class Body {
       const index = this.get(String(fieldOf(loop, "index")));
       this.i32(1);
       this.op(fieldOf(BINARY[String(I32)],"add") as number);
-      this.keepAndRead(index.index);
+      this.keepAndRead(fieldOf(index,"index") as number);
       this.read(end);
       // The count is read out of the host's memory as a whole number, so it is
       // ordered as one: a count past the signed range is a count, not a
@@ -3355,7 +3356,7 @@ class Body {
       this.op(fieldOf(UNSIGNED_BINARY[String(I32)],"ge") as number);
       this.exitTest();
       this.address(
-        { k: "local", type: this.resolve(String(fieldOf(loop, "of"))).type, name: String(fieldOf(loop, "of")) },
+        { k: "local", type: fieldOf(this.resolve(String(fieldOf(loop, "of"))), "type") as SemanticType, name: String(fieldOf(loop, "of")) },
         { k: "local", type: ADDRESS, name: String(fieldOf(loop, "index")) },
         (fieldOf(loop, "elementType") as SemanticType),
       );
@@ -3554,7 +3555,7 @@ class Body {
         // and every other service of the table that takes a text takes it
         // that way.
         const text = argument(0);
-        if (!isTextType(text.type)) {
+        if (!isTextType(fieldOf(text,"type") as SemanticType)) {
           unreachable("parse JSON of something that is not a text", this.name, this.candidate);
         }
         this.value(text, TEXT);
@@ -3643,7 +3644,7 @@ class Body {
         // runtime renders it as.
         this.dynamicValue(argument(0));
         const text = argument(1);
-        if (isTextType(text.type)) {
+        if (isTextType(fieldOf(text,"type") as SemanticType)) {
           this.value(text, TEXT);
         } else {
           this.dynamicValue(text);
@@ -3890,7 +3891,7 @@ class Body {
    */
   private dynamicValue(value: SemanticValue): void {
     const type = fieldOf(value,"type") as SemanticType;
-    if (type.kind === "ref" && type.of === null && type.name === undefined) {
+    if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
       this.value(value, DYNAMIC_TYPE);
       return;
     }
@@ -3913,7 +3914,7 @@ class Body {
       this.value(value, TEXT);
       return;
     }
-    if (value.k === "nothing") {
+    if (String(fieldOf(value,"k")) === "nothing") {
       this.i32(0);
       return;
     }
@@ -3964,12 +3965,12 @@ class Body {
    * that type behind, and the format has no other way to fall off the end.
    */
   answer(): void {
-    if (this.returns.kind === "void") return;
-    if (this.returns.kind === "primitive" && this.returns.name === "f64") {
+    if (String(fieldOf(this.returns,"kind")) === "void") return;
+    if (String(fieldOf(this.returns,"kind")) === "primitive" && String(fieldOf(this.returns,"name")) === "f64") {
       this.float(0, true);
       return;
     }
-    if (this.returns.kind === "primitive" && this.returns.name === "f32") {
+    if (String(fieldOf(this.returns,"kind")) === "primitive" && String(fieldOf(this.returns,"name")) === "f32") {
       this.float(0, false);
       return;
     }
@@ -4022,8 +4023,8 @@ function constantOf(value: SemanticValue | null): { text: string; type: Semantic
   if (value === null) return null;
   if (String(fieldOf(value,"k")) !== "const") return null;
   const type = fieldOf(value,"type") as SemanticType;
-  if (type.kind !== "primitive") return null;
-  if (isWide(type.name)) return null;
+  if (String(fieldOf(type,"kind")) !== "primitive") return null;
+  if (isWide(String(fieldOf(type,"name")) as never)) return null;
   return { text: String(fieldOf(value,"text")), type };
 }
 
@@ -4236,7 +4237,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   for (const one of functions) probe.held.push(heldOf(fieldOf(one, "fn") as SemanticFunction, String(fieldOf(one, "export"))));
   const scratch: number[] = [];
   for (const one of functions) {
-    scratch.push(lower(probe, one, 0, candidate, style, optimize).scratch);
+    scratch.push(fieldOf(lower(probe, one, 0, candidate, style, optimize), "scratch") as number);
   }
 
   // The imports are known now, so the functions of the module are numbered
@@ -4265,7 +4266,7 @@ export function programModuleBytes(program: ProgramModule, options: ModuleOption
   for (const one of functions) module.held.push(heldOf(fieldOf(one, "fn") as SemanticFunction, String(fieldOf(one, "export"))));
   const codes: Bytes[] = [];
   for (const [index, one] of functions.entries()) {
-    codes.push(lower(module, one, regions[index] as number, candidate, style, optimize).code);
+    codes.push(fieldOf(lower(module, one, regions[index] as number, candidate, style, optimize), "code") as Bytes);
   }
 
   const signatures = services.map((symbol) => {
@@ -4496,7 +4497,7 @@ function lower(
   // A body that always answers does not fall out of its own end, so the value
   // is written where nothing reaches it: the module carries it and nothing
   // reads it.
-  if (signature.result !== undefined && !(optimize && alwaysReturns(fn))) body.answer();
+  if (fieldOf(signature, "result") !== undefined && !(optimize && alwaysReturns(fn))) body.answer();
   // The locals are declared in front of the body rather than after it, because
   // a statement that needs a value twice borrows a local for it, and a local
   // borrowed while the body was emitted was not declared yet. Both are written
@@ -4566,9 +4567,9 @@ export function describeModule(bytes: Uint8Array): string {
     const id = bytes[at] ?? 0;
     const size = readVaruint(bytes, at + 1, 32);
     const name = SECTIONS[String(id)] ?? `section ${id}`;
-    lines.push(`${name}: ${size.value} bytes`);
+    lines.push(`${name}: ${(fieldOf(size, "value"))} bytes`);
     sections.set(id, bodyOf(bytes, size));
-    at = size.next + size.value;
+    at = (fieldOf(size, "next") as number) + (fieldOf(size, "value") as number);
   }
   lines.push("");
 
@@ -4638,16 +4639,16 @@ function readTypes(body: Uint8Array | undefined): string[] {
   if (body === undefined) return [];
   const types: string[] = [];
   const count = readVaruint(body, 0, 32);
-  let at = count.next;
-  for (let index = 0; index < count.value; index += 1) {
+  let at = (fieldOf(count, "next") as number);
+  for (let index = 0; index < (fieldOf(count, "value") as number); index += 1) {
     if (at >= body.length) break;
     const form = body[at];
     at += 1;
     if (form !== 0x60) break;
     const parameters = readVaruint(body, at, 32);
     const names: string[] = [];
-    let cursor = parameters.next;
-    for (let position = 0; position < parameters.value; position += 1) {
+    let cursor = (fieldOf(parameters, "next") as number);
+    for (let position = 0; position < (fieldOf(parameters, "value") as number); position += 1) {
       if (cursor >= body.length) break;
       names.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
@@ -4655,8 +4656,8 @@ function readTypes(body: Uint8Array | undefined): string[] {
     at = cursor;
     const results = readVaruint(body, at, 32);
     const answers: string[] = [];
-    cursor = results.next;
-    for (let position = 0; position < results.value; position += 1) {
+    cursor = (fieldOf(results, "next") as number);
+    for (let position = 0; position < (fieldOf(results, "value") as number); position += 1) {
       if (cursor >= body.length) break;
       answers.push(VALUE_TYPES[String(body[cursor] ?? 0)] ?? "unknown");
       cursor += 1;
@@ -4672,26 +4673,26 @@ function readImports(body: Uint8Array | undefined): string[] {
   if (body === undefined) return [];
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
-  let at = count.next;
-  for (let index = 0; index < count.value; index += 1) {
+  let at = (fieldOf(count, "next") as number);
+  for (let index = 0; index < (fieldOf(count, "value") as number); index += 1) {
     if (at >= body.length) break;
     const module = readVaruint(body, at, 32);
-    const field = readVaruint(body, module.next + module.value, 32);
-    const kind = body[field.next + field.value] ?? 0;
+    const field = readVaruint(body, (fieldOf(module, "next") as number) + (fieldOf(module, "value") as number), 32);
+    const kind = body[(fieldOf(field, "next") as number) + (fieldOf(field, "value") as number)] ?? 0;
     const name = new TextDecoder().decode(bodyOf(body, field));
     const moduleName = new TextDecoder().decode(bodyOf(body, module));
-    at = field.next + field.value + 1;
+    at = (fieldOf(field, "next") as number) + (fieldOf(field, "value") as number) + 1;
     if (kind === 0x00) {
       const type = readVaruint(body, at, 32);
-      at = type.next;
-      entries.push(`${moduleName}.${name} (function ${type.value})`);
+      at = (fieldOf(type, "next") as number);
+      entries.push(`${moduleName}.${name} (function ${(fieldOf(type, "value"))})`);
       continue;
     }
     if (kind === 0x02) {
       at += 1;
       const minimum = readVaruint(body, at, 32);
-      at = minimum.next;
-      entries.push(`${moduleName}.${name} (memory ${minimum.value} pages)`);
+      at = (fieldOf(minimum, "next") as number);
+      entries.push(`${moduleName}.${name} (memory ${(fieldOf(minimum, "value"))} pages)`);
       continue;
     }
     break;
@@ -4704,8 +4705,8 @@ function readGlobals(body: Uint8Array | undefined): string[] {
   if (body === undefined) return [];
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
-  let at = count.next;
-  for (let index = 0; index < count.value; index += 1) {
+  let at = (fieldOf(count, "next") as number);
+  for (let index = 0; index < (fieldOf(count, "value") as number); index += 1) {
     if (at >= body.length) break;
     const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
     const mutable = (body[at + 1] ?? 0) !== 0;
@@ -4724,14 +4725,14 @@ function readExports(body: Uint8Array | undefined): string[] {
   const kinds = ["function", "table", "memory", "global"];
   const entries: string[] = [];
   const count = readVaruint(body, 0, 32);
-  let at = count.next;
-  for (let index = 0; index < count.value; index += 1) {
+  let at = (fieldOf(count, "next") as number);
+  for (let index = 0; index < (fieldOf(count, "value") as number); index += 1) {
     if (at >= body.length) break;
     const name = readVaruint(body, at, 32);
-    const kind = kinds[body[name.next + name.value] ?? 0] ?? "unknown";
-    const target = readVaruint(body, name.next + name.value + 1, 32);
-    entries.push(`${new TextDecoder().decode(bodyOf(body, name))} (${kind} ${target.value})`);
-    at = target.next;
+    const kind = kinds[body[(fieldOf(name, "next") as number) + (fieldOf(name, "value") as number)] ?? 0] ?? "unknown";
+    const target = readVaruint(body, (fieldOf(name, "next") as number) + (fieldOf(name, "value") as number) + 1, 32);
+    entries.push(`${new TextDecoder().decode(bodyOf(body, name))} (${kind} ${(fieldOf(target, "value"))})`);
+    at = (fieldOf(target, "next") as number);
   }
   return entries;
 }
@@ -4746,13 +4747,13 @@ function readExports(body: Uint8Array | undefined): string[] {
 function readCode(body: Uint8Array): string[][] {
   const functions: string[][] = [];
   const count = readVaruint(body, 0, 32);
-  let at = count.next;
-  for (let index = 0; index < count.value; index += 1) {
+  let at = (fieldOf(count, "next") as number);
+  for (let index = 0; index < (fieldOf(count, "value") as number); index += 1) {
     if (at >= body.length) break;
     const size = readVaruint(body, at, 32);
-    at = size.next;
-    functions.push(readFunction(body.subarray(at, at + size.value)));
-    at += size.value;
+    at = (fieldOf(size, "next") as number);
+    functions.push(readFunction(body.subarray(at, at + (fieldOf(size, "value") as number))));
+    at += (fieldOf(size, "value") as number);
   }
   return functions;
 }
@@ -4761,16 +4762,16 @@ function readCode(body: Uint8Array): string[][] {
 function readFunction(body: Uint8Array): string[] {
   const lines: string[] = [];
   const locals = readVaruint(body, 0, 32);
-  let at = locals.next;
+  let at = (fieldOf(locals, "next") as number);
   let local = 0;
-  for (let index = 0; index < locals.value; index += 1) {
+  for (let index = 0; index < (fieldOf(locals, "value") as number); index += 1) {
     if (at >= body.length) break;
     const count = readVaruint(body, at, 32);
-    at = count.next;
+    at = (fieldOf(count, "next") as number);
     const type = VALUE_TYPES[String(body[at] ?? 0)] ?? "unknown";
     at += 1;
-    if (index === 0) lines.push(`locals: ${count.value} x ${type}`);
-    local += count.value;
+    if (index === 0) lines.push(`locals: ${(fieldOf(count, "value"))} x ${type}`);
+    local += (fieldOf(count, "value") as number);
   }
   while (at < body.length) {
     const start = at;
@@ -4782,8 +4783,8 @@ function readFunction(body: Uint8Array): string[] {
       break;
     }
     const immediate = readImmediate(body, at, instruction[1]);
-    at = immediate.next;
-    lines.push(`${start.toString(16).padStart(4, "0")}  ${instruction[0]}${immediate.text === "" ? "" : ` ${immediate.text}`}`);
+    at = (fieldOf(immediate, "next") as number);
+    lines.push(`${start.toString(16).padStart(4, "0")}  ${instruction[0]}${String(fieldOf(immediate, "text")) === "" ? "" : ` ${(fieldOf(immediate, "text"))}`}`);
   }
   return lines;
 }
@@ -5118,7 +5119,7 @@ export async function buildModule(request: ModuleRequest): Promise<ModuleResult>
     runner: { command: process.execPath, args: [hostPath, modulePath] },
     modulePath,
     hostPath,
-    moduleSizeBytes: (await stat(modulePath)).size,
+    moduleSizeBytes: Number(fieldOf(await stat(modulePath), "size")),
   };
 }
 
@@ -5156,7 +5157,7 @@ export async function buildProgramModule(request: ProgramModuleRequest): Promise
     runner: { command: process.execPath, args: [hostPath, modulePath] },
     modulePath,
     hostPath,
-    moduleSizeBytes: (await stat(modulePath)).size,
+    moduleSizeBytes: Number(fieldOf(await stat(modulePath), "size")),
   };
 }
 
@@ -5176,8 +5177,8 @@ async function inspect(path: string, expected: string | undefined, bytes: Uint8A
   if (problems === null) {
     await writeFile(path, bytes, "utf8");
     const inspection = run(process.execPath, ["--input-type=module", "-e", INSPECT_MODULE, path, expected ?? ""], { timeoutMs: 60_000 });
-    if (inspection.code === 0) return null;
-    return (inspection.stderr.trim() || inspection.stdout.trim()).slice(0, 2000);
+    if (Number(fieldOf(inspection, "code")) === 0) return null;
+    return (String(fieldOf(inspection, "stderr")).trim() || String(fieldOf(inspection, "stdout")).trim()).slice(0, 2000);
   }
   if (problems.length === 0) return null;
   // The child reports an invalid module in one line where the checks above

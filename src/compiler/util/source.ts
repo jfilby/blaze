@@ -65,9 +65,9 @@ function walkString(source: string, start: number, quote: string, out: string[],
   out.push(quote);
   let at = start + 1;
   while (at < source.length) {
-    const character = source[at] as string;
+    const character = source.slice(at, at + 1);
     if (character === "\\" && at + 1 < source.length) {
-      out.push(blank ? " " : character, blank ? " " : (source[at + 1] as string));
+      out.push(blank ? " " : character, blank ? " " : source.slice(at + 1, at + 2));
       at += 2;
       continue;
     }
@@ -86,9 +86,9 @@ function walkTemplate(source: string, start: number, out: string[], blank: boole
   out.push("`");
   let at = start + 1;
   while (at < source.length) {
-    const character = source[at] as string;
+    const character = source.slice(at, at + 1);
     if (character === "\\" && at + 1 < source.length) {
-      out.push(blank ? " " : character, blank ? " " : (source[at + 1] as string));
+      out.push(blank ? " " : character, blank ? " " : source.slice(at + 1, at + 2));
       at += 2;
       continue;
     }
@@ -96,12 +96,12 @@ function walkTemplate(source: string, start: number, out: string[], blank: boole
       out.push("`");
       return at + 1;
     }
-    if (character === "$" && source[at + 1] === "{") {
+    if (character === "$" && source.slice(at + 1, at + 2) === "{") {
       out.push("$", "{");
       at += 2;
       let depth = 1;
       while (at < source.length) {
-        const inner = source[at] as string;
+        const inner = source.slice(at, at + 1);
         if (inner === "{") depth += 1;
         if (inner === "}") {
           depth -= 1;
@@ -130,19 +130,19 @@ function walkTemplate(source: string, start: number, out: string[], blank: boole
  * character of code, with the index it stopped at.
  */
 function scanOne(source: string, at: number, out: string[], blank: boolean): number {
-  const character = source[at] as string;
-  if (character === "/" && source[at + 1] === "/") {
-    while (at < source.length && source[at] !== "\n") {
+  const character = source.slice(at, at + 1);
+  if (character === "/" && source.slice(at + 1, at + 2) === "/") {
+    while (at < source.length && source.slice(at, at + 1) !== "\n") {
       out.push(" ");
       at += 1;
     }
     return at;
   }
-  if (character === "/" && source[at + 1] === "*") {
+  if (character === "/" && source.slice(at + 1, at + 2) === "*") {
     out.push(" ", " ");
     at += 2;
-    while (at < source.length && !(source[at] === "*" && source[at + 1] === "/")) {
-      out.push(source[at] === "\n" ? "\n" : " ");
+    while (at < source.length && !(source.slice(at, at + 1) === "*" && source.slice(at + 1, at + 2) === "/")) {
+      out.push(source.slice(at, at + 1) === "\n" ? "\n" : " ");
       at += 1;
     }
     if (at < source.length) {

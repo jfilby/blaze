@@ -2,6 +2,10 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Lowering a function's semantic IR to machine code.
  *
@@ -64,7 +68,7 @@ import {
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
-import type { FunctionContract, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
+import type { FunctionContract, ObjectLayout, PrimitiveTypeName, TargetSpec, TypeExpr } from "../core/types.ts";
 import { nameLiveness, overlaps } from "../semantics/liveness.ts";
 import { isSafeToCompute, substituteLocals, valueKey } from "../semantics/repair.ts";
 import { turnIsTooCheap } from "../semantics/parallel.ts";
@@ -101,7 +105,7 @@ import {
 /* -------------------------------------------------------------------------- */
 
 function isDynamicType(type: SemanticType | null): boolean {
-  return type !== null && type.kind === "ref" && type.of === null && type.name === undefined;
+  return type !== null && String(fieldOf(type, "kind")) === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
 }
 
 function isFloatType(type: SemanticType | null): boolean {
@@ -110,7 +114,7 @@ function isFloatType(type: SemanticType | null): boolean {
   // `ref<any>` is still an address, not a floating point number. Treating
   // it as a float made field access read through a register the pointer never
   // reached and crashed programs that use unshaped references (binarytrees).
-  if (type.kind === "ref") return false;
+  if (String(fieldOf(type, "kind")) === "ref") return false;
   if (isDynamicType(type)) return true;
   return isFloat(type);
 }
@@ -365,7 +369,9 @@ function oppositeOf(op: CompareOp): CompareOp {
 
 /** A comparison the machine answers from the flags, which is one over anything but text. */
 function flagComparison(value: SemanticValue): (SemanticValue & { k: "compare" }) | null {
-  return value.k === "compare" && !isTextType(fieldOf(value, "operand") as SemanticType) ? value : null;
+  return String(fieldOf(value, "k")) === "compare" && !isTextType(fieldOf(value, "operand") as SemanticType)
+    ? (value as Extract<SemanticValue, { k: "compare" }>)
+    : null;
 }
 
 /**
@@ -609,14 +615,14 @@ function isInlineBuiltin(name: string): boolean {
  * a wide number, so a value written down has somewhere for all four limbs to go.
  */
 function widthOf(type: SemanticType): Width {
-  if (type.kind === "primitive" && isWide(type.name)) {
+  if (String(fieldOf(type, "kind")) === "primitive" && isWide(fieldOf(type, "name"))) {
     throw machineError(
-      `a ${type.name} has no single-register width`,
+      `a ${String(fieldOf(type, "name"))} has no single-register width`,
       "a wide number is four 64 bit limbs and this is the width one register carries a value at; a wide number is measured in frame bytes and carried in limb registers, not in the accumulator",
     );
   }
-  if (type.kind !== "primitive") return 8;
-  switch (type.name) {
+  if (String(fieldOf(type, "kind")) !== "primitive") return 8;
+  switch (String(fieldOf(type, "name"))) {
     case "bool":
     case "i8":
     case "u8":
@@ -644,13 +650,13 @@ function widthOf(type: SemanticType): Width {
  * them, and the value read back would be a number the program never wrote.
  */
 function frameBytes(type: SemanticType): number {
-  if (type.kind === "primitive" && isWide(type.name)) return WIDE_LIMBS[type.name] * LIMB_BYTES;
+  if (/^primitive$/.test(String(fieldOf(type, "kind"))) && isWide(String(fieldOf(type, "name")) as PrimitiveTypeName)) return WIDE_LIMBS[String(fieldOf(type, "name"))] * LIMB_BYTES;
   return widthOf(type);
 }
 
 /** Whether a whole number of this type is read as signed. */
 function signedOf(type: SemanticType): boolean {
-  if (type.kind !== "primitive") return true;
+  if (String(fieldOf(type, "kind")) !== "primitive") return true;
   return isUnsigned(type) ? false : true;
 }
 
@@ -750,8 +756,8 @@ export interface MachineResult {
  * That is a question of speed, not of what the program computes.
  */
 export function assertMachineTarget(target: TargetSpec): void {
-  if (target.arch === "x86_64" && target.abi === "sysv") return;
-  throw new CompilerError("TargetError", "assemble", `the machine backend cannot build for ${target.arch}-${target.os}-${target.abi}`, "it writes x86-64 System V code itself; build with --backend c for another target", "", "", "");
+  if (String(fieldOf(target, "arch")) === "x86_64" && String(fieldOf(target, "abi")) === "sysv") return;
+  throw new CompilerError("TargetError", "assemble", `the machine backend cannot build for ${String(fieldOf(target, "arch"))}-${String(fieldOf(target, "os"))}-${String(fieldOf(target, "abi"))}`, "it writes x86-64 System V code itself; build with --backend c for another target", "", "", "");
 }
 
 /**
@@ -811,7 +817,7 @@ export function machineRefusal(
     return null;
   } catch (cause) {
     const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", "", "", "");
-    return new MachineRefusal(error.message, error.detail);
+    return new MachineRefusal(String(fieldOf(error, "message")), error.detail);
   }
 }
 
@@ -847,16 +853,17 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
     fieldOf(request, "powerOfTwoParams") as ReadonlySet<number>,
     foreign,
   );
-  await writeFile(objectPath, object.bytes, "utf8");
+  await writeFile(objectPath, fieldOf(object, "bytes") as Uint8Array, "utf8");
   const written = inspectWrittenObject(objectPath, functionName);
-  if (written.defined.length !== 1 || written.defined[0] !== functionName) {
+  const defined = fieldOf(written, "defined") as readonly string[];
+  if (defined.length !== 1 || String(defined[0]) !== functionName) {
     throw machineError(
-      `the object of ${functionName} defines [${written.defined.join(", ")}] instead of only "${functionName}"`,
+      `the object of ${functionName} defines [${defined.join(", ")}] instead of only "${functionName}"`,
       "the program links the objects beside each other and calls this one by that name",
       functionName,
     );
   }
-  const outside = written.undefined.filter((symbol) => {
+  const outside = (fieldOf(written, "undefined") as readonly string[]).filter((symbol) => {
     if (isRuntimeSymbol(symbol)) return false;
     if (isLibrarySymbol(symbol)) return false;
     if (callable.has(symbol)) return false;
@@ -872,9 +879,9 @@ export async function buildObject(request: MachineRequest): Promise<MachineResul
   }
   return {
     objectPath,
-    objectSizeBytes: (await stat(objectPath)).size,
-    textSizeBytes: object.textSizeBytes,
-    threads: object.threads,
+    objectSizeBytes: Number(fieldOf(await stat(objectPath), "size")),
+    textSizeBytes: Number(fieldOf(object, "textSizeBytes")),
+    threads: fieldOf(object, "threads") === true,
   };
 }
 
@@ -895,13 +902,13 @@ function everyBlockAtDepth(
 ): { block: SemanticBlock; depth: number }[] {
   into.push({ block, depth });
   for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-    if (statement.k === "if") {
+    if (String(fieldOf(statement, "k")) === "if") {
       everyBlockAtDepth(fieldOf(statement, "then") as SemanticBlock, depth, into);
       const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
       if (String(otherwise) !== "null") everyBlockAtDepth(otherwise as SemanticBlock, depth, into);
-    } else if (statement.k === "loop") {
+    } else if (String(fieldOf(statement, "k")) === "loop") {
       everyBlockAtDepth(fieldOf(fieldOf(statement, "loop"), "body") as SemanticBlock, depth + 1, into);
-    } else if (statement.k === "block") {
+    } else if (String(fieldOf(statement, "k")) === "block") {
       everyBlockAtDepth(fieldOf(statement, "body") as SemanticBlock, depth, into);
     }
   }
@@ -937,9 +944,9 @@ interface PackedDot {
 
 /** The whole number a `const` writes, or null where it is not one. */
 function wholeConst(value: SemanticValue): number | null {
-  if (value.k !== "const") return null;
-  if (!/^-?[0-9]+$/.test(value.text)) return null;
-  const read = Number(value.text);
+  if (String(fieldOf(value, "k")) !== "const") return null;
+  if (!/^-?[0-9]+$/.test(fieldOf(value, "text"))) return null;
+  const read = Number(fieldOf(value, "text"));
   return Number.isSafeInteger(read) ? read : null;
 }
 
@@ -962,7 +969,7 @@ function wholeConst(value: SemanticValue): number | null {
  * same order as the scalar loop read them in.
  */
 function packedDotOf(loop: SemanticLoop): PackedDot | null {
-  if (loop.kind !== "counted") return null;
+  if (String(fieldOf(loop, "kind")) !== "counted") return null;
   if (String(fieldOf(loop, "inclusive")) === "true" ||
       String(fieldOf(loop, "down")) === "true" ||
       String(fieldOf(loop, "step")) !== "null") return null;
@@ -972,16 +979,16 @@ function packedDotOf(loop: SemanticLoop): PackedDot | null {
   if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
       String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
   const statement = statements[0];
-  if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+  if (String(fieldOf(statement, "k")) !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
   const variable = String(fieldOf(loop, "variable"));
   if (String(fieldOf(statement, "name")) === variable) return null;
   const product = fieldOf(statement, "value") as SemanticValue;
-  if (product.k !== "arith" || String(fieldOf(product, "op")) !== "mul") return null;
+  if (String(fieldOf(product, "k")) !== "arith" || String(fieldOf(product, "op")) !== "mul") return null;
   const left = readOf(fieldOf(product, "left") as SemanticValue, variable);
   const right = readOf(fieldOf(product, "right") as SemanticValue, variable);
   if (left === null || right === null) return null;
-  if (left.element !== "f64" || right.element !== "f64") return null;
-  if (left.of === right.of) return null;
+  if (String(fieldOf(left, "element")) !== "f64" || String(fieldOf(right, "element")) !== "f64") return null;
+  if (String(fieldOf(left, "of")) === String(fieldOf(right, "of"))) return null;
   const from = wholeConst(fieldOf(loop, "from") as SemanticValue);
   // A negative start makes the byte cursor a negative number of bytes, which the
   // shift that turns it back into an index would read as a very large one.
@@ -994,8 +1001,8 @@ function packedDotOf(loop: SemanticLoop): PackedDot | null {
   return {
     counter: variable,
     accumulator: String(fieldOf(statement, "name")),
-    left: left.of,
-    right: right.of,
+    left: String(fieldOf(left, "of")),
+    right: String(fieldOf(right, "of")),
     from,
     bound: to,
   };
@@ -1012,17 +1019,17 @@ function readOf(
   const of = fieldOf(value, "of") as SemanticValue;
   const index = fieldOf(value, "index") as SemanticValue;
   const type = fieldOf(value, "type") as SemanticType;
-  if (value.k !== "element" || of.k !== "local") return null;
-  if (index.k !== "local" || String(fieldOf(index, "name")) !== counter) return null;
-  if (type.kind !== "primitive") return null;
-  return { of: String(fieldOf(of, "name")), element: type.name };
+  if (String(fieldOf(value, "k")) !== "element" || String(fieldOf(of, "k")) !== "local") return null;
+  if (String(fieldOf(index, "k")) !== "local" || String(fieldOf(index, "name")) !== counter) return null;
+  if (String(fieldOf(type, "kind")) !== "primitive") return null;
+  return { of: String(fieldOf(of, "name")), element: fieldOf(type, "name") };
 }
 
 /** The names a value reads. */
 function namesIn(value: SemanticValue): string[] {
   const found: string[] = [];
   walkValues(value, (one) => {
-    if (one.k === "local") found.push(String(fieldOf(one, "name")));
+    if (String(fieldOf(one, "k")) === "local") found.push(String(fieldOf(one, "name")));
   });
   return found;
 }
@@ -1078,7 +1085,7 @@ interface PackedSum {
  * this backend will not run twice to answer one turn.
  */
 function packedSumOf(loop: SemanticLoop): PackedSum | null {
-  if (loop.kind !== "counted") return null;
+  if (String(fieldOf(loop, "kind")) !== "counted") return null;
   if (String(fieldOf(loop, "inclusive")) === "true" ||
       String(fieldOf(loop, "down")) === "true" ||
       String(fieldOf(loop, "step")) !== "null") return null;
@@ -1088,7 +1095,7 @@ function packedSumOf(loop: SemanticLoop): PackedSum | null {
   if ((fieldOf(loopBody, "releases") as readonly string[]).length > 0 ||
       String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
   const statement = statements[0];
-  if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+  if (String(fieldOf(statement, "k")) !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
   const variable = String(fieldOf(loop, "variable"));
   const accumulator = String(fieldOf(statement, "name"));
   if (accumulator === variable) return null;
@@ -1145,9 +1152,9 @@ interface PackedWeighted {
  * left to the scalar loop.
  */
 function packedWeightedOf(loop: SemanticLoop): PackedWeighted | null {
-  if (loop.kind !== "counted") return null;
+  if (String(fieldOf(loop, "kind")) !== "counted") return null;
   const loopType = fieldOf(loop, "type") as SemanticType;
-  if (loopType.kind !== "primitive" || loopType.name !== "i64") return null;
+  if (String(fieldOf(loopType, "kind")) !== "primitive" || String(fieldOf(loopType, "name")) !== "i64") return null;
   if (String(fieldOf(loop, "down")) === "true") return null;
   const stepValue = fieldOf(loop, "step");
   if (String(stepValue) !== "null") {
@@ -1164,36 +1171,36 @@ function packedWeightedOf(loop: SemanticLoop): PackedWeighted | null {
   if (statements.length !== 3) return null;
   const variable = String(fieldOf(loop, "variable"));
   const division = statements[0];
-  if (division.k !== "set" || String(fieldOf(division, "op")) !== "+=" ||
+  if (String(fieldOf(division, "k")) !== "set" || String(fieldOf(division, "op")) !== "+=" ||
       String(fieldOf(division, "name")) === variable) return null;
   const value = fieldOf(division, "value") as SemanticValue;
-  if (value.k !== "arith" || String(fieldOf(value, "op")) !== "div") return null;
+  if (String(fieldOf(value, "k")) !== "arith" || String(fieldOf(value, "op")) !== "div") return null;
   const valueType = fieldOf(value, "type") as SemanticType;
-  if (valueType.kind !== "primitive" || valueType.name !== "f64") return null;
+  if (String(fieldOf(valueType, "kind")) !== "primitive" || String(fieldOf(valueType, "name")) !== "f64") return null;
   const element = fieldOf(value, "left") as SemanticValue;
   const divisor = fieldOf(value, "right") as SemanticValue;
   const elementOf = fieldOf(element, "of") as SemanticValue;
   const elementIndex = fieldOf(element, "index") as SemanticValue;
   const elementType = fieldOf(element, "type") as SemanticType;
-  if (element.k !== "element" || elementOf.k !== "local") return null;
-  if (elementIndex.k !== "local" || String(fieldOf(elementIndex, "name")) !== variable) return null;
-  if (elementType.kind !== "primitive" || elementType.name !== "f64") return null;
-  if (divisor.k !== "local") return null;
+  if (String(fieldOf(element, "k")) !== "element" || String(fieldOf(elementOf, "k")) !== "local") return null;
+  if (String(fieldOf(elementIndex, "k")) !== "local" || String(fieldOf(elementIndex, "name")) !== variable) return null;
+  if (String(fieldOf(elementType, "kind")) !== "primitive" || String(fieldOf(elementType, "name")) !== "f64") return null;
+  if (String(fieldOf(divisor, "k")) !== "local") return null;
   const weight = String(fieldOf(divisor, "name"));
   const accumulator = String(fieldOf(division, "name"));
   // `weight += step`
   const stepped = statements[1];
-  if (stepped.k !== "set" || String(fieldOf(stepped, "op")) !== "+=" ||
+  if (String(fieldOf(stepped, "k")) !== "set" || String(fieldOf(stepped, "op")) !== "+=" ||
       String(fieldOf(stepped, "name")) !== weight) return null;
   const steppedValue = fieldOf(stepped, "value") as SemanticValue;
-  if (steppedValue.k !== "local") return null;
+  if (String(fieldOf(steppedValue, "k")) !== "local") return null;
   const step = String(fieldOf(steppedValue, "name"));
   // `step += 1`
   const advanced = statements[2];
-  if (advanced.k !== "set" || String(fieldOf(advanced, "op")) !== "+=" ||
+  if (String(fieldOf(advanced, "k")) !== "set" || String(fieldOf(advanced, "op")) !== "+=" ||
       String(fieldOf(advanced, "name")) !== step) return null;
   const advancedValue = fieldOf(advanced, "value") as SemanticValue;
-  if (advancedValue.k !== "const") return null;
+  if (String(fieldOf(advancedValue, "k")) !== "const") return null;
   const one = wholeLiteral(advancedValue);
   if (one === null || one !== 1) return null;
   return {
@@ -1243,9 +1250,9 @@ const PACKED_RIGHT_DEPTH = 2;
  * register its neighbour is standing in is the one it borrows.
  */
 function shallow(value: SemanticValue, depth = PACKED_RIGHT_DEPTH): boolean {
-  if (value.k !== "arith") return true;
+  if (String(fieldOf(value, "k")) !== "arith") return true;
   if (depth === 0) return false;
-  return shallow(value.left, depth - 1) && shallow(value.right, depth - 1);
+  return shallow(fieldOf(value, "left"), depth - 1) && shallow(fieldOf(value, "right"), depth - 1);
 }
 
 /**
@@ -1274,14 +1281,14 @@ class Census {
     this.counter = counter;
     this.accumulator = accumulator;
     walkValues(value, (one) => {
-      if (one.k === "call" || one.k === "newObject") this.hasCalls = true;
+      if (String(fieldOf(one, "k")) === "call" || String(fieldOf(one, "k")) === "newObject") this.hasCalls = true;
       if (!this.fits(one)) this.isPackable = false;
     });
   }
 
   /** Whether one value under the addition has a packed form of itself. */
   private fits(value: SemanticValue): boolean {
-    switch (value.k) {
+    switch (String(fieldOf(value, "k"))) {
       case "const":
         // A literal is the same number in both lanes, which is what a pair of
         // copies of it is.
@@ -1298,9 +1305,9 @@ class Census {
         // operation's own type.
         return String(fieldOf(value, "name")) !== this.accumulator;
       case "element":
-        return this.fitsElement(value);
+        return this.fitsElement(value as Extract<SemanticValue, { k: "element" }>);
       case "arith":
-        return this.fitsArithmetic(value);
+        return this.fitsArithmetic(value as Extract<SemanticValue, { k: "arith" }>);
       default:
         // A field, a length, a piece of text, a cast: none of them is a number
         // a lane can be handed, and each would have to be computed twice for
@@ -1318,9 +1325,9 @@ class Census {
    * instruction would read is not the pair the loop wants.
    */
   private fitsElement(value: SemanticValue & { k: "element" }): boolean {
-    if (value.of.k !== "local") return false;
-    if (value.index.k !== "local" || value.index.name !== this.counter) return false;
-    if (value.type.kind !== "primitive" || value.type.name !== "f64") return false;
+    if (String(fieldOf(fieldOf(value, "of"), "k")) !== "local") return false;
+    if (String(fieldOf(fieldOf(value, "index"), "k")) !== "local" || String(fieldOf(fieldOf(value, "index"), "name")) !== this.counter) return false;
+    if (String(fieldOf(fieldOf(value, "type"), "kind")) !== "primitive" || String(fieldOf(fieldOf(value, "type"), "name")) !== "f64") return false;
     if (!this.arrayNames.includes(String(fieldOf(fieldOf(value, "of"), "name")))) this.arrayNames.push(String(fieldOf(fieldOf(value, "of"), "name")));
     return true;
   }
@@ -1421,7 +1428,7 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
     walkValues(value, (one) => { into.push(one); });
   };
   for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-    switch (statement.k) {
+    switch (String(fieldOf(statement, "k"))) {
       case "let":
       case "set":
       case "printText":
@@ -1438,11 +1445,11 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
       }
       case "loop": {
         const loop = fieldOf(statement, "loop") as SemanticLoop;
-        if (loop.kind === "counted") {
+        if (String(fieldOf(loop, "kind")) === "counted") {
           add(fieldOf(loop, "from") as SemanticValue);
           add(fieldOf(loop, "to") as SemanticValue);
           add(fieldOf(loop, "step") as SemanticValue);
-        } else if (loop.kind === "each") {
+        } else if (String(fieldOf(loop, "kind")) === "each") {
           add(fieldOf(loop, "length") as SemanticValue);
         } else {
           add(fieldOf(loop, "condition") as SemanticValue);
@@ -1454,7 +1461,7 @@ function everyValue(block: SemanticBlock, into: SemanticValue[] = []): SemanticV
     }
   }
   const terminator = fieldOf(block, "terminator") as SemanticTerminator;
-  if (terminator.k === "return") add(fieldOf(terminator, "value") as SemanticValue);
+  if (String(fieldOf(terminator, "k")) === "return") add(fieldOf(terminator, "value") as SemanticValue);
   return into;
 }
 
@@ -1488,11 +1495,11 @@ function namesAViewReads(loop: SemanticLoop): Set<string> {
   const own = new Set<string>();
   for (const block of everyBlock(fieldOf(loop, "body") as SemanticBlock, [])) {
     for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-      if (statement.k === "let") own.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
-      if (statement.k === "loop") {
+      if (String(fieldOf(statement, "k")) === "let") own.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
+      if (String(fieldOf(statement, "k")) === "loop") {
         const inner = fieldOf(statement, "loop") as SemanticLoop;
-        if (inner.kind === "counted") own.add(String(fieldOf(inner, "variable")));
-        else if (inner.kind === "each") {
+        if (String(fieldOf(inner, "kind")) === "counted") own.add(String(fieldOf(inner, "variable")));
+        else if (String(fieldOf(inner, "kind")) === "each") {
           own.add(String(fieldOf(inner, "index")));
           own.add(String(fieldOf(inner, "element")));
         }
@@ -1501,27 +1508,27 @@ function namesAViewReads(loop: SemanticLoop): Set<string> {
   }
   for (const block of everyBlock(fieldOf(loop, "body") as SemanticBlock, [])) {
     for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-      if (statement.k === "set" || statement.k === "step") {
+      if (String(fieldOf(statement, "k")) === "set" || String(fieldOf(statement, "k")) === "step") {
         const name = String(fieldOf(statement, "name"));
         if (!own.has(name)) names.add(name);
       }
-      if (statement.k === "setElement") names.add(String(fieldOf(statement, "buffer")));
-      if (statement.k === "fill") names.add(String(fieldOf(statement, "buffer")));
-      if (statement.k === "loop" && String(fieldOf(fieldOf(statement, "loop"), "kind")) === "each") names.add(String(fieldOf(fieldOf(statement, "loop"), "of")));
+      if (String(fieldOf(statement, "k")) === "setElement") names.add(String(fieldOf(statement, "buffer")));
+      if (String(fieldOf(statement, "k")) === "fill") names.add(String(fieldOf(statement, "buffer")));
+      if (String(fieldOf(statement, "k")) === "loop" && String(fieldOf(fieldOf(statement, "loop"), "kind")) === "each") names.add(String(fieldOf(fieldOf(statement, "loop"), "of")));
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          if (inner.k === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
+          if (String(fieldOf(inner, "k")) === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
         });
       }
     }
     const terminator = fieldOf(block, "terminator") as SemanticTerminator;
-    if (terminator.k === "return" && String(fieldOf(terminator, "value")) !== "null") {
+    if (String(fieldOf(terminator, "k")) === "return" && String(fieldOf(terminator, "value")) !== "null") {
       walkValues(fieldOf(terminator, "value") as SemanticValue, (inner) => {
-        if (inner.k === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
+        if (String(fieldOf(inner, "k")) === "local" && !own.has(String(fieldOf(inner, "name")))) names.add(String(fieldOf(inner, "name")));
       });
     }
   }
-  if (loop.kind === "each") names.add(String(fieldOf(loop, "of")));
+  if (String(fieldOf(loop, "kind")) === "each") names.add(String(fieldOf(loop, "of")));
   return names;
 }
 
@@ -1537,7 +1544,7 @@ function returnsFromItsBody(body: SemanticBlock): boolean {
     // so a turn that reaches it returns out of the function on every one of them
     // — which is what this rule is about.
     const terminator = fieldOf(block, "terminator") as SemanticTerminator;
-    if (terminator.k === "return" || terminator.k === "unreachable") return true;
+    if (String(fieldOf(terminator, "k")) === "return" || String(fieldOf(terminator, "k")) === "unreachable") return true;
   }
   return false;
 }
@@ -1563,15 +1570,16 @@ function lowerFunction(
       functionName,
     );
   }
+  const written = writeObject({
+    text,
+    rodata: Uint8Array.from(machine.rodata),
+    function: { name: fieldOf(fn, "symbol"), offset: 0, size: text.length },
+    labels: machine.labels,
+    undefined: machine.externals,
+    relocations: machine.code.relocations,
+  });
   return {
-    bytes: writeObject({
-      text,
-      rodata: Uint8Array.from(machine.rodata),
-      function: { name: fn.symbol, offset: 0, size: text.length },
-      labels: machine.labels,
-      undefined: machine.externals,
-      relocations: machine.code.relocations,
-    }).bytes,
+    bytes: fieldOf(written, "bytes") as Uint8Array,
     textSizeBytes: text.length,
     threads: machine.teamed.size > 0,
   };
@@ -1715,7 +1723,7 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
   // cannot: `fCmp` over eleven limbs is a single `if` whose arms assign to one
   // name, and unrolling it put 284 instructions of duplicated guard into the
   // middle of an `fAddMod` called 1.7 million times per scalar multiplication.
-  if (statements.length > 0 && statements.every((statement) => statement.k === "if")) return null;
+  if (statements.length > 0 && statements.every((statement) => String(fieldOf(statement, "k")) === "if")) return null;
   const from = wholeLiteral(fieldOf(loop, "from") as SemanticValue);
   const to = wholeLiteral(fieldOf(loop, "to") as SemanticValue);
   if (from === null || to === null) return null;
@@ -1747,7 +1755,7 @@ function unrollPlan(loop: Extract<SemanticLoop, { kind: "counted" }>): { factor:
 
 /** The number a whole literal writes down, or null when it is not one. */
 function wholeLiteral(value: SemanticValue): number | null {
-  if (value.k !== "const") return null;
+  if (String(fieldOf(value, "k")) !== "const") return null;
   const type = fieldOf(value, "type") as SemanticType;
   const text = String(fieldOf(value, "text"));
   const number = isFloatType(type) ? Number(decimalText(text)) : Number(integerText(text));
@@ -1764,9 +1772,9 @@ function soleSelect(value: SemanticValue): Extract<SemanticValue, { k: "select" 
   let found: Extract<SemanticValue, { k: "select" }> | null = null;
   let again = false;
   walkValues(value, (inner) => {
-    if (inner.k !== "select") return;
+    if (String(fieldOf(inner, "k")) !== "select") return;
     again = again || found !== null;
-    found ??= inner;
+    found ??= inner as Extract<SemanticValue, { k: "select" }>;
   });
   return found === null || again ? null : found;
 }
@@ -1778,12 +1786,12 @@ function soleSelect(value: SemanticValue): Extract<SemanticValue, { k: "select" 
  * adds past the weight is what is left when the kernel is taken out.
  */
 function addendsOf(value: SemanticValue, into: SemanticValue[]): void {
-  if (value.k !== "arith" || value.op !== "add") {
+  if (String(fieldOf(value, "k")) !== "arith" || String(fieldOf(value, "op")) !== "add") {
     into.push(value);
     return;
   }
-  addendsOf(value.left, into);
-  addendsOf(value.right, into);
+  addendsOf(fieldOf(value, "left"), into);
+  addendsOf(fieldOf(value, "right"), into);
 }
 
 /** Whether two values are written as one: the same shape with the same leaves. */
@@ -1793,7 +1801,7 @@ function sameValue(left: SemanticValue, right: SemanticValue): boolean {
 
 /** Whether a value of the IR is what a tree's node is, in the shape of one. */
 function isValueNode(node: unknown): node is SemanticValue {
-  return node !== null && typeof node === "object" && typeof (node as { k?: unknown }).k === "string";
+  return node !== null && typeof node === "object" && typeof fieldOf(node, "k") === "string";
 }
 
 /**
@@ -1844,19 +1852,19 @@ function walkReplace(
  * 1)) >>> 1` has the pair of it.
  */
 function sumOfKernel(kernel: SemanticValue): SemanticValue | null {
-  if (kernel.k !== "arith") return null;
-  const product = kernel.op === "ushr" ? kernel.left : null;
-  if (product === null || product.k !== "arith" || product.op !== "mul") return null;
-  if (kernel.right.k !== "const" || wholeLiteral(kernel.right) !== 1) return null;
-  const sum = oneAbove(product.left, product.right) ?? oneAbove(product.right, product.left);
+  if (String(fieldOf(kernel, "k")) !== "arith") return null;
+  const product = String(fieldOf(kernel, "op")) === "ushr" ? fieldOf(kernel, "left") : null;
+  if (product === null || String(fieldOf(product, "k")) !== "arith" || String(fieldOf(product, "op")) !== "mul") return null;
+  if (String(fieldOf(fieldOf(kernel, "right"), "k")) !== "const" || wholeLiteral(fieldOf(kernel, "right")) !== 1) return null;
+  const sum = oneAbove(fieldOf(product, "left"), fieldOf(product, "right")) ?? oneAbove(fieldOf(product, "right"), fieldOf(product, "left"));
   return sum;
 }
 
 /** The value of the pair, where one of the two sides is the other plus one. */
 function oneAbove(value: SemanticValue, other: SemanticValue): SemanticValue | null {
-  if (other.k !== "arith" || other.op !== "add") return null;
-  if (other.right.k === "const" && wholeLiteral(other.right) === 1 && sameValue(other.left, value)) return value;
-  if (other.left.k === "const" && wholeLiteral(other.left) === 1 && sameValue(other.right, value)) return value;
+  if (String(fieldOf(other, "k")) !== "arith" || String(fieldOf(other, "op")) !== "add") return null;
+  if (String(fieldOf(fieldOf(other, "right"), "k")) === "const" && wholeLiteral(fieldOf(other, "right")) === 1 && sameValue(fieldOf(other, "left"), value)) return value;
+  if (String(fieldOf(fieldOf(other, "left"), "k")) === "const" && wholeLiteral(fieldOf(other, "left")) === 1 && sameValue(fieldOf(other, "right"), value)) return value;
   return null;
 }
 
@@ -1868,9 +1876,9 @@ function oneAbove(value: SemanticValue, other: SemanticValue): SemanticValue | n
  * carried as the leaf it is and what it asks is the leaf's own to answer.
  */
 function conjunctsOf(value: SemanticValue): SemanticValue[] | null {
-  if (value.k === "logical" && value.op === "and") {
-    const left = conjunctsOf(value.left);
-    const right = conjunctsOf(value.right);
+  if (String(fieldOf(value, "k")) === "logical" && String(fieldOf(value, "op")) === "and") {
+    const left = conjunctsOf(fieldOf(value, "left"));
+    const right = conjunctsOf(fieldOf(value, "right"));
     return left === null || right === null ? null : [...left, ...right];
   }
   return [value];
@@ -1883,7 +1891,7 @@ function conjunctsOf(value: SemanticValue): SemanticValue[] | null {
 function readsLocal(value: SemanticValue, name: string): boolean {
   let found = false;
   walkValues(value, (inner) => {
-    if (inner.k === "local" && inner.name === name) found = true;
+    if (String(fieldOf(inner, "k")) === "local" && String(fieldOf(inner, "name")) === name) found = true;
   });
   return found;
 }
@@ -1929,11 +1937,11 @@ function hoistableLeaf(
   from: SemanticValue,
   to: SemanticValue,
 ): SemanticValue | null {
-  if (leaf.k === "local") {
+  if (String(fieldOf(leaf, "k")) === "local") {
     if (!isBoolean(fieldOf(leaf, "type") as SemanticType) || writes(String(fieldOf(leaf, "name")))) return null;
     return structuredClone(leaf);
   }
-  if (leaf.k !== "compare") return null;
+  if (String(fieldOf(leaf, "k")) !== "compare") return null;
   if (String(fieldOf(leaf, "op")) !== "le" && String(fieldOf(leaf, "op")) !== "lt" && String(fieldOf(leaf, "op")) !== "ge" && String(fieldOf(leaf, "op")) !== "gt") return null;
   // The comparison is read at the widest unsigned width, where the side that
   // moves cannot pass the top of the width more than once over the whole run.
@@ -1998,7 +2006,7 @@ function growthOf(
   counter: string,
   writes: (name: string) => boolean,
 ): number | null {
-  switch (value.k) {
+  switch (String(fieldOf(value, "k"))) {
     case "const": {
       return wholeLiteral(value) === null ? null : 0;
     }
@@ -2131,7 +2139,7 @@ function callsOut(value: SemanticValue): boolean {
   let called = false;
   walkValues(value, (inner) => {
     if (called) return;
-    if (inner.k === "call") {
+    if (String(fieldOf(inner, "k")) === "call") {
       const call = fieldOf(inner, "call") as SemanticCall;
       if (isInlineBuiltin(String(fieldOf(call, "callee")))) return;
     }
@@ -2164,7 +2172,7 @@ function blockReadsCounterAsValue(block: SemanticBlock, name: string): boolean {
   for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
     // The index of an element write is left out, and everything else the
     // statement carries is walked.
-    if (statement.k === "setElement") {
+    if (String(fieldOf(statement, "k")) === "setElement") {
       if (valueWantsName(fieldOf(statement, "value") as SemanticValue, name)) return true;
     } else {
       for (const value of statementValues(statement)) {
@@ -2179,7 +2187,7 @@ function blockReadsCounterAsValue(block: SemanticBlock, name: string): boolean {
 }
 
 function valueWantsName(value: SemanticValue, name: string): boolean {
-  switch (value.k) {
+  switch (String(fieldOf(value, "k"))) {
     case "local":
       return String(fieldOf(value, "name")) === name;
     case "element":
@@ -2188,7 +2196,7 @@ function valueWantsName(value: SemanticValue, name: string): boolean {
       const parts = fieldOf(value, "parts") as readonly
         ({ k: "text"; value: string } | { k: "value"; value: SemanticValue })[];
       for (const part of parts) {
-        if (part.k === "value" && valueWantsName(fieldOf(part, "value") as SemanticValue, name)) return true;
+        if (String(fieldOf(part, "k")) === "value" && valueWantsName(fieldOf(part, "value") as SemanticValue, name)) return true;
       }
       return false;
     }
@@ -2275,7 +2283,7 @@ function wholeCountable(loop: Extract<SemanticLoop, { kind: "counted" }>): boole
 /** Whether a loop's body writes the name the loop counts by, which the loop owns. */
 function writesCounter(body: SemanticBlock, name: string): boolean {
   for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
-    if ((statement.k === "set" || statement.k === "step") && String(fieldOf(statement, "name")) === name) return true;
+    if ((String(fieldOf(statement, "k")) === "set" || String(fieldOf(statement, "k")) === "step") && String(fieldOf(statement, "name")) === name) return true;
     for (const inner of statementBlocksOf(statement)) {
       if (writesCounter(inner, name)) return true;
     }
@@ -2300,8 +2308,8 @@ function writesCounter(body: SemanticBlock, name: string): boolean {
  */
 function countsWholly(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean {
   if (!wholeCountable(loop)) return false;
-  if (readsCounterAsValue(loop.body, loop.variable)) return false;
-  if (writesCounter(loop.body, loop.variable)) return false;
+  if (readsCounterAsValue(fieldOf(loop, "body"), fieldOf(loop, "variable"))) return false;
+  if (writesCounter(fieldOf(loop, "body"), fieldOf(loop, "variable"))) return false;
   return true;
 }
 
@@ -2318,7 +2326,7 @@ function countsWholly(loop: Extract<SemanticLoop, { kind: "counted" }>): boolean
 function allocates(value: SemanticValue): boolean {
   let found = false;
   walkValues(value, (one) => {
-    if (one.k === "newObject" || one.k === "buffer") found = true;
+    if (String(fieldOf(one, "k")) === "newObject" || String(fieldOf(one, "k")) === "buffer") found = true;
   });
   return found;
 }
@@ -2342,8 +2350,8 @@ function allocates(value: SemanticValue): boolean {
  * here was reading a target the C half of the same build had already believed.
  */
 function roundsOnItsOwn(target: TargetSpec): boolean {
-  if (target.features.includes("sse4.1") || target.features.includes("sse4.2")) return true;
-  return target.cpu !== "" && CPU_HAS_SSE41.test(target.cpu);
+  if (fieldOf(target, "features").includes("sse4.1") || fieldOf(target, "features").includes("sse4.2")) return true;
+  return String(fieldOf(target, "cpu")) !== "" && CPU_HAS_SSE41.test(fieldOf(target, "cpu"));
 }
 
 /**
@@ -2359,8 +2367,8 @@ function roundsOnItsOwn(target: TargetSpec): boolean {
  * does not is no worse off than before.
  */
 function bmi2OnItsOwn(target: TargetSpec): boolean {
-  if (target.features.includes("bmi2")) return true;
-  return target.cpu !== "" && CPU_HAS_BMI2.test(target.cpu);
+  if (fieldOf(target, "features").includes("bmi2")) return true;
+  return String(fieldOf(target, "cpu")) !== "" && CPU_HAS_BMI2.test(fieldOf(target, "cpu"));
 }
 
 /** The value of a wide constant the source wrote out, or null for anything
@@ -2371,8 +2379,8 @@ function bmi2OnItsOwn(target: TargetSpec): boolean {
  * values the compiler knows, so both count. */
 function wideConstantOf(value: SemanticValue): bigint | null {
   const type = fieldOf(value, "type") as SemanticType;
-  if (value.k === "const") return isWideType(type) ? integerLiteral(String(fieldOf(value, "text"))) : null;
-  if (value.k !== "call" || !isWideType(type)) return null;
+  if (String(fieldOf(value, "k")) === "const") return isWideType(type) ? integerLiteral(String(fieldOf(value, "text"))) : null;
+  if (String(fieldOf(value, "k")) !== "call" || !isWideType(type)) return null;
   const call = fieldOf(value, "call") as SemanticCall;
   const callee = String(fieldOf(call, "callee"));
   if (callee !== "u256_from_u64x2" && callee !== "u256_from_u64x4") return null;
@@ -2380,7 +2388,7 @@ function wideConstantOf(value: SemanticValue): bigint | null {
   let whole = 0n;
   for (let at = 0; at < args.length; at += 1) {
     const limb = args[at];
-    const part = limb.k === "const" ? integerLiteral(String(fieldOf(limb, "text"))) : null;
+    const part = String(fieldOf(limb, "k")) === "const" ? integerLiteral(String(fieldOf(limb, "text"))) : null;
     if (part === null || part < 0n || part >= (1n << 64n)) return null;
     whole |= part << BigInt(at * 64);
   }
@@ -2434,7 +2442,7 @@ function inspectWrittenObject(objectPath: string, functionName: string): { defin
   } catch (reason) {
     throw machineError(
       `cannot inspect the object of ${functionName}`,
-      reason instanceof Error ? reason.message : String(reason),
+      reason instanceof Error ? String(fieldOf(reason, "message")) : String(reason),
       functionName,
     );
   }
@@ -2764,7 +2772,7 @@ class Machine {
   private fillsObjects(): boolean {
     for (const block of everyBlock(fieldOf(this.fn, "entry") as SemanticBlock, [])) {
       for (const value of everyValue(block, [])) {
-        if (value.k === "newObject" || value.k === "buffer") return true;
+        if (String(fieldOf(value, "k")) === "newObject" || String(fieldOf(value, "k")) === "buffer") return true;
       }
     }
     return false;
@@ -2787,7 +2795,7 @@ class Machine {
    * host processor, so a binary built with it only runs on AVX-512 hardware.
    */
   private get avx512(): boolean {
-    return this.target.features.includes("avx512f");
+    return fieldOf(this.target, "features").includes("avx512f");
   }
   /**
    * The parameter indices that hold power-of-two arrays, so division by one of
@@ -2960,11 +2968,11 @@ class Machine {
     function turning(block: SemanticBlock, depth: number): number {
       let count = 0;
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-        for (const inner of statementBlocksOf(statement)) count += turning(inner, depth + (statement.k === "loop" ? 1 : 0));
+        for (const inner of statementBlocksOf(statement)) count += turning(inner, depth + (String(fieldOf(statement, "k")) === "loop" ? 1 : 0));
         if (depth === 0) continue;
         for (const value of statementValues(statement)) {
           if (isFloatType(fieldOf(value, "type") as SemanticType) &&
-              (value.k === "arith" || value.k === "compare")) count += 1;
+              (String(fieldOf(value, "k")) === "arith" || String(fieldOf(value, "k")) === "compare")) count += 1;
         }
       }
       return count;
@@ -3001,19 +3009,19 @@ class Machine {
   private boundDepth(body: SemanticBlock, depth: number): number {
     let deepest = depth;
     for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
-      if (statement.k === "loop") {
+      if (String(fieldOf(statement, "k")) === "loop") {
         const loop = fieldOf(statement, "loop") as SemanticLoop;
-        if (loop.kind === "counted" && this.holdsBound(loop)) {
+        if (String(fieldOf(loop, "kind")) === "counted" && this.holdsBound(loop as Extract<SemanticLoop, { kind: "counted" }>)) {
           deepest = Math.max(deepest, depth + 1);
         }
         deepest = Math.max(deepest, this.boundDepth(fieldOf(loop, "body") as SemanticBlock, depth + 1));
-      } else if (statement.k === "if") {
+      } else if (String(fieldOf(statement, "k")) === "if") {
         deepest = Math.max(deepest, this.boundDepth(fieldOf(statement, "then") as SemanticBlock, depth));
         const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
         if (String(otherwise) !== "null") {
           deepest = Math.max(deepest, this.boundDepth(otherwise as SemanticBlock, depth));
         }
-      } else if (statement.k === "block") {
+      } else if (String(fieldOf(statement, "k")) === "block") {
         deepest = Math.max(deepest, this.boundDepth(fieldOf(statement, "body") as SemanticBlock, depth));
       }
     }
@@ -3058,9 +3066,9 @@ class Machine {
   private indexDepth(body: SemanticBlock, depth: number): number {
     let deepest = depth;
     for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
-      if (statement.k === "loop") {
+      if (String(fieldOf(statement, "k")) === "loop") {
         const loop = fieldOf(statement, "loop") as SemanticLoop;
-        if (loop.kind === "counted" &&
+        if (String(fieldOf(loop, "kind")) === "counted" &&
             isFloatType(fieldOf(loop, "type") as SemanticType) &&
             wholeLiteral(fieldOf(loop, "from") as SemanticValue) !== null &&
             !writesCounter(fieldOf(loop, "body") as SemanticBlock, String(fieldOf(loop, "variable")))) {
@@ -3096,9 +3104,9 @@ class Machine {
   private weightedDepth(body: SemanticBlock, depth: number): number {
     let deepest = depth;
     for (const statement of fieldOf(body, "statements") as readonly SemanticStatement[]) {
-      if (statement.k === "loop") {
+      if (String(fieldOf(statement, "k")) === "loop") {
         const loop = fieldOf(statement, "loop") as SemanticLoop;
-        if (loop.kind === "counted" && this.weightedPlan(loop) !== null) {
+        if (String(fieldOf(loop, "kind")) === "counted" && this.weightedPlan(loop as Extract<SemanticLoop, { kind: "counted" }>) !== null) {
           deepest = Math.max(deepest, depth + 1);
         }
         deepest = Math.max(deepest, this.weightedDepth(fieldOf(loop, "body") as SemanticBlock, depth + 1));
@@ -3219,7 +3227,7 @@ class Machine {
     // writes go through it is not reserved: its distance is zero, which is the
     // first slot's own address, and it is never read.
     const need = Math.max(frameBytes(type), 8);
-    const spare = where === null ? this.spareSlots.findIndex((slot) => slot.bytes >= need) : -1;
+    const spare = where === null ? this.spareSlots.findIndex((slot) => Number(fieldOf(slot, "bytes")) >= need) : -1;
     const offset =
       where !== null ? 0 : spare >= 0 ? (fieldOf(this.spareSlots.splice(spare, 1)[0], "offset") as number) : this.reserve(need);
     this.heldCount += 1;
@@ -3296,12 +3304,12 @@ class Machine {
    * written over.
    */
   private boundElementsOf(value: SemanticValue): bigint | Held | null {
-    if (value.k !== "buffer") {
+    if (String(fieldOf(value, "k")) !== "buffer") {
       // A name holds the count it was bound with whatever the array it holds is
       // spelled as: a slice and an array are both a pointer and a length here,
       // which is why the C backend declares a `_length` beside either.
-      if (value.k === "local" && isSequence(value.type)) {
-        return this.arrayCounts.get(this.names.read(value.name)) ?? null;
+      if (String(fieldOf(value, "k")) === "local" && isSequence(fieldOf(value, "type"))) {
+        return this.arrayCounts.get(this.names.read(fieldOf(value, "name"))) ?? null;
       }
       return null;
     }
@@ -3322,8 +3330,8 @@ class Machine {
 
   /** Whether a value is a window of another block, and not a block of its own. */
   private isView(value: SemanticValue): boolean {
-    if (value.k === "buffer") return String(fieldOf(value, "view")) !== "null";
-    if (value.k === "local" && isSequence(fieldOf(value, "type") as SemanticType)) {
+    if (String(fieldOf(value, "k")) === "buffer") return String(fieldOf(value, "view")) !== "null";
+    if (String(fieldOf(value, "k")) === "local" && isSequence(fieldOf(value, "type") as SemanticType)) {
       return this.views.has(this.names.read(String(fieldOf(value, "name"))));
     }
     return false;
@@ -3348,8 +3356,8 @@ class Machine {
    * carries every length as an argument of its own.
    */
   private lengthArgument(value: SemanticValue): Held {
-    if (value.k === "local") {
-      const hidden = this.arrayParamLengths.get(value.name);
+    if (String(fieldOf(value, "k")) === "local") {
+      const hidden = this.arrayParamLengths.get(fieldOf(value, "name"));
       if (hidden !== undefined) return this.slot(hidden);
     }
     const count = this.boundElementsOf(value);
@@ -3395,19 +3403,19 @@ class Machine {
    * a value that is a call is made once the source says it is.
    */
   private fill(statement: Extract<SemanticStatement, { k: "fill" }>): void {
-    const buffer = this.slot(statement.buffer);
-    const count = this.arrayCounts.get(this.names.read(statement.buffer));
+    const buffer = this.slot(fieldOf(statement, "buffer"));
+    const count = this.arrayCounts.get(this.names.read(fieldOf(statement, "buffer")));
     if (count === undefined) {
       throw machineError(
-        `${String(fieldOf(this.fn, "symbol"))} fills ${statement.buffer}, which it binds with no count of its own`,
+        `${String(fieldOf(this.fn, "symbol"))} fills ${String(fieldOf(statement, "buffer"))}, which it binds with no count of its own`,
         "the count of an array is settled where the array is bound: a fill of a name the binding does not count is not one this backend writes",
       );
     }
-    const element = statement.type;
+    const element = fieldOf(statement, "type");
     const written = this.hold(element, "blaze_fill");
     // The value is read once, at the type the elements are written at: a fill
     // writes one value into every element of the array.
-    this.at(statement.value, element);
+    this.at(fieldOf(statement, "value"), element);
     this.store(written);
     // The accumulator note is a claim about the register, and the address
     // arithmetic the walk takes it through is a claim nothing backs: it is
@@ -3530,15 +3538,15 @@ class Machine {
       const weight = READ_WEIGHT[Math.min(depth + recursed, READ_WEIGHT.length - 1)];
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         const statementName = String(fieldOf(statement, "name"));
-        if (statement.k === "set" || statement.k === "step") write(statementName, weight);
+        if (String(fieldOf(statement, "k")) === "set" || String(fieldOf(statement, "k")) === "step") write(statementName, weight);
         // A compound assignment reads what the name holds as well as writing
         // what it is given, and the read is a read of the name: an accumulator
         // that is added to on every turn of a loop is reached for as often as
         // anything else there, and the frame round trip of keeping it there is
         // a load and a store on every turn.
-        if (statement.k === "set" && String(fieldOf(statement, "op")) !== "=") read(statementName, weight);
-        if (statement.k === "step") read(statementName, weight);
-        if (statement.k === "setElement") {
+        if (String(fieldOf(statement, "k")) === "set" && String(fieldOf(statement, "op")) !== "=") read(statementName, weight);
+        if (String(fieldOf(statement, "k")) === "step") read(statementName, weight);
+        if (String(fieldOf(statement, "k")) === "setElement") {
           // The buffer of a write is named rather than valued, so a census of
           // the values the body computes never sees it read. Writing an element
           // changes what the pointer reaches and not the pointer itself, so it
@@ -3546,7 +3554,7 @@ class Machine {
           const buffer = String(fieldOf(statement, "buffer"));
           reads.set(buffer, (reads.get(buffer) ?? 0) + weight);
         }
-        if (statement.k === "fill") {
+        if (String(fieldOf(statement, "k")) === "fill") {
           // A fill is every element written at once, and the pointer it writes
           // through is read on every turn of the walk it is, which is a read
           // the census counts here the way a write of one element counts it.
@@ -3555,7 +3563,7 @@ class Machine {
         }
       }
       for (const value of everyValue(block, [])) {
-        if (value.k === "local") {
+        if (String(fieldOf(value, "k")) === "local") {
           const name = String(fieldOf(value, "name"));
           reads.set(name, (reads.get(name) ?? 0) + weight);
         }
@@ -3576,9 +3584,9 @@ class Machine {
     for (const entry of everyBlockAtDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0, [])) {
       const block = fieldOf(entry, "block") as SemanticBlock;
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-        if (statement.k === "let") {
+        if (String(fieldOf(statement, "k")) === "let") {
           declare(String(fieldOf(fieldOf(statement, "slot"), "name")));
-        } else if (statement.k === "loop") {
+        } else if (String(fieldOf(statement, "k")) === "loop") {
           const loop = fieldOf(statement, "loop") as SemanticLoop;
           const kind = String(fieldOf(loop, "kind"));
           if (kind === "counted") {
@@ -3604,7 +3612,7 @@ class Machine {
     for (const entry of everyBlockAtDepth(fieldOf(this.fn, "entry") as SemanticBlock, 0, [])) {
       const block = fieldOf(entry, "block") as SemanticBlock;
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-        if (statement.k !== "let") continue;
+        if (String(fieldOf(statement, "k")) !== "let") continue;
         const slot = fieldOf(statement, "slot") as SemanticSlot;
         const name = String(fieldOf(slot, "name"));
         if (loopDeclared.has(name)) continue;
@@ -3622,8 +3630,8 @@ class Machine {
     // cannot be said without solving for it, which `liveness.ts` does.
     const score = (name: string): number => (reads.get(name) ?? 0) + (writes.get(name) ?? 0);
     const candidates = declared
-      .map((entry) => ({ entry, score: score(entry.name) }))
-      .filter((candidate) => candidate.score > 0 && declarationCount.get(candidate.entry.name) === 1 && !candidate.entry.name.startsWith("blaze_limb_"))
+      .map((entry) => ({ entry, score: score(String(fieldOf(entry, "name"))) }))
+      .filter((candidate) => candidate.score > 0 && declarationCount.get(String(fieldOf(fieldOf(candidate, "entry"), "name"))) === 1 && !String(fieldOf(fieldOf(candidate, "entry"), "name")).startsWith("blaze_limb_"))
       .sort((left, right) => right.score - left.score);
 
     this.pinnedRegisters = [];
@@ -3643,7 +3651,7 @@ class Machine {
       (statement) => {
         const loop = fieldOf(statement, "loop") as SemanticLoop;
         const kind = String(fieldOf(loop, "kind"));
-        return statement.k === "loop" &&
+        return String(fieldOf(statement, "k")) === "loop" &&
           (kind === "counted" || kind === "each") &&
           (this.teamed.has(loop) || String(fieldOf(loop, "region")) === "true");
       },
@@ -3784,12 +3792,12 @@ class Machine {
       // value.
       if (isWideType(type)) return;
       const facts = liveness.get(name);
-      if (facts === undefined || facts.live.length === 0) return;
-      const live = facts.live;
+      if (facts === undefined || (fieldOf(facts, "live") as readonly (readonly [number, number])[]).length === 0) return;
+      const live = fieldOf(facts, "live") as readonly (readonly [number, number])[];
       const float = isFloatType(type);
       const preserved = float ? [6, 7, 8, 9, 10, 11, 12, 13, 14, 15] : [3, 12, 13, 14];
       const given = float ? [3, 4, 5] : [7, 6, 8, 9, 10, 11];
-      const register = facts.acrossCall
+      const register = String(fieldOf(facts, "acrossCall")) === "true"
         ? free(preserved, live, name)
         : (free(given, live, name) ?? free(preserved, live, name));
       if (register === null) return;
@@ -3810,11 +3818,11 @@ class Machine {
     // register has to be earned and a free one has not.
     const worth = (name: string): number => {
       const facts = liveness.get(name);
-      return facts?.acrossCall === true ? PINNING_READS + 1 : 1;
+      return facts !== undefined && fieldOf(facts, "acrossCall") === true ? PINNING_READS + 1 : 1;
     };
     for (const candidate of candidates) {
-      if (candidate.score < worth(candidate.entry.name)) continue;
-      assign(candidate.entry.name, candidate.entry.type);
+      if (candidate.score < worth(String(fieldOf(fieldOf(candidate, "entry"), "name")))) continue;
+      assign(String(fieldOf(fieldOf(candidate, "entry"), "name")), fieldOf(fieldOf(candidate, "entry"), "type"));
     }
     // A counted loop's counter is written and read by the loop itself on every
     // turn, so it is what a register is worth the most on. Left in the frame it
@@ -3861,7 +3869,7 @@ class Machine {
           const foundDepth = found === undefined ? 0 : Number(fieldOf(found, "depth"));
           counters.set(name, { depth: Math.max(foundDepth, depth), type, asIndex, wholly });
         };
-        if (statement.k !== "loop") {
+        if (String(fieldOf(statement, "k")) !== "loop") {
           // A loop in an arm of an `if` is a loop like any other, and the
           // census above counted it: a name this walk did not reach is a name
           // it would answer for the wrong number of declarations.
@@ -3870,7 +3878,7 @@ class Machine {
         }
         const loop = fieldOf(statement, "loop") as SemanticLoop;
         let inside: Set<string> | null = null;
-        if (loop.kind === "counted") {
+        if (String(fieldOf(loop, "kind")) === "counted") {
           // A counter the body reaches only as an index is counted in whole
           // numbers, which is what `counted` writes it as, so giving it a vector
           // register would be a register for a double nothing reads — and a
@@ -3887,10 +3895,10 @@ class Machine {
             variable,
             loopType,
             isFloatType(loopType) && !readsCounterAsValue(fieldOf(loop, "body") as SemanticBlock, variable),
-            countsWholly(loop),
+            countsWholly(loop as Extract<SemanticLoop, { kind: "counted" }>),
           );
           inside = new Set(enclosing).add(variable);
-        } else if (loop.kind === "each") {
+        } else if (String(fieldOf(loop, "kind")) === "each") {
           const element = String(fieldOf(loop, "element"));
           declarations.set(element, (declarations.get(element) ?? 0) + 1);
           // A walk over an array steps its index once per turn and reads it
@@ -4026,7 +4034,7 @@ class Machine {
         String(fieldOf(this.fn, "readsArgv")) === "true") return true;
     for (const block of everyBlock(fieldOf(this.fn, "entry") as SemanticBlock, [])) {
       for (const value of everyValue(block, [])) {
-        if (value.k !== "call") continue;
+        if (String(fieldOf(value, "k")) !== "call") continue;
         const call = fieldOf(value, "call") as SemanticCall;
         if (String(fieldOf(call, "builtin")) === "true" || !this.callable.has(String(fieldOf(call, "callee")))) return true;
       }
@@ -4051,7 +4059,7 @@ class Machine {
   private planTeams(): void {
     const visit = (block: SemanticBlock, inside: boolean): void => {
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-        if (statement.k === "loop") {
+        if (String(fieldOf(statement, "k")) === "loop") {
           const loop = fieldOf(statement, "loop") as SemanticLoop;
           const team = inside ? null : this.teamFor(loop);
           if (team !== null) {
@@ -4066,13 +4074,13 @@ class Machine {
           visit(fieldOf(loop, "body") as SemanticBlock, inside || team !== null);
           continue;
         }
-        if (statement.k === "if") {
+        if (String(fieldOf(statement, "k")) === "if") {
           visit(fieldOf(statement, "then") as SemanticBlock, inside);
           const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
           if (String(otherwise) !== "null") visit(otherwise as SemanticBlock, inside);
           continue;
         }
-        if (statement.k === "block") visit(fieldOf(statement, "body") as SemanticBlock, inside);
+        if (String(fieldOf(statement, "k")) === "block") visit(fieldOf(statement, "body") as SemanticBlock, inside);
       }
     };
     visit(fieldOf(this.fn, "entry") as SemanticBlock, false);
@@ -4138,7 +4146,7 @@ class Machine {
     // The body opens a scope of its own, and the parameters are read in it, so
     // they are declared one scope further out.
     this.names.enter();
-    this.block(this.fn.entry);
+    this.block(fieldOf(this.fn, "entry"));
     this.code.bind(this.epilogue);
     // A wide answer is copied to where the caller said it wanted it before the
     // frame is given back, because the pointer to that place was read out of
@@ -4237,7 +4245,7 @@ class Machine {
     // to start past it as well: a first parameter read from `rdi` is the
     // pointer, so the body works on the address of its own answer as though it
     // were the number it was handed.
-    let general = isWideType(this.fn.returns) ? 1 : 0;
+    let general = isWideType(fieldOf(this.fn, "returns")) ? 1 : 0;
     let floating = 0;
     let stack = 0;
     // Whether the registers have run out, which is not the same question as
@@ -4433,13 +4441,13 @@ class Machine {
    * and a read written at another width converts on the way out of it.
    */
   private shiftInPlace(value: SemanticValue, target: Held): boolean {
-    if (value.k !== "arith") return false;
+    if (String(fieldOf(value, "k")) !== "arith") return false;
     const op = String(fieldOf(value, "op"));
     if (op !== "shl" && op !== "shr" && op !== "ushr") return false;
     const type = fieldOf(target, "type") as SemanticType;
     if (isFloatType(type) || isWideType(type)) return false;
     const left = fieldOf(value, "left") as SemanticValue;
-    if (left.k !== "local") return false;
+    if (String(fieldOf(left, "k")) !== "local") return false;
     const places = this.immediateOf(fieldOf(value, "right") as SemanticValue, type);
     if (places === null) return false;
     const held = this.slot(String(fieldOf(left, "name")));
@@ -4633,7 +4641,7 @@ class Machine {
     // A block that leaves for another one has written the jump that does it,
     // and that jump is not one the lowering laid out to reach whatever comes
     // next here.
-    if (terminator.k === "jump") this.code.sealJump();
+    if (String(fieldOf(terminator, "k")) === "jump") this.code.sealJump();
     this.names.leave();
   }
 
@@ -4645,21 +4653,21 @@ class Machine {
   private powerOfTwoDivFloor(
     value: SemanticValue,
   ): { readonly value: SemanticValue; readonly index: SemanticValue & { k: "local" }; readonly paramName: string } | null {
-    if (value.k !== "call") return null;
+    if (String(fieldOf(value, "k")) !== "call") return null;
     const call = fieldOf(value, "call") as SemanticCall;
     if (String(fieldOf(call, "callee")) !== "Math.floor") return null;
     const args = fieldOf(call, "args") as readonly SemanticValue[];
     if (args.length !== 1) return null;
     const div = args[0];
-    if (div.k !== "arith" || String(fieldOf(div, "op")) !== "div") return null;
+    if (String(fieldOf(div, "k")) !== "arith" || String(fieldOf(div, "op")) !== "div") return null;
     // Division is not commutative: the divisor is the element read from the
     // power-of-two array, and the dividend is everything else.
     const right = fieldOf(div, "right") as SemanticValue;
-    if (right.k !== "element") return null;
+    if (String(fieldOf(right, "k")) !== "element") return null;
     const element = right;
     const of = fieldOf(element, "of") as SemanticValue;
     const index = fieldOf(element, "index") as SemanticValue;
-    if (of.k !== "local" || index.k !== "local") return null;
+    if (String(fieldOf(of, "k")) !== "local" || String(fieldOf(index, "k")) !== "local") return null;
     return {
       value: fieldOf(div, "left") as SemanticValue,
       index: index as SemanticValue & { k: "local" },
@@ -4673,35 +4681,35 @@ class Machine {
    * side of the subtraction.
    */
   private ifTestsOddness(condition: SemanticValue, chunk: string): boolean {
-    if (condition.k !== "compare" || String(fieldOf(condition, "op")) !== "eq") return false;
+    if (String(fieldOf(condition, "k")) !== "compare" || String(fieldOf(condition, "op")) !== "eq") return false;
     const left = fieldOf(condition, "left") as SemanticValue;
     const right = fieldOf(condition, "right") as SemanticValue;
-    if (right.k !== "const" || Number(fieldOf(right, "text")) !== 1) return false;
-    if (left.k !== "arith" || String(fieldOf(left, "op")) !== "sub") return false;
+    if (String(fieldOf(right, "k")) !== "const" || Number(fieldOf(right, "text")) !== 1) return false;
+    if (String(fieldOf(left, "k")) !== "arith" || String(fieldOf(left, "op")) !== "sub") return false;
     const leftLeft = fieldOf(left, "left") as SemanticValue;
-    if (leftLeft.k !== "local" || String(fieldOf(leftLeft, "name")) !== chunk) return false;
+    if (String(fieldOf(leftLeft, "k")) !== "local" || String(fieldOf(leftLeft, "name")) !== chunk) return false;
     const mul = fieldOf(left, "right") as SemanticValue;
-    if (mul.k !== "arith" || String(fieldOf(mul, "op")) !== "mul") return false;
+    if (String(fieldOf(mul, "k")) !== "arith" || String(fieldOf(mul, "op")) !== "mul") return false;
     const mulLeft = fieldOf(mul, "left") as SemanticValue;
     const mulRight = fieldOf(mul, "right") as SemanticValue;
-    const floorDiv = mulLeft.k === "call" ? mulLeft : mulRight.k === "call" ? mulRight : null;
-    if (floorDiv === null || floorDiv.k !== "call") return false;
+    const floorDiv = String(fieldOf(mulLeft, "k")) === "call" ? mulLeft : String(fieldOf(mulRight, "k")) === "call" ? mulRight : null;
+    if (floorDiv === null || String(fieldOf(floorDiv, "k")) !== "call") return false;
     const call = fieldOf(floorDiv, "call") as SemanticCall;
     if (String(fieldOf(call, "callee")) !== "Math.floor") return false;
     const floorArgs = fieldOf(call, "args") as readonly SemanticValue[];
     if (floorArgs.length !== 1) return false;
     const innerDiv = floorArgs[0];
-    if (innerDiv.k !== "arith" || String(fieldOf(innerDiv, "op")) !== "div") return false;
+    if (String(fieldOf(innerDiv, "k")) !== "arith" || String(fieldOf(innerDiv, "op")) !== "div") return false;
     const innerDivLeft = fieldOf(innerDiv, "left") as SemanticValue;
     const innerDivRight = fieldOf(innerDiv, "right") as SemanticValue;
-    const innerLeft = innerDivLeft.k === "local" ? innerDivLeft : null;
-    const innerRight = innerDivRight.k === "local" ? innerDivRight : null;
+    const innerLeft = String(fieldOf(innerDivLeft, "k")) === "local" ? innerDivLeft : null;
+    const innerRight = String(fieldOf(innerDivRight, "k")) === "local" ? innerDivRight : null;
     const chunkRead = innerLeft !== null && String(fieldOf(innerLeft, "name")) === chunk ? innerLeft : innerRight;
     if (chunkRead === null || String(fieldOf(chunkRead, "name")) !== chunk) return false;
     const two = innerLeft === chunkRead ? innerDivRight : innerDivLeft;
-    if (two.k !== "const" || Number(fieldOf(two, "text")) !== 2) return false;
+    if (String(fieldOf(two, "k")) !== "const" || Number(fieldOf(two, "text")) !== 2) return false;
     const other = mulLeft === floorDiv ? mulRight : mulLeft;
-    if (other.k !== "const" || Number(fieldOf(other, "text")) !== 2) return false;
+    if (String(fieldOf(other, "k")) !== "const" || Number(fieldOf(other, "text")) !== 2) return false;
     return true;
   }
 
@@ -4715,15 +4723,15 @@ class Machine {
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         for (const value of statementValues(statement)) {
           walkValues(value, (one) => {
-            if (one.k === "local" && String(fieldOf(one, "name")) === name) count += 1;
+            if (String(fieldOf(one, "k")) === "local" && String(fieldOf(one, "name")) === name) count += 1;
           });
         }
         for (const nested of statementBlocksOf(statement)) walk(nested);
       }
       const terminator = fieldOf(block, "terminator") as SemanticTerminator;
-      if (terminator.k === "return" && String(fieldOf(terminator, "value")) !== "null") {
+      if (String(fieldOf(terminator, "k")) === "return" && String(fieldOf(terminator, "value")) !== "null") {
         walkValues(fieldOf(terminator, "value") as SemanticValue, (one) => {
-          if (one.k === "local" && String(fieldOf(one, "name")) === name) count += 1;
+          if (String(fieldOf(one, "k")) === "local" && String(fieldOf(one, "name")) === name) count += 1;
         });
       }
     };
@@ -4742,19 +4750,19 @@ class Machine {
    * the low bit.
    */
   private tryPowerOfTwoBitTest(statement: SemanticStatement, next: SemanticStatement): boolean {
-    if (statement.k !== "let" || next.k !== "if") return false;
-    const div = this.powerOfTwoDivFloor(statement.value);
+    if (String(fieldOf(statement, "k")) !== "let" || String(fieldOf(next, "k")) !== "if") return false;
+    const div = this.powerOfTwoDivFloor(fieldOf(statement, "value"));
     if (div === null) return false;
     const param = (fieldOf(this.fn, "params") as readonly SemanticSlot[]).find(
       (p, position) => String(fieldOf(p, "kind")) === "value" &&
-        String(fieldOf(p, "name")) === div.paramName &&
+        String(fieldOf(p, "name")) === String(fieldOf(div, "paramName")) &&
         this.poTParams.has(position),
     );
     if (param === undefined) return false;
     // The shift count has to be a whole-number counter this function keeps in
     // a register of its own; a counter held as a double in the frame cannot be
     // used as a shift count here.
-    const shift = this.counterRegisters.get(String(fieldOf(div.index, "name")));
+    const shift = this.counterRegisters.get(String(fieldOf(fieldOf(div, "index"), "name")));
     if (shift === undefined) return false;
     const chunk = String(fieldOf(fieldOf(statement, "slot"), "name"));
     const nextCondition = fieldOf(next, "condition") as SemanticValue;
@@ -4765,7 +4773,7 @@ class Machine {
     if (this.localReads(chunk) !== 2) return false;
     const otherwise = this.code.label("Lelse");
     const end = this.code.label("Lend");
-    this.at(div.value, NUMBER);
+    this.at(fieldOf(div, "value"), NUMBER);
     this.code.cvtFloatToInt(RAX, XMM0, false, true);
     this.code.movRegReg(RDX, RAX);
     this.code.movRegReg(RCX, shift);
@@ -4800,7 +4808,7 @@ class Machine {
   }
 
   private writeStatement(statement: SemanticStatement): void {
-    switch (statement.k) {
+    switch (String(fieldOf(statement, "k"))) {
       case "let": {
         const slot = fieldOf(statement, "slot") as SemanticSlot;
         const value = fieldOf(statement, "value") as SemanticValue;
@@ -4898,7 +4906,7 @@ class Machine {
         const op = String(fieldOf(statement, "op"));
         const buffer = this.slot(String(fieldOf(statement, "buffer")));
         const bufferType = fieldOf(buffer, "type") as SemanticType;
-        const isDynamic = bufferType.kind === "ref" && bufferType.of === null;
+        const isDynamic = String(fieldOf(bufferType, "kind")) === "ref" && fieldOf(bufferType, "of") === null;
         if (isDynamic) {
           this.value(value);
           this.code.movsMove(XMM2, XMM0, false);
@@ -4993,7 +5001,7 @@ class Machine {
         return;
       }
       case "printText":
-        this.printText(statement.value);
+        this.printText(fieldOf(statement, "value") as SemanticValue);
         return;
       case "printNumber": {
         const value = fieldOf(statement, "value") as SemanticValue;
@@ -5088,7 +5096,7 @@ class Machine {
         this.loop(fieldOf(statement, "loop") as SemanticLoop);
         return;
       case "fill":
-        this.fill(statement);
+        this.fill(statement as Extract<SemanticStatement, { k: "fill" }>);
         return;
     }
   }
@@ -5140,8 +5148,8 @@ class Machine {
       // than the pair. A name the build gave a register of its own is a value
       // read on every turn of a loop as often as anything else — `borrow` is
       // one, and the eleven limbs of a modular subtraction assign it twice each.
-      if (value.k === "const" && isFloatType(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
-        this.floatConstant(Number(decimalText(value.text)), targetType, targetRegister as number);
+      if (String(fieldOf(value, "k")) === "const" && isFloatType(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
+        this.floatConstant(Number(decimalText(fieldOf(value, "text"))), targetType, targetRegister as number);
         return;
       }
       // The same is true of an integer written out: a constant already fits in
@@ -5149,8 +5157,8 @@ class Machine {
       // directly rather than through the accumulator and a move. A name the
       // build gave a register of its own is the one both sides read equally,
       // and the eleven limbs of a field arithmetic assign one several times.
-      if (value.k === "const" && isInteger(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
-        const whole = integerText(value.text);
+      if (String(fieldOf(value, "k")) === "const" && isInteger(targetType) && String(targetRegister) !== "null" && !isWideType(targetType)) {
+        const whole = integerText(fieldOf(value, "text"));
         this.code.movRegImm(targetRegister as number, whole);
         if (!this.writtenWhole(whole, targetType)) this.normalizeArithmetic(targetType, targetRegister as number);
         return;
@@ -5188,8 +5196,8 @@ class Machine {
     // A number written out, added to a name that has a register of its own, is
     // the one instruction that carries the number: the value does not have to
     // be built in the accumulator first.
-    if (String(targetRegister) !== "null" && value.k === "const" && isInteger(targetType) && !isWideType(targetType)) {
-      const whole = integerText(value.text);
+    if (String(targetRegister) !== "null" && String(fieldOf(value, "k")) === "const" && isInteger(targetType) && !isWideType(targetType)) {
+      const whole = integerText(fieldOf(value, "text"));
       const carried =
         whole >= -0x8000_0000n &&
         whole <= 0x7fff_ffffn &&
@@ -5329,13 +5337,13 @@ class Machine {
     const targetType = fieldOf(target, "type") as SemanticType;
     const register = fieldOf(target, "register") as number;
     const single = widthOf(targetType) === 4;
-    if (value.k === "local") {
+    if (String(fieldOf(value, "k")) === "local") {
       const held = this.slot(String(fieldOf(value, "name")));
       const heldRegister = fieldOf(held, "register") as number | null;
       const heldType = fieldOf(held, "type") as SemanticType;
       if (String(heldRegister) === "null" || isWideType(heldType) || !typeEquals(heldType, targetType)) return false;
       this.code.sse(operation as "add" | "sub" | "mul", register, heldRegister as number, single);
-    } else if (value.k === "const" && isFloatType(fieldOf(value, "type") as SemanticType) &&
+    } else if (String(fieldOf(value, "k")) === "const" && isFloatType(fieldOf(value, "type") as SemanticType) &&
                widthOf(fieldOf(value, "type") as SemanticType) === widthOf(targetType)) {
       const label = this.floatLiteral(floatBits(Number(decimalText(String(fieldOf(value, "text")))), single));
       this.code.sseMemLabel(operation as "add" | "sub" | "mul", register, label, single);
@@ -5367,7 +5375,7 @@ class Machine {
    * moves, which is the same question asked of the other side.
    */
   private copyBetween(value: SemanticValue, target: Held): boolean {
-    if (value.k !== "local") return false;
+    if (String(fieldOf(value, "k")) !== "local") return false;
     const source = this.slot(String(fieldOf(value, "name")));
     const sourceType = fieldOf(source, "type") as SemanticType;
     const targetType = fieldOf(target, "type") as SemanticType;
@@ -5422,7 +5430,7 @@ class Machine {
     // general form copies the object into the accumulator first. The address is
     // taken before the value is written, and the value does not take the
     // scratch, so nothing moves it in between.
-    const held = object.k === "local" ? this.slot(String(fieldOf(object, "name"))) : null;
+    const held = String(fieldOf(object, "k")) === "local" ? this.slot(String(fieldOf(object, "name"))) : null;
     const heldRegister = held === null ? null : fieldOf(held, "register") as number | null;
     const heldType = held === null ? null : fieldOf(held, "type") as SemanticType;
     const register = held !== null && String(heldRegister) !== "null" && heldType !== null && isReference(heldType)
@@ -5475,14 +5483,14 @@ class Machine {
    * takes it away, and a value that does either is written the long way round.
    */
   private keepsScratch(value: SemanticValue): boolean {
-    switch (value.k) {
+    switch (String(fieldOf(value, "k"))) {
       case "local":
       case "const":
       case "bool":
       case "nothing":
         return true;
       case "loadField":
-        return this.keepsScratch(value.object);
+        return this.keepsScratch(fieldOf(value, "object"));
       default:
         return false;
     }
@@ -5545,18 +5553,18 @@ class Machine {
     this.code.movRegReg(RDI, RAX);
     this.code.leaOwnLabel(RSI, label);
     this.runtime("_parallel_for");
-    if (loop.kind === "counted") {
-      const counter = this.bind(loop.variable, loop.type);
+    if (String(fieldOf(loop, "kind")) === "counted") {
+      const counter = this.bind(fieldOf(loop, "variable"), fieldOf(loop, "type"));
       this.load(to);
       this.store(counter);
     } else {
-      const index = this.bind(loop.index, USIZE);
+      const index = this.bind(fieldOf(loop, "index"), USIZE);
       this.load(to);
       this.store(index);
       // The element the walk was holding is only ever read inside the loop, so
       // what stands here is a slot that nothing reads: it is bound because the
       // walk declares the name, and left as it was found.
-      this.bind(loop.element, loop.elementType);
+      this.bind(fieldOf(loop, "element"), fieldOf(loop, "elementType"));
     }
     this.freeSlot(from);
     this.freeSlot(to);
@@ -5598,7 +5606,7 @@ class Machine {
       // them when the body reads it as a value, and it is given a register the
       // loop binds it into rather than one established here.
       const cached = this.cacheTurnReads(fieldOf(turn, "loop") as TeamedLoop);
-      const established = [...cached].filter(([, held]) => held.established);
+      const established = [...cached].filter(([, held]) => String(fieldOf(held, "established")) === "true");
       // The registers the convention asks a callee to leave as it found them.
       // A turn is called by the runtime rather than by this function, and it
       // writes as many of them as the body it was written out of does, so it
@@ -5693,13 +5701,13 @@ class Machine {
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
         for (const value of statementValues(statement)) {
           walkValues(value, (inner) => {
-            if (inner.k === "local") {
+            if (String(fieldOf(inner, "k")) === "local") {
               const name = String(fieldOf(inner, "name"));
               reads.set(name, (reads.get(name) ?? 0) + weight);
             }
           });
         }
-        if (statement.k === "setElement") {
+        if (String(fieldOf(statement, "k")) === "setElement") {
           const buffer = String(fieldOf(statement, "buffer"));
           reads.set(buffer, (reads.get(buffer) ?? 0) + weight);
         }
@@ -5833,26 +5841,26 @@ class Machine {
     this.names.enter();
     const labels = this.loopLabels(loop);
     this.loops.push({
-      header: labels.header,
-      exit: labels.exit,
+      header: fieldOf(labels, "header"),
+      exit: fieldOf(labels, "exit"),
       names: { header: String(fieldOf(loop, "header")), exit: String(fieldOf(loop, "exit")) },
     });
     if (kind === "while" || kind === "doWhile") {
       const condition = fieldOf(loop, "condition") as SemanticValue;
       const body = fieldOf(loop, "body") as SemanticBlock;
       if (kind === "while") {
-        this.code.bind(labels.header);
-        this.truthBranch(condition, false, labels.exit);
+        this.code.bind(fieldOf(labels, "header"));
+        this.truthBranch(condition, false, fieldOf(labels, "exit"));
         this.block(body);
         // The same, for the edge back to the header: a body that returns or
         // breaks never reaches the test again, so the jump is not written.
-        if (String(fieldOf(fieldOf(body, "terminator"), "k")) === "next") this.code.jmp(labels.header);
-        this.code.bind(labels.exit);
+        if (String(fieldOf(fieldOf(body, "terminator"), "k")) === "next") this.code.jmp(fieldOf(labels, "header"));
+        this.code.bind(fieldOf(labels, "exit"));
       } else {
-        this.code.bind(labels.header);
+        this.code.bind(fieldOf(labels, "header"));
         this.block(body);
-        this.truthBranch(condition, true, labels.header);
-        this.code.bind(labels.exit);
+        this.truthBranch(condition, true, fieldOf(labels, "header"));
+        this.code.bind(fieldOf(labels, "exit"));
       }
     } else if (kind === "counted") {
       this.counted(loop as Extract<SemanticLoop, { kind: "counted" }>, labels);
@@ -5878,21 +5886,21 @@ class Machine {
     }
     const visit = (block: SemanticBlock): void => {
       for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
-        if (statement.k === "set" || statement.k === "step") {
+        if (String(fieldOf(statement, "k")) === "set" || String(fieldOf(statement, "k")) === "step") {
           written.add(String(fieldOf(statement, "name")));
-        } else if (statement.k === "setElement") {
+        } else if (String(fieldOf(statement, "k")) === "setElement") {
           written.add(String(fieldOf(statement, "buffer")));
-        } else if (statement.k === "let") {
+        } else if (String(fieldOf(statement, "k")) === "let") {
           written.add(String(fieldOf(fieldOf(statement, "slot"), "name")));
-        } else if (statement.k === "loop") {
+        } else if (String(fieldOf(statement, "k")) === "loop") {
           const inner = fieldOf(statement, "loop") as SemanticLoop;
           for (const name of this.loopWrites(inner)) written.add(name);
           visit(fieldOf(inner, "body") as SemanticBlock);
-        } else if (statement.k === "if") {
+        } else if (String(fieldOf(statement, "k")) === "if") {
           visit(fieldOf(statement, "then") as SemanticBlock);
           const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
           if (String(otherwise) !== "null") visit(otherwise as SemanticBlock);
-        } else if (statement.k === "block") {
+        } else if (String(fieldOf(statement, "k")) === "block") {
           visit(fieldOf(statement, "body") as SemanticBlock);
         }
       }
@@ -5910,7 +5918,7 @@ class Machine {
     const written = this.loopWrites(loop);
     let seen = false;
     walkValues(value, (one) => {
-      if (one.k === "local" && written.has(String(fieldOf(one, "name")))) seen = true;
+      if (String(fieldOf(one, "k")) === "local" && written.has(String(fieldOf(one, "name")))) seen = true;
     });
     return seen;
   }
@@ -6331,7 +6339,7 @@ class Machine {
     // The array's base pointer and the bound the counter is tested against.
     if (String(fieldOf(array, "register")) !== "null") this.code.movRegReg(baseRegister, fieldOf(array, "register") as number);
     else this.code.movRegMemSized(baseRegister, frame(fieldOf(array, "offset") as number), 8, false);
-    if ((fieldOf(loop, "to") as SemanticValue).k === "local") {
+    if (String(fieldOf((fieldOf(loop, "to") as SemanticValue), "k")) === "local") {
       const bound = this.slot(String(fieldOf(fieldOf(loop, "to"), "name")));
       if (String(fieldOf(bound, "register")) !== "null") this.code.movRegReg(boundRegister, fieldOf(bound, "register") as number);
       else this.code.movRegMemSized(boundRegister, frame(fieldOf(bound, "offset") as number), 8, false);
@@ -6429,7 +6437,7 @@ class Machine {
     third: number,
     turn: PackedTurn,
   ): void {
-    switch (value.k) {
+    switch (String(fieldOf(value, "k"))) {
       case "const": {
         // The number in both halves is read out of the read-only data in one
         // instruction, where the general form loads it and then interleaves it
@@ -6457,7 +6465,7 @@ class Machine {
         // load of sixteen bytes: the base of the array the read names and the
         // cursor of the pairs, both of which are in registers for the whole loop.
         const of = fieldOf(value, "of") as SemanticValue;
-        const ofName = of.k === "local" ? String(fieldOf(of, "name")) : "";
+        const ofName = String(fieldOf(of, "k")) === "local" ? String(fieldOf(of, "name")) : "";
         const at = (fieldOf(turn, "arrays") as readonly string[]).indexOf(ofName);
         const base = (fieldOf(turn, "bases") as readonly number[])[at];
         if (base === undefined) throw machineError("a pair load was written for an array no base register was read for");
@@ -6512,7 +6520,7 @@ class Machine {
     // of steps, for the arithmetic of the turn and the counter to be the same
     // number.
     const type = fieldOf(loop, "type") as SemanticType;
-    if (type.kind !== "primitive" || type.name !== "i64") return null;
+    if (String(fieldOf(type, "kind")) !== "primitive" || String(fieldOf(type, "name")) !== "i64") return null;
     const loopBody = fieldOf(loop, "body") as SemanticBlock;
     const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
     if (statements.length !== 1) return null;
@@ -6520,7 +6528,7 @@ class Machine {
         String(fieldOf(fieldOf(loopBody, "terminator"), "k")) !== "next") return null;
     const statement = statements[0];
     const variable = String(fieldOf(loop, "variable"));
-    if (statement.k !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
+    if (String(fieldOf(statement, "k")) !== "set" || String(fieldOf(statement, "op")) !== "+=") return null;
     if (String(fieldOf(statement, "name")) === variable) return null;
     // The ends of the loop have to be known, because the arithmetic of the turn
     // has to be exact over the whole of the range the counter takes, and the
@@ -6579,10 +6587,10 @@ class Machine {
         terminator: fieldOf(loopBody, "terminator") as SemanticTerminator,
       },
     };
-    if (String(fieldOf(loop, "parallel")) === "true") counted.parallel = true;
-    if (String(fieldOf(loop, "region")) === "true") counted.region = true;
+    if (String(fieldOf(loop, "parallel")) === "true") setFieldOn(counted, "parallel", true);
+    if (String(fieldOf(loop, "region")) === "true") setFieldOn(counted, "region", true);
     const reductions = fieldOf(loop, "reductions");
-    if (String(reductions) !== "undefined") counted.reductions = reductions as Extract<SemanticLoop, { kind: "counted" }>["reductions"];
+    if (String(reductions) !== "undefined") setFieldOn(counted, "reductions", reductions as Extract<SemanticLoop, { kind: "counted" }>["reductions"]);
     return counted;
   }
 
@@ -6591,12 +6599,12 @@ class Machine {
    * where the expression is not of that shape.
    */
   private progressionOf(value: SemanticValue, counter: string): { k: number; c: number } | null {
-    if (value.k === "local") return String(fieldOf(value, "name")) === counter ? { k: 1, c: 0 } : null;
-    if (value.k === "const") {
+    if (String(fieldOf(value, "k")) === "local") return String(fieldOf(value, "name")) === counter ? { k: 1, c: 0 } : null;
+    if (String(fieldOf(value, "k")) === "const") {
       const whole = wholeLiteral(value);
       return whole === null ? null : { k: 0, c: whole };
     }
-    if (value.k !== "arith") return null;
+    if (String(fieldOf(value, "k")) !== "arith") return null;
     if (String(fieldOf(value, "op")) === "mul") {
       const scaled = this.scaledOf(value, counter);
       return scaled === null ? null : { k: scaled, c: 0 };
@@ -6624,8 +6632,8 @@ class Machine {
    * not the counter multiplied by one.
    */
   private scaledOf(value: SemanticValue, counter: string): number | null {
-    if (value.k === "local") return String(fieldOf(value, "name")) === counter ? 1 : null;
-    if (value.k !== "arith" || String(fieldOf(value, "op")) !== "mul") return null;
+    if (String(fieldOf(value, "k")) === "local") return String(fieldOf(value, "name")) === counter ? 1 : null;
+    if (String(fieldOf(value, "k")) !== "arith" || String(fieldOf(value, "op")) !== "mul") return null;
     const left = this.scaledOf(fieldOf(value, "left") as SemanticValue, counter);
     const right = this.scaledOf(fieldOf(value, "right") as SemanticValue, counter);
     if (left !== null && right === null) {
@@ -6657,7 +6665,7 @@ class Machine {
     otherwise: SemanticValue;
   } | null {
     const type = fieldOf(loop, "type") as SemanticType;
-    if (type.kind !== "primitive" || type.name !== "i64") return null;
+    if (String(fieldOf(type, "kind")) !== "primitive" || String(fieldOf(type, "name")) !== "i64") return null;
     if (String(fieldOf(loop, "down")) === "true") return null;
     const stepValue = fieldOf(loop, "step");
     if (String(stepValue) !== "null") {
@@ -6672,16 +6680,16 @@ class Machine {
     // The turn is one accumulation of a quotient; the declarations before it
     // are computable where they stand, which is what lets the weight read them.
     const statements = fieldOf(loopBody, "statements") as readonly SemanticStatement[];
-    const accumulation = statements.findIndex((statement) => statement.k === "set");
+    const accumulation = statements.findIndex((statement) => String(fieldOf(statement, "k")) === "set");
     if (accumulation < 0 || accumulation !== statements.length - 1) return null;
     for (const statement of statements) {
-      if (statement.k === "set") {
+      if (String(fieldOf(statement, "k")) === "set") {
         if (String(fieldOf(statement, "op")) !== "+=") return null;
         if (String(fieldOf(statement, "name")) === String(fieldOf(loop, "variable"))) return null;
         continue;
       }
       const slot = fieldOf(statement, "slot") as SemanticSlot;
-      if (statement.k !== "let" || String(fieldOf(slot, "kind")) !== "value" || String(fieldOf(slot, "mutable")) === "true") return null;
+      if (String(fieldOf(statement, "k")) !== "let" || String(fieldOf(slot, "kind")) !== "value" || String(fieldOf(slot, "mutable")) === "true") return null;
       if (!isSafeToCompute(fieldOf(statement, "value") as SemanticValue)) return null;
     }
     const statement = statements[accumulation] as Extract<SemanticStatement, { k: "set" }>;
@@ -6689,14 +6697,14 @@ class Machine {
     const select = soleSelect(fieldOf(statement, "value") as SemanticValue);
     if (select === null) return null;
     const selectType = fieldOf(select, "type") as SemanticType;
-    if (selectType.kind !== "primitive" || selectType.name !== "f64") return null;
+    if (String(fieldOf(selectType, "kind")) !== "primitive" || String(fieldOf(selectType, "name")) !== "f64") return null;
     // A turn this pass has already weighted is the one whose fast arm is the
     // weight itself, and weighting it again would hold a second value under the
     // name the first turn's steps keep moving. The arm the weight replaced is a
     // name this pass reserved, so a select whose fast arm is that name is the
     // turn again, and the loop is left as the rewrite left it.
     const selectThen = fieldOf(select, "then") as SemanticValue;
-    if (selectThen.k === "local" && String(fieldOf(selectThen, "name")).startsWith("blaze_triangular")) return null;
+    if (String(fieldOf(selectThen, "k")) === "local" && String(fieldOf(selectThen, "name")).startsWith("blaze_triangular")) return null;
     // The arm that answers when the test holds is the whole-number weight,
     // and the progression of it is what the step of the weight is. The names
     // the arm reads are the declarations the body made of its own values,
@@ -6704,7 +6712,7 @@ class Machine {
     const lets = new Map<string, SemanticValue>();
     for (const entry of statements.slice(0, accumulation)) {
       const slot = fieldOf(entry, "slot") as SemanticSlot;
-      if (entry.k === "let" && String(fieldOf(slot, "kind")) === "value") {
+      if (String(fieldOf(entry, "k")) === "let" && String(fieldOf(slot, "kind")) === "value") {
         lets.set(String(fieldOf(slot, "name")), fieldOf(entry, "value") as SemanticValue);
       }
     }
@@ -6871,7 +6879,7 @@ class Machine {
         ]);
       const dead = alive.filter(
         (entry) =>
-          entry.k === "let" &&
+          String(fieldOf(entry, "k")) === "let" &&
           String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
           !everyValue(guardedBody, []).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
       );
@@ -6907,7 +6915,7 @@ class Machine {
           ]);
         const dead = aliveLean.filter(
           (entry) =>
-            entry.k === "let" &&
+            String(fieldOf(entry, "k")) === "let" &&
             String(fieldOf(fieldOf(entry, "slot"), "kind")) === "value" &&
             !everyValue(tryBody, []).some((value) => readsLocal(value, String(fieldOf(fieldOf(entry, "slot"), "name")))),
         );
@@ -7043,7 +7051,7 @@ class Machine {
     // the division by a register and one addition, where it was a product, a
     // shift and two conversions.
     const weighted = this.weighted(loop);
-    if (weighted !== null && weighted.lean !== null && !this.teamed.has(loop)) {
+    if (weighted !== null && fieldOf(weighted, "lean") !== null && !this.teamed.has(loop)) {
       // The loop comes back twice: the turns the ends' answer admits divide by
       // the weight and nothing else, and the turns it refuses keep the select
       // and the tests under it. The answer is asked of the loop's two ends
@@ -7082,7 +7090,7 @@ class Machine {
     // a counter read as an index is converted on every element it reaches. Where
     // one is to hand, the loop keeps the same number in a register of its own and
     // steps it beside the double: the conversion is done once for the loop.
-    const writtenName = (value: SemanticValue): boolean => value.k === "local" && writesCounter(body, value.name);
+    const writtenName = (value: SemanticValue): boolean => String(fieldOf(value, "k")) === "local" && writesCounter(body, fieldOf(value, "name"));
     const shadow =
       isFloatType(type) &&
       this.spareIndexes.length > 0 &&
@@ -7580,7 +7588,7 @@ class Machine {
    */
   private truth(value: SemanticValue): void {
     this.value(value);
-    this.truthOfAccumulator(value.type);
+    this.truthOfAccumulator(fieldOf(value, "type"));
   }
 
   /**
@@ -7622,7 +7630,7 @@ class Machine {
    * where a branch is one.
    */
   private truthBranch(value: SemanticValue, whenTrue: boolean, label: string): void {
-    if (value.k === "isNull" && !isTextType((fieldOf(fieldOf(value, "operand"), "type") as SemanticType))) {
+    if (String(fieldOf(value, "k")) === "isNull" && !isTextType((fieldOf(fieldOf(value, "operand"), "type") as SemanticType))) {
       // A test of a reference is a test of the pointer holding it, and the
       // answer is a branch on the pointer rather than a truth written down as a
       // number and tested again. `is_null` is the test itself and
@@ -7634,7 +7642,7 @@ class Machine {
       this.code.jcc((whenTrue ? !negate : negate) ? "e" : "ne", label);
       return;
     }
-    if (value.k === "logical" && (String(fieldOf(value, "op")) === "and" || String(fieldOf(value, "op")) === "or")) {
+    if (String(fieldOf(value, "k")) === "logical" && (String(fieldOf(value, "op")) === "and" || String(fieldOf(value, "op")) === "or")) {
       // A condition that is two conditions joined is asked arm by arm: the
       // arm that settles the whole settles it, and the other arm is asked
       // only where the whole is not settled yet. The branch is the question
@@ -7662,7 +7670,7 @@ class Machine {
       this.code.bind(settled);
       return;
     }
-    const underNot = value.k === "unary" && String(fieldOf(value, "op")) === "not" ? flagComparison(fieldOf(value, "operand") as SemanticValue) : null;
+    const underNot = String(fieldOf(value, "k")) === "unary" && String(fieldOf(value, "op")) === "not" ? flagComparison(fieldOf(value, "operand") as SemanticValue) : null;
     const comparison = underNot ?? flagComparison(value);
     if (comparison === null) {
       this.truth(value);
@@ -7766,7 +7774,7 @@ class Machine {
    * what the other arm of the `if` does.
    */
   private noteCompared(side: SemanticValue, type: SemanticType): void {
-    if (!isFloatType(type) || side.k !== "local") return;
+    if (!isFloatType(type) || String(fieldOf(side, "k")) !== "local") return;
     const held = this.slot(String(fieldOf(side, "name")));
     // The accumulator is asked whether it holds this slot rather than told, so
     // a form that moved it on the way to the comparison leaves nothing behind.
@@ -7826,12 +7834,12 @@ class Machine {
   }
 
   private terminator(terminator: SemanticTerminator): void {
-    if (terminator.k === "next") return;
+    if (String(fieldOf(terminator, "k")) === "next") return;
     // A block nothing arrives at writes nothing. The instructions that would
     // follow it are the epilogue's, and the epilogue is reached only by a return
     // — a fall-through here would hand back whatever the accumulator held.
-    if (terminator.k === "unreachable") return;
-    if (terminator.k === "return") {
+    if (String(fieldOf(terminator, "k")) === "unreachable") return;
+    if (String(fieldOf(terminator, "k")) === "return") {
       this.leaveRegion();
       // A wide number is returned through a pointer the caller passes rather
       // than in a register, because four limbs do not fit in the two registers
@@ -7904,13 +7912,13 @@ class Machine {
     // type of its own. Writing the absence in the representation of `ref<any>`
     // left the accumulator a float where a pointer belongs, and `=== null`
     // asked about whatever the other arm had left in the register.
-    if (value.k === "nothing" && as !== null) {
+    if (String(fieldOf(value, "k")) === "nothing" && as !== null) {
       this.zero(as);
       return;
     }
     this.value(value);
     if (as === null) return;
-    this.convert(value.type, as);
+    this.convert(fieldOf(value, "type"), as);
   }
 
   /**
@@ -7919,7 +7927,7 @@ class Machine {
    */
   private boxesDynamic(value: SemanticValue, as: SemanticType | null): boolean {
     if (as === null || !isDynamicType(as)) return false;
-    return isTextType(value.type) || value.k === "text" || isNumber(value.type);
+    return isTextType(fieldOf(value, "type")) || String(fieldOf(value, "k")) === "text" || isNumber(fieldOf(value, "type"));
   }
 
   /**
@@ -7928,9 +7936,9 @@ class Machine {
    * is always the number its type names and never the bits of something wider.
    */
   private value(value: SemanticValue): void {
-    switch (value.k) {
+    switch (String(fieldOf(value, "k"))) {
       case "const":
-        this.constant(value);
+        this.constant(value as Extract<SemanticValue, { k: "const" }>);
         return;
       case "bool":
         this.code.movRegImm(RAX, String(fieldOf(value, "value")) === "true" ? 1n : 0n);
@@ -7962,7 +7970,7 @@ class Machine {
         return;
       }
       case "text":
-        this.text(value);
+        this.text(value as Extract<SemanticValue, { k: "text" }>);
         return;
       case "toText":
         // The digits are part of what `toFixed(d)` means, so they are passed
@@ -7979,7 +7987,7 @@ class Machine {
         this.callValue(fieldOf(value, "call") as SemanticCall, fieldOf(value, "type") as SemanticType);
         return;
       case "newObject":
-        this.object(value);
+        this.object(value as Extract<SemanticValue, { k: "newObject" }>);
         return;
       case "loadField": {
         // The offset of the field is the displacement of the read, so the
@@ -7993,7 +8001,7 @@ class Machine {
         const found = this.field(String(fieldOf(value, "layout")), String(fieldOf(value, "field")));
         const offset = fieldOf(found, "offset") as number;
         const object = fieldOf(value, "object") as SemanticValue;
-        if (object.k === "local") {
+        if (String(fieldOf(object, "k")) === "local") {
           const held = this.slot(String(fieldOf(object, "name")));
           if (String(fieldOf(held, "register")) !== "null" && isReference(fieldOf(held, "type") as SemanticType)) {
             this.readFrom(fieldOf(value, "type") as SemanticType, mem(fieldOf(held, "register") as number, offset));
@@ -8010,7 +8018,7 @@ class Machine {
       case "element": {
         const ofValue = fieldOf(value, "of") as SemanticValue;
         const bufferType = fieldOf(ofValue, "type") as SemanticType;
-        const isDynamic = bufferType.kind === "ref" && bufferType.of === null;
+        const isDynamic = String(fieldOf(bufferType, "kind")) === "ref" && fieldOf(bufferType, "of") === null;
         if (isDynamic) {
           this.value(ofValue);
           const slot = this.holdSlot(NUMBER, "blaze_dyn_arr");
@@ -8047,36 +8055,36 @@ class Machine {
         return;
       case "unary":
         if (isWideType(fieldOf(value, "type") as SemanticType)) {
-          this.wideUnary(value);
+          this.wideUnary(value as Extract<SemanticValue, { k: "unary" }>);
           return;
         }
-        this.unary(value);
+        this.unary(value as Extract<SemanticValue, { k: "unary" }>);
         return;
       case "arith":
-        this.arithmetic(value);
+        this.arithmetic(value as Extract<SemanticValue, { k: "arith" }>);
         return;
       case "compare":
         if (isWideType(fieldOf(value, "operand") as SemanticType)) {
-          this.wideCompare(value);
+          this.wideCompare(value as Extract<SemanticValue, { k: "compare" }>);
           return;
         }
-        this.comparison(value);
+        this.comparison(value as Extract<SemanticValue, { k: "compare" }>);
         return;
       case "logical":
-        this.logical(value);
+        this.logical(value as Extract<SemanticValue, { k: "logical" }>);
         return;
       case "coalesce":
-        this.coalesce(value);
+        this.coalesce(value as Extract<SemanticValue, { k: "coalesce" }>);
         return;
       case "select":
         if (isWideType(fieldOf(value, "type") as SemanticType)) {
-          this.wideSelect(value);
+          this.wideSelect(value as Extract<SemanticValue, { k: "select" }>);
           return;
         }
-        this.select(value);
+        this.select(value as Extract<SemanticValue, { k: "select" }>);
         return;
       case "buffer":
-        this.buffer(value);
+        this.buffer(value as Extract<SemanticValue, { k: "buffer" }>);
         return;
       case "closure":
       case "capture":
@@ -8107,7 +8115,7 @@ class Machine {
    * converts a NaN to as a size, and an allocation of that is a fault.
    */
   private countAsSize(count: SemanticValue): void {
-    if (!isFloatType(count.type)) {
+    if (!isFloatType(fieldOf(count, "type"))) {
       this.at(count, USIZE);
       return;
     }
@@ -8128,18 +8136,18 @@ class Machine {
   }
 
   private constant(value: SemanticValue & { k: "const" }): void {
-    if (isWideType(value.type)) return;
-    if (isFloatType(value.type)) {
-      const single = widthOf(value.type) === 4;
-      this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(Number(decimalText(value.text)), single)), single);
+    if (isWideType(fieldOf(value, "type"))) return;
+    if (isFloatType(fieldOf(value, "type"))) {
+      const single = widthOf(fieldOf(value, "type")) === 4;
+      this.code.movsLoadLabel(XMM0, this.floatLiteral(floatBits(Number(decimalText(fieldOf(value, "text"))), single)), single);
       return;
     }
-    const whole = integerText(value.text);
+    const whole = integerText(fieldOf(value, "text"));
     this.code.movRegImm(RAX, whole);
     // A literal already the number its type holds needs nothing written after
     // it: the register already holds it at its own width, and narrowing it is
     // the same value read back. One instruction per literal, for nothing.
-    if (!this.writtenWhole(whole, value.type)) this.normalize(value.type);
+    if (!this.writtenWhole(whole, fieldOf(value, "type"))) this.normalize(fieldOf(value, "type"));
   }
 
   /**
@@ -8513,12 +8521,12 @@ class Machine {
    * as it was.
    */
   private carriedOperand(value: SemanticValue, type: SemanticType, survives: boolean): Memory | null {
-    if (value.k !== "element") return null;
-    const element = elementTypeOf(value.of.type) ?? value.type;
+    if (String(fieldOf(value, "k")) !== "element") return null;
+    const element = elementTypeOf(fieldOf(fieldOf(value, "of"), "type")) ?? fieldOf(value, "type");
     // A use that widens what the array holds is a conversion the instruction has
     // none of, so it is left to the general form rather than read at the wrong
     // width.
-    if (!typeEquals(element, value.type)) return null;
+    if (!typeEquals(element, fieldOf(value, "type"))) return null;
     if (!typeEquals(element, type)) return null;
     // An address the instruction is to name as its own operand is built here and
     // used by the caller *after* it has written the other side. What has to
@@ -8535,13 +8543,13 @@ class Machine {
     // asks of a carried register. Left to the general form otherwise: the value
     // is written to a slot of its own there, and the slot is not the scratch.
     if (!survives) {
-      const index = this.plainIndex(value.index);
+      const index = this.plainIndex(fieldOf(value, "index"));
       if (typeof index !== "bigint") {
         if (index === null) return null;
         if (index.register === null || ![3, 12, 13, 14].includes(index.register)) return null;
       }
     }
-    return this.elementAddress(value.of, value.index, element);
+    return this.elementAddress(fieldOf(value, "of"), fieldOf(value, "index"), element);
   }
 
   /**
@@ -8564,9 +8572,9 @@ class Machine {
    * instruction has none of.
    */
   private registerOperand(value: SemanticValue, type: SemanticType, survives: boolean): number | null {
-    if (value.k !== "local" || !isFloatType(value.type) || !isFloatType(type)) return null;
-    if (widthOf(value.type) !== widthOf(type)) return null;
-    const held = this.slot(value.name);
+    if (String(fieldOf(value, "k")) !== "local" || !isFloatType(fieldOf(value, "type")) || !isFloatType(type)) return null;
+    if (widthOf(fieldOf(value, "type")) !== widthOf(type)) return null;
+    const held = this.slot(fieldOf(value, "name"));
     const register = held.register;
     if (register === null) return null;
     if (register === XMM0 || register === XMM1 || register === XMM2) return null;
@@ -8581,9 +8589,9 @@ class Machine {
    * instruction has none of — or the operation has no form that takes memory.
    */
   private floatOperand(value: SemanticValue, type: SemanticType, op: string): string | null {
-    if (!isFloatType(type) || value.k !== "const" || !isFloatType(value.type)) return null;
-    if (!floatOperation(op) || widthOf(value.type) !== widthOf(type)) return null;
-    return this.floatLiteral(floatBits(Number(decimalText(value.text)), widthOf(type) === 4));
+    if (!isFloatType(type) || String(fieldOf(value, "k")) !== "const" || !isFloatType(fieldOf(value, "type"))) return null;
+    if (!floatOperation(op) || widthOf(fieldOf(value, "type")) !== widthOf(type)) return null;
+    return this.floatLiteral(floatBits(Number(decimalText(fieldOf(value, "text"))), widthOf(type) === 4));
   }
 
   /**
@@ -8601,8 +8609,8 @@ class Machine {
    * fields encode it — a sign-extended byte or a sign-extended word.
    */
   private literalOf(value: SemanticValue, type: SemanticType): number | null {
-    if (value.k === "bool") return isFloatType(type) ? null : String(fieldOf(value, "value")) === "true" ? 1 : 0;
-    if (value.k !== "const") return null;
+    if (String(fieldOf(value, "k")) === "bool") return isFloatType(type) ? null : String(fieldOf(value, "value")) === "true" ? 1 : 0;
+    if (String(fieldOf(value, "k")) !== "const") return null;
     if (isFloatType(type)) {
       // A float the program wrote out at the other precision is a conversion
       // the instruction has no form of, so it is left to the frame.
@@ -8629,8 +8637,8 @@ class Machine {
    */
   private immediateOf(value: SemanticValue, type: SemanticType): number | null {
     if (isFloatType(type)) return null;
-    if (value.k === "bool") return String(fieldOf(value, "value")) === "true" ? 1 : 0;
-    if (value.k !== "const") return null;
+    if (String(fieldOf(value, "k")) === "bool") return String(fieldOf(value, "value")) === "true" ? 1 : 0;
+    if (String(fieldOf(value, "k")) !== "const") return null;
     const parsed = integerText(String(fieldOf(value, "text")));
     if (parsed < -0x8000_0000n || parsed > 0x7fff_ffffn) return null;
     return Number(parsed);
@@ -8734,7 +8742,7 @@ class Machine {
       // quotient may not take their sides either way round, so the literal here
       // is always the divisor and the value is already in the accumulator.
       const reciprocal =
-        op === "div" && rightValue.k === "const" ? reciprocalOfTwo(Number(decimalText(String(fieldOf(rightValue, "text"))))) : null;
+        op === "div" && String(fieldOf(rightValue, "k")) === "const" ? reciprocalOfTwo(Number(decimalText(String(fieldOf(rightValue, "text"))))) : null;
       this.at(onRight === null ? rightValue : leftValue, type);
       this.code.sseMemLabel(
         reciprocal === null ? (op as "add" | "sub" | "mul" | "div") : "mul",
@@ -8945,7 +8953,7 @@ class Machine {
     for (const carried of sides) {
       const side = carried ? fieldOf(value, "left") as SemanticValue : fieldOf(value, "right") as SemanticValue;
       const other = carried ? fieldOf(value, "right") as SemanticValue : fieldOf(value, "left") as SemanticValue;
-      if (side.k !== "local" || !isInteger(fieldOf(side, "type") as SemanticType) || !isInteger(type)) continue;
+      if (String(fieldOf(side, "k")) !== "local" || !isInteger(fieldOf(side, "type") as SemanticType) || !isInteger(type)) continue;
       if (widthOf(fieldOf(side, "type") as SemanticType) !== widthOf(type)) continue;
       const register = fieldOf(this.slot(String(fieldOf(side, "name"))), "register") as number | null;
       // The accumulator and the scratch register are where the operation is
@@ -8970,7 +8978,7 @@ class Machine {
    */
   private heldByAccumulator(value: SemanticValue): boolean {
     const accumulator = this.accumulatorNote;
-    if (value.k !== "local" || accumulator === null) return false;
+    if (String(fieldOf(value, "k")) !== "local" || accumulator === null) return false;
     if ((fieldOf(accumulator, "at") as number) !== this.code.written) return false;
     const held = this.slots.get(this.names.read(String(fieldOf(value, "name"))));
     return held !== undefined && (fieldOf(held, "id") as number) === (fieldOf(accumulator, "id") as number);
@@ -9029,7 +9037,7 @@ class Machine {
    * own would agree with this one only for as long as both were right.
    */
   private limbsOf(type: SemanticType): number {
-    return type.kind === "primitive" ? limbsOfName(type.name) ?? 0 : 0;
+    return String(fieldOf(type, "kind")) === "primitive" ? limbsOfName(fieldOf(type, "name")) ?? 0 : 0;
   }
 
   /**
@@ -9070,8 +9078,8 @@ class Machine {
    * this true if that ever changes.
    */
   private wideLocalSlot(value: SemanticValue): Held | null {
-    if (value.k !== "local" || !isWideType(value.type)) return null;
-    const held = this.slot(value.name);
+    if (String(fieldOf(value, "k")) !== "local" || !isWideType(fieldOf(value, "type"))) return null;
+    const held = this.slot(fieldOf(value, "name"));
     if (!isWideType(held.type) || held.register !== null) return null;
     return held;
   }
@@ -9264,7 +9272,7 @@ class Machine {
 
   /** Whether a call is one of the wide kernels, whose answer is one slot. */
   private isWideKernelCall(value: SemanticValue): value is SemanticValue & { k: "call" } {
-    if (value.k !== "call") return false;
+    if (String(fieldOf(value, "k")) !== "call") return false;
     const call = fieldOf(value, "call") as SemanticCall;
     const callee = String(fieldOf(call, "callee"));
     if (callee === "u256_div" || callee === "u256_invert_mod") return true;
@@ -9276,7 +9284,7 @@ class Machine {
   private reads(value: SemanticValue, name: string): boolean {
     let found = false;
     walkValues(value, (one) => {
-      if (one.k === "local" && String(fieldOf(one, "name")) === name) found = true;
+      if (String(fieldOf(one, "k")) === "local" && String(fieldOf(one, "name")) === name) found = true;
     });
     return found;
   }
@@ -9293,7 +9301,7 @@ class Machine {
    * taken exactly where it is known to be the same answer.
    */
   private wideBind(name: string, held: Held, value: SemanticValue): void {
-    const call = value.k === "call" ? fieldOf(value, "call") as SemanticCall : null;
+    const call = String(fieldOf(value, "k")) === "call" ? fieldOf(value, "call") as SemanticCall : null;
     const callee = call === null ? "" : String(fieldOf(call, "callee"));
     const aliasing = callee === "u256_div" || callee === "u256_invert_mod";
     if (this.isWideKernelCall(value) && !aliasing && !this.reads(value, name)) {
@@ -9325,7 +9333,7 @@ class Machine {
     // A const literal is widened to four limbs even when it was typed `i64`
     // (a whole number that does not fit in one word): the const's text is the
     // full value, so every limb is written rather than sign-extending one word.
-    if (value.k === "const") {
+    if (String(fieldOf(value, "k")) === "const") {
       const whole = integerLiteral(String(fieldOf(value, "text"))) ?? 0n;
       for (let limb = 0; limb < 4; limb += 1) {
         this.code.movRegImm([8, 9, 10, 11][limb], (whole >> BigInt(limb * 64)) & 0xffffffffffffffffn);
@@ -9338,7 +9346,7 @@ class Machine {
       this.wideFrom(value);
       return;
     }
-    switch (value.k) {
+    switch (String(fieldOf(value, "k"))) {
       case "local": {
         const held = this.slot(String(fieldOf(value, "name")));
         // The name is read at the width of a wide number while the slot holds
@@ -9352,7 +9360,7 @@ class Machine {
         return;
       }
       case "arith":
-        this.wideArithmetic(value);
+        this.wideArithmetic(value as Extract<SemanticValue, { k: "arith" }>);
         return;
       case "loadField": {
         // A wide field is four limbs at the field's offset of the object the
@@ -9367,10 +9375,10 @@ class Machine {
         return;
       }
       case "unary":
-        this.wideUnary(value);
+        this.wideUnary(value as Extract<SemanticValue, { k: "unary" }>);
         return;
       case "select":
-        this.wideSelect(value);
+        this.wideSelect(value as Extract<SemanticValue, { k: "select" }>);
         return;
       case "call": {
         // `u256_from_u64x2(low, high)` builds a u256 from two 64 bit halves:
@@ -9405,14 +9413,14 @@ class Machine {
           callee === "u256_mul_mod"
         ) {
           const out = this.hold(type, "blaze_wide_out");
-          this.wideKernelCall(value, out);
+          this.wideKernelCall(value as Extract<SemanticValue, { k: "call" }>, out);
           this.wideLoad(out);
           return;
         }
         // Integer division: left / right.
         if (callee === "u256_div") {
           const out = this.hold(type, "blaze_wide_out");
-          this.wideKernelCall(value, out);
+          this.wideKernelCall(value as Extract<SemanticValue, { k: "call" }>, out);
           this.wideLoad(out);
           return;
         }
@@ -9420,7 +9428,7 @@ class Machine {
         // Euclidean kernel's answer.
         if (callee === "u256_invert_mod") {
           const out = this.hold(type, "blaze_wide_out");
-          this.wideKernelCall(value, out);
+          this.wideKernelCall(value as Extract<SemanticValue, { k: "call" }>, out);
           this.wideLoad(out);
           return;
         }
@@ -9436,7 +9444,7 @@ class Machine {
       }
       default:
         throw machineError(
-          `a wide number is not built from a ${value.k}`,
+          `a wide number is not built from a ${String(fieldOf(value, "k"))}`,
           "a wide number is a literal, a name, or the answer to an operation on two of those, and nothing else yet",
         );
     }
@@ -9456,7 +9464,7 @@ class Machine {
     const type = fieldOf(value, "type") as SemanticType;
     if (isFloatType(type)) {
       throw machineError(
-        `a ${type.kind === "primitive" ? type.name : "f64"} is handed to a use that reads a wide number`,
+        `a ${String(fieldOf(type, "kind")) === "primitive" ? fieldOf(type, "name") : "f64"} is handed to a use that reads a wide number`,
         "a wide number is four limbs and a double is not a set of them: the kernel every backend widens with takes one machine word, so only a whole number has a limb in it",
       );
     }
@@ -9491,24 +9499,24 @@ class Machine {
    * only two below that are not written here.
    */
   private wideArithmetic(value: SemanticValue & { k: "arith" }): void {
-    const type = value.type;
+    const type = fieldOf(value, "type");
     const limbs = this.limbsOf(type);
-    if (value.op === "mul" || value.op === "div" || value.op === "mod") {
+    if (String(fieldOf(value, "op")) === "mul" || String(fieldOf(value, "op")) === "div" || String(fieldOf(value, "op")) === "mod") {
       // BREAK_POINT_FOR_TESTING
-      this.wideKernel(value.op, value.left, value.right, type);
+      this.wideKernel(fieldOf(value, "op"), fieldOf(value, "left"), fieldOf(value, "right"), type);
       return;
     }
-    if (value.op === "shl" || value.op === "shr") {
-      this.wideShift(value, value.op);
+    if (String(fieldOf(value, "op")) === "shl" || String(fieldOf(value, "op")) === "shr") {
+      this.wideShift(value, fieldOf(value, "op"));
       return;
     }
     const plain =
-      value.op === "add" || value.op === "sub" || value.op === "and" || value.op === "or" || value.op === "xor"
-        ? value.op
+      String(fieldOf(value, "op")) === "add" || String(fieldOf(value, "op")) === "sub" || String(fieldOf(value, "op")) === "and" || String(fieldOf(value, "op")) === "or" || String(fieldOf(value, "op")) === "xor"
+        ? fieldOf(value, "op")
         : null;
     if (plain === null) {
       throw machineError(
-        `a wide ${value.op} is not written in this backend`,
+        `a wide ${String(fieldOf(value, "op"))} is not written in this backend`,
         "a wide number adds, subtracts and combines bitwise here, and multiplies, divides and takes a remainder through the wide kernel",
       );
     }
@@ -9525,15 +9533,15 @@ class Machine {
     // the six registers the convention does not preserve are six and a wide
     // number is four of them.
     const right = this.hold(type, "blaze_wide_right");
-    this.wideValue(value.right);
+    this.wideValue(fieldOf(value, "right"));
     this.wideStore(right);
-    this.wideValue(value.left);
+    this.wideValue(fieldOf(value, "left"));
     // The first limb does not read the carry the one before it left, because
     // there is no one before it; every limb after it does, which is the whole
     // difference between an addition of four limbs and four additions. The three
     // bitwise combinations read none, because a carry means nothing to them and
     // reading one would add it to a value that never carried.
-    if (bmi2OnItsOwn(this.target) && value.op === "add") {
+    if (bmi2OnItsOwn(this.target) && String(fieldOf(value, "op")) === "add") {
       // BMI2: `adcx` reads and writes CF without touching the other flags, so
       // the carry chain does not serialise on the whole flags register. The
       // first limb is a plain add (it sets CF), and each limb after it folds
@@ -9545,7 +9553,7 @@ class Machine {
         this.code.adcx([8, 9, 10, 11][limb], RAX);
       }
     } else {
-      const carry = value.op === "add" ? "adc" : value.op === "sub" ? "sbb" : null;
+      const carry = String(fieldOf(value, "op")) === "add" ? "adc" : String(fieldOf(value, "op")) === "sub" ? "sbb" : null;
       this.code.aluRegMem(plain, [8, 9, 10, 11][0], this.limbOf(right.offset, 0), true);
       for (let limb = 1; limb < limbs; limb += 1) {
         this.code.aluRegMem(carry ?? plain, [8, 9, 10, 11][limb], this.limbOf(right.offset, limb), true);
@@ -9654,17 +9662,17 @@ class Machine {
    * one instruction per limb where a branch costs a copy of both sides.
    */
   private wideSelect(value: SemanticValue & { k: "select" }): void {
-    const limbs = this.limbsOf(value.type);
-    const whenTrue = this.hold(value.type, "blaze_wide_then");
-    const whenFalse = this.hold(value.type, "blaze_wide_otherwise");
-    this.wideValue(value.then);
+    const limbs = this.limbsOf(fieldOf(value, "type"));
+    const whenTrue = this.hold(fieldOf(value, "type"), "blaze_wide_then");
+    const whenFalse = this.hold(fieldOf(value, "type"), "blaze_wide_otherwise");
+    this.wideValue(fieldOf(value, "then"));
     this.wideStore(whenTrue);
-    this.wideValue(value.otherwise);
+    this.wideValue(fieldOf(value, "otherwise"));
     this.wideStore(whenFalse);
     // The condition is tested once, before anything is moved: a `mov` leaves the
     // flags alone, so all four moves read the same test and a chain of them is
     // four conditional moves rather than four branches.
-    this.value(value.condition);
+    this.value(fieldOf(value, "condition"));
     this.code.test(RAX, true);
     for (let limb = 0; limb < limbs; limb += 1) {
       this.code.movRegMemSized([8, 9, 10, 11][limb], this.limbOf(whenFalse.offset, limb), 8, false);
@@ -9703,12 +9711,12 @@ class Machine {
     // IR does not stop one being a wide number, and reading one as a machine
     // number would take the first eight bytes of it — the count would be the low
     // half of the number being shifted, and the answer wrong rather than refused.
-    if (isWideType(value.right.type)) {
+    if (isWideType(fieldOf(fieldOf(value, "right"), "type"))) {
       throw new CompilerError("SemanticIrError", "semantic-ir", `the count of a shift by ${op} is a wide number, which is not the number of bits to move`, "", "", "", "");
     }
-    const type = value.type;
+    const type = fieldOf(value, "type");
     const limbs = this.limbsOf(type);
-    const signed = type.kind === "primitive" && type.name === "i256";
+    const signed = String(fieldOf(type, "kind")) === "primitive" && String(fieldOf(type, "name")) === "i256";
     const width = limbs * 64;
     const padding = limbs * LIMB_BYTES;
     const span = padding * 3;
@@ -9718,7 +9726,7 @@ class Machine {
     // limb read from beyond the number is not a limb of it.
     this.code.movRegImm(RAX, 0n);
     for (let at = 0; at < span; at += LIMB_BYTES) this.code.movMemRegSized(frame(region + at), RAX, 8);
-    this.wideValue(value.left);
+    this.wideValue(fieldOf(value, "left"));
     // A signed number that is being moved down reads the limbs above it, and
     // those are the sign rather than zeros: a shift right of a negative number
     // keeps it negative, and a run of zeros above it would answer a positive
@@ -9738,7 +9746,7 @@ class Machine {
     // The amount: `k` whole limbs and `r` bits inside one. `k` is negated for a
     // shift left, because the limb it wants is below the one being written and
     // an index register can only count up.
-    this.at(value.right, USIZE);
+    this.at(fieldOf(value, "right"), USIZE);
     // A count that moves every bit of the number out is answered rather than
     // walked: the walk reads the limbs around the number, and a count past the
     // width would read past the run and answer whatever the frame held there.
@@ -9832,7 +9840,7 @@ class Machine {
     this.code.leaMemReg(mem(RSP, result.offset), RDI);
     this.code.leaMemReg(mem(RSP, a.offset), RSI);
     this.code.leaMemReg(mem(RSP, b.offset), RDX);
-    const signed = type.kind === "primitive" && type.name === "i256";
+    const signed = String(fieldOf(type, "kind")) === "primitive" && String(fieldOf(type, "name")) === "i256";
     this.library(`${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${op}`);
     // The kernel writes its answer through the first pointer, so it is in the
     // slot that pointer names and not in the registers. Every other wide value
@@ -9864,12 +9872,12 @@ class Machine {
    * float keeps the branch and the whole number takes the move.
    */
   private between(value: SemanticValue & { k: "arith" }, smaller: boolean): void {
-    const type = value.type;
+    const type = fieldOf(value, "type");
     const low = this.hold(type, "blaze_low");
     const high = this.hold(type, "blaze_high");
-    this.at(value.left, type);
+    this.at(fieldOf(value, "left"), type);
     this.store(low);
-    this.at(value.right, type);
+    this.at(fieldOf(value, "right"), type);
     this.store(high);
     if (!isFloatType(type)) {
       this.load(low);
@@ -10036,8 +10044,8 @@ class Machine {
   private logical(value: SemanticValue & { k: "logical" }): void {
     const otherwise = this.code.label("Larm");
     const end = this.code.label("Lend");
-    const keep = hasCall(value.right);
-    if (!keep && value.left.k === "compare" && isBoolean(value.left.type) && typeEquals(value.left.type, value.type)) {
+    const keep = hasCall(fieldOf(value, "right"));
+    if (!keep && String(fieldOf(fieldOf(value, "left"), "k")) === "compare" && isBoolean(fieldOf(fieldOf(value, "left"), "type")) && typeEquals(fieldOf(fieldOf(value, "left"), "type"), fieldOf(value, "type"))) {
       // The deciding arm holds the answer the operator gives when the left one
       // settles it: zero for `&&`, whose left arm being false settles it, and
       // one for `||`, whose left arm being *true* settles it. So the jump to
@@ -10047,28 +10055,28 @@ class Machine {
       // with the other operator's rule: an `a && b` with a true a jumped past
       // b and answered false, and an `a || b` with a true a fell into b and
       // answered b.
-      this.truthBranch(value.left, value.op === "or", otherwise);
-      this.at(value.right, value.type);
+      this.truthBranch(fieldOf(value, "left"), String(fieldOf(value, "op")) === "or", otherwise);
+      this.at(fieldOf(value, "right"), fieldOf(value, "type"));
       this.code.jmp(end);
       this.code.bind(otherwise);
-      this.code.movRegImm(RAX, value.op === "and" ? 0n : 1n);
+      this.code.movRegImm(RAX, String(fieldOf(value, "op")) === "and" ? 0n : 1n);
       this.code.bind(end);
       return;
     }
-    const arm = keep ? this.hold(value.left.type, "blaze_arm") : null;
-    this.value(value.left);
+    const arm = keep ? this.hold(fieldOf(fieldOf(value, "left"), "type"), "blaze_arm") : null;
+    this.value(fieldOf(value, "left"));
     if (arm !== null) this.store(arm);
-    this.truthOfAccumulator(value.left.type);
-    this.code.jcc(value.op === "and" ? "e" : "ne", otherwise);
+    this.truthOfAccumulator(fieldOf(fieldOf(value, "left"), "type"));
+    this.code.jcc(String(fieldOf(value, "op")) === "and" ? "e" : "ne", otherwise);
     // A number arm beside a text is the test, and the text is the value the
     // operator hands back, so a number that answers is written as the text of
     // that number.
-    this.arm(value.right, value.type);
+    this.arm(fieldOf(value, "right"), fieldOf(value, "type"));
     this.code.jmp(end);
     this.code.bind(otherwise);
     if (arm !== null) this.load(arm);
-    if (isNumber(value.left.type) && isTextType(value.type)) this.numberAsText();
-    else this.convert(value.left.type, value.type);
+    if (isNumber(fieldOf(fieldOf(value, "left"), "type")) && isTextType(fieldOf(value, "type"))) this.numberAsText();
+    else this.convert(fieldOf(fieldOf(value, "left"), "type"), fieldOf(value, "type"));
     this.code.bind(end);
   }
 
@@ -10082,7 +10090,7 @@ class Machine {
    * whether it is handed back.
    */
   private arm(value: SemanticValue, type: SemanticType): void {
-    if (isNumber(value.type) && isTextType(type)) {
+    if (isNumber(fieldOf(value, "type")) && isTextType(type)) {
       this.value(value);
       this.numberAsText();
       return;
@@ -10096,9 +10104,9 @@ class Machine {
   }
 
   private coalesce(value: SemanticValue & { k: "coalesce" }): void {
-    const kind = valueKind(value.left);
-    if (kind !== "null" && kind !== "reference" && !isTextType(value.left.type)) {
-      this.value(value.left);
+    const kind = valueKind(fieldOf(value, "left"));
+    if (kind !== "null" && kind !== "reference" && !isTextType(fieldOf(fieldOf(value, "left"), "type"))) {
+      this.value(fieldOf(value, "left"));
       return;
     }
     const otherwise = this.code.label("Larm");
@@ -10107,27 +10115,27 @@ class Machine {
     // too, so the test is the same one the `||` above asks: is the value zero.
     // It is asked of the accumulator the arm is already in, unless the right
     // arm is a call and would take the accumulator away from it.
-    const keep = hasCall(value.right);
-    const arm = keep ? this.hold(value.left.type, "blaze_arm") : null;
-    this.value(value.left);
+    const keep = hasCall(fieldOf(value, "right"));
+    const arm = keep ? this.hold(fieldOf(fieldOf(value, "left"), "type"), "blaze_arm") : null;
+    this.value(fieldOf(value, "left"));
     if (arm !== null) this.store(arm);
     this.code.test(RAX);
     this.code.jcc("e", otherwise);
-    this.convert(value.left.type, value.type);
+    this.convert(fieldOf(fieldOf(value, "left"), "type"), fieldOf(value, "type"));
     this.code.jmp(end);
     this.code.bind(otherwise);
-    this.at(value.right, value.type);
+    this.at(fieldOf(value, "right"), fieldOf(value, "type"));
     this.code.bind(end);
   }
 
   private select(value: SemanticValue & { k: "select" }): void {
     const otherwise = this.code.label("Larm");
     const end = this.code.label("Lend");
-    this.truthBranch(value.condition, false, otherwise);
-    this.at(value.then, value.type);
+    this.truthBranch(fieldOf(value, "condition"), false, otherwise);
+    this.at(fieldOf(value, "then"), fieldOf(value, "type"));
     this.code.jmp(end);
     this.code.bind(otherwise);
-    this.at(value.otherwise, value.type);
+    this.at(fieldOf(value, "otherwise"), fieldOf(value, "type"));
     this.code.bind(end);
   }
 
@@ -10146,8 +10154,8 @@ class Machine {
         this.value(operand);
         return;
       case "not": {
-        if (operand.k === "compare" && !isTextType(fieldOf(operand, "operand") as SemanticType)) {
-          this.comparedNegated(operand);
+        if (String(fieldOf(operand, "k")) === "compare" && !isTextType(fieldOf(operand, "operand") as SemanticType)) {
+          this.comparedNegated(operand as Extract<SemanticValue, { k: "compare" }>);
           return;
         }
         // The truth of the operand is asked of the accumulator it is already
@@ -10208,8 +10216,8 @@ class Machine {
    */
   private text(value: SemanticValue & { k: "text" }): void {
     const textParts = fieldOf(value, "parts") as readonly SemanticValue[];
-    if (textParts.every((part) => part.k === "text")) {
-      this.literal(textParts.map((part) => (part.k === "text" ? String(fieldOf(part, "value")) : "")).join(""));
+    if (textParts.every((part) => String(fieldOf(part, "k")) === "text")) {
+      this.literal(textParts.map((part) => (String(fieldOf(part, "k")) === "text" ? String(fieldOf(part, "value")) : "")).join(""));
       this.code.leaLabel(RAX, this.lastLiteral);
       return;
     }
@@ -10226,7 +10234,7 @@ class Machine {
     const unmeasured: number[] = [];
     for (let at = 0; at < textParts.length; at += 1) {
       const part = textParts[at];
-      if (part.k === "text") {
+      if (String(fieldOf(part, "k")) === "text") {
         this.literal(String(fieldOf(part, "value")));
         this.code.leaLabel(RAX, this.lastLiteral);
         this.store(fieldOf(parts[at], "pointer") as Held);
@@ -10320,9 +10328,9 @@ class Machine {
   }
 
   private printText(value: SemanticValue): void {
-    const textParts = value.k === "text" ? fieldOf(value, "parts") as readonly SemanticValue[] : null;
+    const textParts = String(fieldOf(value, "k")) === "text" ? fieldOf(value, "parts") as readonly SemanticValue[] : null;
     const parts = textParts;
-    const writes = parts === null ? 0 : parts.filter((part) => part.k !== "text").length;
+    const writes = parts === null ? 0 : parts.filter((part) => String(fieldOf(part, "k")) !== "text").length;
     if (parts === null || (parts.length > 0 && writes === 0)) {
       this.value(value);
       this.code.movRegReg(RDI, RAX);
@@ -10334,7 +10342,7 @@ class Machine {
     // the runtime returned it or read as a constant.
     const length = this.hold(USIZE, "blaze_length");
     for (const part of parts) {
-      if (part.k === "text") {
+      if (String(fieldOf(part, "k")) === "text") {
         this.literal(String(fieldOf(part, "value")));
         this.code.leaLabel(RAX, this.lastLiteral);
         this.code.movRegReg(RDI, RAX);
@@ -10368,10 +10376,10 @@ class Machine {
     // `${x.toString(16)}` is a number in base sixteen, and reading through the
     // wrapper for the value alone wrote the number the way the shortest writing
     // of it goes — `255` where the source says `ff`.
-    const digits = value.k === "toText" ? fieldOf(value, "digits") as number : null;
-    const precision = value.k === "toText" && String(fieldOf(value, "precision")) === "true";
+    const digits = String(fieldOf(value, "k")) === "toText" ? fieldOf(value, "digits") as number : null;
+    const precision = String(fieldOf(value, "k")) === "toText" && String(fieldOf(value, "precision")) === "true";
     let inner = value;
-    while (inner.k === "toText") inner = fieldOf(inner, "of") as SemanticValue;
+    while (String(fieldOf(inner, "k")) === "toText") inner = fieldOf(inner, "of") as SemanticValue;
     return this.asText(inner, measured, digits, precision);
   }
 
@@ -10399,7 +10407,7 @@ class Machine {
       this.code.leaLabel(RAX, this.lastLiteral);
     };
 
-    if (isTextType(value.type)) {
+    if (isTextType(fieldOf(value, "type"))) {
       this.value(value);
       return false;
     }
@@ -10407,7 +10415,7 @@ class Machine {
       word("null");
       return true;
     }
-    if (isBoolean(value.type)) {
+    if (isBoolean(fieldOf(value, "type"))) {
       const otherwise = this.code.label("Lword");
       const end = this.code.label("Lend");
       this.value(value);
@@ -10420,7 +10428,7 @@ class Machine {
       this.code.bind(end);
       return true;
     }
-    if (isDynamicType(value.type)) {
+    if (isDynamicType(fieldOf(value, "type"))) {
       // A service takes the handle as the double it is, and the bits this
       // backend keeps in the accumulator are that double's: the move turns
       // them back into the number the convention passes.
@@ -10429,8 +10437,8 @@ class Machine {
       this.runtime("_to_text");
       return false;
     }
-    if (isReference(value.type)) {
-      const pointer = this.hold(value.type, "blaze_reference");
+    if (isReference(fieldOf(value, "type"))) {
+      const pointer = this.hold(fieldOf(value, "type"), "blaze_reference");
       const otherwise = this.code.label("Lword");
       const end = this.code.label("Lend");
       this.value(value);
@@ -10446,19 +10454,19 @@ class Machine {
       this.code.bind(end);
       return true;
     }
-    if (digits !== null && digits < 0 && isFloatType(value.type)) {
+    if (digits !== null && digits < 0 && isFloatType(fieldOf(value, "type"))) {
       throw machineError(
         `${String(fieldOf(this.fn, "symbol"))} writes a fraction in hexadecimal, which this backend cannot do`,
         "a hexadecimal form is written for a whole number; convert the value to one first",
       );
     }
-    if (isWideType(value.type) || (digits !== null && digits < 0 && isInteger(value.type))) {
+    if (isWideType(fieldOf(value, "type")) || (digits !== null && digits < 0 && isInteger(fieldOf(value, "type")))) {
       // A wide number is printed from its four limbs, and a narrow whole number
       // written in base sixteen is widened into the same four so one formatter
       // writes both.
       const base = digits === null ? 10 : digits === -2 ? 2 : digits < 0 ? 16 : 10;
-      const slot = this.hold(isWideType(value.type) ? value.type : WIDE_UNSIGNED, "blaze_wide_text");
-      if (isWideType(value.type)) this.wideValue(value);
+      const slot = this.hold(isWideType(fieldOf(value, "type")) ? fieldOf(value, "type") : WIDE_UNSIGNED, "blaze_wide_text");
+      if (isWideType(fieldOf(value, "type"))) this.wideValue(value);
       else this.wideFrom(value);
       this.wideStore(slot);
       const buffer = this.scratch(80, "blaze_wide_text_buffer");
@@ -10529,7 +10537,7 @@ class Machine {
   }
 
   private length(of: SemanticValue): void {
-    if (isTextType(of.type)) {
+    if (isTextType(fieldOf(of, "type"))) {
       // A string is as long as its bytes. The runtime counts a string it owns
       // from the header it installed before it, which a string written out in
       // the source does not have, so both are counted as the C library counts
@@ -10549,15 +10557,15 @@ class Machine {
         "a view's pointer is the block moved to where the window starts, and no count arrives with it; write the elements out, or build with --backend c",
       );
     }
-    if (of.k === "local") {
-      const lengthName = this.arrayParamLengths.get(of.name);
+    if (String(fieldOf(of, "k")) === "local") {
+      const lengthName = this.arrayParamLengths.get(fieldOf(of, "name"));
       if (lengthName !== undefined) {
         this.value({ k: "local", type: USIZE, name: lengthName });
         return;
       }
       // A name a list was bound to carries the count it was bound with, which is
       // the elements a list was written with or the count a block was joined at.
-      const count = this.arrayCounts.get(this.names.read(of.name));
+      const count = this.arrayCounts.get(this.names.read(fieldOf(of, "name")));
       if (count !== undefined) {
         if (typeof count === "bigint") {
           this.code.movRegImm(RAX, count);
@@ -10567,13 +10575,13 @@ class Machine {
         return;
       }
     }
-    if (isSequence(of.type)) {
+    if (isSequence(fieldOf(of, "type"))) {
       // A list a function holds is the block the runtime laid out: the header
       // records the bytes it holds, so the count of elements is that many bytes
       // divided by the width of one. Every element the IR names is a power of
       // two wide, so the division is a shift, and the answer is the whole
       // number the length is.
-      const element = elementTypeOf(of.type);
+      const element = elementTypeOf(fieldOf(of, "type"));
       const bytes = element === null ? 8 : widthOf(element);
       this.value(of);
       this.code.movRegReg(RDI, RAX);
@@ -10729,9 +10737,9 @@ class Machine {
    * frame is zero, which is the first slot's own address.
    */
   private plainIndex(index: SemanticValue): Held | bigint | null {
-    if (index.k === "const") return integerText(index.text);
-    if (index.k !== "local") return null;
-    const held = this.slot(index.name);
+    if (String(fieldOf(index, "k")) === "const") return integerText(fieldOf(index, "text"));
+    if (String(fieldOf(index, "k")) !== "local") return null;
+    const held = this.slot(fieldOf(index, "name"));
     // A counter this pass counted out holds the number of its turn in the
     // instruction rather than anywhere a read could go, and that number is what
     // the address of an element is built from: the buffer and a displacement,
@@ -10786,7 +10794,7 @@ class Machine {
    */
   private builtAddress(sequence: SemanticValue | string, index: SemanticValue, element: SemanticType): void {
     const scale = widthOf(element) as 1 | 2 | 4 | 8;
-    const base = typeof sequence === "string" ? this.slot(sequence) : sequence.k === "local" ? this.slot(sequence.name) : null;
+    const base = typeof sequence === "string" ? this.slot(sequence) : String(fieldOf(sequence, "k")) === "local" ? this.slot(fieldOf(sequence, "name")) : null;
     // An index is a whole number, and where the loop that counts it keeps that
     // whole number in a register of its own this reads it out of that register
     // rather than out of the double the counter also is. The conversion was done
@@ -10857,7 +10865,7 @@ class Machine {
     const scale = widthOf(element) as 1 | 2 | 4 | 8;
     const base = typeof sequence === "string"
       ? this.slot(sequence)
-      : sequence.k === "local" ? this.slot(String(fieldOf(sequence, "name"))) : null;
+      : String(fieldOf(sequence, "k")) === "local" ? this.slot(String(fieldOf(sequence, "name"))) : null;
     // The sequence is a pointer wherever it came from: an array reaches a
     // function as a pointer to its elements, so it is one whole-register read.
     if (base === null) return null;
@@ -11115,7 +11123,7 @@ class Machine {
     }
     if (String(fieldOf(call, "builtin")) === "true") {
       this.builtin(call);
-      if (wanted !== null && wanted.kind !== "void") this.convert(returns, wanted);
+      if (wanted !== null && String(fieldOf(wanted, "kind")) !== "void") this.convert(returns, wanted);
       return;
     }
     // An argument left where it is, rather than written to a slot and read back
@@ -11171,7 +11179,7 @@ class Machine {
       // An argument that is a name read at the type the parameter takes is the
       // slot itself: the register the call takes it in is filled from there
       // anyway, and the general form copies it into a slot of its own first.
-      if (argument.k === "local") {
+      if (String(fieldOf(argument, "k")) === "local") {
         const held = this.slot(String(fieldOf(argument, "name")));
         if (typeEquals(fieldOf(held, "type") as SemanticType, type)) return held;
         // A reference is a pointer whatever it points at, so a slot holding
@@ -11199,7 +11207,7 @@ class Machine {
         intoLast !== undefined &&
         callArgs.some(
           (other, otherAt) =>
-            otherAt !== at && other.k === "local" && fieldOf(this.slot(String(fieldOf(other, "name"))), "register") === intoLast,
+            otherAt !== at && String(fieldOf(other, "k")) === "local" && fieldOf(this.slot(String(fieldOf(other, "name"))), "register") === intoLast,
         );
       if (at === last && intoLast !== undefined && !pinnedHere && this.readIntoRegister(argument, intoLast, type)) {
         placed = handedAt[at] as number;
@@ -11232,7 +11240,7 @@ class Machine {
       shift === 0 ? placed : -1,
     );
     if (sret !== null) return;
-    if (wanted !== null && wanted.kind !== "void") this.convert(returns, wanted);
+    if (wanted !== null && String(fieldOf(wanted, "kind")) !== "void") this.convert(returns, wanted);
   }
 
   /**
@@ -11263,7 +11271,7 @@ class Machine {
    * register holds the number the callee is declared to be handed.
    */
   private readIntoRegister(value: SemanticValue, register: number, type: SemanticType): boolean {
-    if (value.k === "local") {
+    if (String(fieldOf(value, "k")) === "local") {
       const held = this.slot(String(fieldOf(value, "name")));
       if (!typeEquals(fieldOf(held, "type") as SemanticType, type) && !(isReference(fieldOf(held, "type") as SemanticType) && isReference(type))) return false;
       // A value the build gave a register of its own has no slot to read out
@@ -11278,10 +11286,10 @@ class Machine {
       else this.code.movRegMemSized(register, frame(fieldOf(held, "offset") as number), widthOf(fieldOf(held, "type") as SemanticType), signedOf(fieldOf(held, "type") as SemanticType));
       return true;
     }
-    if (value.k !== "loadField") return false;
+    if (String(fieldOf(value, "k")) !== "loadField") return false;
     if (!typeEquals(fieldOf(value, "type") as SemanticType, type) && !(isReference(fieldOf(value, "type") as SemanticType) && isReference(type))) return false;
     const object = fieldOf(value, "object") as SemanticValue;
-    if (object.k !== "local") return false;
+    if (String(fieldOf(object, "k")) !== "local") return false;
     const base = this.slot(String(fieldOf(object, "name")));
     if (!typeEquals(fieldOf(base, "type") as SemanticType, fieldOf(object, "type") as SemanticType)) return false;
     const displacement = fieldOf(this.field(String(fieldOf(value, "layout")), String(fieldOf(value, "field"))), "offset") as number;
@@ -11454,7 +11462,7 @@ class Machine {
         const carries = isTextType(type) || isSequence(type) ? POINTER : NUMBER;
         // An unshaped reference is a double here, exactly as it is when a
         // promise settles a value.
-        const target = type.kind === "ref" && type.of === null && type.name === undefined ? NUMBER : type;
+        const target = String(fieldOf(type, "kind")) === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined ? NUMBER : type;
         const slot = this.hold(carries, "blaze_spread");
         this.at(argument, target);
         this.store(slot);
@@ -11468,7 +11476,7 @@ class Machine {
       // An unshaped reference is a double here, exactly as it is when a
       // promise settles a value.
       const valueType = argTypes[0] ?? NUMBER;
-      const carries = valueType.kind === "ref" && valueType.of === null && valueType.name === undefined ? NUMBER : valueType;
+      const carries = String(fieldOf(valueType, "kind")) === "ref" && fieldOf(valueType, "of") === null && fieldOf(valueType, "name") === undefined ? NUMBER : valueType;
       this.at(args[0] as never, carries);
       this.store(held);
       const spaces = this.hold(NUMBER, "blaze_json_indent");
@@ -11616,7 +11624,7 @@ class Machine {
       this.external("blaze_promise_set_current");
       this.callForeign("blaze_promise_set_current");
       const cb = args[0];
-      if (cb.k === "functionRef") {
+      if (String(fieldOf(cb, "k")) === "functionRef") {
         const captures = Array.isArray(fieldOf(cb, "captures"))
           ? fieldOf(cb, "captures") as readonly { name: string }[]
           : [];
@@ -11727,7 +11735,7 @@ class Machine {
     }
     if (callee === "Promise.reject") {
       const message = args[0];
-      if (message !== undefined && isTextType(message.type)) {
+      if (message !== undefined && isTextType(fieldOf(message, "type"))) {
         this.at(message, TEXT);
         this.code.movRegReg(RDI, RAX);
       } else if (message !== undefined) {
@@ -11745,15 +11753,15 @@ class Machine {
     }
     if (callee === "resolve") {
       const value = args[0];
-      if (value !== undefined && isTextType(value.type)) {
+      if (value !== undefined && isTextType(fieldOf(value, "type"))) {
         this.at(value, TEXT);
         this.code.movRegReg(RDI, RAX);
         this.external("blaze_promise_resolve_current_text");
         this.callForeign("blaze_promise_resolve_current_text");
-      } else if (value !== undefined && value.k === "nothing") {
+      } else if (value !== undefined && String(fieldOf(value, "k")) === "nothing") {
         this.external("blaze_promise_resolve_current_null");
         this.callForeign("blaze_promise_resolve_current_null");
-      } else if (value !== undefined && value.type.kind === "ref") {
+      } else if (value !== undefined && String(fieldOf(fieldOf(value, "type"), "kind")) === "ref") {
         this.at(value, NUMBER);
         this.external("blaze_promise_resolve_current_value");
         this.callForeign("blaze_promise_resolve_current_value");
@@ -11767,7 +11775,7 @@ class Machine {
     }
     if (callee === "reject") {
       const message = args[0];
-      if (message !== undefined && isTextType(message.type)) {
+      if (message !== undefined && isTextType(fieldOf(message, "type"))) {
         this.at(message, TEXT);
         this.code.movRegReg(RDI, RAX);
       } else if (message !== undefined) {
@@ -11851,7 +11859,7 @@ class Machine {
     ) {
       const text = (at: number): Held => {
         const value = args[at];
-        if (isTextType(value.type)) {
+        if (isTextType(fieldOf(value, "type"))) {
           this.at(value, TEXT);
         } else {
           // A dynamic value crosses as the runtime's own text: the value is the
@@ -11943,7 +11951,7 @@ class Machine {
       // takes the accumulator the next is read into.
       const text = (at: number): Held => {
         const value = args[at];
-        if (isTextType(value.type)) {
+        if (isTextType(fieldOf(value, "type"))) {
           this.at(value, TEXT);
         } else {
           this.value(value);
@@ -12194,15 +12202,15 @@ class Machine {
     }
     if (callee === "Number" && args[0] !== undefined) {
       const wide = args[0];
-      const wideType = wide.type;
-      if (wideType.kind === "primitive" && (wideType.name === "u256" || wideType.name === "i256")) {
+      const wideType = fieldOf(wide, "type");
+      if (String(fieldOf(wideType, "kind")) === "primitive" && (String(fieldOf(wideType, "name")) === "u256" || String(fieldOf(wideType, "name")) === "i256")) {
         // A wide whole number is the decimal the runtime's formatter writes,
         // read back by the C library: the double Number(BigInt) answers.
         const slot = this.hold(wideType, "blaze_wide_number");
         this.wideValue(wide);
         this.wideStore(slot);
         this.code.leaMemReg(mem(RSP, slot.offset), RDI);
-        this.library(wideType.name === "i256" ? "_i256_to_double" : "_u256_to_double");
+        this.library(String(fieldOf(wideType, "name")) === "i256" ? "_i256_to_double" : "_u256_to_double");
         return;
       }
     }
@@ -12380,7 +12388,7 @@ class Machine {
     // one of those registers, and writing that register into the slot the
     // function's own value is kept in would lose it.
     const foreign =
-      symbol !== this.fn.symbol && (this.foreign.has(symbol) || !this.callable.has(symbol));
+      symbol !== String(fieldOf(this.fn, "symbol")) && (this.foreign.has(symbol) || !this.callable.has(symbol));
     if (foreign) this.saveVectorsForCall();
     const onStack: { held: Held; slot: number }[] = [];
     const registers: { register: number; held: Held; at: number }[] = [];
@@ -12557,7 +12565,7 @@ class Machine {
     this.code.call(symbol);
     if (slots > 0) this.code.aluImm("add", RSP, slots * 8);
     if (foreign) this.reloadVectorsAfterCall();
-    if (returns.kind !== "void" && !isFloatType(returns) && !isWideType(returns)) this.normalize(returns);
+    if (String(fieldOf(returns, "kind")) !== "void" && !isFloatType(returns) && !isWideType(returns)) this.normalize(returns);
   }
 
   /**
@@ -12672,7 +12680,7 @@ class Machine {
    * into a vector register turns back into the number.
    */
   private dynamicArgument(value: SemanticValue): Held {
-    if (isTextType(value.type) || value.k === "text") {
+    if (isTextType(fieldOf(value, "type")) || String(fieldOf(value, "k")) === "text") {
       this.at(value, TEXT);
       this.code.movRegReg(RDI, RAX);
       this.runtime("_box_string");
@@ -12680,7 +12688,7 @@ class Machine {
       this.store(boxed);
       return boxed;
     }
-    if (isDynamicType(value.type)) {
+    if (isDynamicType(fieldOf(value, "type"))) {
       this.value(value);
       this.code.movdXmm(XMM0, RAX);
       const handle = this.hold(NUMBER, "blaze_handle");
@@ -12778,7 +12786,7 @@ class Machine {
    * and text is a pointer whatever it says, so neither is converted at all.
    */
   private convert(from: SemanticType, to: SemanticType): void {
-    if (to.kind === "void") return;
+    if (String(fieldOf(to, "kind")) === "void") return;
     if (typeEquals(from, to)) return;
     // A value the runtime holds is a handle this backend carries in a whole
     // number register, and the number it says is the runtime's own reading of
@@ -12816,7 +12824,7 @@ class Machine {
       if (isSequence(from)) {
         const element = elementTypeOf(from);
         const kind = element !== null && isTextType(element) ? 1n : element !== null && isBoolean(element) ? 2n : 0n;
-        const size = BigInt(element !== null && element.kind === "primitive" ? widthOf(element) : 8);
+        const size = BigInt(element !== null && String(fieldOf(element, "kind")) === "primitive" ? widthOf(element) : 8);
         this.code.movRegReg(RDI, RAX);
         this.code.movRegImm(RSI, size);
         this.code.movRegImm(RDX, kind);
@@ -12974,9 +12982,9 @@ function floatBits(value: number, single: boolean): bigint {
  */
 export function describeMachineObject(objectPath: string, bytes: Uint8Array): { text: string; note: string | null } {
   const listing = run("objdump", ["-d", "-r", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 });
-  if (listing.code === 0 && listing.stdout.trim() !== "") {
+  if (Number(fieldOf(listing, "code")) === 0 && String(fieldOf(listing, "stdout")).trim() !== "") {
     return {
-      text: listing.stdout,
+      text: String(fieldOf(listing, "stdout")),
       note: "This is the machine code itself, as the disassembler reads it. The IR it was built from is the artifact the rules are applied to, and the object is regenerated from it.",
     };
   }

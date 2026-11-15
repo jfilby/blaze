@@ -149,6 +149,14 @@ import {
   type VerificationResult,
 } from "./core/types.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 export const STATE_DIRECTORY = ".blaze";
 
 /**
@@ -711,9 +719,9 @@ function testConfigFor(input: SourceInput, options: BuildOptions): TestConfig {
   const test = (input as unknown as Record<string, unknown>)["test"] as Record<string, unknown> | undefined;
   const given = options as unknown as Record<string, unknown>;
   return {
-    randomCases: Number(given["randomCases"] ?? (test === undefined ? undefined : test["randomCases"]) ?? DEFAULT_TEST.randomCases),
-    maxLength: Number(given["maxLength"] ?? (test === undefined ? undefined : test["maxLength"]) ?? DEFAULT_TEST.maxLength),
-    seed: Number((test === undefined ? undefined : test["seed"]) ?? DEFAULT_TEST.seed),
+    randomCases: Number(given["randomCases"] ?? (test === undefined ? undefined : test["randomCases"]) ?? fieldOf(DEFAULT_TEST, "randomCases")),
+    maxLength: Number(given["maxLength"] ?? (test === undefined ? undefined : test["maxLength"]) ?? fieldOf(DEFAULT_TEST, "maxLength")),
+    seed: Number((test === undefined ? undefined : test["seed"]) ?? fieldOf(DEFAULT_TEST, "seed")),
   };
 }
 
@@ -728,11 +736,11 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
   };
   const pick = (key: string, fallback: number): number => optional(key) ?? fallback;
   return {
-    maxCandidates: pick("maxCandidates", DEFAULT_GENERATION.maxCandidates),
-    maxAttempts: pick("maxAttempts", DEFAULT_GENERATION.maxAttempts),
-    maxRetries: pick("maxRetries", DEFAULT_GENERATION.maxRetries),
-    candidateConcurrency: pick("candidateConcurrency", DEFAULT_GENERATION.candidateConcurrency),
-    functionConcurrency: pick("functionConcurrency", DEFAULT_GENERATION.functionConcurrency),
+    maxCandidates: pick("maxCandidates", fieldOf(DEFAULT_GENERATION, "maxCandidates")),
+    maxAttempts: pick("maxAttempts", fieldOf(DEFAULT_GENERATION, "maxAttempts")),
+    maxRetries: pick("maxRetries", fieldOf(DEFAULT_GENERATION, "maxRetries")),
+    candidateConcurrency: pick("candidateConcurrency", fieldOf(DEFAULT_GENERATION, "candidateConcurrency")),
+    functionConcurrency: pick("functionConcurrency", fieldOf(DEFAULT_GENERATION, "functionConcurrency")),
     timeoutSeconds: optional("timeoutSeconds"),
   };
 }
@@ -794,7 +802,7 @@ async function recordRejected(
   // refused. Only a refusal before the target was read falls back to the last
   // build's target, and only a project that never had one falls back to the
   // default.
-  const recordTarget = target ?? previous?.target ?? normalizeTarget(undefined);
+  const recordTarget = target ?? fieldOf(previous ?? {}, "target") ?? normalizeTarget(undefined);
   // The engine is this one, not the last build's: the record says which
   // compiler rejected the project, and a record written before this compiler
   // existed has nothing to compare a later build against.
@@ -805,9 +813,9 @@ async function recordRejected(
   // diagnostic.
   let toolchain: string | undefined;
   try {
-    toolchain = toolchainForTarget(recordTarget).id;
+    toolchain = fieldOf(toolchainForTarget(recordTarget), "id");
   } catch {
-    toolchain = previous?.toolchain;
+    toolchain = fieldOf(previous ?? {}, "toolchain");
   }
   const pathFields = paths as unknown as Record<string, unknown>;
   const inputStorePath = String(pathFields["input"]);
@@ -818,17 +826,17 @@ async function recordRejected(
     contract: contractPath,
     target: recordTarget,
     status: "failed",
-    outputKind: previous?.outputKind ?? "machine",
-    backend: previous?.backend ?? "c",
-    mode: previous?.mode ?? "debug",
+    outputKind: fieldOf(previous ?? {}, "outputKind") ?? "machine",
+    backend: fieldOf(previous ?? {}, "backend") ?? "c",
+    mode: fieldOf(previous ?? {}, "mode") ?? "debug",
     ...(toolchain === undefined ? {} : { toolchain }),
-    runtime: previous?.runtime ?? "none",
-    createdAt: previous?.createdAt ?? stamp,
+    runtime: fieldOf(previous ?? {}, "runtime") ?? "none",
+    createdAt: fieldOf(previous ?? {}, "createdAt") ?? stamp,
     updatedAt: stamp,
-    sourceHash: previous?.sourceHash ?? "",
-    contractHash: previous?.contractHash ?? "",
-    model: previous?.model ?? "unset",
-    modelConfig: previous?.modelConfig ?? "unset",
+    sourceHash: fieldOf(previous ?? {}, "sourceHash") ?? "",
+    contractHash: fieldOf(previous ?? {}, "contractHash") ?? "",
+    model: fieldOf(previous ?? {}, "model") ?? "unset",
+    modelConfig: fieldOf(previous ?? {}, "modelConfig") ?? "unset",
     compilerVersion: COMPILER_VERSION,
     engine,
     error: error.toJSON(),
@@ -858,7 +866,7 @@ function functionContext(phase: { program: ProgramContract; objectNames: Record<
   const program = fields["program"] as ProgramContract;
   const objectNames = fields["objectNames"] as Record<string, string>;
   const functions: Record<string, FunctionContract> = {};
-  for (const file of program.files) {
+  for (const file of fieldOf(program, "files") as FileContract[]) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -905,7 +913,7 @@ function semanticFunctions(
   objectKeys: LiteralKeys,
 ): Record<string, SemanticFunction> {
   const functions: Record<string, FunctionContract> = {};
-  for (const file of program.files) {
+  for (const file of fieldOf(program, "files") as FileContract[]) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -915,7 +923,7 @@ function semanticFunctions(
   const language = (program as unknown as Record<string, unknown>)["language"] as string;
   const context: FunctionContext = { objectNames, functions, language };
   const resolved: Record<string, SemanticFunction> = {};
-  for (const file of program.files) {
+  for (const file of fieldOf(program, "files") as FileContract[]) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -940,7 +948,7 @@ function semanticFunctions(
   // checked against the others: a loop marked parallel is proved against what
   // the functions it calls write, and that is a question about the program.
   const callees = new Map(Object.entries(resolved));
-  for (const file of program.files) {
+  for (const file of fieldOf(program, "files") as FileContract[]) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       // A function is checked before it is shown to anything, so a function
@@ -984,9 +992,9 @@ function storedFunctionOf(
 function benchmarkIterationsOf(input: SourceInput): number {
   const inputFields = input as unknown as Record<string, unknown>;
   const benchmark = inputFields["benchmark"] as Record<string, unknown> | undefined;
-  if (benchmark === undefined) return DEFAULT_BENCHMARK.iterations;
+  if (benchmark === undefined) return fieldOf(DEFAULT_BENCHMARK, "iterations");
   const iterations = benchmark["iterations"] as number | undefined;
-  return iterations === undefined ? DEFAULT_BENCHMARK.iterations : iterations;
+  return iterations === undefined ? fieldOf(DEFAULT_BENCHMARK, "iterations") : iterations;
 }
 
 /** The contract a stored unit holds, at the type the evaluator reads it as. */
@@ -1032,7 +1040,7 @@ function unitNameKey(unit: unknown, units: readonly CompilationUnit[]): string {
 
 function compilationUnits(program: ProgramContract, isProgram: boolean): CompilationUnit[] {
   const units: CompilationUnit[] = [];
-  for (const file of program.files) {
+  for (const file of fieldOf(program, "files") as FileContract[]) {
     const fields = file as unknown as Record<string, unknown>;
     const declared = fields["functions"] as Record<string, FunctionContract>;
     const filePath = fields["path"] as string;
@@ -1836,12 +1844,12 @@ export async function runBuild(
   // mismatch against what it was promised instead.
   const discardStored = (fields["recompile"] as boolean | undefined) === true || (engineChanged && (fields["reuse"] as boolean) !== true);
 
-  await storeMkdirp(store, paths.root);
+  await storeMkdirp(store, String(fieldOf(paths, "root")));
   await storeMkdirp(store, workPath);
   if ((fields["recompile"] as boolean | undefined) === true) {
     try { await storeRemove(store, join(workPath, "program.c")); } catch {}
   }
-  await storeMkdirp(store, paths.output);
+  await storeMkdirp(store, String(fieldOf(paths, "output")));
   // The project is stored as the record the rest of the compiler reads, which
   // is JSON whatever the project file is, so `blaze test` and `blaze benchmark`
   // re-run a build against the project it was given.
@@ -1849,15 +1857,15 @@ export async function runBuild(
 
   const createdAt = new Date().toISOString();
   const build: BuildStatus = {
-    id,
+    id: String(id),
     input: inputPath,
-    contract: paths.contract,
+    contract: String(fieldOf(paths, "contract")),
     target,
     status: "building",
     outputKind,
     backend: backendKind,
     mode: buildMode,
-    ...(toolchainId === undefined ? {} : { toolchain: toolchainId }),
+    toolchain: toolchainId,
     runtime: runtimeKind,
     createdAt,
     updatedAt: createdAt,
@@ -1869,7 +1877,7 @@ export async function runBuild(
     engine,
     // The flag is the record of a build that was told to recompile. An engine
     // change that forced one is already visible as the stamp, which moved.
-    ...((fields["recompile"] as boolean | undefined) === true ? { recompiled: true } : {}),
+    recompiled: (fields["recompile"] as boolean | undefined) === true,
   };
   await writeBuildRecord(store, buildPathOf(paths), build);
 
@@ -1924,15 +1932,15 @@ export async function runBuild(
       const moduleFields = module as unknown as Record<string, unknown>;
       return [String(moduleFields["path"]), String(moduleFields["source"])];
     }));
-    build.sourceHash = sourceHash;
-    build.contractHash = hashValue(program);
-    await storeWrite(store, paths.contract, program);
+    setFieldOn(build, "sourceHash", sourceHash);
+    setFieldOn(build, "contractHash", hashValue(program));
+    await storeWrite(store, String(fieldOf(paths, "contract")), program);
     reporter(
       "contract",
       "ok",
       body === undefined
-        ? `Program contract: ${program.files.length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(String(entry["function"]))} in ${String(entry["file"])}`
-        : `Program contract: ${program.files.length} file(s), ${units.length} compiled function(s), program ${String(entry["file"])}`,
+        ? `Program contract: ${(fieldOf(program, "files") as FileContract[]).length} file(s), ${contractedFunctionCount(program)} contracted function(s), entry ${String(String(entry["function"]))} in ${String(entry["file"])}`
+        : `Program contract: ${(fieldOf(program, "files") as FileContract[]).length} file(s), ${units.length} compiled function(s), program ${String(entry["file"])}`,
     );
     // The program's own statements are held to the same deterministic rewrites
     // a function's are: a top-level loop of a program is a loop like any other,
@@ -1984,8 +1992,8 @@ export async function runBuild(
           reporter("assemble", "info", detail.trim());
         }
         backendKind = "c";
-        build.backend = "c";
-        build.backendFallback = backendFallbackOf(String(refusalFields["function"]), reason);
+        setFieldOn(build, "backend", "c");
+        setFieldOn(build, "backendFallback", backendFallbackOf(String(refusalFields["function"]), reason));
       } else if (driver !== undefined) {
         // Every function the program declares for itself is lowered the same
         // way the functions a candidate implements are: into an object the
@@ -2009,12 +2017,12 @@ export async function runBuild(
     // which is the point of recompiling rather than of forgetting.
     const incremental = discardStored
       ? (Object.create(null) as IncrementalRecord)
-      : await readIncremental(store, paths.incremental);
+      : await readIncremental(store, String(fieldOf(paths, "incremental")));
     const base = storeResolve(store, workPath);
     // What every function of this build was compiled against, so nothing is
     // reused across a change of contract, target, options or model.
     const test = testConfigFor(input, options);
-    const benchmarkConfig = { iterations: (inputFields["benchmark"] as Record<string, unknown> | undefined)?.["iterations"] as number | undefined ?? DEFAULT_BENCHMARK.iterations };
+    const benchmarkConfig = { iterations: (inputFields["benchmark"] as Record<string, unknown> | undefined)?.["iterations"] as number | undefined ?? fieldOf(DEFAULT_BENCHMARK, "iterations") };
     // A program links the object of every function it calls, and running it is
     // what proves the functions it is the only oracle for. A build that stops
     // at candidate selection has no program to link or to run, and so has no
@@ -2118,7 +2126,7 @@ export async function runBuild(
         const entry = awaitingProgram.get(key) ?? incremental[key];
         if (entry !== undefined) proved[key] = entry;
       }
-      await storeWrite(store, paths.incremental, proved);
+      await storeWrite(store, String(fieldOf(paths, "incremental")), proved);
     };
 
     // What a round of generation produced, by function. A repair round replaces
@@ -2323,7 +2331,7 @@ export async function runBuild(
         // the other wrote it, and one entry would be lost. One writer at a
         // time costs nothing: this is a write of a few kilobytes, and the
         // functions it is waiting for are still waiting on a model.
-        const writeIncremental = (): Promise<void> => storeWrite(store, paths.incremental, { ...incremental });
+        const writeIncremental = (): Promise<void> => storeWrite(store, String(fieldOf(paths, "incremental")), { ...incremental });
         const writeNext = writing.then(writeIncremental, writeIncremental);
         writing = writeNext.then(
           () => {},
@@ -2461,7 +2469,7 @@ export async function runBuild(
     // what runs the entry of it.
     const programModule = join(base, "program.wasm");
     const programHost = join(base, "program.host.mjs");
-    const deliveredProgram = join(project.directory, `${id}${EXECUTABLE_SUFFIX}`);
+    const deliveredProgram = join(String(fieldOf(project, "directory")), `${id}${EXECUTABLE_SUFFIX}`);
     for (let round = 1; round <= programRounds; round += 1) {
       await generateUnits(mismatch);
       selected = await record();
@@ -2536,7 +2544,7 @@ export async function runBuild(
           String(inputFields["language"]),
         );
       } else if (isHttp || runtimeKind === "none") {
-        const driverObjective: Objective = String(normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined).primary) as Objective;
+        const driverObjective: Objective = String(fieldOf(normalizeOptimize(inputFields["optimize"] as Partial<OptimizeSpec> | undefined), "primary")) as Objective;
         const driverMode: BuildMode = buildMode;
         const driverTarget: TargetSpec = target;
         const driverProgram: SemanticProgram = driver as SemanticProgram;
@@ -2626,7 +2634,7 @@ export async function runBuild(
         "ok",
         (inputFields["verifyProgram"] as boolean | undefined) === false
           ? "Program output is not checked (verifyProgram = false)"
-          : `Program output is not checked: the program is built for ${target.os}, and this host is ${hostPlatform()}`,
+          : `Program output is not checked: the program is built for ${String(fieldOf(target, "os"))}, and this host is ${hostPlatform()}`,
       );
     }
     // The program has agreed with its source, so the functions it is the only
@@ -2635,7 +2643,7 @@ export async function runBuild(
     if (checked !== undefined) await prove();
     // A build that delivered a program says whether it checked that program's
     // output. A function-only build has no program and leaves the field out.
-    if (driver !== undefined && String(mode) === "build") build.programVerification = programVerification;
+    if (driver !== undefined && String(mode) === "build") setFieldOn(build, "programVerification", programVerification);
 
     const generated = unitsGenerated();
     // Keyed by whatever the source named the function, so these are built from
@@ -2711,9 +2719,9 @@ export async function runBuild(
           // module holds every function of the program and the body it runs,
           // and the host is the runtime it runs under. A module nobody can run
           // is not a deliverable, so the host is delivered beside it.
-          await deliverStored(store, base, delivered, "program.wasm", paths.outputModule);
-          await deliverStored(store, base, delivered, "program.host.mjs", paths.outputHost);
-          outputPath = storeResolve(store, paths.outputModule);
+          await deliverStored(store, base, delivered, "program.wasm", String(fieldOf(paths, "outputModule")));
+          await deliverStored(store, base, delivered, "program.host.mjs", String(fieldOf(paths, "outputHost")));
+          outputPath = storeResolve(store, String(fieldOf(paths, "outputModule")));
         } else {
           //
           // The program beside the project's sources is stripped, and the store's
@@ -2721,12 +2729,12 @@ export async function runBuild(
           // symbol table, a build id and the unwind tables of a program with no
           // exceptions are 10-20% of a small binary for nothing. The store's copy
           // is made before the strip, so it keeps them.
-          await deliverStored(store, base, delivered, programBinary, paths.outputBinary);
+          await deliverStored(store, base, delivered, programBinary, String(fieldOf(paths, "outputBinary")));
           run("strip", ["--strip-unneeded", programPath]);
           await copyDelivered(programPath, deliveredProgram);
-          await deliverStored(store, base, delivered, runtimeKind === "nim" ? "program_host.nim" : "program.c", paths.outputProgram);
+          await deliverStored(store, base, delivered, runtimeKind === "nim" ? "program_host.nim" : "program.c", String(fieldOf(paths, "outputProgram")));
           delivered.push(deliveredProgram);
-          outputPath = storeResolve(store, paths.outputBinary);
+          outputPath = storeResolve(store, String(fieldOf(paths, "outputBinary")));
         }
       } else {
         const firstUnit = units[0] as CompilationUnit;
@@ -2748,39 +2756,39 @@ export async function runBuild(
         // the IR it was lowered from, which is the text a model wrote and the
         // one a later repair round is shown. Every kind answers in the IR, so
         // what differs is only the file the compiler wrote.
-        await deliverStored(store, base, delivered, `${functionName}/${winner}.ir`, paths.outputIr);
+        await deliverStored(store, base, delivered, `${functionName}/${winner}.ir`, String(fieldOf(paths, "outputIr")));
         if (outputKind === "wasm") {
-          await deliverStored(store, base, delivered, `${functionName}/${winner}.wasm`, paths.outputModule);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.wasm`, String(fieldOf(paths, "outputModule")));
           // The host is the runtime a module runs under, and a module nobody
           // can run is not a deliverable: the host is delivered beside it.
-          await deliverStored(store, base, delivered, `${functionName}/${winner}.host.mjs`, paths.outputHost);
-          outputPath = storeResolve(store, paths.outputModule);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.host.mjs`, String(fieldOf(paths, "outputHost")));
+          outputPath = storeResolve(store, String(fieldOf(paths, "outputModule")));
         } else if (outputKind === "ir") {
           if (standalone) {
-            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
-            outputPath = storeResolve(store, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, String(fieldOf(paths, "outputBinary")));
+            outputPath = storeResolve(store, String(fieldOf(paths, "outputBinary")));
           }
         } else if (backendKind === "machine") {
           // The object is the artifact the compiler wrote, so it is what the
           // build delivers beside the IR it was written from. A `machine`
           // build also delivers the executable, which is what a person runs.
-          await deliverStored(store, base, delivered, `${functionName}/${winner}.o`, paths.outputObject);
-          outputAssemblyPath = storeResolve(store, paths.outputObject);
-          outputPath = storeResolve(store, paths.outputObject);
+          await deliverStored(store, base, delivered, `${functionName}/${winner}.o`, String(fieldOf(paths, "outputObject")));
+          outputAssemblyPath = storeResolve(store, String(fieldOf(paths, "outputObject")));
+          outputPath = storeResolve(store, String(fieldOf(paths, "outputObject")));
           if (outputKind === "machine" && standalone) {
-            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
-            outputPath = storeResolve(store, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, String(fieldOf(paths, "outputBinary")));
+            outputPath = storeResolve(store, String(fieldOf(paths, "outputBinary")));
           }
         } else {
           // The delivered text is the one the object was built from, so it can
           // be fed straight back to the toolchain that reads it.
-          const target = outputKind === "c" ? paths.outputSource : paths.outputAssembly;
+          const target = outputKind === "c" ? String(fieldOf(paths, "outputSource")) : String(fieldOf(paths, "outputAssembly"));
           await deliverStored(store, base, delivered, `${functionName}/${winner}.${outputKind === "c" ? "c" : "s"}`, target);
           outputAssemblyPath = storeResolve(store, target);
           outputPath = storeResolve(store, target);
           if (outputKind === "machine" && standalone) {
-            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, paths.outputBinary);
-            outputPath = storeResolve(store, paths.outputBinary);
+            await deliverStored(store, base, delivered, `${functionName}/${winner}${EXECUTABLE_SUFFIX}`, String(fieldOf(paths, "outputBinary")));
+            outputPath = storeResolve(store, String(fieldOf(paths, "outputBinary")));
           }
         }
       }
@@ -2794,14 +2802,14 @@ export async function runBuild(
     // A build with no program to check has proved everything its functions
     // could prove on their own, so the record of that is written now.
     if (checked === undefined) await prove();
-    build.status = "success";
-    build.selectedCandidates = selected;
-    build.reused = Object.fromEntries(reusedByFunction);
+    setFieldOn(build, "status", "success");
+    setFieldOn(build, "selectedCandidates", selected);
+    setFieldOn(build, "reused", Object.fromEntries(reusedByFunction));
     // The deliverable this build actually produced. A build that only
     // generated candidates delivered nothing, and saying it delivered the
     // assembly pointed automation at a file that was never written.
-    if (outputPath !== null) build.output = relative(store.root, outputPath);
-    build.updatedAt = new Date().toISOString();
+    if (outputPath !== null) setFieldOn(build, "output", relative(String(fieldOf(store, "root")), outputPath));
+    setFieldOn(build, "updatedAt", new Date().toISOString());
     await writeBuildRecord(store, buildPathOf(paths), build);
 
     const generationRecord = generationRecordOf(
@@ -2832,9 +2840,9 @@ export async function runBuild(
     // The project is known from here on, so the CLI can point at the record.
     const failure = toCompilerError(cause, "AiReviewError", mode, "", "", "", "", "");
     const error = new CompilerError(failure.category, failure.stage, failure.message, failure.detail, failure.functionName, failure.candidate, id);
-    build.status = "failed";
-    build.error = error.toJSON();
-    build.updatedAt = new Date().toISOString();
+    setFieldOn(build, "status", "failed");
+    setFieldOn(build, "error", error.toJSON());
+    setFieldOn(build, "updatedAt", new Date().toISOString());
     await writeBuildRecord(store, buildPathOf(paths), build);
     throw error;
   }
@@ -3081,7 +3089,10 @@ export interface SemanticIrOptions {
  */
 export async function runSemanticIr(inputPath: string, options: SemanticIrOptions): Promise<string> {
   const fields = options as unknown as Record<string, unknown>;
-  const { input, entry, directory } = readInput(inputPath);
+  const projectInput = readInput(inputPath);
+  const input = fieldOf(projectInput, "input") as SourceInput;
+  const entry = fieldOf(projectInput, "entry") as SourceModule;
+  const directory = String(fieldOf(projectInput, "directory"));
   const inputFields = input as unknown as Record<string, unknown>;
   const phase = contractPhaseFor(
     frontendFor(String(inputFields["language"])),
@@ -3101,7 +3112,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   // name, and every function of the program can be asked for at once.
   if (fields["function"] !== undefined || (fields["all"] as boolean | undefined) === true) {
     if (fields["function"] === undefined) {
-      return contract.files
+      return (fieldOf(contract, "files") as FileContract[])
         .map((file) => {
           const fileFields = file as unknown as Record<string, unknown>;
           return printSemanticModule(resolveModule(String(fileFields["path"]), fileFields["functions"] as Record<string, FunctionContract>, functionContext(phase)));
@@ -3171,5 +3182,5 @@ export async function projectStateLine(project: string, cwd: string): Promise<st
 
 /** How many functions the program contract covers, for the build report. */
 function contractedFunctionCount(program: ProgramContract): number {
-  return program.files.reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
+  return (fieldOf(program, "files") as FileContract[]).reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
 }

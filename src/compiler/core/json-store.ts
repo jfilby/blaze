@@ -11,8 +11,12 @@
  * apart when the same field name lives in more than one layout.
  */
 
-import { createHash, readFile, mkdir, open, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, resolveFrom, sep, writeFile, dirname } from "./platform.ts";
+import { createHash, readFile, mkdir, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, resolveFrom, sep, syncFile, writeFile, dirname } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 export interface JsonStore {
   readonly root: string;
@@ -45,12 +49,7 @@ let temporaryWrites = 0;
  * writes over the only copy of it.
  */
 async function syncPath(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
+  await syncFile(path);
 }
 
 /**
@@ -71,8 +70,9 @@ export function storeResolve(store: JsonStore, relativePath: string): string {
   if (isAbsolute(relativePath)) {
     throw new CompilerError("StorageError", "storage", `store paths must be relative: ${relativePath}`, "", "", "", "");
   }
-  const target = resolveFrom(store.root, normalize(relativePath));
-  const rel = relative(store.root, target);
+  const root = String(fieldOf(store, "root"));
+  const target = resolveFrom(root, normalize(relativePath));
+  const rel = relative(root, target);
   if (rel.startsWith("..") || rel.split(sep).includes("..")) {
     throw new CompilerError("StorageError", "storage", `store path escapes root: ${relativePath}`, "", "", "", "");
   }
@@ -117,7 +117,7 @@ export async function storeReadIfValid<T>(store: JsonStore, relativePath: string
 
 export async function storeWrite<T>(store: JsonStore, relativePath: string, value: T): Promise<void> {
   const file = storeResolve(store, relativePath);
-  await storeMkdirp(store, dirname(relative(store.root, file)));
+  await storeMkdirp(store, dirname(relative(String(fieldOf(store, "root")), file)));
   // A build writes from several places at once, and two writes to the same
   // path would otherwise share this name: one would rename the other's
   // temporary away and the loser would fail on a file that no longer
@@ -153,7 +153,7 @@ export async function storeReadText(store: JsonStore, relativePath: string): Pro
 
 export async function storeWriteText(store: JsonStore, relativePath: string, contents: string): Promise<void> {
   const file = storeResolve(store, relativePath);
-  await storeMkdirp(store, dirname(relative(store.root, file)));
+  await storeMkdirp(store, dirname(relative(String(fieldOf(store, "root")), file)));
   // A write in place is the half-written file this store promises never to
   // expose: a reader that arrives between the truncate and the last write
   // sees a file that is neither the old contents nor the new. It goes
@@ -185,7 +185,8 @@ export async function storeMkdirp(store: JsonStore, relativePath: string): Promi
 
 export async function storeList(store: JsonStore, relativePath: string): Promise<string[]> {
   try {
-    return (await readdirEntries(storeResolve(store, relativePath))).map((entry) => entry.name);
+    const entries = await readdirEntries(storeResolve(store, relativePath));
+    return entries.map((entry) => String(fieldOf(entry, "name")));
   } catch (cause) {
     // A directory nobody created is a directory with nothing in it: the
     // caller is asking what projects exist, and one that does not is none.

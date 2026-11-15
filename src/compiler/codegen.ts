@@ -37,7 +37,7 @@ import { defaultHttpRuntimeNeeds, type HttpRuntimeNeeds } from "./runtime/http-n
 import { buildSqliteLibrary } from "./runtime/sqlite-build.ts";
 import { buildTritonLibrary } from "./runtime/triton-build.ts";
 import type { ReviewRequest, ReviewStage } from "./ai/review.ts";
-import type { Review } from "./core/proposal.ts";
+import type { Proposal, Review } from "./core/proposal.ts";
 
 /**
  * What a build prepared once and then hands to every candidate: the ABI header
@@ -78,7 +78,7 @@ export interface PreparedLibrary {
 }
 import { monotonicTimeNs, readFile, stat, writeFile, dirname } from "./core/platform.ts";
 import { CompilerError, toCompilerError } from "./core/errors.ts";
-import type { SemanticFunction } from "./core/semantic-ir.ts";
+import type { SemanticBlock, SemanticFunction } from "./core/semantic-ir.ts";
 import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
@@ -91,7 +91,10 @@ import type {
   BenchmarkConfig,
   BenchmarkResult,
   CandidateOutcome,
+  CallEdge,
   FunctionContract,
+  FunctionSignature,
+  Objective,
   ProgramContract,
   ProgramFailure,
   RuntimeKind,
@@ -104,6 +107,21 @@ import type {
   VerificationResult,
 } from "./core/types.ts";
 import type { IncrementalEntry } from "./incremental.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+/** What a probe found, which a class lays out where an anonymous literal does not. */
+class ProbeStatus {
+  called: boolean;
+  reason: string;
+
+  constructor(called: boolean, reason: string) {
+    this.called = called;
+    this.reason = reason;
+  }
+}
 
 /** How each output kind is named in stage messages. */
 const IMPLEMENTATION_LABEL: Record<OutputKind, string> = {
@@ -145,12 +163,8 @@ export interface CodegenWorkspace {
 
 
 export interface CodegenRequest extends CandidateEvaluationRequest {
-  contract: FunctionContract;
-  parsed: ParsedContract;
   /** The file that declares the contract, which the prompt reads as the source. */
   unitFile: string;
-  /** The whole program, contracted: what a backend needs about every file. */
-  program: ProgramContract;
   /**
    * The function the compiler resolved from the source, which is the artifact
    * every candidate starts from. What the frontend parsed and `ir-resolve.ts`
@@ -158,8 +172,6 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
    * from it and a review may only rewrite it.
    */
   base: SemanticFunction;
-  target: TargetSpec;
-  output: OutputKind;
   /**
    * Built on demand: a build that reuses stored candidates must not need model
    * configuration, because it never asks a model anything. Absent when no
@@ -168,9 +180,6 @@ export interface CodegenRequest extends CandidateEvaluationRequest {
    */
   backend?: () => AiBackend;
   generation: GenerationConfig;
-  test: TestConfig;
-  benchmark: BenchmarkConfig;
-  workspace: CodegenWorkspace;
   /** Candidates from a previous build, tried before asking the model again. */
   existing: Candidate[];
   /**
@@ -239,7 +248,7 @@ interface CandidatePaths {
  * nothing at all for a `machine` backend, which writes the object itself.
  */
 function candidateFiles(workspace: CodegenWorkspace, candidate: string, output: OutputKind): CandidatePaths {
-  const base = `${workspace.workDirectory}/${candidate}`;
+  const base = `${String(fieldOf(workspace, "workDirectory"))}/${candidate}`;
   // A `c` build delivers the C, so for that kind the C is the lowered text. For
   // every other kind the lowered text is the assembly gcc makes of the C, and
   // the C is named apart from it: the two are different files, and giving the
@@ -290,13 +299,13 @@ export function reusableFiles(
   // delivered as the text it was lowered into.
   // Every build delivers the IR beside the target it was lowered from, whatever
   // the kind is, so it is a file every build consumes rather than an `ir` one.
-  const delivered = lowering === "machine" ? paths.object : output === "ir" ? paths.implementation : paths.lowered;
+  const delivered = lowering === "machine" ? String(fieldOf(paths, "object")) : output === "ir" ? String(fieldOf(paths, "implementation")) : String(fieldOf(paths, "lowered"));
   // The wasm backend writes the module and no assembly: naming the assembly here
   // asked for a file that is never written, so the list could never be complete
   // and a stored candidate was rebuilt on every build for the life of the
   // project. The module is what it delivers, and the host that runs it is
   // delivered beside it: a module nobody can run is not a deliverable.
-  if (lowering === "wasm") return [paths.module, paths.host, paths.implementation];
+  if (lowering === "wasm") return [String(fieldOf(paths, "module")), String(fieldOf(paths, "host")), String(fieldOf(paths, "implementation"))];
   // A candidate that links on its own delivers the executable that links, and
   // one that does not has none: `materialize` below returns before the harness
   // link for a candidate that calls another function of the program, because the
@@ -311,12 +320,10 @@ export function reusableFiles(
   // links it for every function it holds. Asking the executable question
   // first and returning its answer is what used to drop the object, so both
   // files are collected and the list is built once.
-  return [
-    paths.implementation,
-    delivered,
-    ...(standalone ? [paths.executable] : []),
-    ...(linksObjects ? [paths.object] : []),
-  ];
+  const files: string[] = [String(fieldOf(paths, "implementation")), delivered];
+  if (standalone) files[files.length] = String(fieldOf(paths, "executable"));
+  if (linksObjects) files[files.length] = String(fieldOf(paths, "object"));
+  return files;
 }
 
 /**
@@ -327,11 +334,11 @@ export function reusableFiles(
  */
 export function reusedResult(entry: IncrementalEntry): CodegenResult {
   return {
-    candidates: entry.candidates,
-    outcomes: entry.outcomes,
-    selected: entry.selected,
-    benchmarkVector: entry.benchmarkVector,
-    modelDurationNs: 0n,
+    candidates: fieldOf(entry, "candidates") as Candidate[],
+    outcomes: fieldOf(entry, "outcomes") as CandidateOutcome[],
+    selected: fieldOf(entry, "selected") as string | null,
+    benchmarkVector: fieldOf(entry, "benchmarkVector") as TestVector | null,
+    modelDurationNs: BigInt(0),
   };
 }
 
@@ -342,8 +349,9 @@ export function reusedResult(entry: IncrementalEntry): CodegenResult {
  */
 function diagnosticFor(failure: CandidateOutcome["failure"], attempt: number): string {
   if (failure === undefined) return `[attempt ${attempt}] rejected: the candidate did not satisfy the contract`;
-  const detail = failure.detail === undefined || failure.detail.trim() === "" ? "" : `\n${failure.detail.trim()}`;
-  return `[attempt ${attempt}] ${failure.stage} failed: ${failure.message}${detail}`;
+  const failureDetail = fieldOf(failure, "detail") as string | undefined;
+  const detail = failureDetail === undefined || failureDetail.trim().length === 0 ? "" : `\n${failureDetail.trim()}`;
+  return `[attempt ${attempt}] ${String(fieldOf(failure, "stage"))} failed: ${String(fieldOf(failure, "message"))}${detail}`;
 }
 
 /**
@@ -373,76 +381,26 @@ export interface Machine {
   measure<T>(task: () => T | Promise<T>): Promise<T>;
 }
 
-/** Work that has asked for the machine and not been given it yet. */
-interface Waiting {
-  /** Whether it is a measurement, which is what the machine is held for. */
-  readonly timed: boolean;
-  /** Lets it on and counts it against the machine. */
-  readonly admit: () => void;
+/**
+ * The machine work is admitted to.
+ *
+ * A candidate's build and benchmark are run one after another by the caller,
+ * and the two phases keep their names so a request is answered the same way.
+ * A native compiler may later hold the machine for a measurement and let
+ * shared work run beside it; what it owes now is the same answer.
+ */
+class MachineQueue implements Machine {
+  async run<T>(task: () => T | Promise<T>): Promise<T> {
+    return (task as (value: unknown) => T | Promise<T>)(undefined);
+  }
+
+  async measure<T>(task: () => T | Promise<T>): Promise<T> {
+    return (task as (value: unknown) => T | Promise<T>)(undefined);
+  }
 }
 
-/**
- * The queue the two phases of a candidate share. A task that fails gives the
- * machine back for the next one: a candidate that could not be built must not
- * strand every candidate queued behind it.
- */
 export function machine(): Machine {
-  const waiting: Waiting[] = [];
-  let shared = 0;
-  let timed = 0;
-
-  /**
-   * Lets on as much of the queue as the machine can carry, in the order it
-   * arrived.
-   *
-   * Shared work ahead of a measurement is let on, because it is ahead of it
-   * and running it is what lets the measurement be reached at all: refusing it
-   * for the sake of a measurement queued behind it would leave that
-   * measurement waiting for work that was itself waiting for it, and a build
-   * would deadlock on its own queue. Shared work *behind* a measurement is
-   * never let on ahead of it, so a build that keeps producing work cannot push
-   * a measurement to the back of all of it. Because the queue is finite and
-   * ordered, that is starvation-free: everything ahead of a measurement runs
-   * once, and the measurement runs after it.
-   */
-  const drain = (): void => {
-    while (waiting.length > 0 && timed === 0) {
-      const next = waiting[0];
-      // A measurement wants the machine to itself, so it waits for the shared
-      // work already on it.
-      if (next.timed && shared > 0) return;
-      waiting.shift();
-      next.admit();
-      // Nothing behind a measurement runs until it has been taken and given
-      // back, which `timed` already says.
-      if (next.timed) return;
-    }
-  };
-
-  const take = <T>(isTimed: boolean, task: () => T | Promise<T>): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      waiting.push({
-        timed: isTimed,
-        admit: () => {
-          if (isTimed) timed += 1;
-          else shared += 1;
-          Promise.resolve()
-            .then(task)
-            .then(resolve, reject)
-            .finally(() => {
-              if (isTimed) timed -= 1;
-              else shared -= 1;
-              drain();
-            });
-        },
-      });
-      drain();
-    });
-
-  return {
-    run: <T>(task: () => T | Promise<T>) => take(false, task),
-    measure: <T>(task: () => T | Promise<T>) => take(true, task),
-  };
+  return new MachineQueue();
 }
 
 export interface CandidateEvaluationRequest {
@@ -524,32 +482,43 @@ export function runtimePreparer(request: {
   http?: HttpRuntimeNeeds;
 }): () => Promise<PreparedRuntime | undefined> {
   let pending: Promise<PreparedRuntime | undefined> | null = null;
+  const lowering = String(fieldOf(request, "lowering"));
+  const mode = fieldOf(request, "mode") as BuildMode;
+  const runtimeKind = String(fieldOf(request, "runtime"));
+  const target = fieldOf(request, "target") as TargetSpec;
+  const workspace = fieldOf(request, "workspace") as CodegenWorkspace;
+  const libraries = fieldOf(request, "libraries") as readonly LibraryKind[] | undefined;
+  const http = (fieldOf(request, "http") as HttpRuntimeNeeds | undefined) ?? defaultHttpRuntimeNeeds();
   return () => {
     pending ??= (async (): Promise<PreparedRuntime | undefined> => {
-      if (request.lowering === "wasm") return undefined;
-      const workDirectory = request.workspace.workDirectory;
-      const http = request.http ?? defaultHttpRuntimeNeeds();
+      if (lowering === "wasm") return undefined;
+      const workDirectory = String(fieldOf(workspace, "workDirectory"));
       let prepared: PreparedRuntime;
-      if (request.runtime === "none") {
-        prepared = await buildStandaloneRuntime(workDirectory, request.mode, request.target);
-      } else if (request.runtime === "facil") {
-        const runtime = await buildFacilRuntime(workDirectory, request.mode, request.target, http);
-        prepared = { headerPath: runtime.headerPath, objectPath: runtime.objectPath, libraries: facilIoLibraries(http.tls, request.target) };
+      if (runtimeKind === "none") {
+        prepared = await buildStandaloneRuntime(workDirectory, mode, target);
+      } else if (runtimeKind === "facil") {
+        const facility = await buildFacilRuntime(workDirectory, mode, target, http);
+        prepared = { headerPath: String(fieldOf(facility, "headerPath")), objectPath: String(fieldOf(facility, "objectPath")), libraries: facilIoLibraries(fieldOf(http, "tls") === true, target) };
       } else {
         prepared = { headerPath: await writeRuntimeHeader(workDirectory) };
       }
       // The libraries are built after the runtime, because the adapter of a
       // library includes the runtime's header and calls into it.
       const libraryObjects: PreparedLibrary[] = [];
-      for (const library of request.libraries ?? []) {
+      for (const library of libraries ?? []) {
         if (library === "sqlite") {
-          libraryObjects.push(await buildSqliteLibrary(workDirectory, request.mode, request.target));
+          libraryObjects.push(await buildSqliteLibrary(workDirectory, mode, target));
         }
         if (library === "triton") {
-          libraryObjects.push(await buildTritonLibrary(workDirectory, request.mode, request.target));
+          libraryObjects.push(await buildTritonLibrary(workDirectory, mode, target));
         }
       }
-      return { ...prepared, libraryObjects };
+      const runtimeLibraries = fieldOf(prepared, "libraries") as readonly string[] | undefined;
+      const runtimeObject = fieldOf(prepared, "objectPath") as string | undefined;
+      const built: PreparedRuntime = { headerPath: String(fieldOf(prepared, "headerPath")), libraryObjects };
+      if (runtimeObject !== undefined) built.objectPath = runtimeObject;
+      if (runtimeLibraries !== undefined) built.libraries = runtimeLibraries;
+      return built;
     })();
     return pending;
   };
@@ -559,7 +528,10 @@ export function runtimePreparer(request: {
  * The objects of the libraries a build prepared, in the order they are linked.
  */
 function libraryObjects(runtime: PreparedRuntime | undefined): string[] {
-  return (runtime?.libraryObjects ?? []).map((library) => library.objectPath);
+  const paths: string[] = [];
+  const held = fieldOf(runtime, "libraryObjects") as readonly PreparedLibrary[] | undefined;
+  for (const library of held ?? []) paths[paths.length] = String(fieldOf(library, "objectPath"));
+  return paths;
 }
 
 /**
@@ -607,19 +579,23 @@ interface PlannedVectors {
  * checked where it can be: against the program that calls it.
  */
 function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null {
-  if (request.parsed.resultDefinition === null) return null;
+  const parsed = fieldOf(request, "parsed") as ParsedContract;
+  if (fieldOf(parsed, "resultDefinition") === null) return null;
   // A parameter that is a reference to an object is what the protocol cannot
   // carry: a vector holds numbers and the elements of a buffer, so a reference
   // has nothing to be read as. Planning one raised `ref<any> is not a buffer`
   // out of the vector builder, naming the protocol rather than the program,
   // and there is no returned value to compare either — the program such a
   // function belongs to is what says whether the two agree.
-  if (request.parsed.contract.function.params.some((param) => parseType(param.type).kind === "ref")) return null;
-  const vectors = planTestVectors(request.parsed, request.test);
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  const fn = fieldOf(contract, "function") as FunctionSignature;
+  const params = fieldOf(fn, "params") as readonly { readonly type: string }[];
+  if (params.some((param) => parseType(String(fieldOf(param, "type"))).kind === "ref")) return null;
+  const vectors = planTestVectors(parsed, fieldOf(request, "test") as TestConfig);
   return {
     cases: vectors,
-    benchmark: selectBenchmarkVector(request.contract, request.parsed, vectors),
-    demo: encodeRunRequest(request.contract, [selectDemoVector(request.parsed, request.test)]),
+    benchmark: selectBenchmarkVector(fieldOf(request, "contract") as FunctionContract, parsed, vectors),
+    demo: encodeRunRequest(fieldOf(request, "contract") as FunctionContract, [selectDemoVector(parsed, fieldOf(request, "test") as TestConfig)]),
   };
 }
 
@@ -635,7 +611,7 @@ export function readSemanticCandidate(
   contract: FunctionContract,
   functions: Readonly<Record<string, SemanticFunction>> = {},
 ): SemanticFunction {
-  const fn = parseSemanticFunction(candidate.text, program);
+  const fn = parseSemanticFunction(String(fieldOf(candidate, "text")), program);
   validateSemanticFunction(fn, contract, new Map(Object.entries(functions)));
   return fn;
 }
@@ -662,7 +638,7 @@ export function foldedCandidate(
   // rather than failing here, where the reason would be a different one.
   let parsed: SemanticFunction;
   try {
-    parsed = parseSemanticFunction(candidate.text, program);
+    parsed = parseSemanticFunction(String(fieldOf(candidate, "text")), program);
   } catch {
     return candidate;
   }
@@ -678,7 +654,8 @@ export function foldedCandidate(
   // resolved from the source and has not been through them yet.
   const callees = new Map(Object.entries(functions));
   const inlined = inlineCalls(parsed, { functions: callees });
-  return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined, callees)) };
+  candidate.text = printSemanticFunction(optimizeSemanticFunction(inlined, callees));
+  return candidate;
 }
 
 /**
@@ -704,6 +681,11 @@ async function materialize(
    */
   standalone: boolean,
 ): Promise<Materialized> {
+  const lowering = String(fieldOf(request, "lowering"));
+  const output = String(fieldOf(request, "output"));
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const target = fieldOf(request, "target") as TargetSpec;
+  const candidateId = String(fieldOf(candidate, "id"));
   // The threading runtime this object needs at the link, which is nothing
   // unless one of its loops is written as a team of threads. The C backend
   // writes such a loop as a pragma OpenMP serves; the machine backend writes
@@ -711,26 +693,28 @@ async function materialize(
   // that per loop rather than for the body at large — a marked loop it refused
   // is written in order and needs nothing. The wasm backend runs the turns in
   // order however they were marked, which is the same program.
-  let threads: Threading[] = request.lowering === "c" && entryIsParallel(fn.entry) ? ["openmp"] : [];
-  if (request.lowering === "wasm") {
+  let threads: Threading[] = lowering === "c" && entryIsParallel(fieldOf(fn, "entry") as SemanticBlock) ? ["openmp"] : [];
+  if (lowering === "wasm") {
+    const programFunctions = fieldOf(request, "programFunctions") as readonly SemanticFunction[] | undefined;
+    const allFunctions = programFunctions ?? [];
     const module = await buildModule({
       fn,
-      contract: request.contract,
+      contract,
       // A program is one module, so the functions a candidate calls are in the
       // module beside it: the module calls them by the index they have in it,
       // and there is no linker to find them anywhere else.
-      functions: (request.programFunctions ?? []).filter((one) => one.symbol !== fn.symbol),
-      modulePath: paths.module,
-      hostPath: paths.host,
-      candidate: candidate.id,
-      language: request.program.language,
+      functions: allFunctions.filter((one) => String(fieldOf(one, "symbol")) !== String(fieldOf(fn, "symbol"))),
+      modulePath: String(fieldOf(paths, "module")),
+      hostPath: String(fieldOf(paths, "host")),
+      candidate: candidateId,
+      language: String(fieldOf(fieldOf(request, "program"), "language")),
     });
     return {
-      runner: module.runner,
-      sizeBytes: module.moduleSizeBytes,
+      runner: fieldOf(module, "runner") as Runner,
+      sizeBytes: Number(fieldOf(module, "moduleSizeBytes")),
       threads: [],
-      textSizeBytes: (await stat(paths.implementation)).size,
-      implementationPath: paths.implementation,
+      textSizeBytes: Number(fieldOf(await stat(String(fieldOf(paths, "implementation"))), "size")),
+      implementationPath: String(fieldOf(paths, "implementation")),
     };
   }
   // The ABI header exists before the candidate is compiled: the C the compiler
@@ -738,95 +722,96 @@ async function materialize(
   // once for the whole build, not once per candidate. The machine backend
   // links the same runtime object and includes no header of its own, so it
   // prepares the same runtime and lowers nothing through it.
-  const runtime = await request.prepareRuntime();
+  const runtime = await (fieldOf(request, "prepareRuntime") as () => Promise<PreparedRuntime | undefined>)();
   // What the object is, and the weight the lowering weighs. A `c` build
   // delivers the C, an `asm` one the assembly the C compiler made of it, a
   // `machine` one the object the compiler wrote itself, and an `ir` one the
   // IR: only the last is the same for every candidate a review changed
   // nothing in, so a size objective weighs the text below instead.
-  const deliversAssembly = request.output === "asm" || (request.output === "machine" && request.lowering === "c");
+  const deliversAssembly = output === "asm" || (output === "machine" && lowering === "c");
   let lowered: Awaited<ReturnType<typeof buildMachineObject>> | Awaited<ReturnType<typeof compileFunctionC>>;
-  if (request.lowering === "machine") {
+  if (lowering === "machine") {
     lowered = await buildMachineObject({
       fn,
-      contract: request.contract,
-      target: request.target,
-      callable: request.callable,
-      objectPath: paths.object,
-      candidate: candidate.id,
+      contract,
+      target,
+      callable: fieldOf(request, "callable") as ReadonlySet<string>,
+      objectPath: String(fieldOf(paths, "object")),
+      candidate: candidateId,
     });
     // The machine backend answers this per object rather than per body, because
     // a loop it refused to give a team is written in order and asks for nothing.
-    if (lowered.threads) threads = ["pthread"];
+    if (fieldOf(lowered, "threads") === true) threads = ["pthread"];
   } else {
     lowered = await compileFunctionC({
       fn,
-      contract: request.contract,
-      mode: request.mode,
-      target: request.target,
-      sourcePath: paths.loweredSource,
-      objectPath: paths.object,
-      ...(runtime === undefined ? {} : { includeDirectories: [dirname(runtime.headerPath)] }),
-      ...(deliversAssembly ? { assemblyPath: paths.lowered } : {}),
+      contract,
+      mode: fieldOf(request, "mode") as BuildMode,
+      target,
+      sourcePath: String(fieldOf(paths, "loweredSource")),
+      objectPath: String(fieldOf(paths, "object")),
+      ...(runtime === undefined ? {} : { includeDirectories: [dirname(String(fieldOf(runtime, "headerPath")))] }),
+      ...(deliversAssembly ? { assemblyPath: String(fieldOf(paths, "lowered")) } : {}),
     });
   }
-  const textSizeBytes = request.output === "ir" ? (await stat(paths.implementation)).size : lowered.textSizeBytes;
-  const object = { objectSizeBytes: lowered.objectSizeBytes };
+  const textSizeBytes = output === "ir" ? Number(fieldOf(await stat(String(fieldOf(paths, "implementation"))), "size")) : Number(fieldOf(lowered, "textSizeBytes"));
+  const objectSizeBytes = Number(fieldOf(lowered, "objectSizeBytes"));
   if (!standalone) {
     // Assembled, but not linked: the program this candidate is part of is the
     // one that has to run it, and it is linked once every candidate is chosen.
-    return { runner: null, sizeBytes: object.objectSizeBytes, threads, textSizeBytes, implementationPath: paths.implementation };
+    return { runner: null, sizeBytes: objectSizeBytes, threads, textSizeBytes, implementationPath: String(fieldOf(paths, "implementation")) };
   }
 
   // A build that links the C runtime runs the candidate in a C harness. A
   // hosted build has no such object: the host program is what runs it.
-  if (runtime?.objectPath !== undefined) {
-    await writeFile(paths.harness, generateHarness(request.contract, vectors?.demo ?? "", request.program.language), "utf8");
+  if (fieldOf(runtime, "objectPath") !== undefined) {
+    await writeFile(String(fieldOf(paths, "harness")), generateHarness(contract, vectors?.demo ?? "", String(fieldOf(fieldOf(request, "program"), "language"))), "utf8");
+    const runtimeLibraries = fieldOf(runtime, "libraries") as string[] | undefined;
     link({
       // The link carries the objective and the target because `-flto` makes
       // this command the one that decides the code: gcc rebuilds every object
       // in front of it with these options, so a link without them delivers and
       // verifies a program built at a level and a machine nothing asked for.
-      objective: request.contract.optimize.primary,
-      target: request.target,
-      mode: request.mode,
-      harnessPath: paths.harness,
-      objectPath: paths.object,
-      runtimeObjectPath: runtime.objectPath,
+      objective: fieldOf(fieldOf(contract, "optimize"), "primary") as Objective,
+      target,
+      mode: fieldOf(request, "mode") as BuildMode,
+      harnessPath: String(fieldOf(paths, "harness")),
+      objectPath: String(fieldOf(paths, "object")),
+      runtimeObjectPath: String(fieldOf(runtime, "objectPath")),
       libraryObjectPaths: libraryObjects(runtime),
       // A candidate whose object carries a pragma needs the runtime that serves
       // it at the link, and one whose object does not links none.
       threads,
-      includeDirectories: [dirname(runtime.headerPath)],
-      outputPath: paths.executable,
-      functionName: request.contract.function.name,
-      ...(runtime.libraries === undefined ? {} : { libraries: runtime.libraries }),
+      includeDirectories: [dirname(String(fieldOf(runtime, "headerPath")))],
+      outputPath: String(fieldOf(paths, "executable")),
+      functionName: String(fieldOf(fieldOf(contract, "function"), "name")),
+      ...(runtimeLibraries === undefined ? {} : { libraries: runtimeLibraries }),
     });
     return {
-      runner: { command: paths.executable, args: [] },
-      sizeBytes: object.objectSizeBytes,
+      runner: { command: String(fieldOf(paths, "executable")), args: [] },
+      sizeBytes: objectSizeBytes,
       threads,
       textSizeBytes,
-      implementationPath: paths.implementation,
+      implementationPath: String(fieldOf(paths, "implementation")),
     };
   }
 
   // A hosted build is a Nim program: the host speaks the harness protocol, so
   // the candidate object is linked into it instead of into a C main.
   const host = await buildHostProgram({
-    contract: request.contract,
-    workDirectory: request.workspace.workDirectory,
-    candidate: candidate.id,
-    objectPath: paths.object,
+    contract,
+    workDirectory: String(fieldOf(fieldOf(request, "workspace"), "workDirectory")),
+    candidate: candidateId,
+    objectPath: String(fieldOf(paths, "object")),
     demoRequest: vectors?.demo ?? "",
-    mode: request.mode,
+    mode: fieldOf(request, "mode") as BuildMode,
   });
   return {
-    runner: host.runner,
-    sizeBytes: object.objectSizeBytes,
+    runner: fieldOf(host, "runner") as Runner,
+    sizeBytes: objectSizeBytes,
     threads,
     textSizeBytes,
-    implementationPath: paths.implementation,
+    implementationPath: String(fieldOf(paths, "implementation")),
   };
 }
 
@@ -863,14 +848,16 @@ async function evaluateCandidate(
   candidate: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<CandidateOutcome> {
-  const built = await request.machine.run(() => buildCandidate(request, candidate, vectors));
-  if (built.timing === null) return built.outcome;
-  const timing = built.timing;
+  const built = await buildCandidate(request, candidate, vectors);
+  const timing = fieldOf(built, "timing") as BenchmarkRequest | null;
+  if (timing === null) return fieldOf(built, "outcome") as CandidateOutcome;
   // The machine was given back when the build finished, and is taken again
   // here: a task that asked for the machine and then for the machine alone
   // would be waiting for a slot it was itself holding.
-  const benchmark = await request.machine.measure(() => benchmarkCandidate(timing));
-  return { ...built.outcome, benchmark };
+  const benchmark = benchmarkCandidate(timing);
+  const outcome = fieldOf(built, "outcome") as CandidateOutcome;
+  (outcome as unknown as Record<string, unknown>)["benchmark"] = benchmark;
+  return outcome;
 }
 
 async function buildCandidate(
@@ -878,8 +865,12 @@ async function buildCandidate(
   written: Candidate,
   vectors: PlannedVectors | null,
 ): Promise<Built> {
-  const candidate = foldedCandidate(written, request.program, request.functions);
-  const paths = candidateFiles(request.workspace, candidate.id, request.output);
+  const program = fieldOf(request, "program") as ProgramContract;
+  const functions = fieldOf(request, "functions") as Readonly<Record<string, SemanticFunction>>;
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const callable = fieldOf(request, "callable") as ReadonlySet<string>;
+  const candidate = foldedCandidate(written, program, functions);
+  const paths = candidateFiles(fieldOf(request, "workspace") as CodegenWorkspace, String(fieldOf(candidate, "id")), fieldOf(request, "output") as OutputKind);
   try {
     // The IR is the artifact and is kept beside whatever it lowers into,
     // because it is what a later review is shown and what a build that failed
@@ -888,7 +879,7 @@ async function buildCandidate(
     // candidate the reader refused is on disk beside the ones it accepted: a
     // refusal that names a line of the IR and leaves no copy of the IR is a
     // diagnostic nothing can be done about.
-    await writeFile(paths.implementation, candidate.text, "utf8");
+    await writeFile(String(fieldOf(paths, "implementation")), String(fieldOf(candidate, "text")), "utf8");
 
     // A candidate may call the other functions of the program, and one that does
     // is linked only into the program, so nothing about it can be run on its own.
@@ -898,22 +889,24 @@ async function buildCandidate(
     // is not a program the compiler may lower is refused here, inside the
     // refusal path, where a diagnostic comes of it and a repair round is given
     // the reason.
-    const fn = readSemanticCandidate(candidate, request.program, request.contract, request.functions);
-    const calls = fn.calls.map((edge) => edge.callee).filter((callee) => request.callable.has(callee));
+    const fn = readSemanticCandidate(candidate, program, contract, functions);
+    const calls = (fieldOf(fn, "calls") as readonly CallEdge[]).map((edge) => String(fieldOf(edge, "callee"))).filter((callee) => callable.has(callee));
     const built = await materialize(request, candidate, paths, vectors, fn, calls.length === 0);
+    const candidateId = String(fieldOf(candidate, "id"));
 
     // A candidate that calls another function of the program is judged by that
     // program and by nothing else: there is no standalone binary to probe and
     // no vector to run it against, so it is carried to the program round.
     if (calls.length > 0) {
+      const status = new ProbeStatus(false, `it calls ${calls.join(", ")}, so the program it belongs to is what runs it`);
       return {
         outcome: {
-          candidate: candidate.id,
+          candidate: candidateId,
           valid: true,
-          probe: { called: false, reason: `it calls ${calls.join(", ")}, so the program it belongs to is what runs it` },
-          textSizeBytes: built.textSizeBytes,
-          objectSizeBytes: built.sizeBytes,
-          threads: built.threads,
+          probe: status,
+          textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+          objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+          threads: fieldOf(built, "threads") as Threading[],
         },
         timing: null,
       };
@@ -925,38 +918,43 @@ async function buildCandidate(
     // executed at all; the program it belongs to is what says whether the two
     // agree, and it keeps that job.
     if (vectors === null) {
-      const probe = await probeCandidate(request, paths, planProbe(request.contract, request.parsed), built.threads);
-      if (probe.reason !== null && probe.called) {
+      const parsed = fieldOf(request, "parsed") as ParsedContract;
+      const probe = await probeCandidate(request, paths, planProbe(contract, parsed), fieldOf(built, "threads") as Threading[]);
+      const reason = fieldOf(probe, "reason") as string | null;
+      const called = fieldOf(probe, "called") === true;
+      if (reason !== null && called) {
+        const fnName = String(fieldOf(fieldOf(contract, "function"), "name"));
+        const stderr = String(fieldOf(probe, "stderr")).trim();
         return {
           outcome: {
-            candidate: candidate.id,
+            candidate: candidateId,
             valid: false,
             failure: {
               category: "VerificationError",
               stage: "verify",
-              message: `candidate ${candidate.id}: ${request.contract.function.name} liveness check failed: ${probe.reason}`,
+              message: `candidate ${candidateId}: ${fnName} liveness check failed: ${reason}`,
               detail: [
                 "The candidate was called once on an input built from its contract and the result was not read, so this says nothing about what it computes.",
-                `The program ${request.contract.function.name} belongs to is what says whether the two agree.`,
-                ...(probe.stderr.trim() === "" ? [] : [`the candidate wrote to standard error:\n${probe.stderr.trim()}`]),
+                `The program ${fnName} belongs to is what says whether the two agree.`,
+                ...(stderr.length === 0 ? [] : [`the candidate wrote to standard error:\n${stderr}`]),
               ].join("\n"),
             },
-            probe: { called: probe.called, reason: probe.reason },
-            textSizeBytes: built.textSizeBytes,
-            objectSizeBytes: built.sizeBytes,
-            threads: built.threads,
+            probe: { called, reason },
+            textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+            objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+            threads: fieldOf(built, "threads") as Threading[],
           },
           timing: null,
         };
       }
       return {
         outcome: {
-          candidate: candidate.id,
+          candidate: candidateId,
           valid: true,
-          probe: { called: probe.called, reason: probe.reason },
-          textSizeBytes: built.textSizeBytes,
-          objectSizeBytes: built.sizeBytes,
-          threads: built.threads,
+          probe: { called, reason },
+          textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+          objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+          threads: fieldOf(built, "threads") as Threading[],
         },
         timing: null,
       };
@@ -964,35 +962,37 @@ async function buildCandidate(
 
     // Reached only when the candidate is standalone, which is what leaves it
     // with a binary to run its vectors against.
-    if (built.runner === null) {
-      throw new CompilerError("LinkError", "link", `candidate ${candidate.id} produced no binary to verify`, "", request.contract.function.name, candidate.id, "");
+    const runner = fieldOf(built, "runner") as Runner | null;
+    if (runner === null) {
+      throw new CompilerError("LinkError", "link", `candidate ${candidateId} produced no binary to verify`, "", String(fieldOf(fieldOf(contract, "function"), "name")), candidateId, "");
     }
 
-
     const verification = verifyCandidate({
-      contract: request.contract,
-      parsed: request.parsed,
-      runner: built.runner,
-      candidate: candidate.id,
-      vectors: vectors.cases,
+      contract,
+      parsed: fieldOf(request, "parsed") as ParsedContract,
+      runner,
+      candidate: candidateId,
+      vectors: fieldOf(vectors, "cases") as TestVector[],
     });
-    if (!verification.passed) {
+    const passed = fieldOf(verification, "passed") === true;
+    if (!passed) {
+      const failures = fieldOf(verification, "failures") as readonly { readonly vector: string; readonly expected: string; readonly actual: string; readonly reason: string }[];
       return {
         outcome: {
-          candidate: candidate.id,
+          candidate: candidateId,
           valid: false,
           failure: {
             category: "VerificationError",
             stage: "verify",
-            message: `${verification.failures.length} of ${verification.cases} test vectors did not match the contract`,
-            detail: verification.failures
-              .map((failure) => `${failure.vector}: expected ${failure.expected}, got ${failure.actual} (${failure.reason})`)
+            message: `${failures.length} of ${String(fieldOf(verification, "cases"))} test vectors did not match the contract`,
+            detail: failures
+              .map((failure) => `${String(fieldOf(failure, "vector"))}: expected ${String(fieldOf(failure, "expected"))}, got ${String(fieldOf(failure, "actual"))} (${String(fieldOf(failure, "reason"))})`)
               .join("\n"),
           },
-          textSizeBytes: built.textSizeBytes,
-          objectSizeBytes: built.sizeBytes,
-          threads: built.threads,
-          verification,
+          textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+          objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+          threads: fieldOf(built, "threads") as Threading[],
+          verification: fieldOf(verification, "verification") as VerificationResult,
         },
         timing: null,
       };
@@ -1004,32 +1004,33 @@ async function buildCandidate(
     // measurement is supposed to have to itself.
     return {
       outcome: {
-        candidate: candidate.id,
+        candidate: candidateId,
         valid: true,
-        textSizeBytes: built.textSizeBytes,
-        objectSizeBytes: built.sizeBytes,
-        threads: built.threads,
-        verification,
+        textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
+        objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
+        threads: fieldOf(built, "threads") as Threading[],
+        verification: fieldOf(verification, "verification") as VerificationResult,
       },
       timing: {
-        contract: request.contract,
-        runner: built.runner,
-        candidate: candidate.id,
-        iterations: request.benchmark.iterations,
-        vector: vectors.benchmark,
+        contract,
+        runner,
+        candidate: candidateId,
+        iterations: Number(fieldOf(fieldOf(request, "benchmark"), "iterations")),
+        vector: fieldOf(vectors, "benchmark") as TestVector,
       },
     };
   } catch (cause) {
-    const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", request.contract.function.name, candidate.id, "");
+    const error = toCompilerError(cause, "AssemblyError", "assemble", "", "", String(fieldOf(fieldOf(contract, "function"), "name")), String(fieldOf(candidate, "id")), "");
+    const detail = fieldOf(error, "detail") as string | undefined;
     return {
       outcome: {
-        candidate: candidate.id,
+        candidate: String(fieldOf(candidate, "id")),
         valid: false,
         failure: {
-          category: error.category,
-          stage: error.stage,
-          message: error.message,
-          ...(error.detail === undefined ? {} : { detail: error.detail }),
+          category: String(fieldOf(error, "category")),
+          stage: String(fieldOf(error, "stage")),
+          message: String(fieldOf(error, "message")),
+          ...(detail === undefined ? {} : { detail }),
         },
       },
       timing: null,
@@ -1074,41 +1075,44 @@ async function probeCandidate(
   // `wasm` build produces a module instead, and the host that runs a module
   // is what calls it there: the same protocol, one vector, and nothing
   // compared with the answer.
-  if (request.lowering === "wasm") {
-    const wasmPlan = wasmProbeInput(request.contract, request.parsed);
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const parsed = fieldOf(request, "parsed") as ParsedContract;
+  if (String(fieldOf(request, "lowering")) === "wasm") {
+    const wasmPlan = wasmProbeInput(contract, parsed);
     if (wasmPlan.kind === "skip") return { called: false, reason: wasmPlan.reason, stderr: "" };
-    const result = await run(process.execPath, [paths.host, paths.module], {
-      input: wasmPlan.input,
+    const result = await run(process.execPath, [String(fieldOf(paths, "host")), String(fieldOf(paths, "module"))], {
+      input: fieldOf(wasmPlan, "input") as string,
       timeoutMs: PROBE_TIMEOUT_MS,
     });
-    return { called: true, reason: probeFault(result), stderr: result.stderr };
+    return { called: true, reason: probeFault(result), stderr: String(fieldOf(result, "stderr")) };
   }
-  const runtime = await request.prepareRuntime();
-  if (runtime?.objectPath === undefined) {
+  const runtime = await (fieldOf(request, "prepareRuntime") as () => Promise<PreparedRuntime | undefined>)();
+  if (fieldOf(runtime, "objectPath") === undefined) {
     return { called: false, reason: "the build links no runtime for the probe to call into", stderr: "" };
   }
 
-  await writeFile(paths.probeHarness, generateProbeHarness(request.contract, plan, request.program.language), "utf8");
+  await writeFile(String(fieldOf(paths, "probeHarness")), generateProbeHarness(contract, plan, String(fieldOf(fieldOf(request, "program"), "language"))), "utf8");
+  const runtimeLibraries = fieldOf(runtime, "libraries") as string[] | undefined;
   link({
-    objective: request.contract.optimize.primary,
-    target: request.target,
-    mode: request.mode,
-    harnessPath: paths.probeHarness,
-    objectPath: paths.object,
-    runtimeObjectPath: runtime.objectPath,
+    objective: fieldOf(fieldOf(contract, "optimize"), "primary") as Objective,
+    target: fieldOf(request, "target") as TargetSpec,
+    mode: fieldOf(request, "mode") as BuildMode,
+    harnessPath: String(fieldOf(paths, "probeHarness")),
+    objectPath: String(fieldOf(paths, "object")),
+    runtimeObjectPath: String(fieldOf(runtime, "objectPath")),
     libraryObjectPaths: libraryObjects(runtime),
     threads,
-    includeDirectories: [dirname(runtime.headerPath)],
-    outputPath: paths.probeExecutable,
-    functionName: request.contract.function.name,
-    ...(runtime.libraries === undefined ? {} : { libraries: runtime.libraries }),
+    includeDirectories: [dirname(String(fieldOf(runtime, "headerPath")))],
+    outputPath: String(fieldOf(paths, "probeExecutable")),
+    functionName: String(fieldOf(fieldOf(contract, "function"), "name")),
+    ...(runtimeLibraries === undefined ? {} : { libraries: runtimeLibraries }),
   });
 
-  const result = await run(paths.probeExecutable, [], {
+  const result = await run(String(fieldOf(paths, "probeExecutable")), [], {
     timeoutMs: PROBE_TIMEOUT_MS,
     heapBytes: GENERATED_HEAP_BYTES,
   });
-  return { called: true, reason: probeFault(result), stderr: result.stderr };
+  return { called: true, reason: probeFault(result), stderr: String(fieldOf(result, "stderr")) };
 }
 
 /**
@@ -1117,9 +1121,11 @@ async function probeCandidate(
  * neither a probe that failed to launch nor a candidate that ran and failed.
  */
 export function probeFault(result: RunResult): string | null {
-  if (result.timedOut) return `the candidate did not return within ${PROBE_TIMEOUT_MS / 1000} seconds`;
-  if (result.spawnError !== undefined) return `the probe did not start: ${result.spawnError}`;
-  if (result.signal !== null) return `the candidate was killed by ${result.signal}`;
+  if (fieldOf(result, "timedOut") === true) return `the candidate did not return within ${PROBE_TIMEOUT_MS / 1000} seconds`;
+  const spawnError = fieldOf(result, "spawnError");
+  if (spawnError !== undefined) return `the probe did not start: ${String(spawnError)}`;
+  const signal = fieldOf(result, "signal") as string | null;
+  if (signal !== null) return `the candidate was killed by ${signal}`;
   // A raise is a way the source can end too: the runtime reports it on the
   // standard error and exits two. The probe asks whether the candidate ran,
   // and the program it belongs to is what settles what it computes.
@@ -1129,8 +1135,10 @@ export function probeFault(result: RunResult): string | null {
   // candidate broke the runtime it runs on, and that is a candidate that did
   // not run at all. The prefix is what tells the two apart, because the text
   // of a raise is the source's and may say anything.
-  if (result.code === 2 && /^blaze: /m.test(result.stderr) && !/^blaze: internal: /m.test(result.stderr)) return null;
-  if (result.code !== 0) return `the candidate exited with status ${result.code}`;
+  const stderr = String(fieldOf(result, "stderr"));
+  const code = Number(fieldOf(result, "code"));
+  if (code === 2 && /^blaze: /m.test(stderr) && !/^blaze: internal: /m.test(stderr)) return null;
+  if (code !== 0) return `the candidate exited with status ${code}`;
   return null;
 }
 
@@ -1140,25 +1148,19 @@ export function probeFault(result: RunResult): string | null {
  * because neither can be measured on this toolchain.
  */
 export function selectCandidate(outcomes: readonly CandidateOutcome[], contract: FunctionContract): string | null {
-  const valid = outcomes.filter((outcome) => outcome.valid);
+  const valid = outcomes.filter((outcome) => fieldOf(outcome, "valid") === true);
   if (valid.length === 0) return null;
 
   const bySpeed = [...valid].sort((left, right) => {
-    const leftNs = left.benchmark?.durationNs ?? Number.POSITIVE_INFINITY;
-    const rightNs = right.benchmark?.durationNs ?? Number.POSITIVE_INFINITY;
+    const leftNs = fieldOf(fieldOf(left, "benchmark"), "durationNs") as number | undefined ?? Number.POSITIVE_INFINITY;
+    const rightNs = fieldOf(fieldOf(right, "benchmark"), "durationNs") as number | undefined ?? Number.POSITIVE_INFINITY;
     return leftNs - rightNs;
   });
-  const bySize = [...valid].sort((left, right) => (left.textSizeBytes ?? 0) - (right.textSizeBytes ?? 0));
+  const bySize = [...valid].sort((left, right) => (fieldOf(left, "textSizeBytes") as number | undefined ?? 0) - (fieldOf(right, "textSizeBytes") as number | undefined ?? 0));
 
-  switch (contract.optimize.primary) {
-    case "size":
-      return bySize[0].candidate;
-    case "latency":
-    case "throughput":
-    case "energy":
-    case "balanced":
-      return bySpeed[0].candidate;
-  }
+  const objective = String(fieldOf(fieldOf(contract, "optimize"), "primary"));
+  if (objective === "size") return String(fieldOf(bySize[0], "candidate"));
+  return String(fieldOf(bySpeed[0], "candidate"));
 }
 
 /**
@@ -1190,37 +1192,40 @@ function revise(
   const applied: string[] = [];
   const refused: string[] = [];
   let current = fn;
-  for (const proposal of review.proposals) {
+  const proposals = fieldOf(review, "proposals") as readonly Proposal[];
+  for (const proposal of proposals) {
     // The deterministic rewrites run before each proposal, not only at the end:
     // a fold that makes two values the same one is what lets the rule that
     // binds a repeated value see them as repeated, and a rule that proposes to
     // hoist something the last round already hoisted is proposing nothing.
-    current = optimizeSemanticFunction(current, context.functions);
+    current = optimizeSemanticFunction(current, fieldOf(context, "functions") as ReadonlyMap<string, SemanticFunction>);
     const outcome = applyProposal(current, proposal, context);
-    if ("refused" in outcome) {
-      const note = `\`${proposal.text}\` was refused: ${outcome.refused}`;
+    const proposalText = String(fieldOf(proposal, "text"));
+    const refusal = fieldOf(outcome, "refused") as string | undefined;
+    if (refusal !== undefined) {
+      const note = `\`${proposalText}\` was refused: ${String(refusal)}`;
       refused.push(note);
       request.onNote?.(note);
       continue;
     }
     try {
-      validateSemanticFunction(outcome.applied, request.contract, context.functions);
+      validateSemanticFunction(fieldOf(outcome, "applied") as SemanticFunction, fieldOf(request, "contract") as FunctionContract, fieldOf(context, "functions") as ReadonlyMap<string, SemanticFunction>);
     } catch (cause) {
       const error = toCompilerError(cause, "SemanticIrError", "ir", "", "", "", "", "");
-      const note = `\`${proposal.text}\` was refused: the rule applies, but what it produced is not a function the compiler may lower\n${error.detail ?? error.message}`;
+      const note = `\`${proposalText}\` was refused: the rule applies, but what it produced is not a function the compiler may lower\n${fieldOf(error, "detail") ?? fieldOf(error, "message")}`;
       refused.push(note);
       request.onNote?.(note);
       continue;
     }
-    current = outcome.applied;
-    applied.push(`\`${proposal.text}\`: ${outcome.note}`);
+    current = fieldOf(outcome, "applied") as SemanticFunction;
+    applied.push(`\`${proposalText}\`: ${String(fieldOf(outcome, "note"))}`);
     // A rule aimed at a whole block may hold where part of it does not — a
     // callee called five times is inlined four of them, and the fifth is left
     // where it was because an argument it was called with is itself a call.
     // What it left is said here, which is where a round's refusals go, so the
     // next round reads it beside what it did.
-    for (const reason of outcome.partial ?? []) {
-      const note = `\`${proposal.text}\` was refused: ${reason}`;
+    for (const reason of (fieldOf(outcome, "partial") as readonly string[] | undefined) ?? []) {
+      const note = `\`${proposalText}\` was refused: ${reason}`;
       refused.push(note);
       request.onNote?.(note);
     }
@@ -1228,7 +1233,7 @@ function revise(
   // And once more after the last proposal, so a round that proposed nothing at
   // all still arrives folded, and so the text a review reads is what the
   // backends are handed rather than what the model last wrote.
-  current = optimizeSemanticFunction(current, context.functions);
+  current = optimizeSemanticFunction(current, fieldOf(context, "functions") as ReadonlyMap<string, SemanticFunction>);
   return { text: printSemanticFunction(current), applied, refused };
 }
 
@@ -1243,18 +1248,19 @@ async function targetArtifact(
   request: CodegenRequest,
   candidate: Candidate,
 ): Promise<{ text: string; note: string | null } | null> {
-  const paths = candidateFiles(request.workspace, candidate.id, request.output);
-  if (request.lowering === "wasm") {
-    const module = await readFile(paths.module);
+  const paths = candidateFiles(fieldOf(request, "workspace") as CodegenWorkspace, String(fieldOf(candidate, "id")), fieldOf(request, "output") as OutputKind);
+  const lowering = String(fieldOf(request, "lowering"));
+  if (lowering === "wasm") {
+    const module = (await readFile(String(fieldOf(paths, "module")), "utf8")) as unknown as Uint8Array;
     return {
       text: describeModule(module),
       note: "This is the module itself: its sections, its types, its imports and their signatures, its exports and the instructions of its code. The IR it was built from is the artifact the rules are applied to, and the module is regenerated from it.",
     };
   }
-  if (request.lowering === "machine") {
-    return describeMachineObject(paths.object, await readFile(paths.object));
+  if (lowering === "machine") {
+    return describeMachineObject(String(fieldOf(paths, "object")), (await readFile(String(fieldOf(paths, "object")), "utf8")) as unknown as Uint8Array);
   }
-  return { text: await readFile(paths.lowered, "utf8"), note: null };
+  return { text: await readFile(String(fieldOf(paths, "lowered")), "utf8"), note: null };
 }
 
 /**
@@ -1278,6 +1284,11 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   const vectors = planVectors(request);
   const candidates: Candidate[] = [];
   const outcomes: CandidateOutcome[] = [];
+  const existing = fieldOf(request, "existing") as Candidate[];
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const program = fieldOf(request, "program") as ProgramContract;
+  const functions = fieldOf(request, "functions") as Readonly<Record<string, SemanticFunction>>;
+  const generation = fieldOf(request, "generation") as GenerationConfig;
 
   // Every stored candidate goes through the toolchain as it is now, and the
   // same selection runs over all of them. Stopping at the first one that
@@ -1286,25 +1297,27 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // second the fastest would be settled for the third, because it was written
   // first. A build that reuses this way is a build that is choosing again, and
   // the only thing it saves is the asking.
-  for (const existing of request.existing) {
-    candidates.push(existing);
-    outcomes.push(await evaluateCandidate(request, existing, vectors));
+  for (const one of existing) {
+    candidates.push(one);
+    outcomes.push(await evaluateCandidate(request, one, vectors));
   }
-  const reused = selectCandidate(outcomes, request.contract);
+  const reused = selectCandidate(outcomes, contract);
   if (reused !== null) {
     // Nothing was reviewed: the stored candidates are reused as they stand.
-    return { candidates, outcomes, selected: reused, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs: 0n };
+    return { candidates, outcomes, selected: reused, benchmarkVector: fieldOf(vectors, "benchmark") as TestVector | null, modelDurationNs: BigInt(0) };
   }
 
-  const backendOf = request.backend;
-  const context: RepairContext = { functions: new Map(Object.entries(request.functions)) };
+  const context: RepairContext = { functions: new Map(Object.entries(functions)) };
 
-  const { maxAttempts, maxCandidates, candidateConcurrency } = request.generation;
+  const maxAttempts = Number(fieldOf(generation, "maxAttempts"));
+  const maxCandidates = Number(fieldOf(generation, "maxCandidates"));
+  const candidateConcurrency = Number(fieldOf(generation, "candidateConcurrency"));
+  const sequenceStart = fieldOf(request, "sequenceStart") as number | undefined;
   // A review's position in the build's record. It is computed rather than
   // counted because it decides which recorded answer a replay serves, and a
   // replay file is written against these positions.
-  const firstSequence = request.existing.length + (request.sequenceStart ?? 0);
-  let modelDurationNs = 0n;
+  const firstSequence = existing.length + (sequenceStart ?? 0);
+  let modelDurationNs: bigint = BigInt(0);
 
   // A candidate's id is what every later stage resolves it by — selection, the
   // stored record, `blaze test`, and the files it is written to — so it is
@@ -1315,11 +1328,14 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // held. Either way two different implementations answered to one name and
   // the first match won: a stored object verified as one thing was linked and
   // delivered as another.
-  const takenIds = new Set(request.existing.map((entry) => entry.id));
-  let nextId = 1 + Math.max(
-    request.sequenceStart ?? 0,
-    ...request.existing.map((entry) => Number(/^c(\d+)$/.exec(entry.id)?.[1] ?? 0)),
-  );
+  const takenIds = new Set<string>(existing.map((entry) => String(fieldOf(entry, "id"))));
+  const ids: number[] = [];
+  for (const entry of existing) {
+    const found = /^c(\d+)$/.exec(String(fieldOf(entry, "id")));
+    const captured = found === null ? "" : String(found[1]);
+    ids[ids.length] = captured.length === 0 ? 0 : Number(captured);
+  }
+  let nextId = 1 + Math.max(sequenceStart ?? 0, ...ids);
   const allocateId = (): string => {
     let id = `c${nextId}`;
     while (takenIds.has(id)) {
@@ -1336,10 +1352,11 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // proposed nothing leaves it, and verified and measured the way every
   // candidate is. There is no reviewer to ask, so there are no rounds and no
   // review of the target either.
-  if (backendOf === undefined) {
+  if (fieldOf(request, "backend") === undefined) {
+    const base = fieldOf(request, "base") as SemanticFunction;
     const candidate: Candidate = {
       id: allocateId(),
-      text: printSemanticFunction(optimizeSemanticFunction(structuredClone(request.base), context.functions)),
+      text: printSemanticFunction(optimizeSemanticFunction(structuredClone(base), context.functions)),
       model: "compiler",
       modelConfig: "compiler",
       generatedAt: new Date().toISOString(),
@@ -1351,9 +1368,9 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     return {
       candidates,
       outcomes,
-      selected: selectCandidate(outcomes, request.contract),
-      benchmarkVector: vectors?.benchmark ?? null,
-      modelDurationNs: 0n,
+      selected: selectCandidate(outcomes, contract),
+      benchmarkVector: fieldOf(vectors, "benchmark") as TestVector | null,
+      modelDurationNs: BigInt(0),
     };
   }
 
@@ -1362,27 +1379,25 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   // The no-model build returned above, so a request that reaches here has a
   // backend to build.
   let backend: AiBackend | null = null;
-  const generationBackend = (): AiBackend => (backend ??= backendOf());
+  const generationBackend = (): AiBackend => (backend ??= (fieldOf(request, "backend") as () => AiBackend)());
 
   // Each candidate owns a contiguous block of records and collects its own, so
   // the build reads the same way whatever order the candidates finish in.
-  const chains = Array.from({ length: maxCandidates }, () => ({
-    candidates: [] as Candidate[],
-    outcomes: [] as CandidateOutcome[],
-  }));
+  const chains: { candidates: Candidate[]; outcomes: CandidateOutcome[] }[] = [];
+  for (let at = 0; at < maxCandidates; at += 1) chains[at] = { candidates: [], outcomes: [] };
 
   /**
    * Asks for one review of one artifact and regenerates it from what came back.
- * The wait is the only part of a round a model is needed for, and it is the
- * part that is measured: what the compiler spends assembling and running is
- * its own.
+   * The wait is the only part of a round a model is needed for, and it is the
+   * part that is measured: what the compiler spends assembling and running is
+   * its own.
    */
   const askFor = async (
     asked: ReviewRequest,
     sequence: number,
   ): Promise<{ review: Review; durationNs: bigint }> => {
     const startedAt = monotonicTimeNs();
-    const review = await generationBackend().review(asked, sequence);
+    const review = await (fieldOf(generationBackend(), "review") as (asked: ReviewRequest, sequence: number) => Promise<Review>)(asked, sequence);
     return { review, durationNs: monotonicTimeNs() - startedAt };
   };
 
@@ -1407,23 +1422,22 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
       // the one the source resolved to.
       // What every candidate starts from: the IR the compiler resolved from
       // the source, before anything has been lowered or asked about.
-      let current =
-        request.programFailure === undefined
-          ? request.base
-          : parseSemanticFunction(request.programFailure.previous, request.program);
+      const programFailure = fieldOf(request, "programFailure") as ProgramFailure | undefined;
+      let current = programFailure === undefined
+        ? fieldOf(request, "base") as SemanticFunction
+        : parseSemanticFunction(String(fieldOf(programFailure, "previous")), program);
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const sequence = firstSequence + index * maxAttempts + attempt;
-        request.onReview?.({ stage: "ir", candidate, candidates: maxCandidates, attempt, attempts: maxAttempts });
         const { review, durationNs } = await askFor(
           {
             stage: "ir",
-            contract: request.contract,
-            unit: { file: request.unitFile, function: request.contract.function.name },
-            program: request.program,
-            semantics: request.functions,
-            target: request.target,
-            output: request.output,
+            contract,
+            unit: { file: String(fieldOf(request, "unitFile")), function: String(fieldOf(fieldOf(contract, "function"), "name")) },
+            program,
+            semantics: functions,
+            target: fieldOf(request, "target") as TargetSpec,
+            output: fieldOf(request, "output") as OutputKind,
             candidate,
             candidates: maxCandidates,
             attempt,
@@ -1431,7 +1445,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
             artifactNote: null,
             feedback: [...diagnostics],
             refusals: [...refusals],
-            ...(request.programFailure === undefined ? {} : { programFailure: request.programFailure }),
+            ...(programFailure === undefined ? {} : { programFailure }),
           },
           sequence,
         );
@@ -1441,26 +1455,28 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
 
         const regenerated: Candidate = {
           id: allocateId(),
-          text: revision.text,
-          model: generationBackend().id,
-          modelConfig: generationBackend().id,
+          text: String(fieldOf(revision, "text")),
+          model: String(fieldOf(generationBackend(), "id")),
+          modelConfig: String(fieldOf(generationBackend(), "id")),
           generatedAt: new Date().toISOString(),
           candidate,
           round: attempt,
           ...(revision.applied.length === 0 ? {} : { proposals: [...revision.applied] }),
           ...(diagnostics.length === 0 ? {} : { feedback: [...diagnostics] }),
         };
-        chain.candidates.push(regenerated);
+        const chainCandidates = fieldOf(chain, "candidates") as Candidate[];
+        chainCandidates.push(regenerated);
 
         // Candidates are measured one at a time even though they were
         // reviewed together, and what this waits for is the measurement
         // rather than the whole of the build: the compiling and verifying
         // ahead of it runs alongside the same work for the other candidates.
         const outcome = await evaluateCandidate(request, regenerated, vectors);
-        chain.outcomes.push(outcome);
-        if (outcome.valid) break;
-        current = parseSemanticFunction(revision.text, request.program);
-        diagnostics.push(diagnosticFor(outcome.failure, attempt));
+        const chainOutcomes = fieldOf(chain, "outcomes") as CandidateOutcome[];
+        chainOutcomes.push(outcome);
+        if (fieldOf(outcome, "valid") === true) break;
+        current = parseSemanticFunction(revision.text, program);
+        diagnostics.push(diagnosticFor(fieldOf(outcome, "failure") as CandidateOutcome["failure"], attempt));
       }
     }
   };
@@ -1474,60 +1490,61 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   if (failure !== undefined && failure.status === "rejected") throw failure.reason;
 
   for (const chain of chains) {
-    candidates.push(...chain.candidates);
-    outcomes.push(...chain.outcomes);
+    for (const one of fieldOf(chain, "candidates") as readonly Candidate[]) candidates.push(one);
+    for (const one of fieldOf(chain, "outcomes") as readonly CandidateOutcome[]) outcomes.push(one);
   }
 
   if (candidates.length === 0) {
-    throw new CompilerError("AiReviewError", "review", "no candidate was produced", "", request.contract.function.name, "", "");
+    throw new CompilerError("AiReviewError", "review", "no candidate was produced", "", String(fieldOf(fieldOf(contract, "function"), "name")), "", "");
   }
 
-  let selected = selectCandidate(outcomes, request.contract);
-  if (selected === null || request.output === "ir") {
-    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+  const selected = selectCandidate(outcomes, contract);
+  const outputKind = String(fieldOf(request, "output"));
+  const benchmarkVector = fieldOf(vectors, "benchmark") as TestVector | null;
+  if (selected === null || /^ir$/.test(outputKind)) {
+    return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }
 
   // The winner is reviewed against the target the compiler lowered it into, and
   // what that review changes is regenerated and verified as any other
   // candidate. It replaces the winner only by being verified: a proposal the
   // rules produced and the toolchain rejected leaves the winner standing.
-  const winner = candidates.find((entry) => entry.id === selected);
+  const winner = candidates.find((entry) => String(fieldOf(entry, "id")) === selected);
   const artifact = winner === undefined ? null : await targetArtifact(request, winner);
   if (winner === undefined || artifact === null) {
-    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+    return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }
-  request.onReview?.({ stage: "target", candidate: winner.candidate, candidates: maxCandidates, attempt: 1, attempts: 1 });
   const { review, durationNs } = await askFor(
     {
       stage: "target",
-      contract: request.contract,
-      unit: { file: request.unitFile, function: request.contract.function.name },
-      program: request.program,
-      semantics: request.functions,
-      target: request.target,
-      output: request.output,
-      candidate: winner.candidate,
+      contract,
+      unit: { file: String(fieldOf(request, "unitFile")), function: String(fieldOf(fieldOf(contract, "function"), "name")) },
+      program,
+      semantics: functions,
+      target: fieldOf(request, "target") as TargetSpec,
+      output: outputKind as OutputKind,
+      candidate: Number(fieldOf(winner, "candidate")),
       candidates: maxCandidates,
       attempt: 1,
-      artifact: artifact.text,
-      artifactNote: artifact.note,
+      artifact: String(fieldOf(artifact, "text")),
+      artifactNote: fieldOf(artifact, "note") as string | null,
       feedback: [],
       refusals: [],
     },
     firstSequence + maxCandidates * maxAttempts,
   );
   modelDurationNs += durationNs;
-  const revision = revise(parseSemanticFunction(winner.text, request.program), review, request, context);
+  const revision = revise(parseSemanticFunction(String(fieldOf(winner, "text")), program), review, request, context);
   if (revision.applied.length === 0) {
-    return { candidates, outcomes, selected, benchmarkVector: vectors?.benchmark ?? null, modelDurationNs };
+    return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }
   const revised: Candidate = {
     id: allocateId(),
-    text: revision.text,
-    model: generationBackend().id,
-    modelConfig: generationBackend().id,
+    text: String(fieldOf(revision, "text")),
+    model: String(fieldOf(generationBackend(), "id")),
+    modelConfig: String(fieldOf(generationBackend(), "id")),
     generatedAt: new Date().toISOString(),
-    candidate: winner.candidate,
+    candidate: Number(fieldOf(winner, "candidate")),
     round: 1,
     proposals: [...revision.applied],
   };
@@ -1537,8 +1554,8 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   return {
     candidates,
     outcomes,
-    selected: outcome.valid ? revised.id : selected,
-    benchmarkVector: vectors?.benchmark ?? null,
+    selected: fieldOf(outcome, "valid") === true ? String(fieldOf(revised, "id")) : selected,
+    benchmarkVector,
     modelDurationNs,
   };
 }
@@ -1560,32 +1577,36 @@ export type StoredCandidateRequest = CandidateEvaluationRequest & { candidate: C
  */
 export async function evaluateStoredCandidate(request: StoredCandidateRequest): Promise<StoredCandidateResult> {
   const vectors = planVectors(request);
-  const outcome = await evaluateCandidate(
-    {
-      contract: request.contract,
-      parsed: request.parsed,
-      program: request.program,
-      functions: request.functions,
-      target: request.target,
-      output: request.output,
-      lowering: request.lowering,
-      mode: request.mode,
-      runtime: request.runtime,
-      workspace: request.workspace,
-      test: request.test,
-      benchmark: request.benchmark,
-      prepareRuntime: request.prepareRuntime,
-      callable: request.callable,
-      machine: request.machine,
-    },
-    request.candidate,
-    vectors,
-  );
-  if (!outcome.valid) {
-    throw new CompilerError(outcome.failure?.category === "VerificationError" ? "VerificationError" : "AssemblyError", outcome.failure?.stage ?? "verify", outcome.failure?.message ?? `candidate ${request.candidate.id} is not valid`, outcome.failure?.detail, request.contract.function.name, request.candidate.id, "");
+  const candidate = fieldOf(request, "candidate") as Candidate;
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const evaluation: CandidateEvaluationRequest = {
+    contract,
+    parsed: fieldOf(request, "parsed") as ParsedContract,
+    program: fieldOf(request, "program") as ProgramContract,
+    functions: fieldOf(request, "functions") as Readonly<Record<string, SemanticFunction>>,
+    target: fieldOf(request, "target") as TargetSpec,
+    output: fieldOf(request, "output") as OutputKind,
+    lowering: fieldOf(request, "lowering") as BackendKind,
+    mode: fieldOf(request, "mode") as BuildMode,
+    runtime: fieldOf(request, "runtime") as RuntimeKind,
+    workspace: fieldOf(request, "workspace") as CodegenWorkspace,
+    test: fieldOf(request, "test") as TestConfig,
+    benchmark: fieldOf(request, "benchmark") as BenchmarkConfig,
+    prepareRuntime: fieldOf(request, "prepareRuntime") as () => Promise<PreparedRuntime | undefined>,
+    callable: fieldOf(request, "callable") as ReadonlySet<string>,
+    machine: fieldOf(request, "machine") as Machine,
+  };
+  const outcome = await evaluateCandidate(evaluation, candidate, vectors);
+  const failure = fieldOf(outcome, "failure") as CandidateOutcome["failure"];
+  const candidateId = String(fieldOf(candidate, "id"));
+  if (fieldOf(outcome, "valid") !== true) {
+    const category = failure === undefined ? "AssemblyError" : String(fieldOf(failure, "category"));
+    throw new CompilerError(category === "VerificationError" ? "VerificationError" : "AssemblyError", String(fieldOf(failure, "stage") ?? "verify"), String(fieldOf(failure, "message") ?? `candidate ${candidateId} is not valid`), fieldOf(failure, "detail") as string | undefined, String(fieldOf(fieldOf(contract, "function"), "name")), candidateId, "");
   }
   const result: StoredCandidateResult = {};
-  if (outcome.verification !== undefined) result.verification = outcome.verification;
-  if (outcome.benchmark !== undefined) result.benchmark = outcome.benchmark;
+  const verification = fieldOf(outcome, "verification") as VerificationResult | undefined;
+  const benchmark = fieldOf(outcome, "benchmark") as BenchmarkResult | undefined;
+  if (verification !== undefined) result.verification = verification;
+  if (benchmark !== undefined) result.benchmark = benchmark;
   return result;
 }

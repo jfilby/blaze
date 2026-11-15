@@ -2259,7 +2259,7 @@ export function generateProgramDriver(
       includeHttpHeader,
       lowering,
       includeSqliteHeader,
-      rulesFor(String(fieldOf(program,"language"))).style,
+      fieldOf(rulesFor(String(fieldOf(program,"language"))),"style") as TextStyle,
       loweredElsewhere,
       sharedWithObjects,
     ),
@@ -2386,7 +2386,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
     for (const library of socketLibraries) linkOptions.push(library);
   }
   const command = compileCommand(toolchain, linkOptions);
-  const result = run(command.command, command.args, { timeoutMs: 120_000 });
+  const result = run(String(fieldOf(command,"command")), fieldOf(command,"args") as readonly string[], { timeoutMs: 120_000 });
   if (fieldOf(result,"spawnError") !== undefined) {
     throw driverError("the C compiler is not available", String(fieldOf(result,"spawnError")));
   }

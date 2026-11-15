@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Lowering a function's semantic IR to C.
  *
@@ -18,7 +22,7 @@ import { CompilerError } from "../core/errors.ts";
 import { inspectObject } from "./assembler.ts";
 import { run } from "../core/process.ts";
 import { symbolOf } from "../semantics/contract.ts";
-import type { BuildMode, FunctionContract, FunctionSignature, TargetSpec } from "../core/types.ts";
+import type { BuildMode, FunctionContract, FunctionParam, FunctionSignature, TargetSpec } from "../core/types.ts";
 import { contractText, parseType } from "../semantics/contract.ts";
 import { ARGV_LENGTH, builtinFor } from "../semantics/builtins.ts";
 import {
@@ -34,11 +38,15 @@ import {
   isTextType,
   isSequence,  slotType,
   valueKind,
+  type CaptureRef,
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
   type SemanticLoop,
+  type SemanticReduction,
+  type SemanticSlot,
   type SemanticStatement,
+  type SemanticTextPart,
   type SemanticType,
   type SemanticValue,
   type ValueKind,
@@ -123,8 +131,8 @@ function declaredType(type: SemanticType | null): string {
 function absenceOf(type: SemanticType | null): string {
   if (type === null) return "NULL";
   if (isNumber(type) || isBoolean(type)) return "0.0";
-  if (type.kind === "ref" && type.of === null && type.name === undefined) return "0.0";
-  if (type.kind === "mask") return "0.0";
+  if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) return "0.0";
+  if (String(fieldOf(type,"kind")) === "mask") return "0.0";
   return "NULL";
 }
 
@@ -151,9 +159,9 @@ function cAssignOp(op: string): string {
  * terminates the literal and is not one of the characters counted.
  */
 function literalText(value: SemanticValue): string | null {
-  if (value.k === "const" && isTextType(value.type)) return value.text;
-  if (value.k === "text" && value.parts.every((part) => part.k === "text")) {
-    return value.parts.map((part) => (part.k === "text" ? part.value : "")).join("");
+  if (String(fieldOf(value,"k")) === "const" && isTextType(fieldOf(value,"type"))) return fieldOf(value,"text");
+  if (String(fieldOf(value,"k")) === "text" && (fieldOf(value,"parts") as SemanticTextPart[]).every((part) => String(fieldOf(part,"k")) === "text")) {
+    return (fieldOf(value,"parts") as { k: "text"; value: string; }[]).map((part) => (String(fieldOf(part,"k")) === "text" ? fieldOf(part,"value") : "")).join("");
   }
   return null;
 }
@@ -171,7 +179,7 @@ function literalText(value: SemanticValue): string | null {
  * writes, which is not the same value on every turn.
  */
 function readEveryTurn(value: SemanticValue): boolean {
-  return value.k !== "local" && value.k !== "const";
+  return String(fieldOf(value,"k")) !== "local" && String(fieldOf(value,"k")) !== "const";
 }
 
 /**
@@ -773,26 +781,26 @@ class FunctionEmitter {
     // Parameters are the scope the body reads its arguments from, bound before
     // anything is written so a body that shadows one writes a second name.
     const parameters: string[] = [];
-    for (const param of this.fn.params) {
+    for (const param of (fieldOf(this.fn,"params") as SemanticSlot[])) {
       const type = slotType(param);
-      const name = this.names.declare(param.name, type);
-      const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
-      if (boxed) this.boxedTexts.add(param.name);
+      const name = this.names.declare(fieldOf(param,"name"), type);
+      const boxed = String(fieldOf(param,"kind")) === "text" && fieldOf((param as { boxed?: boolean }),"boxed") === true;
+      if (boxed) this.boxedTexts.add(fieldOf(param,"name"));
       parameters.push(boxed ? `char **${name}` : `${declaredType(type)} ${name}`);
       // A function's array parameter carries its length beside it, so the body
       // can ask for it and join arrays at run time. The length is a hidden
       // parameter the caller supplies alongside the pointer.
       if (isSequence(type)) {
-        const lengthName = this.names.declare(`${param.name}_length`, USIZE);
-        this.arrayParamLengths.set(param.name, lengthName);
+        const lengthName = this.names.declare(`${fieldOf(param,"name")}_length`, USIZE);
+        this.arrayParamLengths.set(fieldOf(param,"name"), lengthName);
         parameters.push(`${declaredType(USIZE)} ${lengthName}`);
       }
     }
-    this.block(this.fn.entry, 1);
-    const layouts = cObjectDeclarations(this.fn.objects);
-    const signature = `${declaredType(this.fn.returns)} ${this.fn.symbol}(${parameters.join(", ") || "void"})`;
+    this.block(fieldOf(this.fn,"entry"), 1);
+    const layouts = cObjectDeclarations(fieldOf(this.fn,"objects"));
+    const signature = `${declaredType(fieldOf(this.fn,"returns"))} ${fieldOf(this.fn,"symbol")}(${parameters.join(", ") || "void"})`;
     return [
-      `/* ${this.fn.name}, as the compiler resolved it, lowered from the semantic IR. Do not edit. */`,
+      `/* ${fieldOf(this.fn,"name")}, as the compiler resolved it, lowered from the semantic IR. Do not edit. */`,
       "#include <stdbool.h>",
       "#include <stdint.h>",
       "#include <math.h>",
@@ -846,12 +854,12 @@ class FunctionEmitter {
     this.names.enter();
     const outer = this.depth;
     this.depth = depth;
-    for (const statement of block.statements) {
+    for (const statement of (fieldOf(block,"statements") as SemanticStatement[])) {
       this.flush();
       this.statement(statement, depth);
     }
     this.flush();
-    for (const name of block.releases) {
+    for (const name of (fieldOf(block,"releases") as string[])) {
       this.write([`${pad(depth)}${RUNTIME_NAME}_release(${this.names.read(name)});`]);
     }
     this.terminator(block, depth);
@@ -879,92 +887,92 @@ class FunctionEmitter {
   }
 
   private statement(statement: SemanticStatement, depth: number): void {
-    switch (statement.k) {
+    switch (String(fieldOf(statement,"k"))) {
       case "let": {
-        const type = slotType(statement.slot);
-        const name = this.names.declare(statement.slot.name, type);
-        const boxed = statement.slot.kind === "text" && (statement.slot as { boxed?: boolean }).boxed === true;
-        if (boxed) this.boxedTexts.add(statement.slot.name);
+        const type = slotType(fieldOf(statement,"slot"));
+        const name = this.names.declare(fieldOf(fieldOf(statement,"slot"),"name"), type);
+        const boxed = String(fieldOf(fieldOf(statement,"slot"),"kind")) === "text" && fieldOf((fieldOf(statement,"slot") as { boxed?: boolean }),"boxed") === true;
+        if (boxed) this.boxedTexts.add(fieldOf(fieldOf(statement,"slot"),"name"));
         if (boxed) {
           this.write([`${pad(depth)}char **${name} = (char **)malloc(sizeof(char *));`]);
-          this.write([`${pad(depth)}*${name} = ${this.expression(statement.value, type, depth)};`]);
+          this.write([`${pad(depth)}*${name} = ${this.expression(fieldOf(statement,"value"), type, depth)};`]);
           return;
         }
-        this.write([`${pad(depth)}${declaredType(type)} ${name} = ${this.expression(statement.value, type, depth)};`]);
+        this.write([`${pad(depth)}${declaredType(type)} ${name} = ${this.expression(fieldOf(statement,"value"), type, depth)};`]);
         if (isSequence(type)) {
           // An array local carries its length beside it, so a later `length`
           // of it and a join of it answer from that hidden variable.
-          this.write([`${pad(depth)}size_t ${name}_length = ${this.boundLength(name, statement.value, type, depth)};`]);
-          this.arrayLocals.add(statement.slot.name);
+          this.write([`${pad(depth)}size_t ${name}_length = ${this.boundLength(name, fieldOf(statement,"value"), type, depth)};`]);
+          this.arrayLocals.add(fieldOf(fieldOf(statement,"slot"),"name"));
         }
         return;
       }
       case "set": {
-        const type = this.names.typeOf(statement.name, statement.value.type);
-        const baseTarget = this.names.read(statement.name);
-        const target = (isTextType(type) && this.boxedTexts.has(statement.name)) ? `*${baseTarget}` : baseTarget;
+        const type = this.names.typeOf(fieldOf(statement,"name"), fieldOf(fieldOf(statement,"value"),"type"));
+        const baseTarget = this.names.read(fieldOf(statement,"name"));
+        const target = (isTextType(type) && this.boxedTexts.has(fieldOf(statement,"name"))) ? `*${baseTarget}` : baseTarget;
         // A string grows: `+=` is a new value rather than an addition in place,
         // and C adds two pointers by their addresses. It is written as the
         // concatenation the IR states, which is what the other targets do.
-        if (statement.op === "+=" && (type === null || isTextType(type))) {
-          const held: SemanticValue = { k: "local", type: type ?? { kind: "text" }, name: statement.name };
+        if (String(fieldOf(statement,"op")) === "+=" && (type === null || isTextType(type))) {
+          const held: SemanticValue = { k: "local", type: type ?? { kind: "text" }, name: fieldOf(statement,"name") };
           // concat reads the (possibly boxed) local via expression(), which
           // already dereferences; the store goes through the cell.
-          this.write([`${pad(depth)}${target} = ${this.concat(held, statement.value, depth)};`]);
+          this.write([`${pad(depth)}${target} = ${this.concat(held, fieldOf(statement,"value"), depth)};`]);
           return;
         }
         // C has a compound form of every operator the IR names except `**=`;
         // a power is a libm call, so it is spelled out like one.
-        if (statement.op === "**=") {
-          this.write([`${pad(depth)}${target} = pow(${target}, ${this.expression(statement.value, type, depth)});`]);
+        if (String(fieldOf(statement,"op")) === "**=") {
+          this.write([`${pad(depth)}${target} = pow(${target}, ${this.expression(fieldOf(statement,"value"), type, depth)});`]);
           return;
         }
-        this.write([`${pad(depth)}${target} ${cAssignOp(statement.op)} ${this.expression(statement.value, type, depth)};`]);
+        this.write([`${pad(depth)}${target} ${cAssignOp(fieldOf(statement,"op"))} ${this.expression(fieldOf(statement,"value"), type, depth)};`]);
         // A length that travels beside the name travels with what the name is
         // written as: an array assigned to a name is as long as the array it is
         // now, and a sidecar left saying what it was is a name whose length is
         // the one it had two pushes ago.
-        if (statement.op === "=" && isSequence(type)) {
-          const written = this.names.read(statement.name);
-          const length = this.arrayParamLengths.get(statement.name) ?? (this.arrayLocals.has(statement.name) ? `${written}_length` : null);
+        if (String(fieldOf(statement,"op")) === "=" && isSequence(type)) {
+          const written = this.names.read(fieldOf(statement,"name"));
+          const length = this.arrayParamLengths.get(fieldOf(statement,"name")) ?? (this.arrayLocals.has(fieldOf(statement,"name")) ? `${written}_length` : null);
           if (length !== null) {
-            this.write([`${pad(depth)}${length} = ${this.boundLength(written, statement.value, type, depth)};`]);
+            this.write([`${pad(depth)}${length} = ${this.boundLength(written, fieldOf(statement,"value"), type, depth)};`]);
           }
         }
         return;
       }
       case "setElement": {
-        const buffer = this.names.declared(statement.buffer);
-        const element = buffer === null || buffer.type === null ? null : elementTypeOf(buffer.type);
+        const buffer = this.names.declared(fieldOf(statement,"buffer"));
+        const element = buffer === null || fieldOf(buffer,"type") === null ? null : elementTypeOf(fieldOf(buffer,"type"));
         // C has no `**=`: a power is libm's `pow`, spelled out, over the slot
         // whose address the element already needed. `>>>=` is written `>>=`,
         // the same spelling the binary form takes.
-        if (statement.op === "**=") {
+        if (String(fieldOf(statement,"op")) === "**=") {
           this.write([
-            `${pad(depth)}{ ${declaredType(element ?? statement.value.type)}* blaze_pow_slot = &(${this.element(statement.buffer, statement.index, depth)}); *blaze_pow_slot = pow(*blaze_pow_slot, ${this.expression(statement.value, element ?? statement.value.type, depth)}); }`,
+            `${pad(depth)}{ ${declaredType(element ?? fieldOf(fieldOf(statement,"value"),"type"))}* blaze_pow_slot = &(${this.element(fieldOf(statement,"buffer"), fieldOf(statement,"index"), depth)}); *blaze_pow_slot = pow(*blaze_pow_slot, ${this.expression(fieldOf(statement,"value"), element ?? fieldOf(fieldOf(statement,"value"),"type"), depth)}); }`,
           ]);
           return;
         }
         this.write([
-          `${pad(depth)}${this.element(statement.buffer, statement.index, depth)} ${cAssignOp(statement.op)} ${this.expression(statement.value, element ?? statement.value.type, depth)};`,
+          `${pad(depth)}${this.element(fieldOf(statement,"buffer"), fieldOf(statement,"index"), depth)} ${cAssignOp(fieldOf(statement,"op"))} ${this.expression(fieldOf(statement,"value"), element ?? fieldOf(fieldOf(statement,"value"),"type"), depth)};`,
         ]);
         return;
       }
       case "step":
         this.write([
-          `${pad(depth)}${statement.prefix ? statement.op : ""}${this.names.read(statement.name)}${statement.prefix ? "" : statement.op};`,
+          `${pad(depth)}${fieldOf(statement,"prefix") ? fieldOf(statement,"op") : ""}${this.names.read(fieldOf(statement,"name"))}${fieldOf(statement,"prefix") ? "" : fieldOf(statement,"op")};`,
         ]);
         return;
       case "printText":
-        this.printText(statement.value, depth);
+        this.printText(fieldOf(statement,"value"), depth);
         return;
       case "printNumber": {
         // A whole number is written as the integer it is. The runtime's
         // formatter takes a double, and a double holds every `i64` only up to
         // 2^53, so a larger one lost its last digits on the way out.
-        const value = statement.value;
-        if (isNumber(value.type) && isInteger(value.type)) {
-          const text = this.number(this.expression(value, value.type, depth), value.type).text;
+        const value = fieldOf(statement,"value");
+        if (isNumber(fieldOf(value,"type")) && isInteger(fieldOf(value,"type"))) {
+          const text = fieldOf(this.number(this.expression(value, fieldOf(value,"type"), depth), fieldOf(value,"type")),"text");
           this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${text});`]);
           return;
         }
@@ -975,21 +983,21 @@ class FunctionEmitter {
         this.write([`${pad(depth)}${RUNTIME_NAME}_print_newline();`]);
         return;
       case "retain":
-        this.write([`${pad(depth)}(void)${RUNTIME_NAME}_retain(${this.expression(statement.value, null, depth)});`]);
+        this.write([`${pad(depth)}(void)${RUNTIME_NAME}_retain(${this.expression(fieldOf(statement,"value"), null, depth)});`]);
         return;
       case "call":
-        if (statement.call.callee === "http.serve") {
-          this.httpServe(statement.call, depth);
+        if (String(fieldOf(fieldOf(statement,"call"),"callee")) === "http.serve") {
+          this.httpServe(fieldOf(statement,"call"), depth);
           return;
         }
-        if (statement.call.callee === "fetch" || statement.call.callee === "http.request") {
-          this.httpRequest(statement.call, depth);
+        if (String(fieldOf(fieldOf(statement,"call"),"callee")) === "fetch" || String(fieldOf(fieldOf(statement,"call"),"callee")) === "http.request") {
+          this.httpRequest(fieldOf(statement,"call"), depth);
           return;
         }
-        this.write([`${pad(depth)}${this.call(statement.call, depth)};`]);
+        this.write([`${pad(depth)}${this.call(fieldOf(statement,"call"), depth)};`]);
         return;
       case "raise":
-        this.write([`${pad(depth)}${RUNTIME_NAME}_raise(${this.expression(statement.message, TEXT, depth)});`]);
+        this.write([`${pad(depth)}${RUNTIME_NAME}_raise(${this.expression(fieldOf(statement,"message"), TEXT, depth)});`]);
         return;
       case "storeField":
         // A reference travels as the double the ABI carries, and a layout's
@@ -997,25 +1005,25 @@ class FunctionEmitter {
         // wide enough to hold one, as every other reference read in this
         // backend does. `self` is already a pointer and casts the same way.
         this.write([
-          `${pad(depth)}((struct ${statement.layout}*)(uintptr_t)(${this.expression(statement.object, null, depth)}))->${cMemberName(statement.field)} = ${this.expression(statement.value, null, depth)};`,
+          `${pad(depth)}((struct ${fieldOf(statement,"layout")}*)(uintptr_t)(${this.expression(fieldOf(statement,"object"), null, depth)}))->${cMemberName(fieldOf(statement,"field"))} = ${this.expression(fieldOf(statement,"value"), null, depth)};`,
         ]);
         return;
       case "if":
-        this.write([`${pad(depth)}if (${this.condition(statement.condition, depth)}) {`]);
-        this.block(statement.then, depth + 1);
-        if (statement.otherwise !== null) {
+        this.write([`${pad(depth)}if (${this.condition(fieldOf(statement,"condition"), depth)}) {`]);
+        this.block(fieldOf(statement,"then"), depth + 1);
+        if (fieldOf(statement,"otherwise") !== null) {
           this.write([`${pad(depth)}} else {`]);
-          this.block(statement.otherwise, depth + 1);
+          this.block(fieldOf(statement,"otherwise"), depth + 1);
         }
         this.write([`${pad(depth)}}`]);
         return;
       case "block":
         this.write([`${pad(depth)}{`]);
-        this.block(statement.body, depth + 1);
+        this.block(fieldOf(statement,"body"), depth + 1);
         this.write([`${pad(depth)}}`]);
         return;
       case "loop":
-        this.loop(statement.loop, depth);
+        this.loop(fieldOf(statement,"loop"), depth);
         return;
     }
   }
@@ -1034,9 +1042,9 @@ class FunctionEmitter {
    * was: the turns share nothing, so there is nothing to combine.
    */
   private parallelDirective(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
-    const reductions = loop.reductions ?? [];
+    const reductions = (fieldOf(loop,"reductions") as SemanticReduction[] | undefined) ?? [];
     if (reductions.length === 0) return "#pragma omp parallel for";
-    const clauses = reductions.map((reduction) => `reduction(${reduction.op}:${this.names.read(reduction.name)})`);
+    const clauses = reductions.map((reduction) => `reduction(${fieldOf(reduction,"op")}:${this.names.read(fieldOf(reduction,"name"))})`);
     return `#pragma omp parallel for ${clauses.join(" ")}`;
   }
 
@@ -1045,25 +1053,25 @@ class FunctionEmitter {
     // entered in, and not in the loop's own. An element declared under the
     // same name as the buffer shadows it, so reading the buffer after the
     // declaration made the loop subscript the element it had not taken yet.
-    const buffer = loop.kind === "each" ? this.names.read(loop.of) : null;
-    const walk = loop.kind === "each" ? this.expression(loop.length, USIZE, depth) : null;
+    const buffer = String(fieldOf(loop,"kind")) === "each" ? this.names.read(fieldOf(loop,"of")) : null;
+    const walk = String(fieldOf(loop,"kind")) === "each" ? this.expression(fieldOf(loop,"length"), USIZE, depth) : null;
     this.names.enter();
-    this.loops.push({ header: loop.header, exit: loop.exit });
-    switch (loop.kind) {
+    this.loops.push({ header: fieldOf(loop,"header"), exit: fieldOf(loop,"exit") });
+    switch (String(fieldOf(loop,"kind"))) {
       case "while":
-        this.write([`${pad(depth)}while (${this.condition(loop.condition, depth)}) {`]);
-        this.block(loop.body, depth + 1);
+        this.write([`${pad(depth)}while (${this.condition(fieldOf(loop,"condition"), depth)}) {`]);
+        this.block(fieldOf(loop,"body"), depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
       case "doWhile":
         this.write([`${pad(depth)}do {`]);
-        this.block(loop.body, depth + 1);
-        this.write([`${pad(depth)}} while (${this.condition(loop.condition, depth)});`]);
+        this.block(fieldOf(loop,"body"), depth + 1);
+        this.write([`${pad(depth)}} while (${this.condition(fieldOf(loop,"condition"), depth)});`]);
         break;
       case "counted": {
-        const type = loop.type;
+        const type = fieldOf(loop,"type");
         const written = declaredType(type);
-        const bound = `${COMPARE_OPERATORS[loop.down ? "gt" : "lt"]}${loop.inclusive ? "=" : ""}`;
+        const bound = `${COMPARE_OPERATORS[fieldOf(loop,"down") ? "gt" : "lt"]}${fieldOf(loop,"inclusive") ? "=" : ""}`;
         // The index is declared under its own name, and a loop that counts
         // from a value of that same name counts from the outer one:
         // `for (let limit = limit; ...)` starts at the `limit` around it. The
@@ -1071,19 +1079,19 @@ class FunctionEmitter {
         // name resolves to the loop's own declaration — which is written into
         // the `for` below, so reading it first named a variable the C did not
         // declare yet and the object did not build.
-        const given = loop.step;
-        const start = this.expression(loop.from, type, depth);
-        const end = this.expression(loop.to, type, depth);
+        const given = fieldOf(loop,"step");
+        const start = this.expression(fieldOf(loop,"from"), type, depth);
+        const end = this.expression(fieldOf(loop,"to"), type, depth);
         const by = given === null ? null : this.expression(given, type, depth);
-        const variable = this.names.declare(loop.variable, type);
+        const variable = this.names.declare(fieldOf(loop,"variable"), type);
         // What the loop counts over is read once. The `for` reads its bound on
         // every turn and adds its step on every turn, so a bound or a step the
         // IR calls is a call the loop makes once per turn. One that is a name or
         // a literal is read as it is, and a temporary for it would be a slot and
         // a copy the C compiler makes and removes for itself — see
         // `readEveryTurn` for what is left once the IR pass has had its turn.
-        const from = readEveryTurn(loop.from) ? this.temporary("blaze_from") : null;
-        const to = readEveryTurn(loop.to) ? this.temporary("blaze_to") : null;
+        const from = readEveryTurn(fieldOf(loop,"from")) ? this.temporary("blaze_from") : null;
+        const to = readEveryTurn(fieldOf(loop,"to")) ? this.temporary("blaze_to") : null;
         const step = given !== null && readEveryTurn(given) ? this.temporary("blaze_step") : null;
         if (from !== null) this.write([`${pad(depth)}${written} ${from} = ${start};`]);
         if (to !== null) this.write([`${pad(depth)}${written} ${to} = ${end};`]);
@@ -1093,7 +1101,7 @@ class FunctionEmitter {
         // subtracting it from a step of -1 moves the index the other way, and
         // the loop never ends. A step with a name of its own is added by that
         // name, whichever of the two it is.
-        const move = by === null ? `${variable}${loop.down ? "--" : "++"}` : `${variable} += ${step ?? (by as string)}`;
+        const move = by === null ? `${variable}${fieldOf(loop,"down") ? "--" : "++"}` : `${variable} += ${step ?? (by as string)}`;
         // A loop the compiler proved has turns that do not depend on each other
         // is handed to OpenMP, which is the C compiler's threads and not the
         // compiler's: the pragma asks for a team of them over the turns, and
@@ -1102,30 +1110,30 @@ class FunctionEmitter {
         // above, so the loop OpenMP is handed is the canonical one — an integer
         // counter from a bound up to a bound — and a bound the loop re-read on
         // every turn is read by one thread rather than by all of them.
-        if (loop.parallel === true) {
-          this.write([`${pad(depth)}${this.parallelDirective(loop)}`]);
+        if (fieldOf(loop,"parallel") === true) {
+          this.write([`${pad(depth)}${this.parallelDirective(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>)}`]);
         }
         this.write([`${pad(depth)}for (${written} ${variable} = ${from ?? start}; ${variable} ${bound} ${to ?? end}; ${move}) {`]);
-        this.turn(loop, depth + 1);
+        this.turn(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
       }
       case "each": {
-        const index = this.names.declare(loop.index, USIZE);
-        const element = this.names.declare(loop.element, loop.elementType);
+        const index = this.names.declare(fieldOf(loop,"index"), USIZE);
+        const element = this.names.declare(fieldOf(loop,"element"), fieldOf(loop,"elementType"));
         // The length is read once, for the same reason a counted loop's bound
         // is: the walk reads it on every turn. One the IR already named is the
         // name the walk would read anyway.
-        const length = readEveryTurn(loop.length) ? this.temporary("blaze_length") : null;
+        const length = readEveryTurn(fieldOf(loop,"length")) ? this.temporary("blaze_length") : null;
         if (length !== null) this.write([`${pad(depth)}size_t ${length} = ${walk as string};`]);
-        if (loop.parallel === true) {
-          this.write([`${pad(depth)}${this.parallelDirective(loop)}`]);
+        if (fieldOf(loop,"parallel") === true) {
+          this.write([`${pad(depth)}${this.parallelDirective(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>)}`]);
         }
         this.write([
           `${pad(depth)}for (size_t ${index} = 0; ${index} < ${length ?? (walk as string)}; ${index}++) {`,
-          `${pad(depth + 1)}${declaredType(loop.elementType)} ${element} = ${buffer as string}[${index}];`,
+          `${pad(depth + 1)}${declaredType(fieldOf(loop,"elementType"))} ${element} = ${buffer as string}[${index}];`,
         ]);
-        this.turn(loop, depth + 1);
+        this.turn(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>, depth + 1);
         this.write([`${pad(depth)}}`]);
         break;
       }
@@ -1145,48 +1153,48 @@ class FunctionEmitter {
    * out of it or not.
    */
   private turn(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>, depth: number): void {
-    if (loop.region !== true) {
-      this.block(loop.body, depth);
+    if (fieldOf(loop,"region") !== true) {
+      this.block(fieldOf(loop,"body"), depth);
       return;
     }
     this.write([`${pad(depth)}${RUNTIME_NAME}_region_enter();`]);
     const opened = this.region;
-    this.region = { header: loop.header };
-    this.block(loop.body, depth);
+    this.region = { header: fieldOf(loop,"header") };
+    this.block(fieldOf(loop,"body"), depth);
     this.write([`${pad(depth)}${RUNTIME_NAME}_region_leave();`]);
     this.region = opened;
   }
 
   /** Where a block ends: the value it hands back, or where it jumps to. */
   private terminator(block: SemanticBlock, depth: number): void {
-    const terminator = block.terminator;
-    if (terminator.k === "next") return;
+    const terminator = fieldOf(block,"terminator");
+    if (String(fieldOf(terminator,"k")) === "next") return;
     // A block nothing arrives at writes nothing: there is no return to write,
     // no block to leave for, and no path that reaches the end of the function
     // from here — every way through the block has already left.
-    if (terminator.k === "unreachable") return;
-    if (terminator.k === "return") {
+    if (String(fieldOf(terminator,"k")) === "unreachable") return;
+    if (String(fieldOf(terminator,"k")) === "return") {
       this.leaveRegion(depth);
       // A body that falls off its end says so with a return carrying nothing,
       // which a function that returns a value has nothing to say with: C will
       // not compile `return;` in one, and nothing reaches it — an arm that
       // returns leaves the end of the body past every path that got there.
-      if (terminator.value === null) {
-        if (this.fn.returns.kind === "void") this.write([`${pad(depth)}return;`]);
+      if (fieldOf(terminator,"value") === null) {
+        if (String(fieldOf(fieldOf(this.fn,"returns"),"kind")) === "void") this.write([`${pad(depth)}return;`]);
         return;
       }
-      this.write([`${pad(depth)}return ${this.expression(terminator.value, this.fn.returns, depth)};`]);
+      this.write([`${pad(depth)}return ${this.expression(fieldOf(terminator,"value"), fieldOf(this.fn,"returns"), depth)};`]);
       return;
     }
     // A jump leaves the blocks it is written in, and frees what they owned on
     // the way out. A function allocates no array, and an object it builds
     // belongs to its caller, so there is normally nothing to free here.
-    for (const name of terminator.releases) {
+    for (const name of (fieldOf(terminator,"releases") as string[])) {
       this.write([`${pad(depth)}${RUNTIME_NAME}_release(${this.names.read(name)});`]);
     }
     const open = this.loops[this.loops.length - 1];
-    if (open === undefined || (terminator.target !== open.header && terminator.target !== open.exit)) {
-      throw backendError(`${this.fn.symbol} jumps for a block no loop around it names`, terminator.target);
+    if (open === undefined || (String(fieldOf(terminator,"target")) !== String(fieldOf(open,"header")) && String(fieldOf(terminator,"target")) !== String(fieldOf(open,"exit")))) {
+      throw backendError(`${fieldOf(this.fn,"symbol")} jumps for a block no loop around it names`, fieldOf(terminator,"target"));
     }
     // A `continue` is another turn of the same loop, so the region is still the
     // right one after it; a jump out of the loop the region belongs to is not,
@@ -1198,8 +1206,8 @@ class FunctionEmitter {
     // the cursor, and a block released on that path reached the slab's released
     // list while the region was still rewound over the same bytes — two live
     // blocks in one piece of memory from the next turn on.
-    if (terminator.target !== open.header && this.region?.header === open.header) this.leaveRegion(depth);
-    this.write([`${pad(depth)}${terminator.target === open.header ? "continue;" : "break;"}`]);
+    if (String(fieldOf(terminator,"target")) !== String(fieldOf(open,"header")) && this.region !== null && String(fieldOf(this.region,"header")) === String(fieldOf(open,"header"))) this.leaveRegion(depth);
+    this.write([`${pad(depth)}${String(fieldOf(terminator,"target")) === String(fieldOf(open,"header")) ? "continue;" : "break;"}`]);
   }
 
   /** Leaves the region the code being written is inside, where there is one. */
@@ -1214,12 +1222,12 @@ class FunctionEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue, depth: number): string {
-    return this.truth(this.expression(value, null, depth), valueKind(value), value.type);
+    return this.truth(this.expression(value, null, depth), valueKind(value), fieldOf(value,"type"));
   }
 
   /** Whether C text already written answers as a truth. */
   private truth(text: string, kind: ValueKind, type: SemanticType | null): string {
-    if (type !== null && type.kind === "ref" && type.of === null && type.name === undefined) {
+    if (type !== null && String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
       return `((${text}) == (${text}) && (${text}) != 0.0)`;
     }
     switch (kind) {
@@ -1244,7 +1252,7 @@ class FunctionEmitter {
   private call(call: SemanticCall, depth: number): string {
     // A call through a value is made by the code the value holds, so it is
     // written before everything a named callee is looked up for.
-    if (call.through !== undefined) return this.closureCall(call, depth);
+    if (fieldOf(call,"through") !== undefined) return this.closureCall(call, depth);
     // The HTTP calls carry their handles and their text in their own way, so
     // they are written before the arguments are placed: an argument of the
     // HTTP ABI is a C string and not a dynamic value, and the boxing the
@@ -1256,87 +1264,87 @@ class FunctionEmitter {
     // argument is the pointer to the bytes it names, and anything else is
     // what the runtime renders as one — the wall a dynamic value crosses.
     if (
-      call.callee === "text.indexOf" ||
-      call.callee === "text.codePointAt" ||
-      call.callee === "text.slice" ||
-      call.callee === "text.trim" ||
-      call.callee === "text.trimStart" ||
-      call.callee === "text.trimEnd" ||
-      call.callee === "text.toLowerCase" ||
-      call.callee === "text.toUpperCase"
+      String(fieldOf(call,"callee")) === "text.indexOf" ||
+      String(fieldOf(call,"callee")) === "text.codePointAt" ||
+      String(fieldOf(call,"callee")) === "text.slice" ||
+      String(fieldOf(call,"callee")) === "text.trim" ||
+      String(fieldOf(call,"callee")) === "text.trimStart" ||
+      String(fieldOf(call,"callee")) === "text.trimEnd" ||
+      String(fieldOf(call,"callee")) === "text.toLowerCase" ||
+      String(fieldOf(call,"callee")) === "text.toUpperCase"
     ) {
       const textOf = (value: SemanticValue): string => {
-        const raw = this.expression(value, isTextType(value.type) ? TEXT : null, depth);
-        return isTextType(value.type) || value.k === "text" ? raw : `${RUNTIME_NAME}_to_text(${raw})`;
+        const raw = this.expression(value, isTextType(fieldOf(value,"type")) ? TEXT : null, depth);
+        return isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text" ? raw : `${RUNTIME_NAME}_to_text(${raw})`;
       };
-      if (call.callee === "text.codePointAt") {
-        return `${RUNTIME_NAME}_text_code_point_at(${textOf(call.args[0])}, ${this.expression(call.args[1], null, depth)})`;
+      if (String(fieldOf(call,"callee")) === "text.codePointAt") {
+        return `${RUNTIME_NAME}_text_code_point_at(${textOf((fieldOf(call,"args") as SemanticValue[])[0])}, ${this.expression((fieldOf(call,"args") as SemanticValue[])[1], null, depth)})`;
       }
-      if (call.callee === "text.indexOf") {
-        return `((double)${RUNTIME_NAME}_text_index_of(${textOf(call.args[0])}, ${textOf(call.args[1])}))`;
+      if (String(fieldOf(call,"callee")) === "text.indexOf") {
+        return `((double)${RUNTIME_NAME}_text_index_of(${textOf((fieldOf(call,"args") as SemanticValue[])[0])}, ${textOf((fieldOf(call,"args") as SemanticValue[])[1])}))`;
       }
-      if (call.callee === "text.slice") {
+      if (String(fieldOf(call,"callee")) === "text.slice") {
         // A slice written with one index runs to the end, which the runtime
         // reads as a stop it can never reach: a stop below zero counts back
         // from the end, so the end itself is the number a stop stops at.
-        const stop = call.args.length > 2 ? `(long long)(${this.expression(call.args[2], null, depth)})` : "9223372036854775807LL";
-        return `${RUNTIME_NAME}_text_slice(${textOf(call.args[0])}, (long long)(${this.expression(call.args[1], null, depth)}), ${stop})`;
+        const stop = (fieldOf(call,"args") as SemanticValue[]).length > 2 ? `(long long)(${this.expression((fieldOf(call,"args") as SemanticValue[])[2], null, depth)})` : "9223372036854775807LL";
+        return `${RUNTIME_NAME}_text_slice(${textOf((fieldOf(call,"args") as SemanticValue[])[0])}, (long long)(${this.expression((fieldOf(call,"args") as SemanticValue[])[1], null, depth)}), ${stop})`;
       }
-      if (call.callee === "text.trimStart") return `${RUNTIME_NAME}_text_trim_start(${textOf(call.args[0])})`;
-      if (call.callee === "text.trimEnd") return `${RUNTIME_NAME}_text_trim_end(${textOf(call.args[0])})`;
-      if (call.callee === "text.toLowerCase") return `${RUNTIME_NAME}_text_lower(${textOf(call.args[0])})`;
-      if (call.callee === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf(call.args[0])})`;
-      return `${RUNTIME_NAME}_text_trim(${textOf(call.args[0])})`;
+      if (String(fieldOf(call,"callee")) === "text.trimStart") return `${RUNTIME_NAME}_text_trim_start(${textOf((fieldOf(call,"args") as SemanticValue[])[0])})`;
+      if (String(fieldOf(call,"callee")) === "text.trimEnd") return `${RUNTIME_NAME}_text_trim_end(${textOf((fieldOf(call,"args") as SemanticValue[])[0])})`;
+      if (String(fieldOf(call,"callee")) === "text.toLowerCase") return `${RUNTIME_NAME}_text_lower(${textOf((fieldOf(call,"args") as SemanticValue[])[0])})`;
+      if (String(fieldOf(call,"callee")) === "text.toUpperCase") return `${RUNTIME_NAME}_text_upper(${textOf((fieldOf(call,"args") as SemanticValue[])[0])})`;
+      return `${RUNTIME_NAME}_text_trim(${textOf((fieldOf(call,"args") as SemanticValue[])[0])})`;
     }
     // `JSON.stringify.pretty(value, n)` is the same document written at an
     // indent: a value the compiler cannot name is a record, and the runtime
     // walks the layout its block carries.
-    if (call.callee === "JSON.stringify.pretty" && call.args.length === 2) {
+    if (String(fieldOf(call,"callee")) === "JSON.stringify.pretty" && (fieldOf(call,"args") as SemanticValue[]).length === 2) {
       // The value is handed over as the call states it: an unshaped reference
       // is the double a pointer is carried in, and a record literal written in
       // the argument is boxed the same way here as at any other call.
-      const value = this.expression(call.args[0] as SemanticValue, call.argTypes[0] ?? null, depth);
-      return `${RUNTIME_NAME}_json_object(${value}, ${this.expression(call.args[1] as SemanticValue, NUMBER, depth)})`;
+      const value = this.expression((fieldOf(call,"args") as SemanticValue[])[0] as SemanticValue, (fieldOf(call,"argTypes") as SemanticType[])[0] ?? null, depth);
+      return `${RUNTIME_NAME}_json_object(${value}, ${this.expression((fieldOf(call,"args") as SemanticValue[])[1] as SemanticValue, NUMBER, depth)})`;
     }
     // `JSON.stringify(value)` writes a value as the JSON text that holds it.
     // The runtime renders it as the dynamic string it holds, and the text it
     // says is the answer: a text the program wrote is boxed so the runtime can
     // render it, a number and a dynamic value are already the value it reads.
-    if (call.callee === "JSON.stringify" && call.args[0] !== undefined) {
+    if (String(fieldOf(call,"callee")) === "JSON.stringify" && (fieldOf(call,"args") as SemanticValue[])[0] !== undefined) {
       // The runtime reads a dynamic value, and a handle is what it is: a text
       // and a number are boxed into one, and a value the runtime already holds
       // is the handle it is. A raw number is not a handle — a small one is the
       // index of a value some other part of the program registered.
-      const value = call.args[0];
+      const value = (fieldOf(call,"args") as SemanticValue[])[0];
       const written =
-        isTextType(value.type) || value.k === "text" ? `${RUNTIME_NAME}_box_string(${this.expression(value, TEXT, depth)})`
-          : isNumber(value.type) ? `${RUNTIME_NAME}_box_number(${this.expression(value, NUMBER, depth)})`
+        isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text" ? `${RUNTIME_NAME}_box_string(${this.expression(value, TEXT, depth)})`
+          : isNumber(fieldOf(value,"type")) ? `${RUNTIME_NAME}_box_number(${this.expression(value, NUMBER, depth)})`
             : this.expression(value, null, depth);
       return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_json_stringify(${written}))`;
     }
     // `JSON.parse(text)` reads a document as the dynamic value it holds. The
     // text crosses the wall as the pointer to its bytes, which the ABI carries
     // as the number a value is.
-    if (call.callee === "JSON.parse" && call.args[0] !== undefined) {
-      const text = this.expression(call.args[0], isTextType(call.args[0].type) ? TEXT : null, depth);
+    if (String(fieldOf(call,"callee")) === "JSON.parse" && (fieldOf(call,"args") as SemanticValue[])[0] !== undefined) {
+      const text = this.expression((fieldOf(call,"args") as SemanticValue[])[0], isTextType(fieldOf((fieldOf(call,"args") as SemanticValue[])[0],"type")) ? TEXT : null, depth);
       return `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${text}))`;
     }
     const args: string[] = [];
-    call.args.forEach((argument, index) => {
-      const builtin = call.builtin ? builtinFor(call.callee) : null;
+    (fieldOf(call,"args") as SemanticValue[]).forEach((argument, index) => {
+      const builtin = fieldOf(call,"builtin") ? builtinFor(fieldOf(call,"callee")) : null;
       // The type the call states is the one the value is handed over as. It is
       // the builtin's own parameter for almost every builtin, but a settle
       // function carries the value the executor handed it, not the untyped
       // reference the contract has for all four kinds.
-      const targetType = call.argTypes[index] ?? (builtin !== null ? builtin.params[index] : argument.type);
+      const targetType = (fieldOf(call,"argTypes") as SemanticType[])[index] ?? (builtin !== null ? (fieldOf(builtin,"params") as SemanticType[])[index] : fieldOf(argument,"type"));
       // A text local is held in a cell, and a parameter declared `boxedtext` is
       // handed the cell: that is how a mutable text a nested function writes
       // travels. A parameter declared `text` is the string itself, so the value
       // is read through the cell — passing the cell made the callee a pointer
       // where a string was expected.
-      const parameter = builtin !== null ? null : call.signature.params[index]?.type;
-      if (argument.k === "local" && isTextType(argument.type) && this.boxedTexts.has(argument.name) && parameter === "boxedtext") {
-        args.push(this.names.read(argument.name));
+      const parameter = builtin !== null ? null : fieldOf((fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[])[index] ?? {}, "type");
+      if (String(fieldOf(argument,"k")) === "local" && isTextType(fieldOf(argument,"type")) && this.boxedTexts.has(fieldOf(argument,"name")) && parameter === "boxedtext") {
+        args.push(this.names.read(fieldOf(argument,"name")));
       } else {
         args.push(this.expression(argument, targetType, depth));
       }
@@ -1344,50 +1352,50 @@ class FunctionEmitter {
       // length of this argument as the hidden parameter that follows it.
       const paramType = builtin !== null
         ? null
-        : (call.signature.params[index] !== undefined ? parseType(call.signature.params[index].type) : null);
-      if (paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr") && !call.builtin) {
+        : ((fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[])[index] !== undefined ? parseType(fieldOf((fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[])[index],"type")) : null);
+      if (paramType !== null && (String(fieldOf(paramType,"kind")) === "slice" || String(fieldOf(paramType,"kind")) === "array" || String(fieldOf(paramType,"kind")) === "ptr") && !fieldOf(call,"builtin")) {
         this.placeLength(argument, targetType, paramType, args, depth);
       }
     });
-    if (!call.builtin) {
+    if (!fieldOf(call,"builtin")) {
       this.declareCallee(call);
-      return `${call.signature.symbol}(${args.join(", ")})`;
+      return `${fieldOf(fieldOf(call,"signature"),"symbol")}(${args.join(", ")})`;
     }
-    if (call.callee === "blaze_rt_state_get") {
+    if (String(fieldOf(call,"callee")) === "blaze_rt_state_get") {
       // A named cell holds the bits of the value the module keeps: a pointer,
       // a text, a handle or a number. The type the read states says which of
       // them the bits are, and a pointer is cast back from the address.
-      const held = call.returns;
-      const pointer = held.kind === "text" || held.kind === "slice" || held.kind === "array" || held.kind === "ptr"
-        || (held.kind === "ref" && !(held.of === null && held.name === undefined));
+      const held = fieldOf(call,"returns");
+      const pointer = String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
+        || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined));
       const stored = `${RUNTIME_NAME}_state_get(${args[0]})`;
       return pointer ? `((${declaredType(held)})(uintptr_t)(${stored}))` : stored;
     }
-    if (call.callee === "blaze_rt_state_set") {
-      const held = call.argTypes[1] ?? call.args[1]?.type ?? null;
-      const pointer = held !== null && (held.kind === "text" || held.kind === "slice" || held.kind === "array" || held.kind === "ptr"
-        || (held.kind === "ref" && !(held.of === null && held.name === undefined)));
+    if (String(fieldOf(call,"callee")) === "blaze_rt_state_set") {
+      const held = (fieldOf(call,"argTypes") as SemanticType[])[1] ?? fieldOf((fieldOf(call,"args") as SemanticValue[])[1] ?? {}, "type") ?? null;
+      const pointer = held !== null && (String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
+        || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined)));
       return `${RUNTIME_NAME}_state_set(${args[0]}, ${pointer ? `(double)(uintptr_t)(${args[1]})` : args[1] ?? "0.0"})`;
     }
-    if (call.callee === "structuredClone") {
-      const argument = call.args[0];
+    if (String(fieldOf(call,"callee")) === "structuredClone") {
+      const argument = (fieldOf(call,"args") as SemanticValue[])[0];
       if (argument === undefined) return "0.0";
-      if (argument.type.kind === "primitive" || isTextType(argument.type)) return args[0] ?? "0.0";
-      if (argument.type.kind === "slice" || argument.type.kind === "array") {
-        return `((void*)${RUNTIME_NAME}_clone_block((void*)(uintptr_t)(${args[0]}), "${contractText(argument.type.of)}"))`;
+      if (String(fieldOf(fieldOf(argument,"type"),"kind")) === "primitive" || isTextType(fieldOf(argument,"type"))) return args[0] ?? "0.0";
+      if (String(fieldOf(fieldOf(argument,"type"),"kind")) === "slice" || String(fieldOf(fieldOf(argument,"type"),"kind")) === "array") {
+        return `((void*)${RUNTIME_NAME}_clone_block((void*)(uintptr_t)(${args[0]}), "${contractText(fieldOf(fieldOf(argument,"type"),"of"))}"))`;
       }
-      const held = call.argTypes[0];
-      const dynamic = held === undefined || held.kind !== "ref" || (held.of === null && held.name === undefined);
+      const held = (fieldOf(call,"argTypes") as SemanticType[])[0];
+      const dynamic = held === undefined || String(fieldOf(held,"kind")) !== "ref" || (fieldOf(held,"of") === null && fieldOf(held,"name") === undefined);
       return dynamic
         ? `((double)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`
         : `((void*)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`;
     }
-    if (call.callee === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
-    if (call.callee === "u256_from_u64x2") {
+    if (String(fieldOf(call,"callee")) === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
+    if (String(fieldOf(call,"callee")) === "u256_from_u64x2") {
       const out = this.temporary("blaze_wide");
       return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x2(&${out}, ${args[0]}, ${args[1]}); ${out}; })`;
     }
-    if (call.callee === "u256_from_u64x4") {
+    if (String(fieldOf(call,"callee")) === "u256_from_u64x4") {
       const out = this.temporary("blaze_wide");
       return `({ blaze_u256 ${out}; ${RUNTIME_NAME}_u256_from_u64x4(&${out}, ${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}); ${out}; })`;
     }
@@ -1395,12 +1403,12 @@ class FunctionEmitter {
     // C operator that computes one: the operands are bound to names first, since
     // an operand may be a call and one written into the argument list would run
     // once per mention.
-    if (call.callee === "u256_add_mod" || call.callee === "u256_sub_mod" || call.callee === "u256_mul_mod") {
+    if (String(fieldOf(call,"callee")) === "u256_add_mod" || String(fieldOf(call,"callee")) === "u256_sub_mod" || String(fieldOf(call,"callee")) === "u256_mul_mod") {
       const out = this.temporary("blaze_wide");
       const left = this.temporary("blaze_wide");
       const right = this.temporary("blaze_wide");
       const mod = this.temporary("blaze_wide");
-      const kernel = call.callee.slice("u256_".length);
+      const kernel = String(fieldOf(call,"callee")).slice("u256_".length);
       return (
         `({ blaze_u256 ${out}; ` +
         `const blaze_u256 ${left} = ${args[0]}; ` +
@@ -1409,7 +1417,7 @@ class FunctionEmitter {
         `${RUNTIME_NAME}_u256_${kernel}(&${out}, &${left}, &${right}, &${mod}); ${out}; })`
       );
     }
-    if (call.callee === "u256_div") {
+    if (String(fieldOf(call,"callee")) === "u256_div") {
       const out = this.temporary("blaze_wide");
       const left = this.temporary("blaze_wide");
       const right = this.temporary("blaze_wide");
@@ -1420,7 +1428,7 @@ class FunctionEmitter {
         `${RUNTIME_NAME}_u256_div(&${out}, &${left}, &${right}); ${out}; })`
       );
     }
-    if (call.callee === "u256_invert_mod") {
+    if (String(fieldOf(call,"callee")) === "u256_invert_mod") {
       const out = this.temporary("blaze_wide");
       const value = this.temporary("blaze_wide");
       const mod = this.temporary("blaze_wide");
@@ -1431,19 +1439,19 @@ class FunctionEmitter {
         `${RUNTIME_NAME}_u256_invert_mod(&${out}, &${value}, &${mod}); ${out}; })`
       );
     }
-    if (call.callee === "fetch" || call.callee === "http.request") {
-      const url = this.expression(call.args[0], null, depth);
-      const method = this.expression(call.args[1], null, depth);
-      const headers = this.expression(call.args[2], null, depth);
-      const body = this.expression(call.args[3], null, depth);
-      const bodyText = (call.args[3].type.kind === "ptr" || call.args[3].type.kind === "text") ? body : `blaze_rt_to_text(${body})`;
+    if (String(fieldOf(call,"callee")) === "fetch" || String(fieldOf(call,"callee")) === "http.request") {
+      const url = this.expression((fieldOf(call,"args") as SemanticValue[])[0], null, depth);
+      const method = this.expression((fieldOf(call,"args") as SemanticValue[])[1], null, depth);
+      const headers = this.expression((fieldOf(call,"args") as SemanticValue[])[2], null, depth);
+      const body = this.expression((fieldOf(call,"args") as SemanticValue[])[3], null, depth);
+      const bodyText = (String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "ptr" || String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "text") ? body : `blaze_rt_to_text(${body})`;
       return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
     }
     // `parseInt(text)` and `Number(text)` are the number a value states: a
     // text is the number its text says, which the runtime reads out of the box
     // it makes of the pointer it is. A number and a dynamic value are already
     // the value it reads.
-    if (call.callee === "BigInt") {
+    if (String(fieldOf(call,"callee")) === "BigInt") {
       // A whole number as the wide integer the language holds it in. The value
       // is an integer double, which is exact below 2^53 and has trailing zero
       // bits above it; each 64 bit limb is read by the arithmetic the double
@@ -1467,13 +1475,13 @@ class FunctionEmitter {
         `${RUNTIME_NAME}_u256_from_u64x4(&${out}, blaze_wide_l0, blaze_wide_l1, blaze_wide_l2, blaze_wide_l3); ${out}; })`
       );
     }
-    if (call.callee === "parseInt" || call.callee === "Number") {
+    if (String(fieldOf(call,"callee")) === "parseInt" || String(fieldOf(call,"callee")) === "Number") {
       // A wide whole number is read as the decimal the formatter writes, which
       // is the double `Number(BigInt)` answers; the runtime's formatter and the
       // C library's reader do the conversion with the one rounding.
-      const first = call.args[0];
-      if (call.callee === "Number" && first !== undefined && isWideType(first.type)) {
-        const signed = first.type.kind === "primitive" && first.type.name === "i256";
+      const first = (fieldOf(call,"args") as SemanticValue[])[0];
+      if (String(fieldOf(call,"callee")) === "Number" && first !== undefined && isWideType(fieldOf(first,"type"))) {
+        const signed = String(fieldOf(fieldOf(first,"type"),"kind")) === "primitive" && String(fieldOf(fieldOf(first,"type"),"name")) === "i256";
         return `({ ${signed ? "blaze_i256" : "blaze_u256"} blaze_wide = ${this.raw(first, depth)}; ${RUNTIME_NAME}_${signed ? "i256" : "u256"}_to_double(&blaze_wide); })`;
       }
       // The argument is read at the parameter's type, which is a value the
@@ -1481,61 +1489,61 @@ class FunctionEmitter {
       // the value says out of it.
       return `${RUNTIME_NAME}_to_number(${args[0] ?? "0.0"})`;
     }
-    if (call.callee === "Number.parseInt") {
+    if (String(fieldOf(call,"callee")) === "Number.parseInt") {
       // The text is read at the parameter the runtime declares: a text the
       // read holds is the pointer itself, and a value the read cannot name is
       // the text it holds.
-      const first = call.args[0];
-      const text = first !== undefined && isTextType(first.type) ? this.raw(first, depth) : `${RUNTIME_NAME}_to_text(${args[0] ?? "0.0"})`;
+      const first = (fieldOf(call,"args") as SemanticValue[])[0];
+      const text = first !== undefined && isTextType(fieldOf(first,"type")) ? this.raw(first, depth) : `${RUNTIME_NAME}_to_text(${args[0] ?? "0.0"})`;
       return `${RUNTIME_NAME}_parse_int(${text}, ${args[1] ?? "0.0"})`;
     }
-    if (call.callee === "String.fromCodePoint") {
+    if (String(fieldOf(call,"callee")) === "String.fromCodePoint") {
       return `${RUNTIME_NAME}_from_code_point(${args[0] ?? "0.0"})`;
     }
     // `new Promise(executor)`: the promise the runtime holds, with the executor
     // called while it is the current promise. The executor is the function the
     // arrow lifted to, and the captures are the values its call is handed.
-    if (call.callee === "Promise") {
-      const cb = call.args[0];
+    if (String(fieldOf(call,"callee")) === "Promise") {
+      const cb = (fieldOf(call,"args") as SemanticValue[])[0];
       let invoke = `${args[0] ?? "0" }()`;
-      if (cb !== undefined && cb.k === "functionRef") {
-        const captures = Array.isArray(cb.captures) ? cb.captures : [];
+      if (cb !== undefined && String(fieldOf(cb,"k")) === "functionRef") {
+        const captures = Array.isArray((fieldOf(cb,"captures") as CaptureRef[])) ? (fieldOf(cb,"captures") as CaptureRef[]) : [];
         // The executor is a function of this file, and the C of this function
         // declares every function it calls: the declaration is the lifted
         // function's, with the values it captured as its parameters.
         this.declareClosureCode({
-          name: cb.name,
-          symbol: cb.name,
+          name: fieldOf(cb,"name"),
+          symbol: fieldOf(cb,"name"),
           params: captures.map((capture: { name: string; type: SemanticType }, at: number) => ({
             name: `capture${at}`,
-            type: contractText(capture.type),
+            type: contractText(fieldOf(capture,"type")),
           })),
           returns: "void",
         });
-        invoke = `${cb.name}(${captures.map((capture: { name: string }) => capture.name).join(", ")})`;
+        invoke = `${fieldOf(cb,"name")}(${captures.map((capture: { name: string }) => fieldOf(capture,"name")).join(", ")})`;
       }
       return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
     }
     // A promise executor settles the promise the runtime holds as the current
     // one: the value is a text, nothing, a reference or a number, and the
     // runtime's service for the one it is.
-    if (call.callee === "resolve" || call.callee === "onFulfilled") {
-      const arg = call.args[0];
-      if (arg !== undefined && isTextType(arg.type)) return `(blaze_promise_resolve_current_text(${args[0]}), 0.0)`;
-      if (arg !== undefined && arg.k === "nothing") return `(blaze_promise_resolve_current_null(), 0.0)`;
-      if (arg !== undefined && arg.type.kind === "ref") return `(blaze_promise_resolve_current_value(${args[0]}), 0.0)`;
+    if (String(fieldOf(call,"callee")) === "resolve" || String(fieldOf(call,"callee")) === "onFulfilled") {
+      const arg = (fieldOf(call,"args") as SemanticValue[])[0];
+      if (arg !== undefined && isTextType(fieldOf(arg,"type"))) return `(blaze_promise_resolve_current_text(${args[0]}), 0.0)`;
+      if (arg !== undefined && String(fieldOf(arg,"k")) === "nothing") return `(blaze_promise_resolve_current_null(), 0.0)`;
+      if (arg !== undefined && String(fieldOf(fieldOf(arg,"type"),"kind")) === "ref") return `(blaze_promise_resolve_current_value(${args[0]}), 0.0)`;
       return `(blaze_promise_resolve_current(${args[0] ?? "0.0"}), 0.0)`;
     }
-    if (call.callee === "reject" || call.callee === "onRejected") {
-      const arg = call.args[0];
+    if (String(fieldOf(call,"callee")) === "reject" || String(fieldOf(call,"callee")) === "onRejected") {
+      const arg = (fieldOf(call,"args") as SemanticValue[])[0];
       const text = arg === undefined
         ? `""`
-        : arg.k === "text" || arg.k === "const" || isTextType(arg.type)
+        : String(fieldOf(arg,"k")) === "text" || String(fieldOf(arg,"k")) === "const" || isTextType(fieldOf(arg,"type"))
           ? args[0]
           : `${RUNTIME_NAME}_to_text(${args[0]})`;
       return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
     }
-    return builtinExpression(call.callee, args);
+    return builtinExpression(fieldOf(call,"callee"), args);
   }
 
   /**
@@ -1547,9 +1555,9 @@ class FunctionEmitter {
    * request, and it is there for as long as the request is being served.
    */
   private httpCall(call: SemanticCall, depth: number): string | null {
-    const handle = (at: number): string => `(void*)(uintptr_t)(${this.raw(call.args[at], depth)})`;
-    const text = (at: number): string => this.raw(call.args[at], depth);
-    switch (call.callee) {
+    const handle = (at: number): string => `(void*)(uintptr_t)(${this.raw((fieldOf(call,"args") as SemanticValue[])[at], depth)})`;
+    const text = (at: number): string => this.raw((fieldOf(call,"args") as SemanticValue[])[at], depth);
+    switch (String(fieldOf(call,"callee"))) {
       case "http.requestPath":
         this.httpExtern("blaze_http_req_path");
         return `blaze_http_req_path(${handle(0)})`;
@@ -1582,7 +1590,7 @@ class FunctionEmitter {
         /* The body is written before the response is completed, and the
            response is completed by the call that ends it: a handler that ends
            a response with a body sends that body. */
-        if (call.args.length < 2) return `blaze_http_resp_complete(${handle(0)})`;
+        if ((fieldOf(call,"args") as SemanticValue[]).length < 2) return `blaze_http_resp_complete(${handle(0)})`;
         return `({ const char *blaze_http_body_text = (const char *) ${text(1)};` +
           ` blaze_http_resp_body(${handle(0)}, (const unsigned char *) blaze_http_body_text, ${RUNTIME_NAME}_text_length(blaze_http_body_text));` +
           ` blaze_http_resp_complete(${handle(0)}); })`;
@@ -1607,26 +1615,26 @@ class FunctionEmitter {
 
   /** A declaration of another function of this program, so the C can call it. */
   private declareCallee(call: SemanticCall): void {
-    const symbol = call.signature.symbol;
-    if (symbol === this.fn.symbol || this.externs.has(symbol)) return;
-    const parameters = call.signature.params.flatMap((param) => {
-      const type = parseType(param.type);
-      const base = `${declaredType(type)} ${cEscape(param.name, TAKEN)}`;
-      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") {
-        return [base, `${declaredType(USIZE)} ${cEscape(param.name, TAKEN)}_length`];
+    const symbol = fieldOf(fieldOf(call,"signature"),"symbol");
+    if (symbol === String(fieldOf(this.fn,"symbol")) || this.externs.has(symbol)) return;
+    const parameters = (fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[]).flatMap((param) => {
+      const type = parseType(fieldOf(param,"type"));
+      const base = `${declaredType(type)} ${cEscape(fieldOf(param,"name"), TAKEN)}`;
+      if (String(fieldOf(type,"kind")) === "slice" || String(fieldOf(type,"kind")) === "array" || String(fieldOf(type,"kind")) === "ptr") {
+        return [base, `${declaredType(USIZE)} ${cEscape(fieldOf(param,"name"), TAKEN)}_length`];
       }
       return [base];
     }).join(", ");
     this.externs.set(
       symbol,
-      `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(call.signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
+      `/* defined by another function of this program, and linked beside this one */\nextern ${declaredType(parseType(fieldOf(fieldOf(call,"signature"),"returns")))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
     );
   }
 
   /** `http.serve(port)`: create the server, register the default handler, run it.
    * `blaze_http_server_run` never returns, so nothing after the call runs. */
   private httpServe(call: SemanticCall, depth: number): void {
-    const port = this.expression(call.args[0], USIZE, depth);
+    const port = this.expression((fieldOf(call,"args") as SemanticValue[])[0], USIZE, depth);
     const server = this.temporary("blaze_http_server");
     this.write([
       `${pad(depth)}void *${server} = blaze_http_server_new(NULL, (uint16_t)${port});`,
@@ -1640,7 +1648,7 @@ class FunctionEmitter {
   }
 
   private httpRequest(call: SemanticCall, depth: number): void {
-    const cstr = (index: number) => this.expression(call.args[index], null, depth);
+    const cstr = (index: number) => this.expression((fieldOf(call,"args") as SemanticValue[])[index], null, depth);
     const url = cstr(0);
     const method = cstr(1);
     const headers = cstr(2);
@@ -1666,44 +1674,45 @@ class FunctionEmitter {
    */
   /** The type the layout of an object gives one of its fields. */
   private declaredField(layout: string, field: string): SemanticType | null {
-    const found = this.fn.objects[layout]?.fields.find((one) => one.name === field);
-    return found === undefined ? null : parseType(found.type);
+    const layoutEntry = fieldOf(this.fn,"objects")[layout];
+    const found = layoutEntry === undefined ? undefined : (fieldOf(layoutEntry,"fields") as { name: string; type: string; offset: number; }[]).find((one) => String(fieldOf(one,"name")) === field);
+    return found === undefined ? null : parseType(fieldOf(found,"type"));
   }
 
   private buildObject(value: SemanticValue & { k: "newObject" }): string {
     const name = this.temporary("blaze_object");
-    const written = value.fields.map((field) => {
-      const expr = this.expression(field.value, null, 0);
+    const written = (fieldOf(value,"fields") as { name: string; value: SemanticValue; }[]).map((field) => {
+      const expr = this.expression(fieldOf(field,"value"), null, 0);
       // A field that holds no value starts as nothing, and nothing is written
       // the way the field reads it: a number is zero and a pointer is null.
-      const declared = this.declaredField(value.layout, field.name);
+      const declared = this.declaredField(fieldOf(value,"layout"), fieldOf(field,"name"));
       // A reference the source left unshaped is a `double` here and not a
       // pointer, so nothing is written into it as one.
-      const unshaped = declared !== null && declared.kind === "ref" && declared.of === null && declared.name === undefined;
+      const unshaped = declared !== null && String(fieldOf(declared,"kind")) === "ref" && fieldOf(declared,"of") === null && fieldOf(declared,"name") === undefined;
       const pointer = declared !== null && !unshaped && (
-        declared.kind === "text" || declared.kind === "slice" || declared.kind === "ptr" || declared.kind === "array" || declared.kind === "ref"
+        String(fieldOf(declared,"kind")) === "text" || String(fieldOf(declared,"kind")) === "slice" || String(fieldOf(declared,"kind")) === "ptr" || String(fieldOf(declared,"kind")) === "array" || String(fieldOf(declared,"kind")) === "ref"
       );
       const assigned = expr === "NULL" ? (pointer ? "NULL" : "0.0") : expr;
-      return `((${name})->${cMemberName(field.name)} = ${assigned});`;
+      return `((${name})->${cMemberName(fieldOf(field,"name"))} = ${assigned});`;
     });
-    const size = `sizeof(struct ${value.layout})`;
+    const size = `sizeof(struct ${fieldOf(value,"layout")})`;
     const allocation = this.writesEveryField(value)
       ? `${RUNTIME_NAME}_allocate_uninitialized(${size})`
-      : `${RUNTIME_NAME}_object_new(${size}, _Alignof(struct ${value.layout}))`;
+      : `${RUNTIME_NAME}_object_new(${size}, _Alignof(struct ${fieldOf(value,"layout")}))`;
     // The descriptor names the layout the object was laid out with: each
     // field's name, the offset it sits at and the type it holds, which is what
     // the JSON of a value a function cannot name is written from. Each piece is
     // a literal of its own so the NUL that ends it cannot take the first digit
     // of the offset into an octal escape: "list\016" is "list" and one
     // character, where "list\0" "16\0" is the two fields it looks like.
-    const layout = this.fn.objects[value.layout];
+    const layout = fieldOf(this.fn,"objects")[fieldOf(value,"layout")];
     const fields = layout === undefined
       ? ""
-      : `${layout.fields
-          .map((field) => `"${field.name}\\0" "${field.offset}\\0" "${field.type}\\0"`)
+      : `${(fieldOf(layout,"fields") as { name: string; type: string; offset: number; }[])
+          .map((field) => `"${fieldOf(field,"name")}\\0" "${fieldOf(field,"offset")}\\0" "${fieldOf(field,"type")}\\0"`)
           .join(" ")} "\\0"`;
     const describe = layout === undefined ? "" : ` ${RUNTIME_NAME}_object_describe(${name}, ${fields});`;
-    return `({ struct ${value.layout}* ${name} = (struct ${value.layout}*)${allocation};${describe} ${written.join(" ")} ${name}; })`;
+    return `({ struct ${fieldOf(value,"layout")}* ${name} = (struct ${fieldOf(value,"layout")}*)${allocation};${describe} ${written.join(" ")} ${name}; })`;
   }
 
   /**
@@ -1726,38 +1735,38 @@ class FunctionEmitter {
    * that true rather than what makes it true.
    */
   private writesEveryField(value: SemanticValue & { k: "newObject" }): boolean {
-    const layout = this.fn.objects[value.layout];
-    if (layout === undefined || layout.align > DEFAULT_ALIGNMENT) return false;
-    const written = new Set(value.fields.map((field) => field.name));
-    return layout.fields.every((field) => written.has(field.name));
+    const layout = fieldOf(this.fn,"objects")[fieldOf(value,"layout")];
+    if (layout === undefined || fieldOf(layout,"align") > DEFAULT_ALIGNMENT) return false;
+    const written = new Set((fieldOf(value,"fields") as { name: string; value: SemanticValue; }[]).map((field) => fieldOf(field,"name")));
+    return (fieldOf(layout,"fields") as { name: string; type: string; offset: number; }[]).every((field) => written.has(fieldOf(field,"name")));
   }
 
   /** A value read as the type a use fixes it at. */
   private expression(value: SemanticValue, as: SemanticType | null, depth: number): string {
     const written = this.raw(value, depth);
-    const asAny = as !== null && as.kind === "ref" && as.of === null && as.name === undefined;
+    const asAny = as !== null && String(fieldOf(as,"kind")) === "ref" && fieldOf(as,"of") === null && fieldOf(as,"name") === undefined;
     // An absence read at a type is the zero of *that* type: a field of a text
     // the literal left out is the null pointer, and the handle of an unshaped
     // reference is the number zero, whichever type the null was written at.
-    if (value.k === "nothing" && as !== null) return absenceOf(as);
+    if (String(fieldOf(value,"k")) === "nothing" && as !== null) return absenceOf(as);
     // A call that answers nothing is still a call: a use that reads it at
     // another type takes the absence the call answered *after* it runs, so the
     // call is not dropped from the program by the conversion.
-    if (value.type.kind === "void" && as !== null && as.kind !== "void") {
+    if (String(fieldOf(fieldOf(value,"type"),"kind")) === "void" && as !== null && String(fieldOf(as,"kind")) !== "void") {
       return `(${written}, ${asAny ? `${RUNTIME_NAME}_box_null()` : absenceOf(as)})`;
     }
     if (asAny) {
-      if (isTextType(value.type) || value.k === "text") {
+      if (isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text") {
         return `${RUNTIME_NAME}_box_string(${written})`;
       }
-      if (isNumber(value.type)) return `${RUNTIME_NAME}_box_number(${written})`;
-      if (isSequence(value.type)) {
+      if (isNumber(fieldOf(value,"type"))) return `${RUNTIME_NAME}_box_number(${written})`;
+      if (isSequence(fieldOf(value,"type"))) {
         // A list handed to a use that reads a value the compiler cannot name is
         // the dynamic array of its elements: the block and the length its header
         // measures are boxed one element at a time, so the value is the list and
         // not an empty array. Only a number and a text are elements a dynamic
         // value can hold.
-        const element = elementTypeOf(value.type);
+        const element = elementTypeOf(fieldOf(value,"type"));
         const kind = element !== null && isTextType(element)
           ? 1
           : element !== null && isBoolean(element)
@@ -1766,27 +1775,27 @@ class FunctionEmitter {
               ? 0
               : -1;
         if (kind < 0) {
-          throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(value.type)} is handed to a use that reads a value the compiler cannot name`, "a dynamic value holds numbers and texts; a list of references has no dynamic form yet", "", "", "");
+          throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(fieldOf(value,"type"))} is handed to a use that reads a value the compiler cannot name`, "a dynamic value holds numbers and texts; a list of references has no dynamic form yet", "", "", "");
         }
         return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), sizeof(${declaredType(element)}), (int64_t)${kind})`;
       }
-      if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) return written;
-      if (isReference(value.type)) return `((double)(uintptr_t)(${written}))`;
+      if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) return written;
+      if (isReference(fieldOf(value,"type"))) return `((double)(uintptr_t)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;
     }
-    const fromDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
+    const fromDynamic = String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined;
     // A value the runtime holds, read where a text is expected, is the text it
     // says: the handle is the double the runtime unboxes, and a text already
     // is the pointer the parameter takes. The read comes before the branch
     // below, which hands an untyped value straight through because a text is
     // not converted.
     if (fromDynamic && as !== null && isTextType(as)) return `${RUNTIME_NAME}_to_text(${written})`;
-    if (as === null || isTextType(value.type) || isTextType(as)) {
+    if (as === null || isTextType(fieldOf(value,"type")) || isTextType(as)) {
       // A string a use reads as a number is the number its text states: the
       // language reads the '+text' written in front of one as the number it
       // names, and a string is boxed the runtime reads the pointer it carries
       // out of.
-      if (isTextType(value.type) && as !== null && isNumber(as) && !isTextType(as)) {
+      if (isTextType(fieldOf(value,"type")) && as !== null && isNumber(as) && !isTextType(as)) {
         return `${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_box_string(${written}))`;
       }
       return written;
@@ -1808,13 +1817,13 @@ class FunctionEmitter {
     // A reference read at a number is the address it is. The runtime's handles
     // are the doubles their addresses say, so a layout question a value the
     // read could not shape is asked of a record is asked with this.
-    if (isReference(value.type) && isNumber(as)) return `(double)(uintptr_t)(${written})`;
-    if (isNumber(value.type) && isNumber(as)) {
-      return value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name
+    if (isReference(fieldOf(value,"type")) && isNumber(as)) return `(double)(uintptr_t)(${written})`;
+    if (isNumber(fieldOf(value,"type")) && isNumber(as)) {
+      return String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" && String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(fieldOf(value,"type"),"name")) === String(fieldOf(as,"name"))
         ? written
         : `(${declaredType(as)})(${written})`;
     }
-    if (isReference(value.type) && isReference(as)) return `(${declaredType(as)})(${written})`;
+    if (isReference(fieldOf(value,"type")) && isReference(as)) return `(${declaredType(as)})(${written})`;
     return written;
   }
 
@@ -1828,28 +1837,28 @@ class FunctionEmitter {
    * so it is refused at the point where the cast used to be written.
    */
   private widen(written: string, value: SemanticValue, as: SemanticType): string {
-    if (isWideType(value.type)) return written;
-    if (!isInteger(value.type)) {
-      throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(value.type)} is handed to a use that reads a wide number`, "a wide number is four limbs, and a whole number is the only narrower value that has a limb in it: " +
+    if (isWideType(fieldOf(value,"type"))) return written;
+    if (!isInteger(fieldOf(value,"type"))) {
+      throw new CompilerError("SemanticIrError", "semantic-ir", `a ${typeText(fieldOf(value,"type"))} is handed to a use that reads a wide number`, "a wide number is four limbs, and a whole number is the only narrower value that has a limb in it: " +
           "the kernel every backend widens with takes one machine word. Convert the value first, and say which of the two you meant", "", "", "");
     }
     const out = this.temporary("blaze_wide");
-    const signed = as.kind === "primitive" && as.name === "i256";
+    const signed = String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(as,"name")) === "i256";
     return `({ ${signed ? "blaze_i256" : "blaze_u256"} ${out}; ${RUNTIME_NAME}_${signed ? "i256_from_i64" : "u256_from_u64"}(&${out}, (${signed ? "int64_t" : "uint64_t"})(${written})); ${out}; })`;
   }
 
   private raw(value: SemanticValue, depth: number): string {
-    switch (value.k) {
+    switch (String(fieldOf(value,"k"))) {
       case "const":
         // A constant states the type it is written at, and a text one is a
         // string: the numeric literal writer leaves anything that is not a
         // float as the text it was given, so a text constant came out as a
         // bare identifier the C compiler has never heard of.
-        if (isTextType(value.type)) return cStringLiteral(value.text);
-        if (isWideType(value.type)) return cLiteral(value.text, value.type.kind === "primitive" ? value.type.name : "u256");
-        return cLiteral(value.text, isNumber(value.type) && value.type.kind === "primitive" ? value.type.name : "f64");
+        if (isTextType(fieldOf(value,"type"))) return cStringLiteral(fieldOf(value,"text"));
+        if (isWideType(fieldOf(value,"type"))) return cLiteral(fieldOf(value,"text"), String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" ? fieldOf(fieldOf(value,"type"),"name") : "u256");
+        return cLiteral(fieldOf(value,"text"), isNumber(fieldOf(value,"type")) && String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" ? fieldOf(fieldOf(value,"type"),"name") : "f64");
       case "bool":
-        return value.value ? "1" : "0";
+        return fieldOf(value,"value") ? "1" : "0";
       case "nothing":
         // Nothing read as a value of a scalar type is that type's zero, which
         // is what a conditional arm that wrote `null` beside a number is: the
@@ -1857,16 +1866,16 @@ class FunctionEmitter {
         // that states the type it reads the value at asks `absenceOf` in
         // `expression`; what is left here is a use that states none, and the
         // null pointer is the absence of every value but a number.
-        return isNumber(value.type) || isBoolean(value.type) ? "0.0" : "NULL";
+        return isNumber(fieldOf(value,"type")) || isBoolean(fieldOf(value,"type")) ? "0.0" : "NULL";
       case "functionRef":
-        return (value as { k: "functionRef"; name: string }).name;
+        return fieldOf((value as { k: "functionRef"; name: string }),"name");
       case "local":
-        if (isTextType(value.type) && this.boxedTexts.has(value.name)) {
-          return `*${this.names.read(value.name)}`;
+        if (isTextType(fieldOf(value,"type")) && this.boxedTexts.has(fieldOf(value,"name"))) {
+          return `*${this.names.read(fieldOf(value,"name"))}`;
         }
-        return this.names.read(value.name);
+        return this.names.read(fieldOf(value,"name"));
       case "text":
-        return this.text(value, depth);
+        return this.text(value as SemanticValue & { k: "text" }, depth);
       case "toText": {
         // A number written at a fixed count of digits, or in base sixteen, is
         // not the shortest text of it: the runtime's formatter is asked for the
@@ -1876,23 +1885,23 @@ class FunctionEmitter {
         // A whole number of four limbs is written by the runtime's wide
         // formatter, which takes the radix the source asked for. Only a double
         // has no second writing here.
-        if (value.digits !== null && !isWideType(value.of.type)) {
+        if (fieldOf(value,"digits") !== null && !isWideType(fieldOf(fieldOf(value,"of"),"type"))) {
           throw backendError(
-            `${this.fn.symbol} writes a number with the digits the source asked for, which this backend cannot do`,
+            `${fieldOf(this.fn,"symbol")} writes a number with the digits the source asked for, which this backend cannot do`,
             "the C this backend writes a function body as has one formatter, and it writes the shortest text of a number",
           );
         }
         const name = this.temporary("blaze_text");
-        if (value.digits !== null) {
+        if (fieldOf(value,"digits") !== null) {
           // A whole number of four limbs is written from its limbs by the
           // runtime's formatter, which is handed the radix the source asked for,
           // and the text is copied into the managed heap because the buffer is
           // this function's own.
-          const signed = value.of.type.kind === "primitive" && value.of.type.name === "i256";
+          const signed = String(fieldOf(fieldOf(fieldOf(value,"of"),"type"),"kind")) === "primitive" && String(fieldOf(fieldOf(fieldOf(value,"of"),"type"),"name")) === "i256";
           const wide = signed ? "blaze_i256" : "blaze_u256";
-          const base = value.digits === -2 ? 2 : 16;
+          const base = fieldOf(value,"digits") === -2 ? 2 : 16;
           const held = this.temporary("blaze_wide_text");
-          this.pending.push(`${wide} ${held} = ${this.raw(value.of, depth)};`);
+          this.pending.push(`${wide} ${held} = ${this.raw(fieldOf(value,"of"), depth)};`);
           const buffer = this.temporary("blaze_wide_buffer");
           this.pending.push(`unsigned char ${buffer}[80];`);
           const written = this.temporary("blaze_wide_written");
@@ -1902,46 +1911,46 @@ class FunctionEmitter {
           this.pending.push(`const char* ${name} = ${RUNTIME_NAME}_string_new(${buffer}, ${written});`);
           return name;
         }
-        this.asText(value.of, depth, name);
+        this.asText(fieldOf(value,"of"), depth, name);
         return name;
       }
       case "call":
-        return this.call(value.call, depth);
+        return this.call(fieldOf(value,"call"), depth);
       case "newObject":
-        return this.buildObject(value);
+        return this.buildObject(value as SemanticValue & { k: "newObject" });
       case "loadField":
-        return `((struct ${value.layout}*)(uintptr_t)(${this.raw(value.object, depth)}))->${cMemberName(value.field)}`;
+        return `((struct ${fieldOf(value,"layout")}*)(uintptr_t)(${this.raw(fieldOf(value,"object"), depth)}))->${cMemberName(fieldOf(value,"field"))}`;
       case "length": {
         // An array parameter carries its length beside it, so asking for its
         // length answers that hidden parameter rather than reading a header
         // that is not there.
-        if (value.of.k === "local" && this.arrayParamLengths.has(value.of.name)) {
-          return this.arrayParamLengths.get(value.of.name)!;
+        if (String(fieldOf(fieldOf(value,"of"),"k")) === "local" && this.arrayParamLengths.has(fieldOf(fieldOf(value,"of"),"name"))) {
+          return this.arrayParamLengths.get(fieldOf(fieldOf(value,"of"),"name"))!;
         }
-        if (isSequence(value.of.type)) {
+        if (isSequence(fieldOf(fieldOf(value,"of"),"type"))) {
           // A non-parameter array: try to settle its length at compile time.
           try {
-            return this.arrayLength(value.of, depth);
+            return this.arrayLength(fieldOf(value,"of"), depth);
           } catch {
             // Fall through to the text/array length path below.
           }
         }
-        return this.length(value.of, depth);
+        return this.length(fieldOf(value,"of"), depth);
       }
       case "element": {
-        const isDynamic = value.of.type?.kind === "ref" && value.of.type?.of === null;
+        const isDynamic = String(fieldOf(fieldOf(fieldOf(value,"of"),"type"),"kind")) === "ref" && fieldOf(fieldOf(fieldOf(value,"of"),"type"),"of") === null;
         if (isDynamic) {
-          return `${RUNTIME_NAME}_array_get(${this.raw(value.of, depth)}, ${this.expression(value.index, USIZE, depth)})`;
+          return `${RUNTIME_NAME}_array_get(${this.raw(fieldOf(value,"of"), depth)}, ${this.expression(fieldOf(value,"index"), USIZE, depth)})`;
         }
         // A bounds check on an array whose length is carried (a parameter or
         // a local that holds one) keeps an out-of-range index from reading
         // past the block: the function answers 0 rather than crashing, and a
         // vector that is out of the function's domain is not faulted for it.
-        if (value.of.k === "local") {
-          const name = value.of.name;
+        if (String(fieldOf(fieldOf(value,"of"),"k")) === "local") {
+          const name = fieldOf(fieldOf(value,"of"),"name");
           const hasLength = this.arrayParamLengths.has(name) || this.arrayLocals.has(name);
           if (!hasLength) {
-            return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
+            return `${this.raw(fieldOf(value,"of"), depth)}[${this.expression(fieldOf(value,"index"), USIZE, depth)}]`;
           }
           const lengthExpr = this.arrayParamLengths.has(name)
             ? this.arrayParamLengths.get(name)!
@@ -1950,70 +1959,70 @@ class FunctionEmitter {
           // fall through to the plain subscript.
           // We cannot easily check scope here, so emit the check guarded by
           // a comparison that is always valid C.
-          const indexExpr = this.expression(value.index, USIZE, depth);
-          const baseExpr = this.raw(value.of, depth);
+          const indexExpr = this.expression(fieldOf(value,"index"), USIZE, depth);
+          const baseExpr = this.raw(fieldOf(value,"of"), depth);
           return `((${indexExpr} >= 0 && (size_t)(${indexExpr}) < (size_t)(${lengthExpr})) ? ${baseExpr}[${indexExpr}] : 0)`;
         }
-        return `${this.raw(value.of, depth)}[${this.expression(value.index, USIZE, depth)}]`;
+        return `${this.raw(fieldOf(value,"of"), depth)}[${this.expression(fieldOf(value,"index"), USIZE, depth)}]`;
       }
       case "argv":
-        return value.index === null
+        return fieldOf(value,"index") === null
           ? `${RUNTIME_NAME}_argv_count()`
-          : `${RUNTIME_NAME}_argv(${this.expression(value.index, USIZE, depth)})`;
+          : `${RUNTIME_NAME}_argv(${this.expression(fieldOf(value,"index"), USIZE, depth)})`;
       case "isNull":
         // The absence is the zero of the representation the value is carried in:
         // a handle is a `double` and its absence is `0.0`, which is the value a
         // dictionary answers for a key it does not hold.
-        return `((${this.raw(value.operand, depth)}) ${value.negate ? "!=" : "=="} ${absenceOf(value.operand.type)})`;
+        return `((${this.raw(fieldOf(value,"operand"), depth)}) ${fieldOf(value,"negate") ? "!=" : "=="} ${absenceOf(fieldOf(fieldOf(value,"operand"),"type"))})`;
       case "unary": {
-        const operand = this.expression(value.operand, value.type, depth);
-        if (value.op === "not") return `((${this.condition(value.operand, depth)}) == 0)`;
+        const operand = this.expression(fieldOf(value,"operand"), fieldOf(value,"type"), depth);
+        if (String(fieldOf(value,"op")) === "not") return `((${this.condition(fieldOf(value,"operand"), depth)}) == 0)`;
         // A wide complement covers every limb, which C's `~` cannot be asked for
         // over a struct, so it is the kernel's operation rather than an operator.
-        if (value.op === "bitNot" && isWideType(value.type)) {
+        if (String(fieldOf(value,"op")) === "bitNot" && isWideType(fieldOf(value,"type"))) {
           const out = this.temporary("blaze_wide");
           const moved = this.temporary("blaze_wide");
-          const signed = value.type.kind === "primitive" && value.type.name === "i256";
+          const signed = String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" && String(fieldOf(fieldOf(value,"type"),"name")) === "i256";
           const wide = signed ? "blaze_i256" : "blaze_u256";
           return (
             `({ ${wide} ${out}; ` +
-            `${wide} ${moved} = ${this.expression(value.operand, value.type, depth)}; ` +
+            `${wide} ${moved} = ${this.expression(fieldOf(value,"operand"), fieldOf(value,"type"), depth)}; ` +
             `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_not(&${out}, &${moved}); ${out}; })`
           );
         }
-        if (value.op === "bitNot") return `(~${operand})`;
-        const asAny = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
-        const fromDynamic = value.operand.type.kind === "ref" && value.operand.type.of === null && value.operand.type.name === undefined;
+        if (String(fieldOf(value,"op")) === "bitNot") return `(~${operand})`;
+        const asAny = String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined;
+        const fromDynamic = String(fieldOf(fieldOf(fieldOf(value,"operand"),"type"),"kind")) === "ref" && fieldOf(fieldOf(fieldOf(value,"operand"),"type"),"of") === null && fieldOf(fieldOf(fieldOf(value,"operand"),"type"),"name") === undefined;
         if (asAny || fromDynamic) {
           const converted = `${RUNTIME_NAME}_to_number(${operand})`;
-          return value.op === "neg" ? `(-${converted})` : converted;
+          return String(fieldOf(value,"op")) === "neg" ? `(-${converted})` : converted;
         }
         // The sign binds to the operand, and the whole is parenthesised so a
         // negation of a product stays a negation of the whole product.
-        return `(${value.op === "neg" ? "-" : "+"}${operand})`;
+        return `(${String(fieldOf(value,"op")) === "neg" ? "-" : "+"}${operand})`;
       }
       case "arith":
-        return this.arith(value, depth);
+        return this.arith(value as SemanticValue & { k: "arith" }, depth);
       case "compare": {
         // A wide comparison walks limbs in the kernel. C compares a struct with
         // `==` only by identity and has no ordering at all, so the operator the
         // IR names has no spelling here.
-        if (isWideType(value.operand)) {
+        if (isWideType(fieldOf(value,"operand"))) {
           const left = this.temporary("blaze_wide");
           const right = this.temporary("blaze_wide");
-          const signed = value.operand.kind === "primitive" && value.operand.name === "i256";
+          const signed = String(fieldOf(fieldOf(value,"operand"),"kind")) === "primitive" && String(fieldOf(fieldOf(value,"operand"),"name")) === "i256";
           const wide = signed ? "blaze_i256" : "blaze_u256";
-          const kernel = value.op === "eq" || value.op === "ne" ? "equal" : "less";
+          const kernel = String(fieldOf(value,"op")) === "eq" || String(fieldOf(value,"op")) === "ne" ? "equal" : "less";
           const test = `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${kernel}(&${left}, &${right})`;
-          const flip = (value.op === "ne" || value.op === "ge" || value.op === "gt") ? "!" : "";
+          const flip = (String(fieldOf(value,"op")) === "ne" || String(fieldOf(value,"op")) === "ge" || String(fieldOf(value,"op")) === "gt") ? "!" : "";
           return (
-            `({ const ${wide} ${left} = ${this.expression(value.left, value.operand, depth)}; ` +
-            `const ${wide} ${right} = ${this.expression(value.right, value.operand, depth)}; ` +
+            `({ const ${wide} ${left} = ${this.expression(fieldOf(value,"left"), fieldOf(value,"operand"), depth)}; ` +
+            `const ${wide} ${right} = ${this.expression(fieldOf(value,"right"), fieldOf(value,"operand"), depth)}; ` +
             `${flip}${test}; })`
           );
         }
-        if (!isTextType(value.operand)) {
-          return `(${this.expression(value.left, value.operand, depth)} ${cOperator(COMPARE_OPERATORS[value.op])} ${this.expression(value.right, value.operand, depth)})`;
+        if (!isTextType(fieldOf(value,"operand"))) {
+          return `(${this.expression(fieldOf(value,"left"), fieldOf(value,"operand"), depth)} ${cOperator(COMPARE_OPERATORS[fieldOf(value,"op")])} ${this.expression(fieldOf(value,"right"), fieldOf(value,"operand"), depth)})`;
         }
         // Two strings are compared by what they say and not by where they are:
         // a string built at run time and one written out are two addresses that
@@ -2024,10 +2033,10 @@ class FunctionEmitter {
         // WebAssembly backend calls the same service and answers the same.
         const left = this.temporary("blaze_left");
         const right = this.temporary("blaze_right");
-        const operator = cOperator(COMPARE_OPERATORS[value.op]);
+        const operator = cOperator(COMPARE_OPERATORS[fieldOf(value,"op")]);
         return (
-          `({ const char* ${left} = ${this.raw(value.left, depth)}; ` +
-          `const char* ${right} = ${this.raw(value.right, depth)}; ` +
+          `({ const char* ${left} = ${this.raw(fieldOf(value,"left"), depth)}; ` +
+          `const char* ${right} = ${this.raw(fieldOf(value,"right"), depth)}; ` +
           `${RUNTIME_NAME}_text_compare(${left}, ${right}) ${operator} 0; })`
         );
       }
@@ -2037,22 +2046,22 @@ class FunctionEmitter {
         // written down as the test and again as the value that answers, so it
         // is bound first.
         const arm = this.temporary("blaze_arm");
-        const left = this.raw(value.left, depth);
+        const left = this.raw(fieldOf(value,"left"), depth);
         // A number arm beside a text is the test, and the text is the value the
         // operator hands back, so a number that answers is written as the text
         // of that number.
-        if (isTextType(value.type) && (isNumber(value.left.type) || isNumber(value.right.type))) {
+        if (isTextType(fieldOf(value,"type")) && (isNumber(fieldOf(fieldOf(value,"left"),"type")) || isNumber(fieldOf(fieldOf(value,"right"),"type")))) {
           const text = (one: SemanticValue): string => {
             const name = this.temporary("blaze_text");
             this.asText(one, depth, name);
             return name;
           };
-          const first = isNumber(value.left.type) ? text(value.left) : left;
-          const second = isNumber(value.right.type) ? text(value.right) : this.raw(value.right, depth);
+          const first = isNumber(fieldOf(fieldOf(value,"left"),"type")) ? text(fieldOf(value,"left")) : left;
+          const second = isNumber(fieldOf(fieldOf(value,"right"),"type")) ? text(fieldOf(value,"right")) : this.raw(fieldOf(value,"right"), depth);
           return (
-            `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
-            `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +
-            `${value.op === "and" ? second : first} : ${value.op === "and" ? first : second}; })`
+            `({ ${declaredType(fieldOf(fieldOf(value,"left"),"type"))} ${arm} = ${left}; ` +
+            `${this.truth(arm, valueKind(fieldOf(value,"left")), fieldOf(fieldOf(value,"left"),"type"))} ? ` +
+            `${String(fieldOf(value,"op")) === "and" ? second : first} : ${String(fieldOf(value,"op")) === "and" ? first : second}; })`
           );
         }
         // A text arm of an operator whose value is a text is that text, not the
@@ -2060,28 +2069,28 @@ class FunctionEmitter {
         // as one, and boxing it wrote a `double` where the other arm's
         // `const char*` belongs. The two arms are boxed only where the value is
         // the dynamic handle, as the `select` below states.
-        const right = isTextType(value.right.type) && !isTextType(value.type)
-          ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, depth)})`
-          : isNumber(value.right.type) && !isNumber(value.type)
-            ? `${RUNTIME_NAME}_box_number(${this.raw(value.right, depth)})`
-            : this.raw(value.right, depth);
+        const right = isTextType(fieldOf(fieldOf(value,"right"),"type")) && !isTextType(fieldOf(value,"type"))
+          ? `${RUNTIME_NAME}_box_string(${this.raw(fieldOf(value,"right"), depth)})`
+          : isNumber(fieldOf(fieldOf(value,"right"),"type")) && !isNumber(fieldOf(value,"type"))
+            ? `${RUNTIME_NAME}_box_number(${this.raw(fieldOf(value,"right"), depth)})`
+            : this.raw(fieldOf(value,"right"), depth);
         return (
-          `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
-          `${this.truth(arm, valueKind(value.left), value.left.type)} ? ` +
-          `${value.op === "and" ? right : arm} : ${value.op === "and" ? arm : right}; })`
+          `({ ${declaredType(fieldOf(fieldOf(value,"left"),"type"))} ${arm} = ${left}; ` +
+          `${this.truth(arm, valueKind(fieldOf(value,"left")), fieldOf(fieldOf(value,"left"),"type"))} ? ` +
+          `${String(fieldOf(value,"op")) === "and" ? right : arm} : ${String(fieldOf(value,"op")) === "and" ? arm : right}; })`
         );
       }
       case "coalesce": {
-        if (valueKind(value.left) !== "null" && valueKind(value.left) !== "reference" && !isTextType(value.left.type)) {
-          return this.raw(value.left, depth);
+        if (valueKind(fieldOf(value,"left")) !== "null" && valueKind(fieldOf(value,"left")) !== "reference" && !isTextType(fieldOf(fieldOf(value,"left"),"type"))) {
+          return this.raw(fieldOf(value,"left"), depth);
         }
         // The left arm is the test and is what answers when it is there, so it
         // is bound first.
         const arm = this.temporary("blaze_arm");
-        const left = this.raw(value.left, depth);
+        const left = this.raw(fieldOf(value,"left"), depth);
         return (
-          `({ ${declaredType(value.left.type)} ${arm} = ${left}; ` +
-          `(${arm}) == ${absenceOf(value.left.type)} ? ${this.expression(value.right, value.type, depth)} : ${arm}; })`
+          `({ ${declaredType(fieldOf(fieldOf(value,"left"),"type"))} ${arm} = ${left}; ` +
+          `(${arm}) == ${absenceOf(fieldOf(fieldOf(value,"left"),"type"))} ? ${this.expression(fieldOf(value,"right"), fieldOf(value,"type"), depth)} : ${arm}; })`
         );
       }
       case "select": {
@@ -2097,22 +2106,23 @@ class FunctionEmitter {
           // asks about the arm that was taken. A text's absence is the null
           // pointer, as it is for the coalesce and the null test: an empty text
           // is a value the source wrote, and the two are not the same thing.
-          if (one.k === "nothing") return absenceOf(value.type);
-          if (!isTextType(value.type) && (isTextType(one.type) || one.k === "text")) {
+          if (String(fieldOf(one,"k")) === "nothing") return absenceOf(fieldOf(value,"type"));
+          if (!isTextType(fieldOf(value,"type")) && (isTextType(fieldOf(one,"type")) || String(fieldOf(one,"k")) === "text")) {
             return `${RUNTIME_NAME}_box_string(${this.raw(one, depth)})`;
           }
-          return this.expression(one, value.type, depth);
+          return this.expression(one, fieldOf(value,"type"), depth);
         };
-        return `((${this.condition(value.condition, depth)}) ? ${arm(value.then)} : ${arm(value.otherwise)})`;
+        return `((${this.condition(fieldOf(value,"condition"), depth)}) ? ${arm(fieldOf(value,"then"))} : ${arm(fieldOf(value,"otherwise"))})`;
       }
 
       case "buffer":
-        return this.buffer(value, depth);
+        return this.buffer(value as SemanticValue & { k: "buffer" }, depth);
       case "closure":
-        return this.buildClosure(value, depth);
+        return this.buildClosure(value as SemanticValue & { k: "closure" }, depth);
       case "capture":
-        return this.readCapture(value, depth);
+        return this.readCapture(value as SemanticValue & { k: "capture" }, depth);
     }
+    throw backendError(`unknown value kind ${String(fieldOf(value,"k"))}`, "the semantic IR states what a value is");
   }
 
   /** A closure's block, read out of the double a closure value is held in. */
@@ -2130,15 +2140,15 @@ class FunctionEmitter {
    */
   private buildClosure(value: SemanticValue & { k: "closure" }, depth: number): string {
     this.usesClosures = true;
-    this.declareClosureCode(value.signature);
-    const count = value.captures.length;
+    this.declareClosureCode(fieldOf(value,"signature"));
+    const count = (fieldOf(value,"captures") as SemanticValue[]).length;
     const room = count > 1 ? `sizeof(blaze_fn_closure_t) + ${count - 1} * sizeof(blaze_fn_capture_t)` : "sizeof(blaze_fn_closure_t)";
     const slot = this.temporary("blaze_closure");
     const lines = [
       `blaze_fn_closure_t *${slot} = (blaze_fn_closure_t*)${RUNTIME_NAME}_object_new(${room}, 16);`,
-      `${slot}->code = (void*)(${cSymbolName(value.code)});`,
+      `${slot}->code = (void*)(${cSymbolName(fieldOf(value,"code"))});`,
     ];
-    value.captures.forEach((capture, index) => {
+    (fieldOf(value,"captures") as SemanticValue[]).forEach((capture, index) => {
       lines.push(`${slot}->captured[${index}] = ${this.captureEntry(capture, depth)};`);
     });
     return `({ ${lines.join(" ")} (double)(uintptr_t)${slot}; })`;
@@ -2146,16 +2156,16 @@ class FunctionEmitter {
 
   /** One captured value, as the block it travels in holds it. */
   private captureEntry(capture: SemanticValue, depth: number): string {
-    if (!isCarriedAsCaptureAddress(capture.type)) {
+    if (!isCarriedAsCaptureAddress(fieldOf(capture,"type"))) {
       return `(blaze_fn_capture_t){ .pointer = NULL, .number = (double)(${this.raw(capture, depth)}) }`;
     }
-    const bits = capture.type.kind === "ref" && capture.type.of === null && capture.type.name === undefined
+    const bits = String(fieldOf(fieldOf(capture,"type"),"kind")) === "ref" && fieldOf(fieldOf(capture,"type"),"of") === null && fieldOf(fieldOf(capture,"type"),"name") === undefined
       ? `(void*)(uintptr_t)(intptr_t)(${this.raw(capture, depth)})`
       : `(void*)(uintptr_t)(${this.raw(capture, depth)})`;
     // A buffer is one value and its length is another: the block carries the
     // length beside the pointer, so the function that enters the closure is
     // handed both.
-    const length = capture.type.kind === "slice" || capture.type.kind === "array" || capture.type.kind === "ptr"
+    const length = String(fieldOf(fieldOf(capture,"type"),"kind")) === "slice" || String(fieldOf(fieldOf(capture,"type"),"kind")) === "array" || String(fieldOf(fieldOf(capture,"type"),"kind")) === "ptr"
       ? `(double)(${this.arrayLength(capture, depth)})`
       : "0.0";
     return `(blaze_fn_capture_t){ .pointer = ${bits}, .number = ${length} }`;
@@ -2164,32 +2174,32 @@ class FunctionEmitter {
   /** One value a closure captured, read out of the block it travels in. */
   private readCapture(value: SemanticValue & { k: "capture" }, depth: number): string {
     this.usesClosures = true;
-    const block = this.closurePointer(this.raw(value.closure, depth));
-    const held = `(${block}->captured[${value.index}])`;
-    if (!isCarriedAsCaptureAddress(value.type)) return `(${held}.number)`;
+    const block = this.closurePointer(this.raw(fieldOf(value,"closure"), depth));
+    const held = `(${block}->captured[${fieldOf(value,"index")}])`;
+    if (!isCarriedAsCaptureAddress(fieldOf(value,"type"))) return `(${held}.number)`;
     const pointer = `(${held}.pointer)`;
-    if (isTextType(value.type)) return `((const char*)(uintptr_t)${pointer})`;
-    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+    if (isTextType(fieldOf(value,"type"))) return `((const char*)(uintptr_t)${pointer})`;
+    if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) {
       return `((double)(uintptr_t)${pointer})`;
     }
-    return `((${declaredType(value.type)})(uintptr_t)${pointer})`;
+    return `((${declaredType(fieldOf(value,"type"))})(uintptr_t)${pointer})`;
   }
 
   /** The declaration of the function a closure is entered through. */
   private declareClosureCode(signature: FunctionSignature): void {
-    const symbol = signature.symbol;
-    if (symbol === this.fn.symbol || this.externs.has(symbol)) return;
-    const parameters = signature.params.flatMap((param) => {
-      const type = parseType(param.type);
-      const base = `${declaredType(type)} ${cEscape(param.name, TAKEN)}`;
-      if (type.kind === "slice" || type.kind === "array" || type.kind === "ptr") {
-        return [base, `${declaredType(USIZE)} ${cEscape(param.name, TAKEN)}_length`];
+    const symbol = fieldOf(signature,"symbol");
+    if (symbol === String(fieldOf(this.fn,"symbol")) || this.externs.has(symbol)) return;
+    const parameters = (fieldOf(signature,"params") as FunctionParam[]).flatMap((param) => {
+      const type = parseType(fieldOf(param,"type"));
+      const base = `${declaredType(type)} ${cEscape(fieldOf(param,"name"), TAKEN)}`;
+      if (String(fieldOf(type,"kind")) === "slice" || String(fieldOf(type,"kind")) === "array" || String(fieldOf(type,"kind")) === "ptr") {
+        return [base, `${declaredType(USIZE)} ${cEscape(fieldOf(param,"name"), TAKEN)}_length`];
       }
       return [base];
     }).join(", ");
     this.externs.set(
       symbol,
-      `/* the function a closure of this program is entered through */\nextern ${declaredType(parseType(signature.returns))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
+      `/* the function a closure of this program is entered through */\nextern ${declaredType(parseType(fieldOf(signature,"returns")))} ${cSymbolName(symbol)}(${parameters || "void"})${cSymbolLabel(symbol)};`,
     );
   }
 
@@ -2203,14 +2213,14 @@ class FunctionEmitter {
    */
   private closureCall(call: SemanticCall, depth: number): string {
     this.usesClosures = true;
-    const through = call.through as SemanticValue;
+    const through = fieldOf(call,"through") as SemanticValue;
     const args: string[] = [];
     const types: string[] = ["double"];
-    call.args.forEach((argument, index) => {
-      const targetType = call.argTypes[index] ?? argument.type;
+    (fieldOf(call,"args") as SemanticValue[]).forEach((argument, index) => {
+      const targetType = (fieldOf(call,"argTypes") as SemanticType[])[index] ?? fieldOf(argument,"type");
       args.push(this.expression(argument, targetType, depth));
       types.push(declaredType(targetType));
-      if (targetType.kind === "slice" || targetType.kind === "array" || targetType.kind === "ptr") {
+      if (String(fieldOf(targetType,"kind")) === "slice" || String(fieldOf(targetType,"kind")) === "array" || String(fieldOf(targetType,"kind")) === "ptr") {
         this.placeLength(argument, targetType, targetType, args, depth);
         types.push(declaredType(USIZE));
       }
@@ -2219,7 +2229,7 @@ class FunctionEmitter {
     const forwarded = args.length === 0 ? "" : `, ${args.join(", ")}`;
     return (
       `({ blaze_fn_closure_t *${slot} = ${this.closurePointer(this.raw(through, depth))}; ` +
-      `((${declaredType(call.returns)} (*)(${types.join(", ")}))${slot}->code)((double)(uintptr_t)${slot}${forwarded}); })`
+      `((${declaredType(fieldOf(call,"returns"))} (*)(${types.join(", ")}))${slot}->code)((double)(uintptr_t)${slot}${forwarded}); })`
     );
   }
 
@@ -2237,14 +2247,14 @@ class FunctionEmitter {
    * own, so the bytes it looks into belong to that name and are freed with it.
    */
   private buffer(value: SemanticValue & { k: "buffer" }, depth: number): string {
-    const element = declaredType(value.element);
-    if (value.view !== null) {
-      const base = this.raw(value.view.of, depth);
-      const offset = this.raw(value.view.offset, depth);
+    const element = declaredType(fieldOf(value,"element"));
+    if (fieldOf(value,"view") !== null) {
+      const base = this.raw(fieldOf(fieldOf(value,"view"),"of"), depth);
+      const offset = this.raw(fieldOf(fieldOf(value,"view"),"offset"), depth);
       return `(((${element}*)((char*)(${base}) + (size_t)(${offset}) * sizeof(${element}))))`;
     }
-    if (value.count !== null) {
-      const count = this.raw(value.count, depth);
+    if (fieldOf(value,"count") !== null) {
+      const count = this.raw(fieldOf(value,"count"), depth);
       const block = this.temporary(`${element}_block`);
       return (
         `({ const size_t ${block}_length = (size_t)(${count}); ` +
@@ -2264,10 +2274,10 @@ class FunctionEmitter {
     // whatever the previous frame wrote there. This is the same allocation the
     // machine backend makes for a written-out list, so the two answer the same
     // program.
-    const length = value.length ?? value.values.length;
+    const length = fieldOf(value,"length") ?? (fieldOf(value,"values") as SemanticValue[]).length;
     const block = this.temporary(`${element}_block`);
-    const written = value.values.map(
-      (one, at) => `${block}[${at}] = ${this.expression(one, value.element, depth)};`,
+    const written = (fieldOf(value,"values") as SemanticValue[]).map(
+      (one, at) => `${block}[${at}] = ${this.expression(one, fieldOf(value,"element"), depth)};`,
     );
     return (
       `({ ${element}* ${block} = (${element}*)${RUNTIME_NAME}_array_new(${length}, sizeof(${element})); ` +
@@ -2276,34 +2286,34 @@ class FunctionEmitter {
   }
 
   private arith(value: SemanticValue & { k: "arith" }, depth: number): string {
-    if (isWideType(value.type)) return this.wideArith(value, depth);
-    if (value.op === "arrayConcat") {
-      return this.arrayConcat(value.left, value.right, value.type, depth);
+    if (isWideType(fieldOf(value,"type"))) return this.wideArith(value, depth);
+    if (String(fieldOf(value,"op")) === "arrayConcat") {
+      return this.arrayConcat(fieldOf(value,"left"), fieldOf(value,"right"), fieldOf(value,"type"), depth);
     }
-    if (value.op === "concat") return this.concat(value.left, value.right, depth);
-    const left = this.expression(value.left, value.type, depth);
-    const right = this.expression(value.right, value.type, depth);
-    switch (value.op) {
+    if (String(fieldOf(value,"op")) === "concat") return this.concat(fieldOf(value,"left"), fieldOf(value,"right"), depth);
+    const left = this.expression(fieldOf(value,"left"), fieldOf(value,"type"), depth);
+    const right = this.expression(fieldOf(value,"right"), fieldOf(value,"type"), depth);
+    switch (String(fieldOf(value,"op"))) {
       case "pow":
         return `pow(${left}, ${right})`;
       case "floorDiv":
-        return this.floorDivide(left, right, value.type);
+        return this.floorDivide(left, right, fieldOf(value,"type"));
       case "floorMod":
-        return this.floorModulo(left, right, value.type);
+        return this.floorModulo(left, right, fieldOf(value,"type"));
       case "min":
       case "max": {
         // Each arm answers twice, so both are bound: a value the IR calls is a
         // call that would otherwise run twice.
         const low = this.temporary("blaze_arm");
         const high = this.temporary("blaze_arm");
-        const type = declaredType(value.type);
+        const type = declaredType(fieldOf(value,"type"));
         // A whole number has no NaN and no signed zero, so the order answers
         // it. A float has both, and neither is answered by the order alone: the
         // language carries a NaN through rather than answering one of the arms
         // (`NaN > 1.0` is false in C, so the test alone answers 1.0 where the
         // source answers NaN), and a zero is answered by its sign — a maximum
         // is `+0` and a minimum is `-0` however the two zeros were written.
-        if (isFloat(value.type)) {
+        if (isFloat(fieldOf(value,"type"))) {
           // The two arms of the order answer the unequal case, and the fixup is
           // the third: reached only when neither ordered test holds, which with
           // no NaN in either arm means the two are the same value. Two equal
@@ -2313,8 +2323,8 @@ class FunctionEmitter {
           // nothing else. The test for a zero that used to stand in front of
           // it therefore could not change the answer, and the unequal case does
           // not reach it.
-          const ordered = value.op === "min" ? "<" : ">";
-          const zero = value.op === "min" ? "-0.0" : "0.0";
+          const ordered = String(fieldOf(value,"op")) === "min" ? "<" : ">";
+          const zero = String(fieldOf(value,"op")) === "min" ? "-0.0" : "0.0";
           return (
             `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
             `isnan(${low}) || isnan(${high}) ? ${low} + ${high} : ` +
@@ -2324,11 +2334,11 @@ class FunctionEmitter {
         }
         return (
           `({ ${type} ${low} = ${left}; ${type} ${high} = ${right}; ` +
-          `${low} ${value.op === "min" ? "<" : ">"} ${high} ? ${low} : ${high}; })`
+          `${low} ${String(fieldOf(value,"op")) === "min" ? "<" : ">"} ${high} ? ${low} : ${high}; })`
         );
       }
       default:
-        return `(${left} ${cOperator(ARITHMETIC_OPERATORS[value.op])} ${right})`;
+        return `(${left} ${cOperator(ARITHMETIC_OPERATORS[fieldOf(value,"op")])} ${right})`;
     }
   }
 
@@ -2387,7 +2397,7 @@ class FunctionEmitter {
     // The result is declared before the operands rather than after them: the
     // statement expression names it in the call, and a name C reads before its
     // declaration is one it has never heard of.
-    if (value.op === "shl" || value.op === "shr") {
+    if (String(fieldOf(value,"op")) === "shl" || String(fieldOf(value,"op")) === "shr") {
       // The count of a shift is the number the source wrote, which is a machine
       // number and not a whole number of the width being shifted. The IR does
       // not stop one being a whole number, and asking the writer for a scalar
@@ -2395,31 +2405,31 @@ class FunctionEmitter {
       // a compound literal where an integer belongs, which does not compile. A
       // build that stops here says what is wrong; the same request answered
       // anyway is a build that fails somewhere else entirely.
-      if (isWideType(value.right.type)) {
-        throw new CompilerError("SemanticIrError", "semantic-ir", `the count of a shift by ${value.op} is a ${typeText(value.right.type)}, which is a whole number rather than the number of bits to move`, "", "", "", "");
+      if (isWideType(fieldOf(fieldOf(value,"right"),"type"))) {
+        throw new CompilerError("SemanticIrError", "semantic-ir", `the count of a shift by ${fieldOf(value,"op")} is a ${typeText(fieldOf(fieldOf(value,"right"),"type"))}, which is a whole number rather than the number of bits to move`, "", "", "", "");
       }
       const out = this.temporary("blaze_wide");
       const moved = this.temporary("blaze_wide");
       const count = this.temporary("blaze_shift");
-      const signed = value.type.kind === "primitive" && value.type.name === "i256";
+      const signed = String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" && String(fieldOf(fieldOf(value,"type"),"name")) === "i256";
       const wide = signed ? "blaze_i256" : "blaze_u256";
       return (
         `({ ${wide} ${out}; ` +
-        `${wide} ${moved} = ${this.expression(value.left, value.type, depth)}; ` +
-        `const unsigned ${count} = (unsigned)${this.expression(value.right, USIZE, depth)}; ` +
-        `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${value.op}(&${out}, &${moved}, ${count}); ${out}; })`
+        `${wide} ${moved} = ${this.expression(fieldOf(value,"left"), fieldOf(value,"type"), depth)}; ` +
+        `const unsigned ${count} = (unsigned)${this.expression(fieldOf(value,"right"), USIZE, depth)}; ` +
+        `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${fieldOf(value,"op")}(&${out}, &${moved}, ${count}); ${out}; })`
       );
     }
     const out = this.temporary("blaze_wide");
     const left = this.temporary("blaze_wide");
     const right = this.temporary("blaze_wide");
-    const signed = value.type.kind === "primitive" && value.type.name === "i256";
+    const signed = String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" && String(fieldOf(fieldOf(value,"type"),"name")) === "i256";
     const wide = signed ? "blaze_i256" : "blaze_u256";
     return (
       `({ ${wide} ${out}; ` +
-      `const ${wide} ${left} = ${this.expression(value.left, value.type, depth)}; ` +
-      `const ${wide} ${right} = ${this.expression(value.right, value.type, depth)}; ` +
-      `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${value.op}(&${out}, &${left}, &${right}); ${out}; })`
+      `const ${wide} ${left} = ${this.expression(fieldOf(value,"left"), fieldOf(value,"type"), depth)}; ` +
+      `const ${wide} ${right} = ${this.expression(fieldOf(value,"right"), fieldOf(value,"type"), depth)}; ` +
+      `${RUNTIME_NAME}_${signed ? "i256" : "u256"}_${fieldOf(value,"op")}(&${out}, &${left}, &${right}); ${out}; })`
     );
   }
 
@@ -2432,13 +2442,13 @@ class FunctionEmitter {
    * is a block with a length in it and no other way to ask.
    */
   private settledLength(value: SemanticValue): boolean {
-    if (value.k === "local") return true;
+    if (String(fieldOf(value,"k")) === "local") return true;
     // A window of a block carries the count it was taken at, which is the
     // length the name bound to it is given. A window with no count reaches the
     // end of the block it looks into, which is a length this emitter cannot
     // settle: it reads the block it was taken of instead.
-    if (value.k === "buffer") return value.view === null || value.count !== null;
-    return value.k === "arith" && value.op === "arrayConcat";
+    if (String(fieldOf(value,"k")) === "buffer") return fieldOf(value,"view") === null || fieldOf(value,"count") !== null;
+    return String(fieldOf(value,"k")) === "arith" && String(fieldOf(value,"op")) === "arrayConcat";
   }
 
   /**
@@ -2503,39 +2513,39 @@ class FunctionEmitter {
 
   /** The length of an array whose length the compiler can settle on. */
   private arrayLength(value: SemanticValue, depth: number): string {
-    if (value.k === "local" && this.arrayParamLengths.has(value.name)) {
-      return this.arrayParamLengths.get(value.name)!;
+    if (String(fieldOf(value,"k")) === "local" && this.arrayParamLengths.has(fieldOf(value,"name"))) {
+      return this.arrayParamLengths.get(fieldOf(value,"name"))!;
     }
-    if (value.k === "local") {
+    if (String(fieldOf(value,"k")) === "local") {
       // A local array carries its length beside it, under the same name with
       // a `_length` suffix, so asking for its length answers that variable.
-      return `${value.name}_length`;
+      return `${fieldOf(value,"name")}_length`;
     }
-    if (value.k === "arith" && value.op === "arrayConcat") {
-      return `(${this.arrayLength(value.left, depth)} + ${this.arrayLength(value.right, depth)})`;
+    if (String(fieldOf(value,"k")) === "arith" && String(fieldOf(value,"op")) === "arrayConcat") {
+      return `(${this.arrayLength(fieldOf(value,"left"), depth)} + ${this.arrayLength(fieldOf(value,"right"), depth)})`;
     }
-    if (value.k === "buffer") {
-      if (value.count !== null) {
-        return this.expression(value.count, USIZE, depth);
+    if (String(fieldOf(value,"k")) === "buffer") {
+      if (fieldOf(value,"count") !== null) {
+        return this.expression(fieldOf(value,"count"), USIZE, depth);
       }
-      if (value.view !== null) {
+      if (fieldOf(value,"view") !== null) {
         // A view's length is not carried in the IR; refuse rather than guess.
         throw backendError(
-          `${this.fn.symbol} reads the length of a view, which this backend cannot settle`,
+          `${fieldOf(this.fn,"symbol")} reads the length of a view, which this backend cannot settle`,
           "a view reaches a function as a window and no length arrives with it",
         );
       }
-      return String(value.length ?? value.values.length);
+      return String(fieldOf(value,"length") ?? (fieldOf(value,"values") as SemanticValue[]).length);
     }
     // A block of elements a call answered is a block the runtime laid out, and
     // it records how many bytes it holds: how many elements that is, is the
     // answer. The value is written once, where the length is asked for.
-    const element = elementTypeOf(value.type);
-    if (element !== null && isSequence(value.type)) {
+    const element = elementTypeOf(fieldOf(value,"type"));
+    if (element !== null && isSequence(fieldOf(value,"type"))) {
       return `(${RUNTIME_NAME}_object_size(${this.raw(value, depth)}) / sizeof(${declaredType(element)}))`;
     }
     throw backendError(
-      `${this.fn.symbol} reads the length of an array, which this backend cannot settle`,
+      `${fieldOf(this.fn,"symbol")} reads the length of an array, which this backend cannot settle`,
       "an array reaches a function as a pointer to its first element and no length arrives with it; pass the length as a parameter, as in f(a, len(a))",
     );
   }
@@ -2545,7 +2555,7 @@ class FunctionEmitter {
     const element = elementTypeOf(type);
     if (element === null) {
       throw backendError(
-        `${this.fn.symbol} concatenates two arrays whose element type is not known`,
+        `${fieldOf(this.fn,"symbol")} concatenates two arrays whose element type is not known`,
         "write the list out, as in [1, 2, 3, 4]",
       );
     }
@@ -2600,7 +2610,7 @@ class FunctionEmitter {
     // written for it is a fixed run of bytes, so its length is a number the
     // emitter can write down, and a whole probe and scan become a literal in
     // the middle of the program.
-    if (isTextType(of.type)) {
+    if (isTextType(fieldOf(of,"type"))) {
       const literal = literalText(of);
       // The C string ends at a NUL, so a literal with one in it is as long as
       // what is in front of it and no longer.
@@ -2608,7 +2618,7 @@ class FunctionEmitter {
       return `${RUNTIME_NAME}_text_length(${this.raw(of, depth)})`;
     }
     throw backendError(
-      `${this.fn.symbol} reads the length of an array, which no C this compiler writes can answer`,
+      `${fieldOf(this.fn,"symbol")} reads the length of an array, which no C this compiler writes can answer`,
       "an array reaches a function as a pointer to its first element and no length arrives with it",
     );
   }
@@ -2625,20 +2635,20 @@ class FunctionEmitter {
    * a value but the output, so it is written whole.
    */
   private printText(value: SemanticValue, depth: number): void {
-    const parts = value.k === "text" ? value.parts : null;
-    if (parts === null || parts.length === 0 || parts.every((part) => part.k === "text")) {
+    const parts = String(fieldOf(value,"k")) === "text" ? (fieldOf(value,"parts") as SemanticTextPart[]) : null;
+    if (parts === null || parts.length === 0 || parts.every((part) => String(fieldOf(part,"k")) === "text")) {
       this.write([`${pad(depth)}${RUNTIME_NAME}_print_text(${this.expression(value, TEXT, depth)});`]);
       return;
     }
     for (const part of parts) {
-      if (part.k === "text") {
+      if (String(fieldOf(part,"k")) === "text") {
         this.write([
-          `${pad(depth)}${RUNTIME_NAME}_print_text_n(${cStringLiteral(part.value)}, ${Buffer.byteLength(part.value, "utf8")});`,
+          `${pad(depth)}${RUNTIME_NAME}_print_text_n(${cStringLiteral(fieldOf(part,"value"))}, ${Buffer.byteLength(fieldOf(part,"value"), "utf8")});`,
         ]);
         continue;
       }
       const name = this.temporary("blaze_part");
-      const length = this.asText(part.value, depth, name);
+      const length = this.asText(fieldOf(part,"value"), depth, name);
       this.write([`${pad(depth)}${RUNTIME_NAME}_print_text_n(${name}, ${length});`]);
     }
   }
@@ -2650,9 +2660,9 @@ class FunctionEmitter {
    * into a string is formatted by the runtime and never by this backend.
    */
   private text(value: SemanticValue & { k: "text" }, depth: number): string {
-    if (value.parts.length === 0) return '""';
-    if (value.parts.every((part) => part.k === "text")) {
-      return value.parts.map((part) => cStringLiteral(part.value)).join("");
+    if ((fieldOf(value,"parts") as SemanticTextPart[]).length === 0) return '""';
+    if ((fieldOf(value,"parts") as SemanticTextPart[]).every((part) => String(fieldOf(part,"k")) === "text")) {
+      return (fieldOf(value,"parts") as { k: "text"; value: string; }[]).map((part) => cStringLiteral(fieldOf(part,"value"))).join("");
     }
     // Every part is bound before the string is laid out, and the parts are
     // joined by the runtime rather than copied into a buffer sized here. A
@@ -2664,11 +2674,11 @@ class FunctionEmitter {
     // geometrically, so a string built in a loop copies its bytes a linear
     // number of times rather than a quadratic one.
     const mark = this.pending.length;
-    const parts: string[] = value.parts.map(() => this.temporary("blaze_part"));
+    const parts: string[] = (fieldOf(value,"parts") as SemanticTextPart[]).map(() => this.temporary("blaze_part"));
     const joined = this.temporary("blaze_text");
-    for (const [index, part] of value.parts.entries()) {
-      if (part.k === "text") this.pending.push(`const char* ${parts[index]} = ${cStringLiteral(part.value)};`);
-      else this.asText(part.value, depth, parts[index]);
+    for (const [index, part] of (fieldOf(value,"parts") as SemanticTextPart[]).entries()) {
+      if (String(fieldOf(part,"k")) === "text") this.pending.push(`const char* ${parts[index]} = ${cStringLiteral(fieldOf(part,"value"))};`);
+      else this.asText(fieldOf(part,"value"), depth, parts[index]);
     }
     const lines: string[] = [];
     // The first part becomes the string the rest are appended to, and it is
@@ -2707,9 +2717,9 @@ class FunctionEmitter {
     // shortest text of it, and this backend writes the shortest one: a body
     // that asks for the digits the source asked for is refused here rather than
     // answered with `255` where the source says `ff`.
-    if (value.k === "toText" && value.digits !== null) {
+    if (String(fieldOf(value,"k")) === "toText" && fieldOf(value,"digits") !== null) {
       throw backendError(
-        `${this.fn.symbol} writes a number with the digits the source asked for, which this backend cannot do`,
+        `${fieldOf(this.fn,"symbol")} writes a number with the digits the source asked for, which this backend cannot do`,
         "the C this backend writes a function body as has one formatter, and it writes the shortest text of a number",
       );
     }
@@ -2717,15 +2727,15 @@ class FunctionEmitter {
     // a string that arrives without a length and measured for one. What it
     // wraps is what knows how long the text is.
     let inner = value;
-    while (inner.k === "toText") inner = inner.of;
+    while (String(fieldOf(inner,"k")) === "toText") inner = fieldOf(inner,"of");
     value = inner;
-    if (value.type.kind === "ref" && value.type.of === null && value.type.name === undefined) {
+    if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) {
       const handle = this.temporary("blaze_handle");
-      this.pending.push(`double ${handle} = ${this.expression(value, value.type, depth)};`);
+      this.pending.push(`double ${handle} = ${this.expression(value, fieldOf(value,"type"), depth)};`);
       this.pending.push(`const char* ${name} = ${RUNTIME_NAME}_to_text(${handle});`);
       return `${RUNTIME_NAME}_text_length(${name})`;
     }
-    if (isTextType(value.type)) {
+    if (isTextType(fieldOf(value,"type"))) {
       this.pending.push(`const char* ${name} = ${this.raw(value, depth)};`);
       return `strlen(${name})`;
     }
@@ -2733,7 +2743,7 @@ class FunctionEmitter {
       this.pending.push(`const char* ${name} = "null";`);
       return "4";
     }
-    if (isBoolean(value.type)) {
+    if (isBoolean(fieldOf(value,"type"))) {
       const truth = this.temporary("blaze_truth");
       this.pending.push(`const bool ${truth} = ${this.raw(value, depth)};`);
       this.pending.push(`const char* ${name} = ${truth} ? "true" : "false";`);
@@ -2749,16 +2759,16 @@ class FunctionEmitter {
     // which is where a double stops being able to hold every integer, so the
     // formatter wrote a number that was not the address held — the low bits
     // of it were zeros by then.
-    if (isReference(value.type)) {
+    if (isReference(fieldOf(value,"type"))) {
       const pointer = this.temporary("blaze_reference");
       this.pending.push(`const void* ${pointer} = ${this.raw(value, depth)};`);
       const address = this.number(`(uintptr_t)${pointer}`, USIZE);
-      this.pending.push(`const char* ${name} = ${pointer} == NULL ? "null" : ${address.text};`);
-      return `(${pointer} == NULL ? 4 : ${address.length})`;
+      this.pending.push(`const char* ${name} = ${pointer} == NULL ? "null" : ${fieldOf(address,"text")};`);
+      return `(${pointer} == NULL ? 4 : ${fieldOf(address,"length")})`;
     }
-    const number = this.number(this.raw(value, depth), value.type);
-    this.pending.push(`const char* ${name} = ${number.text};`);
-    return number.length;
+    const number = this.number(this.raw(value, depth), fieldOf(value,"type"));
+    this.pending.push(`const char* ${name} = ${fieldOf(number,"text")};`);
+    return fieldOf(number,"length");
   }
 
   /**
@@ -2789,7 +2799,7 @@ class FunctionEmitter {
       // error. A call that ran once per use of the value is bound for the same
       // reason the whole-number path binds it.
       const wide = this.temporary("blaze_wide_value");
-      const signed = type !== null && type.kind === "primitive" && type.name === "i256";
+      const signed = type !== null && String(fieldOf(type,"kind")) === "primitive" && String(fieldOf(type,"name")) === "i256";
       const wideType = signed ? "blaze_i256" : "blaze_u256";
       return {
         text:
@@ -2892,17 +2902,17 @@ export interface CompileFunctionResult {
  * linked into.
  */
 export async function compileFunctionC(request: CompileFunctionRequest): Promise<CompileFunctionResult> {
-  const functionName = symbolOf(request.contract);
-  const source = generateFunctionC(request.fn);
-  await writeFile(request.sourcePath, source, "utf8");
+  const functionName = symbolOf(fieldOf(request,"contract"));
+  const source = generateFunctionC(fieldOf(request,"fn"));
+  await writeFile(fieldOf(request,"sourcePath"), source, "utf8");
 
-  const toolchain = toolchainFor(request.target);
-  const archFlag = cTargetOptions(request.target);
-  const includes = (request.includeDirectories ?? []).flatMap((directory) => ["-I", directory]);
+  const toolchain = toolchainFor(fieldOf(request,"target"));
+  const archFlag = cTargetOptions(fieldOf(request,"target"));
+  const includes = ((fieldOf(request,"includeDirectories") as string[] | undefined) ?? []).flatMap((directory) => ["-I", directory]);
   // `-fopenmp` is asked for only when the function has a loop the compiler
   // proved its turns independent, because it is the flag that makes the pragma
   // a team of threads rather than a line the C compiler ignores.
-  const threads = threadingOptionsFor(toolchain, entryIsParallel(request.fn.entry) ? ["openmp"] : []);
+  const threads = threadingOptionsFor(toolchain, entryIsParallel(fieldOf(fieldOf(request,"fn"),"entry")) ? ["openmp"] : []);
   // Register allocation, instruction selection and the stack are the C
   // compiler's, which is the point of the boundary: no register, offset or
   // instruction is a model's to choose, on any target. An assembly build
@@ -2916,71 +2926,71 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   // compiler's intermediate form rather than machine code: what the build
   // delivered was a dump of what was about to be handed to the linker, and the
   // size it reported was the size of that dump.
-  if (request.assemblyPath !== undefined) {
+  if (fieldOf(request,"assemblyPath") !== undefined) {
     const stop = compileCommand(toolchain, [
       "-std=c11",
-      ...assemblyOptions(request.mode, request.contract.optimize.primary),
+      ...assemblyOptions(fieldOf(request,"mode"), fieldOf(fieldOf(fieldOf(request,"contract"),"optimize"),"primary")),
       "-S",
       ...threads,
       ...archFlag,
       ...includes,
       "-o",
-      request.assemblyPath,
-      request.sourcePath,
+      fieldOf(request,"assemblyPath"),
+      fieldOf(request,"sourcePath"),
     ]);
-    const stopped = run(stop.command, stop.args, { timeoutMs: 120_000 });
-    if (stopped.spawnError !== undefined) {
-      throw new CompilerError("TargetError", "compile", "the C compiler is not available", stopped.spawnError, "", "", "");
+    const stopped = run(fieldOf(stop,"command"), (fieldOf(stop,"args") as string[]), { timeoutMs: 120_000 });
+    if (fieldOf(stopped,"spawnError") !== undefined) {
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", fieldOf(stopped,"spawnError"), "", "", "");
     }
-    if (stopped.code !== 0) {
-      throw new CompilerError("LinkError", "compile", `the C compiler could not stop at assembly for ${functionName}`, `${request.sourcePath}\n${stopped.stderr.trim()}`, "", "", "");
+    if (fieldOf(stopped,"code") !== 0) {
+      throw new CompilerError("LinkError", "compile", `the C compiler could not stop at assembly for ${functionName}`, `${fieldOf(request,"sourcePath")}\n${String(fieldOf(stopped,"stderr")).trim()}`, "", "", "");
     }
     // The object is the assembly assembled, so the object and the delivered
     // assembly are one compilation rather than two that happen to agree.
-    const assembly = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
-    const assembled = run(assembly.command, assembly.args, { timeoutMs: 120_000 });
-    if (assembled.spawnError !== undefined) {
-      throw new CompilerError("TargetError", "compile", "the assembler is not available", assembled.spawnError, "", "", "");
+    const assembly = assembleCommand(toolchain, fieldOf(request,"target"), fieldOf(request,"assemblyPath"), fieldOf(request,"objectPath"));
+    const assembled = run(fieldOf(assembly,"command"), (fieldOf(assembly,"args") as string[]), { timeoutMs: 120_000 });
+    if (fieldOf(assembled,"spawnError") !== undefined) {
+      throw new CompilerError("TargetError", "compile", "the assembler is not available", fieldOf(assembled,"spawnError"), "", "", "");
     }
-    if (assembled.code !== 0) {
-      throw new CompilerError("LinkError", "compile", `the assembler could not build the object of ${functionName}`, `${request.assemblyPath}\n${assembled.stderr.trim()}`, "", "", "");
+    if (fieldOf(assembled,"code") !== 0) {
+      throw new CompilerError("LinkError", "compile", `the assembler could not build the object of ${functionName}`, `${fieldOf(request,"assemblyPath")}\n${String(fieldOf(assembled,"stderr")).trim()}`, "", "", "");
     }
   } else {
     const command = compileCommand(toolchain, [
       "-std=c11",
-      ...loweringOptionsFor(toolchain, request.mode, request.contract.optimize.primary),
+      ...loweringOptionsFor(toolchain, fieldOf(request,"mode"), fieldOf(fieldOf(fieldOf(request,"contract"),"optimize"),"primary")),
       "-c",
       ...threads,
       ...archFlag,
       ...includes,
       "-o",
-      request.objectPath,
-      request.sourcePath,
+      fieldOf(request,"objectPath"),
+      fieldOf(request,"sourcePath"),
     ]);
-    const compiled = run(command.command, command.args, { timeoutMs: 120_000 });
-    if (compiled.spawnError !== undefined) {
-      throw new CompilerError("TargetError", "compile", "the C compiler is not available", compiled.spawnError, "", "", "");
+    const compiled = run(fieldOf(command,"command"), (fieldOf(command,"args") as string[]), { timeoutMs: 120_000 });
+    if (fieldOf(compiled,"spawnError") !== undefined) {
+      throw new CompilerError("TargetError", "compile", "the C compiler is not available", fieldOf(compiled,"spawnError"), "", "", "");
     }
-    if (compiled.code !== 0) {
-      throw new CompilerError("LinkError", "compile", `the C compiler rejected the IR of ${functionName}`, `${request.sourcePath}\n${compiled.stderr.trim()}`, "", "", "");
+    if (fieldOf(compiled,"code") !== 0) {
+      throw new CompilerError("LinkError", "compile", `the C compiler rejected the IR of ${functionName}`, `${fieldOf(request,"sourcePath")}\n${String(fieldOf(compiled,"stderr")).trim()}`, "", "", "");
     }
   }
 
-  const info = inspectObject(request.objectPath, functionName, undefined, toolchain);
-  if (info.defined.length !== 1 || info.defined[0] !== functionName) {
+  const info = inspectObject(fieldOf(request,"objectPath"), functionName, undefined, toolchain);
+  if ((fieldOf(info,"defined") as string[]).length !== 1 || (fieldOf(info,"defined") as string[])[0] !== functionName) {
     throw backendError(
-      `the C of ${functionName} defines [${info.defined.join(", ")}] instead of only "${functionName}"`,
-      `the object must define exactly the symbol the program calls: ${declaredType(parseType(request.contract.function.returns))} ${functionName}(...)`,
+      `the C of ${functionName} defines [${(fieldOf(info,"defined") as string[]).join(", ")}] instead of only "${functionName}"`,
+      `the object must define exactly the symbol the program calls: ${declaredType(parseType(fieldOf(fieldOf(fieldOf(request,"contract"),"function"),"returns")))} ${functionName}(...)`,
     );
   }
 
-  const delivered = request.assemblyPath ?? request.sourcePath;
+  const delivered = fieldOf(request,"assemblyPath") ?? fieldOf(request,"sourcePath");
   return {
-    sourcePath: request.sourcePath,
-    objectPath: request.objectPath,
-    objectSizeBytes: (await stat(request.objectPath)).size,
-    textSizeBytes: (await stat(delivered)).size,
-    ...(request.assemblyPath === undefined ? {} : { assemblyPath: request.assemblyPath }),
+    sourcePath: fieldOf(request,"sourcePath"),
+    objectPath: fieldOf(request,"objectPath"),
+    objectSizeBytes: fieldOf((await stat(fieldOf(request,"objectPath"))),"size"),
+    textSizeBytes: fieldOf((await stat(delivered)),"size"),
+    ...(fieldOf(request,"assemblyPath") === undefined ? {} : { assemblyPath: fieldOf(request,"assemblyPath") }),
   };
 }
 

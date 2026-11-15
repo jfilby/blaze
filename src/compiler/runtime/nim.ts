@@ -12,13 +12,17 @@
  * and the benchmark never learn which runtime a candidate was built against.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 import { mkdir, writeFile } from "../core/platform.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { EXECUTABLE_SUFFIX, nimOptimizationOptions } from "../core/target.ts";
 import { isFloatType, parseType, typeToString } from "../semantics/contract.ts";
 import { cDeclarationType } from "../toolchain/linker.ts";
-import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, Runner, TypeExpr } from "../core/types.ts";
+import type { BuildMode, FunctionContract, FunctionParam, ObjectLayout, PrimitiveTypeName, Runner, TypeExpr } from "../core/types.ts";
 import { RUNTIME_ANCHOR, RUNTIME_NAME } from "./abi.ts";
 import { symbolOf } from "../semantics/contract.ts";
 
@@ -61,15 +65,19 @@ const NIM_ELEMENT_SIZES: Record<string, number> = {
 type BufferType = Extract<TypeExpr, { kind: "ptr" | "slice" | "array" }>;
 
 function isBuffer(type: TypeExpr): type is BufferType {
-  return type.kind === "ptr" || type.kind === "slice" || type.kind === "array";
+  const kind = String(fieldOf(type, "kind"));
+  return kind === "ptr" || kind === "slice" || kind === "array";
 }
 
 function isSigned(type: TypeExpr): boolean {
-  return type.kind === "primitive" && (type.name === "isize" || type.name.startsWith("i"));
+  if (String(fieldOf(type, "kind")) !== "primitive") return false;
+  const name = String(fieldOf(type, "name"));
+  return name === "isize" || name.startsWith("i");
 }
 
 function isFloat(type: TypeExpr): boolean {
-  return type.kind === "primitive" && isFloatType(type.name);
+  if (String(fieldOf(type, "kind")) !== "primitive") return false;
+  return isFloatType(String(fieldOf(type, "name")) as PrimitiveTypeName);
 }
 
 function hostError(message: string, detail?: string, functionName?: string): CompilerError {
@@ -77,27 +85,35 @@ function hostError(message: string, detail?: string, functionName?: string): Com
 }
 
 function elementNimType(type: TypeExpr): string {
-  if (type.kind !== "primitive") {
+  if (String(fieldOf(type, "kind")) !== "primitive") {
     throw hostError(`the host program cannot hold a ${typeToString(type)} element`);
   }
-  const nim = NIM_PRIMITIVES[type.name];
-  if (nim === undefined) throw hostError(`the host program cannot hold a ${type.name} element`);
+  const name = String(fieldOf(type, "name"));
+  const nim = NIM_PRIMITIVES[name];
+  if (nim === undefined) throw hostError(`the host program cannot hold a ${name} element`);
   return nim;
 }
 
 function elementSize(type: TypeExpr): number {
-  if (type.kind !== "primitive") throw hostError(`the host program cannot size a ${typeToString(type)} element`);
-  const size = NIM_ELEMENT_SIZES[type.name];
-  if (size === undefined) throw hostError(`the host program cannot size a ${type.name} element`);
+  if (String(fieldOf(type, "kind")) !== "primitive") {
+    throw hostError(`the host program cannot size a ${typeToString(type)} element`);
+  }
+  const name = String(fieldOf(type, "name"));
+  const size = NIM_ELEMENT_SIZES[name];
+  if (size === undefined) throw hostError(`the host program cannot size a ${name} element`);
   return size;
 }
 
 export function nimType(type: TypeExpr): string {
   // A reference is one pointer, named after the object it points at when the
   // contract lays that object out.
-  if (type.kind === "ref") return type.name === undefined ? "pointer" : `ptr ${type.name}`;
-  if (type.kind === "void") return "void";
-  if (isBuffer(type)) return `ptr ${elementNimType(type.of)}`;
+  const kind = String(fieldOf(type, "kind"));
+  if (kind === "ref") {
+    const name = fieldOf(type, "name");
+    return name === undefined ? "pointer" : `ptr ${String(name)}`;
+  }
+  if (kind === "void") return "void";
+  if (isBuffer(type)) return `ptr ${elementNimType(fieldOf(type, "of") as TypeExpr)}`;
   return elementNimType(type);
 }
 
@@ -208,10 +224,11 @@ export function nimName(name: string): string {
 export function nimObjectDeclarations(objects: Record<string, ObjectLayout>): string {
   return Object.values(objects)
     .map((object) => {
-      const fields = object.fields
-        .map((field) => `    ${nimName(field.name)}*: ${nimType(parseType(field.type))}`)
+      const declared = fieldOf(object, "fields") as readonly { name: string; type: string; offset: number }[];
+      const fields = declared
+        .map((field) => `    ${nimName(String(fieldOf(field, "name")))}*: ${nimType(parseType(String(fieldOf(field, "type"))))}`)
         .join("\n");
-      return `type\n  ${object.name}* = object\n${fields}`;
+      return `type\n  ${String(fieldOf(object, "name"))}* = object\n${fields}`;
     })
     .join("\n");
 }
@@ -3295,7 +3312,7 @@ proc nowNs(): int64 =
 
 /** Nim that reads one scalar from a token, with the C harness semantics. */
 function scalarRead(type: TypeExpr, name: string, token: string): string {
-  if (type.kind === "primitive" && type.name === "bool") {
+  if (String(fieldOf(type, "kind")) === "primitive" && String(fieldOf(type, "name")) === "bool") {
     return `${name} = (${token}[0] == 't' or ${token}[0] == '1')`;
   }
   if (isFloat(type)) {
@@ -3319,7 +3336,7 @@ function scalarRead(type: TypeExpr, name: string, token: string): string {
  */
 function resultPrint(type: TypeExpr, expression: string): string {
   if (isFloat(type)) return `stdout.write("RESULT " & formatBiggestFloat(float64(${expression}), ffScientific, 17) & "\\n")`;
-  if (type.kind === "primitive" && type.name === "bool") {
+  if (String(fieldOf(type, "kind")) === "primitive" && String(fieldOf(type, "name")) === "bool") {
     return `stdout.write(if ${expression}: "RESULT 1\\n" else: "RESULT 0\\n")`;
   }
   return `stdout.write("RESULT " & $${expression} & "\\n")`;
@@ -3327,14 +3344,16 @@ function resultPrint(type: TypeExpr, expression: string): string {
 
 /** The value a benchmark accumulates, as a float. */
 function sinkValue(type: TypeExpr, expression: string): string {
-  if (type.kind === "primitive" && type.name === "bool") return `(if ${expression}: 1.0 else: 0.0)`;
+  if (String(fieldOf(type, "kind")) === "primitive" && String(fieldOf(type, "name")) === "bool") {
+    return `(if ${expression}: 1.0 else: 0.0)`;
+  }
   return `float64(${expression})`;
 }
 
 function parameterStorage(type: TypeExpr, name: string): string[] {
   if (!isBuffer(type)) return [`var ${name}_value: ${nimType(type)}`];
   return [
-    `var ${name}_storage: ptr UncheckedArray[${elementNimType(type.of)}]`,
+    `var ${name}_storage: ptr UncheckedArray[${elementNimType(fieldOf(type, "of") as TypeExpr)}]`,
     `var ${name}_count: csize_t`,
   ];
 }
@@ -3356,7 +3375,8 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
       body.push(`  ${scalarRead(type, `${name}_value`, `tokens[${index}]`)}`);
       return;
     }
-    const fixed = type.kind === "array" && type.length !== null ? type.length : null;
+    const length = fieldOf(type, "length") as number | null;
+    const fixed = String(fieldOf(type, "kind")) === "array" && length !== null ? length : null;
     body.push(`  if tokens.len < ${index + 1}: fail("missing length for ${name}")`);
     body.push(`  let declared_${name} = parseBiggestInt(tokens[${index}])`);
     if (fixed !== null) {
@@ -3377,8 +3397,8 @@ function headerReader(types: readonly TypeExpr[], names: readonly string[]): str
     body.push(`    if ${name}_count > (1'u64 shl 28).csize_t: fail("buffer too large")`);
     body.push(`    if ${name}_count != 0:`);
     body.push(
-      `      ${name}_storage = cast[ptr UncheckedArray[${elementNimType(type.of)}]](\n` +
-        `        ${RUNTIME_NAME}_allocate(${name}_count * ${elementSize(type.of)}))`,
+      `      ${name}_storage = cast[ptr UncheckedArray[${elementNimType(fieldOf(type, "of") as TypeExpr)}]](\n` +
+        `        ${RUNTIME_NAME}_allocate(${name}_count * ${elementSize(fieldOf(type, "of") as TypeExpr)}))`,
     );
   });
   return body.join("\n");
@@ -3395,7 +3415,7 @@ function dataReader(types: readonly TypeExpr[], names: readonly string[]): strin
     body.push(`    if not nextLine(tokens): fail("missing data for ${name}")`);
     body.push(`    if tokens.len < int(${name}_count): fail("truncated data for ${name}")`);
     body.push(`    for element in 0 ..< int(${name}_count):`);
-    body.push(`      ${scalarRead(type.of, `${name}_storage[element]`, `tokens[element]`)}`);
+    body.push(`      ${scalarRead(fieldOf(type, "of") as TypeExpr, `${name}_storage[element]`, `tokens[element]`)}`);
   });
   return body.join("\n");
 }
@@ -3414,7 +3434,9 @@ function bufferRelease(types: readonly TypeExpr[], names: readonly string[]): st
 
 function callExpression(contract: FunctionContract, types: readonly TypeExpr[], names: readonly string[]): string {
   const callArguments = names.map((name, index) =>
-    isBuffer(types[index]) ? `cast[ptr ${elementNimType(types[index]!.of)}](${name}_storage)` : `${name}_value`,
+    isBuffer(types[index])
+      ? `cast[ptr ${elementNimType(fieldOf(types[index], "of") as TypeExpr)}](${name}_storage)`
+      : `${name}_value`,
   );
   return `${symbolOf(contract)}(${callArguments.join(", ")})`;
 }
@@ -3425,24 +3447,26 @@ export function generateHostSource(contract: FunctionContract, demoRequest: stri
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     throw hostError("the contract function name is not a valid identifier", undefined, name);
   }
-  const returns = parseType(contract.function.returns);
+  const signature = fieldOf(contract, "function") as { returns: string; params: FunctionParam[] };
+  const returns = parseType(String(fieldOf(signature, "returns")));
   if (isBuffer(returns)) throw hostError("a pointer return type cannot be called from the host", undefined, name);
-  const types = contract.function.params.map((param: FunctionParam) => parseType(param.type));
+  const parameters = fieldOf(signature, "params") as FunctionParam[];
+  const types = parameters.map((param: FunctionParam) => parseType(String(fieldOf(param, "type"))));
   // The C declaration spells the names the contract gives, because that is
   // the ABI. The Nim side is free of them: a parameter is a local name in Nim
   // however the C one is spelled, so it goes through `nimName`. A parameter
   // the source called `type` or `result` named a Nim keyword, and the whole
   // host failed to build.
-  const cNames = contract.function.params.map((param) => param.name);
+  const cNames = parameters.map((param: FunctionParam) => String(fieldOf(param, "name")));
   const names = cNames.map(nimName);
   const cParameters = types.map((type, index) => `${cDeclarationType(type)} ${cNames[index]}`).join(", ");
-  const nimParameters = names.map((name, index) => `${name}: ${nimType(types[index]!)}`).join(", ");
+  const nimParameters = names.map((name, index) => `${name}: ${nimType(types[index])}`).join(", ");
   const declaration = `extern ${cDeclarationType(returns)} ${name}(${cParameters || "void"});`;
   const invocation = callExpression(contract, types, names);
   const anchor = RUNTIME_ANCHOR.map((symbol) => `  cast[pointer](${symbol}),`).join("\n");
   // A `ref` parameter is named after the object it points at, so the types the
   // contract lays out are declared before the signature that spells them.
-  const objects = nimObjectDeclarations(contract.definition.objects);
+  const objects = nimObjectDeclarations(fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>);
 
   return `${HOST_PRELUDE}
 {.emit: """
@@ -3453,7 +3477,7 @@ ${objects}
 
 proc ${name}(${nimParameters}): ${nimType(returns)} {.importc: "${name}", nodecl.}
 
-${types.map((type, index) => parameterStorage(type, names[index]!).join("\n")).join("\n")}
+${types.map((type, index) => parameterStorage(type, names[index]).join("\n")).join("\n")}
 
 proc readHeader(): bool =
 ${headerReader(types, names)}
@@ -3566,8 +3590,12 @@ export interface HostResult {
  * this is the only way a candidate can be built at the same time as another.
  */
 export async function buildHostProgram(request: HostRequest): Promise<HostResult> {
-  const functionName = request.contract.function.name;
-  const base = `${request.workDirectory}/${request.candidate}`;
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const functionName = String(fieldOf(fieldOf(contract, "function"), "name"));
+  const workDirectory = String(fieldOf(request, "workDirectory"));
+  const candidate = String(fieldOf(request, "candidate"));
+  const mode = String(fieldOf(request, "mode")) as BuildMode;
+  const base = `${workDirectory}/${candidate}`;
   // The adapter is imported by its module name, so the file has to be named
   // after it, and a module is looked for beside the file that imports it: the
   // two of them share a directory for that reason and nothing else.
@@ -3579,8 +3607,8 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
   const executable = `${base}${EXECUTABLE_SUFFIX}`;
 
   await mkdir(directory, { recursive: true });
-  await writeFile(adapterPath, generateRuntimeAdapterSource(request.mode), "utf8");
-  await writeFile(hostPath, generateHostSource(request.contract, request.demoRequest), "utf8");
+  await writeFile(adapterPath, generateRuntimeAdapterSource(mode), "utf8");
+  await writeFile(hostPath, generateHostSource(contract, String(fieldOf(request, "demoRequest"))), "utf8");
 
   const result = run(
     "nim",
@@ -3588,23 +3616,25 @@ export async function buildHostProgram(request: HostRequest): Promise<HostResult
       "c",
       "--hints:off",
       "--warnings:off",
-      ...nimOptimizationOptions(request.mode),
+      ...nimOptimizationOptions(mode),
       `--nimcache:${directory}/nimcache`,
       `--out:${executable}`,
-      `--passL:${request.objectPath}`,
+      `--passL:${String(fieldOf(request, "objectPath"))}`,
       hostPath,
     ],
     { timeoutMs: 600_000 },
   );
-  if (result.spawnError !== undefined) {
-    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${result.spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
+  const spawnError = fieldOf(result, "spawnError");
+  if (spawnError !== undefined) {
+    throw new CompilerError("TargetError", "host", "the Nim compiler is not available", `${spawnError}\ninstall Nim, or build this project with --runtime none`, "", "", "");
   }
-  if (result.code !== 0) {
+  if (fieldOf(result, "code") !== 0) {
+    const stderr = String(fieldOf(result, "stderr"));
     throw hostError(
       `the Nim host program for ${functionName} did not build`,
-      `${adapterPath}\n${hostPath}\n${result.stderr.trim()}`,
+      `${adapterPath}\n${hostPath}\n${stderr.trim()}`,
       functionName,
     );
   }
-  return { runner: { command: executable, args: [] }, hostPath, adapterPath };
+  return { runner: { command: executable, args: [] }, hostPath: hostPath, adapterPath: adapterPath };
 }

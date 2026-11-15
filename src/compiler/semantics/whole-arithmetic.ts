@@ -9,6 +9,32 @@
  * mathematical product rather than the low 256 bits of it.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+/** Whether a tree has been rewritten onto modular kernels yet. */
+interface ReduceState { fused: boolean }
+
+/** One value of a dividend tree, written as the kernel call that computes it. */
+function reduceModular(
+  value: SemanticValue,
+  reduced: SemanticValue,
+  make: ModularCall,
+  state: ReduceState,
+): SemanticValue | null {
+  if (value.k !== "arith") return asU256(value);
+  const kernel = MODULAR_KERNEL[String(fieldOf(value, "op"))];
+  const type = fieldOf(value, "type") as SemanticType;
+  if (kernel === undefined || String(fieldOf(type, "kind")) !== "primitive" || String(fieldOf(type, "name")) !== "u256") return null;
+  const left = reduceModular(fieldOf(value, "left") as SemanticValue, reduced, make, state);
+  if (left === null) return null;
+  const right = reduceModular(fieldOf(value, "right") as SemanticValue, reduced, make, state);
+  if (right === null) return null;
+  state.fused = true;
+  return make(kernel, [left, right, reduced]);
+}
+
 import {
   isWhole,
   type ArithOp,
@@ -64,7 +90,9 @@ export function wholePower(base: bigint, exponent: bigint): bigint | null {
   if (exponent === 0n) return 1n;
   const bits = base === 0n ? 1 : base.toString(2).replace("-", "").length;
   if (bits * Number(exponent) > MAX_POWER_BITS) return null;
-  return base ** exponent;
+  let result = 1n;
+  for (let at = 0n; at < exponent; at += 1n) result *= base;
+  return result;
 }
 
 /**
@@ -211,20 +239,9 @@ export function modularReduction(
   // Whether the tree holds an operation at all: a dividend that is one value is
   // the ordinary remainder, and answering it as the value itself would drop the
   // reduction the source wrote.
-  let fused = false;
-  const reduce = (value: SemanticValue): SemanticValue | null => {
-    if (value.k !== "arith") return asU256(value);
-    const kernel = MODULAR_KERNEL[value.op];
-    if (kernel === undefined || value.type.kind !== "primitive" || value.type.name !== "u256") return null;
-    const left = reduce(value.left);
-    if (left === null) return null;
-    const right = reduce(value.right);
-    if (right === null) return null;
-    fused = true;
-    return call(kernel, [left, right, reduced]);
-  };
-  const rendered = reduce(dividend);
-  return fused ? rendered : null;
+  const state: ReduceState = { fused: false };
+  const rendered = reduceModular(dividend, reduced, call, state);
+  return state.fused ? rendered : null;
 }
 
 /**

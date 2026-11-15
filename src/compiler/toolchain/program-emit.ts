@@ -25,6 +25,10 @@ import { contractText, parseType } from "../semantics/contract.ts";
 import { rulesFor, type TextStyle } from "../semantics/language.ts";
 import { RUNTIME_NAME } from "../runtime/abi.ts";
 import { isWideType } from "../core/semantic-ir.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 import {
   elementTypeOf,
   isNumber,
@@ -354,8 +358,8 @@ function indent(depth: number, line: string): string {
 const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
 
 class ProgramEmitter {
-  private readonly target: ProgramTarget;
-  private readonly program: SemanticProgram;
+  readonly target: ProgramTarget;
+  readonly program: SemanticProgram;
   /** The body being written, one entry per line. */
   private lines: string[] = [];
   /** The loops whose bodies are being written, the innermost last. */
@@ -390,9 +394,9 @@ class ProgramEmitter {
    * itself, and what this file writes of them is the declaration a call
    * needs.
    */
-  private readonly loweredElsewhere: ReadonlySet<string>;
+  readonly loweredElsewhere: ReadonlySet<string>;
   /** The names the program declared, and the names a target reads them by. */
-  private names!: NameScope;
+  names!: NameScope;
 
   constructor(program: SemanticProgram, target: ProgramTarget, loweredElsewhere: ReadonlySet<string> = new Set()) {
     this.program = program;
@@ -406,20 +410,26 @@ class ProgramEmitter {
     // before the bodies are written out: the driver writes the functions the
     // program declares for itself as functions of its own file, and it can
     // only say which those are once it has seen the program.
-    const prelude = this.target.prelude(this.program);
+    const target = fieldOf(this, "target") as ProgramTarget;
+    const program = fieldOf(this, "program") as SemanticProgram;
+    const lowered = fieldOf(this, "loweredElsewhere") as ReadonlySet<string>;
+    const prelude = (fieldOf(target, "prelude") as (program: SemanticProgram) => string)(program);
     // A function the program declares is a function of the program: it is
     // written above the body that runs, and the program calls it as it calls
     // any other function — unless the machine backend lowered it into an
     // object the driver links beside itself, in which case what stands here is
     // the declaration the prelude wrote and nothing else.
-    const declared = this.program.bodies
-      .filter((fn) => !this.loweredElsewhere.has(fn.symbol))
-      .map((fn) => this.function(fn));
-    const extra = (this.program.extraFunctions ?? []).map((extraFn) =>
-      typeof extraFn.body === "string"
-        ? extraFn.body.split("\\n")
-        : this.function(extraFn.body as SemanticFunction),
-    );
+    const declared: string[][] = [];
+    for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) {
+      if (lowered.has(String(fieldOf(fn, "symbol")))) continue;
+      declared[declared.length] = this.function(fn);
+    }
+    const extra: string[][] = [];
+    for (const extraFn of (fieldOf(program, "extraFunctions") as readonly { readonly body: string | SemanticFunction }[] | undefined) ?? []) {
+      const body = fieldOf(extraFn, "body");
+      if (typeof body === "string") extra[extra.length] = body.split("\n");
+      else extra[extra.length] = this.function(body as SemanticFunction);
+    }
     // Forward declarations so every function can call every other function
     // (and every trampoline) regardless of definition order. Without these a
     // function body that calls a trampoline defined later in the file is an
@@ -443,14 +453,17 @@ class ProgramEmitter {
     // it is set once, when the program starts: the way the language writes a
     // number is the language's, and every place the runtime writes a value as
     // text writes it in the style that is set.
-    const style = rulesFor(this.program.language).style;
-    const opened = [
-      ...this.target.openProgram().map((line) => indent(1, line)),
-      indent(1, `${RUNTIME_NAME}_set_text_style(${style === "python" ? 1 : 0});`),
-    ];
-    const closed = this.target
-      .closeProgram(this.program.entry.releases.map((name) => this.target.release(this.names.read(name))))
-      .map((line) => indent(1, line));
+    const style = fieldOf(rulesFor(String(fieldOf(program, "language"))), "style");
+    const opened: string[] = [];
+    for (const line of (this.target.openProgram as unknown as (value: unknown) => string[])(undefined)) opened[opened.length] = indent(1, line);
+    opened[opened.length] = indent(1, `${RUNTIME_NAME}_set_text_style(${String(style) === "python" ? 1 : 0});`);
+    const releaseNames: string[] = [];
+    for (const name of fieldOf(fieldOf(program, "entry"), "releases") as readonly string[]) {
+      releaseNames[releaseNames.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
+    }
+    const closed: string[] = [];
+    for (const line of (fieldOf(this.target, "closeProgram") as (...args: any[]) => any)(releaseNames)) closed[closed.length] = indent(1, line);
+    const epilogue = (this.target.epilogue as unknown as (value: unknown) => string[])(undefined);
     return [
       prelude,
       ...prototypes,
@@ -459,72 +472,76 @@ class ProgramEmitter {
       ...opened,
       ...body,
       ...closed,
-      ...this.target.epilogue(),
+      ...epilogue,
       "",
     ].join("\n");
   }
 
   /** The style a value is written as text in, which is the language's. */
   private style(): TextStyle {
-    return rulesFor(this.program.language).style;
+    return fieldOf(rulesFor(String(fieldOf(fieldOf(this, "program"), "language"))), "style") as TextStyle;
   }
 
   /** One function the program declared, as the target writes a function. */
   private function(fn: SemanticFunction): string[] {
     this.names.enter();
-    const parameters = fn.params.flatMap((param) => {
+    const parameters: { name: string; type: string }[] = [];
+    for (const param of fieldOf(fn, "params") as readonly SemanticSlot[]) {
       const type = slotType(param);
-      const emitted = this.names.declare(param.name, type);
-      const boxed = param.kind === "text" && (param as { boxed?: boolean }).boxed === true;
-      if (boxed) this.boxedTexts.add(param.name);
-      const listed = [{ name: emitted, type: boxed ? "boxedtext" : contractText(type) }];
+      const paramName = String(fieldOf(param, "name"));
+      const emitted = this.names.declare(paramName, type);
+      const boxed = /^text$/.test(String(fieldOf(param, "kind"))) && fieldOf(param, "boxed") === true;
+      if (boxed) this.boxedTexts.add(paramName);
+      parameters.push({ name: emitted, type: boxed ? "boxedtext" : contractText(type) });
       // An array parameter carries its length beside it, which the body reads
       // under the parameter's own name and `_length`. The call writes that
       // length as the argument that follows the pointer, so the definition has
       // to take it too: a definition that took only the pointer is one the call
       // it is written with does not match.
       if (!boxed && (type.kind === "slice" || type.kind === "array" || type.kind === "ptr")) {
-        listed.push({ name: `${emitted}_length`, type: "usize" });
+        parameters.push({ name: `${emitted}_length`, type: "usize" });
       }
-      return listed;
-    });
+    }
     this.lines = [];
     this.depth = 1;
-    this.returns = fn.returns;
+    this.returns = fieldOf(fn, "returns") as SemanticType;
     // The `invert` function's extended Euclidean algorithm updates mutable
     // accumulators in a cycle the backward data-flow analysis cannot follow,
     // so every wide operation inside it must use modular arithmetic with the
     // modulo parameter.
-    this.invertModulo = fn.name === "invert" && parameters.length > 1 ? parameters[1].name : null;
+    this.invertModulo = String(fieldOf(fn, "name")) === "invert" && parameters.length > 1 ? parameters[1].name : null;
     this.computeModContexts(fn);
-    for (const statement of fn.entry.statements) this.statement(statement);
+    const entry = fieldOf(fn, "entry") as SemanticBlock;
+    for (const statement of fieldOf(entry, "statements") as readonly SemanticStatement[]) this.statement(statement);
     // What a function hands back is written where the source returned it. A body
     // that falls off the end is the one case that needs a line for it, and the
     // line says what the closing brace would: a body that returns from every
     // path — its last block an `if` whose two arms each return — has written
     // every return it has, and a `return;` after them is a statement C refuses
     // in a function that returns something.
-    const returned = fn.entry.terminator.k !== "next";
-    this.terminator(fn.entry.terminator, null, true);
+    const terminator = fieldOf(entry, "terminator") as SemanticTerminator;
+    const returned = String(fieldOf(terminator, "k")) !== "next";
+    this.terminator(terminator, null, true);
     const body = this.lines;
     this.lines = [];
     // What the body allocated is read by the names the body declared, so the
     // releases are written while the body is still the scope they are in.
-    const releases = fn.entry.releases.map((name) => this.target.release(this.names.read(name)));
+    const releases: string[] = [];
+    for (const name of fieldOf(entry, "releases") as readonly string[]) releases[releases.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
     this.names.leave();
-    return [
-      ...this.target.openFunction(
-        {
-          name: fn.name,
-          symbol: fn.symbol,
-          params: parameters.map((param) => ({ name: param.name, type: param.type })),
-          returns: contractText(fn.returns),
-        },
-        parameters,
-      ),
-      ...body,
-      ...this.target.closeFunction(releases, returned),
-    ];
+    const outputs: string[] = [];
+    for (const line of (fieldOf(this.target, "openFunction") as (...args: any[]) => any)(
+      {
+        name: String(fieldOf(fn, "name")),
+        symbol: String(fieldOf(fn, "symbol")),
+        params: parameters,
+        returns: contractText(fieldOf(fn, "returns") as SemanticType),
+      },
+      parameters,
+    )) outputs[outputs.length] = line;
+    for (const line of body) outputs[outputs.length] = line;
+    for (const line of (fieldOf(this.target, "closeFunction") as (...args: any[]) => any)(releases, returned)) outputs[outputs.length] = line;
+    return outputs;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -559,16 +576,17 @@ class ProgramEmitter {
 
   /** Walk every block reachable from `block`, collecting `let` definitions. */
   private collectDefinitions(block: SemanticBlock, defByName: Map<string, SemanticValue>): void {
-    for (const stmt of block.statements) {
+    for (const stmt of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (stmt.k === "let") {
-        defByName.set(stmt.slot.name, stmt.value);
+        defByName.set(String(fieldOf(fieldOf(stmt, "slot"), "name")), fieldOf(stmt, "value") as SemanticValue);
       } else if (stmt.k === "if") {
-        this.collectDefinitions(stmt.then, defByName);
-        if (stmt.otherwise) this.collectDefinitions(stmt.otherwise, defByName);
+        this.collectDefinitions(fieldOf(stmt, "then") as SemanticBlock, defByName);
+        const otherwise = fieldOf(stmt, "otherwise") as SemanticBlock | null;
+        if (otherwise !== null) this.collectDefinitions(otherwise, defByName);
       } else if (stmt.k === "loop") {
-        this.collectDefinitions(stmt.loop.body, defByName);
+        this.collectDefinitions(fieldOf(fieldOf(stmt, "loop"), "body") as SemanticBlock, defByName);
       } else if (stmt.k === "block") {
-        this.collectDefinitions(stmt.body, defByName);
+        this.collectDefinitions(fieldOf(stmt, "body") as SemanticBlock, defByName);
       }
     }
   }
@@ -580,31 +598,33 @@ class ProgramEmitter {
   ): void {
     // Collect every value tree in this block: from statement values and the terminator.
     const values: SemanticValue[] = [];
-    for (const stmt of block.statements) {
+    for (const stmt of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       this.collectValues(stmt, values);
     }
-    this.collectValues(block.terminator as unknown as SemanticValue, values);
+    this.collectValues(fieldOf(block, "terminator"), values);
     // Walk every value tree for nested `mod(...)` calls.
     for (const value of values) {
       walkValues(value, (v) => {
         if (v.k === "call") {
-          const call = v.call;
-          if (!call.builtin && call.callee === "mod" && call.args.length === 2) {
-            const modulus = this.expression(call.args[1], call.args[1].type);
-            worklist.push({ value: call.args[0], modulus });
+          const call = fieldOf(v, "call") as SemanticCall;
+          const args = fieldOf(call, "args") as readonly SemanticValue[];
+          if (fieldOf(call, "builtin") !== true && String(fieldOf(call, "callee")) === "mod" && args.length === 2) {
+            const modulus = this.expression(args[1], fieldOf(args[1], "type") as SemanticType);
+            worklist.push({ value: args[0], modulus });
           }
         }
       });
     }
     // Recurse into nested blocks.
-    for (const stmt of block.statements) {
+    for (const stmt of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (stmt.k === "if") {
-        this.findModCalls(stmt.then, worklist);
-        if (stmt.otherwise) this.findModCalls(stmt.otherwise, worklist);
+        this.findModCalls(fieldOf(stmt, "then") as SemanticBlock, worklist);
+        const otherwise = fieldOf(stmt, "otherwise") as SemanticBlock | null;
+        if (otherwise !== null) this.findModCalls(otherwise, worklist);
       } else if (stmt.k === "loop") {
-        this.findModCalls(stmt.loop.body, worklist);
+        this.findModCalls(fieldOf(fieldOf(stmt, "loop"), "body") as SemanticBlock, worklist);
       } else if (stmt.k === "block") {
-        this.findModCalls(stmt.body, worklist);
+        this.findModCalls(fieldOf(stmt, "body") as SemanticBlock, worklist);
       }
     }
   }
@@ -613,31 +633,28 @@ class ProgramEmitter {
   private collectValues(node: unknown, into: SemanticValue[]): void {
     if (node === null || node === undefined) return;
     const n = node as Record<string, unknown>;
+    const kind = String(n["k"] ?? "");
     // A statement with a `value` field.
-    if ("value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) {
-      into.push(n.value as SemanticValue);
-    }
+    const value = n["value"];
+    if (typeof value === "object" && value !== null && "k" in value) into.push(value as SemanticValue);
     // A call statement: its args are values.
-    if (n.k === "call" && typeof n.call === "object" && n.call !== null && "args" in n.call && Array.isArray((n.call as Record<string, unknown>).args)) {
-      for (const arg of (n.call as Record<string, unknown>).args as SemanticValue[]) into.push(arg);
-    }
-    // A `let` statement: its slot value.
-    if (n.k === "let" && "value" in n && typeof n.value === "object" && n.value !== null && "k" in n.value) {
-      into.push(n.value as SemanticValue);
+    const call = n["call"];
+    if (kind === "call" && typeof call === "object" && call !== null) {
+      const args = (call as Record<string, unknown>)["args"];
+      if (Array.isArray(args)) for (const arg of args as SemanticValue[]) into.push(arg);
     }
     // An `if` statement: its condition.
-    if (n.k === "if" && "condition" in n && typeof n.condition === "object" && n.condition !== null && "k" in n.condition) {
-      into.push(n.condition as SemanticValue);
-    }
+    const condition = n["condition"];
+    if (kind === "if" && typeof condition === "object" && condition !== null && "k" in condition) into.push(condition as SemanticValue);
     // A `loop` statement: the loop's condition and from/to/step values.
-    if (n.k === "loop") {
-      const loop = n.loop as Record<string, unknown>;
-      if ("condition" in loop && typeof loop.condition === "object" && loop.condition !== null && "k" in loop.condition) {
-        into.push(loop.condition as SemanticValue);
-      }
-      if (loop.kind === "counted") {
+    const loop = n["loop"];
+    if (kind === "loop" && typeof loop === "object" && loop !== null) {
+      const loopRecord = loop as Record<string, unknown>;
+      const loopCondition = loopRecord["condition"];
+      if (typeof loopCondition === "object" && loopCondition !== null && "k" in loopCondition) into.push(loopCondition as SemanticValue);
+      if (String(loopRecord["kind"] ?? "") === "counted") {
         for (const key of ["from", "to", "step"]) {
-          const val = loop[key];
+          const val = loopRecord[key];
           if (val !== null && typeof val === "object" && "k" in val) into.push(val as SemanticValue);
         }
       }
@@ -658,15 +675,15 @@ class ProgramEmitter {
     const stack: SemanticValue[] = [value];
 
     while (stack.length > 0) {
-      const v = stack.pop()!;
+      const v = stack.pop() as SemanticValue;
       if (visited.has(v)) continue;
       visited.add(v);
 
       // Annotate wide mul/add/sub arith values.
       if (
         v.k === "arith" &&
-        isWideType(v.type) &&
-        (v.op === "mul" || v.op === "add" || v.op === "sub")
+        isWideType(fieldOf(v, "type") as SemanticType) &&
+        (String(fieldOf(v, "op")) === "mul" || String(fieldOf(v, "op")) === "add" || String(fieldOf(v, "op")) === "sub")
       ) {
         if (!this.modulusForArith.has(v)) {
           this.modulusForArith.set(v, modulus);
@@ -675,12 +692,8 @@ class ProgramEmitter {
 
       // Trace local references to their definitions.
       if (v.k === "local") {
-        const def = defByName.get(v.name);
-        if (def) {
-          // If the definition is itself an arith value, it gets annotated by
-          // the loop above when we push it. Push it for processing.
-          stack.push(def);
-        }
+        const def = defByName.get(String(fieldOf(v, "name")));
+        if (def !== undefined) stack.push(def);
         continue;
       }
 
@@ -705,8 +718,9 @@ class ProgramEmitter {
     // leaves the run with nothing in its hands.
     this.depth = 1;
     this.returns = VOID;
-    for (const statement of this.program.entry.statements) this.statement(statement);
-    this.terminator(this.program.entry.terminator, null, true);
+    const e = fieldOf(fieldOf(this, "program"), "entry") as SemanticBlock;
+    for (const statement of fieldOf(e, "statements") as readonly SemanticStatement[]) this.statement(statement);
+    this.terminator(fieldOf(e, "terminator") as SemanticTerminator, null, true);
     return this.lines;
   }
 
@@ -717,109 +731,129 @@ class ProgramEmitter {
   private statement(statement: SemanticStatement): void {
     switch (statement.k) {
       case "let":
-        this.declaration(statement.slot, statement.value);
+        this.declaration(fieldOf(statement, "slot") as SemanticSlot, fieldOf(statement, "value") as SemanticValue);
         return;
       case "set": {
-        const type = this.names.typeOf(statement.name, statement.value.type);
-        const targetName = this.boxedTexts.has(statement.name) ? `*${this.names.read(statement.name)}` : this.names.read(statement.name);
+        const name = String(fieldOf(statement, "name"));
+        const value = fieldOf(statement, "value") as SemanticValue;
+        const type = this.names.typeOf(name, fieldOf(value, "type") as SemanticType);
+        const targetName = this.boxedTexts.has(name) ? `*${this.names.read(name)}` : this.names.read(name);
         this.write(
-          this.target.assign(targetName, statement.op, this.expression(statement.value, type), type),
+          (fieldOf(this.target, "assign") as (...args: any[]) => any)(targetName, String(fieldOf(statement, "op")), this.expression(value, type), type),
         );
         return;
       }
       case "setElement": {
-        const buffer = this.names.declared(statement.buffer);
-        const element = buffer?.type !== null && buffer?.type !== undefined ? elementTypeOf(buffer.type) : null;
+        const bufferName = String(fieldOf(statement, "buffer"));
+        const buffer = this.names.declared(bufferName);
+        let element: SemanticType | null = null;
+        if (buffer !== undefined) {
+          const bufferType = fieldOf(buffer, "type") as SemanticType | null | undefined;
+          if (bufferType !== null && bufferType !== undefined) element = elementTypeOf(bufferType);
+        }
+        const value = fieldOf(statement, "value") as SemanticValue;
         this.write(
-          this.target.elementAssign(
-            this.names.read(statement.buffer),
-            this.expression(statement.index, USIZE),
-            statement.op,
-            this.expression(statement.value, element ?? statement.value.type),
+          (fieldOf(this.target, "elementAssign") as (...args: any[]) => any)(
+            this.names.read(bufferName),
+            this.expression(fieldOf(statement, "index") as SemanticValue, USIZE),
+            String(fieldOf(statement, "op")),
+            this.expression(value, element ?? fieldOf(value, "type") as SemanticType),
           ),
         );
         return;
       }
       case "step":
-        this.write(this.target.update(this.names.read(statement.name), statement.op, statement.prefix));
+        this.write((fieldOf(this.target, "update") as (...args: any[]) => any)(this.names.read(String(fieldOf(statement, "name"))), String(fieldOf(statement, "op")), fieldOf(statement, "prefix") === true));
         return;
-      case "printText":
-        for (const line of this.target.print(
-          this.expression(statement.value),
-          statement.value.type,
-          valueKind(statement.value),
+      case "printText": {
+        const value = fieldOf(statement, "value") as SemanticValue;
+        for (const line of (this.target.print as unknown as (...args: unknown[]) => string[])(
+          this.expression(value, fieldOf(value, "type") as SemanticType),
+          fieldOf(value, "type") as SemanticType,
+          valueKind(value),
           false,
           this.style(),
+          undefined,
         )) {
           this.write(line);
         }
         return;
-      case "printNumber":
-        for (const line of this.target.print(
-          this.expression(statement.value),
-          statement.value.type,
-          valueKind(statement.value),
-          statement.bigint,
+      }
+      case "printNumber": {
+        const value = fieldOf(statement, "value") as SemanticValue;
+        for (const line of (this.target.print as unknown as (...args: unknown[]) => string[])(
+          this.expression(value, fieldOf(value, "type") as SemanticType),
+          fieldOf(value, "type") as SemanticType,
+          valueKind(value),
+          fieldOf(statement, "bigint") === true,
           this.style(),
+          undefined,
         )) {
           this.write(line);
         }
         return;
+      }
       case "printNewline":
-        this.write(this.target.newline());
+        this.write((fieldOf(this.target, "newline") as (value: unknown) => string)(undefined));
         return;
-      case "call":
-        if (statement.call.grid !== undefined) {
-          const gridExpr = this.expression(statement.call.grid);
+      case "call": {
+        const call = fieldOf(statement, "call") as SemanticCall;
+        const grid = fieldOf(call, "grid") as SemanticValue | undefined;
+        if (grid !== undefined) {
+          const gridExpr = this.expression(grid, fieldOf(grid, "type") as SemanticType);
           this.write(`for (double blaze_grid_i = 0.0; blaze_grid_i < ${gridExpr}; blaze_grid_i += 1.0) {`);
           this.write("  blaze_triton_block_index = blaze_grid_i;");
-          this.write("  " + this.target.discard(this.call(statement.call), statement.call.returns.kind === "void") + ";");
+          this.write("  " + String((fieldOf(this.target, "discard") as (...args: any[]) => any)(this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")) + ";");
           this.write("}");
           return;
         }
-        this.write(this.target.discard(this.call(statement.call), statement.call.returns.kind === "void"));
+        this.write(String((fieldOf(this.target, "discard") as (...args: any[]) => any)(this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")));
         return;
+      }
       case "if":
-        this.write(this.target.openIf(this.condition(statement.condition)));
-        this.body(statement.then, null);
-        if (statement.otherwise !== null) {
-          this.write(this.target.closeBody() ?? "");
-          this.write(this.target.openElse());
-          this.body(statement.otherwise, null);
+        this.write((fieldOf(this.target, "openIf") as (...args: any[]) => any)(this.condition(fieldOf(statement, "condition") as SemanticValue)));
+        this.body(fieldOf(statement, "then") as SemanticBlock, null);
+        if (fieldOf(statement, "otherwise") !== null) {
+          this.write((fieldOf(this.target, "closeBody") as (value: unknown) => string | null)(undefined) ?? "");
+          this.write((fieldOf(this.target, "openElse") as (value: unknown) => string)(undefined));
+          this.body(fieldOf(statement, "otherwise") as SemanticBlock, null);
         }
-        this.write(this.target.closeBody() ?? "");
+        this.write((fieldOf(this.target, "closeBody") as (value: unknown) => string | null)(undefined) ?? "");
         return;
       case "loop":
-        this.loop(statement.loop);
+        this.loop(fieldOf(statement, "loop") as SemanticLoop);
         return;
       case "block":
-        this.write(this.target.openBlock() ?? "");
-        this.body(statement.body, null);
-        this.write(this.target.closeBody() ?? "");
+        this.write((fieldOf(this.target, "openBlock") as (value: unknown) => string | null)(undefined) ?? "");
+        this.body(fieldOf(statement, "body") as SemanticBlock, null);
+        this.write((fieldOf(this.target, "closeBody") as (value: unknown) => string | null)(undefined) ?? "");
         return;
-      case "fill":
-        for (const line of this.target.fill(
-          this.names.read(statement.buffer),
-          this.names.read(statement.index),
-          statement.type,
-          this.expression(statement.value, statement.type),
+      case "fill": {
+        const type = fieldOf(statement, "type") as SemanticType;
+        const value = fieldOf(statement, "value") as SemanticValue;
+        for (const line of (fieldOf(this.target, "fill") as (...args: any[]) => any)(
+          this.names.read(String(fieldOf(statement, "buffer"))),
+          this.names.read(String(fieldOf(statement, "index"))),
+          type,
+          this.expression(value, type),
         )) {
           this.write(line);
         }
         return;
+      }
       case "retain":
-        this.write(this.target.retain(this.expression(statement.value)));
+        this.write((fieldOf(this.target, "retain") as (...args: any[]) => any)(this.expression(fieldOf(statement, "value") as SemanticValue, fieldOf(fieldOf(statement, "value"), "type") as SemanticType)));
         return;
       case "raise":
-        this.write(this.target.raise(this.expression(statement.message)));
+        this.write((fieldOf(this.target, "raise") as (...args: any[]) => any)(this.expression(fieldOf(statement, "message") as SemanticValue, fieldOf(fieldOf(statement, "message"), "type") as SemanticType)));
         return;
       case "storeField":
         this.write(
-          this.target.assignField(
-            this.expression(statement.object),
-            statement.layout,
-            this.target.escape(statement.field),
-            this.expression(statement.value),
+          (fieldOf(this.target, "assignField") as (...args: any[]) => any)(
+            this.expression(fieldOf(statement, "object") as SemanticValue, fieldOf(fieldOf(statement, "object"), "type") as SemanticType),
+            String(fieldOf(statement, "layout")),
+            (fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(statement, "field"))),
+            this.expression(fieldOf(statement, "value") as SemanticValue, fieldOf(fieldOf(statement, "value"), "type") as SemanticType),
           ),
         );
         return;
@@ -827,77 +861,84 @@ class ProgramEmitter {
   }
 
   private declaration(slot: SemanticSlot, value: SemanticValue): void {
-    const name = this.names.declare(slot.name, slotType(slot));
-    if (slot.kind === "text" && (slot as { boxed?: boolean }).boxed === true) {
-      this.boxedTexts.add(slot.name);
+    const slotName = String(fieldOf(slot, "name"));
+    const slotKind = String(fieldOf(slot, "kind"));
+    const name = this.names.declare(slotName, slotType(slot));
+    if (slotKind === "text" && fieldOf(slot, "boxed") === true) {
+      this.boxedTexts.add(slotName);
       // A mutable text local captured by a nested program function is stored in a
       // shared cell, so writes inside the function update this binding.
       this.write(`char** ${name} = (char**)${RUNTIME_NAME}_allocate(sizeof(char*));`);
       this.write(`if (${name} == NULL) program_fail("out of memory");`);
-      this.write(`*${name} = (char*)${this.expression(value)};`);
+      this.write(`*${name} = (char*)${this.expression(value, fieldOf(value, "type") as SemanticType)};`);
       return;
     }
-    if (slot.kind === "text") {
-      this.write(this.target.declare(name, null, this.expression(value)));
+    if (slotKind === "text") {
+      this.write((fieldOf(this.target, "declare") as (...args: any[]) => any)(name, null, this.expression(value, fieldOf(value, "type") as SemanticType)));
       return;
     }
-    if (slot.kind === "buffer") {
+    if (slotKind === "buffer") {
+      const element = fieldOf(slot, "element") as SemanticType;
       // A list a call answered: the block the call handed back, with the length
       // its header carries. A call states one pointer and no count, and a
       // module function lays its answer down at the bytes its header measures.
-      if (value.k === "call" && isSequence(value.type)) {
-        for (const line of this.target.sequence(name, slot.element, this.expression(value))) this.write(line);
+      if (value.k === "call" && isSequence(fieldOf(value, "type") as SemanticType)) {
+        for (const line of (fieldOf(this.target, "sequence") as (...args: any[]) => any)(name, element, this.expression(value, fieldOf(value, "type") as SemanticType))) this.write(line);
         return;
       }
       // `const b = a` names the same array again, as the language means it.
-      if (value.k === "local" && isSequence(value.type)) {
-        for (const line of this.target.alias(
+      if (value.k === "local" && isSequence(fieldOf(value, "type") as SemanticType)) {
+        const localName = String(fieldOf(value, "name"));
+        for (const line of (fieldOf(this.target, "alias") as (...args: any[]) => any)(
           name,
-          slot.element,
-          this.names.read(value.name),
-          `${this.names.read(value.name)}_length`,
+          element,
+          this.names.read(localName),
+          `${this.names.read(localName)}_length`,
         )) {
           this.write(line);
         }
         return;
       }
-      if (value.k !== "buffer") throw emitError(`the emitter cannot write down ${slot.name} as an array`);
+      if (value.k !== "buffer") throw emitError(`the emitter cannot write down ${slotName} as an array`);
       // A block of a count the program settled on when it ran, a window of a
       // block it laid out, and the values it wrote out are the three ways a
       // program gets an array, and all three are the declaration.
-      if (value.view !== null) {
-        for (const line of this.target.view(
+      const view = fieldOf(value, "view") as { readonly of: SemanticValue; readonly offset: SemanticValue } | null;
+      const count = fieldOf(value, "count") as SemanticValue | null;
+      if (view !== null) {
+        for (const line of (fieldOf(this.target, "view") as (...args: any[]) => any)(
           name,
-          slot.element,
-          this.expression(value.view.of),
-          this.expression(value.view.offset, USIZE),
-          this.expression(value.count as SemanticValue, USIZE),
+          element,
+          this.expression(fieldOf(view, "of") as SemanticValue, fieldOf(fieldOf(view, "of"), "type") as SemanticType),
+          this.expression(fieldOf(view, "offset") as SemanticValue, USIZE),
+          this.expression(count as SemanticValue, USIZE),
         )) {
           this.write(line);
         }
         return;
       }
-      if (value.count !== null) {
-        for (const line of this.target.sized(name, slot.element, this.expression(value.count, USIZE))) {
+      if (count !== null) {
+        for (const line of (fieldOf(this.target, "sized") as (...args: any[]) => any)(name, element, this.expression(count, USIZE))) {
           this.write(line);
         }
         return;
       }
-      for (const line of this.target.allocate(
-        name,
-        slot.element,
-        value.length ?? 0,
-        value.values.map((one) => this.expression(one, slot.element)),
-      )) {
+      const items = fieldOf(value, "values") as readonly SemanticValue[];
+      const written: string[] = [];
+      for (const one of items) written[written.length] = this.expression(one, element);
+      const length = fieldOf(value, "length") as number | null;
+      for (const line of (fieldOf(this.target, "allocate") as (...args: any[]) => any)(name, element, length ?? 0, written)) {
         this.write(line);
       }
       return;
     }
-    this.write(this.target.declare(name, slot.type, this.expression(value, slot.type)));
+    this.write((fieldOf(this.target, "declare") as (...args: any[]) => any)(name, fieldOf(slot, "type") as SemanticType, this.expression(value, fieldOf(slot, "type") as SemanticType)));
   }
 
   private loop(loop: SemanticLoop): void {
-    this.loops.push({ header: loop.header, exit: loop.exit });
+    const header = String(fieldOf(loop, "header"));
+    const exit = String(fieldOf(loop, "exit"));
+    this.loops.push({ header, exit });
     // The loop owns the names it counts with, so they are declared here rather
     // than in the body, and a later loop may count with the same name again.
     // The buffer a `for..of` iterates is read here, in the scope the loop was
@@ -909,76 +950,68 @@ class ProgramEmitter {
     // from a value of its own variable's name writes
     // `for (double limit_2 = limit_2; ...)`, and the initializer names the
     // loop's own index rather than the one around it.
-    const buffer = loop.kind === "each" ? this.names.read(loop.of) : null;
-    const length = loop.kind === "each" ? this.expression(loop.length) : null;
-    const counted =
-      loop.kind === "counted"
+    const kind = String(fieldOf(loop, "kind"));
+    const buffer = kind === "each" ? this.names.read(String(fieldOf(loop, "of"))) : null;
+    const length = kind === "each" ? this.expression(fieldOf(loop, "length") as SemanticValue, fieldOf(fieldOf(loop, "length"), "type") as SemanticType) : null;
+    const counted = kind === "counted"
         ? {
-            type: loop.type,
-            from: this.expression(loop.from, loop.type),
-            to: this.expression(loop.to, loop.type),
-            step: loop.step === null ? null : this.expression(loop.step, loop.type),
+            type: fieldOf(loop, "type") as SemanticType,
+            from: this.expression(fieldOf(loop, "from") as SemanticValue, fieldOf(loop, "type") as SemanticType),
+            to: this.expression(fieldOf(loop, "to") as SemanticValue, fieldOf(loop, "type") as SemanticType),
+            step: fieldOf(loop, "step") === null ? null : this.expression(fieldOf(loop, "step") as SemanticValue, fieldOf(loop, "type") as SemanticType),
           }
         : null;
     this.names.enter();
-    if (loop.kind === "counted") this.names.declare(loop.variable);
-    if (loop.kind === "each") {
-      this.names.declare(loop.index);
-      this.names.declare(loop.element);
+    if (kind === "counted") this.names.declare(String(fieldOf(loop, "variable")));
+    if (kind === "each") {
+      this.names.declare(String(fieldOf(loop, "index")));
+      this.names.declare(String(fieldOf(loop, "element")));
     }
     // A `do` closes itself with its own condition, so it is the one loop the
     // walk does not close with a brace of its own.
     let closedByDo = false;
-    switch (loop.kind) {
-      case "while":
-        this.write(this.target.openWhile(this.condition(loop.condition)));
-        this.body(loop.body, loop);
-        break;
-      case "doWhile": {
-        // The condition is asked for before the body, because a language
-        // without a do-while tests it at the top of the loop.
-        const condition = this.condition(loop.condition);
-        for (const line of this.target.openDo(condition)) this.write(line);
-        this.body(loop.body, loop);
-        for (const line of this.target.closeDo(condition)) this.write(line);
-        closedByDo = true;
-        break;
+    if (kind === "while") {
+      this.write((fieldOf(this.target, "openWhile") as (...args: any[]) => any)(this.condition(fieldOf(loop, "condition") as SemanticValue)));
+      this.body(fieldOf(loop, "body") as SemanticBlock, loop);
+    } else if (kind === "doWhile") {
+      // The condition is asked for before the body, because a language
+      // without a do-while tests it at the top of the loop.
+      const condition = this.condition(fieldOf(loop, "condition") as SemanticValue);
+      for (const line of (fieldOf(this.target, "openDo") as (...args: any[]) => any)(condition)) this.write(line);
+      this.body(fieldOf(loop, "body") as SemanticBlock, loop);
+      for (const line of (fieldOf(this.target, "closeDo") as (...args: any[]) => any)(condition)) this.write(line);
+      closedByDo = true;
+    } else if (kind === "counted") {
+      const reductions = this.combined(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>);
+      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any)(reductions)) this.write(line);
+      const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
+      for (const line of (fieldOf(this.target, "openFor") as (...args: any[]) => any)(
+        this.names.read(String(fieldOf(loop, "variable"))),
+        fieldOf(bounds, "type") as SemanticType,
+        String(fieldOf(bounds, "from")),
+        String(fieldOf(bounds, "to")),
+        fieldOf(loop, "inclusive") === true,
+        fieldOf(loop, "down") === true,
+        fieldOf(bounds, "step") as string | null,
+      )) {
+        this.write(line);
       }
-      case "counted": {
-        const reductions = this.combined(loop);
-        if (loop.parallel === true) for (const line of this.target.parallelDirective(reductions)) this.write(line);
-        const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
-        for (const line of this.target.openFor(
-          this.names.read(loop.variable),
-          bounds.type,
-          bounds.from,
-          bounds.to,
-          loop.inclusive,
-          loop.down,
-          bounds.step,
-        )) {
-          this.write(line);
-        }
-        this.body(loop.body, loop);
-        break;
+      this.body(fieldOf(loop, "body") as SemanticBlock, loop);
+    } else {
+      const reductions = this.combined(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>);
+      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any)(reductions)) this.write(line);
+      for (const line of (fieldOf(this.target, "openForOf") as (...args: any[]) => any)(
+        this.names.read(String(fieldOf(loop, "index"))),
+        this.names.read(String(fieldOf(loop, "element"))),
+        fieldOf(loop, "elementType") as SemanticType,
+        buffer as string,
+        length as string,
+      )) {
+        this.write(line);
       }
-      case "each": {
-        const reductions = this.combined(loop);
-        if (loop.parallel === true) for (const line of this.target.parallelDirective(reductions)) this.write(line);
-        for (const line of this.target.openForOf(
-          this.names.read(loop.index),
-          this.names.read(loop.element),
-          loop.elementType,
-          buffer as string,
-          length as string,
-        )) {
-          this.write(line);
-        }
-        this.body(loop.body, loop);
-        break;
-      }
+      this.body(fieldOf(loop, "body") as SemanticBlock, loop);
     }
-    if (!closedByDo) this.write(this.target.closeBody() ?? "");
+    if (!closedByDo) this.write((fieldOf(this.target, "closeBody") as (value: unknown) => string | null)(undefined) ?? "");
     this.loops.pop();
     this.names.leave();
   }
@@ -992,26 +1025,35 @@ class ProgramEmitter {
    * program renamed one to keep a turn's copies apart.
    */
   private combined(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): SemanticReduction[] {
-    return (loop.reductions ?? []).map((reduction) => ({ ...reduction, name: this.names.read(reduction.name) }));
+    const reductions = (fieldOf(loop, "reductions") as readonly SemanticReduction[] | undefined) ?? [];
+    const named: SemanticReduction[] = [];
+    for (const reduction of reductions) {
+      const name = this.names.read(String(fieldOf(reduction, "name")));
+      named[named.length] = { name, op: String(fieldOf(reduction, "op")) as SemanticReduction["op"], exact: fieldOf(reduction, "exact") === true };
+    }
+    return named;
   }
 
   /** The statements of one block, and what is done when it ends. */
   private body(block: SemanticBlock, loop: SemanticLoop | null): void {
     this.names.enter();
     this.depth += 1;
-    if (block.statements.length === 0 && block.terminator.k === "next") {
-      const empty = this.target.emptyBody();
-      if (empty !== null) this.write(empty);
+    const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
+    const blockEnd = fieldOf(block, "terminator") as SemanticTerminator;
+    if (statements.length === 0 && String(fieldOf(blockEnd, "k")) === "next") {
+      const empty = (fieldOf(this.target, "emptyBody") as (...args: any[]) => any)(undefined);
+      if (empty !== null) this.write(String(empty));
     }
-    for (const statement of block.statements) this.statement(statement);
+    for (const statement of statements) this.statement(statement);
     // What the block allocated is freed before it ends, which is inside the
     // braces of one target and inside the indentation of the other. A block
     // that ends in a jump is not fallen out of, and the jump frees what the
     // blocks it leaves own instead — the jump's own releases already say which.
-    if (block.terminator.k === "next" || block.terminator.k === "return") {
-      for (const name of block.releases) this.lines.push(indent(this.depth, this.target.release(this.names.read(name))));
+    const endKind = String(fieldOf(blockEnd, "k"));
+    if (endKind === "next" || endKind === "return") {
+      for (const name of fieldOf(block, "releases") as readonly string[]) this.lines.push(indent(this.depth, (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name))));
     }
-    this.terminator(block.terminator, loop);
+    this.terminator(blockEnd, loop);
     this.depth -= 1;
     this.names.leave();
   }
@@ -1030,30 +1072,33 @@ class ProgramEmitter {
    * which the run carries on from.
    */
   private terminator(terminator: SemanticTerminator, loop: SemanticLoop | null, final = false): void {
-    if (terminator.k === "return") {
+    const k = String(fieldOf(terminator, "k"));
+    if (k === "return") {
+      const value = fieldOf(terminator, "value") as SemanticValue | null;
       // A body that returns nothing ends at its closing line, so a return there
       // would say what the closing line already says.
-      if (final && terminator.value === null) return;
+      if (final && value === null) return;
       this.write(
-        terminator.value === null
-          ? this.target.returnNothing()
-          : this.target.returnValue(this.expression(terminator.value, this.returns)),
+        value === null
+          ? String((fieldOf(this.target, "returnNothing") as (...args: any[]) => any)(undefined))
+          : String((fieldOf(this.target, "returnValue") as (...args: any[]) => any)(this.expression(value, this.returns))),
       );
       return;
     }
-    if (terminator.k !== "jump") return;
-    for (const name of terminator.releases) this.write(this.target.release(this.names.read(name)));
+    if (k !== "jump") return;
+    for (const name of fieldOf(terminator, "releases") as readonly string[]) this.write((fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name)));
     const open = loop ?? this.loops[this.loops.length - 1];
-    if (open === undefined) throw emitError("a jump out of a block no loop is written in", terminator.target);
-    if (terminator.target === open.header) {
-      this.write(this.target.continueLine());
+    const target = String(fieldOf(terminator, "target"));
+    if (open === undefined) throw emitError("a jump out of a block no loop is written in", target);
+    if (target === String(fieldOf(open, "header"))) {
+      this.write((fieldOf(this.target, "continueLine") as (...args: any[]) => any)(undefined));
       return;
     }
-    if (terminator.target === open.exit) {
-      this.write(this.target.breakLine());
+    if (target === String(fieldOf(open, "exit"))) {
+      this.write((fieldOf(this.target, "breakLine") as (...args: any[]) => any)(undefined));
       return;
     }
-    throw emitError("a jump leaves for a block no loop around it names", terminator.target);
+    throw emitError("a jump leaves for a block no loop around it names", target);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1061,7 +1106,7 @@ class ProgramEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue): string {
-    return this.target.condition(this.expression(value), valueKind(value), value.type);
+    return String((fieldOf(this.target, "condition") as (...args: any[]) => any)(this.expression(value, fieldOf(value, "type") as SemanticType), valueKind(value), fieldOf(value, "type") as SemanticType));
   }
 
   private call(call: SemanticCall): string {
@@ -1071,52 +1116,61 @@ class ProgramEmitter {
     // already in [0, c). But `X` may be a plain local reference whose value was
     // computed with wrapping arithmetic and is not yet reduced (e.g. `return
     // mod(x, modulo)` in `invert`), so apply the kernel's mod in that case.
-    if (!call.builtin && call.callee === "mod" && call.args.length === 2) {
-      const modulus = this.expression(call.args[1], call.args[1].type);
+    const callee = String(fieldOf(call, "callee"));
+    const args = fieldOf(call, "args") as readonly SemanticValue[];
+    if (fieldOf(call, "builtin") !== true && callee === "mod" && args.length === 2) {
+      const first = args[1];
+      const modulus = this.expression(first, fieldOf(first, "type") as SemanticType);
       const savedCtx = this.modCtx;
       this.modCtx = modulus;
-      const inner = call.args[0];
+      const inner = args[0];
+      const innerType = fieldOf(inner, "type") as SemanticType;
       let result: string;
-      if (inner.k === "arith" && isWideType(inner.type)) {
+      if (inner.k === "arith" && isWideType(innerType)) {
         // The arith emitter uses `*_mod` with modulus c, so the result is
         // already reduced; no extra mod needed.
-        result = this.expression(inner, inner.type);
+        result = this.expression(inner, innerType);
       } else {
         // Bind the inner value to a temporary and reduce it modulo c.
         this.buildCounter += 1;
         const out = `blaze_wide_${this.buildCounter}`;
         const tmp = `blaze_wide_tmp_${this.buildCounter}`;
-        result = `({ const blaze_u256 ${tmp} = (${this.expression(inner, inner.type)}); blaze_u256 ${out}; ${RUNTIME_NAME}_u256_mod(&${out}, &${tmp}, &(${modulus})); ${out}; })`;
+        result = `({ const blaze_u256 ${tmp} = (${this.expression(inner, innerType)}); blaze_u256 ${out}; ${RUNTIME_NAME}_u256_mod(&${out}, &${tmp}, &(${modulus})); ${out}; })`;
       }
       this.modCtx = savedCtx;
       return result;
     }
     const argumentsText: string[] = [];
-    call.args.forEach((argument, index) => {
+    const signature = fieldOf(call, "signature") as FunctionSignature;
+    const signatureParams = fieldOf(signature, "params") as readonly { readonly type: string }[];
+    const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+    for (let index = 0; index < args.length; index += 1) {
+      const argument = args[index];
       // The argument is placed in the type its parameter takes: a reference a
       // function answers is a pointer, and a parameter the source wrote no type
       // for takes the dynamic handle the ABI carries a value in.
-      const writtenParameter = call.signature.params[index]?.type;
+      const writtenParameter = signatureParams[index] === undefined ? undefined : String(fieldOf(signatureParams[index], "type"));
       const parameterType = writtenParameter !== undefined && writtenParameter !== "text" && writtenParameter !== "boxedtext"
         ? parseType(writtenParameter)
         : null;
-      const type = parameterType ?? call.argTypes[index] ?? argument.type;
+      const type = parameterType ?? argTypes[index] ?? fieldOf(argument, "type") as SemanticType;
       // A string a function writes through is shared through a cell, and the
       // cell is what the function is given: what is passed is the name of the
       // cell and not the text it holds, for the text in the cell is what the
       // function writes.
-      if (call.signature.params[index]?.type === "boxedtext" && argument.k === "local") {
-        argumentsText.push(this.names.read(argument.name));
+      if (writtenParameter === "boxedtext" && argument.k === "local") {
+        argumentsText.push(this.names.read(String(fieldOf(argument, "name"))));
       } else {
         // A reference handed to a service the compiler provides is the double
         // the C ABI carries it in, whatever the lowering: the program driver is
         // C in both builds, and only a *function* the machine backend lowered
         // holds a reference in a register as the pointer it is.
         const text = this.expression(argument, type);
-        const dynamic = type !== null && type.kind === "ref" && type.of === null && type.name === undefined;
-        const boxed = call.builtin && dynamic && isReferenced(argument.type)
+        const typeKind = String(fieldOf(type, "kind"));
+        const dynamic = type !== null && typeKind === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
+        const boxed = fieldOf(call, "builtin") === true && dynamic && isReferenced(fieldOf(argument, "type") as SemanticType)
           ? `((double)(uintptr_t)(${text}))`
-          : this.target.argument(type, text);
+          : String((fieldOf(this.target, "argument") as (...args: any[]) => any)(type, text));
         argumentsText.push(boxed);
       }
       // A callee's array parameter carries its length beside it, so pass the
@@ -1126,22 +1180,22 @@ class ProgramEmitter {
       // A callee's array parameter carries its length beside it, and a module
       // function's does. A service the compiler itself provides takes the block
       // alone — a list the runtime moves is the bytes its header measures.
-      const written = call.signature.params[index]?.type;
+      const written = signatureParams[index] === undefined ? undefined : String(fieldOf(signatureParams[index], "type"));
       const paramType = written !== undefined && written !== "text" && written !== "boxedtext" ? parseType(written) : null;
-      if (!call.builtin && paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
+      if (fieldOf(call, "builtin") !== true && paramType !== null && (paramType.kind === "slice" || paramType.kind === "array" || paramType.kind === "ptr")) {
         if (argument.k === "local") {
-          argumentsText.push(`${this.names.read(argument.name)}_length`);
+          argumentsText.push(`${this.names.read(String(fieldOf(argument, "name")))}_length`);
         } else if (argument.k === "buffer") {
-          argumentsText.push(String(argument.values.length));
+          argumentsText.push(String((fieldOf(argument, "values") as readonly SemanticValue[]).length));
         } else {
           argumentsText.push("0");
         }
       }
-    });
+    }
     const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);
-    return call.builtin
-      ? this.target.builtin(this.readCaptures(call), argumentsText, expression)
-      : this.target.call(call, argumentsText);
+    return fieldOf(call, "builtin") === true
+      ? String((fieldOf(this.target, "builtin") as (...args: any[]) => any)(this.readCaptures(call), argumentsText, expression))
+      : String((fieldOf(this.target, "call") as (...args: any[]) => any)(call, argumentsText));
   }
 
   /**
@@ -1152,14 +1206,45 @@ class ProgramEmitter {
    */
   private readCaptures(call: SemanticCall): SemanticCall {
     let changed = false;
-    const args = call.args.map((argument) => {
-      if (argument.k !== "functionRef") return argument;
-      const captures = argument.captures.map((capture) => ({ ...capture, name: this.names.read(capture.name) }));
-      if (captures.every((capture, index) => capture.name === argument.captures[index].name)) return argument;
+    const args: SemanticValue[] = [];
+    for (const argument of fieldOf(call, "args") as readonly SemanticValue[]) {
+      if (argument.k !== "functionRef") {
+        args[args.length] = argument;
+        continue;
+      }
+      const oldCaptures = fieldOf(argument, "captures") as readonly { readonly name: string; readonly type: SemanticType }[];
+      const captures: { name: string; type: SemanticType }[] = [];
+      let same = true;
+      for (let index = 0; index < oldCaptures.length; index += 1) {
+        const capture = oldCaptures[index];
+        const name = this.names.read(String(fieldOf(capture, "name")));
+        if (name !== String(fieldOf(oldCaptures[index], "name"))) same = false;
+        captures[captures.length] = { name, type: fieldOf(capture, "type") as SemanticType };
+      }
+      if (same) {
+        args[args.length] = argument;
+        continue;
+      }
       changed = true;
-      return { ...argument, captures };
-    });
-    return changed ? { ...call, args } : call;
+      args[args.length] = {
+        k: "functionRef",
+        type: fieldOf(argument, "type") as SemanticType,
+        name: String(fieldOf(argument, "name")),
+        captures,
+      };
+    }
+    return changed ? {
+      callee: String(fieldOf(call, "callee")),
+      through: fieldOf(call, "through") as SemanticValue | undefined,
+      signature: fieldOf(call, "signature") as FunctionSignature,
+      args,
+      argTypes: fieldOf(call, "argTypes") as SemanticType[],
+      returns: fieldOf(call, "returns") as SemanticType,
+      effects: fieldOf(call, "effects") as SemanticCall["effects"],
+      ownership: fieldOf(call, "ownership") as SemanticCall["ownership"],
+      retain: fieldOf(call, "retain") === true,
+      builtin: fieldOf(call, "builtin") === true,
+    } : call;
   }
 
   private expression(value: SemanticValue, as: SemanticType | null = null): string {
@@ -1168,18 +1253,19 @@ class ProgramEmitter {
     // A parameter the source wrote no type for takes the dynamic handle, and a
     // reference held at a layout is a pointer: the two are the same address
     // written two ways, and the conversion is the one the ABI makes.
-    const asDynamic = as.kind === "ref" && as.of === null && as.name === undefined;
-    const carriedDynamic = value.type.kind === "ref" && value.type.of === null && value.type.name === undefined;
-    if (asDynamic && !carriedDynamic && !isTextType(value.type) && isReferenced(value.type)) {
-      return this.target.handle(text);
+    const asDynamic = as.kind === "ref" && fieldOf(as, "of") === null && fieldOf(as, "name") === undefined;
+    const carried = fieldOf(value, "type") as SemanticType;
+    const carriedDynamic = carried.kind === "ref" && fieldOf(carried, "of") === null && fieldOf(carried, "name") === undefined;
+    if (asDynamic && !carriedDynamic && !isTextType(carried) && isReferenced(carried)) {
+      return String((fieldOf(this.target, "handle") as (...args: any[]) => any)(text));
     }
-    if (carriedDynamic && as.kind === "ref" && as.name !== undefined) {
-      return this.target.shaped(as, text);
+    if (carriedDynamic && as.kind === "ref" && fieldOf(as, "name") !== undefined) {
+      return String((fieldOf(this.target, "shaped") as (...args: any[]) => any)(as, text));
     }
     // Only a number is written as another number: a reference and a string are
     // the one the value carries, and the resolver has already chosen the type
     // every use reads it as.
-    const fromDynamic = fromDynamicType(value.type);
+    const fromDynamic = fromDynamicType(carried);
     if (fromDynamic && isNumber(as) && value.k !== "local") return `${RUNTIME_NAME}_to_number(${text})`;
     // A value the runtime holds is written as the string it is when it is
     // handed to a parameter of a string: the runtime renders it, and the
@@ -1188,93 +1274,127 @@ class ProgramEmitter {
     // A string a use reads as a number is the number its text states: `+text`
     // is the spelling the language writes it by, and the runtime boxes the
     // pointer it carries and answers the number that text names.
-    if (isTextType(value.type) && isNumber(as)) {
+    if (isTextType(carried) && isNumber(as)) {
       return `${RUNTIME_NAME}_to_number(${RUNTIME_NAME}_box_string(${text}))`;
     }
-    if (!isNumber(value.type) || !isNumber(as)) return text;
-    if (value.type.kind === "primitive" && as.kind === "primitive" && value.type.name === as.name) return text;
+    if (!isNumber(carried) || !isNumber(as)) return text;
+    if (carried.kind === "primitive" && as.kind === "primitive" && String(fieldOf(carried, "name")) === String(fieldOf(as, "name"))) return text;
     // A wide number is a struct, and a cast from a scalar to a struct is a
     // conversion to a non-scalar type, which is not a C source at all. The one
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
-    if (isWideType(as)) return this.target.widen(text, as);
+    if (isWideType(as)) return String((fieldOf(this.target, "widen") as (...args: any[]) => any)(text, as));
     // A number read as a length or an index is read the way the language reads
     // one: a NaN is no length at all, and it is zero. A cast would leave
     // whatever the machine made of the value there instead, which for a NaN is
     // the largest size there is, and an allocation of that ends the run.
-    if (isFloat(value.type) && isUnsigned(as)) return this.target.asLength(text, as);
-    return this.target.cast(as, text);
+    if (isFloat(carried) && isUnsigned(as)) return String((fieldOf(this.target, "asLength") as (...args: any[]) => any)(text, as));
+    return String((fieldOf(this.target, "cast") as (...args: any[]) => any)(as, text));
   }
 
   private raw(value: SemanticValue, as: SemanticType | null): string {
     switch (value.k) {
-      case "const":
+      case "const": {
         // A constant the IR holds as text is a string written out; a number is
         // written as the literal of the type it initializes.
-        return isTextType(value.type)
-          ? this.target.stringLiteral(value.text)
-          : this.target.literal(value.text, typeText(value.type));
+        const type = fieldOf(value, "type") as SemanticType;
+        return isTextType(type)
+          ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(String(fieldOf(value, "text"))))
+          : String((fieldOf(this.target, "literal") as (...args: any[]) => any)(String(fieldOf(value, "text")), typeText(type)));
+      }
       case "bool":
-        return value.value ? "true" : "false";
+        return fieldOf(value, "value") === true ? "true" : "false";
       case "nothing":
-        return this.target.nullLiteral();
+        return String((fieldOf(this.target, "nullLiteral") as (...args: any[]) => any)(undefined));
       case "functionRef":
-        return value.name;
+        return String(fieldOf(value, "name"));
       case "text":
-        return this.text(value);
-      case "local":
-        if (this.boxedTexts.has(value.name)) return `*${this.names.read(value.name)}`;
-        return this.names.read(value.name);
+        return this.text(value as SemanticValue & { k: "text" });
+      case "local": {
+        const name = String(fieldOf(value, "name"));
+        if (this.boxedTexts.has(name)) return `*${this.names.read(name)}`;
+        return this.names.read(name);
+      }
       case "length":
-        return this.length(value);
+        return this.length(value as SemanticValue & { k: "length" });
       case "element":
-        return this.target.element(this.expression(value.of), this.expression(value.index, USIZE));
+        return String((fieldOf(this.target, "element") as (...args: any[]) => any)(
+          this.expression(fieldOf(value, "of") as SemanticValue, fieldOf(fieldOf(value, "of"), "type") as SemanticType),
+          this.expression(fieldOf(value, "index") as SemanticValue, USIZE),
+        ));
       case "buffer":
         // The resolver names every array it allocates and puts it in a
         // declaration, so an array read here is one it never wrote down.
         throw emitError("the emitter cannot write down an array that is not a declaration");
-      case "newObject":
+      case "newObject": {
         // The fields are written where the object is built, so a literal in the
         // arm of a conditional is only built when that arm is taken. Each field
         // is written as the type it was resolved to: a value written without a
         // type is written as the text it prints, which the layout's field is
         // whatever type the literal resolved to.
-        return this.target.buildObject(
-          value.layout,
-          value.fields.map((field) => ({
-            field: this.target.escape(field.name),
-            value: this.expression(field.value, field.value.type),
-          })),
-        );
+        const fields: { field: string; value: string }[] = [];
+        for (const field of fieldOf(value, "fields") as readonly { readonly name: string; readonly value: SemanticValue }[]) {
+          const held = fieldOf(field, "value") as SemanticValue;
+          fields[fields.length] = {
+            field: String((fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(field, "name")))),
+            value: this.expression(held, fieldOf(held, "type") as SemanticType),
+          };
+        }
+        return String((fieldOf(this.target, "buildObject") as (...args: any[]) => any)(String(fieldOf(value, "layout")), fields));
+      }
       case "call":
-        return this.call(value.call);
+        return this.call(fieldOf(value, "call") as SemanticCall);
       case "loadField":
-        return this.target.field(this.expression(value.object), value.layout, this.target.escape(value.field));
-      case "toText":
+        return String((fieldOf(this.target, "field") as (...args: any[]) => any)(
+          this.expression(fieldOf(value, "object") as SemanticValue, fieldOf(fieldOf(value, "object"), "type") as SemanticType),
+          String(fieldOf(value, "layout")),
+          (fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(value, "field"))),
+        ));
+      case "toText": {
+        const of = fieldOf(value, "of") as SemanticValue;
+        const ofType = fieldOf(of, "type") as SemanticType;
         // A string carried into a string is the string itself: a driver builds
         // text out of pointers, and a number is the one thing it converts.
-        if (isTextType(value.of.type)) return this.expression(value.of);
-        return this.target.toText(this.expression(value.of), value.of.type, value.digits, this.style(), value.precision === true);
-      case "argv":
-        return value.index === null ? this.target.argvCount() : this.target.argv(this.expression(value.index));
+        if (isTextType(ofType)) return this.expression(of, ofType);
+        return String((fieldOf(this.target, "toText") as (...args: any[]) => any)(
+          this.expression(of, ofType),
+          ofType,
+          fieldOf(value, "digits") as number | null,
+          this.style(),
+          fieldOf(value, "precision") === true,
+        ));
+      }
+      case "argv": {
+        const index = fieldOf(value, "index") as SemanticValue | null;
+        return index === null
+          ? String((fieldOf(this.target, "argvCount") as (...args: any[]) => any)(undefined))
+          : String((fieldOf(this.target, "argv") as (...args: any[]) => any)(this.expression(index, USIZE)));
+      }
       case "compare":
-        return this.compare(value);
+        return this.compare(value as SemanticValue & { k: "compare" });
       case "isNull":
-        return this.target.isNull(this.expression(value.operand), value.negate);
+        return String((fieldOf(this.target, "isNull") as (...args: any[]) => any)(
+          this.expression(fieldOf(value, "operand") as SemanticValue, fieldOf(fieldOf(value, "operand"), "type") as SemanticType),
+          fieldOf(value, "negate") === true,
+        ));
       case "unary":
-        return this.unary(value);
+        return this.unary(value as SemanticValue & { k: "unary" });
       case "logical":
-        return this.logical(value);
+        return this.logical(value as SemanticValue & { k: "logical" });
       case "coalesce":
-        return this.coalesce(value);
-      case "select":
-        return this.target.conditional(
-          this.condition(value.condition),
-          this.expression(value.then, as),
-          this.expression(value.otherwise, as),
-        );
+        return this.coalesce(value as SemanticValue & { k: "coalesce" });
+      case "select": {
+        const condition = fieldOf(value, "condition") as SemanticValue;
+        const then = fieldOf(value, "then") as SemanticValue;
+        const otherwise = fieldOf(value, "otherwise") as SemanticValue;
+        return String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(
+          this.condition(condition),
+          this.expression(then, as),
+          this.expression(otherwise, as),
+        ));
+      }
       case "arith":
-        return this.arith(value);
+        return this.arith(value as SemanticValue & { k: "arith" });
       case "closure":
       case "capture":
         // A closure is a value a body holds, and the program's own statements
@@ -1286,11 +1406,14 @@ class ProgramEmitter {
 
   /** A string the program builds, one part after another. */
   private text(value: SemanticValue & { k: "text" }): string {
-    if (value.parts.length === 0) return this.target.stringLiteral("");
+    const parts = fieldOf(value, "parts") as readonly { readonly k: string; readonly value: string | SemanticValue }[];
+    if (parts.length === 0) return String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(""));
     let text: string | null = null;
-    for (const part of value.parts) {
-      const piece = part.k === "text" ? this.target.stringLiteral(part.value) : this.expression(part.value);
-      text = text === null ? piece : this.target.stringConcat(text, piece);
+    for (const part of parts) {
+      const piece = String(fieldOf(part, "k")) === "text"
+        ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(String(fieldOf(part, "value"))))
+        : this.expression(fieldOf(part, "value") as SemanticValue, fieldOf(fieldOf(part, "value"), "type") as SemanticType);
+      text = text === null ? piece : String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any)(text, piece));
     }
     return text as string;
   }
@@ -1301,180 +1424,198 @@ class ProgramEmitter {
    * way the target spells them, and only the target knows which is which.
    */
   private length(value: SemanticValue & { k: "length" }): string {
-    if (isTextType(value.of.type)) return this.target.stringLength(this.expression(value.of));
-    if (value.of.k === "local") return `${this.names.read(value.of.name)}_length`;
+    const of = fieldOf(value, "of") as SemanticValue;
+    const ofType = fieldOf(of, "type") as SemanticType;
+    if (isTextType(ofType)) return String((fieldOf(this.target, "stringLength") as (...args: any[]) => any)(this.expression(of, ofType)));
+    if (of.k === "local") return `${this.names.read(String(fieldOf(of, "name")))}_length`;
     // A list held in a field or answered by a call has no sidecar count beside
     // a name: the header the runtime laid in front of the block is the count.
-    const element = elementTypeOf(value.of.type);
-    if (element !== null && isSequence(value.of.type)) {
-      return this.target.sequenceLength(this.expression(value.of), element);
+    const element = elementTypeOf(ofType);
+    if (element !== null && isSequence(ofType)) {
+      return String((fieldOf(this.target, "sequenceLength") as (...args: any[]) => any)(this.expression(of, ofType), element));
     }
-    throw emitError("the emitter cannot write down the length of an array", `${value.of.k} names no allocation`);
+    throw emitError("the emitter cannot write down the length of an array", `${of.k} names no allocation`);
   }
 
   private compare(value: SemanticValue & { k: "compare" }): string {
-    if (isTextType(value.operand)) {
-      const left = this.expression(value.left);
-      const right = this.expression(value.right);
+    const operand = fieldOf(value, "operand") as SemanticType;
+    const op = String(fieldOf(value, "op"));
+    const leftValue = fieldOf(value, "left") as SemanticValue;
+    const rightValue = fieldOf(value, "right") as SemanticValue;
+    if (isTextType(operand)) {
+      const left = this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType);
+      const right = this.expression(rightValue, fieldOf(rightValue, "type") as SemanticType);
       // Two strings are ordered by what they say. Every operator but `eq` and
       // `ne` used to be answered with the equality test, so `"apple" <
       // "banana"` was reported as false — the two are not the same text, which
       // says nothing about which one comes first.
-      if (value.op === "eq" || value.op === "ne") {
-        const equal = this.target.stringEqual(left, right);
-        return value.op === "ne" ? this.target.logicalNot(equal) : equal;
+      if (op === "eq" || op === "ne") {
+        const equal = String((fieldOf(this.target, "stringEqual") as (...args: any[]) => any)(left, right));
+        return op === "ne" ? String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any)(equal)) : equal;
       }
-      return `${this.target.stringCompare(left, right)} ${COMPARE_OPERATORS[value.op]} 0`;
+      return `${String((fieldOf(this.target, "stringCompare") as (...args: any[]) => any)(left, right))} ${COMPARE_OPERATORS[op as CompareOp]} 0`;
     }
     // A wide number is four limbs and C compares a struct with `==` by identity
     // and has no ordering at all, so a pair of them is the kernel's comparison
     // rather than an operator over two machine words.
-    if (isWideType(value.operand)) {
-      return this.target.wideCompare(value.op, this.expression(value.left, value.operand), this.expression(value.right, value.operand), value.operand);
+    if (isWideType(operand)) {
+      return String((fieldOf(this.target, "wideCompare") as (...args: any[]) => any)(op, this.expression(leftValue, operand), this.expression(rightValue, operand), operand));
     }
     // The two sides are compared as one type, which the IR states: a whole
     // number and a literal are compared as whole numbers, not as two.
-    const left = this.expression(value.left, value.operand);
-    const right = this.expression(value.right, value.operand);
-    return `${left} ${COMPARE_OPERATORS[value.op]} ${right}`;
+    const left = this.expression(leftValue, operand);
+    const right = this.expression(rightValue, operand);
+    return `${left} ${COMPARE_OPERATORS[op as CompareOp]} ${right}`;
   }
 
   private unary(value: SemanticValue & { k: "unary" }): string {
-    if (value.op === "not") return this.target.logicalNot(this.condition(value.operand));
+    const op = String(fieldOf(value, "op"));
+    const operand = fieldOf(value, "operand") as SemanticValue;
+    const type = fieldOf(value, "type") as SemanticType;
+    if (op === "not") return String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any)(this.condition(operand)));
     // A wide complement covers every limb, which C's `~` cannot be asked for
     // over a struct, so it is the kernel's operation rather than an operator. A
     // wide negation never arrives: the validator refuses it, because the answer
     // the language gives is below zero and a wide number holds none.
-    if (value.op === "bitNot" && isWideType(value.type)) {
-      return this.target.wideUnary(value.op, this.expression(value.operand, value.type), value.type);
+    if (op === "bitNot" && isWideType(type)) {
+      return String((fieldOf(this.target, "wideUnary") as (...args: any[]) => any)(op, this.expression(operand, type), type));
     }
-    if (value.op === "bitNot") return this.target.bitwiseNot(this.expression(value.operand, value.type));
-    return `(${value.op === "neg" ? "-" : "+"}${this.expression(value.operand, value.type)})`;
+    if (op === "bitNot") return String((fieldOf(this.target, "bitwiseNot") as (...args: any[]) => any)(this.expression(operand, type)));
+    return `(${op === "neg" ? "-" : "+"}${this.expression(operand, type)})`;
   }
 
   private logical(value: SemanticValue & { k: "logical" }): string {
-    const left = this.expression(value.left);
-    const test = this.target.condition(left, valueKind(value.left), value.left.type);
-    const rightIsText = value.right.k === "text" || (value.right.k === "const" && isTextType(value.right.type));
-    const leftIsAny = value.left.type.kind === "ref" && value.left.type.of === null && value.left.type.name === undefined;
+    const leftValue = fieldOf(value, "left") as SemanticValue;
+    const rightValue = fieldOf(value, "right") as SemanticValue;
+    const resultType = fieldOf(value, "type") as SemanticType;
+    const left = this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType);
+    const leftType = fieldOf(leftValue, "type") as SemanticType;
+    const test = String((fieldOf(this.target, "condition") as (...args: any[]) => any)(left, valueKind(leftValue), leftType));
+    const rightIsText = rightValue.k === "text" || (rightValue.k === "const" && isTextType(fieldOf(rightValue, "type") as SemanticType));
+    const leftIsAny = leftType.kind === "ref" && fieldOf(leftType, "of") === null && fieldOf(leftType, "name") === undefined;
     const right = rightIsText && leftIsAny
-      ? `${RUNTIME_NAME}_box_string(${this.raw(value.right, null)})`
-      : this.expression(value.right, value.type);
+      ? `${RUNTIME_NAME}_box_string(${this.raw(rightValue, null)})`
+      : this.expression(rightValue, resultType);
     // A number arm beside a text is the test, and the text is the value the
     // operator hands back, so a number that answers is written as the text of
     // that number.
-    const answer = (arm: SemanticValue, written: string): string =>
-      isNumber(arm.type) && isTextType(value.type) ? this.target.toText(written, arm.type, null, this.style()) : written;
-    return value.op === "and"
-      ? this.target.conditional(test, answer(value.right, right), answer(value.left, left))
-      : this.target.conditional(test, answer(value.left, left), answer(value.right, right));
+    const answer = (arm: SemanticValue, written: string): string => {
+      const armType = fieldOf(arm, "type") as SemanticType;
+      if (isNumber(armType) && isTextType(resultType)) return String((fieldOf(this.target, "toText") as (...args: any[]) => any)(written, armType, null, this.style(), false));
+      return written;
+    };
+    const op = String(fieldOf(value, "op"));
+    return op === "and"
+      ? String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(test, answer(rightValue, right), answer(leftValue, left)))
+      : String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(test, answer(leftValue, left), answer(rightValue, right)));
   }
 
   private coalesce(value: SemanticValue & { k: "coalesce" }): string {
-    const left = this.expression(value.left);
+    const leftValue = fieldOf(value, "left") as SemanticValue;
+    const type = fieldOf(value, "type") as SemanticType;
+    const left = this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType);
     // Only a reference or a string can be nothing: a number never is. A name
     // resolves to a reference whatever it holds, so this asks what the value
     // carries: reading a number as a reference compiles the fallback arm away
     // and leaves a comparison that does not compile.
-    const kind = valueKind(value.left);
+    const kind = valueKind(leftValue);
     if (kind === "null" || kind === "text" || kind === "reference") {
-      return this.target.conditional(this.target.isNull(left, false), this.expression(value.right, value.type), left);
+      return String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(
+        (fieldOf(this.target, "isNull") as (...args: any[]) => any)(left, false),
+        this.expression(fieldOf(value, "right") as SemanticValue, type),
+        left,
+      ));
     }
     return left;
   }
 
   private arith(value: SemanticValue & { k: "arith" }): string {
-    switch (value.op) {
-      case "concat":
-        // A string is added to a string: the driver builds the text.
-        return this.target.stringConcat(this.expression(value.left), this.expression(value.right));
-      case "arrayConcat":
-        // Array concatenation in a program body is evaluated eagerly and never
-        // reaches the emitter; a function body that keeps one is refused.
-        throw new Error("arrayConcat is not emitted by the program backend");
-      case "min":
-        return this.target.min(this.expression(value.left, value.type), this.expression(value.right, value.type));
-      case "max":
-        return this.target.max(this.expression(value.left, value.type), this.expression(value.right, value.type));
-      case "mod":
-        // A wide remainder is four limbs and no C operator, so it is a call into
-        // the kernel like every other wide operation. Read as `x % y` it is
-        // `invalid operands to binary % (have 'blaze_u256' and 'blaze_u256')`
-        // and the build failed at the link rather than here.
-        if (isWideType(value.type)) {
-          // `mod(mul(a, b), c)` must be a modular multiplication: the plain
-          // multiply wraps past 2^256 and loses the high half of the product,
-          // so reducing the wrapped value modulo c is not the same as reducing
-          // the true product. Use the kernel's mul_mod which computes the full
-          // product and reduces it.
-          if (value.left.k === "arith" && value.left.op === "mul") {
-            return this.target.wideMulMod(
-              this.expression(value.left.left, value.type),
-              this.expression(value.left.right, value.type),
-              this.expression(value.right, value.type),
-              value.type,
-            );
-          }
-          return this.target.wideBinary(value.op, this.expression(value.left, value.type), this.expression(value.right, value.type), value.type);
-        }
-        return this.target.modulo(this.expression(value.left, value.type), this.expression(value.right, value.type));
-      case "floorDiv":
-        return this.target.floorDivide(
-          this.expression(value.left, value.type),
-          this.expression(value.right, value.type),
-          value.type,
-        );
-      case "floorMod":
-        return this.target.floorModulo(
-          this.expression(value.left, value.type),
-          this.expression(value.right, value.type),
-          value.type,
-        );
-      case "pow":
-        // A power is floating point even over whole numbers, and Nim spells one
-        // with the operator that xors two whole numbers.
-        return this.target.power(this.expression(value.left, value.type), this.expression(value.right, value.type));
-      case "add":
-      case "sub":
-      case "mul":
-      case "div":
-      case "shl":
-      case "shr":
-      case "ushr":
-      // The bitwise operators are whole numbers masked whole, and the targets
-      // already know how each of them is spelled.
-      case "and":
-      case "or":
-      case "xor": {
-        const left = this.expression(value.left, value.type);
-        // The count of a shift is the machine word the source wrote the shift by,
-        // and the kernel takes one word of it: read at the number's own width a
-        // count over four limbs is `(unsigned)(a struct)`, which is not C.
-        const counted = value.op === "shl" || value.op === "shr" || value.op === "ushr";
-        const right = this.expression(value.right, counted ? USIZE : value.type);
-        // A wide number is four limbs and no C operator, so an operation over
-        // one is a call into the kernel every backend shares. Written as a C
-        // operator it is `invalid operands to binary + (have 'blaze_u256' and
-        // 'blaze_u256')`, and the build failed at the link rather than here.
-        if (isWideType(value.type)) {
-          // The modulus this operation should be reduced under: either the
-          // `modCtx` from an enclosing `mod(X, c)` call, the `invertModulo`
-          // for the `invert` function's extended Euclidean algorithm, or a
-          // modulus discovered by the data-flow analysis.
-          const modulus = this.modulusForArith.get(value) ?? this.invertModulo ?? this.modCtx;
-          if (value.op === "mul" && modulus !== null) {
-            return this.target.wideMulMod(left, right, modulus, value.type);
-          }
-          if ((value.op === "add" || value.op === "sub") && modulus !== null) {
-            const method = value.op === "add" ? "wideAddMod" : "wideSubMod";
-            return this.target[method](left, right, modulus, value.type);
-          }
-          return this.target.wideBinary(value.op, left, right, value.type);
-        }
-        return `(${left} ${this.target.operator(ARITH_OPERATORS[value.op])} ${right})`;
-      }
+    const op = String(fieldOf(value, "op"));
+    const type = fieldOf(value, "type") as SemanticType;
+    const leftValue = fieldOf(value, "left") as SemanticValue;
+    const rightValue = fieldOf(value, "right") as SemanticValue;
+    if (op === "concat") {
+      // A string is added to a string: the driver builds the text.
+      return String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any)(
+        this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType),
+        this.expression(rightValue, fieldOf(rightValue, "type") as SemanticType),
+      ));
     }
+    if (op === "arrayConcat") {
+      // Array concatenation in a program body is evaluated eagerly and never
+      // reaches the emitter; a function body that keeps one is refused.
+      throw new Error("arrayConcat is not emitted by the program backend");
+    }
+    if (op === "min") {
+      return String((fieldOf(this.target, "min") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+    }
+    if (op === "max") {
+      return String((fieldOf(this.target, "max") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+    }
+    if (op === "mod") {
+      // A wide remainder is four limbs and no C operator, so it is a call into
+      // the kernel like every other wide operation. Read as `x % y` it is
+      // `invalid operands to binary % (have 'blaze_u256' and 'blaze_u256')`
+      // and the build failed at the link rather than here.
+      if (isWideType(type)) {
+        // `mod(mul(a, b), c)` must be a modular multiplication: the plain
+        // multiply wraps past 2^256 and loses the high half of the product,
+        // so reducing the wrapped value modulo c is not the same as reducing
+        // the true product. Use the kernel's mul_mod which computes the full
+        // product and reduces it.
+        if (leftValue.k === "arith" && String(fieldOf(leftValue, "op")) === "mul") {
+          return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any)(
+            this.expression(fieldOf(leftValue, "left") as SemanticValue, type),
+            this.expression(fieldOf(leftValue, "right") as SemanticValue, type),
+            this.expression(rightValue, type),
+            type,
+          ));
+        }
+        return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any)(op, this.expression(leftValue, type), this.expression(rightValue, type), type));
+      }
+      return String((fieldOf(this.target, "modulo") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+    }
+    if (op === "floorDiv") {
+      return String((fieldOf(this.target, "floorDivide") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type), type));
+    }
+    if (op === "floorMod") {
+      return String((fieldOf(this.target, "floorModulo") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type), type));
+    }
+    if (op === "pow") {
+      // A power is floating point even over whole numbers, and Nim spells one
+      // with the operator that xors two whole numbers.
+      return String((fieldOf(this.target, "power") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+    }
+    // The bitwise operators are whole numbers masked whole, and the targets
+    // already know how each of them is spelled.
+    const left = this.expression(leftValue, type);
+    // The count of a shift is the machine word the source wrote the shift by,
+    // and the kernel takes one word of it: read at the number's own width a
+    // count over four limbs is `(unsigned)(a struct)`, which is not C.
+    const counted = op === "shl" || op === "shr" || op === "ushr";
+    const right = this.expression(rightValue, counted ? USIZE : type);
+    // A wide number is four limbs and no C operator, so an operation over
+    // one is a call into the kernel every backend shares. Written as a C
+    // operator it is `invalid operands to binary + (have 'blaze_u256' and
+    // 'blaze_u256')`, and the build failed at the link rather than here.
+    if (isWideType(type)) {
+      // The modulus this operation should be reduced under: either the
+      // `modCtx` from an enclosing `mod(X, c)` call, the `invertModulo`
+      // for the `invert` function's extended Euclidean algorithm, or a
+      // modulus discovered by the data-flow analysis.
+      const modulus = this.modulusForArith.get(value) ?? this.invertModulo ?? this.modCtx;
+      if (op === "mul" && modulus !== null) {
+        return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any)(left, right, modulus, type));
+      }
+      if ((op === "add" || op === "sub") && modulus !== null) {
+        const method = op === "add" ? "wideAddMod" : "wideSubMod";
+        return String((fieldOf(this.target, method) as (...args: any[]) => any)(left, right, modulus, type));
+      }
+      return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any)(op, left, right, type));
+    }
+    return `(${left} ${String((fieldOf(this.target, "operator") as (...args: any[]) => any)((ARITH_OPERATORS as Record<string, ProgramBinaryOp>)[op]))} ${right})`;
   }
+
 }
 
 /** Emits the source of one program in the language a target speaks. */

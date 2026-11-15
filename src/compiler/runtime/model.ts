@@ -8,6 +8,14 @@
  * drift.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 export const MODEL_NAME = "blaze_model";
 
 /** One entry point of the Model ABI. */
@@ -28,7 +36,9 @@ function modelEntry(
   ownership: string,
   extra: { noreturn?: boolean } = {},
 ): ModelEntry {
-  return { symbol, returns, params, summary, ownership, ...extra };
+  const made: ModelEntry = { symbol, returns, params, summary, ownership };
+  if (fieldOf(extra, "noreturn") === true) setFieldOn(made, "noreturn", true);
+  return made;
 }
 
 /**
@@ -110,9 +120,12 @@ export const MODEL_ABI: readonly ModelEntry[] = [
 ];
 
 /** Symbols generated Model/kernel code may reference. Nothing else resolves at link time. */
-export const MODEL_SYMBOLS: Record<string, true> = Object.fromEntries(
-  MODEL_ABI.map((item) => [item.symbol, true as const]),
-);
+function modelSymbolTable(): Record<string, true> {
+  const symbols: Record<string, true> = {};
+  for (const item of MODEL_ABI) symbols[String(fieldOf(item, "symbol"))] = true;
+  return symbols;
+}
+export const MODEL_SYMBOLS: Record<string, true> = modelSymbolTable();
 
 /** True when generated code is allowed to reference a Model symbol. */
 export function isModelSymbol(symbol: string): boolean {
@@ -138,12 +151,16 @@ const MODEL_HEADER_EPILOGUE = `
 
 /** The C header a program that uses the Model runtime includes. */
 export function modelHeaderSource(): string {
-  const declarations = MODEL_ABI.map((item) => {
-    const suffix = item.noreturn === true ? " /* never returns */" : "";
-    return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
-      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
-    })${suffix};`;
-  }).join("\n");
+  const lines: string[] = [];
+  for (const item of MODEL_ABI) {
+    const suffix = fieldOf(item, "noreturn") === true ? " /* never returns */" : "";
+    const ret = String(fieldOf(item, "returns"));
+    const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
+    const written: string[] = [];
+    for (const param of params) written[written.length] = `${String(param[1])} ${String(param[0])}`;
+    lines[lines.length] = `${ret === "void" ? "void" : ret} ${String(fieldOf(item, "symbol"))}(${written.length === 0 ? "void" : written.join(", ")})${suffix};`;
+  }
+  const declarations = lines.join("\n");
   return `${MODEL_HEADER_PREAMBLE}\n${declarations}\n\n${MODEL_HEADER_EPILOGUE}`;
 }
 

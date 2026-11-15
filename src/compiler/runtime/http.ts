@@ -2,6 +2,14 @@
  * The blaze HTTP runtime ABI, backed by facil.io.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 export const HTTP_NAME = "blaze_http";
 
 /** One entry point of the HTTP ABI. */
@@ -22,7 +30,9 @@ function httpEntry(
   ownership: string,
   extra: { noreturn?: boolean } = {},
 ): HttpEntry {
-  return { symbol, returns, params, summary, ownership, ...extra };
+  const made: HttpEntry = { symbol, returns, params, summary, ownership };
+  if (fieldOf(extra, "noreturn") === true) setFieldOn(made, "noreturn", true);
+  return made;
 }
 
 /**
@@ -266,9 +276,12 @@ export const HTTP_ABI: readonly HttpEntry[] = [
 ];
 
 /** Symbols generated HTTP code may reference. Nothing else resolves at link time. */
-export const HTTP_SYMBOLS: Record<string, true> = Object.fromEntries(
-  HTTP_ABI.map((item) => [item.symbol, true as const]),
-);
+function httpSymbolTable(): Record<string, true> {
+  const symbols: Record<string, true> = {};
+  for (const item of HTTP_ABI) symbols[String(fieldOf(item, "symbol"))] = true;
+  return symbols;
+}
+export const HTTP_SYMBOLS: Record<string, true> = httpSymbolTable();
 
 /** True when generated code is allowed to reference an HTTP symbol. */
 export function isHttpSymbol(symbol: string): boolean {
@@ -304,11 +317,15 @@ const HTTP_HEADER_EPILOGUE = `
 
 /** The C header a program that uses the HTTP runtime includes. */
 export function httpHeaderSource(): string {
-  const declarations = HTTP_ABI.map((item) => {
-    const suffix = item.noreturn === true ? " /* never returns */" : "";
-    return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
-      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
-    })${suffix};`;
-  }).join("\n");
+  const lines: string[] = [];
+  for (const item of HTTP_ABI) {
+    const suffix = fieldOf(item, "noreturn") === true ? " /* never returns */" : "";
+    const ret = String(fieldOf(item, "returns"));
+    const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
+    const written: string[] = [];
+    for (const param of params) written[written.length] = `${String(param[1])} ${String(param[0])}`;
+    lines[lines.length] = `${ret === "void" ? "void" : ret} ${String(fieldOf(item, "symbol"))}(${written.length === 0 ? "void" : written.join(", ")})${suffix};`;
+  }
+  const declarations = lines.join("\n");
   return `${HTTP_HEADER_PREAMBLE}\n${declarations}\n\n${HTTP_HEADER_EPILOGUE}`;
 }

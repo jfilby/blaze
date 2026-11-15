@@ -15,6 +15,10 @@
 import { CompilerError } from "../core/errors.ts";
 import type { Relocation } from "./x86.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /* -------------------------------------------------------------------------- */
 /* The format                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -173,8 +177,19 @@ function align(value: number, to: number): number {
 
 /** The object a function's machine code is written into. */
 export function writeObject(request: ObjectRequest): ObjectBytes {
+  // An interface is an opaque reference to the IR, so every field is read by
+  // name rather than through the type the declaration spells.
+  const text = fieldOf(request, "text") as Uint8Array;
+  const rodata = fieldOf(request, "rodata") as Uint8Array;
+  const labels = fieldOf(request, "labels") as readonly DataLabel[];
+  const undefinedNames = fieldOf(request, "undefined") as readonly string[];
+  const relocations = fieldOf(request, "relocations") as readonly Relocation[];
+  const functionName = String(fieldOf(fieldOf(request, "function"), "name"));
+  const functionOffset = Number(fieldOf(fieldOf(request, "function"), "offset"));
+  const functionSize = Number(fieldOf(fieldOf(request, "function"), "size"));
+
   const sectionNames = new StringTable();
-  for (const section of SECTION_LAYOUT) sectionNames.add(section.name);
+  for (const section of SECTION_LAYOUT) sectionNames.add(String(fieldOf(section, "name")));
 
   // One table of names for every symbol: the format reads a local name out of
   // the same table the section header points at, so a name kept in a table of
@@ -191,33 +206,35 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
   // A name is written once however many places take its address, so the symbol
   // a relocation names is the one the table already holds.
   const index = new Map<string, number>();
-  for (const label of request.labels) {
-    index.set(label.name, symbols.length);
-    symbols.push({ name: names.add(label.name), section: SECTIONS.data, value: label.offset, size: 0, info: STT_NOTYPE });
+  for (const label of labels) {
+    const labelName = String(fieldOf(label, "name"));
+    index.set(labelName, symbols.length);
+    symbols.push({ name: names.add(labelName), section: SECTIONS.data, value: Number(fieldOf(label, "offset")), size: 0, info: STT_NOTYPE });
   }
   const firstGlobal = symbols.length;
   symbols.push({
-    name: names.add(request.function.name),
+    name: names.add(functionName),
     section: SECTIONS.text,
-    value: request.function.offset,
-    size: request.function.size,
+    value: functionOffset,
+    size: functionSize,
     info: (STB_GLOBAL << 4) | STT_FUNC,
   });
-  index.set(request.function.name, firstGlobal);
-  for (const name of request.undefined) {
+  index.set(functionName, firstGlobal);
+  for (const name of undefinedNames) {
     if (index.has(name)) continue;
     index.set(name, symbols.length);
     symbols.push({ name: names.add(name), section: SHN_UNDEF, value: 0, size: 0, info: (STB_GLOBAL << 4) | STT_NOTYPE });
   }
-  for (const relocation of request.relocations) {
-    if (index.has(relocation.symbol)) continue;
-    throw new CompilerError("AssemblyError", "assemble", `the machine code refers to ${relocation.symbol}, which the object does not name`, "", "", "", "");
+  for (const relocation of relocations) {
+    const symbol = String(fieldOf(relocation, "symbol"));
+    if (index.has(symbol)) continue;
+    throw new CompilerError("AssemblyError", "assemble", `the machine code refers to ${symbol}, which the object does not name`, "", "", "", "");
   }
 
-  const relocationSize = request.relocations.length * RELOCATION_SIZE;
+  const relocationSize = relocations.length * RELOCATION_SIZE;
   const textOffset = align(ELF_HEADER_SIZE, 32);
-  const dataOffset = align(textOffset + request.text.length, 16);
-  const relocationOffset = align(dataOffset + request.rodata.length, 8);
+  const dataOffset = align(textOffset + text.length, 16);
+  const relocationOffset = align(dataOffset + rodata.length, 8);
   const symbolOffset = align(relocationOffset + relocationSize, 8);
   const stringOffset = symbolOffset + symbols.length * SYMBOL_SIZE;
   const sectionNameOffset = stringOffset + names.size;
@@ -239,39 +256,39 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
   view.setUint16(60, SECTIONS.count, true);
   view.setUint16(62, SECTIONS.sectionNames, true);
 
-  bytes.set(request.text, textOffset);
-  bytes.set(request.rodata, dataOffset);
+  bytes.set(text, textOffset);
+  bytes.set(rodata, dataOffset);
 
   // The relocations, each one a place the linker fills an address into. Both
   // kinds are measured from the end of their own field, so the four bytes of
   // the instruction before it are the addend.
-  request.relocations.forEach((relocation, at) => {
+  relocations.forEach((relocation, at) => {
     const where = relocationOffset + at * RELOCATION_SIZE;
-    const symbol = index.get(relocation.symbol) ?? 0;
-    const type = relocation.kind === "call" ? R_X86_64_PLT32 : R_X86_64_PC32;
+    const symbol = index.get(String(fieldOf(relocation, "symbol"))) ?? 0;
+    const type = String(fieldOf(relocation, "kind")) === "call" ? R_X86_64_PLT32 : R_X86_64_PC32;
     // The offset is the one inside the section, not a place in the file: a
     // relocatable is a template the linker places, and the section is what it
     // places at an address.
-    view.setBigUint64(where, BigInt(relocation.offset), true);
+    view.setBigUint64(where, BigInt(Number(fieldOf(relocation, "offset"))), true);
     view.setBigUint64(where + 8, BigInt(symbol) * 0x1_0000_0000n + BigInt(type), true);
     view.setBigInt64(where + 16, -4n, true);
   });
 
   symbols.forEach((symbol, at) => {
     const where = symbolOffset + at * SYMBOL_SIZE;
-    view.setUint32(where, symbol.name, true);
-    bytes[where + 4] = symbol.info;
-    view.setUint16(where + 6, symbol.section, true);
-    view.setBigUint64(where + 8, BigInt(symbol.value), true);
-    view.setBigUint64(where + 16, BigInt(symbol.size), true);
+    view.setUint32(where, Number(fieldOf(symbol, "name")), true);
+    bytes[where + 4] = Number(fieldOf(symbol, "info"));
+    view.setUint16(where + 6, Number(fieldOf(symbol, "section")), true);
+    view.setBigUint64(where + 8, BigInt(Number(fieldOf(symbol, "value"))), true);
+    view.setBigUint64(where + 16, BigInt(Number(fieldOf(symbol, "size"))), true);
   });
   names.write(bytes, stringOffset);
   sectionNames.write(bytes, sectionNameOffset);
 
   const size: Record<number, number> = {
     [SECTIONS.empty]: 0,
-    [SECTIONS.text]: request.text.length,
-    [SECTIONS.data]: request.rodata.length,
+    [SECTIONS.text]: Number(text.length),
+    [SECTIONS.data]: Number(rodata.length),
     [SECTIONS.relocations]: relocationSize,
     [SECTIONS.symbols]: symbols.length * SYMBOL_SIZE,
     [SECTIONS.strings]: names.size,
@@ -289,26 +306,27 @@ export function writeObject(request: ObjectRequest): ObjectBytes {
     [SECTIONS.stackNote]: 0,
   };
   for (const section of SECTION_LAYOUT) {
-    const index2 = SECTIONS[section.key];
+    const sectionKey = String(fieldOf(section, "key"));
+    const index2 = SECTION_LAYOUT.indexOf(section);
     const where = headerOffset + index2 * SECTION_HEADER_SIZE;
     // A relocations section links the symbols it names and carries the section
     // it applies to; a symbol table links the names it writes them out of and
     // says where its globals start.
-    const link = section.key === "relocations" ? SECTIONS.symbols : section.key === "symbols" ? SECTIONS.strings : 0;
-    const target = section.key === "relocations" ? SECTIONS.text : section.key === "symbols" ? firstGlobal : 0;
-    view.setUint32(where, sectionNames.add(section.name), true);
-    view.setUint32(where + 4, section.type, true);
-    view.setBigUint64(where + 8, BigInt(section.flags), true);
+    const link = sectionKey === "relocations" ? SECTIONS.symbols : sectionKey === "symbols" ? SECTIONS.strings : 0;
+    const target = sectionKey === "relocations" ? SECTIONS.text : sectionKey === "symbols" ? firstGlobal : 0;
+    view.setUint32(where, sectionNames.add(String(fieldOf(section, "name"))), true);
+    view.setUint32(where + 4, Number(fieldOf(section, "type")), true);
+    view.setBigUint64(where + 8, BigInt(Number(fieldOf(section, "flags"))), true);
     // The address a section is loaded at is the linker's to decide: an object
     // holds none, so the field stays zero and the offset and the size follow.
     view.setBigUint64(where + 24, BigInt(at[index2]), true);
     view.setBigUint64(where + 32, BigInt(size[index2]), true);
     view.setUint32(where + 40, link, true);
     view.setUint32(where + 44, target, true);
-    view.setBigUint64(where + 48, BigInt(section.align), true);
-    view.setBigUint64(where + 56, BigInt(section.entrySize), true);
+    view.setBigUint64(where + 48, BigInt(Number(fieldOf(section, "align"))), true);
+    view.setBigUint64(where + 56, BigInt(Number(fieldOf(section, "entrySize"))), true);
   }
-  return { bytes, textSizeBytes: request.text.length };
+  return { bytes, textSizeBytes: Number(text.length) };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -440,16 +458,19 @@ export function describeObject(bytes: Uint8Array): string {
     "sections:",
     ...sections
       .slice(1)
-      .map((section) => `  ${section.name.padEnd(16)} ${section.type.padEnd(8)} ${section.size} bytes  flags 0x${section.flags.toString(16)}`),
+      .map((section) => `  ${String(fieldOf(section, "name")).padEnd(16)} ${String(fieldOf(section, "type")).padEnd(8)} ${Number(fieldOf(section, "size"))} bytes  flags 0x${Number(fieldOf(section, "flags")).toString(16)}`),
     "",
   ];
 
-  const symbolTable = sections.find((section) => section.kind === SHT_SYMTAB);
+  const symbolTable = sections.find((section) => Number(fieldOf(section, "kind")) === SHT_SYMTAB);
   if (symbolTable !== undefined) {
-    const stringsAt = sections[symbolTable.link].offset;
+    const symbolTableOffset = Number(fieldOf(symbolTable, "offset"));
+    const symbolTableSize = Number(fieldOf(symbolTable, "size"));
+    const symbolTableEntrySize = Number(fieldOf(symbolTable, "entrySize"));
+    const stringsAt = Number(fieldOf(sections[Number(fieldOf(symbolTable, "link"))], "offset"));
     const defined: string[] = [];
     const absent: string[] = [];
-    for (let at = symbolTable.offset; at < symbolTable.offset + symbolTable.size; at += symbolTable.entrySize) {
+    for (let at = symbolTableOffset; at < symbolTableOffset + symbolTableSize; at += symbolTableEntrySize) {
       const name = readString(bytes, stringsAt + view.getUint32(at, true));
       if (name === "") continue;
       const line = `${name} at ${view.getBigUint64(at + 8, true)}`;
@@ -458,14 +479,19 @@ export function describeObject(bytes: Uint8Array): string {
     lines.push("defines:", ...defined.map((name) => `  ${name}`), "", "refers to:", ...absent.map((name) => `  ${name}`), "");
   }
 
-  const relocations = sections.find((section) => section.kind === SHT_RELA);
+  const relocations = sections.find((section) => Number(fieldOf(section, "kind")) === SHT_RELA);
   if (relocations !== undefined) {
-    const table = sections[relocations.link];
-    const stringsAt = sections[table.link].offset;
+    const relocationOffset = Number(fieldOf(relocations, "offset"));
+    const relocationSize = Number(fieldOf(relocations, "size"));
+    const relocationEntrySize = Number(fieldOf(relocations, "entrySize"));
+    const table = sections[Number(fieldOf(relocations, "link"))];
+    const tableOffset = Number(fieldOf(table, "offset"));
+    const tableEntrySize = Number(fieldOf(table, "entrySize"));
+    const stringsAt = Number(fieldOf(sections[Number(fieldOf(table, "link"))], "offset"));
     const entries: string[] = [];
-    for (let at = relocations.offset; at < relocations.offset + relocations.size; at += relocations.entrySize) {
+    for (let at = relocationOffset; at < relocationOffset + relocationSize; at += relocationEntrySize) {
       const info = view.getBigUint64(at + 8, true);
-      const symbolAt = table.offset + Number(info / 0x1_0000_0000n) * table.entrySize;
+      const symbolAt = tableOffset + Number(info / 0x1_0000_0000n) * tableEntrySize;
       const type = Number(info & 0xffn);
       entries.push(
         `  text+${Number(view.getBigUint64(at, true))} ${RELOCATION_TYPES[String(type)] ?? String(type)} ${readString(bytes, stringsAt + view.getUint32(symbolAt, true))}`,

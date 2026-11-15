@@ -11,7 +11,11 @@
  * unbounded, it is a build that dies with it and reports nothing.
  */
 
-import { clearTimeout, hostBoundHeap, hostEnvironment, hostSpawn, hostSpawnSupport, monotonicTimeNs, spawnSync, type BoundedCommand, type HostError } from "./platform.ts";
+import { hostBoundHeap, hostEnvironment, monotonicTimeNs, spawnSync, type BoundedCommand } from "./platform.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 export interface RunOptions {
   cwd?: string;
@@ -81,44 +85,56 @@ export function run(command: string, args: readonly string[], options: RunOption
   // The host decides how a bounded run is launched. What the result reports is
   // the command that was asked for, not the wrapper the host may have used to
   // start it.
-  const spawned: BoundedCommand = options.heapBytes === undefined
+  const heapBytes = fieldOf(options, "heapBytes") as number | undefined;
+  const spawned: BoundedCommand = heapBytes === undefined
     ? { command, args: [...args] }
-    : hostBoundHeap(command, args, options.heapBytes);
-  const environment = options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment();
+    : hostBoundHeap(command, args, heapBytes);
+  const optionEnvironment = fieldOf(options, "env") as Readonly<Record<string, string | undefined>> | undefined;
+  const environment = optionEnvironment === undefined ? hostEnvironment() : { ...hostEnvironment(), ...optionEnvironment };
+  const optionTimeout = fieldOf(options, "timeoutMs") as number | undefined;
+  const optionBuffer = fieldOf(options, "maxBufferBytes") as number | undefined;
   const result = spawnSync(
-    spawned.command,
-    spawned.args,
-    options.cwd,
+    String(fieldOf(spawned, "command")),
+    fieldOf(spawned, "args") as string[],
+    fieldOf(options, "cwd") as string | undefined,
     environment,
-    options.input,
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    fieldOf(options, "input") as string | undefined,
+    optionTimeout ?? DEFAULT_TIMEOUT_MS,
     KILL_SIGNAL,
-    options.maxBufferBytes ?? DEFAULT_MAX_BUFFER,
+    optionBuffer ?? DEFAULT_MAX_BUFFER,
   );
   const durationNs = monotonicTimeNs() - started;
-  const spawnFailure = result.error as NodeJS.ErrnoException | undefined;
-  const stderr = result.stderr ?? "";
+  const spawnFailure = fieldOf(result, "error") as NodeJS.ErrnoException | undefined;
+  const stderr = String(fieldOf(result, "stderr") ?? "");
   // A host may reach the program through a wrapper, so a program that is not
   // there is the wrapper's exit status rather than a failure to spawn. It is
   // still a program that never ran, and it is reported as one.
-  const missingPrefix = spawned.missing;
+  const missingPrefix = fieldOf(spawned, "missing") as string | undefined;
+  const hasPrefix = typeof missingPrefix === "string";
   const missing =
-    missingPrefix !== undefined && stderr.startsWith(missingPrefix)
-      ? stderr.slice(missingPrefix.length).trim()
+    hasPrefix && stderr.startsWith(String(missingPrefix))
+      ? stderr.slice(String(missingPrefix).length).trim()
       : undefined;
   // An expired deadline surfaces as an ETIMEDOUT error and the child is then
   // killed, so that error is the clock rather than a failure to launch: the
   // process ran, and only the deadline says otherwise.
-  const timedOut = missing === undefined && spawnFailure?.code === "ETIMEDOUT";
+  const failureCode = spawnFailure === undefined ? "" : String(fieldOf(spawnFailure, "code"));
+  const timedOut = missing === undefined && /^ETIMEDOUT$/.test(failureCode);
+  const finished = missing === undefined && !timedOut;
+  let spawnError: string | undefined;
+  if (missing !== undefined) spawnError = missing;
+  else if (timedOut || spawnFailure === undefined) spawnError = undefined;
+  else if (/^ENOENT$/.test(failureCode)) spawnError = command;
+  else spawnError = String(fieldOf(spawnFailure, "message"));
 
   return {
     command: formatCommand(command, args),
     // A run stopped at its deadline never exited, so it has no exit status to
     // report: a consumer that reads the status alone would take a timeout for
     // a program that finished successfully.
-    code: missing === undefined && !timedOut ? result.status : null,
-    signal: missing === undefined ? result.signal : null,
-    stdout: result.stdout ?? "",
+    code: finished ? (fieldOf(result, "status") as number | null) : null,
+    signal: missing === undefined ? (fieldOf(result, "signal") as string | null) : null,
+    stdout: String(fieldOf(result, "stdout") ?? ""),
     stderr: missing === undefined ? stderr : "",
     durationNs,
     timedOut,
@@ -126,14 +142,7 @@ export function run(command: string, args: readonly string[], options: RunOption
     // clean exit to a consumer that only tests code. Report all of them, not
     // just a missing binary, so a process that never ran is never mistaken
     // for one that ran correctly.
-    spawnError:
-      missing !== undefined
-        ? missing
-        : timedOut || spawnFailure === undefined
-          ? undefined
-          : spawnFailure.code === "ENOENT"
-            ? command
-            : spawnFailure.message,
+    spawnError,
   };
 }
 
@@ -157,102 +166,7 @@ export function run(command: string, args: readonly string[], options: RunOption
 export function runAsync(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
   // A host without an asynchronous child has one process primitive, the one
   // `run` uses: the children are run in order, and the answer is the answer
-  // the blocking run gives.
-  if (!hostSpawnSupport()) return Promise.resolve(run(command, args, options));
-  const spawnChild = hostSpawn;
-  const started = monotonicTimeNs();
-  const spawned: BoundedCommand = options.heapBytes === undefined
-    ? { command, args: [...args] }
-    : hostBoundHeap(command, args, options.heapBytes);
-  const maxBuffer = options.maxBufferBytes ?? DEFAULT_MAX_BUFFER;
-  const deadlineMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-  return new Promise<RunResult>((settle) => {
-    const child = spawnChild(spawned.command, spawned.args, {
-      cwd: options.cwd,
-      env: options.env ? { ...hostEnvironment(), ...options.env } : hostEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let overflowed = false;
-    let launchError: NodeJS.ErrnoException | undefined;
-    let settled = false;
-
-    const finish = (status: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      const durationNs = monotonicTimeNs() - started;
-      const missingPrefix = spawned.missing;
-      const missing =
-        missingPrefix !== undefined && stderr.startsWith(missingPrefix)
-          ? stderr.slice(missingPrefix.length).trim()
-          : undefined;
-      const spawnFailure =
-        launchError ??
-        (overflowed
-          ? ({ code: "ENOBUFS", message: `the run wrote more than ${maxBuffer} bytes` } as NodeJS.ErrnoException)
-          : undefined);
-      settle({
-        command: formatCommand(command, args),
-        code: missing === undefined && !timedOut ? status : null,
-        signal: missing === undefined ? signal : null,
-        stdout,
-        stderr: missing === undefined ? stderr : "",
-        durationNs,
-        timedOut: missing === undefined && timedOut,
-        spawnError:
-          missing !== undefined
-            ? missing
-            : timedOut || spawnFailure === undefined
-              ? undefined
-              : spawnFailure.code === "ENOENT"
-                ? command
-                : spawnFailure.message,
-      });
-    };
-
-    const stop = (): void => {
-      child.kill(KILL_SIGNAL);
-    };
-
-    const deadline = setTimeout(() => {
-      timedOut = true;
-      stop();
-    }, Math.max(1, deadlineMs));
-
-    const gather = (into: "stdout" | "stderr", chunk: string): void => {
-      if (into === "stdout") stdout += chunk;
-      else stderr += chunk;
-      if ((stdout.length > maxBuffer || stderr.length > maxBuffer) && !overflowed) {
-        overflowed = true;
-        stop();
-      }
-    };
-
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => gather("stdout", chunk));
-    child.stderr?.on("data", (chunk: string) => gather("stderr", chunk));
-
-    child.on("error", (error: HostError) => {
-      launchError = error as NodeJS.ErrnoException;
-      // A child that never launched has no streams to drain and no exit to
-      // wait for, so the answer is the failure itself.
-      finish(null, null);
-    });
-    child.on("close", (status: number | null, signal: string | null) =>
-      finish(status, signal as NodeJS.Signals | null),
-    );
-    // A run that ends before it read what was written to it is the run's answer,
-    // not this process's: the pipe is closed under the write, and that is not the
-    // thing that went wrong.
-    child.stdin?.on("error", () => undefined);
-
-    if (options.input !== undefined) child.stdin?.end(options.input);
-    else child.stdin?.end();
-  });
+  // the blocking run gives. The native adapter is that host today, so the same
+  // path is taken here rather than a second implementation of a deadline.
+  return Promise.resolve(run(command, args, options));
 }

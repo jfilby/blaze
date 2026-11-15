@@ -11,6 +11,10 @@ import { CompilerError } from "./errors.ts";
 import { hostPlatform } from "./platform.ts";
 import type { Arch, Abi, BuildMode, LibraryKind, Objective, OsName, VerificationMode, RuntimeKind, TargetSpec } from "./types.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 const ARCHES: readonly Arch[] = ["x86_64", "aarch64", "riscv64"];
 const OPERATING_SYSTEMS: readonly OsName[] = ["linux", "qnx"];
 const ABIS: readonly Abi[] = ["sysv", "aapcs"];
@@ -32,7 +36,14 @@ function requireString(value: unknown, field: string): string {
 
 function requireMember<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
   const text = requireString(value, field);
-  const match = allowed.find((entry) => entry === text.toLowerCase());
+  const lowered = text.toLowerCase();
+  let match: T | undefined;
+  for (let at = 0; at < allowed.length; at += 1) {
+    if (String(allowed[at]) === lowered) {
+      match = allowed[at];
+      break;
+    }
+  }
   if (match === undefined) {
     throw new CompilerError("TargetError", "target", `unsupported target.${field} "${text}"`, `supported: ${allowed.join(", ")}`, "", "", "");
   }
@@ -45,26 +56,41 @@ function requireMember<T extends string>(value: unknown, allowed: readonly T[], 
 export function normalizeTarget(partial: Partial<TargetSpec> | undefined): TargetSpec {
   if (partial === undefined) return { ...DEFAULT_TARGET };
 
-  const features = partial.features ?? [];
-  if (!Array.isArray(features) || features.some((feature) => typeof feature !== "string")) {
+  const givenFeatures = fieldOf(partial, "features");
+  const features = (givenFeatures === undefined ? [] : givenFeatures) as readonly unknown[];
+  if (Array.isArray(features) === false) {
     throw new CompilerError("TargetError", "target", "target.features must be an array of strings", "", "", "", "");
+  }
+  for (const feature of features) {
+    if (typeof feature !== "string") {
+      throw new CompilerError("TargetError", "target", "target.features must be an array of strings", "", "", "", "");
+    }
   }
 
   // An empty cpu means "whatever the toolchain defaults to".
-  if (partial.cpu !== undefined && typeof partial.cpu !== "string") {
-    throw new CompilerError("TargetError", "target", "target.cpu must be a string", `received ${JSON.stringify(partial.cpu)}`, "", "", "");
+  const givenCpu = fieldOf(partial, "cpu");
+  if (givenCpu !== undefined && typeof givenCpu !== "string") {
+    throw new CompilerError("TargetError", "target", "target.cpu must be a string", `received ${JSON.stringify(givenCpu)}`, "", "", "");
   }
-  const cpu = partial.cpu ?? "";
+  const cpu = givenCpu === undefined ? "" : String(givenCpu);
   if (cpu !== "" && !/^[A-Za-z0-9_.-]+$/.test(cpu)) {
     throw new CompilerError("TargetError", "target", `target.cpu "${cpu}" is not a valid assembler architecture selector`, "", "", "", "");
   }
 
+  const arch = fieldOf(partial, "arch");
+  const os = fieldOf(partial, "os");
+  const abi = fieldOf(partial, "abi");
+  const archValue = arch === undefined ? DEFAULT_TARGET.arch : requireMember(arch, ARCHES, "arch");
+  const osValue = os === undefined ? DEFAULT_TARGET.os : requireMember(os, OPERATING_SYSTEMS, "os");
+  const abiValue = abi === undefined ? DEFAULT_TARGET.abi : requireMember(abi, ABIS, "abi");
+  const lowered: string[] = [];
+  for (const feature of features) lowered[lowered.length] = String(feature).toLowerCase();
   return {
-    arch: partial.arch === undefined ? DEFAULT_TARGET.arch : requireMember(partial.arch, ARCHES, "arch"),
-    os: partial.os === undefined ? DEFAULT_TARGET.os : requireMember(partial.os, OPERATING_SYSTEMS, "os"),
-    abi: partial.abi === undefined ? DEFAULT_TARGET.abi : requireMember(partial.abi, ABIS, "abi"),
+    arch: archValue,
+    os: osValue,
+    abi: abiValue,
     cpu,
-    features: [...features].map((feature) => feature.toLowerCase()),
+    features: lowered,
   };
 }
 
@@ -73,16 +99,19 @@ export function normalizeTarget(partial: Partial<TargetSpec> | undefined): Targe
  * explicit instead of producing assembly for the wrong machine.
  */
 function supportedTarget(target: TargetSpec): boolean {
-  if (target.arch === "x86_64" && target.abi === "sysv" && (target.os === "linux" || target.os === "qnx")) {
+  const arch = String(fieldOf(target, "arch"));
+  const abi = String(fieldOf(target, "abi"));
+  const os = String(fieldOf(target, "os"));
+  if (arch === "x86_64" && abi === "sysv" && (os === "linux" || os === "qnx")) {
     return true;
   }
-  return target.arch === "aarch64" && target.os === "qnx" && target.abi === "aapcs";
+  return arch === "aarch64" && os === "qnx" && abi === "aapcs";
 }
 
 export function assertBuildableTarget(target: TargetSpec, functionName?: string): TargetSpec {
   if (supportedTarget(target)) return target;
   throw new CompilerError("TargetError", "target", `version 0.1 builds x86_64/linux/sysv, x86_64/qnx/sysv and ` +
-      `aarch64/qnx/aapcs only (got ${target.arch}/${target.os}/${target.abi})`, "", functionName, "", "");
+      `aarch64/qnx/aapcs only (got ${String(fieldOf(target, "arch"))}/${String(fieldOf(target, "os"))}/${String(fieldOf(target, "abi"))})`, "", functionName, "", "");
 }
 
 /**
@@ -353,7 +382,9 @@ export function nimOptimizationOptions(mode: BuildMode): string[] {
 }
 
 export function targetSummary(target: TargetSpec): string {
-  const features = target.features.length > 0 ? ` features=[${target.features.join(",")}]` : "";
-  const cpu = target.cpu === "" ? "toolchain-default" : target.cpu;
-  return `${target.arch}/${target.os}/${target.abi} cpu=${cpu}${features}`;
+  const names = fieldOf(target, "features") as readonly string[];
+  const features = names.length > 0 ? ` features=[${names.join(",")}]` : "";
+  const cpuName = String(fieldOf(target, "cpu"));
+  const cpu = cpuName === "" ? "toolchain-default" : cpuName;
+  return `${String(fieldOf(target, "arch"))}/${String(fieldOf(target, "os"))}/${String(fieldOf(target, "abi"))} cpu=${cpu}${features}`;
 }

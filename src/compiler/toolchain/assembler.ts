@@ -15,7 +15,7 @@
 
 import { stat, writeFile } from "../core/platform.ts";
 import { archOptions, DEFAULT_TARGET } from "../core/target.ts";
-import { assembleCommand, assemblerProbeCommand, toolchainFor, type Toolchain } from "../core/toolchain.ts";
+import { assembleCommand, assemblerProbeCommand, toolchainForTarget, type Toolchain } from "../core/toolchain.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import type { FunctionContract, TargetSpec } from "../core/types.ts";
@@ -24,6 +24,10 @@ import { symbolOf } from "../semantics/contract.ts";
 import { callableFrom, type ContractsByName } from "../semantics/calls.ts";
 import { stackAlignmentProblems } from "./stack-frame.ts";
 import { readAssemblyLines } from "./asm-text.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 const ALLOWED_DIRECTIVES = new Set([
   ".text",
@@ -133,17 +137,20 @@ export function readAssemblyStructure(assembly: string): AssemblyStructure {
   const instructions: AssemblyStructure["instructions"] = [];
 
   for (const line of readAssemblyLines(assembly)) {
-    if (line.label !== null) definedLabels.add(line.label);
-    if (line.kind === "label") continue;
-    if (line.kind === "directive") {
-      directives.push({ name: line.name, arguments: line.arguments, line: line.line });
+    const label = fieldOf(line, "label") as string | null;
+    if (label !== null) definedLabels.add(label);
+    const kind = String(fieldOf(line, "kind"));
+    if (kind === "label") continue;
+    if (kind === "directive") {
+      directives.push({ name: String(fieldOf(line, "name")), arguments: String(fieldOf(line, "arguments")), line: Number(fieldOf(line, "line")) });
       continue;
     }
-    instructions.push({ mnemonic: line.mnemonic, operands: line.operands.join(" "), line: line.line });
-    for (const token of line.operands) {
+    const operands = fieldOf(line, "operands") as readonly string[];
+    instructions.push({ mnemonic: String(fieldOf(line, "mnemonic")), operands: operands.join(" "), line: Number(fieldOf(line, "line")) });
+    for (const token of operands) {
       // A leading %, $, * or @ marks a register, an immediate or an indirect
       // operand; a leading digit is a displacement. Neither is a symbol.
-      if (token === "" || /^[%*$@\d]/.test(token)) continue;
+      if (/^$/.test(token) || /^[%*$@\d]/.test(token)) continue;
       const ripRelative = /^([A-Za-z_.$][A-Za-z0-9_.$]*)\(/.exec(token);
       if (ripRelative !== null) {
         referencedSymbols.push(ripRelative[1]);
@@ -276,20 +283,20 @@ export interface ObjectInfo {
 /** Confirms the assembler understands the requested architecture. */
 export function assertAssemblerSupportsArch(
   target: TargetSpec,
-  toolchain: Toolchain = toolchainFor(target),
+  toolchain: Toolchain = toolchainForTarget(target),
 ): void {
   const options = archOptions(target);
   if (options.length === 0) return;
   const probe = assemblerProbeCommand(toolchain, target);
-  const result = run(probe.command, probe.args, {
+  const result = run(String(fieldOf(probe, "command")), fieldOf(probe, "args") as readonly string[], {
     input: ".text\n.globl probe\nprobe:\n\tret\n",
     timeoutMs: 30_000,
   });
-  if (result.spawnError !== undefined) {
-    throw new CompilerError("TargetError", "assemble", "the assembler is not available", result.spawnError, "", "", "");
+  if (fieldOf(result, "spawnError") !== undefined) {
+    throw new CompilerError("TargetError", "assemble", "the assembler is not available", String(fieldOf(result, "spawnError")), "", "", "");
   }
-  if (result.code !== 0) {
-    throw new CompilerError("TargetError", "assemble", `the assembler does not support target.cpu "${target.cpu}"`, result.stderr.trim(), "", "", "");
+  if (Number(fieldOf(result, "code")) !== 0) {
+    throw new CompilerError("TargetError", "assemble", `the assembler does not support target.cpu "${target.cpu}"`, String(fieldOf(result, "stderr")).trim(), "", "", "");
   }
 }
 
@@ -297,27 +304,27 @@ export function inspectObject(
   objectPath: string,
   functionName: string,
   candidate?: string,
-  toolchain: Toolchain = toolchainFor(DEFAULT_TARGET),
+  toolchain: Toolchain = toolchainForTarget(DEFAULT_TARGET),
 ): ObjectInfo {
   const definedResult = run(toolchain.nm, ["--defined-only", "--extern-only", objectPath], { timeoutMs: 30_000 });
   const undefinedResult = run(toolchain.nm, ["--undefined-only", objectPath], { timeoutMs: 30_000 });
-  if (definedResult.code !== 0 || undefinedResult.code !== 0) {
+  if (Number(fieldOf(definedResult, "code")) !== 0 || Number(fieldOf(undefinedResult, "code")) !== 0) {
     throw assemblyError(
       `cannot inspect the object file for ${functionName}`,
-      `${definedResult.stderr}${undefinedResult.stderr}`.trim(),
+      `${String(fieldOf(definedResult, "stderr"))}${String(fieldOf(undefinedResult, "stderr"))}`.trim(),
       functionName,
       candidate,
     );
   }
 
-  const defined = definedResult.stdout
+  const defined = String(fieldOf(definedResult, "stdout"))
     .split("\n")
     .map((line) => line.trim().split(/\s+/).pop() ?? "")
     .filter((symbol) => symbol !== "");
   // Named for what it holds rather than for the keyword it shadows: a local
   // `undefined` makes every `x === undefined` below read as a comparison
   // against a list of symbols, and stops narrowing anything.
-  const undefinedSymbols = undefinedResult.stdout
+  const undefinedSymbols = String(fieldOf(undefinedResult, "stdout"))
     .split("\n")
     .map((line) => line.trim().split(/\s+/).pop() ?? "")
     .filter((symbol) => symbol !== "");
@@ -328,15 +335,15 @@ export function inspectObject(
   // smallest size there is: a size-optimised build would then pick whichever
   // candidate it happened to evaluate first, and report it as the smallest.
   const sizeResult = run(toolchain.size, ["--format=berkeley", objectPath], { timeoutMs: 30_000 });
-  if (sizeResult.code !== 0) {
+  if (Number(fieldOf(sizeResult, "code")) !== 0) {
     throw assemblyError(
       `cannot measure the object file for ${functionName}`,
-      sizeResult.spawnError ?? sizeResult.stderr.trim(),
+      String(fieldOf(sizeResult, "spawnError") ?? String(fieldOf(sizeResult, "stderr")).trim()),
       functionName,
       candidate,
     );
   }
-  const dataLine = sizeResult.stdout
+  const dataLine = String(fieldOf(sizeResult, "stdout"))
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => /^[0-9]/.test(line))
@@ -344,7 +351,7 @@ export function inspectObject(
   if (dataLine === undefined) {
     throw assemblyError(
       `cannot measure the object file for ${functionName}`,
-      `size reported no size line:\n${sizeResult.stdout.trim()}`,
+      `size reported no size line:\n${String(fieldOf(sizeResult, "stdout")).trim()}`,
       functionName,
       candidate,
     );
@@ -365,46 +372,47 @@ export function inspectObject(
 export async function assemble(request: AssembleRequest): Promise<AssembleResult> {
   // The symbol the candidate is asked to define is the one the contract names,
   // which is not the function's name when a program entry carries its own.
-  const functionName = symbolOf(request.contract);
-  validateAssembly(request.assembly, request.contract, request.candidate, request.callable);
+  const functionName = symbolOf(fieldOf(request, "contract") as FunctionContract);
+  validateAssembly(String(fieldOf(request, "assembly")), fieldOf(request, "contract") as FunctionContract, fieldOf(request, "candidate") as string | undefined, fieldOf(request, "callable") as ReadonlySet<string> | undefined);
 
-  await writeFile(request.assemblyPath, `.text\n${request.assembly}`, "utf8");
+  await writeFile(String(fieldOf(request, "assemblyPath")), `.text\n${String(fieldOf(request, "assembly"))}`, "utf8");
 
-  const toolchain = toolchainFor(request.target);
-  const command = assembleCommand(toolchain, request.target, request.assemblyPath, request.objectPath);
-  const result = run(command.command, command.args, { timeoutMs: 60_000 });
-  if (result.spawnError !== undefined) {
-    throw new CompilerError("TargetError", "assemble", "the assembler is not available", result.spawnError, "", "", "");
+  const toolchain = toolchainForTarget(fieldOf(request, "target") as TargetSpec);
+  const command = assembleCommand(toolchain, fieldOf(request, "target") as TargetSpec, String(fieldOf(request, "assemblyPath")), String(fieldOf(request, "objectPath")));
+  const result = run(String(fieldOf(command, "command")), fieldOf(command, "args") as readonly string[], { timeoutMs: 60_000 });
+  if (fieldOf(result, "spawnError") !== undefined) {
+    throw new CompilerError("TargetError", "assemble", "the assembler is not available", String(fieldOf(result, "spawnError")), "", "", "");
   }
-  if (result.code !== 0) {
+  if (Number(fieldOf(result, "code")) !== 0) {
     throw assemblyError(
       `the assembler rejected the candidate for ${functionName}`,
-      `${request.assemblyPath}\n${result.stderr.trim()}`,
+      `${String(fieldOf(request, "assemblyPath"))}\n${String(fieldOf(result, "stderr")).trim()}`,
       functionName,
-      request.candidate,
+      fieldOf(request, "candidate") as string | undefined,
     );
   }
 
-  const info = inspectObject(request.objectPath, functionName, request.candidate, toolchain);
-  if (info.defined.length !== 1 || info.defined[0] !== functionName) {
+  const info = inspectObject(String(fieldOf(request, "objectPath")), functionName, fieldOf(request, "candidate") as string | undefined, toolchain);
+  const defined = fieldOf(info, "defined") as readonly string[];
+  if (defined.length !== 1 || String(defined[0]) !== functionName) {
     throw assemblyError(
-      `the object defines [${info.defined.join(", ")}] instead of only "${functionName}"`,
+      `the object defines [${(fieldOf(info, "defined") as readonly string[]).join(", ")}] instead of only "${functionName}"`,
       undefined,
       functionName,
-      request.candidate,
+      fieldOf(request, "candidate") as string | undefined,
     );
   }
-  const callable = request.callable ?? new Set<string>();
-  const unresolved = info.undefined.filter((symbol) => !isCallableSymbol(symbol, callable));
+  const callable = (fieldOf(request, "callable") as ReadonlySet<string> | undefined) ?? new Set<string>();
+  const unresolved = (fieldOf(info, "undefined") as readonly string[]).filter((symbol) => !isCallableSymbol(symbol, callable));
   if (unresolved.length > 0) {
     throw assemblyError(
       `the object references symbols outside the runtime ABI and this program: ${unresolved.join(", ")}`,
       undefined,
       functionName,
-      request.candidate,
+      fieldOf(request, "candidate") as string | undefined,
     );
   }
 
-  const stats = await stat(request.objectPath);
-  return { objectPath: request.objectPath, textSizeBytes: info.textSizeBytes, objectSizeBytes: stats.size };
+  const stats = await stat(String(fieldOf(request, "objectPath")));
+  return { objectPath: String(fieldOf(request, "objectPath")), textSizeBytes: Number(fieldOf(info, "textSizeBytes")), objectSizeBytes: Number(fieldOf(stats, "size")) };
 }

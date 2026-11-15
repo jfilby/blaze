@@ -25,6 +25,10 @@
  * the other two backends call.
  */
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 
 /** One service of the host ABI: the name a module imports it under, and its signature. */
 export interface HostService {
@@ -1033,7 +1037,7 @@ export const POW_IMPORT = "pow";
  * the result, or null where the service answers nothing.
  */
 export function serviceSignature(service: HostService): { params: readonly string[]; result: string | null } {
-  return { params: service.params, result: service.result };
+  return { params: fieldOf(service, "params") as readonly string[], result: fieldOf(service, "result") as string | null };
 }
 
 /* -------------------------------------------------------------------------- */

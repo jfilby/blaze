@@ -21,6 +21,10 @@
 
 import { readAssemblyLines } from "./asm-text.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /** rsp at some point, as an offset from a 16-byte boundary, or null when unknown. */
 type Alignment = number | null;
 
@@ -34,7 +38,7 @@ const ENTRY_ALIGNMENT = 8;
 const ANY = 16;
 
 /** The whole register set is 32 bytes, not the one cell a push moves. */
-
+const WHOLE_REGISTER_SET: ReadonlySet<string> = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]);
 
 /**
  * The mnemonics that move rsp by one cell. They are named one by one rather
@@ -42,6 +46,36 @@ const ANY = 16;
  * way and is a register operation: read as a pop it moved rsp that no
  * instruction did, and a candidate that was aligned was turned away.
  */
+const ONE_CELL_MNEMONICS: ReadonlySet<string> = new Set([
+  "push",
+  "pop",
+  // AT&T writes the operand size into the mnemonic, so `pushq %rbp` is as
+  // ordinary as `push %rbp` and both are the same instruction.
+  "pushb",
+  "pushw",
+  "pushl",
+  "pushq",
+  "pushbq",
+  "pushwq",
+  "pushlq",
+  "pushqq",
+  "popb",
+  "popw",
+  "popl",
+  "popq",
+  "popbq",
+  "popwq",
+  "poplq",
+  "popqq",
+  "pushf",
+  "pushfw",
+  "pushfd",
+  "pushfq",
+  "popf",
+  "popfw",
+  "popfd",
+  "popfq",
+]);
 
 /**
  * The registers an instruction moves rsp by writing to. A write to `esp` or
@@ -68,13 +102,14 @@ function branchLine(
   if (operand === undefined) return null;
   const local = /^(\d+)([bf])$/.exec(operand);
   if (local !== null) {
-    const at = byLabel.get(local[1]) ?? [];
-    return local[2] === "b"
+    const at = byLabel.get(String(local[1])) ?? [];
+    return String(local[2]) === "b"
       ? (at.filter((line) => line < index).at(-1) ?? null)
       : (at.find((line) => line > index) ?? null);
   }
   if (!/^(?:[A-Za-z_.$][A-Za-z0-9_.$]*|\d+)$/.test(operand)) return null;
-  return byLabel.get(operand)?.[0] ?? null;
+  const named = byLabel.get(operand);
+  return named === undefined ? null : named[0] ?? null;
 }
 
 /**
@@ -106,42 +141,13 @@ function immediateValue(operand: string): number {
 
 /** What an instruction leaves the offset at, given what it started at. */
 function transfer(mnemonic: string, operands: string[], alignment: Alignment): Alignment {
-  if (new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]).has(mnemonic) || new Set([
-  "push",
-  "pop",
-  // AT&T writes the operand size into the mnemonic, so `pushq %rbp` is as
-  // ordinary as `push %rbp` and both are the same instruction.
-  "pushb",
-  "pushw",
-  "pushl",
-  "pushq",
-  "pushbq",
-  "pushwq",
-  "pushlq",
-  "pushqq",
-  "popb",
-  "popw",
-  "popl",
-  "popq",
-  "popbq",
-  "popwq",
-  "poplq",
-  "popqq",
-  "pushf",
-  "pushfw",
-  "pushfd",
-  "pushfq",
-  "popf",
-  "popfw",
-  "popfd",
-  "popfq",
-]).has(mnemonic)) {
+  if (WHOLE_REGISTER_SET.has(mnemonic) || ONE_CELL_MNEMONICS.has(mnemonic)) {
     // A push and a pop both move rsp by one cell, and one cell is half a
     // boundary, so either one leaves an aligned offset where it found a
     // misaligned one and the other way about. Pushing the whole register set
     // moves eight cells, which is a whole number of boundaries and so leaves
     // the offset where it was.
-    const cell = new Set(["pusha", "pushad", "pushal", "pushaw", "popa", "popad", "popal", "popaw"]).has(mnemonic) ? 32 : 8;
+    const cell = WHOLE_REGISTER_SET.has(mnemonic) ? 32 : 8;
     return alignment === null ? null : (alignment + cell) % ANY;
   }
   // `leave` restores rsp from a frame the walk never read, and `enter` builds
@@ -179,13 +185,15 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
   const lines = readAssemblyLines(assembly);
   const byLabel = new Map<string, number[]>();
   lines.forEach((line, index) => {
-    if (line.label === null) return;
-    const at = byLabel.get(line.label) ?? [];
+    const label = fieldOf(line, "label") as string | null;
+    if (label === null) return;
+    const at = byLabel.get(label) ?? [];
     at.push(index);
-    byLabel.set(line.label, at);
+    byLabel.set(label, at);
   });
 
-  const start = byLabel.get(entry)?.[0];
+  const startLine = byLabel.get(entry);
+  const start = startLine === undefined ? undefined : startLine[0];
   if (start === undefined) return [];
 
   // What the walk has worked out about where each line is reached: the
@@ -215,11 +223,12 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
   while (work.length > 0) {
     const { index, alignment } = work.pop() as { index: number; alignment: Alignment };
     const line = lines[index];
-    if (line.kind !== "instruction") {
+    if (String(fieldOf(line, "kind")) !== "instruction") {
       reach(index + 1, alignment);
       continue;
     }
-    const { mnemonic, operands } = line;
+    const mnemonic = String(fieldOf(line, "mnemonic"));
+    const operands = fieldOf(line, "operands") as string[];
     const next = transfer(mnemonic, operands, alignment);
     const target = branchLine(operands[0], index, byLabel);
 
@@ -246,11 +255,13 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
   // found.
   const problems: string[] = [];
   lines.forEach((line, index) => {
-    if (line.kind !== "instruction" || !line.mnemonic.startsWith("call")) return;
+    if (String(fieldOf(line, "kind")) !== "instruction") return;
+    const mnemonic = String(fieldOf(line, "mnemonic"));
+    if (!mnemonic.startsWith("call")) return;
     const wrong = [...(offsets.get(index) ?? [])].filter((offset) => offset !== 0).sort((a, b) => a - b);
     if (wrong.length === 0) return;
     problems.push(
-      `line ${line.line}: "${line.mnemonic} ${line.operands.join(", ")}" is made with rsp ${wrong.join(" or ")} byte(s) off a 16-byte boundary, which faults the first aligned move in what it calls`,
+      `line ${Number(fieldOf(line, "line"))}: "${mnemonic} ${(fieldOf(line, "operands") as string[]).join(", ")}" is made with rsp ${wrong.join(" or ")} byte(s) off a 16-byte boundary, which faults the first aligned move in what it calls`,
     );
   });
   return problems;

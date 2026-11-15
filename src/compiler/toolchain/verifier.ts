@@ -22,7 +22,6 @@ import {
   preconditionFailures,
   referenceResult,
   valuesMatch,
-  type BufferValue,
   type Expr,
   type ParsedContract,
   type Value,
@@ -31,7 +30,11 @@ import { CompilerError } from "../core/errors.ts";
 import { monotonicTimeNs } from "../core/platform.ts";
 import { byName } from "../core/named-record.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
-import type { FunctionContract, Runner, TestConfig, TestFailure, VerificationResult } from "../core/types.ts";
+import type { FunctionContract, Runner, TestConfig, TestFailure, TypeExpr, VerificationResult } from "../core/types.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 const BOUNDARY_LENGTHS = [0, 1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 257, 1023, 1024];
 
@@ -98,7 +101,12 @@ function mulberry32(seed: number): () => number {
 /** Identifiers that determine how much of a buffer is read. */
 function lengthParameters(parsed: ParsedContract): string[] {
   const names = new Set<string>();
-  for (const range of [...parsed.contract.memory.reads, ...parsed.contract.memory.writes]) {
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  const memory = fieldOf(contract, "memory") as { readonly reads: readonly string[]; readonly writes: readonly string[] };
+  const ranges: string[] = [];
+  for (const one of fieldOf(memory, "reads") as readonly string[]) ranges[ranges.length] = one;
+  for (const one of fieldOf(memory, "writes") as readonly string[]) ranges[ranges.length] = one;
+  for (const range of ranges) {
     const match = /^[A-Za-z_][A-Za-z0-9_]*\[([^:]+):(.+)\]$/.exec(range.trim());
     if (match === null) continue;
     const otherBounds = [match[2], match[1]];
@@ -113,7 +121,8 @@ function lengthParameters(parsed: ParsedContract): string[] {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) continue;
       const identifier = trimmed;
       if (new RegExp(`\\b${identifier}\\b`).test(other)) continue;
-      const type = parsed.env.get(identifier);
+      const env = fieldOf(parsed, "env") as ReadonlyMap<string, TypeExpr>;
+      const type = env.get(identifier);
       if (type === undefined) continue;
       // A buffer is not a count. The bound `len(a)` is the length of the
       // buffer `a`, and the vector gives a buffer a length of its own: a
@@ -194,16 +203,11 @@ function randomScalar(random: () => number, type: ScalarType): ScalarValue {
 }
 
 function patternValue(kind: "zeros" | "ones" | "ramp" | "alternating", index: number): number {
-  switch (kind) {
-    case "zeros":
-      return 0;
-    case "ones":
-      return 1;
-    case "ramp":
-      return index % 17;
-    case "alternating":
-      return index % 2 === 0 ? 1 : -1;
-  }
+  const word = String(kind);
+  if (/^zeros$/.test(word)) return 0;
+  if (/^ones$/.test(word)) return 1;
+  if (/^ramp$/.test(word)) return index % 17;
+  return index % 2 === 0 ? 1 : -1;
 }
 
 interface VectorBuilder {
@@ -220,99 +224,128 @@ function buildVector(parsed: ParsedContract, builder: VectorBuilder, lengthParam
   // of the record instead of adding an argument, and the vector would reach
   // the harness with one argument short.
   const args: (readonly [string, string | string[] | null])[] = [];
-  for (const param of parsed.contract.function.params) {
-    const type = parseType(param.type);
-    if (lengthParameters.includes(param.name)) {
-      args.push([param.name, formatScalar(type, BigInt(builder.length))]);
+  const paramList = fieldOf(fieldOf(fieldOf(parsed, "contract"), "function"), "params") as readonly { readonly name: string; readonly type: string }[];
+  for (const param of paramList) {
+    const paramName = String(fieldOf(param, "name"));
+    const type = parseType(String(fieldOf(param, "type")));
+    if (lengthParameters.includes(paramName)) {
+      args.push([paramName, formatScalar(type, BigInt(Number(fieldOf(builder, "length"))))]);
       continue;
     }
     if (type.kind === "text") {
       // A text parameter is one word of the header line, and it is the value
       // itself: a text is not a buffer, so it has no data line to follow it.
       // The vector is generated, so the word it carries is generated too.
-      args.push([param.name, `arg${args.length}`]);
+      args.push([paramName, `arg${args.length}`]);
       continue;
     }
     if (type.kind !== "primitive") {
       const element = bufferElement(type);
-      const size = type.kind === "array" && type.length !== null ? type.length : builder.length;
-      args.push([param.name, Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)))]);
+      const size = type.kind === "array" && type.length !== null ? type.length : Number(fieldOf(builder, "length"));
+      args.push([paramName, Array.from({ length: size }, (_, index) => formatScalar(element, scalarFor(builder, element, index)))]);
       continue;
     }
-    if (indexParameters.has(param.name) && (type.kind === "primitive" && isIntegerType(type.name as never))) {
+    if (indexParameters.has(paramName) && (type.kind === "primitive" && isIntegerType(type.name as never))) {
       // An index stays inside the buffer it reads: a value at most the
       // buffer's length, so the precondition that guards the access holds.
-      const maxIndex = Math.max(0, builder.length - 1);
-      const value = Math.floor(builder.random() * (maxIndex + 1));
-      args.push([param.name, formatScalar(type, BigInt(value))]);
+      const maxIndex = Math.max(0, Number(fieldOf(builder, "length")) - 1);
+      const value = Math.floor((fieldOf(builder, "random") as (value: unknown) => number)(undefined) * (maxIndex + 1));
+      args.push([paramName, formatScalar(type, BigInt(value))]);
       continue;
     }
-    args.push([param.name, formatScalar(type, randomScalar(builder.random, type))]);
+    args.push([paramName, formatScalar(type, randomScalar(builder.random, type))]);
   }
-  return { id: builder.id, kind: builder.kind, args: byName(args) };
+  return { id: String(fieldOf(builder, "id")), kind: fieldOf(builder, "kind") as TestVector["kind"], args: byName(args) };
 }
 
 function scalarFor(builder: VectorBuilder, type: ScalarType, index: number): ScalarValue {
-  if (type.name === "bool") return builder.pattern === "ones" ? true : builder.random() < 0.5;
-  if (builder.pattern !== "random") {
-    const raw = patternValue(builder.pattern, index);
+  const pattern = fieldOf(builder, "pattern") as "random" | "zeros" | "ones" | "ramp" | "alternating";
+  if (/^bool$/.test(String(type.name))) {
+    if (/^ones$/.test(String(pattern))) return true;
+    const pick = (fieldOf(builder, "random") as (value: unknown) => number)(undefined);
+    if (pick < 0.5) return true;
+    return false;
+  }
+  if (!/^random$/.test(String(pattern))) {
+    const raw = patternValue(pattern as "zeros" | "ones" | "ramp" | "alternating", index);
     const value = isSignedName(type.name) ? raw : Math.abs(raw);
     if (isFloatType(type.name as never)) {
-      return type.name === "f32" ? Math.fround(value) : value;
+      return /^f32$/.test(String(type.name)) ? Math.fround(value) : value;
     }
     return BigInt(value);
   }
   return randomScalar(builder.random, type);
 }
 
+/** One seeded generator, held as a field so a call reaches it by name. */
+class RandomSource {
+  next: (value: unknown) => number;
+
+  constructor(seed: number) {
+    this.next = mulberry32(seed);
+  }
+}
+
+/** The next number of a seeded generator. */
+function nextRandom(source: RandomSource): number {
+  return (fieldOf(source, "next") as (value: unknown) => number)(undefined);
+}
+
 /** Fixed, boundary and randomized vectors, filtered by the preconditions. */
 export function planTestVectors(parsed: ParsedContract, config: TestConfig): TestVector[] {
   const lengths = lengthParameters(parsed);
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  const memory = fieldOf(contract, "memory") as { readonly reads: readonly string[]; readonly writes: readonly string[] };
+  const env = fieldOf(parsed, "env") as ReadonlyMap<string, TypeExpr>;
   // Parameters that appear inside a memory range's bounds are indices into a
   // buffer, not counts: they are generated within the buffer's length so the
   // precondition that guards the access can hold, instead of spanning the
   // whole integer type and overflowing the arithmetic the contract wraps.
   const indexParams = new Set<string>();
-  for (const range of [...parsed.contract.memory.reads, ...parsed.contract.memory.writes]) {
+  const ranges: string[] = [];
+  for (const one of fieldOf(memory, "reads") as readonly string[]) ranges[ranges.length] = one;
+  for (const one of fieldOf(memory, "writes") as readonly string[]) ranges[ranges.length] = one;
+  for (const range of ranges) {
     const match = /^[A-Za-z_][A-Za-z0-9_]*\[([^:]+):(.+)\]$/.exec(range.trim());
     if (match === null) continue;
     for (const bound of [match[1], match[2]]) {
       for (const identifier of bound.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
-        const type = parsed.env.get(identifier);
+        const type = env.get(identifier);
         if (type === undefined || isBufferType(type)) continue;
         indexParams.add(identifier);
       }
     }
   }
-  const random = mulberry32(config.seed);
-  const maxLength = Math.max(1, config.maxLength);
+  const source = new RandomSource(Number(fieldOf(config, "seed")));
+  const makeRandom = (): number => nextRandom(source);
+  const maxLength = Math.max(1, Number(fieldOf(config, "maxLength")));
 
   const builders: VectorBuilder[] = [
-    { id: "zeros", kind: "fixed", length: 1, pattern: "zeros", random },
-    { id: "zeros-17", kind: "fixed", length: 17, pattern: "zeros", random },
-    { id: "ones-1", kind: "fixed", length: 1, pattern: "ones", random },
-    { id: "ones-8", kind: "fixed", length: 8, pattern: "ones", random },
-    { id: "ramp-13", kind: "fixed", length: 13, pattern: "ramp", random },
-    { id: "alternating-32", kind: "fixed", length: 32, pattern: "alternating", random },
+    { id: "zeros", kind: "fixed", length: 1, pattern: "zeros", random: makeRandom },
+    { id: "zeros-17", kind: "fixed", length: 17, pattern: "zeros", random: makeRandom },
+    { id: "ones-1", kind: "fixed", length: 1, pattern: "ones", random: makeRandom },
+    { id: "ones-8", kind: "fixed", length: 8, pattern: "ones", random: makeRandom },
+    { id: "ramp-13", kind: "fixed", length: 13, pattern: "ramp", random: makeRandom },
+    { id: "alternating-32", kind: "fixed", length: 32, pattern: "alternating", random: makeRandom },
   ];
   for (const length of BOUNDARY_LENGTHS) {
     if (length > maxLength) continue;
-    builders.push({ id: `boundary-${length}`, kind: "boundary", length, pattern: "random", random });
+    builders.push({ id: `boundary-${length}`, kind: "boundary", length, pattern: "random", random: makeRandom });
   }
-  for (let index = 0; index < Math.max(0, config.randomCases); index += 1) {
+  for (let index = 0; index < Math.max(0, Number(fieldOf(config, "randomCases"))); index += 1) {
     builders.push({
       id: `random-${index}`,
       kind: "random",
-      length: Math.floor(random() * (maxLength + 1)),
+      length: Math.floor(nextRandom(source) * (maxLength + 1)),
       pattern: "random",
-      random,
+      random: makeRandom,
     });
   }
 
   const vectors: TestVector[] = [];
   for (const builder of builders) {
     const vector = buildVector(parsed, builder, lengths, indexParams);
-    const violations = preconditionFailures(parsed, vectorValues(parsed.contract, vector));
+    const violations = preconditionFailures(parsed, vectorValues(contract, vector));
     if (violations.length > 0) continue;
     vectors.push(vector);
   }
@@ -323,17 +356,17 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
     // scalar to a buffer's length is most likely to hold for the smallest
     // inputs, and a function whose domain excludes them is not checkable by
     // vectors at all.
-    const fallbackBuilder: VectorBuilder = { id: "fallback-0", kind: "fixed", length: 1, pattern: "zeros", random };
+    const fallbackBuilder: VectorBuilder = { id: "fallback-0", kind: "fixed", length: 1, pattern: "zeros", random: makeRandom };
     const fallback = buildVector(parsed, fallbackBuilder, lengths, indexParams);
-    if (preconditionFailures(parsed, vectorValues(parsed.contract, fallback)).length === 0) {
+    if (preconditionFailures(parsed, vectorValues(contract, fallback)).length === 0) {
       vectors.push(fallback);
     }
   }
   if (vectors.length === 0) {
     throw verificationError(
-      `no test vector satisfies the preconditions of ${parsed.contract.function.name}`,
-      parsed.contract.requires.join("; "),
-      parsed.contract.function.name,
+      `no test vector satisfies the preconditions of ${String(fieldOf(fieldOf(contract, "function"), "name"))}`,
+      (fieldOf(contract, "requires") as readonly string[]).join("; "),
+      String(fieldOf(fieldOf(contract, "function"), "name")),
     );
   }
   return vectors;
@@ -346,17 +379,20 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
  * vector that satisfies the preconditions.
  */
 export function selectDemoVector(parsed: ParsedContract, config: TestConfig): TestVector {
-  const random = mulberry32(config.seed);
+  const source = new RandomSource(Number(fieldOf(config, "seed")));
+  const makeRandom = (): number => nextRandom(source);
   const lengths = lengthParameters(parsed);
-  for (const builder of [
-    { id: "demo-8", kind: "fixed" as const, length: 8, pattern: "ramp" as const, random },
-    { id: "demo-4", kind: "fixed" as const, length: 4, pattern: "ramp" as const, random },
-    { id: "demo-1", kind: "fixed" as const, length: 1, pattern: "ones" as const, random },
-  ]) {
-    const vector = buildVector(parsed, builder, lengths);
-    if (preconditionFailures(parsed, vectorValues(parsed.contract, vector)).length === 0) return vector;
+  const builders: VectorBuilder[] = [
+    { id: "demo-8", kind: "fixed", length: 8, pattern: "ramp", random: makeRandom },
+    { id: "demo-4", kind: "fixed", length: 4, pattern: "ramp", random: makeRandom },
+    { id: "demo-1", kind: "fixed", length: 1, pattern: "ones", random: makeRandom },
+  ];
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  for (const builder of builders) {
+    const vector = buildVector(parsed, builder, lengths, new Set<string>());
+    if (preconditionFailures(parsed, vectorValues(contract, vector)).length === 0) return vector;
   }
-  return planTestVectors(parsed, { ...config, randomCases: 0 })[0];
+  return planTestVectors(parsed, { randomCases: 0, maxLength: Number(fieldOf(config, "maxLength")), seed: Number(fieldOf(config, "seed")) })[0];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -365,23 +401,29 @@ export function selectDemoVector(parsed: ParsedContract, config: TestConfig): Te
 
 export function vectorValues(contract: FunctionContract, vector: TestVector): Map<string, Value> {
   const values = new Map<string, Value>();
-  for (const param of contract.function.params) {
-    const type = parseType(param.type);
-    const argument = vector.args[param.name];
+  const params = fieldOf(fieldOf(contract, "function"), "params") as readonly { readonly name: string; readonly type: string }[];
+  const args = fieldOf(vector, "args") as Record<string, string | string[] | null>;
+  for (const param of params) {
+    const name = String(fieldOf(param, "name"));
+    const type = parseType(String(fieldOf(param, "type")));
+    const argument = args[name];
     if (type.kind === "text") {
       // A text parameter is the word itself, read back the way it was written.
-      values.set(param.name, typeof argument === "string" ? argument : "");
+      values.set(name, typeof argument === "string" ? argument : "");
       continue;
     }
     if (type.kind !== "primitive") {
       if (argument === null || argument === undefined || typeof argument === "string") {
-        values.set(param.name, null);
+        values.set(name, null);
         continue;
       }
-      values.set(param.name, { type, values: argument.map((text) => parseScalar(bufferElement(type), text)) } satisfies BufferValue);
+      const texts = argument as readonly string[];
+      const parsed: Value[] = [];
+      for (const text of texts) parsed[parsed.length] = parseScalar(bufferElement(type), text);
+      values.set(name, { type, values: parsed });
       continue;
     }
-    values.set(param.name, argument === undefined ? 0 : parseScalar(type, argument as string));
+    values.set(name, argument === undefined ? 0 : parseScalar(type, argument as string));
   }
   return values;
 }
@@ -390,9 +432,11 @@ export function encodeRunRequest(contract: FunctionContract, vectors: readonly T
   const lines = ["run"];
   for (const vector of vectors) {
     const header: string[] = [];
-    for (const param of contract.function.params) {
-      const type = parseType(param.type);
-      const argument = vector.args[param.name];
+    const params = fieldOf(fieldOf(contract, "function"), "params") as readonly { readonly name: string; readonly type: string }[];
+    const args = fieldOf(vector, "args") as Record<string, string | string[] | null>;
+    for (const param of params) {
+      const type = parseType(String(fieldOf(param, "type")));
+      const argument = args[String(fieldOf(param, "name"))];
       header.push(
         type.kind === "primitive"
           ? String(argument)
@@ -404,21 +448,21 @@ export function encodeRunRequest(contract: FunctionContract, vectors: readonly T
       );
     }
     lines.push(header.join(" "));
-    for (const param of contract.function.params) {
-      const type = parseType(param.type);
+    for (const param of params) {
+      const type = parseType(String(fieldOf(param, "type")));
       if (type.kind === "primitive" || type.kind === "text") continue;
-      const argument = vector.args[param.name];
+      const argument = args[String(fieldOf(param, "name"))];
       // An empty or null buffer has no data line, exactly like the harness
       // expects: one line per buffer that actually carries elements.
       if (argument === null || argument === undefined || typeof argument === "string" || argument.length === 0) continue;
-      lines.push(argument.join(" "));
+      lines.push((argument as readonly string[]).join(" "));
     }
   }
   return `${lines.join("\n")}\n`;
 }
 
 export function decodeRunResults(contract: FunctionContract, stdout: string, expected: number): Value[] {
-  const type = parseType(contract.function.returns);
+  const type = parseType(String(fieldOf(contract, "returns")));
   const results: Value[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.startsWith("RESULT ")) continue;
@@ -434,7 +478,7 @@ export function decodeRunResults(contract: FunctionContract, stdout: string, exp
     throw verificationError(
       `the candidate produced ${results.length} results for ${expected} test vectors`,
       stdout.trim().slice(0, 400),
-      contract.function.name,
+      String(fieldOf(fieldOf(contract, "function"), "name")),
     );
   }
   return results;
@@ -449,12 +493,12 @@ export function encodeBenchRequest(contract: FunctionContract, vector: TestVecto
 /* -------------------------------------------------------------------------- */
 
 function toleranceFor(parsed: ParsedContract, values: ReadonlyMap<string, Value>): number | null {
-  const returns = parseType(parsed.contract.function.returns);
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  const returns = parseType(String(fieldOf(fieldOf(contract, "function"), "returns")));
   let terms = 1;
   for (const value of values.values()) {
-    if (typeof value === "object" && value !== null && "values" in value) {
-      terms = Math.max(terms, value.values.length);
-    }
+    const rows = fieldOf(value, "values");
+    if (Array.isArray(rows)) terms = Math.max(terms, rows.length);
   }
   return comparisonTolerance(returns, terms);
 }
@@ -470,10 +514,18 @@ function postconditionFailures(
   const bound = new Map(values);
   bound.set("result", result);
 
-  parsed.ensures.forEach((condition: Expr, index: number) => {
-    const text = parsed.contract.ensures[index];
-    if (condition.t === "binary" && condition.op === "==" && condition.left.t === "var" && condition.left.name === "result") {
-      const expected = referenceResult({ ...parsed, resultDefinition: condition.right }, values);
+  const contract = fieldOf(parsed, "contract") as FunctionContract;
+  const conditions = fieldOf(parsed, "ensures") as readonly Expr[];
+  const texts = fieldOf(contract, "ensures") as readonly string[];
+  conditions.forEach((condition: Expr, index: number) => {
+    const text = texts[index];
+    const left = fieldOf(condition, "left") as Expr;
+    const conditionKind = String(fieldOf(condition, "t"));
+    const leftKind = String(fieldOf(left, "t"));
+    if (conditionKind === "binary" && String(fieldOf(condition, "op")) === "==" && leftKind === "var" && String(fieldOf(left, "name")) === "result") {
+      const right = fieldOf(condition, "right") as Expr;
+      const variant = fieldOf(parsed, "requires") as readonly Expr[];
+      const expected = referenceResult({ contract: fieldOf(parsed, "contract"), env: fieldOf(parsed, "env"), requires: variant, ensures: conditions, resultDefinition: right } as ParsedContract, values);
       if (!valuesMatch(expected, result, tolerance)) {
         failures.push(`${text} (expected ${String(expected)}, got ${String(result)})`);
       }
@@ -481,7 +533,7 @@ function postconditionFailures(
     }
     let outcome: Value;
     try {
-      outcome = evaluate(condition, { env: parsed.env, values: bound });
+      outcome = evaluate(condition, { env: fieldOf(parsed, "env") as ReadonlyMap<string, TypeExpr>, values: bound });
     } catch (cause) {
       failures.push(`${text}: ${cause instanceof Error ? cause.message : String(cause)}`);
       return;
@@ -502,86 +554,98 @@ export interface VerifyRequest {
 
 export function verifyCandidate(request: VerifyRequest): VerificationResult {
   const started = monotonicTimeNs();
-  const { vectors } = request;
-  const expected = vectors.map((vector) => {
-    const values = vectorValues(request.contract, vector);
+  const contract = fieldOf(request, "contract") as FunctionContract;
+  const parsed = fieldOf(request, "parsed") as ParsedContract;
+  const runner = fieldOf(request, "runner") as Runner;
+  const candidateName = String(fieldOf(request, "candidate"));
+  const vectors = fieldOf(request, "vectors") as readonly TestVector[];
+  const expected: { vector: TestVector; values: ReadonlyMap<string, Value>; result: Value | null; skip: boolean }[] = [];
+  for (const vector of vectors) {
+    const values = vectorValues(contract, vector);
     try {
-      return { vector, values, result: referenceResult(request.parsed, values), skip: false };
+      expected[expected.length] = { vector, values, result: referenceResult(parsed, values), skip: false };
     } catch {
       // A vector whose contract cannot be evaluated (for example, an index
       // out of bounds of a slice) is out of the function's domain: it is not
       // compared, and the candidate is not faulted for it.
-      return { vector, values, result: null, skip: true };
+      expected[expected.length] = { vector, values, result: null, skip: true };
     }
-  });
+  }
 
+  const functionName = String(fieldOf(fieldOf(contract, "function"), "name"));
   // A candidate that allocates without bound is refused by its own allocator
   // under this limit, and says so, rather than being killed by a system that
   // has run out of memory and takes the build with it.
-  const execution = run(request.runner.command, request.runner.args, {
-    input: encodeRunRequest(request.contract, vectors),
+  const execution = run(String(fieldOf(runner, "command")), fieldOf(runner, "args") as string[], {
+    input: encodeRunRequest(contract, vectors),
     timeoutMs: 120_000,
     heapBytes: GENERATED_HEAP_BYTES,
   });
-  if (execution.spawnError !== undefined) {
+  if (fieldOf(execution, "spawnError") !== undefined) {
     throw verificationError(
-      `cannot run the candidate for ${request.contract.function.name}`,
-      execution.spawnError,
-      request.contract.function.name,
-      request.candidate,
+      `cannot run the candidate for ${functionName}`,
+      String(fieldOf(execution, "spawnError")),
+      functionName,
+      candidateName,
     );
   }
-  if (execution.timedOut) {
+  if (fieldOf(execution, "timedOut") === true) {
     throw verificationError(
-      `the candidate for ${request.contract.function.name} did not finish`,
+      `the candidate for ${functionName} did not finish`,
       "the test process exceeded its time limit, which usually means an unbounded loop",
-      request.contract.function.name,
-      request.candidate,
+      functionName,
+      candidateName,
     );
   }
-  if (execution.signal !== null) {
+  const signal = fieldOf(execution, "signal") as string | null;
+  if (signal !== null) {
     throw verificationError(
-      `the candidate for ${request.contract.function.name} was terminated by ${execution.signal}`,
-      execution.signal === "SIGILL"
+      `the candidate for ${functionName} was terminated by ${signal}`,
+      /^SIGILL$/.test(signal)
         ? "the implementation used an instruction this machine does not support; check that target.cpu matches the build host"
-        : execution.stderr.trim().slice(0, 2000),
-      request.contract.function.name,
-      request.candidate,
+        : String(fieldOf(execution, "stderr")).trim().slice(0, 2000),
+      functionName,
+      candidateName,
     );
   }
-  if (execution.code !== 0) {
+  const code = fieldOf(execution, "code") as number | null;
+  if (code !== 0) {
     throw verificationError(
-      `the candidate for ${request.contract.function.name} exited with status ${execution.code}`,
-      execution.stderr.trim().slice(0, 2000),
-      request.contract.function.name,
-      request.candidate,
+      `the candidate for ${functionName} exited with status ${code}`,
+      String(fieldOf(execution, "stderr")).trim().slice(0, 2000),
+      functionName,
+      candidateName,
     );
   }
 
-  const actual = decodeRunResults(request.contract, execution.stdout, vectors.length);
+  const actual = decodeRunResults(contract, String(fieldOf(execution, "stdout")), vectors.length);
   const failures: TestFailure[] = [];
   expected.forEach((entry, index) => {
-    if (entry.skip) return;
-    const tolerance = toleranceFor(request.parsed, entry.values);
-    if (!valuesMatch(entry.result, actual[index], tolerance)) {
+    if (fieldOf(entry, "skip") === true) return;
+    const values = fieldOf(entry, "values") as ReadonlyMap<string, Value>;
+    const result = fieldOf(entry, "result") as Value;
+    const vector = fieldOf(entry, "vector") as TestVector;
+    const tolerance = toleranceFor(parsed, values);
+    if (!valuesMatch(result, actual[index], tolerance)) {
       failures.push({
-        vector: entry.vector.id,
-        expected: describeValue(entry.result),
+        vector: String(fieldOf(vector, "id")),
+        expected: describeValue(result),
         actual: describeValue(actual[index]),
         reason: "result does not match the contract",
       });
       return;
     }
-    for (const violation of postconditionFailures(request.parsed, entry.values, actual[index], tolerance)) {
-      failures.push({ vector: entry.vector.id, expected: violation, actual: describeValue(actual[index]), reason: "postcondition" });
+    for (const violation of postconditionFailures(parsed, values, actual[index], tolerance)) {
+      failures.push({ vector: String(fieldOf(vector, "id")), expected: violation, actual: describeValue(actual[index]), reason: "postcondition" });
     }
   });
 
+  const first = expected[0];
   return {
-    candidate: request.candidate,
+    candidate: candidateName,
     passed: failures.length === 0,
     cases: vectors.length,
-    tolerance: expected.length === 0 ? null : toleranceFor(request.parsed, expected[0].values),
+    tolerance: first === undefined ? null : toleranceFor(parsed, fieldOf(first, "values") as ReadonlyMap<string, Value>),
     failures: failures.slice(0, 20),
     durationNs: Number(monotonicTimeNs() - started),
   };

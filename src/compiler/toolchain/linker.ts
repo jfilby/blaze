@@ -29,14 +29,18 @@ import { bufferElement, isFloatType, isSignedIntegerType, parseType, symbolOf, t
 import { rulesFor } from "../semantics/language.ts";
 import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import type { BuildMode, FunctionContract, FunctionParam, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
+import type { BuildMode, FunctionContract, FunctionParam, FunctionSignature, Objective, ObjectLayout, TargetSpec, TypeExpr } from "../core/types.ts";
 import { cTargetOptions, DEFAULT_TARGET, type Threading } from "../core/target.ts";
-import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainFor } from "../core/toolchain.ts";
+import { compileCommand, linkOptionsFor, threadingOptionsFor, toolchainForTarget } from "../core/toolchain.ts";
 
 import type { ProbePlan } from "./probe.ts";
 import { RUNTIME_NAME, RUNTIME_SYMBOLS } from "../runtime/abi.ts";
 import { C_KEYWORDS, cEscape, cHeaderNames, cMemberName, cSymbolLabel, cSymbolName } from "./c-names.ts";
 import { isWide } from "../core/semantic-ir.ts";
+
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
 
 const INTEGER_ARGUMENT_REGISTERS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 const SSE_ARGUMENT_REGISTERS = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
@@ -74,12 +78,12 @@ function isBuffer(type: TypeExpr): type is BufferType {
 }
 
 function isSignedScalar(type: TypeExpr): boolean {
-  return type.kind === "primitive" && isSignedIntegerType(type.name);
+  return type.kind === "primitive" && isSignedIntegerType(fieldOf(type, "name") as never);
 }
 
 /** A wide number, which is four limbs and no machine register. */
 function isWideScalar(type: TypeExpr): boolean {
-  return type.kind === "primitive" && isWide(type.name);
+  return type.kind === "primitive" && isWide(String(fieldOf(type, "name")) as never);
 }
 
 /** C type used in the harness declaration for a contract type. */
@@ -89,12 +93,14 @@ export function cDeclarationType(type: TypeExpr): string {
   if (type.kind === "ref") {
     // An unshaped reference (`any`) is a dynamic value, carried as a double
     // handle so it mixes with the arithmetic the generated C performs.
-    if (type.of === null && type.name === undefined) return "double";
-    return type.name === undefined ? "void*" : `struct ${type.name}*`;
+    const of = fieldOf(type, "of") as TypeExpr | null;
+    const name = fieldOf(type, "name") as string | undefined;
+    if (of === null && name === undefined) return "double";
+    return name === undefined ? "void*" : `struct ${name}*`;
   }
-  if (isBuffer(type)) return `${cDeclarationType(type.of)}*`;
+  if (isBuffer(type)) return `${cDeclarationType(fieldOf(type, "of") as TypeExpr)}*`;
   if (type.kind !== "primitive") throw linkError(`unsupported type ${typeToString(type)}`);
-  const mapped = C_SCALARS[type.name];
+  const mapped = C_SCALARS[String(fieldOf(type, "name"))];
   if (mapped === undefined) throw linkError(`unsupported type ${typeToString(type)}`);
   return mapped;
 }
@@ -117,13 +123,12 @@ export function cObjectDeclarations(objects: Record<string, ObjectLayout>): stri
       // compiler takes. The Nim host already writes its fields under names of
       // their own, and a member is in a namespace of its own, so a typedef the
       // headers define is still a legal member; a keyword and a macro are not.
-      const fields = object.fields
-        .map(
-          (field) =>
-            `  ${cDeclarationType(parseType(field.type))} ${cMemberName(field.name)}; /* +${field.offset} */`,
-        )
-        .join("\n");
-      return `struct ${object.name} {\n${fields}\n}; /* ${object.size} bytes, align ${object.align} */`;
+      const fields: string[] = [];
+      for (const field of fieldOf(object, "fields") as readonly { readonly type: string; readonly name: string; readonly offset: number }[]) {
+        fields[fields.length] = `  ${cDeclarationType(parseType(String(fieldOf(field, "type"))))} ${cMemberName(String(fieldOf(field, "name")))}; /* +${String(fieldOf(field, "offset"))} */`;
+      }
+      const written = fields.join("\n");
+      return `struct ${String(fieldOf(object, "name"))} {\n${written}\n}; /* ${String(fieldOf(object, "size"))} bytes, align ${String(fieldOf(object, "align"))} */`;
     })
     .join("\n");
 }
@@ -430,10 +435,13 @@ function cStringLiteral(text: string): string {
 /** Emits the C harness for a contract. The harness is compiler code. */
 export function generateHarness(contract: FunctionContract, demoRequest: string, language: string = "typescript"): string {
   const name = symbolOf(contract);
+  const fn = fieldOf(contract, "function") as FunctionSignature;
+  const params = fieldOf(fn, "params") as readonly { readonly name: string; readonly type: string }[];
+  const ensures = fieldOf(contract, "ensures") as readonly string[];
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     throw linkError("the contract function name is not a valid C identifier", undefined, name);
   }
-  if (contract.ensures.length === 0) return generateDefinitionHarness(contract, language);
+  if (ensures.length === 0) return generateDefinitionHarness(contract, language);
   // A parameter of a reference type is something the protocol does not carry,
   // so there is no vector to hand this function and nothing for it to be
   // called with. `planVectors` says the same thing and plans none, so the
@@ -441,46 +449,71 @@ export function generateHarness(contract: FunctionContract, demoRequest: string,
   // what calls it, and what says whether the two agree. Reading the header of
   // such a vector raised `ref<any> is not a buffer` out of the harness the
   // compiler wrote for a call it was never going to make.
-  if (contract.function.params.some((param) => parseType(param.type).kind === "ref")) {
-    return generateDefinitionHarness(contract, language);
+  for (const param of params) {
+    if (parseType(String(fieldOf(param, "type"))).kind === "ref") return generateDefinitionHarness(contract, language);
   }
-  const returns = parseType(contract.function.returns);
+  const returns = parseType(String(fieldOf(fn, "returns")));
   if (isBuffer(returns)) throw linkError("a pointer return type cannot be called from the harness", undefined, name);
   // The harness is C and the C compiler places the arguments, so an arity past
   // the registers is a harness that still compiles: a ninth argument goes on
   // the stack. Asking for a register for each one refused a contract whose
   // harness was about to be written perfectly well.
 
-  const types = contract.function.params.map((param) => parseType(param.type));
-  const labels = contract.function.params.map((param) => param.name);
+  const types: TypeExpr[] = [];
+  const labels: string[] = [];
+  for (const param of params) {
+    types[types.length] = parseType(String(fieldOf(param, "type")));
+    labels[labels.length] = String(fieldOf(param, "name"));
+  }
   const names = harnessArgumentNames(labels);
   for (const type of types) {
-    if (type.kind === "array" && type.length === null) {
+    if (type.kind === "array" && (fieldOf(type, "length") as number | null) === null) {
       throw linkError("array parameters need a fixed length", undefined, name);
     }
   }
-  const callArguments = types.flatMap((type, index) => {
+  const callParts: string[] = [];
+  for (let index = 0; index < types.length; index += 1) {
+    const type = types[index];
     const base = names[index];
     if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") {
-      return [base, `count_${names[index]}`];
+      callParts[callParts.length] = base;
+      callParts[callParts.length] = `count_${names[index]}`;
+    } else {
+      callParts[callParts.length] = base;
     }
-    return [base];
-  }).join(", ");
-  const invocation =
-    contract.function.params.length === 0
-      ? `${cDeclarationType(returns)} value = ${cSymbolName(name)}();`
-      : `${cDeclarationType(returns)} value = ${cSymbolName(name)}(${callArguments});`;
+  }
+  const callArguments = callParts.join(", ");
+  const invocation = params.length === 0
+    ? `${cDeclarationType(returns)} value = ${cSymbolName(name)}();`
+    : `${cDeclarationType(returns)} value = ${cSymbolName(name)}(${callArguments});`;
 
-  return `${HARNESS_PRELUDE}
-extern ${cDeclarationType(returns)} ${cSymbolName(name)}(${types.flatMap((type, index) => {
+  const externParams: string[] = [];
+  const declarations: string[] = [];
+  for (let index = 0; index < types.length; index += 1) {
+    const type = types[index];
     const base = `${cDeclarationType(type)} ${names[index]}`;
     if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") {
-      return [base, `size_t count_${names[index]}`];
+      externParams[externParams.length] = base;
+      externParams[externParams.length] = `size_t count_${names[index]}`;
+    } else {
+      externParams[externParams.length] = base;
     }
-    return [base];
-  }).join(", ")})${cSymbolLabel(name)};
+    declarations[declarations.length] = `static ${cDeclarationType(type)} ${names[index]};`;
+  }
 
-${types.map((type, index) => `static ${cDeclarationType(type)} ${names[index]};`).join("\n")}
+  const returnKind = String(fieldOf(returns, "kind"));
+  const returnName = String(fieldOf(returns, "name"));
+  const sinkText = returnKind === "text"
+    ? "0.0"
+    : isWideScalar(returns)
+      ? `(double)${returnKind === "primitive" && returnName === "i256" ? "blaze_rt_i256_to_i64" : "blaze_rt_u256_to_u64"}(&value)`
+      : "(double)value";
+  const style = fieldOf(rulesFor(language), "style");
+
+  return `${HARNESS_PRELUDE}
+extern ${cDeclarationType(returns)} ${cSymbolName(name)}(${externParams.join(", ")})${cSymbolLabel(name)};
+
+${declarations.join("\n")}
 ${vectorCounters(types, names)}
 /* The example run, used when a person starts this program with no input. */
 static const char demo_request[] =
@@ -513,7 +546,7 @@ int main(void) {
   blaze_rt_initialize();
   /* The style a value is written as text in is the language's, and it is set
      once, when the program starts. */
-  blaze_rt_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
+  blaze_rt_set_text_style(${String(style) === "python" ? 1 : 0});
   if (getline(&input_line, &input_capacity, input) <= 0) fail("empty input");
   char* mode_cursor = input_line;
   char* mode = next_token(&mode_cursor);
@@ -551,13 +584,7 @@ int main(void) {
     ${invocation}
     /* A text result is measured for the call it took, not for the value it
        says: a text has no number in it the bench could add up. */
-    sink += ${
-      returns.kind === "text"
-        ? "0.0"
-        : isWideScalar(returns)
-          ? `(double)${returns.kind === "primitive" && returns.name === "i256" ? "blaze_rt_i256_to_i64" : "blaze_rt_u256_to_u64"}(&value)`
-          : "(double)value"
-    };
+    sink += ${sinkText};
   }
   const long long elapsed = now_ns() - start;
   printf("BENCH %lld %.17g\\n", elapsed, (double)sink);
@@ -575,19 +602,21 @@ int main(void) {
  */
 function generateDefinitionHarness(contract: FunctionContract, language: string = "typescript"): string {
   const name = symbolOf(contract);
-  const objects = contract.definition.objects;
+  const fn = fieldOf(contract, "function") as FunctionSignature;
+  const objects = fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>;
   // The names appear only in the extern declaration, so all they have to be is
   // well formed: a contract is free to call a parameter `double`, and an
   // unescaped one makes gcc reject the whole harness. The sibling
   // `generateHarness` solves the same problem for the names it also calls.
-  const parameters = contract.function.params.flatMap((param) => {
-    const type = parseType(param.type);
-    const base = `${cDeclarationType(type)} ${cEscape(param.name, HARNESS_RESERVED)}`;
-    if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") {
-      return [base, `size_t ${cEscape(param.name, HARNESS_RESERVED)}_length`];
-    }
-    return [base];
-  }).join(", ");
+  const parameterParts: string[] = [];
+  for (const param of fieldOf(fn, "params") as readonly { readonly name: string; readonly type: string }[]) {
+    const type = parseType(String(fieldOf(param, "type")));
+    const paramName = cEscape(String(fieldOf(param, "name")), HARNESS_RESERVED);
+    const base = `${cDeclarationType(type)} ${paramName}`;
+    parameterParts[parameterParts.length] = base;
+    if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") parameterParts[parameterParts.length] = `size_t ${paramName}_length`;
+  }
+  const parameters = parameterParts.join(", ");
   const declarations = cObjectDeclarations(objects);
   return `/* Generated by the blaze compiler from a function contract. Do not edit.
  * ${name} is checked by the program it is part of, so this harness only links. */
@@ -601,11 +630,11 @@ function generateDefinitionHarness(contract: FunctionContract, language: string 
 
 ${declarations}
 
-extern ${cDeclarationType(parseType(contract.function.returns))} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(name)};
+extern ${cDeclarationType(parseType(String(fieldOf(fn, "returns"))))} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(name)};
 
 int main(void) {
   blaze_rt_initialize();
-  blaze_rt_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
+  blaze_rt_set_text_style(${String(fieldOf(rulesFor(language), "style")) === "python" ? 1 : 0});
   blaze_rt_finalize();
   return 0;
 }
@@ -630,18 +659,20 @@ export function generateProbeHarness(
   language: string = "typescript",
 ): string {
   const name = symbolOf(contract);
-  const objects = contract.definition.objects;
-  const parameters = contract.function.params.flatMap((param) => {
-    const type = parseType(param.type);
-    const base = `${cDeclarationType(type)} ${cEscape(param.name, HARNESS_RESERVED)}`;
-    if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") {
-      return [base, `size_t ${cEscape(param.name, HARNESS_RESERVED)}_length`];
-    }
-    return [base];
-  }).join(", ");
+  const fn = fieldOf(contract, "function") as FunctionSignature;
+  const objects = fieldOf(fieldOf(contract, "definition"), "objects") as Record<string, ObjectLayout>;
+  const parameterParts: string[] = [];
+  for (const param of fieldOf(fn, "params") as readonly { readonly name: string; readonly type: string }[]) {
+    const type = parseType(String(fieldOf(param, "type")));
+    const paramName = cEscape(String(fieldOf(param, "name")), HARNESS_RESERVED);
+    const base = `${cDeclarationType(type)} ${paramName}`;
+    parameterParts[parameterParts.length] = base;
+    if (type.kind === "array" || type.kind === "slice" || type.kind === "ptr") parameterParts[parameterParts.length] = `size_t ${paramName}_length`;
+  }
+  const parameters = parameterParts.join(", ");
   const declarations = cObjectDeclarations(objects);
-  const returns = cDeclarationType(parseType(contract.function.returns));
-  const call = `${cSymbolName(name)}(${plan.callArguments.join(", ")})`;
+  const returns = cDeclarationType(parseType(String(fieldOf(fn, "returns"))));
+  const call = `${cSymbolName(name)}(${(fieldOf(plan, "callArguments") as readonly string[]).join(", ")})`;
   // A function that returns nothing has nothing to hold, and a variable of
   // type void is not C.
   // `volatile` keeps a result the harness does not read from being dropped, and
@@ -668,8 +699,8 @@ extern ${returns} ${cSymbolName(name)}(${parameters || "void"})${cSymbolLabel(na
 
 int main(void) {
   ${RUNTIME_NAME}_initialize();
-  ${RUNTIME_NAME}_set_text_style(${rulesFor(language).style === "python" ? 1 : 0});
-${plan.statements.map((statement) => `  ${statement}`).join("\n")}
+  ${RUNTIME_NAME}_set_text_style(${String(fieldOf(rulesFor(language), "style")) === "python" ? 1 : 0});
+${(fieldOf(plan, "statements") as readonly string[]).map((statement) => `  ${statement}`).join("\n")}
 ${result}
   ${RUNTIME_NAME}_finalize();
   return 0;
@@ -722,14 +753,19 @@ export interface LinkRequest {
 }
 
 export function link(request: LinkRequest): void {
-  const inputs = [request.harnessPath, request.objectPath];
-  if (request.runtimeObjectPath !== undefined) inputs.push(request.runtimeObjectPath);
+  const inputs: string[] = [String(fieldOf(request, "harnessPath")), String(fieldOf(request, "objectPath"))];
+  const runtimeObject = fieldOf(request, "runtimeObjectPath") as string | undefined;
+  if (runtimeObject !== undefined) inputs[inputs.length] = runtimeObject;
   // A library the program uses is linked beside the runtime, in the order the
   // build prepared it.
-  inputs.push(...(request.libraryObjectPaths ?? []));
+  for (const one of (fieldOf(request, "libraryObjectPaths") as readonly string[] | undefined) ?? []) inputs[inputs.length] = one;
   // The harness includes the runtime header by name, and a build keeps the
   // runtime beside the work directory rather than beside every candidate.
-  const includes = (request.includeDirectories ?? []).flatMap((directory) => [`-I`, directory]);
+  const includes: string[] = [];
+  for (const directory of (fieldOf(request, "includeDirectories") as readonly string[] | undefined) ?? []) {
+    includes[includes.length] = "-I";
+    includes[includes.length] = directory;
+  }
   // A function the compiler lowered from IR may call the maths library, and a
   // harness or a probe that runs one links it in.
   //
@@ -737,30 +773,30 @@ export function link(request: LinkRequest): void {
   // because of `-flto` below: gcc rebuilds every object in front of it with the
   // options of this command, so the program that comes out is built the way
   // this line asks and not the way the objects were compiled.
-  const builtFor = request.target ?? DEFAULT_TARGET;
-  const toolchain = toolchainFor(builtFor);
+  const builtFor = (fieldOf(request, "target") as TargetSpec | undefined) ?? DEFAULT_TARGET;
+  const toolchain = toolchainForTarget(builtFor);
   const target = cTargetOptions(builtFor);
-  const libraries = request.libraries ?? [];
-  const command = compileCommand(toolchain, [
-    ...linkOptionsFor(toolchain, request.mode, request.objective),
-    ...target,
-    ...includes,
-    ...threadingOptionsFor(toolchain, request.threads ?? []),
-    "-o",
-    request.outputPath,
-    ...inputs,
-    "-lm",
-    ...libraries,
-  ]);
-  const result = run(command.command, command.args, { timeoutMs: 120_000 });
-  if (result.spawnError !== undefined) {
-    throw linkError("the C compiler is not available", result.spawnError, request.functionName);
+  const libraries = (fieldOf(request, "libraries") as readonly string[] | undefined) ?? [];
+  const options: string[] = [];
+  for (const one of linkOptionsFor(toolchain, fieldOf(request, "mode") as BuildMode, fieldOf(request, "objective") as Objective | undefined)) options[options.length] = one;
+  for (const one of target) options[options.length] = one;
+  for (const one of includes) options[options.length] = one;
+  for (const one of threadingOptionsFor(toolchain, (fieldOf(request, "threads") as readonly Threading[] | undefined) ?? [])) options[options.length] = one;
+  options[options.length] = "-o";
+  options[options.length] = String(fieldOf(request, "outputPath"));
+  for (const one of inputs) options[options.length] = one;
+  options[options.length] = "-lm";
+  for (const one of libraries) options[options.length] = one;
+  const command = compileCommand(toolchain, options);
+  const result = run(String(fieldOf(command, "command")), fieldOf(command, "args") as string[], { timeoutMs: 120_000 });
+  if (fieldOf(result, "spawnError") !== undefined) {
+    throw linkError("the C compiler is not available", String(fieldOf(result, "spawnError")), String(fieldOf(request, "functionName")));
   }
-  if (result.code !== 0) {
+  if (Number(fieldOf(result, "code")) !== 0) {
     throw linkError(
-      `linking failed for ${request.functionName}`,
-      `${result.command}\n${result.stderr.trim()}`,
-      request.functionName,
+      `linking failed for ${String(fieldOf(request, "functionName"))}`,
+      `${String(fieldOf(result, "command"))}\n${String(fieldOf(result, "stderr")).trim()}`,
+      String(fieldOf(request, "functionName")),
     );
   }
 }

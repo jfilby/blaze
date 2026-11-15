@@ -172,6 +172,7 @@ export {
   sleep,
   spawnSync,
   stat,
+  syncFile,
   tmpdir,
   webAssemblyEngine,
   writeFile,

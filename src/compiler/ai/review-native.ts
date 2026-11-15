@@ -12,7 +12,11 @@ import { CompilerError } from "../core/errors.ts";
 import type { AiBackend, BackendOptions } from "./backend.ts";
 import type { ModelConfiguration } from "./model.ts";
 
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /** The backend a provider configuration constructs on a native host. */
 export function createSdkBackend(configuration: ModelConfiguration, _options: BackendOptions = {}): AiBackend {
-  throw new CompilerError("AiReviewError", "review", `the ${configuration.provider} provider needs a transport this build does not carry`, "build with --model replay; provider review is the last host service a native compiler gains", "", "", "");
+  throw new CompilerError("AiReviewError", "review", `the ${String(fieldOf(configuration, "provider"))} provider needs a transport this build does not carry`, "build with --model replay; provider review is the last host service a native compiler gains", "", "", "");
 }
