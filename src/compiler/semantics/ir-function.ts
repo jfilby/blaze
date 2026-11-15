@@ -1322,13 +1322,20 @@ class FunctionBody {
       case "lengthOf": {
         const operand = this.typed(fieldOfValue(expression, "of") as Expression, null, line);
         // A dynamic value carries its length in the runtime's array, not in a
-        // block header: the length is the service that answers it.
+        // block header: the length is the service that answers it. A value an
+        // assertion names as a list is read at that list: `(x as T[]).length`
+        // is the block's length even where the value arrived as a handle.
         const operandValue = fieldOfValue(operand, "value") as SemanticValue;
-        if (!this.isBufferValue(operandValue.type) && operandValue.type.kind !== "text") {
-          return this.runtimeCall("blaze_rt_array_length", [operandValue], F64);
+        const inferred = fieldOfValue(operand, "inferred") as Inferred;
+        const named = String(fieldOfValue(inferred, "kind")) === "type" ? fieldOfValue(inferred, "type") as SemanticType : null;
+        const read = named !== null && (this.isBufferValue(named) || named.kind === "text")
+          ? { ...operandValue, type: named } as SemanticValue
+          : operandValue;
+        if (!this.isBufferValue(read.type) && read.type.kind !== "text") {
+          return this.runtimeCall("blaze_rt_array_length", [read], F64);
         }
         return {
-          value: { k: "length", type: USIZE, of: operandValue },
+          value: { k: "length", type: USIZE, of: read },
           inferred: asType(USIZE),
         };
       }
@@ -1344,6 +1351,14 @@ class FunctionBody {
         // A value that is not a buffer is a dynamic value: its entries are the
         // runtime's, and the key chooses the service that reads one.
         const baseValue = fieldOfValue(base, "value") as SemanticValue;
+        // A text is indexed by position: the character at the position is the
+        // one-character text the runtime slices out of it.
+        if (isText(baseValue.type)) {
+          const key = this.typed(fieldOfValue(expression, "index") as Expression, WHOLE, line);
+          const one: SemanticValue = { k: "const", type: { kind: "primitive", name: "usize" }, text: "1" };
+          const stop: SemanticValue = { k: "arith", type: F64, op: "add", left: key.value, right: one };
+          return this.runtimeCall("blaze_rt_text_slice", [baseValue, key.value, stop], TEXT);
+        }
         if (!this.isBufferValue(baseValue.type)) {
           const key = this.typed(fieldOfValue(expression, "index") as Expression, null, line);
           return this.dynamicIndexRead(base, key, expect);
@@ -2995,6 +3010,11 @@ class FunctionBody {
 
   /** The type two values are compared as, which is the one number they share. */
   private operand(left: SemanticValue, right: SemanticValue): SemanticType {
+    // A wide side is the width the comparison is read at, and two values of one
+    // type are compared at that type: two truths are a question about truths.
+    if (isWideType(left.type)) return left.type;
+    if (isWideType(right.type)) return right.type;
+    if (typeEquals(left.type, right.type)) return left.type;
     return commonNumber(left.type, right.type) ?? F64;
   }
 

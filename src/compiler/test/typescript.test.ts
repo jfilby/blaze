@@ -6561,3 +6561,34 @@ test("a loop over a module value reads the value's getter", () => {
   assert.match(ir, /call\[ref<any>\] __value_LAYOUT/);
   assert.match(ir, /load_field\[text\] local\[f64\] section Object\d+ name/);
 });
+
+test("a text indexed at a position is the character the runtime slices", () => {
+  // `text[at]` is a one-character text, not the number a buffer read is: the
+  // source reads a character and compares it with the characters a grammar
+  // names, so the index lowers to the runtime's text slice at `at + 1`.
+  const source = [
+    "export function initial(text: string): string { return text[0]; }",
+    'console.log(initial("abc"));',
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source }, "main.ts", "initial");
+  assert.match(ir, /call\[text\] blaze_rt_text_slice/);
+  assert.doesNotMatch(ir, /blaze_rt_array_get/);
+});
+
+test("a loop over a list the source asserted walks the list", () => {
+  // The assertion is the list the loop walks: the walked name is typed at the
+  // list, so its length is the block's length rather than a dynamic read.
+  const source = [
+    "export function total(value: unknown): number {",
+    "  let sum = 0;",
+    "  for (const one of value as number[]) sum += one;",
+    "  return sum;",
+    "}",
+    'console.log(total([1, 2]));',
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source }, "main.ts", "total");
+  assert.match(ir, /length\[usize\]/);
+  assert.doesNotMatch(ir, /blaze_rt_array_length/);
+});

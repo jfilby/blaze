@@ -77,6 +77,7 @@ function builtinTable(): Map<string, BuiltinSignature> {
   table.set("blaze_rt_number_same", { params: [F64, F64], returns: BOOLEAN, arity: 2 });
 
   table.set("blaze_rt_text_length", { params: [TEXT], returns: F64, arity: 1 });
+  table.set("blaze_rt_text_slice", { params: [TEXT, F64, F64], returns: TEXT, arity: 3 });
 
   table.set("encodeURIComponent", { params: [TEXT], returns: TEXT, arity: 1 });
 

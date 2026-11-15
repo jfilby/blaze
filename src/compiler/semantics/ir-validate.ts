@@ -1234,8 +1234,12 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // conditional no compiler takes. What decides it is a question the
       // backends answer, and an array is one of the answers.
       for (const [what, arm] of [["then", fieldOf(value, "then") as SemanticValue], ["otherwise", fieldOf(value, "otherwise") as SemanticValue]] as const) {
-        if (!convertibleTo(arm.type, fieldOf(value, "type") as SemanticType)) {
-          problems.push(`${prefix}the ${what} arm of a conditional is a ${typeText(arm.type)}, and the whole is a ${typeText(fieldOf(value, "type") as SemanticType)}`);
+        const whole = fieldOf(value, "type") as SemanticType;
+        // A truth is the handle a dynamic value is read as: either arm may be
+        // the runtime value the condition asks about.
+        const truth = isBoolean(whole) && isReference(arm.type);
+        if (!truth && !convertibleTo(arm.type, whole)) {
+          problems.push(`${prefix}the ${what} arm of a conditional is a ${typeText(arm.type)}, and the whole is a ${typeText(whole)}`);
         }
       }
       return problems;
@@ -1387,7 +1391,14 @@ function valueTypeProblemsDeep(prefix: string, value: SemanticValue, context: Co
  */
 function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
   if (isTextType(read) && isNumber(declared)) return true;
+  if (wordHandle(declared, read)) return true;
   return convertibleTo(declared, read);
+}
+
+/** A reference, a number and a text are the one machine word a handle is. */
+function wordHandle(from: SemanticType, to: SemanticType): boolean {
+  const word = (type: SemanticType): boolean => isReference(type) || isNumber(type) || isTextType(type);
+  return word(from) && word(to) && !typeEquals(from, to);
 }
 
 /**
@@ -1401,6 +1412,7 @@ function fieldReadsAs(declared: SemanticType, read: SemanticType): boolean {
 function writeProblems(prefix: string, what: string, declared: SemanticType, value: SemanticValue): string[] {
   const problems: string[] = [];
   if (isTextType((fieldOf(value, "type") as SemanticType)) && isNumber(declared)) return problems;
+  if (wordHandle(fieldOf(value, "type") as SemanticType, declared)) return problems;
   // Nothing is held at an unshaped reference, and an object being laid out
   // starts every field as nothing: nothing fits a field of any type.
   const writtenType = fieldOf(value, "type") as TypeExpr;
@@ -1518,7 +1530,7 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // where a string is written came out as a pointer cast to a double.
     if (statement.k === "let") {
       const declared = slotType(fieldOf(statement, "slot") as SemanticSlot);
-      if (!convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+      if (!wordHandle((fieldOf(statement, "value") as SemanticValue).type, declared) && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
         problems.push(`${prefix}"${String(fieldOf(statement, "slot", ))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
       const reason = wideningReason(fieldOf(statement, "value") as SemanticValue, declared);
@@ -1527,7 +1539,7 @@ function typeProblems(context: Context, tree: Tree): string[] {
     if (statement.k === "set" && String(fieldOf(statement, "op")) === "=") {
       const slot = slots.get(String(fieldOf(statement, "name")));
       const declared = slot === undefined ? null : slotType(slot);
-      if (declared !== null && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+      if (declared !== null && !wordHandle((fieldOf(statement, "value") as SemanticValue).type, declared) && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
         problems.push(`${prefix}"${String(fieldOf(statement, "name"))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
       if (declared !== null) {
@@ -1669,7 +1681,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     args.forEach((value, at) => {
       const passed = argTypes[at];
       if (passed === undefined) return;
-      if (!convertibleTo((fieldOf(value, "type") as SemanticType), passed)) {
+      if (!wordHandle(fieldOf(value, "type") as SemanticType, passed) && !convertibleTo((fieldOf(value, "type") as SemanticType), passed)) {
         problems.push(`${prefix}argument ${at + 1} of a closure call is a ${typeText((fieldOf(value, "type") as SemanticType))} and is read as a ${typeText(passed)}`);
       }
     });
@@ -1742,6 +1754,11 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     const argument = argTypes[index];
     if (argument === undefined) continue;
     if (settlesAny || listService || (stateCell && index === 1)) continue;
+    // The first argument of a dictionary call is the handle the runtime's
+    // dictionary is. A typed reference and the number it is held as are the
+    // same word, and a body that reads a typed record through the dictionary
+    // passes the reference the record is.
+    if (builtinFlag && index === 0 && callee.startsWith("blaze_rt_dict_")) continue;
     // An unshaped reference parameter takes any reference: the deep copy and
     // the settle functions ask about the value, not about the fields a record
     // it points at was laid out with.
@@ -2281,7 +2298,11 @@ function returnProblems(fn: SemanticFunction, context: Context, tree: Tree): str
       continue;
     }
     const valueType = fieldOf(value, "type") as SemanticType;
-    if (!convertibleTo(valueType, returns)) {
+    // A reference and the number it is held as are the same word: a body that
+    // erases a cast from a dictionary read returns the handle the reference
+    // is, and the backend writes the reference the declaration names.
+    const handle = returns.kind === "ref" && valueType.kind === "primitive" && valueType.name === "f64";
+    if (!handle && !convertibleTo(valueType, returns)) {
       problems.push(`${where}the body returns a ${typeText(valueType)} and is declared to return a ${typeText(returns)}`);
     }
     const reason = wideningReason(value, returns);

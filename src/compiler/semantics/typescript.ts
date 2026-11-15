@@ -11274,7 +11274,11 @@ class TypeScriptParser {
     // The value is read once, before the loop starts. It is recorded after the
     // body is read, because the body's own pending statements belong inside it.
     if (written !== null) {
-      this.pendingBefore.push(...ofPending, { kind: "declare", name: walked, type: null, init: written, line: start.line });
+      // The source is read once into a name. A source the source asserted at a
+      // list is the name's type: a loop over a cast list walks the list. Any
+      // other source is read as the value it is, as it was before.
+      const asserted = this.assertedValues.has(written) ? this.expressionTypes.get(written) ?? null : null;
+      this.pendingBefore.push(...ofPending, { kind: "declare", name: walked, type: asserted, init: written, line: start.line });
     }
     return { kind: "forOf", variable: item, of: walked, body, line: start.line };
   }
@@ -14719,6 +14723,7 @@ class TypeScriptParser {
       // names the element type the list holds.
       if (this.at("as") || this.at("satisfies")) {
         const assertion = this.next().text;
+        const constAssertion = this.peek().text === "const";
         const type = this.readTypeAnnotation("a type assertion", new Set([
   ",",
   ")",
@@ -14779,7 +14784,7 @@ class TypeScriptParser {
         // states rather than the `unknown` the field was declared at.
         if (type.kind === "slice" || type.kind === "array" || type.kind === "ref") {
           this.expressionTypes.set(current(), type);
-          this.assertedValues.add(current());
+          if (!constAssertion) this.assertedValues.add(current());
         }
         continue;
       }
@@ -18030,6 +18035,7 @@ class TypeScriptParser {
    */
   private objectMembers(method: "keys" | "values", args: readonly Expression[]): Expression {
     const value = args[0];
+
     // A record or a map built while the program runs is a dictionary, and its
     // entries are read by position: `Object.keys` is the keys it holds.
     if (args.length === 1 && value !== undefined) {

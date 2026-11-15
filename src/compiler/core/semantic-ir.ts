@@ -344,7 +344,8 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   if (isSequence(from) && isSequence(to)) {
     const left = elementTypeOf(from);
     const right = elementTypeOf(to);
-    return left !== null && right !== null && (typeEquals(left, right) || (isNumber(left) && isNumber(right)));
+    return left !== null && right !== null &&
+      (typeEquals(left, right) || (isNumber(left) && isNumber(right)) || (isReference(left) && isReference(right)));
   }
   return false;
 }
