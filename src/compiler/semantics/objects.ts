@@ -74,6 +74,41 @@ function fileNameStem(path: string): string {
   return stem === "" ? "file" : stem;
 }
 
+/** The declaration whose fields a record holds, and the stem it is named by. */
+function recordDeclaration(table: TypeTable, shape: ResolvedType): { name: string; stem: string } | null {
+  if (String(fieldOf(shape, "kind")) !== "record" || fieldOf(shape, "index") !== null || fieldOf(shape, "arms") !== undefined) return null;
+  const names: string[] = [];
+  for (const name of (fieldOf(table, "declarations") as ReadonlyMap<string, TypeDecl>).keys()) names.push(name);
+  for (const name of (fieldOf(table, "imported") as ReadonlyMap<string, TypeDecl>).keys()) names.push(name);
+  for (const name of names) {
+    let candidate: ResolvedType;
+    try {
+      candidate = resolveTypeName(table, name);
+    } catch {
+      continue;
+    }
+    if (String(fieldOf(candidate, "kind")) !== "record" || fieldOf(candidate, "index") !== null || fieldOf(candidate, "arms") !== undefined) continue;
+    const left = fieldOf(shape, "fields") as ReadonlyMap<string, ResolvedField>;
+    const right = fieldOf(candidate, "fields") as ReadonlyMap<string, ResolvedField>;
+    if (left.size !== right.size) continue;
+    let same = true;
+    for (const [fieldName, field] of left) {
+      const other = right.get(fieldName);
+      if (other === undefined || fieldOf(field, "optional") !== fieldOf(other, "optional") ||
+          typeToString(contractTypeOf(fieldOf(field, "type") as ResolvedType)) !== typeToString(contractTypeOf(fieldOf(other, "type") as ResolvedType))) {
+        same = false;
+        break;
+      }
+    }
+    if (!same) continue;
+    const declaration = (fieldOf(table, "declarations") as ReadonlyMap<string, TypeDecl>).get(name) ??
+      (fieldOf(table, "imported") as ReadonlyMap<string, TypeDecl>).get(name);
+    const stem = declaration === undefined ? "" : (fieldOf(fieldOf(declaration, "scope"), "stem") as string | undefined) ?? "";
+    return { name, stem };
+  }
+  return null;
+}
+
 /** The number a reference takes: one pointer. */
 const POINTER_SIZE = 8;
 
@@ -288,7 +323,45 @@ class BodyTypes {
     const first = this.results[0];
     if (first === undefined) return null;
     const same = this.results.every((entry) => describe(entry) === describe(first));
-    return same ? first : null;
+    if (same) return first;
+    // A function that answers an object from more than one arm answers one
+    // object: the arms may write the same field from values the read types
+    // differently — a field read and a literal of the same shape — and the
+    // caller still reads one field at one offset. A field the arms type
+    // differently is the dynamic reference when both are one word wide; a
+    // field that is not the same width is not one object and is left alone.
+    if (!this.results.every((entry) => String(fieldOf(entry, "kind")) === "object")) return null;
+    const shapes: Shape[] = [];
+    for (const entry of this.results) {
+      const shape = this.registered.get(String(fieldOf(entry, "key")));
+      if (shape === undefined) return null;
+      shapes[shapes.length] = shape;
+    }
+    const firstFields = shapeFields(shapes[0]);
+    for (const shape of shapes) {
+      const fields = shapeFields(shape);
+      if (fields.length !== firstFields.length) return null;
+      for (let at = 0; at < fields.length; at += 1) {
+        if (String(fieldOf(fields[at], "name")) !== String(fieldOf(firstFields[at], "name"))) return null;
+      }
+    }
+    const merged: { name: string; value: Inferred }[] = [];
+    for (let at = 0; at < firstFields.length; at += 1) {
+      const name = String(fieldOf(firstFields[at], "name"));
+      let value = fieldOf(firstFields[at], "value") as Inferred;
+      for (let other = 1; other < shapes.length; other += 1) {
+        const held = fieldOf(shapeFields(shapes[other])[at], "value") as Inferred;
+        if (describe(held) === describe(value)) continue;
+        if (!widthEight(held) || !widthEight(value)) return null;
+        value = { kind: "type", type: ANY_REF };
+      }
+      merged[merged.length] = { name, value };
+    }
+    const keyParts: [string, string][] = [];
+    for (const field of merged) keyParts[keyParts.length] = [field.name, describe(field.value)];
+    const key = JSON.stringify(keyParts);
+    if (!this.registered.has(key)) this.registered.set(key, { key, fields: merged });
+    return { kind: "object", key };
   }
 
   statements(list: readonly Statement[]): void {
@@ -340,7 +413,9 @@ class BodyTypes {
         return;
       case "result": {
         const value = fieldOf(statement,"value");
-        if (value !== null) this.results.push(this.expression(value));
+        // A bare `return null` is the absent arm of an object answer, not a
+        // second object: it says nothing about the layout the object holds.
+        if (value !== null && String(fieldOf(value, "k")) !== "null") this.results.push(this.expression(value));
         return;
       }
       case "loop": {
@@ -784,6 +859,18 @@ class BodyTypes {
 /** A shape key with every reference's target replaced by a wildcard. */
 function wildcardShape(key: string): string {
   return key.replace(/ref<[^<>]*>/g, "ref<*>");
+}
+
+/** Whether a field of this inferred value is one machine word wide. */
+function widthEight(value: Inferred): boolean {
+  if (String(fieldOf(value, "kind")) === "object") return true;
+  const type = fieldOf(value, "type") as TypeExpr | undefined;
+  if (type === undefined) return false;
+  const kind = String(fieldOf(type, "kind"));
+  if (kind === "text" || kind === "ref" || kind === "ptr" || kind === "slice" || kind === "array" || kind === "mask") return true;
+  if (kind !== "primitive") return false;
+  const name = String(fieldOf(type, "name"));
+  return name === "f64" || name === "i64" || name === "u64" || name === "usize" || name === "isize";
 }
 
 export function describe(value: Inferred): string {
@@ -1649,6 +1736,10 @@ export function resolveObjects(
             }
             return contractTypeOf(type);
           }
+          if (kind === "record") {
+            const named = recordDeclaration(table, type);
+            if (named !== null) return { kind: "ref", of: null, name: `${named.name}__${named.stem === "" ? stem : named.stem}` };
+          }
           return contractTypeOf(type);
         };
         const named = String(fieldOf(field.type,"kind")) === "record" && fieldDecl !== undefined;
@@ -1747,6 +1838,10 @@ export function resolveObjects(
       );
       const statements = fieldOf(definition,"statements") as Statement[];
       body.statements(statements);
+      // The arms of a function's returns may write one object in more than one
+      // way. Merging them here registers the layout before the walk names the
+      // shapes it read, so the return can name it.
+      body.result();
       bodies.set(callerName, body);
       mergeShape(shapes, owners, body);
     }

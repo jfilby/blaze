@@ -84,6 +84,7 @@ import {
   type ResolvedField,
   type ResolvedType,
   type TypeDecl,
+  type TypeField,
   type TypeTable,
 } from "./typescript-types.ts";
 import {
@@ -4474,6 +4475,10 @@ class TypeScriptParser {
       shape = null;
     }
     if (shape !== null && shape.kind !== "any") {
+      if (text.trim().startsWith("{")) {
+        const inline = this.inlineRecordName(shape, line);
+        if (inline !== null) return this.typeExprOfShape(shape, this.layoutRefName(inline));
+      }
       // A union with one record and an absent member is that record, and the
       // name it writes first is the layout the fields are read through.
       const first = (text.match(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)/) ?? [])[1];
@@ -4540,6 +4545,65 @@ class TypeScriptParser {
     const scope = fieldOf(declaration, "scope") as TypeTable | undefined;
     const stem = (scope === undefined ? undefined : fieldOf(scope, "stem")) as string | undefined;
     return `${name}__${stem ?? this.stem}`;
+  }
+
+  /**
+   * The layout name an object type written in an annotation holds.
+   *
+   * `{ pattern: Expression; flags: Expression }` is a record with no name in
+   * the source, and the fields are what a caller reads. The record is written
+   * into the module's type table under a name derived from its field names, so
+   * the layout pass lays it out and every read of the annotation names it.
+   */
+  private inlineRecordName(shape: ResolvedType, line: number): string | null {
+    if (shape.kind !== "record" || fieldOf(shape, "index") !== null || fieldOf(shape, "arms") !== undefined) return null;
+    const fields = fieldOf(shape, "fields") as Map<string, ResolvedField>;
+    if (fields.size === 0) return null;
+    const declaredFields = new Map<string, TypeField>();
+    const parts: string[] = [];
+    for (const [fieldName, field] of fields) {
+      parts[parts.length] = fieldName.replace(/[^A-Za-z0-9_]/g, "_");
+      const type = this.typeExprOfShape(fieldOf(field, "type") as ResolvedType);
+      declaredFields.set(fieldName, {
+        name: fieldName,
+        typeName: typeToString(type),
+        optional: fieldOf(field, "optional") === true,
+        line,
+      });
+    }
+    const base = `Record_${parts.join("_")}`;
+    let name = base;
+    let suffix = 1;
+    for (;;) {
+      const existing = this.typeTable.declarations.get(name);
+      if (existing === undefined) break;
+      let same = existing.kind === "interface" && existing.fields.size === declaredFields.size;
+      if (same) {
+        for (const [fieldName, field] of declaredFields) {
+          const other = existing.fields.get(fieldName);
+          if (other === undefined || other.typeName !== field.typeName) {
+            same = false;
+            break;
+          }
+        }
+      }
+      if (same) return name;
+      name = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    this.typeTable.declarations.set(name, {
+      name,
+      kind: "interface",
+      params: [],
+      extends: [],
+      fields: declaredFields,
+      index: null,
+      target: null,
+      exported: false,
+      line,
+      scope: this.typeTable,
+    });
+    return name;
   }
 
   private typeExprOfShape(shape: ResolvedType, name: string | null = null): TypeExpr {
@@ -8404,9 +8468,21 @@ class TypeScriptParser {
     ) {
       return NUMBER_RESULT;
     }
-    // A function type, an object type, a tuple and a literal type all describe
-    // something the contract can hold only as an opaque reference.
-    if (first.text === "(" || first.text === "{" || first.text === "[" || first.kind !== "ident") return ANY_TYPE;
+    // An object type written in the annotation is a record the fields of the
+    // annotation name: it is laid out under a name derived from those fields.
+    if (first.text === "{") {
+      try {
+        const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
+        const inline = this.inlineRecordName(shape, first.line);
+        if (inline !== null) return this.typeExprOfShape(shape, this.layoutRefName(inline));
+      } catch {
+        // An object type this table cannot resolve is the opaque reference.
+      }
+      return ANY_TYPE;
+    }
+    // A function type, a tuple and a literal type all describe something the
+    // contract can hold only as an opaque reference.
+    if (first.text === "(" || first.text === "[" || first.kind !== "ident") return ANY_TYPE;
     if (first.text === "typeof" || first.text === "keyof" || first.text === "infer" || first.text === "unique" || first.text === "new") {
       return ANY_TYPE;
     }
@@ -16540,6 +16616,31 @@ class TypeScriptParser {
     if (callback === undefined) {
       this.report(`${method} takes a function`, `as in a.${method}((x: number): number => x)`, this.peek());
       return this.hole();
+    }
+    // The callback is read before the list it walks is known. Its element
+    // parameter is the element the list holds, and the index and the list are
+    // the two the helper hands a callback that asks for them.
+    if (callback.k === "arrow") {
+      const lifted = this.liftedArrows.get(callback.name);
+      const binding = this.arrowBindings.get(callback.name);
+      const expected: TypeExpr[] = [elements, NUMBER_RESULT, { kind: "slice", of: elements }];
+      const shape = this.elementShapeOf(receiver, elements);
+      if (lifted !== undefined) {
+        const params = fieldOf(lifted, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
+        for (let at = 0; at < params.length && at < expected.length; at += 1) {
+          if (!unknownReference(params[at].type)) continue;
+          params[at].type = expected[at];
+          if (at === 0 && shape !== null) params[at].shape = shape;
+        }
+      }
+      if (binding !== undefined) {
+        const params = fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
+        for (let at = 0; at < params.length && at < expected.length; at += 1) {
+          if (!unknownReference(params[at].type)) continue;
+          params[at].type = expected[at];
+          if (at === 0 && shape !== null) params[at].shape = shape;
+        }
+      }
     }
     const signature = this.callbackSignature(callback);
     if (signature === null) {
