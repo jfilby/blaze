@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Efficient set representations for the compiler.
  *
@@ -102,9 +106,9 @@ export class BitSet {
 
 /** A sparse set over integer ids (the classic dense/sparse array pair). */
 export class SparseSet {
-  private dense: number[] = [];
-  private sparse: number[] = [];
-  private readonly universe: number;
+  dense: number[] = [];
+  sparse: number[] = [];
+  readonly universe: number;
 
   constructor(universe: number) {
     this.universe = universe;
@@ -118,40 +122,45 @@ export class SparseSet {
   }
 
   add(value: number): boolean {
-    if (value < 0 || value >= this.universe) return false;
-    if (this.sparse[value] !== -1 && this.sparse[value] < this.dense.length && this.dense[this.sparse[value]] === value) return false;
-    this.sparse[value] = this.dense.length;
-    this.dense.push(value);
+    if (value < 0 || value >= fieldOf(this, "universe")) return false;
+    const dense = fieldOf(this, "dense") as number[];
+    const sparse = fieldOf(this, "sparse") as number[];
+    if (sparse[value] !== -1 && sparse[value] < dense.length && dense[sparse[value]] === value) return false;
+    sparse[value] = dense.length;
+    dense.push(value);
     return true;
   }
 
   has(value: number): boolean {
-    if (value < 0 || value >= this.universe) return false;
-    const index = this.sparse[value];
-    return index !== -1 && index < this.dense.length && this.dense[index] === value;
+    if (value < 0 || value >= fieldOf(this, "universe")) return false;
+    const index = fieldOf(this, "sparse")[value];
+    return index !== -1 && index < fieldOf(this, "dense").length && fieldOf(this, "dense")[index] === value;
   }
 
   delete(value: number): boolean {
     if (!this.has(value)) return false;
-    const index = this.sparse[value];
-    const last = this.dense[this.dense.length - 1];
-    this.dense[index] = last;
-    this.sparse[last] = index;
-    this.dense.pop();
-    this.sparse[value] = -1;
+    const dense = fieldOf(this, "dense") as number[];
+    const sparse = fieldOf(this, "sparse") as number[];
+    const index = sparse[value];
+    const last = dense[dense.length - 1];
+    dense[index] = last;
+    sparse[last] = index;
+    dense.pop();
+    sparse[value] = -1;
     return true;
   }
 
   get size(): number {
-    return this.dense.length;
+    return fieldOf(this, "dense").length;
   }
 
   values(): number[] {
-    return [...this.dense];
+    const dense = fieldOf(this, "dense") as number[];
+    return dense.slice();
   }
 
   clear(): void {
-    for (const v of this.dense) this.sparse[v] = -1;
+    for (const v of fieldOf(this, "dense")) fieldOf(this, "sparse")[v] = -1;
     this.dense = [];
   }
 }

@@ -1,3 +1,16 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+/** Reads a field a source wrote with `?.`, answering undefined where there is no value. */
+function fieldOfOptional(value: unknown, key: string): any {
+  return value === null || value === undefined ? undefined : (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Whole-number arithmetic for a function every caller hands whole numbers to.
  *
@@ -54,15 +67,17 @@ import {
   slotType,
   statementValues,
   walkValues,
-  type ArithOp,
   type SemanticBlock,
   type SemanticCall,
   type SemanticFunction,
   type SemanticProgram,
+  type SemanticSlot,
   type SemanticStatement,
+  type SemanticTerminator,
   type SemanticType,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
+import type { FunctionParam, FunctionSignature } from "../core/types.ts";
 import { isSafeToCompute } from "./repair.ts";
 
 /** The type a whole number is held at. */
@@ -105,7 +120,7 @@ const EXACT_OPERATIONS: Record<string, true> = { add: true, sub: true, mul: true
  * that property and none is rewritten here: a form is only worth having where
  * its bound is an answer, and for these three it would be a guess.
  */
-const SHRINKING_WHOLE_OPERATIONS: Record<ArithOp, boolean> = {
+const SHRINKING_WHOLE_OPERATIONS: Record<string, boolean> = {
   add: false,
   sub: false,
   mul: false,
@@ -134,9 +149,12 @@ const WHOLE_BITS: Record<string, number> = { i8: 8, i16: 16, i32: 32, i64: 64, u
 
 /** Every block a statement holds of its own, which is where a name can hide. */
 function blocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
-  if (statement.k === "if") return statement.otherwise === null ? [statement.then] : [statement.then, statement.otherwise];
-  if (statement.k === "loop") return [statement.loop.body];
-  if (statement.k === "block") return [statement.body];
+  if (statement.k === "if") {
+    const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
+    return otherwise === null ? [fieldOf(statement, "then") as SemanticBlock] : [fieldOf(statement, "then"), otherwise];
+  }
+  if (statement.k === "loop") return [fieldOf(statement, "loop").body];
+  if (statement.k === "block") return [fieldOf(statement, "body")];
   return [];
 }
 
@@ -144,14 +162,14 @@ function blocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
 function callsIn(entry: SemanticBlock): SemanticCall[] {
   const calls: SemanticCall[] = [];
   const walk = (block: SemanticBlock): void => {
-    for (const statement of block.statements) {
-      if (statement.k === "call") calls.push(statement.call);
+    for (const statement of fieldOf(block, "statements")) {
+      if (statement.k === "call") calls.push(fieldOf(statement, "call"));
       // A call is usually written inside the value that uses it — a division,
       // a sum — so the values a statement computes are walked whole rather than
       // read at the top.
       for (const value of statementValues(statement)) {
         walkValues(value, (one) => {
-          if (one.k === "call") calls.push(one.call);
+          if (one.k === "call") calls.push(fieldOf(one, "call"));
         });
       }
       for (const nested of blocksOf(statement)) walk(nested);
@@ -172,11 +190,19 @@ function callsIn(entry: SemanticBlock): SemanticCall[] {
  */
 function declaredTypes(fn: SemanticFunction | null, entry: SemanticBlock): Map<string, SemanticType> {
   const declared = new Map<string, SemanticType>();
-  for (const param of fn?.params ?? []) declared.set(param.name, slotType(param));
+  for (const param of fieldOfOptional(fn, "params") ?? []) declared.set(String(fieldOf(param, "name")), slotType(param));
   const walk = (block: SemanticBlock): void => {
-    for (const statement of block.statements) {
-      if (statement.k === "let") declared.set(statement.slot.name, slotType(statement.slot));
-      if (statement.k === "loop" && statement.loop.kind === "counted") declared.set(statement.loop.variable, statement.loop.type);
+    for (const statement of fieldOf(block, "statements")) {
+      if (statement.k === "let") {
+        const slot = fieldOf(statement, "slot");
+        declared.set(String(fieldOf(slot, "name")), slotType(slot));
+      }
+      if (statement.k === "loop") {
+        const loop = fieldOf(statement, "loop");
+        if (String(fieldOf(loop, "kind")) === "counted") {
+          declared.set(String(fieldOf(loop, "variable")), fieldOf(loop, "type"));
+        }
+      }
       for (const nested of blocksOf(statement)) walk(nested);
     }
   };
@@ -204,7 +230,9 @@ function declaredTypes(fn: SemanticFunction | null, entry: SemanticBlock): Map<s
 function wholeArgument(value: SemanticValue, declared: ReadonlyMap<string, SemanticType>): SemanticValue | null {
   switch (value.k) {
     case "const":
-      return isInteger(value.type) && /^[+-]?\d+$/.test(value.text) ? { ...value, type: WHOLE } : null;
+      return isInteger(fieldOf(value, "type")) && /^[+-]?\d+$/.test(String(fieldOf(value, "text")))
+        ? { k: "const", type: WHOLE, text: String(fieldOf(value, "text")) }
+        : null;
     case "local": {
       const type = declared.get(value.name);
       if (type === undefined || type.kind !== "primitive" || !isInteger(type)) return null;
@@ -213,13 +241,14 @@ function wholeArgument(value: SemanticValue, declared: ReadonlyMap<string, Seman
       // and an unsigned word is a value read as a signed one for every number
       // above the middle of its range.
       if (bits === undefined || (bits === 64 && isUnsigned(type))) return null;
-      return { ...value, type: WHOLE };
+      return { k: "local", type: WHOLE, name: String(fieldOf(value, "name")) };
     }
     case "arith": {
-      if (!isInteger(value.type)) return null;
-      const left = wholeArgument(value.left, declared);
-      const right = wholeArgument(value.right, declared);
-      return left === null || right === null ? null : { ...value, left, right };
+      if (!isInteger(fieldOf(value, "type"))) return null;
+      const left = wholeArgument(fieldOf(value, "left"), declared);
+      const right = wholeArgument(fieldOf(value, "right"), declared);
+      if (left === null || right === null) return null;
+      return { k: "arith", type: fieldOf(value, "type"), op: fieldOf(value, "op"), left, right };
     }
     default:
       return null;
@@ -261,13 +290,13 @@ function formOf(
 ): Form | null {
   switch (value.k) {
     case "const": {
-      if (!isFloat(value.type) && !isInteger(value.type)) return null;
+      if (!isFloat(fieldOf(value, "type")) && !isInteger(fieldOf(value, "type"))) return null;
       const number = Number(value.text);
       if (!Number.isInteger(number) || !Number.isSafeInteger(number)) return null;
       return { value: { k: "const", type: WHOLE, text: String(number) }, bound: Math.abs(number) };
     }
     case "local": {
-      if (parameters.has(value.name)) return { value: { ...value, type: WHOLE }, bound: reach };
+      if (parameters.has(String(fieldOf(value, "name")))) return { value: { k: "local", type: WHOLE, name: String(fieldOf(value, "name")) }, bound: reach };
       // A declaration the body made stands in for the value it was bound to,
       // so a value computed of it is computed out of what that declaration was
       // computed from rather than out of the name. A declaration given no form
@@ -280,36 +309,41 @@ function formOf(
       // A shift is written at the type it answers, so it is already a
       // whole-number operation: what it needs is an operand that is one, and it
       // answers a whole number of that type whatever the operand was.
-      if (SHRINKING_WHOLE_OPERATIONS[value.op] === true) {
-        if (value.type.kind !== "primitive" || !isInteger(value.type)) return null;
-        const left = formOf(value.left, reach, parameters, bindings);
-        const right = formOf(value.right, reach, parameters, bindings);
+      if (SHRINKING_WHOLE_OPERATIONS[String(fieldOf(value, "op"))] === true) {
+        if (fieldOf(value, "type").kind !== "primitive" || !isInteger(fieldOf(value, "type"))) return null;
+        const left = formOf(fieldOf(value, "left"), reach, parameters, bindings);
+        const right = formOf(fieldOf(value, "right"), reach, parameters, bindings);
         if (left === null || right === null) return null;
         // The operand has to be a number a double holds exactly: the
         // whole-number form shifts a whole number and the double form shifts
         // the double it holds, and a value above 2^53 is a different number in
         // the two. The bound of the operand is what says how large it is, and a
         // bound that is not under 2^53 is a value this pass may not shift.
-        if (left.bound >= EXACT) return null;
-        const bits = WHOLE_BITS[value.type.name];
+        if (fieldOf(left, "bound") >= EXACT) return null;
+        const bits = WHOLE_BITS[String(fieldOf(fieldOf(value, "type"), "name"))];
         if (bits === undefined) return null;
         // The answer is a whole number of the type the operation is written at,
         // so the bits above it are its ceiling, and a shift carries down as
         // many of them as it is shifted by — masked to the width the shift is
         // carried out at, which is what the backends do with the count and what
         // `>> 40` of a `u32` answers here is the same thing `>> 8` answers.
-        const written = value.right.k === "const" && /^\d+$/.test(value.right.text) ? Number(value.right.text) : 0;
+        const shiftRight = fieldOf(value, "right");
+        const rightText = String(fieldOf(shiftRight, "text"));
+        const written = shiftRight.k === "const" && /^\d+$/.test(rightText) ? Number(rightText) : 0;
         const places = written & (bits - 1);
-        return { value: { ...value, left: left.value, right: right.value }, bound: 2 ** Math.max(0, bits - 1 - places) };
+        const placed = { k: "arith", type: fieldOf(value, "type"), op: fieldOf(value, "op"), left: left.value, right: right.value } as const;
+        return { value: placed, bound: Math.pow(2, Math.max(0, bits - 1 - places)) };
       }
-      if (!isFloat(value.type) || EXACT_OPERATIONS[value.op] !== true) return null;
-      const left = formOf(value.left, reach, parameters, bindings);
-      const right = formOf(value.right, reach, parameters, bindings);
+      if (!isFloat(fieldOf(value, "type")) || EXACT_OPERATIONS[String(fieldOf(value, "op"))] !== true) return null;
+      const left = formOf(fieldOf(value, "left"), reach, parameters, bindings);
+      const right = formOf(fieldOf(value, "right"), reach, parameters, bindings);
       if (left === null || right === null) return null;
       // A sum is as large as the two it is made of and a product as large as
       // the product of them, which is the bound the reach is asked against.
-      const bound = value.op === "mul" ? left.bound * right.bound : left.bound + right.bound;
-      return { value: { ...value, type: WHOLE, left: left.value, right: right.value }, bound };
+      const bound = String(fieldOf(value, "op")) === "mul"
+        ? Number(fieldOf(left, "bound")) * Number(fieldOf(right, "bound"))
+        : Number(fieldOf(left, "bound")) + Number(fieldOf(right, "bound"));
+      return { value: { k: "arith", type: WHOLE, op: fieldOf(value, "op"), left: fieldOf(left, "value"), right: fieldOf(right, "value") }, bound };
     }
     default:
       return null;
@@ -337,33 +371,49 @@ interface CallInBody {
  */
 export function wholeNumberArithmetic(program: SemanticProgram): void {
   const callers = new Map<string, CallInBody[]>();
-  const declared = new Set(program.bodies.map((fn) => fn.name));
+  const declared = new Set<string>((fieldOf(program, "bodies") as readonly SemanticFunction[]).map((fn) => String(fieldOf(fn, "name"))));
   const collect = (entry: SemanticBlock, types: ReadonlyMap<string, SemanticType>): void => {
     for (const call of callsIn(entry)) {
-      if (call.builtin || !declared.has(call.callee)) continue;
+      if (fieldOf(call, "builtin") || !declared.has(call.callee)) continue;
       const found = callers.get(call.callee);
       if (found === undefined) callers.set(call.callee, [{ call, declared: types }]);
       else found.push({ call, declared: types });
     }
   };
   collect(program.entry, declaredTypes(null, program.entry));
-  for (const fn of program.bodies) collect(fn.entry, declaredTypes(fn, fn.entry));
+  for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) collect(fn.entry, declaredTypes(fn, fn.entry));
 
-  for (const fn of program.bodies) {
+  for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) {
     const calls = callers.get(fn.name) ?? [];
+    const params = fieldOf(fn, "params") as readonly SemanticSlot[];
     // A function nothing calls is not asked: a body no caller reaches is one
     // the pass cannot improve and one whose parameters no test speaks for.
-    if (calls.length === 0 || fn.params.length === 0) continue;
+    if (calls.length === 0 || params.length === 0) continue;
     // A wide number is a whole number this pass may not take: it is four limbs,
     // and the whole number a parameter is declared as here is one machine word,
     // so rewriting one would read eight bytes of a thirty-two byte value and
     // answer for it. `WHOLE_BITS` refuses a wide *name* on its own, so this is
     // the other half of the same rule: the parameter is what the arm reads, and
     // nothing about it is left to a table further down.
-    if (!fn.params.every((param) => param.kind === "value" && !isWideType(slotType(param)) && (isFloat(slotType(param)) || isInteger(slotType(param))))) continue;
-    if (!calls.every(({ call, declared: types }) =>
-      call.args.length === fn.params.length && fn.params.every((_, index) => wholeArgument(call.args[index], types) !== null),
-    )) continue;
+    if (!params.every((param) => param.kind === "value" && !isWideType(slotType(param)) && (isFloat(slotType(param)) || isInteger(slotType(param))))) continue;
+    let everyWhole = true;
+    for (const entry of calls) {
+      const call = fieldOf(entry, "call");
+      const types = fieldOf(entry, "declared") as ReadonlyMap<string, SemanticType>;
+      const args = fieldOf(call, "args") as readonly SemanticValue[];
+      if (args.length !== params.length) {
+        everyWhole = false;
+        break;
+      }
+      for (let index = 0; index < args.length; index++) {
+        if (wholeArgument(args[index], types) === null) {
+          everyWhole = false;
+          break;
+        }
+      }
+      if (!everyWhole) break;
+    }
+    if (!everyWhole) continue;
     const arm = wholeNumberArm(fn);
     if (arm === null) continue;
     declareWholeParameters(program, fn, calls);
@@ -382,14 +432,16 @@ export function wholeNumberArithmetic(program: SemanticProgram): void {
  */
 function wholeNumberArm(fn: SemanticFunction): SemanticBlock | null {
   const entry = fn.entry;
-  if (entry.terminator.k !== "return" || entry.terminator.value === null || !isFloat(entry.terminator.value.type)) return null;
+  const terminator = fieldOf(entry, "terminator");
+  if (terminator.k !== "return" || terminator.value === null || !isFloat(terminator.value.type)) return null;
   // A body of declarations and a return is the body this pass rewrites. A loop,
   // an arm, a write or a call in it is one whose values this pass would have to
   // move, and moving a value that reads memory or runs a call is another
   // program: see the head of this file.
-  if (!entry.statements.every((statement) => statement.k === "let")) return null;
-  const parameters = new Set(fn.params.map((param) => param.name));
-  const reads = fn.params.map((param) => ({ k: "local", type: WHOLE, name: param.name }) as const);
+  if (!(fieldOf(entry, "statements") as readonly SemanticStatement[]).every((statement) => statement.k === "let")) return null;
+  const params = fieldOf(fn, "params") as readonly SemanticSlot[];
+  const parameters = new Set<string>(params.map((param) => String(fieldOf(param, "name"))));
+  const reads = params.map((param) => ({ k: "local", type: WHOLE, name: String(fieldOf(param, "name")) }) as const);
 
   for (const reach of REACHES) {
     // The declarations are bound in the order the body writes them, so a name a
@@ -399,14 +451,15 @@ function wholeNumberArm(fn: SemanticFunction): SemanticBlock | null {
     // before it, which is a different number. So is a value that cannot be
     // computed twice, which is a call or a read of memory.
     const bindings = new Map<string, Form>();
-    for (const statement of entry.statements) {
+    for (const statement of fieldOf(entry, "statements")) {
+      const slot = fieldOf(statement, "slot");
       if (statement.k !== "let" || !isSafeToCompute(statement.value)) continue;
-      if (statement.slot.mutable) continue;
+      if (fieldOf(slot, "mutable") === true) continue;
       const form = formOf(statement.value, reach, parameters, bindings);
-      if (form !== null && form.bound < EXACT) bindings.set(statement.slot.name, form);
+      if (form !== null && fieldOf(form, "bound") < EXACT) bindings.set(String(fieldOf(slot, "name")), form);
     }
-    const answer = formOf(entry.terminator.value, reach, parameters, bindings);
-    if (answer === null || answer.bound >= EXACT) continue;
+    const answer = formOf(fieldOf(entry, "terminator").value, reach, parameters, bindings);
+    if (answer === null || fieldOf(answer, "bound") >= EXACT) continue;
 
     // Every parameter within the reach, joined the way the language joins
     // tests. Each one is tested the way a machine tests a range without a
@@ -437,18 +490,21 @@ function wholeNumberArm(fn: SemanticFunction): SemanticBlock | null {
     }
     if (guard === null) continue;
 
+    const statements: SemanticStatement[] = [];
+    statements[0] = {
+      k: "if",
+      condition: guard,
+      then: { id: `${String(fieldOf(entry, "id"))}_whole`, statements: [], releases: [], terminator: { k: "return", value: fieldOf(answer, "value") } },
+      otherwise: null,
+      line: UNSTATED_LINE,
+    } as SemanticStatement;
+    const previous = fieldOf(entry, "statements") as readonly SemanticStatement[];
+    for (let index = 0; index < previous.length; index++) statements[statements.length] = previous[index];
     return {
-      ...entry,
-      statements: [
-        {
-          k: "if",
-          condition: guard,
-          then: { id: `${entry.id}_whole`, statements: [], releases: [], terminator: { k: "return", value: answer.value } },
-          otherwise: null,
-          line: UNSTATED_LINE,
-        },
-        ...entry.statements,
-      ],
+      id: String(fieldOf(entry, "id")),
+      statements,
+      releases: fieldOf(entry, "releases") as string[],
+      terminator: fieldOf(entry, "terminator") as SemanticTerminator,
     };
   }
   return null;
@@ -465,18 +521,50 @@ function wholeNumberArm(fn: SemanticFunction): SemanticBlock | null {
  * all three are written or the program is a C file that does not compile.
  */
 function declareWholeParameters(program: SemanticProgram, fn: SemanticFunction, calls: readonly CallInBody[]): void {
-  fn.params = fn.params.map((param) => (param.kind === "value" ? { ...param, type: WHOLE } : param));
-  const whole = (index: number): boolean => fn.params[index]?.kind === "value";
-  const signature = program.functions.find((one) => one.name === fn.name);
-  if (signature !== undefined) {
-    signature.params = signature.params.map((param, index) => (whole(index) ? { ...param, type: "i64" } : param));
+  const params = fieldOf(fn, "params") as readonly SemanticSlot[];
+  const wholeParams: SemanticSlot[] = [];
+  for (const param of params) {
+    wholeParams[wholeParams.length] = String(fieldOf(param, "kind")) === "value"
+      ? { kind: "value", name: String(fieldOf(param, "name")), type: WHOLE, mutable: fieldOf(param, "mutable") === true }
+      : param;
   }
-  for (const { call, declared } of calls) {
-    call.signature = {
-      ...call.signature,
-      params: call.signature.params.map((param, index) => (whole(index) ? { ...param, type: "i64" } : param)),
-    };
-    call.args = call.args.map((argument, index) => (whole(index) ? (wholeArgument(argument, declared) ?? argument) : argument));
-    call.argTypes = call.argTypes.map((type, index) => (whole(index) ? WHOLE : type));
+  setFieldOn(fn, "params", wholeParams);
+  const whole = (index: number): boolean => index < wholeParams.length && String(fieldOf(wholeParams[index], "kind")) === "value";
+  const signature = (fieldOf(program, "functions") as readonly FunctionSignature[]).find((one) => String(fieldOf(one, "name")) === String(fieldOf(fn, "name")));
+  if (signature !== undefined) {
+    const signatureParams = fieldOf(signature, "params") as readonly FunctionParam[];
+    const rewritten: FunctionParam[] = [];
+    for (let index = 0; index < signatureParams.length; index++) {
+      const param = signatureParams[index];
+      rewritten[rewritten.length] = whole(index)
+        ? { name: String(fieldOf(param, "name")), type: "i64" }
+        : param;
+    }
+    setFieldOn(signature, "params", rewritten);
+  }
+  for (const entry of calls) {
+    const call = fieldOf(entry, "call");
+    const declared = fieldOf(entry, "declared") as ReadonlyMap<string, SemanticType>;
+    const callSignature = fieldOf(call, "signature");
+    const callParams = fieldOf(callSignature, "params") as readonly FunctionParam[];
+    const rewritten: FunctionParam[] = [];
+    for (let index = 0; index < callParams.length; index++) {
+      const param = callParams[index];
+      rewritten[rewritten.length] = whole(index) ? { name: String(fieldOf(param, "name")), type: "i64" } : param;
+    }
+    setFieldOn(call, "signature", { name: String(fieldOf(callSignature, "name")), params: rewritten, returns: fieldOf(callSignature, "returns") });
+    const args = fieldOf(call, "args") as readonly SemanticValue[];
+    const rewrittenArgs: SemanticValue[] = [];
+    for (let index = 0; index < args.length; index++) {
+      const argument = args[index];
+      rewrittenArgs[rewrittenArgs.length] = whole(index) ? (wholeArgument(argument, declared) ?? argument) : argument;
+    }
+    setFieldOn(call, "args", rewrittenArgs);
+    const argTypes = fieldOf(call, "argTypes") as readonly SemanticType[];
+    const rewrittenTypes: SemanticType[] = [];
+    for (let index = 0; index < argTypes.length; index++) {
+      rewrittenTypes[rewrittenTypes.length] = whole(index) ? WHOLE : argTypes[index];
+    }
+    setFieldOn(call, "argTypes", rewrittenTypes);
   }
 }

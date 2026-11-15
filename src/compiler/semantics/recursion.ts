@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Recursion the compiler answers with a loop.
  *
@@ -216,12 +224,12 @@ export function recursionRefusal(fn: SemanticFunction): Refusal | null {
 function readShape(fn: SemanticFunction, cycle: Turns): Shape | Refusal {
   const plan = readPlan(fn, cycle);
   if (typeof plan === "string") return plan;
-  const end = fn.entry.terminator;
+  const end = fieldOf(fn.entry, "terminator");
   if (end.k !== "return") return "the body does not end by handing something back";
   if (end.value === null) return "the body ends without handing anything back";
 
   if (end.value.k === "call") {
-    return cycle.has(end.value.call.callee) ? carried(fn, plan, cycle) : "the body ends in a call of another function";
+    return cycle.has(fieldOf(end.value, "call").callee) ? carried(fn, plan, cycle) : "the body ends in a call of another function";
   }
   if (end.value.k === "const" || end.value.k === "bool" || end.value.k === "nothing") {
     return "the body ends in a value that holds no call of itself";
@@ -253,27 +261,27 @@ function readShape(fn: SemanticFunction, cycle: Turns): Shape | Refusal {
  */
 function readPlan(fn: SemanticFunction, cycle: Turns): Plan | Refusal {
   const entry = fn.entry;
-  if (entry.releases.length > 0) return "the body frees what it owns on its way out of it";
-  if (entry.terminator.k !== "return") return "the body does not end by handing something back";
+  if (fieldOf(entry, "releases").length > 0) return "the body frees what it owns on its way out of it";
+  if (fieldOf(entry, "terminator").k !== "return") return "the body does not end by handing something back";
 
-  const statements = entry.statements;
+  const statements = fieldOf(entry, "statements") as readonly SemanticStatement[];
   const arms = statements.flatMap((statement, at) => (statement.k === "if" && statement.otherwise === null ? [at] : []));
   if (arms.length === 0) return "the body does not end in a test of its own";
   for (const at of arms) {
     const test = statements[at];
     if (test === undefined || test.k !== "if") continue;
     const arm = test.then;
-    if (arm.statements.length > 0) return "the base case computes something before it answers";
-    if (arm.releases.length > 0) return "the base case frees what it owns on its way out of it";
-    if (arm.terminator.k !== "return") return "the base case does not end by handing something back";
+    if (fieldOf(arm, "statements").length > 0) return "the base case computes something before it answers";
+    if (fieldOf(arm, "releases").length > 0) return "the base case frees what it owns on its way out of it";
+    if (fieldOf(arm, "terminator").k !== "return") return "the base case does not end by handing something back";
 
-    const answer = arm.terminator.value;
+    const answer = fieldOf(arm, "terminator").value;
     if (fn.returns.kind === "void" ? answer !== null : answer === null || typeText(answer.type) !== typeText(fn.returns)) {
       return "the base case answers with something the function is not declared to return";
     }
     // An arm that calls the function again is not a base case: it is a turn
     // written as an arm, and the pass carries it as one. The next arm is read.
-    if (answer !== null && answer.k === "call" && cycle.has(answer.call.callee)) continue;
+    if (answer !== null && answer.k === "call" && cycle.has(fieldOf(answer, "call").callee)) continue;
 
     const before = statements.slice(0, at);
     const turns = [...before, ...statements.slice(at + 1)];
@@ -326,9 +334,9 @@ function readPlan(fn: SemanticFunction, cycle: Turns): Plan | Refusal {
 function carried(fn: SemanticFunction, plan: Plan, cycle: Turns): Shape | Refusal {
   let tailCalls = 0;
   for (const block of blocksWithin(fn.entry)) {
-    const end = block.terminator;
-    if (end.k !== "return" || end.value === null || end.value.k !== "call" || !cycle.has(end.value.call.callee)) continue;
-    const refusal = callRefusal(fn, end.value.call);
+    const end = fieldOf(block, "terminator");
+    if (end.k !== "return" || end.value === null || end.value.k !== "call" || !cycle.has(fieldOf(end.value, "call").callee)) continue;
+    const refusal = callRefusal(fn, fieldOf(end.value, "call"));
     if (refusal !== null) return refusal;
     tailCalls += 1;
   }
@@ -348,17 +356,17 @@ function carried(fn: SemanticFunction, plan: Plan, cycle: Turns): Shape | Refusa
  * which is why this was written over `fn` before a cycle of bodies existed.
  */
 function callRefusal(callee: SemanticFunction, call: SemanticCall): Refusal | null {
-  if (call.builtin) return "the call is one the compiler provides";
+  if (fieldOf(call, "builtin")) return "the call is one the compiler provides";
   if (call.ownership !== "none") return "the call hands back storage the caller owns";
-  if (call.retain) return "the call hands back storage the caller keeps";
-  if (call.args.length !== callee.params.length) {
+  if (fieldOf(call, "retain")) return "the call hands back storage the caller keeps";
+  if (fieldOf(call, "args").length !== fieldOf(callee, "params").length) {
     return `the call of "${call.callee}" is made with a different number of arguments than it has parameters`;
   }
   // The `mutable` a parameter's slot carries is not asked about: it says how
   // the source declared the binding, a parameter crosses the ABI by value, and
   // nothing in the IR or in a backend constrains a store by it — so a turn
   // writing one is invisible to every caller and to nothing else.
-  for (const param of callee.params) {
+  for (const param of fieldOf(callee, "params")) {
     if (param.kind !== "value") return `the parameter "${param.name}" is not one name a turn writes`;
   }
   return null;
@@ -384,9 +392,10 @@ function callRefusal(callee: SemanticFunction, call: SemanticCall): Refusal | nu
  * out of nothing.
  */
 function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Shape | Refusal {
-  if (plan.answer === null) return "the body answers with nothing to carry an answer in";
-  if (selfCallsIn(fn.entry, new Set([fn.name])).length !== 1) return "the body makes more than one call of itself";
-  if (namesReadBy(plan.answer).size > 0) return "the base case answers with something the turns move";
+  const answer = fieldOf(plan, "answer") as SemanticValue | null;
+  if (answer === null) return "the body answers with nothing to carry an answer in";
+  if (selfCallsIn(fieldOf(fn, "entry") as SemanticBlock, new Set([String(fieldOf(fn, "name"))])).length !== 1) return "the body makes more than one call of itself";
+  if (namesReadBy(answer).size > 0) return "the base case answers with something the turns move";
   // The answer is carried from a name bound *before* the loop rather than
   // computed where the base case was, so it is evaluated on every call instead
   // of only on the one that reaches the base case. Reading a name is what
@@ -396,7 +405,9 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
   // answer is a call is only the same program if the call is one the compiler
   // provides, which computes its answer out of what it is handed and is the
   // same number whenever it is evaluated.
-  if (plan.answer !== null && callsIn(plan.answer).some((call) => !call.builtin)) {
+  let answersACall = false;
+  for (const call of callsIn(answer)) if (fieldOf(call, "builtin") !== true) answersACall = true;
+  if (answersACall) {
     return "the base case answers with a call, and the answer is carried from before the loop, so the call would run on every call";
   }
 
@@ -411,22 +422,22 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
   // loop, which deletes `wrap` and answers a number the program never computed.
   const returns = typeText(fn.returns);
   let node: SemanticValue = value;
-  while (node.k !== "call" || node.call.callee !== fn.name) {
+  while (node.k !== "call" || fieldOf(node, "call").callee !== fn.name) {
     if (node.k !== "arith" || (node.op !== "add" && node.op !== "mul")) {
       return "the call of itself is not combined into a sum or a product";
     }
     if (selfCallsInValue(node.left, fn.name).length > 0) return "the body makes more than one call of itself";
-    node = node.right;
+    node = fieldOf(node, "right");
   }
   if (!isInteger(fn.returns)) return "the answer is combined into a double, which the loop may not regroup";
-  for (let along: SemanticValue = value; along !== node; along = along.k === "arith" ? along.right : along) {
+  for (let along: SemanticValue = value; along !== node; along = along.k === "arith" ? fieldOf(along, "right") : along) {
     if (typeText(along.type) !== returns) return "the call of itself is combined into something of another type";
   }
-  const refusal = callRefusal(fn, node.call);
+  const refusal = callRefusal(fn, fieldOf(node, "call"));
   if (refusal !== null) return refusal;
 
   const carried = freshName(namesOf(fn), "blaze_acc");
-  return { kind: "accumulated", plan, carried, combined: answeredWith(value, node, fn.returns, carried), call: node.call };
+  return { kind: "accumulated", plan, carried, combined: answeredWith(value, node, fn.returns, carried), call: fieldOf(node, "call") };
 }
 
 /**
@@ -437,7 +448,13 @@ function accumulated(fn: SemanticFunction, plan: Plan, value: SemanticValue): Sh
 function answeredWith(value: SemanticValue, call: SemanticValue, type: SemanticType, name: string): SemanticValue {
   if (value === call) return { k: "local", type, name };
   const arith = value as Extract<SemanticValue, { k: "arith" }>;
-  return { ...arith, right: answeredWith(arith.right, call, type, name) };
+  return {
+    k: "arith",
+    type: fieldOf(arith, "type"),
+    op: fieldOf(arith, "op"),
+    left: fieldOf(arith, "left"),
+    right: answeredWith(fieldOf(arith, "right"), call, type, name),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -458,33 +475,46 @@ function answeredWith(value: SemanticValue, call: SemanticValue, type: SemanticT
 function writeShape(fn: SemanticFunction, shape: Shape): void {
   const taken = namesOf(fn);
   const header = freshName(taken, "blaze_turn");
-  const accumulatedShape = shape.kind === "accumulated" ? shape : null;
-  const start = accumulatedShape === null || shape.plan.answer === null ? [] : [carriedFrom(shape.plan.answer, accumulatedShape, fn.returns)];
+  const accumulatedShape = String(fieldOf(shape, "kind")) === "accumulated" ? shape as Extract<Shape, { kind: "accumulated" }> : null;
+  const plan = fieldOf(shape, "plan") as Plan;
+  const entry = fieldOf(fn, "entry") as SemanticBlock;
+  const start: SemanticStatement[] = [];
+  const answer = fieldOf(plan, "answer") as SemanticValue | null;
+  if (accumulatedShape !== null && answer !== null) {
+    start[start.length] = carriedFrom(answer, accumulatedShape, fieldOf(fn, "returns") as SemanticType);
+  }
 
   const loop: SemanticLoop = {
     kind: "while",
-    condition: negated(shape.plan.guard),
+    condition: negated(fieldOf(plan, "guard") as SemanticValue),
     header,
-    exit: fn.entry.id,
+    exit: String(fieldOf(entry, "id")),
     body: {
       id: freshName(taken, "blaze_body"),
-      statements: accumulatedShape === null ? tailTurns(fn, shape.plan, header, taken) : accumulatedTurns(fn, accumulatedShape, taken),
+      statements: accumulatedShape === null ? tailTurns(fn, plan, header, taken) : accumulatedTurns(fn, accumulatedShape, taken),
       releases: [],
       terminator: { k: "jump", target: header, releases: [] },
     },
   };
 
-  fn.entry.statements = [...start, { k: "loop", loop, line: UNSTATED_LINE }];
-  fn.entry.terminator = {
+  const statements: SemanticStatement[] = [];
+  for (const one of start) statements[statements.length] = one;
+  statements[statements.length] = { k: "loop", loop, line: UNSTATED_LINE };
+  setFieldOn(entry, "statements", statements);
+  setFieldOn(entry, "terminator", {
     k: "return",
-    value: accumulatedShape === null ? shape.plan.answer : { k: "local", type: fn.returns, name: accumulatedShape.carried },
-  };
-  fn.calls = fn.calls.filter((edge) => edge.callee !== fn.name);
+    value: accumulatedShape === null ? answer : { k: "local", type: fieldOf(fn, "returns"), name: String(fieldOf(accumulatedShape, "carried")) },
+  });
+  const kept: CallEdge[] = [];
+  for (const edge of fieldOf(fn, "calls") as readonly CallEdge[]) {
+    if (String(fieldOf(edge, "callee")) !== String(fieldOf(fn, "name"))) kept[kept.length] = edge;
+  }
+  setFieldOn(fn, "calls", kept);
 }
 
 /** The name an accumulated body carries its answer in, starting where the base case starts. */
 function carriedFrom(answer: SemanticValue, shape: Extract<Shape, { kind: "accumulated" }>, type: SemanticType): SemanticStatement {
-  return { k: "let", slot: { kind: "value", name: shape.carried, mutable: true, type }, value: answer, line: UNSTATED_LINE };
+  return { k: "let", slot: { kind: "value", name: String(fieldOf(shape, "carried")), mutable: true, type }, value: answer, line: UNSTATED_LINE };
 }
 
 /**
@@ -500,19 +530,26 @@ function carriedFrom(answer: SemanticValue, shape: Extract<Shape, { kind: "accum
  * call it replaced would have been the next of.
  */
 function tailTurns(fn: SemanticFunction, plan: Plan, header: string, taken: Set<string>): SemanticStatement[] {
+  const entry = fieldOf(fn, "entry") as SemanticBlock;
   const root: SemanticBlock = {
-    id: fn.entry.id,
-    statements: [...plan.turns],
+    id: String(fieldOf(entry, "id")),
+    statements: (fieldOf(plan, "turns") as SemanticStatement[]).slice(),
     releases: [],
-    terminator: fn.entry.terminator,
+    terminator: fieldOf(entry, "terminator") as SemanticTerminator,
   };
+  const wanted = String(fieldOf(fn, "name"));
+  const params = fieldOf(fn, "params") as readonly SemanticSlot[];
   for (const block of blocksWithin(root)) {
-    const end = block.terminator;
-    if (end.k !== "return" || end.value === null || end.value.k !== "call" || end.value.call.callee !== fn.name) continue;
-    block.statements.push(...argumentsCarried(end.value.call, fn.params, taken));
-    block.terminator = { k: "jump", target: header, releases: [] };
+    const end = fieldOf(block, "terminator");
+    const answered = fieldOf(end, "value") as SemanticValue | null;
+    if (String(fieldOf(end, "k")) !== "return" || answered === null || String(fieldOf(answered, "k")) !== "call") continue;
+    const call = fieldOf(answered, "call");
+    if (String(fieldOf(call, "callee")) !== wanted) continue;
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    for (const one of argumentsCarried(call as SemanticCall, params, taken)) statements[statements.length] = one;
+    setFieldOn(block, "terminator", { k: "jump", target: header, releases: [] });
   }
-  return root.statements;
+  return fieldOf(root, "statements") as SemanticStatement[];
 }
 
 /**
@@ -536,12 +573,13 @@ function accumulatedTurns(fn: SemanticFunction, shape: Extract<Shape, { kind: "a
   // second search finds that one instead — a call whose arguments are not the
   // chain's, carried as though they were.
   const combined = freshName(taken, "blaze_combined");
-  return [
-    ...shape.plan.turns,
-    { k: "let", slot: slotFor(shape.combined, combined), value: shape.combined, line: UNSTATED_LINE },
-    ...argumentsCarried(shape.call, fn.params, taken),
-    { k: "set", name: shape.carried, op: "=", value: { k: "local", type: fn.returns, name: combined }, line: UNSTATED_LINE },
-  ];
+  const statements: SemanticStatement[] = [];
+  for (const one of fieldOf(fieldOf(shape, "plan"), "turns") as SemanticStatement[]) statements[statements.length] = one;
+  const combinedValue = fieldOf(shape, "combined") as SemanticValue;
+  statements[statements.length] = { k: "let", slot: slotFor(combinedValue, combined), value: combinedValue, line: UNSTATED_LINE };
+  for (const one of argumentsCarried(fieldOf(shape, "call") as SemanticCall, fieldOf(fn, "params") as readonly SemanticSlot[], taken)) statements[statements.length] = one;
+  statements[statements.length] = { k: "set", name: String(fieldOf(shape, "carried")), op: "=", value: { k: "local", type: fieldOf(fn, "returns"), name: combined }, line: UNSTATED_LINE };
+  return statements;
 }
 
 /**
@@ -552,13 +590,17 @@ function accumulatedTurns(fn: SemanticFunction, shape: Extract<Shape, { kind: "a
 function argumentsCarried(call: SemanticCall, params: readonly SemanticSlot[], taken: Set<string>): SemanticStatement[] {
   const bound: SemanticStatement[] = [];
   const stores: SemanticStatement[] = [];
-  call.args.forEach((arg, index) => {
+  const args = fieldOf(call, "args") as readonly SemanticValue[];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
     const name = freshName(taken, "blaze_arg");
-    bound.push({ k: "let", slot: slotFor(arg, name), value: arg, line: UNSTATED_LINE });
-    const param = params[index] as SemanticSlot;
-    stores.push({ k: "set", name: param.name, op: "=", value: { k: "local", type: arg.type, name }, line: UNSTATED_LINE });
-  });
-  return [...bound, ...stores];
+    bound[bound.length] = { k: "let", slot: slotFor(arg, name), value: arg, line: UNSTATED_LINE };
+    const param = params[index];
+    if (param === undefined) continue;
+    stores[stores.length] = { k: "set", name: String(fieldOf(param, "name")), op: "=", value: { k: "local", type: fieldOf(arg, "type"), name }, line: UNSTATED_LINE };
+  }
+  for (const one of stores) bound[bound.length] = one;
+  return bound;
 }
 
 /**
@@ -572,7 +614,7 @@ function argumentsCarried(call: SemanticCall, params: readonly SemanticSlot[], t
  * number.
  */
 function negated(guard: SemanticValue): SemanticValue {
-  if (guard.k === "bool") return { ...guard, value: !guard.value };
+  if (guard.k === "bool") return { k: "bool", type: fieldOf(guard, "type"), value: fieldOf(guard, "value") !== true };
   return { k: "unary", type: TRUTH, op: "not", operand: guard };
 }
 
@@ -651,9 +693,11 @@ interface Program {
  * this pass refuses — is left exactly as the source wrote it.
  */
 export function eliminateMutualRecursion(subject: SemanticFunction, known: ReadonlyMap<string, SemanticFunction>): boolean {
-  const names = [...known.keys()];
-  if (!names.includes(subject.name)) names.push(subject.name);
-  return answerCycle(subject, { names, body: (name) => (known.get(name) ?? (name === subject.name ? subject : undefined)) });
+  const subjectName = String(fieldOf(subject, "name"));
+  const bodies = new Map<string, SemanticFunction>(known);
+  if (!bodies.has(subjectName)) bodies.set(subjectName, subject);
+  const names = [...bodies.keys()];
+  return answerCycle(subject, { names, body: (name) => bodies.get(name) });
 }
 
 /**
@@ -682,9 +726,11 @@ export function eliminateMutualRecursionInProgram(bodies: Iterable<SemanticFunct
  * reason and a body that is exactly as it was.
  */
 export function mutualRecursionRefusal(subject: SemanticFunction, known: ReadonlyMap<string, SemanticFunction>): Refusal | null {
-  const names = [...known.keys()];
-  if (!names.includes(subject.name)) names.push(subject.name);
-  const program: Program = { names, body: (name) => (known.get(name) ?? (name === subject.name ? subject : undefined)) };
+  const subjectName = String(fieldOf(subject, "name"));
+  const bodies = new Map<string, SemanticFunction>(known);
+  if (!bodies.has(subjectName)) bodies.set(subjectName, subject);
+  const names = [...bodies.keys()];
+  const program: Program = { names, body: (name) => bodies.get(name) };
   const cycle = cycleThrough(subject, program);
   if (cycle === null) return "the body hands back to no body that hands back to it";
   const merged = mergeCycle(subject, cycle, program);
@@ -718,11 +764,11 @@ function answerCycle(subject: SemanticFunction, program: Program): boolean {
  */
 function cycleThrough(subject: SemanticFunction, program: Program): string[] | null {
   const edges = new Map<string, string[]>();
-  for (const name of program.names) {
+  for (const name of fieldOf(program, "names")) {
     const body = program.body(name);
     if (body === undefined) continue;
     const targets: string[] = [];
-    for (const call of turnCallsOf(body.entry, new Set(program.names))) {
+    for (const call of turnCallsOf(body.entry, new Set(fieldOf(program, "names")))) {
       if (!targets.includes(call.callee)) targets.push(call.callee);
     }
     edges.set(name, targets);
@@ -738,17 +784,17 @@ function cycleThrough(subject: SemanticFunction, program: Program): string[] | n
       // one loop, which the per-body pass answers, and a walk that stopped there
       // would never look for the cycle that body is also in.
       if (path.includes(next)) {
-        if (next !== subject.name) return null;
+        if (next !== String(fieldOf(subject, "name"))) return null;
         if (path.length > 1) return path;
         continue;
       }
-      if (path.length >= program.names.length) continue;
+      if (path.length >= fieldOf(program, "names").length) continue;
       const found = walk([...path, next]);
       if (found !== null) return found;
     }
     return null;
   };
-  return walk([subject.name]);
+  return walk([String(fieldOf(subject, "name"))]);
 }
 
 /** How many calls of bodies one body's cycle is looked for through. */
@@ -795,11 +841,13 @@ function mergeCycle(subject: SemanticFunction, cycle: readonly string[], program
   };
 
   const members: Member[] = [];
-  for (const [at, body] of bodies.entries()) {
-    const arm = freshName(taken, `blaze_${body.name}`);
+  let at = 0;
+  for (const body of bodies) {
+    const arm = freshName(taken, `blaze_${String(fieldOf(body, "name"))}`);
     const read = readMember(body, at, arm, taken, names);
     if (typeof read === "string") return read;
-    members.push(read);
+    members[members.length] = read;
+    at += 1;
   }
 
   // The block the loop is written in enters the cycle where the call came from:
@@ -808,73 +856,99 @@ function mergeCycle(subject: SemanticFunction, cycle: readonly string[], program
   // of a call that reaches it. Those are written above the loop rather than
   // where the call was made, so they are evaluated on every call into the
   // function rather than on every turn of the loop.
-  const readable = new Set<string>(subject.params.map((param) => param.name));
+  const readable = new Set<string>((fieldOf(subject, "params") as readonly SemanticSlot[]).map((param) => String(fieldOf(param, "name"))));
   const start: SemanticStatement[] = [
     { k: "let", slot: slotFor({ k: "const", type: COUNT, text: "0" }, loop.counter, true), value: { k: "const", type: COUNT, text: "0" }, line: UNSTATED_LINE },
   ];
   for (const member of members) {
-    const entering: readonly SemanticValue[] | Refusal = member.at === 0
-      ? subject.params.map((param) => ({ k: "local" as const, type: slotType(param), name: param.name }))
-      : startingWith(member, members, readable);
+    let entering: readonly SemanticValue[] | Refusal;
+    if (Number(fieldOf(member, "at")) === 0) {
+      entering = (fieldOf(subject, "params") as readonly SemanticSlot[]).map((param) => ({ k: "local" as const, type: slotType(param), name: String(fieldOf(param, "name")) }));
+    } else {
+      entering = startingWith(member, members, readable);
+    }
     if (typeof entering === "string") return entering;
-    entering.forEach((value, index) => {
-      const param = member.params[index];
-      if (param === undefined) return;
-      start.push({ k: "let", slot: param, value, line: UNSTATED_LINE });
-      readable.add(param.name);
-    });
+    const memberParams = fieldOf(member, "params") as readonly SemanticSlot[];
+    for (let index = 0; index < entering.length; index++) {
+      const param = memberParams[index];
+      if (param === undefined) continue;
+      start[start.length] = { k: "let", slot: param, value: entering[index], line: UNSTATED_LINE };
+      readable.add(String(fieldOf(param, "name")));
+    }
   }
   const opening = members[0] as Member;
-  start.push({ k: "let", slot: slotFor(opening.plan.guard, loop.guard, true), value: opening.plan.guard, line: UNSTATED_LINE });
+  const openingPlan = fieldOf(opening, "plan") as Plan;
+  start[start.length] = { k: "let", slot: slotFor(fieldOf(openingPlan, "guard") as SemanticValue, loop.guard, true), value: fieldOf(openingPlan, "guard") as SemanticValue, line: UNSTATED_LINE };
 
   const firstTurn = turnOf(opening, members, loop);
+  const arms: SemanticBlock = {
+    id: freshName(taken, "blaze_body"),
+    statements: [
+      {
+        k: "if",
+        condition: isBodyAt(loop.counter, Number(fieldOf(opening, "at"))),
+        then: firstTurn,
+        otherwise: elseArms(members, 1, loop),
+        line: UNSTATED_LINE,
+      },
+    ],
+    releases: [],
+    terminator: { k: "jump", target: loop.header, releases: [] },
+  };
   const turns: SemanticLoop = {
     kind: "while",
     condition: { k: "unary", type: TRUTH, op: "not", operand: { k: "local", type: TRUTH, name: loop.guard } },
     header: loop.header,
-    exit: subject.entry.id,
-    body: {
-      id: freshName(taken, "blaze_body"),
-      statements: [
-        {
-          k: "if",
-          condition: isBodyAt(loop.counter, opening.at),
-          then: firstTurn,
-          otherwise: elseArms(members, 1, loop),
-          line: UNSTATED_LINE,
-        },
-      ],
-      releases: [],
-      terminator: { k: "jump", target: loop.header, releases: [] },
-    },
+    exit: String(fieldOf(fieldOf(subject, "entry"), "id")),
+    body: arms,
   };
 
   const finish = answeringOf(members, loop.counter, taken);
+  const statements: SemanticStatement[] = [];
+  for (const one of start) statements[statements.length] = one;
+  statements[statements.length] = { k: "loop", loop: turns, line: UNSTATED_LINE };
+  for (const one of fieldOf(finish, "statements") as readonly SemanticStatement[]) statements[statements.length] = one;
+  let prints = false;
+  let allocates = false;
+  let readsArgv = false;
+  const effectSet = new Set<string>();
+  const objects: Record<string, ObjectLayout> = {};
+  for (const member of members) {
+    const body = fieldOf(member, "body");
+    if (fieldOf(body, "prints") === true) prints = true;
+    if (fieldOf(body, "allocates") === true) allocates = true;
+    if (fieldOf(body, "readsArgv") === true) readsArgv = true;
+    for (const effect of fieldOf(body, "effects") as readonly string[]) effectSet.add(effect);
+    const layouts = fieldOf(body, "objects") as Record<string, ObjectLayout>;
+    for (const key of Object.keys(layouts)) objects[key] = layouts[key];
+  }
+  const effects: string[] = [];
+  for (const effect of effectSet) effects[effects.length] = effect;
   return {
     entry: {
-      id: subject.entry.id,
-      statements: [...start, { k: "loop", loop: turns, line: UNSTATED_LINE }, ...finish.statements],
+      id: String(fieldOf(fieldOf(subject, "entry"), "id")),
+      statements,
       releases: [],
-      terminator: finish.last,
+      terminator: fieldOf(finish, "last") as SemanticTerminator,
     },
-    prints: members.some((member) => member.body.prints),
-    allocates: members.some((member) => member.body.allocates),
-    readsArgv: members.some((member) => member.body.readsArgv),
-    effects: [...new Set(members.flatMap((member) => member.body.effects))],
-    objects: Object.assign({}, ...members.map((member) => member.body.objects)),
+    prints,
+    allocates,
+    readsArgv,
+    effects: effects as Effect[],
+    objects,
     calls: edgesOf(members, names),
   };
 }
 
 /** Puts the loop a cycle of bodies is in place of the calls between the bodies. */
 function writeCycle(fn: SemanticFunction, merged: Merged): void {
-  fn.entry = merged.entry;
-  fn.prints = merged.prints;
-  fn.allocates = merged.allocates;
-  fn.readsArgv = merged.readsArgv;
-  fn.effects = merged.effects;
-  fn.objects = merged.objects;
-  fn.calls = merged.calls;
+  setFieldOn(fn, "entry", fieldOf(merged, "entry"));
+  setFieldOn(fn, "prints", fieldOf(merged, "prints"));
+  setFieldOn(fn, "allocates", fieldOf(merged, "allocates"));
+  setFieldOn(fn, "readsArgv", fieldOf(merged, "readsArgv"));
+  setFieldOn(fn, "effects", fieldOf(merged, "effects"));
+  setFieldOn(fn, "objects", fieldOf(merged, "objects"));
+  setFieldOn(fn, "calls", fieldOf(merged, "calls"));
 }
 
 /**
@@ -903,9 +977,9 @@ function callRefusals(body: SemanticFunction, names: Turns, known: ReadonlyMap<s
 function turnCallsOf(entry: SemanticBlock, names: Turns): SemanticCall[] {
   const found: SemanticCall[] = [];
   for (const block of blocksWithin(entry)) {
-    const end = block.terminator;
-    if (end.k !== "return" || end.value === null || end.value.k !== "call" || !names.has(end.value.call.callee)) continue;
-    found.push(end.value.call);
+    const end = fieldOf(block, "terminator");
+    if (end.k !== "return" || end.value === null || end.value.k !== "call" || !names.has(fieldOf(end.value, "call").callee)) continue;
+    found.push(fieldOf(end.value, "call"));
   }
   return found;
 }
@@ -923,31 +997,45 @@ function turnCallsOf(entry: SemanticBlock, names: Turns): SemanticCall[] {
  * leaves for when it breaks.
  */
 function readMember(body: SemanticFunction, at: number, arm: string, taken: Set<string>, cycle: Turns): Member | Refusal {
-  const entry = structuredClone(body.entry);
+  const bodyName = String(fieldOf(body, "name"));
+  const entry = structuredClone(fieldOf(body, "entry")) as SemanticBlock;
   const scope: Scope = { reads: new Map(), targets: new Map() };
-  const params: SemanticSlot[] = body.params.map((param) => {
-    const name = freshName(taken, `blaze_${body.name}_${param.name}`);
-    scope.reads.set(param.name, { k: "local", type: slotType(param), name });
-    scope.targets.set(param.name, name);
-    return { ...param, name };
-  });
-  const shadowed = renameBindings(entry, scope, taken, body.name);
+  const reads = fieldOf(scope, "reads") as Map<string, SemanticValue>;
+  const targets = fieldOf(scope, "targets") as Map<string, string>;
+  const params: SemanticSlot[] = [];
+  for (const param of fieldOf(body, "params") as readonly SemanticSlot[]) {
+    const paramName = String(fieldOf(param, "name"));
+    const name = freshName(taken, `blaze_${bodyName}_${paramName}`);
+    reads.set(paramName, { k: "local", type: slotType(param), name });
+    targets.set(paramName, name);
+    const copy = structuredClone(param) as SemanticSlot;
+    setFieldOn(copy, "name", name);
+    params[params.length] = copy;
+  }
+  const shadowed = renameBindings(entry, scope, taken, bodyName);
   if (shadowed !== null) return shadowed;
-  const blocks = new Map<string, string>([[entry.id, arm]]);
+  const entryId = String(fieldOf(entry, "id"));
+  const blocks = new Map<string, string>([[entryId, arm]]);
   for (const inner of blocksWithin(entry)) {
-    if (inner.id !== entry.id) blocks.set(inner.id, freshName(taken, "blaze_block"));
+    const innerId = String(fieldOf(inner, "id"));
+    if (innerId !== entryId) blocks.set(innerId, freshName(taken, "blaze_block"));
   }
   for (const inner of blocksWithin(entry)) {
-    for (const statement of inner.statements) {
+    for (const statement of fieldOf(inner, "statements")) {
       if (statement.k !== "loop") continue;
-      for (const id of [statement.loop.header, statement.loop.exit]) {
+      const inner4 = fieldOf(statement, "loop");
+      const header = String(fieldOf(inner4, "header"));
+      const exit = String(fieldOf(inner4, "exit"));
+      for (const id of [header, exit]) {
         if (!blocks.has(id)) blocks.set(id, freshName(taken, "blaze_block"));
       }
     }
   }
   const renamed = replaceBlockIds(entry, blocks) as SemanticBlock;
-  const plan = readPlan({ ...body, entry: renamed }, cycle);
-  if (typeof plan === "string") return `${body.name}: ${plan}`;
+  const draft = structuredClone(body) as SemanticFunction;
+  setFieldOn(draft, "entry", renamed);
+  const plan = readPlan(draft, cycle);
+  if (typeof plan === "string") return `${bodyName}: ${plan}`;
   return { body, arm, entry: renamed, plan, params, at };
 }
 
@@ -967,18 +1055,26 @@ function readMember(body: SemanticFunction, at: number, arm: string, taken: Set<
  * have reached.
  */
 function startingWith(member: Member, members: readonly Member[], readable: ReadonlySet<string>): readonly SemanticValue[] | Refusal {
+  const memberName = String(fieldOf(fieldOf(member, "body"), "name"));
+  const memberAt = Number(fieldOf(member, "at"));
+  const memberParams = fieldOf(member, "params") as readonly SemanticSlot[];
   for (const caller of members) {
-    if (caller.at >= member.at) continue;
-    for (const call of turnCallsOf(caller.entry, new Set([member.body.name]))) {
-      if (call.args.length !== member.params.length) continue;
-      if (call.args.some((argument) => hasCall(argument))) continue;
+    if (Number(fieldOf(caller, "at")) >= memberAt) continue;
+    for (const call of turnCallsOf(fieldOf(caller, "entry") as SemanticBlock, new Set([memberName]))) {
+      const args = fieldOf(call, "args") as readonly SemanticValue[];
+      if (args.length !== memberParams.length) continue;
+      let calls = false;
+      for (const argument of args) if (hasCall(argument)) calls = true;
+      if (calls) continue;
       const reads: string[] = [];
-      for (const argument of call.args) reads.push(...namesReadBy(argument));
-      if (!reads.every((name) => readable.has(name))) continue;
-      return call.args;
+      for (const argument of args) for (const name of namesReadBy(argument)) reads[reads.length] = name;
+      let allReadable = true;
+      for (const name of reads) if (!readable.has(name)) allReadable = false;
+      if (!allReadable) continue;
+      return fieldOf(call, "args") as readonly SemanticValue[];
     }
   }
-  return `${member.body.name} is entered by no call whose arguments the loop can read above itself, so its parameters would be read before any turn wrote them`;
+  return `${memberName} is entered by no call whose arguments the loop can read above itself, so its parameters would be read before any turn wrote them`;
 }
 
 /**
@@ -996,23 +1092,27 @@ function startingWith(member: Member, members: readonly Member[], readable: Read
  */
 function turnOf(member: Member, members: readonly Member[], loop: Loop): SemanticBlock {
   const turn: SemanticBlock = {
-    id: member.arm,
-    statements: [...member.plan.turns],
+    id: String(fieldOf(member, "arm")),
+    statements: (fieldOf(fieldOf(member, "plan"), "turns") as SemanticStatement[]).slice(),
     releases: [],
-    terminator: member.entry.terminator,
+    terminator: fieldOf(fieldOf(member, "entry"), "terminator") as SemanticTerminator,
   };
+  const taken = fieldOf(loop, "taken") as Set<string>;
   for (const block of blocksWithin(turn)) {
-    const end = block.terminator;
-    if (end.k !== "return" || end.value === null || end.value.k !== "call") continue;
-    const call = end.value.call;
-    const next = members.find((one) => one.body.name === call.callee);
+    const end = fieldOf(block, "terminator");
+    const answered = fieldOf(end, "value") as SemanticValue | null;
+    if (String(fieldOf(end, "k")) !== "return" || answered === null || String(fieldOf(answered, "k")) !== "call") continue;
+    const call = fieldOf(answered, "call");
+    let next: Member | undefined = undefined;
+    for (const one of members) {
+      if (String(fieldOf(fieldOf(one, "body"), "name")) === String(fieldOf(call, "callee"))) next = one;
+    }
     if (next === undefined) continue;
-    block.statements.push(
-      ...argumentsCarried(call, next.params, loop.taken),
-      { k: "set", name: loop.counter, op: "=", value: { k: "const", type: COUNT, text: String(next.at) }, line: UNSTATED_LINE },
-      { k: "set", name: loop.guard, op: "=", value: next.plan.guard, line: UNSTATED_LINE },
-    );
-    block.terminator = { k: "jump", target: loop.header, releases: [] };
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    for (const one of argumentsCarried(call as SemanticCall, fieldOf(next, "params") as readonly SemanticSlot[], taken)) statements[statements.length] = one;
+    statements[statements.length] = { k: "set", name: String(fieldOf(loop, "counter")), op: "=", value: { k: "const", type: COUNT, text: String(fieldOf(next, "at")) }, line: UNSTATED_LINE };
+    statements[statements.length] = { k: "set", name: String(fieldOf(loop, "guard")), op: "=", value: fieldOf(fieldOf(next, "plan"), "guard") as SemanticValue, line: UNSTATED_LINE };
+    setFieldOn(block, "terminator", { k: "jump", target: String(fieldOf(loop, "header")), releases: [] });
   }
   return turn;
 }
@@ -1024,9 +1124,9 @@ function elseArms(members: readonly Member[], at: number, loop: Loop): SemanticB
   const last = turnOf(member, members, loop);
   if (members[at + 1] === undefined) return last;
   return {
-    id: freshName(loop.taken, "blaze_arm"),
+    id: freshName(fieldOf(loop, "taken"), "blaze_arm"),
     statements: [
-      { k: "if", condition: isBodyAt(loop.counter, member.at), then: last, otherwise: elseArms(members, at + 1, loop), line: UNSTATED_LINE },
+      { k: "if", condition: isBodyAt(fieldOf(loop, "counter"), fieldOf(member, "at")), then: last, otherwise: elseArms(members, at + 1, loop), line: UNSTATED_LINE },
     ],
     releases: [],
     terminator: { k: "next" },
@@ -1046,7 +1146,7 @@ function answeringOf(members: readonly Member[], counter: string, taken: Set<str
   const final = members[members.length - 1] as Member;
   return {
     statements: answeringArms(members, 0, counter, taken),
-    last: { k: "return", value: final.plan.answer },
+    last: { k: "return", value: fieldOf(final, "plan").answer },
   };
 }
 
@@ -1061,8 +1161,8 @@ function answeringArms(members: readonly Member[], at: number, counter: string, 
   return [
     {
       k: "if",
-      condition: isBodyAt(counter, member.at),
-      then: { id: freshName(taken, "blaze_answer"), statements: [], releases: [], terminator: { k: "return", value: member.plan.answer } },
+      condition: isBodyAt(counter, fieldOf(member, "at")),
+      then: { id: freshName(taken, "blaze_answer"), statements: [], releases: [], terminator: { k: "return", value: fieldOf(member, "plan").answer } },
       otherwise: { id: freshName(taken, "blaze_answer"), statements: answeringArms(members, at + 1, counter, taken), releases: [], terminator: { k: "next" } },
       line: UNSTATED_LINE,
     },
@@ -1086,7 +1186,7 @@ function edgesOf(members: readonly Member[], names: Turns): CallEdge[] {
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
   for (const member of members) {
-    for (const edge of member.body.calls) {
+    for (const edge of fieldOf(member.body, "calls")) {
       if (names.has(edge.callee) || seen.has(edge.callee)) continue;
       seen.add(edge.callee);
       edges.push({ ...edge });
@@ -1102,11 +1202,11 @@ function edgesOf(members: readonly Member[], names: Turns): CallEdge[] {
 /** Every name a function holds, which a name this pass writes may not shadow. */
 function namesOf(fn: SemanticFunction): Set<string> {
   const names = new Set<string>();
-  for (const param of fn.params) names.add(param.name);
+  for (const param of fieldOf(fn, "params")) names.add(param.name);
   for (const block of blocksWithin(fn.entry)) {
     names.add(block.id);
-    for (const statement of block.statements) {
-      if (statement.k === "let") names.add(statement.slot.name);
+    for (const statement of fieldOf(block, "statements")) {
+      if (statement.k === "let") names.add(fieldOf(statement, "slot").name);
     }
   }
   return names;
@@ -1115,7 +1215,7 @@ function namesOf(fn: SemanticFunction): Set<string> {
 /** A block and every block nested inside it, itself included. */
 function blocksWithin(block: SemanticBlock): SemanticBlock[] {
   const blocks: SemanticBlock[] = [block];
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements")) {
     for (const nested of statementBlocksOf(statement)) blocks.push(...blocksWithin(nested));
   }
   return blocks;
@@ -1125,17 +1225,17 @@ function blocksWithin(block: SemanticBlock): SemanticBlock[] {
 function selfCallsIn(entry: SemanticBlock, turns: Turns): SemanticCall[] {
   const found: SemanticCall[] = [];
   for (const block of blocksWithin(entry)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements")) {
       for (const value of statementValues(statement)) collect(value);
     }
-    const end = block.terminator;
+    const end = fieldOf(block, "terminator");
     if (end.k === "return" && end.value !== null) collect(end.value);
   }
   return found;
 
   function collect(value: SemanticValue): void {
     walkValues(value, (inner) => {
-      if (inner.k === "call" && turns.has(inner.call.callee)) found.push(inner.call);
+      if (inner.k === "call" && turns.has(fieldOf(inner, "call").callee)) found.push(fieldOf(inner, "call"));
     });
   }
 }
@@ -1144,7 +1244,7 @@ function selfCallsIn(entry: SemanticBlock, turns: Turns): SemanticCall[] {
 function callsIn(value: SemanticValue): SemanticCall[] {
   const found: SemanticCall[] = [];
   walkValues(value, (inner) => {
-    if (inner.k === "call") found.push(inner.call);
+    if (inner.k === "call") found.push(fieldOf(inner, "call"));
   });
   return found;
 }
@@ -1153,7 +1253,7 @@ function callsIn(value: SemanticValue): SemanticCall[] {
 function selfCallsInValue(value: SemanticValue, name: string): SemanticCall[] {
   const found: SemanticCall[] = [];
   walkValues(value, (inner) => {
-    if (inner.k === "call" && inner.call.callee === name) found.push(inner.call);
+    if (inner.k === "call" && fieldOf(inner, "call").callee === name) found.push(fieldOf(inner, "call"));
   });
   return found;
 }
@@ -1171,11 +1271,11 @@ function namesReadBy(value: SemanticValue): Set<string> {
 function namesWrittenIn(statements: readonly SemanticStatement[]): Set<string> {
   const names = new Set<string>();
   for (const placed of blocksOfStatements(statements)) {
-    for (const statement of placed.statements) {
-      if (statement.k === "let") names.add(statement.slot.name);
+    for (const statement of fieldOf(placed, "statements")) {
+      if (statement.k === "let") names.add(fieldOf(statement, "slot").name);
       else if (statement.k === "set" || statement.k === "step") names.add(statement.name);
       else if (statement.k === "setElement") names.add(statement.buffer);
-      else if (statement.k === "fill") names.add(statement.buffer);
+      else if (statement.k === "fill") names.add(fieldOf(statement, "buffer"));
       else if (statement.k === "storeField") for (const name of namesReadBy(statement.object)) names.add(name);
     }
   }
@@ -1186,7 +1286,7 @@ function namesWrittenIn(statements: readonly SemanticStatement[]): Set<string> {
 function blocksOfStatements(statements: readonly SemanticStatement[]): SemanticBlock[] {
   const blocks: SemanticBlock[] = [{ id: "", statements: [...statements], releases: [], terminator: { k: "next" } }];
   for (const placed of blocks) {
-    for (const statement of placed.statements) {
+    for (const statement of fieldOf(placed, "statements")) {
       for (const nested of statementBlocksOf(statement)) blocks.push(...blocksWithin(nested));
     }
   }

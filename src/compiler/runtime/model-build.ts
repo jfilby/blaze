@@ -95,7 +95,7 @@ export async function buildModelLibrary(
   await writeFile(adapterPath, modelAdapterSource(), "utf8");
   const adapterObject = `${workDirectory}/${MODEL_NAME}_adapter.o`;
   const objectPath = `${workDirectory}/${MODEL_NAME}.o`;
-  const toolchain = toolchainFor(target);
+  const toolchain = toolchainFor(target, undefined, undefined);
   const flags = [
     "-std=gnu11",
     ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),

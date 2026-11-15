@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * TypeScript classes, read as the functions and objects they lower to.
  *
@@ -446,7 +454,7 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
         detail: `near "${memberToken?.text ?? ""}"; write the member as a name`,
         line: memberLine,
       });
-      index = skipValue(tokens, index, close);
+      index = skipValue(tokens, index, close, false);
       if (index < close) index += 1;
       continue;
     }
@@ -529,7 +537,7 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
     if (isPunct(tokens[index], "=")) {
       index += 1;
       initStart = index;
-      index = skipValue(tokens, index, close);
+      index = skipValue(tokens, index, close, false);
       initEnd = index;
     }
     if (isPunct(tokens[index], ";")) index += 1;
@@ -590,11 +598,11 @@ export function scanClasses(tokens: readonly Token[]): ClassTable {
     if (isPunct(tokens[index - 1], ".") || tokens[index + 1]?.kind !== "ident") continue;
     const info = readClass(tokens, index, table.problems);
     if (info === null) continue;
-    table.names.add(info.name);
+    (fieldOf(table, "names") as Set<string>).add(String(fieldOf(info, "name")));
     table.classes.set(info.name, info);
     table.ordered.push(info);
     if (info.isDefault) table.defaultName = info.name;
-    index = info.end - 1;
+    index = fieldOf(info, "end") - 1;
   }
   return table;
 }
@@ -603,7 +611,7 @@ export function scanClasses(tokens: readonly Token[]): ClassTable {
 export function withoutClasses(tokens: readonly Token[], table: ClassTable): Token[] {
   const removed = new Uint8Array(tokens.length);
   for (const info of table.ordered) {
-    for (let index = info.start; index < info.end; index += 1) removed[index] = 1;
+    for (let index = fieldOf(info, "start"); index < fieldOf(info, "end"); index += 1) removed[index] = 1;
   }
   return tokens.filter((_token, index) => removed[index] === 0);
 }
@@ -621,23 +629,47 @@ export function withoutClasses(tokens: readonly Token[], table: ClassTable): Tok
  * that is what the methods are named after (`P_sum`); a file that imports the
  * class under another name still calls the function the module wrote.
  */
+function withoutBodyOf(method: ClassMethod): ClassMethod {
+  const copy = structuredClone(method) as ClassMethod;
+  setFieldOn(copy, "bodyStart", -1);
+  setFieldOn(copy, "bodyEnd", -1);
+  return copy;
+}
+
+function withoutValueOf(field: ClassField): ClassField {
+  const copy = structuredClone(field) as ClassField;
+  setFieldOn(copy, "initStart", -1);
+  setFieldOn(copy, "initEnd", -1);
+  return copy;
+}
+
 export function importedClass(info: ClassInfo): ClassInfo {
-  const withoutBody = (method: ClassMethod): ClassMethod => ({ ...method, bodyStart: -1, bodyEnd: -1 });
-  const withoutValue = (field: ClassField): ClassField => ({ ...field, initStart: -1, initEnd: -1 });
-  return {
-    ...info,
-    fields: info.fields.map(withoutValue),
-    statics: info.statics.map(withoutValue),
-    constructor: info.constructor === null ? null : withoutBody(info.constructor),
-    methods: info.methods.map(withoutBody),
-    staticMethods: info.staticMethods.map(withoutBody),
-    getters: info.getters.map(withoutBody),
-    staticGetters: info.staticGetters.map(withoutBody),
-    start: -1,
-    end: -1,
-    exported: false,
-    isDefault: false,
-  };
+  const fieldsRewritten: ClassField[] = [];
+  for (const one of fieldOf(info, "fields") as readonly ClassField[]) fieldsRewritten[fieldsRewritten.length] = withoutValueOf(one);
+  const staticsRewritten: ClassField[] = [];
+  for (const one of fieldOf(info, "statics") as readonly ClassField[]) staticsRewritten[staticsRewritten.length] = withoutValueOf(one);
+  const methodsRewritten: ClassMethod[] = [];
+  for (const one of fieldOf(info, "methods") as readonly ClassMethod[]) methodsRewritten[methodsRewritten.length] = withoutBodyOf(one);
+  const constructed = fieldOf(info, "constructor") as ClassMethod | null;
+  const copy = structuredClone(info) as ClassInfo;
+  setFieldOn(copy, "fields", fieldsRewritten);
+  setFieldOn(copy, "statics", staticsRewritten);
+  setFieldOn(copy, "constructor", constructed === null ? null : withoutBodyOf(constructed));
+  setFieldOn(copy, "methods", methodsRewritten);
+  const staticMethods: ClassMethod[] = [];
+  for (const one of fieldOf(info, "staticMethods") as readonly ClassMethod[]) staticMethods[staticMethods.length] = withoutBodyOf(one);
+  const getters: ClassMethod[] = [];
+  for (const one of fieldOf(info, "getters") as readonly ClassMethod[]) getters[getters.length] = withoutBodyOf(one);
+  const staticGetters: ClassMethod[] = [];
+  for (const one of fieldOf(info, "staticGetters") as readonly ClassMethod[]) staticGetters[staticGetters.length] = withoutBodyOf(one);
+  setFieldOn(copy, "staticMethods", staticMethods);
+  setFieldOn(copy, "getters", getters);
+  setFieldOn(copy, "staticGetters", staticGetters);
+  setFieldOn(copy, "start", -1);
+  setFieldOn(copy, "end", -1);
+  setFieldOn(copy, "exported", false);
+  setFieldOn(copy, "isDefault", false);
+  return copy;
 }
 
 /**
@@ -664,20 +696,25 @@ export function bindImportedClasses(
 ): boolean {
   let added = false;
   for (const entry of imports) {
-    for (const imported of entry.names ?? []) {
-      const info = offered(entry.specifier, imported);
-      if (info === undefined || table.classes.has(imported)) continue;
-      table.classes.set(imported, importedClass(info));
-      table.names.add(imported);
+    for (const imported of fieldOf(entry, "names") ?? []) {
+      const importedFrom = String(fieldOf(entry, "specifier"));
+      const info = offered(importedFrom, imported);
+      const classes = fieldOf(table, "classes") as Map<string, ClassInfo>;
+      if (info === undefined || classes.has(imported)) continue;
+      classes.set(imported, importedClass(info));
+      const names = fieldOf(table, "names") as Set<string>;
+      names.add(imported);
       added = true;
     }
     // `import { Encoder as Code }` binds the class under the name the file
     // reads; the methods are still the ones the module compiled.
-    for (const rename of entry.renames ?? []) {
-      const info = offered(entry.specifier, rename.imported);
-      if (info === undefined || table.classes.has(rename.local)) continue;
-      table.classes.set(rename.local, importedClass(info));
-      table.names.add(rename.local);
+    for (const rename of fieldOf(entry, "renames") ?? []) {
+      const local = String(fieldOf(rename, "local"));
+      const info = offered(String(fieldOf(entry, "specifier")), String(fieldOf(rename, "imported")));
+      const classes = fieldOf(table, "classes") as Map<string, ClassInfo>;
+      if (info === undefined || classes.has(local)) continue;
+      classes.set(local, importedClass(info));
+      (fieldOf(table, "names") as Set<string>).add(local);
       added = true;
     }
   }
@@ -693,7 +730,7 @@ export function findMethod(
 ): { owner: string; method: ClassMethod } | null {
   let current: string | null = className;
   while (current !== null) {
-    const info = table.classes.get(current);
+    const info = (fieldOf(table, "classes") as ReadonlyMap<string, ClassInfo>).get(current);
     if (info === undefined) return null;
     const method = (isStatic ? info.staticMethods : info.methods).find((entry) => entry.name === name);
     if (method !== undefined) return { owner: info.name, method };
@@ -711,9 +748,10 @@ export function findField(
 ): { owner: string; field: ClassField } | null {
   let current: string | null = className;
   while (current !== null) {
-    const info = table.classes.get(current);
+    const info = (fieldOf(table, "classes") as ReadonlyMap<string, ClassInfo>).get(current);
     if (info === undefined) return null;
-    const field = (isStatic ? info.statics : info.fields).find((entry) => entry.name === name);
+    const plainFields = (fieldOf(info, "fields") as ClassField[]);
+    const field = (isStatic ? info.statics : plainFields).find((entry) => entry.name === name);
     if (field !== undefined) return { owner: info.name, field };
     // `constructor(private readonly table: Table)` declares a field as well as a
     // parameter, and the field is the one the instance carries: a read written
@@ -741,7 +779,7 @@ export function findGetter(
 ): { owner: string; getter: ClassMethod } | null {
   let current: string | null = className;
   while (current !== null) {
-    const info = table.classes.get(current);
+    const info = (fieldOf(table, "classes") as ReadonlyMap<string, ClassInfo>).get(current);
     if (info === undefined) return null;
     const getter = (isStatic ? info.staticGetters : info.getters).find((entry) => entry.name === name);
     if (getter !== undefined) return { owner: info.name, getter };
@@ -757,9 +795,9 @@ export function findGetter(
  */
 export function methodFunctionName(owner: string, method: ClassMethod, arity: number): string {
   const base = method.name === "constructor" ? owner : `${owner}_${method.name}`;
-  const required = requiredParams(method.params);
-  if (arity === method.params.length) return base;
-  if (arity >= required && arity < method.params.length) return `${base}__${arity}`;
+  const required = requiredParams(fieldOf(method, "params"));
+  if (arity === fieldOf(method, "params").length) return base;
+  if (arity >= required && arity < fieldOf(method, "params").length) return `${base}__${arity}`;
   return base;
 }
 

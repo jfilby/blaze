@@ -221,7 +221,9 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
 
   reach(start, ENTRY_ALIGNMENT);
   while (work.length > 0) {
-    const { index, alignment } = work.pop() as { index: number; alignment: Alignment };
+    const item = work.pop() as { index: number; alignment: Alignment };
+    const index = Number(fieldOf(item, "index"));
+    const alignment = fieldOf(item, "alignment") as Alignment;
     const line = lines[index];
     if (String(fieldOf(line, "kind")) !== "instruction") {
       reach(index + 1, alignment);
@@ -258,7 +260,12 @@ export function stackAlignmentProblems(assembly: string, entry: string): string[
     if (String(fieldOf(line, "kind")) !== "instruction") return;
     const mnemonic = String(fieldOf(line, "mnemonic"));
     if (!mnemonic.startsWith("call")) return;
-    const wrong = [...(offsets.get(index) ?? [])].filter((offset) => offset !== 0).sort((a, b) => a - b);
+    const wrong: number[] = [];
+    const seen = offsets.get(index);
+    if (seen !== undefined) {
+      for (const offset of seen) if (Number(offset) !== 0) wrong[wrong.length] = Number(offset);
+    }
+    wrong.sort((a, b) => a - b);
     if (wrong.length === 0) return;
     problems.push(
       `line ${Number(fieldOf(line, "line"))}: "${mnemonic} ${(fieldOf(line, "operands") as string[]).join(", ")}" is made with rsp ${wrong.join(" or ")} byte(s) off a 16-byte boundary, which faults the first aligned move in what it calls`,

@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * The blaze Triton runtime adapter.
  *
@@ -95,22 +99,22 @@ export async function buildTritonLibrary(
   await writeFile(adapterPath, tritonAdapterSource(), "utf8");
   const adapterObject = `${workDirectory}/${TRITON_NAME}_adapter.o`;
   const objectPath = `${workDirectory}/${TRITON_NAME}.o`;
-  const toolchain = toolchainFor(target);
-  const flags = [
-    "-std=gnu11",
-    ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
-    ...cTargetOptions(target),
-    "-ffunction-sections",
-    "-fdata-sections",
-  ];
-  const adapterCommand = compileCommand(toolchain, [
-    ...flags,
-    `-I${workDirectory}`,
-    "-c",
-    "-o",
-    adapterObject,
-    adapterPath,
-  ]);
+  const toolchain = toolchainFor(target, undefined, undefined);
+  const flags: string[] = ["-std=gnu11"];
+  for (const flag of objectOptions(toolchain, mode, undefined)) {
+    if (flag !== "-flto" && flag !== "-ffat-lto-objects") flags[flags.length] = flag;
+  }
+  for (const flag of cTargetOptions(target)) flags[flags.length] = flag;
+  flags[flags.length] = "-ffunction-sections";
+  flags[flags.length] = "-fdata-sections";
+  const adapterArgs: string[] = [];
+  for (const flag of flags) adapterArgs[adapterArgs.length] = flag;
+  adapterArgs[adapterArgs.length] = `-I${workDirectory}`;
+  adapterArgs[adapterArgs.length] = "-c";
+  adapterArgs[adapterArgs.length] = "-o";
+  adapterArgs[adapterArgs.length] = adapterObject;
+  adapterArgs[adapterArgs.length] = adapterPath;
+  const adapterCommand = compileCommand(toolchain, adapterArgs);
   const adapter = run(adapterCommand.command, adapterCommand.args, { timeoutMs: 300_000 });
   if (adapter.spawnError !== undefined) {
     throw new CompilerError("TargetError", "compile", "the C compiler is not available", adapter.spawnError, "", "", "");
@@ -119,7 +123,8 @@ export async function buildTritonLibrary(
     throw new CompilerError("LinkError", "compile", "the Triton adapter did not build", `${adapterPath}\n${adapter.stderr.trim()}`, "", "", "");
   }
   const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject]);
-  const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
+  const bundleCommand = String(fieldOf(bundle, "command"));
+  const bundled = run(bundleCommand, fieldOf(bundle, "args") as string[], { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
     throw new CompilerError("LinkError", "link", "the Triton library did not bundle", bundled.stderr.trim() ?? bundled.spawnError ?? "", "", "", "");
   }

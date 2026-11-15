@@ -95,7 +95,7 @@ export async function buildSglangLibrary(
   await writeFile(adapterPath, sglangAdapterSource(), "utf8");
   const adapterObject = `${workDirectory}/${SGLANG_NAME}_adapter.o`;
   const objectPath = `${workDirectory}/${SGLANG_NAME}.o`;
-  const toolchain = toolchainFor(target);
+  const toolchain = toolchainFor(target, undefined, undefined);
   const flags = [
     "-std=gnu11",
     ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),

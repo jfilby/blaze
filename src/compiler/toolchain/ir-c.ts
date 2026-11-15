@@ -870,7 +870,7 @@ class FunctionEmitter {
   /** Writes the declarations a value needed, before the line that reads them. */
   private flush(): void {
     if (this.pending.length === 0) return;
-    this.body.push(...this.pending.map((line) => `${pad(this.depth)}${line}`));
+    this.body.push(...this.pending.map((line) => `${pad(fieldOf(this, "depth"))}${line}`));
     this.pending = [];
   }
 
@@ -1044,7 +1044,10 @@ class FunctionEmitter {
   private parallelDirective(loop: Extract<SemanticLoop, { kind: "counted" | "each" }>): string {
     const reductions = (fieldOf(loop,"reductions") as SemanticReduction[] | undefined) ?? [];
     if (reductions.length === 0) return "#pragma omp parallel for";
-    const clauses = reductions.map((reduction) => `reduction(${fieldOf(reduction,"op")}:${this.names.read(fieldOf(reduction,"name"))})`);
+    const clauses: string[] = [];
+    for (const reduction of reductions) {
+      clauses[clauses.length] = `reduction(${String(fieldOf(reduction, "op"))}:${this.nameOf(fieldOf(reduction, "name"))})`;
+    }
     return `#pragma omp parallel for ${clauses.join(" ")}`;
   }
 
@@ -1343,8 +1346,8 @@ class FunctionEmitter {
       // is read through the cell — passing the cell made the callee a pointer
       // where a string was expected.
       const parameter = builtin !== null ? null : fieldOf((fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[])[index] ?? {}, "type");
-      if (String(fieldOf(argument,"k")) === "local" && isTextType(fieldOf(argument,"type")) && this.boxedTexts.has(fieldOf(argument,"name")) && parameter === "boxedtext") {
-        args.push(this.names.read(fieldOf(argument,"name")));
+      if (String(fieldOf(argument,"k")) === "local" && isTextType(fieldOf(argument,"type")) && this.boxedText(fieldOf(argument,"name")) && String(parameter) === "boxedtext") {
+        args.push(this.nameOf(fieldOf(argument,"name")));
       } else {
         args.push(this.expression(argument, targetType, depth));
       }
@@ -1613,9 +1616,19 @@ class FunctionEmitter {
     );
   }
 
+  /** Whether a text local is held in a cell, which is what a boxed parameter is handed. */
+  private boxedText(name: unknown): boolean {
+    return this.boxedTexts.has(String(name));
+  }
+
+  /** The C name a value's local was given, which a readonly table cannot be read from in a closure. */
+  private nameOf(value: unknown): string {
+    return this.names.read(String(value));
+  }
+
   /** A declaration of another function of this program, so the C can call it. */
   private declareCallee(call: SemanticCall): void {
-    const symbol = fieldOf(fieldOf(call,"signature"),"symbol");
+    const symbol = String(fieldOf(fieldOf(call,"signature"),"symbol"));
     if (symbol === String(fieldOf(this.fn,"symbol")) || this.externs.has(symbol)) return;
     const parameters = (fieldOf(fieldOf(call,"signature"),"params") as FunctionParam[]).flatMap((param) => {
       const type = parseType(fieldOf(param,"type"));
@@ -2022,7 +2035,7 @@ class FunctionEmitter {
           );
         }
         if (!isTextType(fieldOf(value,"operand"))) {
-          return `(${this.expression(fieldOf(value,"left"), fieldOf(value,"operand"), depth)} ${cOperator(COMPARE_OPERATORS[fieldOf(value,"op")])} ${this.expression(fieldOf(value,"right"), fieldOf(value,"operand"), depth)})`;
+          return `(${this.expression(fieldOf(value,"left"), fieldOf(value,"operand"), depth)} ${cOperator(COMPARE_OPERATORS[String(fieldOf(value,"op"))])} ${this.expression(fieldOf(value,"right"), fieldOf(value,"operand"), depth)})`;
         }
         // Two strings are compared by what they say and not by where they are:
         // a string built at run time and one written out are two addresses that
@@ -2033,7 +2046,7 @@ class FunctionEmitter {
         // WebAssembly backend calls the same service and answers the same.
         const left = this.temporary("blaze_left");
         const right = this.temporary("blaze_right");
-        const operator = cOperator(COMPARE_OPERATORS[fieldOf(value,"op")]);
+        const operator = cOperator(COMPARE_OPERATORS[String(fieldOf(value,"op"))]);
         return (
           `({ const char* ${left} = ${this.raw(fieldOf(value,"left"), depth)}; ` +
           `const char* ${right} = ${this.raw(fieldOf(value,"right"), depth)}; ` +
@@ -2187,7 +2200,7 @@ class FunctionEmitter {
 
   /** The declaration of the function a closure is entered through. */
   private declareClosureCode(signature: FunctionSignature): void {
-    const symbol = fieldOf(signature,"symbol");
+    const symbol = String(fieldOf(signature,"symbol"));
     if (symbol === String(fieldOf(this.fn,"symbol")) || this.externs.has(symbol)) return;
     const parameters = (fieldOf(signature,"params") as FunctionParam[]).flatMap((param) => {
       const type = parseType(fieldOf(param,"type"));
@@ -2338,7 +2351,7 @@ class FunctionEmitter {
         );
       }
       default:
-        return `(${left} ${cOperator(ARITHMETIC_OPERATORS[fieldOf(value,"op")])} ${right})`;
+        return `(${left} ${cOperator(ARITHMETIC_OPERATORS[String(fieldOf(value,"op"))])} ${right})`;
     }
   }
 
@@ -2906,7 +2919,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   const source = generateFunctionC(fieldOf(request,"fn"));
   await writeFile(fieldOf(request,"sourcePath"), source, "utf8");
 
-  const toolchain = toolchainFor(fieldOf(request,"target"));
+  const toolchain = toolchainFor(fieldOf(request,"target"), undefined, undefined);
   const archFlag = cTargetOptions(fieldOf(request,"target"));
   const includes = ((fieldOf(request,"includeDirectories") as string[] | undefined) ?? []).flatMap((directory) => ["-I", directory]);
   // `-fopenmp` is asked for only when the function has a loop the compiler
@@ -2977,7 +2990,7 @@ export async function compileFunctionC(request: CompileFunctionRequest): Promise
   }
 
   const info = inspectObject(fieldOf(request,"objectPath"), functionName, undefined, toolchain);
-  if ((fieldOf(info,"defined") as string[]).length !== 1 || (fieldOf(info,"defined") as string[])[0] !== functionName) {
+  if ((fieldOf(info,"defined") as string[]).length !== 1 || String((fieldOf(info,"defined") as string[])[0]) !== functionName) {
     throw backendError(
       `the C of ${functionName} defines [${(fieldOf(info,"defined") as string[]).join(", ")}] instead of only "${functionName}"`,
       `the object must define exactly the symbol the program calls: ${declaredType(parseType(fieldOf(fieldOf(fieldOf(request,"contract"),"function"),"returns")))} ${functionName}(...)`,

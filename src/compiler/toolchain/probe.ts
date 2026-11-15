@@ -191,7 +191,10 @@ function buildValue(
 
 /** The contract-level value a default argument has, for reading preconditions. */
 function probeValue(type: TypeExpr): Value {
-  if (type.kind === "primitive") return String(fieldOf(type, "name")) === "bool" ? false : 0;
+  if (type.kind === "primitive") {
+    if (String(fieldOf(type, "name")) === "bool") return false;
+    return 0;
+  }
   if (type.kind === "ptr" || type.kind === "slice" || type.kind === "array") {
     return { type, values: [] };
   }

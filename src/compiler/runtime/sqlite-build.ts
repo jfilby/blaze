@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * The blaze SQLite library.
  *
@@ -453,7 +457,7 @@ export function sqliteObjectKey(
     identity.compiler,
     identity.target,
     ...flags,
-    readFileSync(amalgamation),
+    readFileSync(amalgamation, "utf8"),
   ].join("\u0000");
   return createHash("sha256").update(material).digest("hex").slice(0, 16);
 }
@@ -496,17 +500,17 @@ export async function buildSqliteLibrary(
   // linked with it, and an object that carries the compiler's intermediate form
   // is rebuilt at that link — which for the amalgamation is a build of the whole
   // of SQLite again, at the end of every build.
-  const toolchain = toolchainFor(target);
+  const toolchain = toolchainFor(target, undefined, undefined);
   const compiler = await identifyCompiler(toolchain);
-  const flags = [
-    "-std=gnu11",
-    ...objectOptions(toolchain, mode).filter((flag) => flag !== "-flto" && flag !== "-ffat-lto-objects"),
-    ...cTargetOptions(target),
-    ...SQLITE_COMPILE_FLAGS,
-    "-ffunction-sections",
-    "-fdata-sections",
-    "-pthread",
-  ];
+  const flags: string[] = ["-std=gnu11"];
+  for (const flag of objectOptions(toolchain, mode, undefined)) {
+    if (flag !== "-flto" && flag !== "-ffat-lto-objects") flags[flags.length] = flag;
+  }
+  for (const flag of cTargetOptions(target)) flags[flags.length] = flag;
+  for (const flag of SQLITE_COMPILE_FLAGS) flags[flags.length] = flag;
+  flags[flags.length] = "-ffunction-sections";
+  flags[flags.length] = "-fdata-sections";
+  flags[flags.length] = "-pthread";
 
   // The amalgamation is a whole library in one file, and compiling it takes a
   // minute. The object is kept in the work directory under a name that says
@@ -571,7 +575,8 @@ export async function buildSqliteLibrary(
   // runtime bundles itself. The runtime's own entry points stay undefined
   // here and are resolved when the program is linked beside the runtime.
   const bundle = relocatableLinkCommand(toolchain, objectPath, [adapterObject, sqliteObject]);
-  const bundled = run(bundle.command, bundle.args, { timeoutMs: 120_000 });
+  const bundleCommand = String(fieldOf(bundle, "command"));
+  const bundled = run(bundleCommand, fieldOf(bundle, "args") as string[], { timeoutMs: 120_000 });
   if (bundled.spawnError !== undefined || bundled.code !== 0) {
     throw new CompilerError("LinkError", "link", "the SQLite library did not bundle", bundled.stderr.trim() ?? bundled.spawnError ?? "", "", "", "");
   }

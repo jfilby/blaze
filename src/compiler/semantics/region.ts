@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Which loops may have the storage one turn allocates reused by the next.
  *
@@ -26,6 +34,7 @@ import {
   type SemanticFunction,
   type SemanticLoop,
   type SemanticStatement,
+  type SemanticTerminator,
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import { builtinFor } from "./builtins.ts";
@@ -47,7 +56,7 @@ export type Callees = ReadonlyMap<string, SemanticFunction>;
 /** A block and every block nested inside it, itself included. */
 function blocksWithin(block: SemanticBlock): SemanticBlock[] {
   const blocks: SemanticBlock[] = [block];
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements")) {
     for (const inner of statementBlocksOf(statement)) blocks.push(...blocksWithin(inner));
   }
   return blocks;
@@ -81,7 +90,7 @@ export function markRegionLoops(entry: SemanticBlock, callees: Callees = new Map
  * that is not there.
  */
 function isMarkedLoop(loop: SemanticLoop): loop is Extract<SemanticLoop, { kind: "counted" | "each" }> {
-  return loop.kind === "counted" || loop.kind === "each";
+  return String(fieldOf(loop, "kind")) === "counted" || String(fieldOf(loop, "kind")) === "each";
 }
 
 /**
@@ -90,10 +99,10 @@ function isMarkedLoop(loop: SemanticLoop): loop is Extract<SemanticLoop, { kind:
  */
 function markWithin(block: SemanticBlock, callees: Callees): boolean {
   let marked = false;
-  for (const statement of block.statements) {
+  for (const statement of fieldOf(block, "statements")) {
     if (statement.k === "loop") {
-      const loop = statement.loop;
-      const beneath = markWithin(loop.body, callees);
+      const loop = fieldOf(statement, "loop");
+      const beneath = markWithin(fieldOf(loop, "body") as SemanticBlock, callees);
       if (beneath) {
         marked = true;
         continue;
@@ -105,7 +114,7 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
       // on one path hand the inner turn the base block the outer turn is still
       // filling, and every block the outer turn took before it is handed out a
       // second time.
-      if (isMarkedLoop(loop) && loop.region === true) {
+      if (isMarkedLoop(loop) && fieldOf(loop, "region") === true) {
         marked = true;
         continue;
       }
@@ -113,11 +122,11 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
       // would cost the two calls that open and close a region on every turn of
       // every such loop in the program and buy nothing at all.
       if (
-        (loop.kind === "counted" || loop.kind === "each") &&
+        (String(fieldOf(loop, "kind")) === "counted" || String(fieldOf(loop, "kind")) === "each") &&
         turnBuilds(loop, callees) &&
         refusalFor(loop, callees) === null
       ) {
-        loop.region = true;
+        setFieldOn(loop, "region", true);
         marked = true;
       }
       continue;
@@ -147,13 +156,15 @@ function markWithin(block: SemanticBlock, callees: Callees): boolean {
  */
 function turnBuilds(loop: SemanticLoop, callees: Callees): boolean {
   const reach: Builds = { callees, reading: new Set(), builds: new Map() };
-  for (const block of blocksWithin(loop.body)) {
-    for (const statement of block.statements) {
+  for (const block of blocksWithin(fieldOf(loop, "body") as SemanticBlock)) {
+    for (const statement of fieldOf(block, "statements")) {
       for (const value of statementValues(statement)) {
         if (buildsIn(value, reach)) return true;
       }
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null && buildsIn(block.terminator.value, reach)) {
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    const answered = fieldOf(terminator, "value") as SemanticValue | null;
+    if (terminator.k === "return" && answered !== null && buildsIn(answered, reach)) {
       return true;
     }
   }
@@ -179,11 +190,12 @@ function buildsIn(value: SemanticValue, reach: Builds): boolean {
     } else if (inner.k === "buffer") {
       // A window into a block another name holds is a block of that name's, not
       // one this turn made.
-      found = inner.view === null;
+      found = fieldOf(inner, "view") === null;
     } else if (inner.k === "call") {
       // A function the compiler itself provides computes its answer out of what
       // it is handed and builds nothing, so it is not a body nobody has read.
-      found = !inner.call.builtin && calleeMayBuild(inner.call.callee, reach);
+      const call = fieldOf(inner, "call");
+      found = !fieldOf(call, "builtin") && calleeMayBuild(String(fieldOf(call, "callee")), reach);
     }
   });
   return found;
@@ -195,9 +207,11 @@ function buildsIn(value: SemanticValue, reach: Builds): boolean {
  * not hold.
  */
 function calleeMayBuild(name: string, reach: Builds): boolean {
-  const known = reach.builds.get(name);
+  const buildsMap = fieldOf(reach, "builds") as Map<string, boolean>;
+  const known: boolean | undefined = buildsMap.get(name);
   if (known !== undefined) return known;
-  const callee = reach.callees.get(name);
+  const callees = fieldOf(reach, "callees") as Callees;
+  const callee = callees.get(name);
   // A body nobody has read is a body that may allocate. Assuming and checking
   // afterwards is what breaks a recursion: the answer is what the body holds
   // once the loop of the reading has been cut, which is a body this build can
@@ -206,20 +220,23 @@ function calleeMayBuild(name: string, reach: Builds): boolean {
   if (reach.reading.has(name)) return false;
   reach.reading.add(name);
   let builds = false;
-  for (const block of blocksWithin(callee.entry)) {
-    for (const statement of block.statements) {
+  for (const block of blocksWithin(fieldOf(callee, "entry") as SemanticBlock)) {
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    for (const statement of statements) {
       for (const value of statementValues(statement)) {
         if (buildsIn(value, reach)) builds = true;
       }
       if (builds) break;
     }
-    if (!builds && block.terminator.k === "return" && block.terminator.value !== null) {
-      builds = buildsIn(block.terminator.value, reach);
+    const end = fieldOf(block, "terminator") as SemanticTerminator;
+    const answered = fieldOf(end, "value") as SemanticValue | null;
+    if (!builds && String(fieldOf(end, "k")) === "return" && answered !== null) {
+      builds = buildsIn(answered, reach);
     }
     if (builds) break;
   }
   reach.reading.delete(name);
-  reach.builds.set(name, builds);
+  buildsMap.set(name, builds);
   return builds;
 }
 
@@ -247,10 +264,10 @@ interface Reach {
  * that, and a way of showing it the compiler cannot take is a refusal.
  */
 export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Refusal | null {
-  if (loop.kind === "while" || loop.kind === "doWhile") {
+  if (String(fieldOf(loop, "kind")) === "while" || String(fieldOf(loop, "kind")) === "doWhile") {
     return "a turn of a loop that may run any number of times cannot promise what the turn after it still wants";
   }
-  return bodyRefusal(loop.body, { callees, reading: new Set(), makes: new Map(), keeps: new Map() });
+  return bodyRefusal(fieldOf(loop, "body") as SemanticBlock, { callees, reading: new Set(), makes: new Map(), keeps: new Map() });
 }
 
 /**
@@ -268,8 +285,8 @@ function bodyRefusal(body: SemanticBlock, reach: Reach): Refusal | null {
   // a block put into one of those is still wanted when the turn is over.
   const declared = new Set<string>();
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
-      if (statement.k === "let") declared.add(statement.slot.name);
+    for (const statement of fieldOf(block, "statements")) {
+      if (statement.k === "let") declared.add(fieldOf(statement, "slot").name);
     }
   }
   // The names holding a block of this turn. A name is here once a block has
@@ -277,11 +294,13 @@ function bodyRefusal(body: SemanticBlock, reach: Reach): Refusal | null {
   const held: Set<string> = new Set();
 
   for (const block of blocksWithin(body)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements")) {
       const refusal = statementRefusal(statement, declared, held, reach);
       if (refusal !== null) return refusal;
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null && ownsRegionBlock(block.terminator.value, held, reach)) {
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    const answered = fieldOf(terminator, "value") as SemanticValue | null;
+    if (terminator.k === "return" && answered !== null && ownsRegionBlock(answered, held, reach)) {
       return "the turn hands back something it allocated, and the reuse would write over it";
     }
   }
@@ -303,8 +322,10 @@ function statementRefusal(
     let refused: Refusal | null = null;
     walkValues(value, (inner) => {
       if (refused !== null || inner.k !== "call") return;
-      for (const argument of inner.call.args) {
-        if (storesRegionBlock(argument, held, reach) && !calleeKeepsNothing(inner.call.callee, reach)) {
+      const call = fieldOf(inner, "call");
+      const args = fieldOf(call, "args") as SemanticValue[];
+      for (const argument of args) {
+        if (storesRegionBlock(argument, held, reach) && !calleeKeepsNothing(String(fieldOf(call, "callee")), reach)) {
           refused = "the turn hands something it allocated to a function that keeps what it is given";
         }
       }
@@ -318,23 +339,23 @@ function statementRefusal(
       // this line records which names hold a block rather than asking whether
       // one leaves, and a name wrongly in `held` only refuses a mark later. A
       // call whose declared type is a reference is the shape this exists for.
-      if (!ownsRegionBlock(statement.value, held, reach)) return null;
+      if (!ownsRegionBlock(fieldOf(statement, "value"), held, reach)) return null;
       // A name the turn declares dies with the turn, so a block bound to one is
       // gone before the next turn asks for storage.
-      if (declared.has(statement.slot.name)) {
-        held.add(statement.slot.name);
+      if (declared.has(fieldOf(statement, "slot").name)) {
+        held.add(fieldOf(statement, "slot").name);
         return null;
       }
       return "the turn binds something it allocated to a name that outlives it";
     case "set":
-      return storesRegionBlock(statement.value, held, reach)
+      return storesRegionBlock(fieldOf(statement, "value"), held, reach)
         ? "the turn writes something it allocated into a name that outlives it"
         : null;
     case "setElement":
     case "fill":
       // An element written into a buffer the turn made is inside the reuse; one
       // written into a buffer the turn found is handed to whatever holds it.
-      if (storesRegionBlock(statement.value, held, reach) && !(declared.has(statement.buffer) && held.has(statement.buffer))) {
+      if (storesRegionBlock(fieldOf(statement, "value"), held, reach) && !(declared.has(fieldOf(statement, "buffer")) && held.has(fieldOf(statement, "buffer")))) {
         return "the turn writes something it allocated into a buffer that outlives it";
       }
       return null;
@@ -342,12 +363,12 @@ function statementRefusal(
       // A field of a block the turn made is inside the reuse. A field of
       // anything else is not, and putting one there hands the next turn's
       // rewind a value that is still wanted.
-      if (storesRegionBlock(statement.value, held, reach) && !ownsRegionBlock(statement.object, held, reach)) {
+      if (storesRegionBlock(fieldOf(statement, "value"), held, reach) && !ownsRegionBlock(fieldOf(statement, "object") as SemanticValue, held, reach)) {
         return "the turn stores something it allocated into an object that outlives it";
       }
       return null;
     case "retain":
-      return ownsRegionBlock(statement.value, held, reach)
+      return ownsRegionBlock(fieldOf(statement, "value") as SemanticValue, held, reach)
         ? "the turn counts something it allocated, and a count outlives the storage it counts"
         : null;
     default:
@@ -430,10 +451,10 @@ function ownsRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach:
       // it is not the turn's to reuse. Every other array is: the runtime takes
       // every one of them from the region's cursor while a region is open, so an
       // array literal written in a turn is as much the turn's as an object is.
-      found = inner.view === null;
+      found = fieldOf(inner, "view") === null;
     } else if (inner.k === "local" && held.has(inner.name)) {
       found = true;
-    } else if (inner.k === "call" && calleeBuilds(inner.call.callee, reach)) {
+    } else if (inner.k === "call" && calleeBuilds(String(fieldOf(fieldOf(inner, "call"), "callee")), reach)) {
       found = true;
     }
   });
@@ -459,9 +480,10 @@ function ownsRegionBlock(value: SemanticValue, held: ReadonlySet<string>, reach:
  * that delegates to another is read as building nothing either.
  */
 function calleeBuilds(name: string, reach: Reach): boolean {
-  const known = reach.makes.get(name);
+  const known: boolean | undefined = reach.makes.get(name);
   if (known !== undefined) return known;
-  const callee = reach.callees.get(name);
+  const callees = fieldOf(reach, "callees") as Callees;
+  const callee = callees.get(name);
   // A body nobody has read may build. A call through a closure is one: the
   // value it calls is a function this build resolved but cannot name here, and
   // what it answers may be a block the turn has to keep. A builtin is the
@@ -478,18 +500,21 @@ function calleeBuilds(name: string, reach: Reach): boolean {
       // exactly as an object is — the same answer `ownsRegionBlock` gives. A
       // window into a block another name holds is that name's block, not one
       // this body made.
-      else if (inner.k === "buffer") found = inner.view === null;
-      else if (inner.k === "call") found = calleeBuilds(inner.call.callee, reach);
+      else if (inner.k === "buffer") found = fieldOf(inner, "view") === null;
+      else if (inner.k === "call") found = calleeBuilds(String(fieldOf(fieldOf(inner, "call"), "callee")), reach);
     });
     return found;
   };
   let builds = false;
-  for (const block of blocksWithin(callee.entry)) {
-    if (block.terminator.k === "return" && block.terminator.value !== null && buildsIn(block.terminator.value)) {
+  for (const block of blocksWithin(fieldOf(callee, "entry") as SemanticBlock)) {
+    const end = fieldOf(block, "terminator") as SemanticTerminator;
+    const answered = fieldOf(end, "value") as SemanticValue | null;
+    if (String(fieldOf(end, "k")) === "return" && answered !== null && buildsIn(answered)) {
       builds = true;
       break;
     }
-    for (const statement of block.statements) {
+    const statements = fieldOf(block, "statements") as SemanticStatement[];
+    for (const statement of statements) {
       if (builds) break;
       for (const value of statementValues(statement)) {
         if (buildsIn(value)) builds = true;
@@ -512,9 +537,10 @@ function calleeBuilds(name: string, reach: Reach): boolean {
  * taken to keep everything.
  */
 function calleeKeepsNothing(name: string, reach: Reach): boolean {
-  const known = reach.keeps.get(name);
+  const known: boolean | undefined = reach.keeps.get(name);
   if (known !== undefined) return known;
-  const callee = reach.callees.get(name);
+  const callees = fieldOf(reach, "callees") as Callees;
+  const callee = callees.get(name);
   if (callee === undefined) return false;
   if (reach.reading.has(name)) return true;
   reach.reading.add(name);
@@ -536,7 +562,7 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
   // What the function was given, and everything a name of its own now holds
   // because it was given it. A block it built itself is not in here: it dies
   // with the call unless it is handed back, which is read below.
-  const given = new Set(callee.params.map((param) => param.name));
+  const given = new Set<string>((fieldOf(callee, "params") as readonly { readonly name: string }[]).map((param) => String(fieldOf(param, "name"))));
   const declared = new Set<string>();
   const holdsGiven = (value: SemanticValue): boolean => {
     let found = false;
@@ -558,15 +584,17 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
     let handed = false;
     walkValues(value, (inner) => {
       if (handed || inner.k !== "call") return;
-      if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handed = true;
+      const call = fieldOf(inner, "call");
+      const args = fieldOf(call, "args") as SemanticValue[];
+      if (args.some(holdsGiven) && !calleeKeepsNothing(String(fieldOf(call, "callee")), reach)) handed = true;
     });
     return handed;
   };
 
-  for (const block of blocksWithin(callee.entry)) {
-    for (const statement of block.statements) {
+  for (const block of blocksWithin(fieldOf(callee, "entry") as SemanticBlock)) {
+    for (const statement of fieldOf(block, "statements")) {
       if (statement.k === "let") {
-        declared.add(statement.slot.name);
+        declared.add(fieldOf(statement, "slot").name);
         // Any binding of what the function was given is an alias of it, and
         // which slot kind it was written as does not change that. `const copy =
         // node;` is an `object` slot rather than a `value` one, and reading
@@ -574,10 +602,10 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
         // that kept the caller's block through one was answered as keeping
         // nothing, and the loop above it was marked for a reuse that would
         // write over a block the caller still holds.
-        if (holdsGiven(statement.value)) given.add(statement.slot.name);
+        if (holdsGiven(fieldOf(statement, "value"))) given.add(fieldOf(statement, "slot").name);
         // The hand-off below is read here as well. The `continue` used to skip
         // it, and the comment above it named this very form.
-        if (handsOn(statement.value)) return true;
+        if (handsOn(fieldOf(statement, "value"))) return true;
         continue;
       }
       for (const value of statementValues(statement)) {
@@ -587,22 +615,22 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
         case "set":
           // A name of its own is as safe as anything else; a name it found is
           // somewhere the caller can still be holding the block it was given.
-          if (!declared.has(statement.name) && holdsGiven(statement.value)) return true;
+          if (!declared.has(String(fieldOf(statement, "name"))) && holdsGiven(fieldOf(statement, "value"))) return true;
           break;
         case "setElement":
         case "fill":
-          if (!declared.has(statement.buffer) && holdsGiven(statement.value)) return true;
+          if (!declared.has(String(fieldOf(statement, "buffer"))) && holdsGiven(fieldOf(statement, "value"))) return true;
           break;
         case "storeField":
           // Writing into an object it was given puts the block where the owner
           // of that object still finds it, and so does writing something it was
           // given into an object of any other kind: only an object built in
           // this very statement is the function's own.
-          if (holdsGiven(statement.object)) return true;
-          if (holdsGiven(statement.value) && statement.object.k !== "newObject") return true;
+          if (holdsGiven(fieldOf(statement, "object") as SemanticValue)) return true;
+          if (holdsGiven(fieldOf(statement, "value")) && String(fieldOf(fieldOf(statement, "object"), "k")) !== "newObject") return true;
           break;
         case "retain":
-          if (holdsGiven(statement.value)) return true;
+          if (holdsGiven(fieldOf(statement, "value") as SemanticValue)) return true;
           break;
         default:
           break;
@@ -615,22 +643,26 @@ function keepsWhatItIsGiven(callee: SemanticFunction, reach: Reach): boolean {
     // was given and answers `1 + left + right`, a number, and a walk of that
     // answer reaches `node` through every `loadField` in it. Reading the given
     // is not keeping it; only naming it as the answer is.
+    const terminator = fieldOf(block, "terminator") as SemanticTerminator;
+    const answered = fieldOf(terminator, "value") as SemanticValue | null;
     if (
-      block.terminator.k === "return" &&
-      block.terminator.value !== null &&
-      carriesRegionBlock(block.terminator.value) &&
-      holdsGiven(block.terminator.value)
+      String(fieldOf(terminator, "k")) === "return" &&
+      answered !== null &&
+      carriesRegionBlock(answered) &&
+      holdsGiven(answered)
     ) {
       return true;
     }
     // A call written in the answer hands the block on whoever receives it, so
     // answering `store(node)` is as much a place the block lands as calling it
     // and handing the answer back.
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
+    if (String(fieldOf(terminator, "k")) === "return" && answered !== null) {
       let handsOn = false;
-      walkValues(block.terminator.value, (inner) => {
+      walkValues(answered, (inner) => {
         if (handsOn || inner.k !== "call") return;
-        if (inner.call.args.some(holdsGiven) && !calleeKeepsNothing(inner.call.callee, reach)) handsOn = true;
+        const call = fieldOf(inner, "call");
+        const args = fieldOf(call, "args") as SemanticValue[];
+        if (args.some(holdsGiven) && !calleeKeepsNothing(String(fieldOf(call, "callee")), reach)) handsOn = true;
       });
       if (handsOn) return true;
     }

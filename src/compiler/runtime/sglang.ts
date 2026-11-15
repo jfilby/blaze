@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * The blaze Sglang/kernel runtime ABI.
  *
@@ -28,7 +36,9 @@ function sglangEntry(
   ownership: string,
   extra: { noreturn?: boolean } = {},
 ): SglangEntry {
-  return { symbol, returns, params, summary, ownership, ...extra };
+  const made: SglangEntry = { symbol, returns, params, summary, ownership };
+  if (fieldOf(extra, "noreturn") === true) setFieldOn(made, "noreturn", true);
+  return made;
 }
 
 /**
@@ -44,6 +54,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     [],
     "Initializes the device for kernel execution.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_device_sync",
@@ -51,6 +62,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     [],
     "Synchronizes the device stream.",
     "Blocks until all queued work is complete.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_malloc",
@@ -58,6 +70,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     [["bytes", "size_t"]],
     "Allocates device memory.",
     "Returns an owned device pointer; null on failure.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_free",
@@ -65,6 +78,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     [["ptr", "void*"]],
     "Frees device memory.",
     "The pointer is no longer valid after this.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_memcpy_h2d",
@@ -76,6 +90,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     ],
     "Copies memory from host to device.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_memcpy_d2h",
@@ -87,6 +102,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     ],
     "Copies memory from device to host.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   sglangEntry(
     "blaze_sglang_launch",
@@ -106,6 +122,7 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
     ],
     "Launches a kernel.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
 ];
 
@@ -139,9 +156,9 @@ const SGLANG_HEADER_EPILOGUE = `
 /** The C header a program that uses the Sglang runtime includes. */
 export function sglangHeaderSource(): string {
   const declarations = SGLANG_ABI.map((item) => {
-    const suffix = item.noreturn === true ? " /* never returns */" : "";
+    const suffix = fieldOf(item, "noreturn") === true ? " /* never returns */" : "";
     return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
-      item.params.length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
+      fieldOf(item, "params").length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
     })${suffix};`;
   }).join("\n");
   return `${SGLANG_HEADER_PREAMBLE}\n${declarations}\n\n${SGLANG_HEADER_EPILOGUE}`;

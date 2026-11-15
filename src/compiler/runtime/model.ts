@@ -54,6 +54,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     [],
     "Initializes the device for kernel execution.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   modelEntry(
     "blaze_model_device_sync",
@@ -61,6 +62,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     [],
     "Synchronizes the device stream.",
     "Blocks until all queued work is complete.",
+    {},
   ),
   modelEntry(
     "blaze_model_malloc",
@@ -68,6 +70,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     [["bytes", "size_t"]],
     "Allocates device memory.",
     "Returns an owned device pointer; null on failure.",
+    {},
   ),
   modelEntry(
     "blaze_model_free",
@@ -75,6 +78,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     [["ptr", "void*"]],
     "Frees device memory.",
     "The pointer is no longer valid after this.",
+    {},
   ),
   modelEntry(
     "blaze_model_memcpy_h2d",
@@ -86,6 +90,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     ],
     "Copies memory from host to device.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   modelEntry(
     "blaze_model_memcpy_d2h",
@@ -97,6 +102,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     ],
     "Copies memory from device to host.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
   modelEntry(
     "blaze_model_launch",
@@ -116,6 +122,7 @@ export const MODEL_ABI: readonly ModelEntry[] = [
     ],
     "Launches a kernel.",
     "Returns 1 on success, 0 on failure.",
+    {},
   ),
 ];
 

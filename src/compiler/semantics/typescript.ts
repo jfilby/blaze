@@ -153,13 +153,13 @@ const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\",
 export function unescape(text: string, line: number): string {
   let result = "";
   for (let index = 0; index < text.length; index += 1) {
-    const character = text[index];
+    const character = text.charAt(index);
     if (character !== "\\") {
       result += character;
       continue;
     }
-    const escape = text[index + 1];
-    if (escape === undefined) throw frontendError("a string ends in a backslash", `line ${line}`);
+    const escape = text.charAt(index + 1);
+    if (escape === "") throw frontendError("a string ends in a backslash", `line ${line}`);
     result += ESCAPES[escape] ?? `\\${escape}`;
     index += 1;
   }
@@ -176,7 +176,7 @@ export function unescape(text: string, line: number): string {
 export function closingBrace(text: string, open: number): number {
   let depth = 0;
   for (let index = open; index < text.length; index += 1) {
-    const character = text[index];
+    const character = text.charAt(index);
     if (character === '"' || character === "'" || character === "`") {
       let end = index + 1;
       for (;;) {
@@ -194,12 +194,12 @@ export function closingBrace(text: string, open: number): number {
     // desynchronised every quote after it, so the `}` the interpolation ends
     // with was never found. A slash where a value is expected is the pattern's
     // own, and it runs to the next slash outside a class.
-    if (character === "/" && text[index + 1] !== "/" && text[index + 1] !== "*" && valueExpected(text, index)) {
+    if (character === "/" && text.charAt(index + 1) !== "/" && text.charAt(index + 1) !== "*" && valueExpected(text, index)) {
       let end = index + 1;
       let inClass = false;
       for (;;) {
-        if (end >= text.length || text[end] === "\n") return -1;
-        const next = text[end];
+        if (end >= text.length || text.charAt(end) === "\n") return -1;
+        const next = text.charAt(end);
         if (next === "\\") {
           end += 2;
           continue;
@@ -237,7 +237,7 @@ function valueExpected(text: string, at: number): boolean {
   let index = at - 1;
   while (index >= 0 && /\s/.test(text[index] as string)) index -= 1;
   if (index < 0) return true;
-  const character = text[index] as string;
+  const character = text.charAt(index);
   if (/[A-Za-z0-9_$]/.test(character)) {
     let start = index;
     while (start >= 0 && /[A-Za-z0-9_$]/.test(text[start] as string)) start -= 1;
@@ -552,7 +552,8 @@ function typeofName(type: TypeExpr): string {
 /** Whether a field's annotation names the literal. */
 function fieldHasLiteral(field: ResolvedField | undefined, literal: string): boolean {
   if (field === undefined) return false;
-  return field.literal === literal || (field.literals?.includes(literal) ?? false);
+  const literals = fieldOfOptional(field, "literals") as readonly string[] | undefined;
+  return String(fieldOf(field, "literal")) === literal || (literals !== undefined && literals.includes(literal));
 }
 
 /** The arm of a union whose tag field writes the literal, or null. */
@@ -874,6 +875,16 @@ function commonResult(left: TypeExpr, right: TypeExpr): TypeExpr {
 }
 
 /** Whether two results are the same type. */
+/**
+ * Whether two values the frontend read are the same one.
+ *
+ * A comparison of two reads is a comparison of references the contract keeps
+ * unshaped, so it is written once here rather than at each place that asks.
+ */
+function sameValue(left: unknown, right: unknown): boolean {
+  return left === right;
+}
+
 function sameResult(left: TypeExpr, right: TypeExpr): boolean {
   if (left.kind !== right.kind) return false;
   if (left.kind === "primitive" && right.kind === "primitive") return left.name === right.name;
@@ -1295,8 +1306,8 @@ function collectionLiteral(
           keyKind = key.kind === "string" ? "text" : "number";
           const valueStart = from + 2;
           if (tokens[valueStart]?.text !== ",") return null;
-          if (!constantRange(tokens, valueStart + 1, pairClose)) return null;
-          keys.push(key.kind === "string" ? unescape(key.text, key.line) : key.text);
+          if (!constantRange(tokens, valueStart + 1, pairClose, undefined)) return null;
+          keys.push(key.kind === "string" ? unescape(key.text, Number(fieldOf(key, "line"))) : key.text);
           values.push({ range: { start: valueStart + 1, end: pairClose } });
         }
         from = index + 1;
@@ -1969,11 +1980,16 @@ function callsRewritten<T>(node: T, source: string, target: string, captures: re
   }
   if (node !== null && typeof node === "object") {
     const call = node as { k?: unknown; name?: unknown; args?: unknown };
-    if (call.k === "call" && call.name === source && Array.isArray(call.args)) {
+    const callArgs = fieldOf(call, "args") as Expression[] | undefined;
+    const isCall = String(fieldOf(call, "k")) === "call";
+    if (isCall && call.name === source && Array.isArray(callArgs)) {
+      const written: Expression[] = [];
+      for (const name of captures) written.push({ k: "ident", name });
+      for (const argument of callArgs as Expression[]) written.push(argument);
       return {
         ...(node as object),
         name: target,
-        args: [...captures.map((name) => ({ k: "ident", name })), ...call.args],
+        args: written,
       } as T;
     }
     return Object.fromEntries(
@@ -2419,14 +2435,16 @@ const BOXED_FIELD = "__boxed";
 
 /** A read of a value that lives in the box an arrow writes back. */
 function boxedRead(box: Boxed): Expression {
-  if ((fieldOf(box, "list") as boolean)) return { k: "member", base: { k: "ident", name: box.name }, field: BOXED_FIELD };
-  return { k: "index", base: { k: "ident", name: box.name }, index: { k: "literal", text: "0" } };
+  const name = String(fieldOf(box, "name"));
+  if ((fieldOf(box, "list") as boolean)) return { k: "member", base: { k: "ident", name }, field: BOXED_FIELD };
+  return { k: "index", base: { k: "ident", name }, index: { k: "literal", text: "0" } };
 }
 
 /** The write of a boxed value: the element, or the field a list lives in. */
 function boxedWrite(box: Boxed, op: AssignOperator, value: Expression, line: number): Statement {
-  if ((fieldOf(box, "list") as boolean)) return { kind: "memberAssign", base: box.name, field: BOXED_FIELD, op, value, line };
-  return { kind: "indexAssign", buffer: box.name, index: { k: "literal", text: "0" }, op, value, line };
+  const name = String(fieldOf(box, "name"));
+  if ((fieldOf(box, "list") as boolean)) return { kind: "memberAssign", base: name, field: BOXED_FIELD, op, value, line };
+  return { kind: "indexAssign", buffer: name, index: { k: "literal", text: "0" }, op, value, line };
 }
 
 /** A counter the boxed update temporaries are named by. */
@@ -2455,7 +2473,12 @@ function settleBoxUpdate(
   return {
     // The test is the comparison with the value the read kept in place of the
     // update: `searched-- <= 0` is `u <= 0` once the step is a statement.
-    value: { ...condition, left: { k: "ident", name: temporary } },
+    value: {
+      k: "binary",
+      op: condition.op,
+      left: { k: "ident", name: temporary },
+      right: fieldOf(condition, "right") as Expression,
+    },
     prelude: condition.left.prefix ? [write, read] : [read, write],
   };
 }
@@ -2511,11 +2534,12 @@ function unsupportedUpdateIn(statements: readonly Statement[], name: string): bo
 
 /** Every read and write of `name` in a statement list, rewritten to its box. */
 function boxStatements(statements: Statement[], name: string, box: Boxed): void {
-  const rewritten: Statement[] = [];
+    const rewritten: Statement[] = [];
   for (const statement of statements) {
     const one = boxStatement(statement, name, box);
-    if (Array.isArray(one)) rewritten.push(...one);
-    else rewritten.push(one);
+    if (Array.isArray(one)) {
+      for (const each of one as Statement[]) rewritten.push(each);
+    } else rewritten.push(one);
   }
   statements.splice(0, statements.length, ...rewritten);
 }
@@ -2528,33 +2552,39 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
       // already written it: a declaration of the same name inside a block is a
       // different value, and its initialiser is not this one.
       if (statement.name === name) return statement;
-      return { ...statement, init: boxExpression((fieldOf(statement, "init") as Expression), name, box) };
+      setFieldOn(statement, "init", boxExpression((fieldOf(statement, "init") as Expression), name, box));
+      return statement;
     case "assign":
       if (statement.target === name) {
         return boxedWrite(box, statement.op, boxExpression((fieldOf(statement, "value") as Expression), name, box), (fieldOf(statement, "line") as number));
       }
-      return { ...statement, value: boxExpression((fieldOf(statement, "value") as Expression), name, box) };
+      setFieldOn(statement, "value", boxExpression((fieldOf(statement, "value") as Expression), name, box));
+      return statement;
     case "update":
       if (statement.name !== name) return statement;
       return boxedWrite(box, statement.op === "++" ? "+=" : "-=", { k: "literal", text: "1" }, (fieldOf(statement, "line") as number));
     case "memberAssign":
-      return { ...statement, value: boxExpression((fieldOf(statement, "value") as Expression), name, box) };
+      setFieldOn(statement, "value", boxExpression((fieldOf(statement, "value") as Expression), name, box));
+      return statement;
     case "indexAssign":
       // An element written through a boxed list is a write an element of an
       // element, which the box does not hold: the caller refuses that form
       // before it rewrites anything.
-      return {
-        ...statement,
-        buffer: statement.buffer === name && !box.list ? box.name : statement.buffer,
-        index: boxExpression(statement.index, name, box),
-        value: boxExpression((fieldOf(statement, "value") as Expression), name, box),
-      };
-    case "result":
-      return statement.value === null ? statement : { ...statement, value: boxExpression(statement.value, name, box) };
+      setFieldOn(statement, "buffer", String(fieldOf(statement, "buffer")) === name && !(fieldOf(box, "list") as boolean) ? String(fieldOf(box, "name")) : statement.buffer);
+      setFieldOn(statement, "index", boxExpression(statement.index, name, box));
+      setFieldOn(statement, "value", boxExpression((fieldOf(statement, "value") as Expression), name, box));
+      return statement;
+    case "result": {
+      const written = fieldOf(statement, "value") as Expression | null;
+      if (written === null) return statement;
+      setFieldOn(statement, "value", boxExpression(written, name, box));
+      return statement;
+    }
     case "throw":
     case "print":
     case "expression":
-      return { ...statement, value: boxExpression((fieldOf(statement, "value") as Expression), name, box) };
+      setFieldOn(statement, "value", boxExpression((fieldOf(statement, "value") as Expression), name, box));
+      return statement;
     case "if": {
       // `if (searched-- <= 0)` reads the value the counter had before the
       // step and steps it. A captured counter lives in its box, so the read and
@@ -2562,42 +2592,36 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
       // reads the value the read kept.
       const settled = settleBoxUpdate((fieldOf(statement, "condition") as Expression), name, box, (fieldOf(statement, "line") as number));
       const condition = boxExpression(settled === null ? (fieldOf(statement, "condition") as Expression) : settled.value, name, box);
-      const rewritten: Statement = {
-        ...statement,
-        condition,
-        then: boxBlock((fieldOf(statement, "then") as Statement[]), name, box),
-        otherwise: boxBlock((fieldOf(statement, "otherwise") as Statement[]), name, box),
-      };
-      return settled === null ? rewritten : [...(fieldOf(settled, "prelude") as Statement[]), rewritten];
+      setFieldOn(statement, "condition", condition);
+      boxBlock((fieldOf(statement, "then") as Statement[]), name, box);
+      boxBlock((fieldOf(statement, "otherwise") as Statement[]), name, box);
+      if (settled === null) return statement;
+      const prelude = fieldOf(settled, "prelude") as Statement[];
+      const out: Statement[] = [];
+      for (const one of prelude) out.push(one);
+      out.push(statement);
+      return out;
     }
     case "while":
     case "doWhile":
-      return {
-        ...statement,
-        condition: boxExpression(statement.condition, name, box),
-        body: boxBlock(statement.body, name, box),
-      };
+      setFieldOn(statement, "condition", boxExpression(statement.condition, name, box));
+      boxBlock(statement.body, name, box);
+      return statement;
     case "loop":
-      return {
-        ...statement,
-        from: boxExpression(statement.from, name, box),
-        to: boxExpression(statement.to, name, box),
-        step: statement.step === null ? null : boxExpression(statement.step, name, box),
-        body: boxBlock(statement.body, name, box),
-      };
+      setFieldOn(statement, "from", boxExpression(statement.from, name, box));
+      setFieldOn(statement, "to", boxExpression(statement.to, name, box));
+      setFieldOn(statement, "step", statement.step === null ? null : boxExpression(statement.step, name, box));
+      boxBlock(statement.body, name, box);
+      return statement;
     case "forOf":
-      return {
-        ...statement,
-        of: statement.of === name && !box.list ? box.name : statement.of,
-        body: boxBlock(statement.body, name, box),
-      };
+      setFieldOn(statement, "of", String(fieldOf(statement, "of")) === name && !(fieldOf(box, "list") as boolean) ? String(fieldOf(box, "name")) : statement.of);
+      boxBlock(statement.body, name, box);
+      return statement;
     case "try":
-      return {
-        ...statement,
-        body: boxBlock(statement.body, name, box),
-        catchBody: statement.catchBody === null ? null : boxBlock(statement.catchBody, name, box),
-        finallyBody: statement.finallyBody === null ? null : boxBlock(statement.finallyBody, name, box),
-      };
+      boxBlock(statement.body, name, box);
+      if (statement.catchBody !== null) boxBlock(statement.catchBody, name, box);
+      if (statement.finallyBody !== null) boxBlock(statement.finallyBody, name, box);
+      return statement;
     case "break":
     case "continue":
       return statement;
@@ -2619,85 +2643,136 @@ function boxExpression(value: Expression, name: string, box: Boxed): Expression 
     case "bigint":
     case "null":
       return value;
-    case "argv":
-      return (fieldOf(value, "index") as Expression | null) === null ? value : { ...value, index: boxExpression(fieldOf(value, "index") as Expression, name, box) };
+    case "argv": {
+      const index = fieldOf(value, "index") as Expression | null;
+      if (index === null) return value;
+      return { k: "argv", index: boxExpression(index, name, box) };
+    }
     case "length":
       // A list's length is the length of the list the box holds.
-      return value.buffer === name ? { k: "lengthOf", of: boxedRead(box) } : value;
+      return String(fieldOf(value, "buffer")) === name ? { k: "lengthOf", of: boxedRead(box) } : value;
     case "lengthOf":
-      return { ...value, of: boxExpression(value.of, name, box) };
+      return { k: "lengthOf", of: boxExpression(fieldOf(value, "of") as Expression, name, box) };
     case "index":
       return {
-        ...value,
+        k: "index",
         base: boxExpression((fieldOf(value, "base") as Expression), name, box),
         index: boxExpression((fieldOf(value, "index") as Expression), name, box),
       };
-    case "slice":
+    case "slice": {
+      const start = fieldOf(value, "start") as Expression | null;
+      const stop = fieldOf(value, "stop") as Expression | null;
+      const step = fieldOf(value, "step") as Expression | null;
       return {
-        ...value,
-        base: boxExpression(value.base, name, box),
-        start: value.start === null ? null : boxExpression(value.start, name, box),
-        stop: value.stop === null ? null : boxExpression(value.stop, name, box),
-        step: value.step === null ? null : boxExpression(value.step, name, box),
+        k: "slice",
+        base: boxExpression(fieldOf(value, "base") as Expression, name, box),
+        start: start === null ? null : boxExpression(start, name, box),
+        stop: stop === null ? null : boxExpression(stop, name, box),
+        step: step === null ? null : boxExpression(step, name, box),
       };
+    }
     case "member":
-      return { ...value, base: boxExpression(value.base, name, box) };
-    case "call":
-      return { ...value, args: value.args.map((argument) => boxExpression(argument, name, box)) };
-    case "object":
-      return {
-        ...value,
+      return { k: "member", base: boxExpression(fieldOf(value, "base") as Expression, name, box), field: String(fieldOf(value, "field")) };
+    case "call": {
+      const made: Expression = {
+        k: "call",
+        name: String(fieldOf(value, "name")),
+        args: (fieldOf(value, "args") as Expression[]).map((argument) => boxExpression(argument, name, box)),
+      };
+      const returns = fieldOfOptional(value, "returns") as TypeExpr | undefined;
+      if (returns !== undefined) setFieldOn(made, "returns", returns);
+      return made;
+    }
+    case "object": {
+      const made: Expression = {
+        k: "object",
         fields: (fieldOf(value, "fields") as { name: string; value: Expression; }[]).map((field: WrittenField) => ({ ...field, value: boxExpression(field.value, name, box) })),
       };
+      const written = fieldOfOptional(value, "written") as readonly string[] | undefined;
+      if (written !== undefined) setFieldOn(made, "written", written);
+      return made;
+    }
     case "sized":
-      return { ...value, count: boxExpression(value.count, name, box) };
-    case "buffer":
-      return {
-        ...value,
-        values: value.values.map((element) => boxExpression(element, name, box)),
-        ...((fieldOf(value, "view") as { of: Expression; offset: Expression; count: Expression; } | undefined) === undefined
-          ? {}
-          : {
-              view: {
-                of: boxExpression(fieldOf(fieldOf(value, "view"), "of") as Expression, name, box),
-                offset: boxExpression((fieldOf(fieldOf(value, "view"), "offset") as Expression), name, box),
-                count: boxExpression((fieldOf(fieldOf(value, "view"), "count") as Expression), name, box),
-              },
-            }),
+      return { k: "sized", element: String(fieldOf(value, "element")), count: boxExpression(fieldOf(value, "count") as Expression, name, box) };
+    case "buffer": {
+      const made: Expression = {
+        k: "buffer",
+        element: String(fieldOf(value, "element")),
+        values: (fieldOf(value, "values") as Expression[]).map((element) => boxExpression(element, name, box)),
       };
+      const view = fieldOfOptional(value, "view") as { of: Expression; offset: Expression; count: Expression; } | undefined;
+      if (view !== undefined) {
+        setFieldOn(made, "view", {
+          of: boxExpression(fieldOf(view, "of") as Expression, name, box),
+          offset: boxExpression(fieldOf(view, "offset") as Expression, name, box),
+          count: boxExpression(fieldOf(view, "count") as Expression, name, box),
+        });
+      }
+      const dynamic = fieldOfOptional(value, "dynamic") as boolean | undefined;
+      if (dynamic !== undefined) setFieldOn(made, "dynamic", dynamic);
+      return made;
+    }
     case "text":
       return {
-        ...value,
+        k: "text",
         parts: (fieldOf(value, "parts") as TextPart[]).map((part: TextPart) => (part.k === "text" ? part : { ...part, value: boxExpression(part.value, name, box) })),
       };
-    case "fixed":
-      return { ...value, of: boxExpression(value.of, name, box) };
+    case "fixed": {
+      const made: Expression = {
+        k: "fixed",
+        of: boxExpression(fieldOf(value, "of") as Expression, name, box),
+        digits: Number(fieldOf(value, "digits")),
+      };
+      const precision = fieldOfOptional(value, "precision") as true | undefined;
+      if (precision !== undefined) setFieldOn(made, "precision", precision);
+      return made;
+    }
     case "binary":
-      return { ...value, left: boxExpression((fieldOf(value, "left") as Expression), name, box), right: boxExpression((fieldOf(value, "right") as Expression), name, box) };
+      return {
+        k: "binary",
+        op: value.op,
+        left: boxExpression((fieldOf(value, "left") as Expression), name, box),
+        right: boxExpression((fieldOf(value, "right") as Expression), name, box),
+      };
     case "unary":
-      return { ...value, operand: boxExpression(value.operand, name, box) };
+      return { k: "unary", op: value.op, operand: boxExpression(fieldOf(value, "operand") as Expression, name, box) };
     case "conditional":
       return {
-        ...value,
-        condition: boxExpression(value.condition, name, box),
-        then: boxExpression(fieldOf(value, "then"), name, box),
-        otherwise: boxExpression(value.otherwise, name, box),
+        k: "conditional",
+        condition: boxExpression(fieldOf(value, "condition") as Expression, name, box),
+        then: boxExpression(fieldOf(value, "then") as Expression, name, box),
+        otherwise: boxExpression((fieldOf(value, "otherwise") as Expression), name, box),
       };
     case "update":
       // An `x++` read as a value is not a write to an element, and the caller
       // refuses the capture before it rewrites anything.
       return value;
-    case "arrow":
+    case "arrow": {
       // A nested arrow captures the box, not the name: the value it is handed
       // is the box the value lives in.
-      return { ...value, captures: value.captures.map((capture) => (capture === name ? box.name : capture)) };
+      const made: Expression = {
+        k: "arrow",
+        name: String(fieldOf(value, "name")),
+        captures: (fieldOf(value, "captures") as string[]).map((capture) => (capture === name ? String(fieldOf(box, "name")) : capture)),
+      };
+      const code = fieldOfOptional(value, "code") as string | undefined;
+      if (code !== undefined) setFieldOn(made, "code", code);
+      return made;
+    }
     case "capture":
-      return { ...value, closure: boxExpression(value.closure, name, box) };
+      return {
+        k: "capture",
+        closure: boxExpression(fieldOf(value, "closure") as Expression, name, box),
+        index: Number(fieldOf(value, "index")),
+        type: fieldOf(value, "type") as TypeExpr,
+      };
     case "invoke":
       return {
-        ...value,
-        callee: boxExpression(value.callee, name, box),
-        args: value.args.map((argument) => boxExpression(argument, name, box)),
+        k: "invoke",
+        callee: boxExpression(fieldOf(value, "callee") as Expression, name, box),
+        args: (fieldOf(value, "args") as Expression[]).map((argument) => boxExpression(argument, name, box)),
+        params: fieldOf(value, "params") as TypeExpr[],
+        returns: fieldOf(value, "returns") as TypeExpr,
       };
     case "append":
       // A push on a boxed list is a push on the list the box holds; the values
@@ -2705,7 +2780,7 @@ function boxExpression(value: Expression, name: string, box: Boxed): Expression 
       return {
         ...value,
         ...(value.base === null && value.target === name && (fieldOf(box, "list") as boolean)
-          ? { target: BOXED_FIELD, base: box.name }
+          ? { target: BOXED_FIELD, base: String(fieldOf(box, "name")) }
           : {}),
         ...(value.index === undefined ? {} : { index: boxExpression(value.index, name, box) }),
         values: value.values.map((element) => boxExpression(element, name, box)),
@@ -2796,7 +2871,7 @@ function readsUpdate(statement: Statement, name: string): boolean {
     case "indexAssign":
       return expression(statement.index) || expression((fieldOf(statement, "value") as Expression));
     case "result":
-      return expression(statement.value);
+      return expression(fieldOf(statement, "value") as Expression | null);
     case "throw":
     case "print":
     case "expression":
@@ -2844,7 +2919,7 @@ function expressionReadsUpdate(value: Expression, name: string): boolean {
     case "member":
       return expressionReadsUpdate(value.base, name);
     case "call":
-      return value.args.some((argument) => expressionReadsUpdate(argument, name));
+      return (fieldOf(value, "args") as Expression[]).some((argument) => expressionReadsUpdate(argument, name));
     case "object":
       return (fieldOf(value, "fields") as { name: string; value: Expression; }[]).some((field: WrittenField) => expressionReadsUpdate(field.value, name));
     case "sized":
@@ -3049,7 +3124,7 @@ export function tokenize(source: string): Token[] {
   }
 
   while (index < source.length) {
-    const character = source[index];
+    const character = source.charAt(index);
     if (character === "\n") {
       line += 1;
       index += 1;
@@ -3083,10 +3158,10 @@ export function tokenize(source: string): Token[] {
       let end = index + 1;
       let inClass = false;
       for (;;) {
-        if (end >= source.length || source[end] === "\n") {
+        if (end >= source.length || source.charAt(end) === "\n") {
           throw frontendError("unterminated regular expression", `line ${startLine}`);
         }
-        const next = source[end];
+        const next = source.charAt(end);
         if (next === "\\") {
           end += 2;
           continue;
@@ -3628,6 +3703,15 @@ class TypeScriptParser {
    * element, and the write is the write the source wrote.
    */
   private arrowBoxes = new Map<string, { box: string; element: TypeExpr; list: boolean }>();
+  /**
+   * The arrows lifted while the body being read was read, in the order they
+   * were lifted.
+   *
+   * A box belongs to the body that declares the name it holds, and the arrows
+   * that body holds are the ones handed it: an arrow of another body captured
+   * the name in another scope, where the box is not a value.
+   */
+  private arrowLifts: string[] = [];
   /**
    * Calls of a function declared in the block being read, written above it.
    *
@@ -4224,7 +4308,7 @@ class TypeScriptParser {
    * reach a binary.
    */
   private hole(): Expression {
-    return { k: "call", name: `__refused_${this.peek().line}`, args: [], returns: ANY_TYPE };
+    return { k: "call", name: `__refused_${Number(fieldOf(this.peek(), "line"))}`, args: [], returns: ANY_TYPE };
   }
 
   private missing(message: string, token: Token = this.peek()): Expression {
@@ -5103,6 +5187,11 @@ class TypeScriptParser {
     this.valueFunctions = new Map();
     this.valueCollections = new Map();
     this.valueRegexes = new Set();
+    // The boxes a body's arrows write belong to that body: a name another
+    // member boxed is not a box this one captured, and a box this one made is
+    // named here and finished here.
+    this.arrowBoxes = new Map();
+    this.arrowLifts = [];
     if (self) this.valueClasses.set(this.selfName, info.name);
     for (const param of params) {
       const paramName = String(fieldOf(param, "name"));
@@ -5602,9 +5691,11 @@ class TypeScriptParser {
    * subclass says.
    */
   private constructorOf(info: ClassInfo): { params: readonly ClassParam[]; body: ClassMethod | null } | null {
-    if (info.constructor !== null) return { params: info.constructor.params, body: info.constructor };
-    if (info.base === null || info.base === "Error") return null;
-    const base = this.classNamed(info.base);
+    const own = fieldOf(info, "constructor") as ClassMethod | null;
+    if (own !== null) return { params: fieldOf(own, "params") as readonly ClassParam[], body: own };
+    const baseName = String(fieldOf(info, "base") ?? "");
+    if (baseName === "" || baseName === "Error") return null;
+    const base = this.classNamed(baseName);
     if (base === undefined || (fieldOf(base, "start") as number) < 0) return null;
     return this.constructorOf(base);
   }
@@ -6868,7 +6959,16 @@ class TypeScriptParser {
     // imports the name calls it against this signature, whether or not the
     // module that writes it could read the body.
     if ((program || refused) && exported) {
-      for (const entry of entries) this.droppedExports.push({ ...entry, exported: true, internal: undefined });
+      for (const entry of entries) {
+        this.droppedExports.push({
+          name: String(fieldOf(entry, "name")),
+          exported: true,
+          params: fieldOf(entry, "params") as { name: string; type: TypeExpr }[],
+          returns: fieldOf(entry, "returns") as TypeExpr,
+          handle: fieldOf(entry, "handle"),
+          internal: undefined,
+        });
+      }
     }
     const calls = new Set<string>();
     if (!program) {
@@ -7027,7 +7127,7 @@ class TypeScriptParser {
           specifier: list.from,
           names: list.names,
           ...(list.renames.length === 0 ? {} : { renames: list.renames }),
-          line: this.peek().line,
+          line: Number(fieldOf(this.peek(), "line")),
         });
       }
       return null;
@@ -7294,22 +7394,29 @@ class TypeScriptParser {
     types: ModuleTypeBinding[] = [],
     renames: ModuleTypeBinding[] = [],
   ): ModuleImport {
-    const withTypes = types.length === 0 ? {} : { types };
-    if (renames.length > 0) Object.assign(withTypes, { renames });
     if (!this.at("from")) {
       this.report('expected "from" after the imported names', `near "${this.peek().text}"`);
       this.synchronize();
-      return { specifier: "", names, default: isDefault, line: start.line, ...withTypes };
+      const made: ModuleImport = { specifier: "", names, default: isDefault, line: start.line };
+      if (types.length > 0) setFieldOn(made, "types", types);
+      if (renames.length > 0) setFieldOn(made, "renames", renames);
+      return made;
     }
     this.next();
     const specifier = this.next();
     if (specifier.kind !== "string") {
       this.report("expected the imported module as a string", `near "${specifier.text}"`, specifier);
       this.synchronize();
-      return { specifier: "", names, default: isDefault, line: start.line, ...withTypes };
+      const made: ModuleImport = { specifier: "", names, default: isDefault, line: start.line };
+      if (types.length > 0) setFieldOn(made, "types", types);
+      if (renames.length > 0) setFieldOn(made, "renames", renames);
+      return made;
     }
     this.expect(";");
-    return { specifier: specifier.text, names, default: isDefault, line: start.line, ...withTypes };
+    const made: ModuleImport = { specifier: specifier.text, names, default: isDefault, line: start.line };
+    if (types.length > 0) setFieldOn(made, "types", types);
+    if (renames.length > 0) setFieldOn(made, "renames", renames);
+    return made;
   }
 
   private parseFunction(name: Token, isAsync = false): TypeScriptFunction | null {
@@ -7324,6 +7431,7 @@ class TypeScriptParser {
     this.valueArrows = new Map();
     this.valueFunctions = new Map();
     this.arrowBoxes = new Map();
+    this.arrowLifts = [];
     // A collection a file declares at the top is a name its functions read, so
     // what each of them holds is carried into the function being read. What the
     // function declares of its own is the function's: the bindings the body
@@ -7488,7 +7596,7 @@ class TypeScriptParser {
       // is read here rather than refused, because the language lets a function
       // omit the annotation and the returns are what say it.
       const body = this.readFunctionBlock();
-      return declared(inferredResult(body, params), [...prelude, ...body]);
+      return declared(inferredResult(body, params, undefined, undefined), [...prelude, ...body]);
     }
     this.next();
     answered = this.annotationCollection(new Set(["{", "=", ";"]));
@@ -7596,9 +7704,15 @@ class TypeScriptParser {
     let written = bindings;
     if (shape !== null && shape.kind === "record") {
       const fields = [...(fieldOf(shape, "fields") as Map<string, ResolvedField>).keys()];
-      written = bindings.map((binding) => binding.field === null && fields[binding.index] !== undefined
-        ? { name: binding.name, field: fields[binding.index] as string, index: -1 }
-        : binding);
+      const rewritten: { name: string; field: string | null; index: number; default?: Expression }[] = [];
+      for (const binding of bindings) {
+        if (fieldOf(binding, "field") === null && fields[binding.index] !== undefined) {
+          rewritten.push({ name: String(fieldOf(binding, "name")), field: fields[binding.index] as string, index: -1 });
+        } else {
+          rewritten.push(binding);
+        }
+      }
+      written = rewritten;
     }
     // A pattern binds names of its own, and a test that settled a name of the
     // same spelling in the scope around it says nothing about them.
@@ -8118,7 +8232,7 @@ class TypeScriptParser {
     // A class names the layout an instance holds. The layout pass names the
     // object by its fields and the class's own name is an alias of it, so the
     // annotation is the reference a caller reads its fields through.
-    if (fieldOf(this.classTable, "names").has(name)) return this.referenceTo(name);
+    if ((fieldOf(this.classTable, "names") as Set<string>).has(name)) return this.referenceTo(name);
     return mapTypeScriptType(name, `line ${first.line} of ${this.path}`);
   }
 
@@ -8214,34 +8328,37 @@ class TypeScriptParser {
   private withBodyTypes<T>(read: () => T): T {
     const saved = this.typeTable;
     const open = this.position;
-    if (this.tokens[open]?.text !== "{") return read();
+    const callback = read as (ignored?: unknown) => T;
+    if (this.tokens[open]?.text !== "{") return callback(undefined);
     const close = this.blockEnd(open);
-    if (close < 0) return read();
+    if (close < 0) return callback(undefined);
     // A body that names no type of its own is read as it is: the scan is only
     // worth its own pass where the body writes a `type` or an `interface`.
     let namesAType = false;
-    for (let index = open + 1; index < close && !namesAType; index += 1) {
+    let index = open + 1;
+    while (index < close && !namesAType) {
       const token = this.tokens[index] as Token;
       if (token.kind === "ident" && (token.text === "type" || token.text === "interface")) namesAType = true;
+      index += 1;
     }
-    if (!namesAType) return read();
+    if (!namesAType) return callback(undefined);
     const declared = scanTypeTable(this.tokens.slice(open + 1, close));
-    if (declared.declarations.size === 0) return read();
+    if (declared.declarations.size === 0) return callback(undefined);
     const table: TypeTable = {
       declarations: declared.declarations,
       imported: new Map(),
       exported: new Map(),
       reexported: new Set(),
-      classes: saved.classes,
+      classes: fieldOf(saved, "classes") as ReadonlySet<string>,
       parent: saved,
     };
     // A declaration resolves the names it writes in the table it is read in,
     // which is the body's: a body that names its own type and then the module's
     // resolves both.
-    for (const declaration of table.declarations.values()) declaration.scope = table;
+    for (const declaration of table.declarations.values()) setFieldOn(declaration, "scope", table);
     this.typeTable = table;
     try {
-      return read();
+      return callback(undefined);
     } finally {
       this.typeTable = saved;
     }
@@ -8738,11 +8855,22 @@ class TypeScriptParser {
         // ...` reads `value` before its declaration, and the lifted `walk` is
         // handed the closure the declaration makes. An arrow only called by
         // name is no value, and its declaration keeps writing nothing.
-        const capturedAsValue = binding !== undefined &&
-          [...this.valueArrows.values()].some((one) => one !== binding && (fieldOf(one, "captures") as string[]).includes(name.text));
-        const initial: Expression = binding !== undefined && capturedAsValue
-          ? { k: "arrow", name: binding.function, captures: [...(fieldOf(binding, "captures") as string[])], code: this.closureCode(binding) }
-          : { k: "null" };
+        let capturedAsValue = false;
+        if (binding !== undefined) {
+          for (const one of this.valueArrows.values()) {
+            if (one === binding) continue;
+            if ((fieldOf(one, "captures") as string[]).includes(name.text)) {
+              capturedAsValue = true;
+              break;
+            }
+          }
+        }
+        let initial: Expression = { k: "null" };
+        if (binding !== undefined && capturedAsValue) {
+          const copied: string[] = [];
+          for (const capture of (fieldOf(binding, "captures") as string[])) copied.push(capture);
+          initial = { k: "arrow", name: String(fieldOf(binding, "function")), captures: copied, code: this.closureCode(binding) };
+        }
         return { kind: "declare", name: name.text, type: ANY_TYPE, init: initial, line: name.line };
       }
       this.valueArrows.delete(name.text);
@@ -9043,33 +9171,36 @@ class TypeScriptParser {
         if (baseShape !== null) this.valueShapes.set(temp, baseShape);
         base = { k: "ident", name: temp };
       }
-      fields.forEach((entry) => {
-        const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", (fieldOfOptional(constant, "fields") as ReadonlyMap<string, ConstantValue> | undefined)?.get(entry.field)) : null;
+      for (const entry of fields) {
+        const field = String(fieldOf(entry, "field"));
+        const fallback = fieldOf(entry, "default") as Expression | undefined;
+        const expanded = direct ? this.constantValue(init.k === "ident" ? init.name : "", (fieldOfOptional(constant, "fields") as ReadonlyMap<string, ConstantValue> | undefined)?.get(field)) : null;
         const keyed = keyedCollection === null
           ? null
           : this.collectionMethod(base, keyedCollection, "get", [
-              { k: "text", parts: [{ k: "text", value: entry.field }] },
+              { k: "text", parts: [{ k: "text", value: field }] },
             ]);
-        const held: Expression = expanded ?? keyed ?? { k: "member", base, field: entry.field };
-        const read: Expression = entry.default === undefined ? held : { k: "binary", op: "??", left: held, right: entry.default };
-        const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, entry.field)?.type ?? null;
+        const held: Expression = expanded ?? keyed ?? { k: "member", base, field };
+        const read: Expression = fallback === undefined ? held : { k: "binary", op: "??", left: held, right: fallback };
+        const declaredShape = baseShape === null ? null : fieldOfType(this.typeTable, baseShape, field)?.type ?? null;
         // The value the file wrote for a constant field is the value the name
         // reads, so its shape is the one that field holds even where the
         // object itself was never written with an annotation.
         const fieldShape = declaredShape ?? this.shapeOf(read);
+        const name = String(fieldOf(entry, "name"));
         if (fieldShape !== null) {
-          (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(entry.name, fieldShape);
-          this.valueTypes.set(entry.name, this.typeExprOfShape(fieldShape));
+          (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(name, fieldShape);
+          this.valueTypes.set(name, this.typeExprOfShape(fieldShape));
         }
         const pendingDeclared = fieldOf(this, "pending") as Statement[];
         pendingDeclared[pendingDeclared.length] = {
           kind: "declare",
-          name: entry.name,
+          name,
           type: null,
           init: read,
           line,
         };
-      });
+      }
       if (rest !== null) {
         const named = new Set(fields.map((entry) => entry.field));
         if (baseShape === null || baseShape.kind !== "record") {
@@ -9093,8 +9224,9 @@ class TypeScriptParser {
           this.valueTypes.set(rest, this.typeExprOfShape(shape));
           this.pending.push({ kind: "declare", name: rest, type: null, init: read, line });
         } else {
+          const baseFields = fieldOf(baseShape, "fields") as Map<string, ResolvedField>;
           const remaining = new Map(
-            [...baseShape.fields].filter(([name]) => !named.has(name)),
+            [...baseFields].filter(([name]) => !named.has(name)),
           );
           const value: Expression = {
             k: "object",
@@ -9154,7 +9286,7 @@ class TypeScriptParser {
     const init = this.readExpression();
     this.accept(";");
     if (init.k === "buffer") {
-      const values = init.values;
+      const values = fieldOf(init, "values") as Expression[];
       const highest = bindings.reduce((most, binding) => Math.max(most, binding.index), -1);
       if (highest >= values.length) {
         this.report(
@@ -9258,7 +9390,7 @@ class TypeScriptParser {
    * swaps the two.
    */
   private readTupleAssignment(): Statement {
-    const line = this.peek().line;
+    const line = Number(fieldOf(this.peek(), "line"));
     this.expect("[");
     const names: string[] = [];
     while (!this.at("]") && this.peek().kind !== "end") {
@@ -9329,7 +9461,7 @@ class TypeScriptParser {
       (this.valueGetters.has(target.text) || this.valueGetterNames.has(target.text))
     ) {
       const operator = this.peek().text;
-      if (operator === "=" || operator === "++" || operator === "--" || operator in COMPOUND_OPERATORS) {
+      if (operator === "=" || operator === "++" || operator === "--" || Number(operator in COMPOUND_OPERATORS) === 1) {
         this.report(
           `"${target.text}" is a module value read through its getter`,
           "a compiled function has no environment: a module value a function writes needs a cell, which this build does not carry yet",
@@ -9337,7 +9469,7 @@ class TypeScriptParser {
         );
         this.synchronize();
         this.accept(";");
-        return { kind: "expression", value: this.hole(), line: target.line };
+        return { kind: "expression", value: this.hole(), line: Number(fieldOf(target, "line")) };
       }
     }
     if (target.kind !== "ident") {
@@ -9368,9 +9500,9 @@ class TypeScriptParser {
       this.next();
       const value = this.readExpression();
       this.accept(";");
-      return this.globalWrite(globalSlot, value, target.line);
+      return this.globalWrite(globalSlot, value, Number(fieldOf(target, "line")));
     }
-    if (globalSlot !== null && this.peek().kind === "punct" && this.peek().text in COMPOUND_OPERATORS) {
+    if (globalSlot !== null && this.peek().kind === "punct" && Number(this.peek().text in COMPOUND_OPERATORS) === 1) {
       const op = this.next().text;
       const value = this.readExpression();
       this.accept(";");
@@ -9380,7 +9512,7 @@ class TypeScriptParser {
         left: this.globalRead(globalSlot),
         right: value,
       };
-      return this.globalWrite(globalSlot, binary, target.line);
+      return this.globalWrite(globalSlot, binary, Number(fieldOf(target, "line")));
     }
     const operator = this.peek();
     // `x ??= value` writes only where x is null. It is an `if`, not a compound
@@ -9398,10 +9530,10 @@ class TypeScriptParser {
         target: target.text,
         op: "=",
         value: { k: "binary", op: "??", left: { k: "ident", name: target.text }, right: value },
-        line: target.line,
+        line: Number(fieldOf(target, "line")),
       };
     }
-    if (operator.kind !== "punct" || !(operator.text in COMPOUND_OPERATORS)) {
+    if (operator.kind !== "punct" || Number(operator.text in COMPOUND_OPERATORS) === 0) {
       if (operator.text !== "=") {
         this.position = start;
         return null;
@@ -9423,7 +9555,7 @@ class TypeScriptParser {
       const held = this.classOfExpression(value);
       if (held === null) this.valueClasses.delete(target.text);
       else this.valueClasses.set(target.text, held);
-      return { kind: "assign", target: target.text, op: "=", value, line: target.line };
+      return { kind: "assign", target: target.text, op: "=", value, line: Number(fieldOf(target, "line")) };
     }
     this.next();
     const value = this.readExpression();
@@ -9439,7 +9571,7 @@ class TypeScriptParser {
       target: target.text,
       op: operator.text as AssignOperator,
       value,
-      line: target.line,
+      line: Number(fieldOf(target, "line")),
     };
   }
 
@@ -9502,7 +9634,8 @@ class TypeScriptParser {
       return null;
     }
     const operator = this.next();
-    const line = this.tokens[start]?.line ?? operator.line;
+    const started = this.tokens[start];
+    const line = started === undefined ? Number(fieldOf(operator, "line")) : Number(fieldOf(started, "line"));
     if (target.k !== "member" && target.k !== "index") {
       this.position = start;
       return null;
@@ -9669,7 +9802,7 @@ class TypeScriptParser {
       }
       if (depth > 0) continue;
       if (token.kind === "end" || text === ";") return null;
-      if (text !== "=" && text !== "??=" && !(text in COMPOUND_OPERATORS)) continue;
+      if (text !== "=" && text !== "??=" && Number(text in COMPOUND_OPERATORS) === 0) continue;
       const previous = this.tokens[at - 1] as Token | undefined;
       if (previous === undefined) return null;
       const before = mark(previous);
@@ -9710,7 +9843,7 @@ class TypeScriptParser {
     const index = this.readExpression();
     this.expect("]");
     const operator = this.peek();
-    if (operator.kind !== "punct" || (operator.text !== "=" && operator.text !== "??=" && !(operator.text in COMPOUND_OPERATORS))) {
+    if (operator.kind !== "punct" || (operator.text !== "=" && operator.text !== "??=" && Number(operator.text in COMPOUND_OPERATORS) === 0)) {
       this.position = start;
       return null;
     }
@@ -9851,7 +9984,7 @@ class TypeScriptParser {
         operator.text !== "??=" &&
         operator.text !== "++" &&
         operator.text !== "--" &&
-        !(operator.text in COMPOUND_OPERATORS))
+        Number(operator.text in COMPOUND_OPERATORS) === 0)
     ) {
       this.position = start;
       return null;
@@ -9879,7 +10012,7 @@ class TypeScriptParser {
         this.next();
         const value = this.readExpression();
         this.accept(";");
-        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, base.line);
+        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, Number(fieldOf(base, "line")));
         if (lowered !== null) return lowered;
         this.position = start;
         return null;
@@ -9905,7 +10038,7 @@ class TypeScriptParser {
         this.next();
         const value = this.readExpression();
         this.accept(";");
-        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, base.line);
+        const lowered = this.lengthAssign(owner, ownerType, operator.text, value, Number(fieldOf(base, "line")));
         if (lowered !== null) return lowered;
         this.position = start;
         return null;
@@ -9915,7 +10048,7 @@ class TypeScriptParser {
         return null;
       }
       const held = `__field${this.fieldCount++}`;
-      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: owner, line: base.line });
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: owner, line: Number(fieldOf(base, "line")) });
       this.valueTypes.set(held, ownerType);
       const ownerShape = this.shapeOf(owner);
       if (ownerShape !== null) this.valueShapes.set(held, ownerShape);
@@ -9931,7 +10064,7 @@ class TypeScriptParser {
         field: memberNameOf(field.text),
         op: operator.text === "++" ? "+=" : "-=",
         value: { k: "literal", text: "1" },
-        line: base.line,
+        line: Number(fieldOf(base, "line")),
       };
     }
     this.next();
@@ -9959,7 +10092,7 @@ class TypeScriptParser {
           left: { k: "member", base: { k: "ident", name: writtenBase }, field: memberNameOf(field.text) },
           right: value,
         },
-        line: base.line,
+        line: Number(fieldOf(base, "line")),
       };
     }
     return {
@@ -9968,7 +10101,7 @@ class TypeScriptParser {
       field: memberNameOf(field.text),
       op: operator.text as AssignOperator,
       value,
-      line: base.line,
+      line: Number(fieldOf(base, "line")),
     };
   }
 
@@ -10062,55 +10195,66 @@ class TypeScriptParser {
    * the assignment that keeps the grown list.
    */
   private appendWrite(value: Expression & { k: "append" }, line: number): Statement {
-    if ((fieldOf(value, "arms") as readonly { target: string; base: string | null; }[] | undefined) !== undefined && value.condition !== undefined) {
-      const writeArm = (arm: { target: string; base: string | null }): Statement => {
-        const array: Expression = arm.base === null
-          ? { k: "ident", name: arm.target }
-          : { k: "member", base: { k: "ident", name: arm.base }, field: arm.target };
-        const call = (fieldOf(value, "spreads") as readonly boolean[] | undefined) === undefined
-          ? { k: "call", name: value.helper, args: [array, ...(fieldOf(value, "values") as Expression[])] } as Expression
-          : value.values.reduce<Expression>((inner, written, at) => {
-              const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
-              const joined: Expression = (fieldOf(value, "spreads") as readonly boolean[] | undefined)?.[at] === true ? written : { k: "buffer", element, values: [written] };
-              return { k: "binary", op: "+", left: inner, right: joined };
-            }, array);
-        return arm.base === null
-          ? { kind: "assign", target: arm.target, op: "=", value: call, line }
-          : { kind: "memberAssign", base: arm.base, field: arm.target, op: "=", value: call, line };
-      };
-      const arms = (fieldOf(value, "arms") as readonly { target: string; base: string | null; }[]);
+    const spreads = fieldOf(value, "spreads") as readonly boolean[] | undefined;
+    const values = fieldOf(value, "values") as readonly Expression[];
+    const helper = String(fieldOf(value, "helper"));
+    const elementType = fieldOf(value, "element") as TypeExpr | undefined;
+    const element = elementType === undefined ? typeToString(ANY_TYPE) : typeToString(elementType);
+    const arms = fieldOf(value, "arms") as readonly { target: string; base: string | null; }[] | undefined;
+    if (arms !== undefined && fieldOf(value, "condition") !== undefined) {
+      const written: Statement[] = [];
+      for (const arm of arms) {
+        const target = String(fieldOf(arm, "target"));
+        const base = fieldOf(arm, "base") as string | null;
+        const array: Expression = base === null
+          ? { k: "ident", name: target }
+          : { k: "member", base: { k: "ident", name: base }, field: target };
+        const call = this.appendCall(array, helper, values, spreads, element);
+        written.push(base === null
+          ? { kind: "assign", target, op: "=", value: call, line }
+          : { kind: "memberAssign", base, field: target, op: "=", value: call, line });
+      }
       return {
         kind: "if",
-        condition: value.condition,
-        then: [writeArm(arms[0] as { target: string; base: string })],
-        otherwise: [writeArm(arms[1] as { target: string; base: string })],
+        condition: fieldOf(value, "condition") as Expression,
+        then: [written[0] as Statement],
+        otherwise: [written[1] as Statement],
         line,
       };
     }
     const array: Expression = appendArray(value);
-    let call: Expression;
-    if ((fieldOf(value, "spreads") as readonly boolean[] | undefined) === undefined) {
-      call = { k: "call", name: value.helper, args: [array, ...(fieldOf(value, "values") as Expression[])] };
-    } else {
-      // A value written out joins the list as a list of one, and a spread
-      // joins the list it already is: both are the concatenation two lists
-      // added are, in the order the source wrote them.
-      const element = value.element === undefined ? typeToString(ANY_TYPE) : typeToString(value.element);
-      call = array;
-      value.values.forEach((written, at) => {
-        const joined: Expression = (fieldOf(value, "spreads") as readonly boolean[] | undefined)?.[at] === true
-          ? written
-          : { k: "buffer", element, values: [written] };
-        call = { k: "binary", op: "+", left: call, right: joined };
-      });
+    const call = this.appendCall(array, helper, values, spreads, element);
+    const index = fieldOf(value, "index") as Expression | undefined;
+    if (index !== undefined) {
+      return { kind: "indexAssign", buffer: String(fieldOf(value, "target")), index, op: "=", value: call, line };
     }
-    if (value.index !== undefined) {
-      return { kind: "indexAssign", buffer: value.target, index: value.index, op: "=", value: call, line };
+    const base = fieldOf(value, "base") as string | null;
+    if (base === null) {
+      return { kind: "assign", target: String(fieldOf(value, "target")), op: "=", value: call, line };
     }
-    if (value.base === null) {
-      return { kind: "assign", target: value.target, op: "=", value: call, line };
+    return { kind: "memberAssign", base, field: String(fieldOf(value, "target")), op: "=", value: call, line };
+  }
+
+  /** The call that grows the list, joining a written value as a list of one. */
+  private appendCall(
+    array: Expression,
+    helper: string,
+    values: readonly Expression[],
+    spreads: readonly boolean[] | undefined,
+    element: string,
+  ): Expression {
+    if (spreads === undefined) {
+      const args: Expression[] = [array];
+      for (const written of values) args.push(written);
+      return { k: "call", name: helper, args };
     }
-    return { kind: "memberAssign", base: value.base, field: value.target, op: "=", value: call, line };
+    let call: Expression = array;
+    for (let at = 0; at < values.length; at += 1) {
+      const written = values[at] as Expression;
+      const joined: Expression = spreads[at] === true ? written : { k: "buffer", element, values: [written] };
+      call = { k: "binary", op: "+", left: call, right: joined };
+    }
+    return call;
   }
 
   /**
@@ -10296,7 +10440,7 @@ class TypeScriptParser {
     let step: Statement[] = [];
     try {
       if (!this.at(")")) {
-        const line = this.peek().line;
+        const line = Number(fieldOf(this.peek(), "line"));
         const value = this.readSequence();
         this.accept(";");
         step = [...this.pendingBefore, { kind: "expression", value, line }];
@@ -10425,7 +10569,7 @@ class TypeScriptParser {
     // match too, so its own test does not name the arm.
     let onlyByItsOwnMatch = true;
     while (!this.at("}") && this.peek().kind !== "end") {
-      const line = this.peek().line;
+      const line = Number(fieldOf(this.peek(), "line"));
       let test: Expression | null = null;
       if (this.accept("case")) {
         test = this.readExpression();
@@ -10558,7 +10702,7 @@ class TypeScriptParser {
     if (this.accept("else")) {
       const settled = this.narrowingOf(condition, false);
       const read = (): Statement[] => (this.at("if") ? [this.readIf()] : this.readBody());
-      otherwise.push(...this.withNarrowing(settled, read));
+      for (const statement of this.withNarrowing(settled, read)) otherwise.push(statement);
     }
     this.pendingBefore = [...conditionPending, ...this.pendingBefore];
     if (dead && otherwise.length === 0) return { kind: "expression", value: { k: "literal", text: "0" }, line: start.line };
@@ -10820,8 +10964,9 @@ class TypeScriptParser {
       // A map entry is a key and a value, so position 0 reads the key and
       // position 1 the value; a gap names neither and is read past.
       for (const binding of pattern) {
-        const key = binding.index === 0;
-        const value = binding.index === 1;
+        const position = Number(fieldOf(binding, "index"));
+        const key = position === 0;
+        const value = position === 1;
         if (key) body.push(bind(binding.name, collection.key, keyRead));
         else if (value) body.push(bind(binding.name, collection.value, this.valueReadName(collection.value), collection.valueShape ?? null));
         else {
@@ -10926,8 +11071,9 @@ class TypeScriptParser {
       );
     } else {
       for (const binding of pattern) {
-        if (binding.index === 0) body.push(bind(binding.name, NUMBER_RESULT, { k: "ident", name: index }));
-        else if (binding.index === 1) body.push(bind(binding.name, element, elementRead));
+        const position = Number(fieldOf(binding, "index"));
+        if (position === 0) body.push(bind(binding.name, NUMBER_RESULT, { k: "ident", name: index }));
+        else if (position === 1) body.push(bind(binding.name, element, elementRead));
         else {
           this.report(
             "an entry of a list is an index and an element",
@@ -10992,7 +11138,7 @@ class TypeScriptParser {
     const saved = this.loopCondition;
     this.loopCondition = true;
     try {
-      return read();
+      return (read as (ignored?: unknown) => T)(undefined);
     } finally {
       this.loopCondition = saved;
     }
@@ -11104,7 +11250,7 @@ class TypeScriptParser {
   private assignmentAsValue(value: Expression): Expression {
     const operator = this.peek();
     if (operator.kind !== "punct") return value;
-    const op = operator.text === "=" || operator.text in COMPOUND_OPERATORS
+    const op = operator.text === "=" || Number(operator.text in COMPOUND_OPERATORS) === 1
       ? (operator.text as AssignOperator)
       : null;
     if (op === null) return value;
@@ -11119,14 +11265,14 @@ class TypeScriptParser {
       }
       this.next();
       const written = this.readExpression();
-      const base = this.writeTarget(entry.base, operator.line);
+      const base = this.writeTarget(entry.base, Number(fieldOf(operator, "line")));
       const setName = this.collectionSetNameFor(entry.collection);
       if (base === null || setName === null) {
         this.report("an assignment answers the place it writes", "write it as a statement of its own", operator);
         return this.hole();
       }
       const held = `__assigned${this.fieldCount++}`;
-      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: written, line: operator.line });
+      this.pendingBefore.push({ kind: "declare", name: held, type: null, init: written, line: Number(fieldOf(operator, "line")) });
       this.valueTypes.set(held, this.valueTypeOf(written));
       const shape = this.shapeOf(written);
       if (shape !== null) this.valueShapes.set(held, shape);
@@ -11137,7 +11283,7 @@ class TypeScriptParser {
           name: setName,
           args: [{ k: "ident", name: base }, entry.index, { k: "ident", name: held }],
         },
-        line: operator.line,
+        line: Number(fieldOf(operator, "line")),
       });
       return { k: "ident", name: held };
     }
@@ -11145,19 +11291,20 @@ class TypeScriptParser {
     this.next();
     const written = this.readExpression();
     if (value.k === "ident") {
-      this.pendingBefore.push({ kind: "assign", target: value.name, op, value: written, line: operator.line });
+      this.pendingBefore.push({ kind: "assign", target: value.name, op, value: written, line: Number(fieldOf(operator, "line")) });
       return value;
     }
-    const base = this.writeTarget(value.base, operator.line);
+    const base = this.writeTarget(value.base, Number(fieldOf(operator, "line")));
     if (base === null) {
       this.report("an assignment answers the place it writes", "write it as a statement of its own", operator);
       return this.hole();
     }
     if (value.k === "index") {
-      this.pendingBefore.push({ kind: "indexAssign", buffer: base, index: value.index, op, value: written, line: operator.line });
-      return { k: "index", base: { k: "ident", name: base }, index: value.index };
+      const index = fieldOf(value, "index") as Expression;
+      this.pendingBefore.push({ kind: "indexAssign", buffer: base, index, op, value: written, line: Number(fieldOf(operator, "line")) });
+      return { k: "index", base: { k: "ident", name: base }, index };
     }
-    this.pendingBefore.push({ kind: "memberAssign", base, field: value.field, op, value: written, line: operator.line });
+    this.pendingBefore.push({ kind: "memberAssign", base, field: value.field, op, value: written, line: Number(fieldOf(operator, "line")) });
     return { k: "member", base: { k: "ident", name: base }, field: value.field };
   }
 
@@ -11205,12 +11352,13 @@ class TypeScriptParser {
   }
 
   private readBinaryLevel(operators: readonly string[], next: () => Expression): Expression {
-    let left = next();
+    const callback = next as (ignored?: unknown) => Expression;
+    let left = callback(undefined);
     for (;;) {
       const token = this.peek();
       if (token.kind !== "punct" || !operators.includes(token.text)) return left;
       this.next();
-      left = { k: "binary", op: token.text as BinaryOp, left, right: next() };
+      left = { k: "binary", op: token.text as BinaryOp, left, right: callback(undefined) };
     }
   }
 
@@ -11281,9 +11429,11 @@ class TypeScriptParser {
   private absentArmFolded(value: Expression, otherwise: Expression): Expression {
     if (value.k === "null") return otherwise;
     if (value.k !== "conditional") return value;
-    const then = this.absentArmFolded(value.then, otherwise);
-    const otherwiseArm = this.absentArmFolded(value.otherwise, otherwise);
-    if (then === value.then && otherwiseArm === value.otherwise) return value;
+    const writtenThen: Expression = value.then;
+    const writtenOtherwise: Expression = value.otherwise;
+    const then = this.absentArmFolded(writtenThen, otherwise);
+    const otherwiseArm = this.absentArmFolded(writtenOtherwise, otherwise);
+    if (sameValue(then, writtenThen) && sameValue(otherwiseArm, writtenOtherwise)) return value;
     const folded: Expression = { k: "conditional", condition: value.condition, then, otherwise: otherwiseArm };
     // The choice the fold answers is the choice it read: a `Map.get(k) ?? get(j)`
     // is still the map's value, and the fields its shape names are the fields
@@ -11322,7 +11472,7 @@ class TypeScriptParser {
     const saved = this.diagnostics;
     this.diagnostics = new Diagnostics();
     try {
-      read();
+      (read as (ignored?: unknown) => unknown)(undefined);
     } finally {
       this.diagnostics = saved;
     }
@@ -11404,7 +11554,7 @@ class TypeScriptParser {
       let read = key;
       if (!this.repeatable(key)) {
         const held = `__member${this.fieldCount++}`;
-        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: Number(fieldOf(this.peek(), "line")) });
         this.valueTypes.set(held, this.valueTypeOf(key));
         read = { k: "ident", name: held };
       }
@@ -11428,7 +11578,7 @@ class TypeScriptParser {
       let read = key;
       if (!this.repeatable(key)) {
         const held = `__member${this.fieldCount++}`;
-        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: Number(fieldOf(this.peek(), "line")) });
         this.valueTypes.set(held, this.valueTypeOf(key));
         read = { k: "ident", name: held };
       }
@@ -11491,22 +11641,32 @@ class TypeScriptParser {
     // key is one of their names. It is the chain the constant path writes,
     // and the key is asked once per name, which a value that runs on every
     // mention may not be.
+    let everyFieldRequired = true;
+    if (shape !== null && shape.kind === "record") {
+      for (const field of (fieldOf(shape, "fields") as Map<string, ResolvedField>).values()) {
+        if (fieldOf(field, "optional") === true) {
+          everyFieldRequired = false;
+          break;
+        }
+      }
+    }
     if (
       name === null && shape !== null && shape.kind === "record" && (fieldOf(shape, "arms") as ResolvedType[] | undefined) === undefined &&
       shape.index === null && (fieldOf(shape, "fields") as Map<string, ResolvedField>).size > 0 &&
       // An optional field is laid out at the zero of its type whether or not
       // the source wrote it, so whether it is *there* is a question the layout
       // does not answer.
-      [...fieldOf(shape, "fields").values()].every((field) => !field.optional)
+      everyFieldRequired
     ) {
       let read = key;
       if (!this.repeatable(key)) {
         const held = `__member${this.fieldCount++}`;
-        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: this.peek().line });
+        this.pendingBefore.push({ kind: "declare", name: held, type: null, init: key, line: Number(fieldOf(this.peek(), "line")) });
         this.valueTypes.set(held, this.valueTypeOf(key));
         read = { k: "ident", name: held };
       }
-      const keys = [...(fieldOf(shape, "fields") as Map<string, ResolvedField>).keys()];
+      const keys: string[] = [];
+      for (const key of (fieldOf(shape, "fields") as Map<string, ResolvedField>).keys()) keys.push(key);
       let answer: Expression = { k: "literal", text: "0" };
       // The chain asks the last name first, so the comparisons run in the order
       // the object wrote its fields.
@@ -11955,20 +12115,21 @@ class TypeScriptParser {
    * table back afterwards.
    */
   private withNarrowing<T>(settled: Narrowing, read: () => T): T {
+    const callback = read as (ignored?: unknown) => T;
     // A branch reads with its own map even where the branch itself settles
     // nothing: a write inside it forgets a narrowing the branch around it made,
     // and the sibling branch must still read through that narrowing.
     if ((fieldOf(settled, "types") as Map<string, TypeExpr>).size === 0 && (fieldOf(settled, "shapes") as Map<string, ResolvedType>).size === 0 && this.narrowed.size === 0 && this.narrowedShapes.size === 0) {
-      return read();
+      return callback(undefined);
     }
     const saved = this.narrowed;
     const savedShapes = this.narrowedShapes;
     this.narrowed = new Map(saved);
     this.narrowedShapes = new Map(savedShapes);
-    for (const [path, type] of settled.types) this.narrowed.set(path, type);
-    for (const [path, shape] of settled.shapes) this.narrowedShapes.set(path, shape);
+    for (const [path, type] of (fieldOf(settled, "types") as Map<string, TypeExpr>)) this.narrowed.set(path, type);
+    for (const [path, shape] of (fieldOf(settled, "shapes") as Map<string, ResolvedType>)) this.narrowedShapes.set(path, shape);
     try {
-      return read();
+      return callback(undefined);
     } finally {
       this.narrowed = saved;
       this.narrowedShapes = savedShapes;
@@ -12163,17 +12324,18 @@ class TypeScriptParser {
         value: { k: "call", name: "blaze_rt_state_set", args: [key, value] },
         line: (fieldOf(range, "start") as number),
       });
-      const declared: Statement = { kind: "declare", name: "made", type, init, line: (fieldOf(range, "start") as number) };
+      const start = Number(fieldOf(range, "start"));
+      const declared: Statement = { kind: "declare", name: "made", type, init, line: start };
       const writeOne: Expression = { k: "literal", text: "1" };
       const body: Statement[] = [
-        { kind: "if", condition, then: [{ kind: "result", value: readCell(valueKey(name)), line: (fieldOf(range, "start") as number) }], otherwise: [], line: fieldOf(range, "start") },
-        ...(fieldOf(held, "prelude") as Statement[]),
-        declared,
-        write(valueKey(name), { k: "ident", name: "made" }),
-        write(valueKey(`${name}#init`), writeOne),
-        { kind: "result", value: { k: "ident", name: "made" }, line: range.start },
+        { kind: "if", condition, then: [{ kind: "result", value: readCell(valueKey(name)), line: start }], otherwise: [], line: start },
       ];
-      const handle: TypeScriptFunction = { name: getter.name, params: [], returns: type, body, line: range.start, closure: true };
+      for (const statement of (fieldOf(held, "prelude") as Statement[])) body.push(statement);
+      body.push(declared);
+      body.push(write(valueKey(name), { k: "ident", name: "made" }));
+      body.push(write(valueKey(`${name}#init`), writeOne));
+      body.push({ kind: "result", value: { k: "ident", name: "made" }, line: start });
+      const handle: TypeScriptFunction = { name: getter.name, params: [], returns: type, body, line: start, closure: true };
       made.push({ name: getter.name, exported: false, internal: true, params: [], returns: type, handle });
     }
     return made;
@@ -12375,7 +12537,7 @@ class TypeScriptParser {
             false,
             false,
             null,
-            fieldOf(binding, "params").map((param: ParameterInfo) => (fieldOf(param, "shape") as ResolvedType | null | undefined) ?? null),
+            (fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[]).map((param: ParameterInfo) => (fieldOf(param, "shape") as ResolvedType | null | undefined) ?? null),
           );
           const rest = (fieldOf(binding, "rest") as number | undefined);
           // A parameter the call leaves out is the default the arrow wrote. The
@@ -12404,13 +12566,14 @@ class TypeScriptParser {
             name: binding.function,
             args: [...(fieldOf(binding, "captures") as string[]).map((name: string): Expression => ({ k: "ident", name })), ...callArgs],
           };
-          if (fieldOf(binding, "returnsShape") !== undefined && binding.returnsShape !== null) {
-            this.expressionShapes.set(made, this.shapeForRead((fieldOf(binding, "returnsShape") as ResolvedType)) ?? (fieldOf(binding, "returnsShape") as ResolvedType));
+          const returnsShape = fieldOf(binding, "returnsShape") as ResolvedType | null | undefined;
+          if (returnsShape !== undefined && returnsShape !== null) {
+            this.expressionShapes.set(made, this.shapeForRead(returnsShape) ?? returnsShape);
           }
           // A call the arrow's own body writes of the arrow is a call site that
           // was read before the arrow knew what it captured. The values are
           // written in front of the arguments once they are known.
-          if (target.name === this.arrowDeclared) this.arrowSelfCalls.push(made);
+          if (target.name === String(fieldOf(this, "arrowDeclared") ?? "")) this.arrowSelfCalls.push(made);
           replace(made);
           continue;
         }
@@ -12444,8 +12607,9 @@ class TypeScriptParser {
         if (target.k === "ident") {
           const signature = this.valueFunctions.get(target.name);
           if (signature !== undefined) {
-            const args = this.readCallArguments(signature.params);
-            const made: Expression = { k: "invoke", callee: target, args, params: signature.params, returns: signature.returns };
+            const signatureParams = fieldOf(signature, "params") as TypeExpr[];
+            const args = this.readCallArguments(signatureParams);
+            const made: Expression = { k: "invoke", callee: target, args, params: signatureParams, returns: signature.returns };
             // What the value the callee holds answers is the shape its type
             // states, kept beside the call so a call written on the answer —
             // `make()(x)` where `make` returns a function — reads it.
@@ -12624,7 +12788,7 @@ class TypeScriptParser {
           }
           const element = held !== null && (held.kind === "slice" || held.kind === "array") ? held.of : null;
           if (source !== undefined && element !== null && element.kind === "primitive" && element.name === "u8") {
-            const copy = this.typedFromHelper(element, BYTE, this.peek().line);
+            const copy = this.typedFromHelper(element, BYTE, Number(fieldOf(this.peek(), "line")));
             const made: Expression = { k: "call", name: copy.name, args: [source] };
             this.expressionTypes.set(made, copy.returns);
             replace(made);
@@ -12684,7 +12848,7 @@ class TypeScriptParser {
             if (sourcesOk) {
               let answer: Expression = first;
               for (const { source, collection } of sources) {
-                answer = this.collectionAssignHelper(targetCollection, collection, answer, source, this.peek().line);
+                answer = this.collectionAssignHelper(targetCollection, collection, answer, source, Number(fieldOf(this.peek(), "line")));
               }
               this.expressionTypes.set(answer, NUMBER_RESULT);
               this.collectionExpressions.set(answer, targetCollection);
@@ -12699,8 +12863,9 @@ class TypeScriptParser {
           // the merge helper is the whole of the value.
           const expectedMap = this.expectedShape === null ? null : this.collectionOfShape(this.expectedShape);
           const spread = this.argumentSpreads ?? null;
+          const firstFields = fieldOfOptional(first, "fields") as Expression[] | undefined;
           const emptyTarget = first !== undefined && (
-            (first.k === "object" && first.fields.length === 0) ||
+            (first.k === "object" && firstFields !== undefined && firstFields.length === 0) ||
             // An object literal written at a `Record` is the empty dictionary
             // the literal's type names: the allocation writes no entry.
             (first.k === "call" && first.name === "blaze_rt_dict_new" && first.args.length === 0)
@@ -12719,7 +12884,7 @@ class TypeScriptParser {
             const list = args[1] as Expression;
             const held = this.valueTypeOf(list);
             if (held.kind === "slice" || held.kind === "array") {
-              const helper = this.collectionMergeHelper(expectedMap, this.peek().line);
+              const helper = this.collectionMergeHelper(expectedMap, Number(fieldOf(this.peek(), "line")));
               const merged: Expression = { k: "call", name: helper.name, args: [list] };
               this.collectionExpressions.set(merged, expectedMap);
               this.expressionTypes.set(merged, NUMBER_RESULT);
@@ -12791,7 +12956,7 @@ class TypeScriptParser {
             }
             if (usable) {
               for (const hold of holds) {
-                this.pendingBefore.push({ kind: "declare", name: hold.name, type: null, init: hold.source, line: this.peek().line });
+                this.pendingBefore.push({ kind: "declare", name: hold.name, type: null, init: hold.source, line: Number(fieldOf(this.peek(), "line")) });
                 this.valueTypes.set(hold.name, hold.type);
               }
               for (const write of writes) {
@@ -12801,7 +12966,7 @@ class TypeScriptParser {
                   field: write.field,
                   op: "=",
                   value: { k: "member", base: { k: "ident", name: write.from }, field: write.field },
-                  line: this.peek().line,
+                  line: Number(fieldOf(this.peek(), "line")),
                 });
               }
               replace(first);
@@ -12871,7 +13036,7 @@ class TypeScriptParser {
           const sourceCollection = source === undefined ? null : this.collectionOfExpression(source);
           if (source !== undefined && sourceCollection !== null && sourceCollection.kind === "map") {
             const collection: CollectionValue = { kind: "map", key: TEXT_RESULT, value: sourceCollection.value };
-            const copied = this.collectionCopyHelper(collection, source, sourceCollection, this.peek().line);
+            const copied = this.collectionCopyHelper(collection, source, sourceCollection, Number(fieldOf(this.peek(), "line")));
             this.expressionTypes.set(copied, NUMBER_RESULT);
             this.collectionExpressions.set(copied, collection);
             replace(copied);
@@ -12891,7 +13056,7 @@ class TypeScriptParser {
                 value: this.typeExprOfShape(valueShape),
                 valueShape,
               };
-              const copied = this.collectionFromPairs(collection, source, this.peek().line);
+              const copied = this.collectionFromPairs(collection, source, Number(fieldOf(this.peek(), "line")));
               this.expressionTypes.set(copied, NUMBER_RESULT);
               this.collectionExpressions.set(copied, collection);
               this.expressionShapes.set(copied, { kind: "record", fields: new Map(), index: valueShape });
@@ -12935,7 +13100,7 @@ class TypeScriptParser {
           // are: `Object.entries(record).filter(...)`, and a call that copies
           // them into a dictionary.
           if (source !== undefined && collection !== null && collection.kind === "map") {
-            replace(this.entryPairs(source, collection, this.peek().line));
+            replace(this.entryPairs(source, collection, Number(fieldOf(this.peek(), "line"))));
             continue;
           }
           // The record is read through a declaration another module writes, and
@@ -13096,7 +13261,7 @@ class TypeScriptParser {
               if (value.k === "literal" || value.k === "ident" || value.k === "text") return value;
               const held = `__hasOwn${this.fieldCount++}`;
               const beforeHeld = fieldOf(this, "pendingBefore") as Statement[];
-              beforeHeld[beforeHeld.length] = { kind: "declare", name: held, type: null, init: value, line: this.peek().line };
+              beforeHeld[beforeHeld.length] = { kind: "declare", name: held, type: null, init: value, line: Number(fieldOf(this.peek(), "line")) };
               this.valueTypes.set(held, TEXT_RESULT);
               return { k: "ident", name: held };
             };
@@ -13162,7 +13327,7 @@ class TypeScriptParser {
           if (written !== undefined && args.length === 3) {
             const indent = this.jsonIndent(args[1], args[2]);
             if (indent !== null) {
-              const pretty = this.jsonPretty(written, 0, this.peek().line, indent);
+              const pretty = this.jsonPretty(written, 0, Number(fieldOf(this.peek(), "line")), indent);
               if (pretty !== null) {
                 replace(pretty);
                 continue;
@@ -13214,7 +13379,7 @@ class TypeScriptParser {
             // what the inner list holds.
             const heldShape = this.shapeOf(written);
             const elementShape = heldShape !== null && heldShape.kind === "list" ? heldShape.of : null;
-            const helper = this.jsonListHelper(type.of, this.peek().line, elementShape);
+            const helper = this.jsonListHelper(type.of, Number(fieldOf(this.peek(), "line")), elementShape);
             if (helper.name !== "") {
               const serialized: Expression = { k: "call", name: helper.name, args: [written] };
               this.expressionTypes.set(serialized, TEXT_RESULT);
@@ -13240,7 +13405,7 @@ class TypeScriptParser {
           target.k === "member" &&
           target.base.k === "ident" &&
           target.field === "from" &&
-          target.base.name in TYPED_ARRAYS
+          Number(target.base.name in TYPED_ARRAYS) === 1
         ) {
           const args = this.readCallArguments([ANY_TYPE]);
           const source = args[0];
@@ -13262,7 +13427,7 @@ class TypeScriptParser {
             // where the array's elements are: each number is written as the
             // element the array holds, which is what `from` is.
             const to: TypeExpr = { kind: "primitive", name: wanted as PrimitiveTypeName };
-            const helper = this.typedFromHelper(element as TypeExpr, to, this.peek().line);
+            const helper = this.typedFromHelper(element as TypeExpr, to, Number(fieldOf(this.peek(), "line")));
             const converted: Expression = { k: "call", name: helper.name, args: [source] };
             this.expressionTypes.set(converted, { kind: "slice", of: to });
             const shape = this.shapeOf(source);
@@ -13302,7 +13467,7 @@ class TypeScriptParser {
           target.base.name === "Array" &&
           target.field === "from"
         ) {
-          const lowered = this.arrayFrom(this.peek().line);
+          const lowered = this.arrayFrom(Number(fieldOf(this.peek(), "line")));
           if (lowered !== null) {
             replace(lowered);
             continue;
@@ -13378,7 +13543,7 @@ class TypeScriptParser {
             replace(invoke);
             continue;
           }
-          const callLine = this.peek().line;
+          const callLine = Number(fieldOf(this.peek(), "line"));
           const callback = this.collectionCallbackParameters(target.base, target.field);
           const promiseCallbacks = this.promiseCallbackParameters(target.base, target.field);
           // A callback handed to a method of a value whose type this read does
@@ -13959,7 +14124,7 @@ class TypeScriptParser {
           this.at("(") &&
           this.argumentsSpread()
         ) {
-          const line = this.peek().line;
+          const line = Number(fieldOf(this.peek(), "line"));
           const args = this.readCallArguments([], null, true);
           const spreads = this.argumentSpreads ?? args.map(() => false);
           // The token scan found a spread in the list, so one is there.
@@ -14101,7 +14266,7 @@ class TypeScriptParser {
         // statement's own: the place is read into a name and that name is
         // stepped, which is the value the source reads — `this.tokens[i++]` is
         // the element at the old `i`, and `i` is one more afterwards.
-        const stepped = this.stepPlace(target, op, this.peek().line);
+        const stepped = this.stepPlace(target, op, Number(fieldOf(this.peek(), "line")));
         if (stepped !== null) return stepped;
         return this.missing(`"${op}" needs a name to change`, this.peek());
       }
@@ -14305,7 +14470,7 @@ class TypeScriptParser {
             const args = this.readCallArguments([TEXT_RESULT]);
             const encoding = args[0];
             if (args.length === 1 && encoding !== undefined && encoding.k === "text" && textValue(encoding) === "latin1") {
-              const helper = this.latin1Helper(this.peek().line);
+              const helper = this.latin1Helper(Number(fieldOf(this.peek(), "line")));
               const read: Expression = { k: "call", name: helper.name, args: [target] };
               this.expressionTypes.set(read, helper.returns);
               replace(read);
@@ -14410,7 +14575,7 @@ class TypeScriptParser {
     if (target === undefined || target.kind !== "ident") return null;
     const operator = this.tokens[from + 1];
     if (operator === undefined || operator.kind !== "punct") return null;
-    if (operator.text !== "=" && operator.text !== "??=" && !(operator.text in COMPOUND_OPERATORS)) return null;
+    if (operator.text !== "=" && operator.text !== "??=" && Number(operator.text in COMPOUND_OPERATORS) === 0) return null;
     return target.text;
   }
 
@@ -14937,7 +15102,7 @@ class TypeScriptParser {
         let type: TypeExpr = hinted?.type ?? ANY_TYPE;
         let typeName = type.kind === "ref" && type.name !== undefined ? type.name : "";
         let functionType: FunctionType | null = null;
-        let shape: ResolvedType | null = hinted?.shape ?? null;
+        let shape: ResolvedType | null = (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null;
         if (this.accept(":")) {
           typeName = this.peek().kind === "ident" ? this.peek().text : "";
           functionType = this.annotationFunctionType(new Set([",", ")", "="]));
@@ -14952,7 +15117,8 @@ class TypeScriptParser {
             // handed to says what the element is. A record erases to the
             // unshaped reference, so the shape is what the read needs.
             if (!unknownReference(hinted.type)) type = hinted.type;
-            if (hinted.shape !== null && hinted.shape.kind !== "any") shape = hinted.shape;
+            const hintedShape = fieldOf(hinted, "shape") as ResolvedType | null;
+            if (hintedShape !== null && hintedShape.kind !== "any") shape = hintedShape;
           }
         }
         // A default is the value a call writes when it leaves the parameter
@@ -14986,13 +15152,13 @@ class TypeScriptParser {
         return this.missing("expected a parameter name", name);
       }
       const hinted = hints?.[0] ?? null;
-      const type: TypeExpr = hinted?.type ?? ANY_TYPE;
+      const type: TypeExpr = (fieldOfOptional(hinted, "type") as TypeExpr | null) ?? ANY_TYPE;
       params.push({
         name: name.text,
         type,
         typeName: type.kind === "ref" && type.name !== undefined ? type.name : "",
         functionType: null,
-        shape: hinted?.shape ?? null,
+        shape: (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null,
       });
     }
     let stated: TypeExpr | null = null;
@@ -15354,24 +15520,28 @@ class TypeScriptParser {
           init: (fieldOf(entry, "list") as boolean)
             ? { k: "object", fields: [{ name: BOXED_FIELD, value: { k: "ident", name } }] }
             : { k: "buffer", element: typeToString(element), values: [{ k: "ident", name }] },
-          line: body[0]?.line ?? 0,
+          line: body.length === 0 ? 0 : Number(fieldOf(body[0], "line")),
         });
       }
       // An arrow read before this box existed captured the name itself. The
       // name is the box now, so every arrow that captured it is handed the box
       // and reads the value through it.
-      for (const [liftedName, lifted] of this.liftedArrows) {
+      for (const liftedName of this.arrowLifts) {
+        const lifted = this.liftedArrows.get(liftedName);
         const binding = this.arrowBindings.get(liftedName);
-        if (binding === undefined) continue;
-        const at = binding.captures.indexOf(name);
+        if (lifted === undefined || binding === undefined) continue;
+        const at = (fieldOf(binding, "captures") as string[]).indexOf(name);
         if (at < 0) continue;
-        const boxed = entry.list ? ANY_TYPE : { kind: "slice" as const, of: element };
-        binding.captures[at] = box;
-        binding.captureTypes[at] = boxed;
-        const param = lifted.params[at];
+        const boxed = (fieldOf(entry, "list") as boolean) ? ANY_TYPE : { kind: "slice" as const, of: element };
+        const capturedNames = fieldOf(binding, "captures") as string[];
+        const capturedTypes = fieldOf(binding, "captureTypes") as TypeExpr[];
+        capturedNames[at] = box;
+        capturedTypes[at] = boxed;
+        const liftedParams = fieldOf(lifted, "params") as { name: string; type: TypeExpr }[];
+        const param = liftedParams[at];
         if (param !== undefined) {
-          param.name = box;
-          param.type = boxed;
+          setFieldOn(param, "name", box);
+          setFieldOn(param, "type", boxed);
         }
         boxStatements(lifted.body, name, { name: box, list: entry.list });
       }
@@ -15418,6 +15588,15 @@ class TypeScriptParser {
       line,
       closure: true,
     };
+    // A speculative read may have lifted the same name before it was restored;
+    // the closure the file finally holds is the one read last, and the stale
+    // body must not answer for the contract the new parameters describe.
+    for (let at = 0; at < this.closures.length; at += 1) {
+      if (String(fieldOf(this.closures[at], "name")) === name) {
+        this.closures.splice(at, 1);
+        break;
+      }
+    }
     this.closures.push({
       name,
       exported: false,
@@ -15437,6 +15616,7 @@ class TypeScriptParser {
     const restAt = params.findIndex((param) => (fieldOf(param, "rest") as boolean | undefined) === true);
     if (restAt >= 0) binding.rest = restAt;
     this.arrowBindings.set(name, binding);
+    if (!this.arrowLifts.includes(name)) this.arrowLifts.push(name);
     return binding;
   }
 
@@ -15459,19 +15639,24 @@ class TypeScriptParser {
     // declaration's, and a function of that name is written once.
     if (this.liftedArrows.has(code)) return code;
     const line = this.liftedArrows.get(binding.function)?.line ?? binding.line ?? 0;
-    const args: Expression[] = [
-      ...(fieldOf(binding, "captures") as string[]).map((_: string, index: number) => ({
-        k: "capture" as const,
-        closure: { k: "ident" as const, name: "self" },
+    const captured = fieldOf(binding, "captures") as string[];
+    const written = fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[];
+    const args: Expression[] = [];
+    for (let index = 0; index < captured.length; index += 1) {
+      args.push({
+        k: "capture",
+        closure: { k: "ident", name: "self" },
         index,
         type: binding.captureTypes[index] ?? ANY_TYPE,
-      })),
-      ...(fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[]).map((param: ParameterInfo) => ({ k: "ident" as const, name: param.name })),
-    ];
+      });
+    }
+    for (const param of written) args.push({ k: "ident", name: param.name });
     const call: Expression = { k: "call", name: this.calledName(binding.function), args };
+    const params: { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[] = [{ name: "self", type: ANY_TYPE }];
+    for (const param of written) params.push(param);
     const lifted: TypeScriptFunction = {
       name: code,
-      params: [{ name: "self", type: ANY_TYPE }, ...(fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null; default?: Expression; }[])],
+      params,
       returns: binding.returns,
       body: binding.returns.kind === "void"
         ? [{ kind: "expression", value: call, line }]
@@ -16210,7 +16395,7 @@ class TypeScriptParser {
    */
   private promiseMethod(receiver: Expression, method: string, args: readonly Expression[]): Expression | null {
     if (method !== "then" && method !== "catch" && method !== "finally") return null;
-    const line = this.peek().line;
+    const line = Number(fieldOf(this.peek(), "line"));
     // A promise read by the test and again by the arm that runs is read once:
     // a call that answers one is held in a name of the statement's own, so
     // `stat(p).then(f)` reads the file once rather than twice.
@@ -16673,7 +16858,7 @@ class TypeScriptParser {
   private exportedValueShapes(): Map<string, ResolvedType> {
     const shapes = new Map<string, ResolvedType>();
     for (const [name, annotation] of this.constantAnnotations) {
-      if (!annotation.exported) continue;
+      if (fieldOf(annotation, "exported") !== true) continue;
       const shape = this.constantAnnotationShape(name);
       if (shape !== null && shape.kind !== "any") shapes.set(name, shape);
     }
@@ -18783,7 +18968,7 @@ class TypeScriptParser {
     args: readonly Expression[],
   ): Expression | null {
     const keys = (fieldOf(written, "keys") as readonly string[] | undefined) ?? [];
-    const numeric = written.keyKind === "number";
+    const numeric = String(fieldOf(written, "keyKind")) === "number";
     const textOf = (key: string): Expression => numeric
       ? { k: "literal", text: key }
       : { k: "text", parts: [{ k: "text", value: key }] };
@@ -18792,7 +18977,8 @@ class TypeScriptParser {
       this.expressionTypes.set(count, NUMBER_RESULT);
       return count;
     }
-    if (written.values === undefined) {
+    const writtenValues = fieldOf(written, "values") as readonly ConstantValue[] | undefined;
+    if (writtenValues === undefined) {
       if (method !== "has" || args.length !== 1) return null;
       const value = args[0] as Expression;
       if (!this.repeatable(value)) {
@@ -18824,13 +19010,13 @@ class TypeScriptParser {
       return this.hole();
     }
     const name = receiver.k === "ident" ? receiver.name : "";
-    const first = written.values[0] === undefined ? null : this.constantValue(name, written.values[0]);
+    const first = writtenValues[0] === undefined ? null : this.constantValue(name, writtenValues[0]);
     const firstType = first === null ? ANY_TYPE : this.valueTypeOf(first);
     let answer: Expression = firstType.kind === "text"
       ? { k: "text", parts: [{ k: "text", value: "" }] }
       : { k: "literal", text: "0" };
     for (let at = keys.length - 1; at >= 0; at -= 1) {
-      const read = this.constantValue(name, written.values[at]) ?? this.hole();
+      const read = this.constantValue(name, writtenValues[at]) ?? this.hole();
       answer = {
         k: "conditional",
         condition: { k: "binary", op: "===", left: value, right: textOf(keys[at] as string) },
@@ -19029,7 +19215,7 @@ class TypeScriptParser {
     // The runtime answers a truth with the number one, and a body says what it
     // means by it: `!s.has(k)` is a question about a truth, and a number is not
     // one.
-    const answer: Expression = lowered.returns === BOOLEAN_RESULT
+    const answer: Expression = sameResult(lowered.returns, BOOLEAN_RESULT)
       ? { k: "binary", op: "===", left: made, right: { k: "literal", text: "1" } }
       : made;
     this.expressionTypes.set(answer, lowered.returns);
@@ -19066,7 +19252,7 @@ class TypeScriptParser {
     const list: TypeExpr = { kind: "slice", of: element };
     const copy = this.sequenceMethod("slice", element, value, [], fieldOf(this.peek(), "line"));
     const held = `__seq${this.fieldCount++}`;
-    this.pendingBefore.push({ kind: "declare", name: held, type: list, init: copy, line: this.peek().line });
+    this.pendingBefore.push({ kind: "declare", name: held, type: list, init: copy, line: Number(fieldOf(this.peek(), "line")) });
     this.valueTypes.set(held, list);
     const valueShape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
     if (valueShape.kind === "list") this.valueShapes.set(held, valueShape);
@@ -19543,13 +19729,15 @@ class TypeScriptParser {
     // The element the language hands a callback at a sparse index is the absent
     // value, which this compiler has none of. A callback that reads it is
     // refused; the one the sources write names it and reads the index alone.
-    const elementName = callback.k === "arrow" ? this.arrowBindings.get(callback.name)?.params[0]?.name : undefined;
+    const callbackBinding = callback.k === "arrow" ? this.arrowBindings.get(callback.name) : undefined;
+    const callbackParams = fieldOfOptional(callbackBinding, "params") as { name: string }[] | undefined;
+    const elementName = callbackParams === undefined || callbackParams.length === 0 ? undefined : callbackParams[0].name;
     const lifted = callback.k === "arrow" ? this.liftedArrows.get(callback.name) : undefined;
     if (callback.k === "arrow" && lifted !== undefined && elementName !== undefined) {
       let used = false;
       walkFunction(lifted, (name) => {
         if (name === elementName) used = true;
-      });
+      }, () => {});
       if (used) {
         this.report(
           "the element Array.from hands its callback is the value a sparse list leaves absent",
@@ -19572,7 +19760,7 @@ class TypeScriptParser {
       (answered === null || answered.kind === "absent")
       ? { kind: "any" }
       : answered;
-    const key = JSON.stringify(["from", element, signature.params.length]);
+    const key = JSON.stringify(["from", element, (fieldOf(signature, "params") as TypeExpr[]).length]);
     let helper = this.collectHelpers.get(key);
     if (helper === undefined) {
       const name = this.nextCollectName(line);
@@ -19905,7 +20093,7 @@ class TypeScriptParser {
         break;
       }
       case "reduce": {
-        const accumulator = signature.params[0] ?? signature.returns;
+        const accumulator = ((fieldOf(signature, "params") as TypeExpr[])[0] ?? signature.returns) as TypeExpr;
         returns = accumulator;
         body = withInitial
           ? [
@@ -20019,7 +20207,7 @@ class TypeScriptParser {
     const params = [
       { name: "items", type: items },
       { name: "fn", type: ANY_TYPE },
-      ...(withInitial ? [{ name: "initial", type: signature.params[0] ?? signature.returns }] : []),
+      ...(withInitial ? [{ name: "initial", type: ((fieldOf(signature, "params") as TypeExpr[])[0] ?? signature.returns) as TypeExpr }] : []),
     ];
     const helper: TypeScriptFunction = { name, params, returns, body, line, closure: true };
     this.closures.push({
@@ -20296,8 +20484,9 @@ class TypeScriptParser {
       // A name bound to an arrow is that arrow: read where a value is expected,
       // it is the closure the arrow is, carrying the values it captured.
       const arrow = this.valueArrows.get(token.text);
-      if (arrow !== undefined && !this.at("(") && token.text !== this.arrowDeclared) {
-        return { k: "arrow", name: arrow.function, captures: [...arrow.captures], code: this.closureCode(arrow) };
+      const declaredArrow = String(fieldOf(this, "arrowDeclared") ?? "");
+      if (arrow !== undefined && !this.at("(") && (declaredArrow === "" || token.text !== declaredArrow)) {
+        return { k: "arrow", name: arrow.function, captures: (fieldOf(arrow, "captures") as string[]).slice(), code: this.closureCode(arrow) };
       }
       // A value another module holds is read through the getter that module
       // offers: the name is a call, not a function reference.
@@ -20394,13 +20583,15 @@ class TypeScriptParser {
     const names = writtenNames(written) ?? [];
     if (names.length === 0) return false;
     const holdsThen = written === conditional.then;
-    const fields = names.map((name) => fieldOf(written, "fields").find((field: WrittenField) => field.name === name)).filter((field) => field !== undefined);
+    const writtenFields = fieldOf(written, "fields") as { name: string; value: Expression; }[];
+    const fields = names.map((name) => writtenFields.find((field: WrittenField) => field.name === name)).filter((field) => field !== undefined);
+    const expectedFields = fieldOf(expected, "fields") as Map<string, ResolvedField>;
     for (const field of fields) {
-      const declared = fieldOf(expected, "fields").get(field.name);
+      const declared = expectedFields.get(field.name);
       if (declared === undefined || this.absenceExpression(declared.type) === null) return false;
     }
     for (const field of fields) {
-      const declared = fieldOf(expected, "fields").get(field.name) as ResolvedField;
+      const declared = expectedFields.get(field.name) as ResolvedField;
       this.applyExpected(field.value, this.typeExprOfShape(declared.type), this.shapeForRead(declared.type));
       const absent = this.absenceExpression(declared.type) as Expression;
       put(field.name, {
@@ -20782,20 +20973,22 @@ class TypeScriptParser {
       // which is the record of fields it looks like.
       const numeric = pairs.length > 0 && pairs.every((pair) => this.keyKind(this.valueTypeOf(pair.key)) === "number");
       if (numeric) setFieldOn(collection, "key", NUMBER_RESULT);
-      const line = this.peek().line;
+      const line = Number(fieldOf(this.peek(), "line"));
       // A spread of a dictionary writes entries the literal does not name, so
       // the entries are the parts merged: each field is a dictionary of one,
       // and each spread is a dictionary of its own.
-      if (parts.some((part) => "dictionary" in part)) {
+      if (parts.some((part) => fieldOf(part, "dictionary") !== undefined)) {
         const helper = this.collectionMergeHelper(collection, line);
         const written: Expression[] = [];
         for (let at = 0; at < parts.length; at += 1) {
-          const part = parts[at] as { field: { name: string; value: Expression } } | { dictionary: Expression };
-          if ("dictionary" in part) written.push(part.dictionary);
+          const part = parts[at];
+          const dictionaryPart = fieldOf(part, "dictionary") as Expression | undefined;
+          if (dictionaryPart !== undefined) written.push(dictionaryPart);
           else {
+            const fieldPart = fieldOf(part, "field") as { name: string; value: Expression };
             const one = {
-              key: { k: "text", parts: [{ k: "text", value: part.field.name }] } as Expression,
-              value: part.field.value,
+              key: { k: "text", parts: [{ k: "text", value: fieldPart.name }] } as Expression,
+              value: fieldPart.value,
             };
             const single = this.collectionPairsHelper(collection, [one], line);
             this.expressionTypes.set(single, NUMBER_RESULT);
@@ -20882,7 +21075,7 @@ class TypeScriptParser {
       savedShape !== null &&
       savedShape.kind === "record" &&
       (fieldOf(savedShape, "fields") as Map<string, ResolvedField>).has("first") &&
-      fieldOf(savedShape, "fields").has("second") &&
+      (fieldOf(savedShape, "fields") as Map<string, ResolvedField>).has("second") &&
       (savedType === null || savedType.kind === "ref")
     ) {
       const firstField = (fieldOf(savedShape, "fields") as Map<string, ResolvedField>).get("first") as ResolvedField;
@@ -20995,13 +21188,13 @@ class TypeScriptParser {
           const pair: TypeExpr = { kind: "slice", of: collection.key };
           const pairShape: ResolvedType = { kind: "list", of: this.shapeOfTypeExpr(collection.key) };
           const mapName = `__entries${this.fieldCount++}`;
-          this.pendingBefore.push({ kind: "declare", name: mapName, type: null, init: spread, line: this.peek().line });
+          this.pendingBefore.push({ kind: "declare", name: mapName, type: null, init: spread, line: Number(fieldOf(this.peek(), "line")) });
           this.valueTypes.set(mapName, NUMBER_RESULT);
           const map: Expression = { k: "ident", name: mapName };
           this.collectionExpressions.set(map, collection);
           const pairsName = `__pairs${this.fieldCount++}`;
           const empty: Expression = { k: "buffer", element: typeToString(pair), values: [] };
-          this.pendingBefore.push({ kind: "declare", name: pairsName, type: null, init: empty, line: this.peek().line });
+          this.pendingBefore.push({ kind: "declare", name: pairsName, type: null, init: empty, line: Number(fieldOf(this.peek(), "line")) });
           this.valueTypes.set(pairsName, { kind: "slice", of: pair });
           this.valueShapes.set(pairsName, { kind: "list", of: pairShape });
           const at: Expression = { k: "ident", name: `__pair${this.fieldCount++}` };
@@ -21040,7 +21233,7 @@ class TypeScriptParser {
             step: null,
             down: false,
             body: [this.appendWrite(append, fieldOf(this.peek(), "line"))],
-            line: this.peek().line,
+            line: Number(fieldOf(this.peek(), "line")),
           });
           spread = { k: "ident", name: pairsName };
           this.expressionTypes.set(spread, { kind: "slice", of: pair });
@@ -21457,7 +21650,7 @@ class TypeScriptParser {
   private readEntriesConcatAttempt(collection: CollectionValue): Expression | null {
     const at = this.entriesConcatAt();
     if (at === null) return null;
-    const line = this.peek().line;
+    const line = Number(fieldOf(this.peek(), "line"));
     const savedIteration = this.readingIteration;
     const savedCollectionSource = this.readingCollectionSource;
     this.readingIteration = true;
@@ -21466,8 +21659,9 @@ class TypeScriptParser {
     let callback: Expression;
     let sequence: TypeExpr | null = null;
     try {
-      source = this.readBounded(at.dot);
-      if (this.position !== at.dot) return null;
+      const dot = Number(fieldOf(at, "dot"));
+      source = this.readBounded(dot);
+      if (this.position !== dot) return null;
       this.position = (fieldOf(at, "open") as number) + 1;
       const held = this.valueTypeOf(source);
       sequence = held.kind === "slice" || held.kind === "array" ? held : null;
@@ -21481,11 +21675,12 @@ class TypeScriptParser {
       this.readingCollectionSource = savedCollectionSource;
     }
     this.arrowParameters = null;
-    if (this.position !== fieldOf(at, "close") - 1 && !(this.position === fieldOf(at, "close") - 2 && this.tokens[at.close - 1]?.text === ",")) return null;
+    const close = Number(fieldOf(at, "close"));
+    if (this.position !== close - 1 && !(this.position === close - 2 && this.tokens[close - 1]?.text === ",")) return null;
     if (callback.k !== "arrow") return null;
     const lifted = this.liftedArrows.get(callback.name);
     if (lifted === undefined) return null;
-    const answers = fieldOf(lifted, "body").filter((statement: Statement) => statement.kind === "result" && statement.value !== null);
+    const answers = (fieldOf(lifted, "body") as Statement[]).filter((statement: Statement) => statement.kind === "result" && statement.value !== null);
     if (answers.length !== 1) return null;
     const answered = (answers[0] as Statement & { value: Expression }).value;
     if (answered.k !== "call" || answered.name !== "__collection_entries") return null;
@@ -21506,8 +21701,9 @@ class TypeScriptParser {
     const binding = this.arrowBindings.get(callback.name);
     const captures = fieldOfOptional(binding, "captures") ?? [];
     const captureTypes = binding?.captureTypes ?? [];
-    const writtenNames = binding !== undefined
-      ? fieldOf(binding, "params").map((param: ParameterInfo) => param.name)
+    const bindingParams = binding !== undefined ? (fieldOf(binding, "params") as ParameterInfo[]) : null;
+    const writtenNames = bindingParams !== null
+      ? bindingParams.map((param: ParameterInfo) => param.name)
       : (fieldOf(lifted, "params") as { name: string; type: TypeExpr }[]).slice(captures.length).map((param: ParameterInfo) => param.name);
     const params = new Set(writtenNames as string[]);
     const element = (): Expression => ({ k: "index", base: { k: "ident", name: "item" }, index: { k: "ident", name: "at" } });
@@ -21588,7 +21784,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
   private readEntriesSortAttempt(collection: CollectionValue): Expression | null {
     const at = this.entriesSortAt();
     if (at === null) return null;
-    const line = this.peek().line;
+    const line = Number(fieldOf(this.peek(), "line"));
     const savedIteration = this.readingIteration;
     const savedCollectionSource = this.readingCollectionSource;
     this.readingIteration = true;
@@ -21596,15 +21792,17 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     let entries: Expression;
     let callback: Expression;
     try {
-      entries = this.readBounded(at.dot);
-      if (this.position !== at.dot) return null;
+      const dot = Number(fieldOf(at, "dot"));
+      entries = this.readBounded(dot);
+      if (this.position !== dot) return null;
       this.position = (fieldOf(at, "open") as number) + 1;
       callback = this.readArrow(false);
     } finally {
       this.readingIteration = savedIteration;
       this.readingCollectionSource = savedCollectionSource;
     }
-    if (this.position !== fieldOf(at, "close") - 1 && !(this.position === fieldOf(at, "close") - 2 && this.tokens[at.close - 1]?.text === ",")) return null;
+    const close = Number(fieldOf(at, "close"));
+    if (this.position !== close - 1 && !(this.position === close - 2 && this.tokens[close - 1]?.text === ",")) return null;
     if (callback.k !== "arrow") return null;
     const lifted = this.liftedArrows.get(callback.name);
     if (lifted === undefined) return null;
@@ -21618,7 +21816,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const captureTypes = binding?.captureTypes ?? [];
     const written = binding !== undefined ? fieldOf(binding, "params") : fieldOf(lifted, "params").slice(captures.length);
     if (written.length !== 2) return null;
-    const answers = fieldOf(lifted, "body").filter((statement: Statement) => statement.kind === "result" && statement.value !== null);
+    const answers = (fieldOf(lifted, "body") as Statement[]).filter((statement: Statement) => statement.kind === "result" && statement.value !== null);
     if (answers.length !== 1) return null;
     const comparator = (answers[0] as Statement & { value: Expression }).value;
     // A comparator the source wrote as `([a], [b]) => ...` names one position
@@ -21759,7 +21957,12 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const saved = this.tokens;
     const bounded = saved.slice();
     const last = bounded[stop];
-    if (last !== undefined) bounded[stop] = { ...last, kind: "end", text: "" };
+    if (last !== undefined) {
+      const end: Token = { kind: "end", text: "", line: Number(fieldOf(last, "line")) };
+      const quote = fieldOfOptional(last, "quote") as string | undefined;
+      if (quote !== undefined) setFieldOn(end, "quote", quote);
+      bounded[stop] = end;
+    }
     this.tokens = bounded;
     try {
       return this.readExpression();
@@ -21816,7 +22019,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
   private readPairMapAttempt(collection: CollectionValue, from = this.position): Expression | null {
     const at = this.pairMapAt(from);
     if (at === null) return null;
-    const line = this.peek().line;
+    const line = Number(fieldOf(this.peek(), "line"));
     // A callback handed to `map` is read as a list of its answers, so an
     // `Object.entries` it walks read through the same flag a loop over them
     // does. The source it walks is read under those flags too: its entries
@@ -21831,8 +22034,9 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     let sequence: TypeExpr | null = null;
     try {
       // The list the callback walks is read to the `.` and no further.
-      source = this.readBounded(at.dot);
-      if (this.position !== at.dot) return null;
+      const dot = Number(fieldOf(at, "dot"));
+      source = this.readBounded(dot);
+      if (this.position !== dot) return null;
       this.position = (fieldOf(at, "open") as number) + 1;
       // The callback is read against the element the source's list holds.
       // Where the source is `Object.entries(<record>)` itself, the callback
@@ -21854,7 +22058,8 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       this.readingCollectionSource = savedCollectionSource;
     }
     this.arrowParameters = null;
-    if (this.position !== fieldOf(at, "close") - 1 && !(this.position === fieldOf(at, "close") - 2 && this.tokens[at.close - 1]?.text === ",")) return null;
+    const close = Number(fieldOf(at, "close"));
+    if (this.position !== close - 1 && !(this.position === close - 2 && this.tokens[close - 1]?.text === ",")) return null;
     if (callback.k !== "arrow") return null;
     const lifted = this.liftedArrows.get(callback.name);
     if (lifted === undefined) return null;
@@ -21868,8 +22073,9 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const binding = this.arrowBindings.get(callback.name);
     const captures = fieldOfOptional(binding, "captures") ?? [];
     const captureTypes = binding?.captureTypes ?? [];
-    const writtenNames = binding !== undefined
-      ? fieldOf(binding, "params").map((param: ParameterInfo) => param.name)
+    const bindingParams = binding !== undefined ? (fieldOf(binding, "params") as ParameterInfo[]) : null;
+    const writtenNames = bindingParams !== null
+      ? bindingParams.map((param: ParameterInfo) => param.name)
       : (fieldOf(lifted, "params") as { name: string; type: TypeExpr }[]).slice(captures.length).map((param: ParameterInfo) => param.name);
     const params = new Set(writtenNames as string[]);
     const bindings = destructuredBindingsOf(fieldOf(lifted, "body"));
@@ -21972,7 +22178,8 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     this.liftedArrows.set(name, helper);
     this.position = fieldOf(at, "close");
     this.next();
-    const arg = isEntries ? ((source as Expression & { args: Expression[] }).args[0] as Expression) : source;
+    const sourceArgs = fieldOf(source, "args") as Expression[];
+    const arg = isEntries ? (sourceArgs[0] as Expression) : source;
     return { k: "call", name, args: [arg, ...captures.map((capture: string) => ({ k: "ident" as const, name: capture } as Expression))] };
   }
 
@@ -22117,7 +22324,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
     const pairs = collection.kind === "map" ? this.shapeOf(source) : null;
     const pair = pairs !== null && pairs.kind === "list" ? pairs.of : null;
     if (collection.kind === "map" && pair !== null && pair.kind === "record" &&
-        (fieldOf(pair, "fields") as Map<string, ResolvedField>).has("first") && fieldOf(pair, "fields").has("second")) {
+        (fieldOf(pair, "fields") as Map<string, ResolvedField>).has("first") && (fieldOf(pair, "fields") as Map<string, ResolvedField>).has("second")) {
       const first = (fieldOf(pair, "fields") as Map<string, ResolvedField>).get("first") as ResolvedField;
       const second = (fieldOf(pair, "fields") as Map<string, ResolvedField>).get("second") as ResolvedField;
       collection.key = this.typeExprOfShape(first.type);
@@ -22933,7 +23140,7 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       }
       return invoke;
     }
-    if (view.kind !== "ident" || !(view.text in TYPED_ARRAYS)) {
+    if (view.kind !== "ident" || Number(view.text in TYPED_ARRAYS) === 0) {
       this.report(
         `a program allocates a typed array, not "${view.text}"`,
         `as in new Float64Array(n); the arrays are ${Object.keys(TYPED_ARRAYS).join(", ")}`,
@@ -23123,8 +23330,12 @@ function usageOf(declaration: TypeScriptFunction): {
   readsArgv: boolean;
   accesses: AccessRange[];
 } {
-  const parameters = new Set(declaration.params.map((param) => param.name));
-  const parameterTypes = new Map(declaration.params.map((param) => [param.name, param.type]));
+  const parameters = new Set<string>();
+  const parameterTypes = new Map<string, TypeExpr>();
+  for (const param of (fieldOf(declaration, "params") as { name: string; type: TypeExpr }[])) {
+    parameters.add(String(fieldOf(param, "name")));
+    parameterTypes.set(String(fieldOf(param, "name")), fieldOf(param, "type") as TypeExpr);
+  }
   /** Whether a name holds a buffer, which is the only value with a range. */
   const isBuffer = (name: string): boolean => {
     const type = parameterTypes.get(name);
@@ -23142,21 +23353,23 @@ function usageOf(declaration: TypeScriptFunction): {
     switch (value.k) {
       case "literal":
       case "bigint":
-        return value.text;
+        return String(fieldOf(value, "text"));
       case "ident":
-        return parameters.has(value.name) ? value.name : null;
+        return parameters.has(String(fieldOf(value, "name"))) ? String(fieldOf(value, "name")) : null;
       case "length":
-        return parameters.has(value.buffer) ? `len(${value.buffer})` : null;
+        return parameters.has(String(fieldOf(value, "buffer"))) ? `len(${String(fieldOf(value, "buffer"))})` : null;
       case "unary": {
-        if (value.op !== "-" && value.op !== "+") return null;
+        const op = String(fieldOf(value, "op"));
+        if (op !== "-" && op !== "+") return null;
         const operand = text((fieldOf(value, "operand") as Expression));
-        return operand === null ? null : `(${value.op}${operand})`;
+        return operand === null ? null : `(${op}${operand})`;
       }
       case "binary": {
-        if (!ARITHMETIC_OPERATORS.includes(value.op)) return null;
+        const op = fieldOf(value, "op") as BinaryOp;
+        if (!ARITHMETIC_OPERATORS.includes(op)) return null;
         const left = text((fieldOf(value, "left") as Expression));
         const right = text((fieldOf(value, "right") as Expression));
-        return left === null || right === null ? null : `(${left} ${value.op} ${right})`;
+        return left === null || right === null ? null : `(${left} ${op} ${right})`;
       }
       default:
         return null;
@@ -23165,7 +23378,14 @@ function usageOf(declaration: TypeScriptFunction): {
 
   /** One access, stated once however many times the body reads it. */
   const access = (parameter: string, lo: string, hi: string): void => {
-    const seen = accesses.some((entry) => entry.parameter === parameter && (fieldOf(entry, "lo") as string) === lo && (fieldOf(entry, "hi") as string) === hi);
+    let seen = false;
+    for (let at = 0; at < accesses.length; at += 1) {
+      const entry = accesses[at];
+      if (String(fieldOf(entry, "parameter")) === parameter && String(fieldOf(entry, "lo")) === lo && String(fieldOf(entry, "hi")) === hi) {
+        seen = true;
+        break;
+      }
+    }
     if (!seen) accesses.push({ parameter, lo, hi });
   };
 
@@ -23173,7 +23393,7 @@ function usageOf(declaration: TypeScriptFunction): {
     switch (value.k) {
       case "object":
         allocates = true;
-        for (const field of (fieldOf(value, "fields") as { name: string; value: Expression; }[])) expression(field.value);
+        for (const field of (fieldOf(value, "fields") as { name: string; value: Expression; }[])) expression(fieldOf(field, "value") as Expression);
         return;
       case "argv":
         readsArgv = true;
@@ -23184,37 +23404,38 @@ function usageOf(declaration: TypeScriptFunction): {
         // `process.argv.length` is reading the command line, and a contract
         // that answered "this body touches nothing outside its parameters"
         // because of that is what makes the body inlinable and parallel.
-        if (value.name === ARGV_LENGTH) readsArgv = true;
-        for (const argument of value.args) expression(argument);
+        if (String(fieldOf(value, "name")) === ARGV_LENGTH) readsArgv = true;
+        for (const argument of (fieldOf(value, "args") as Expression[])) expression(argument);
         return;
       case "text":
-        for (const part of value.parts) {
-          if (part.k === "value") expression(part.value);
+        for (const part of (fieldOf(value, "parts") as TextPart[])) {
+          if (part.k === "value") expression(fieldOf(part, "value") as Expression);
         }
         return;
       case "binary":
-        expression(value.left);
-        expression(value.right);
+        expression(fieldOf(value, "left") as Expression);
+        expression(fieldOf(value, "right") as Expression);
         return;
       case "unary":
-        expression(value.operand);
+        expression(fieldOf(value, "operand") as Expression);
         return;
       case "conditional":
-        expression(value.condition);
-        expression(value.then);
-        expression(value.otherwise);
+        expression(fieldOf(value, "condition") as Expression);
+        expression(fieldOf(value, "then") as Expression);
+        expression(fieldOf(value, "otherwise") as Expression);
         return;
       case "index": {
         // A buffer the body indexes is a buffer it reads, at a position the
         // contract states as a number. An index the contract language cannot
         // name is not left out: the read is still a read, and what the
         // contract states about it is that the buffer is there.
-        const base = value.base;
-        if (base.k === "ident" && parameters.has(base.name) && isBuffer(base.name)) {
-          const loop = value.index.k === "ident" ? loops.get(value.index.name) : undefined;
-          if (loop !== undefined) access(base.name, loop.lo, loop.hi);
+        const base = fieldOf(value, "base") as Expression;
+        const index = fieldOf(value, "index") as Expression;
+        if (base.k === "ident" && parameters.has(String(fieldOf(base, "name"))) && isBuffer(String(fieldOf(base, "name")))) {
+          const loop = index.k === "ident" ? loops.get(String(fieldOf(index, "name"))) : undefined;
+          if (loop !== undefined) access(String(fieldOf(base, "name")), String(fieldOf(loop, "lo")), String(fieldOf(loop, "hi")));
           else {
-            const at = text(value.index);
+            const at = text(index);
             // An index the contract language cannot name — one a `while`
             // counter holds, or one a `for..of` iterator carries — leaves the
             // position unknown. `a[0:len(a)]` states nothing a caller is held
@@ -23226,27 +23447,31 @@ function usageOf(declaration: TypeScriptFunction): {
             // A position the contract cannot name is a read the body makes and
             // the contract cannot bound: the definition carries the statements,
             // and the caller is held to no range it cannot state.
-            if (at !== null) access(base.name, at, `(${at} + 1)`);
+            if (at !== null) access(String(fieldOf(base, "name")), at, `(${at} + 1)`);
           }
         }
-        expression(value.base);
-        expression(value.index);
+        expression(base);
+        expression(index);
         return;
       }
       case "slice": {
-        expression(value.base);
-        if (value.start !== null) expression(value.start);
-        if (value.stop !== null) expression(value.stop);
-        if (value.step !== null) expression(value.step);
+        const base = fieldOf(value, "base") as Expression;
+        const start = fieldOf(value, "start") as Expression | null;
+        const stop = fieldOf(value, "stop") as Expression | null;
+        const step = fieldOf(value, "step") as Expression | null;
+        expression(base);
+        if (start !== null) expression(start);
+        if (stop !== null) expression(stop);
+        if (step !== null) expression(step);
         return;
       }
       case "member":
-        expression(value.base);
+        expression(fieldOf(value, "base") as Expression);
         return;
       case "length":
         return;
       case "lengthOf":
-        expression(value.of);
+        expression(fieldOf(value, "of") as Expression);
         return;
       case "literal":
       case "bigint":
@@ -23260,18 +23485,18 @@ function usageOf(declaration: TypeScriptFunction): {
         // a name this body reads, which is a read of a name and nothing more.
         // Read as a value, the arrow is a closure, and a closure is a block the
         // runtime lays out.
-        if (value.code !== undefined) allocates = true;
+        if (fieldOf(value, "code") !== undefined) allocates = true;
         return;
       case "capture":
         // One value a closure carries, read out of a closure this body was
         // handed: it reaches no buffer and allocates nothing.
         return;
       case "invoke":
-        expression(value.callee);
-        for (const argument of value.args) expression(argument);
+        expression(fieldOf(value, "callee") as Expression);
+        for (const argument of (fieldOf(value, "args") as Expression[])) expression(argument);
         return;
       case "append":
-        for (const one of value.values) expression(one);
+        for (const one of (fieldOf(value, "values") as Expression[])) expression(one);
         return;
     }
   };
@@ -23290,40 +23515,44 @@ function usageOf(declaration: TypeScriptFunction): {
       case "memberAssign":
         expression((fieldOf(one, "value") as Expression));
         return;
-      case "result":
-        if (one.value !== null) expression(one.value);
+      case "result": {
+        const value = fieldOf(one, "value") as Expression | null;
+        if (value !== null) expression(value);
         return;
+      }
       case "indexAssign": {
         // A buffer the body writes is a buffer it writes, and the range it
         // writes over is the range a caller is held to. Leaving it out stated
         // no precondition at all, and a driver that believed the contract
         // handed the body a buffer shorter than the body walks.
-        const base = one.buffer;
+        const base = String(fieldOf(one, "buffer"));
+        const index = fieldOf(one, "index") as Expression;
         if (parameters.has(base) && isBuffer(base)) {
-          const loop = one.index.k === "ident" ? loops.get(one.index.name) : undefined;
-          if (loop !== undefined) access(base, (fieldOf(loop, "lo") as string), (fieldOf(loop, "hi") as string));
+          const loop = index.k === "ident" ? loops.get(String(fieldOf(index, "name"))) : undefined;
+          if (loop !== undefined) access(base, String(fieldOf(loop, "lo")), String(fieldOf(loop, "hi")));
           else {
-            const at = text(one.index);
+            const at = text(index);
             if (at !== null) access(base, at, `(${at} + 1)`);
             else access(base, "0", `len(${base})`);
           }
         }
-        expression(one.index);
-        expression(one.value);
+        expression(index);
+        expression(fieldOf(one, "value") as Expression);
         return;
       }
       case "if":
         expression((fieldOf(one, "condition") as Expression));
-        one.then.forEach((inner) => statement(inner));
-        one.otherwise.forEach((inner) => statement(inner));
+        for (const inner of (fieldOf(one, "then") as Statement[])) statement(inner);
+        for (const inner of (fieldOf(one, "otherwise") as Statement[])) statement(inner);
         return;
-      case "loop":
+      case "loop": {
         expression((fieldOf(one, "from") as Expression));
         expression((fieldOf(one, "to") as Expression));
         // The step is a whole expression, so it allocates and reads the
         // arguments like any other, and leaving it out let a contract claim
         // the source touches nothing outside them.
-        if (one.step !== null) expression(one.step);
+        const step = fieldOf(one, "step") as Expression | null;
+        if (step !== null) expression(step);
         // The index of a counted loop stands for the whole range the loop
         // walks, so a buffer its body reads is read over that range and not
         // over the single turn that reads it. A loop that counts down walks
@@ -23333,28 +23562,34 @@ function usageOf(declaration: TypeScriptFunction): {
         // the body reads past the end of the buffer it was given.
         const from = text((fieldOf(one, "from") as Expression));
         const to = text((fieldOf(one, "to") as Expression));
-        const outer = loops.get(one.variable);
+        const variable = String(fieldOf(one, "variable"));
+        const down = fieldOf(one, "down") === true;
+        const inclusive = fieldOf(one, "inclusive") === true;
+        const outer = loops.get(variable);
         if (from !== null && to !== null) {
-          loops.set(one.variable, one.down
-            ? { lo: one.inclusive ? to : `(${to} + 1)`, hi: `(${from} + 1)` }
-            : { lo: from, hi: one.inclusive ? `(${to} + 1)` : to });
+          loops.set(variable, down
+            ? { lo: inclusive ? to : `(${to} + 1)`, hi: `(${from} + 1)` }
+            : { lo: from, hi: inclusive ? `(${to} + 1)` : to });
         }
-        one.body.forEach((inner) => statement(inner));
-        if (outer === undefined) loops.delete(one.variable);
-        else loops.set(one.variable, outer);
+        for (const inner of (fieldOf(one, "body") as Statement[])) statement(inner);
+        if (outer === undefined) loops.delete(variable);
+        else loops.set(variable, outer);
         return;
+      }
       case "while":
       case "doWhile":
         expression((fieldOf(one, "condition") as Expression));
-        one.body.forEach((inner) => statement(inner));
+        for (const inner of (fieldOf(one, "body") as Statement[])) statement(inner);
         return;
-      case "forOf":
+      case "forOf": {
         // Walking a buffer reads all of it, so the contract says so. The
         // iteration is bounded by the array's own length, so no length is
         // required of the caller: what it states is that the buffer is there.
-        if (parameters.has(one.of) && isBuffer(one.of)) access(one.of, "0", `len(${one.of})`);
-        one.body.forEach((inner) => statement(inner));
+        const walked = String(fieldOf(one, "of"));
+        if (parameters.has(walked) && isBuffer(walked)) access(walked, "0", `len(${walked})`);
+        for (const inner of (fieldOf(one, "body") as Statement[])) statement(inner);
         return;
+      }
       case "break":
       case "continue":
         return;
@@ -23362,7 +23597,7 @@ function usageOf(declaration: TypeScriptFunction): {
         return;
     }
   };
-  declaration.body.forEach((inner) => statement(inner));
+  for (const inner of (fieldOf(declaration, "body") as Statement[])) statement(inner);
   return { allocates, prints, readsArgv, accesses };
 }
 
@@ -23455,7 +23690,7 @@ class BodyAnalysis {
         this.bindings.set(statement.name, this.serialize((fieldOf(statement, "init") as Expression), loop, (fieldOf(statement, "line") as number)));
         return;
       case "result":
-        if (statement.value !== null) this.result = this.serialize(statement.value, loop, statement.line);
+        if (fieldOf(statement, "value") !== null) this.result = this.serialize(fieldOf(statement, "value") as Expression, loop, Number(fieldOf(statement, "line")));
         return;
       case "assign": {
         const value = this.serialize((fieldOf(statement, "value") as Expression), loop, statement.line);
@@ -24314,20 +24549,20 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // A file read again after its imports are bound keeps the table the first
   // read built: the module graph has added the classes the imports name, and
   // that read is the one that reads the methods written on them.
-  const sharedClasses = (context as { classes?: ClassTable } | undefined)?.classes;
+  const sharedClasses = fieldOfOptional(context, "classes") as ClassTable | undefined;
   const classTable = sharedClasses ?? scanClasses(tokens);
   const scanned = scanConstants(tokens);
   // The interfaces and aliases are read before the bodies that name them.
   // A file read again after its imports are bound keeps the table the first
   // read built, so the declarations the importing files already hold keep
   // resolving against it.
-  const shared = (context as { table?: TypeTable } | undefined)?.table;
+  const shared = fieldOfOptional(context, "table") as TypeTable | undefined;
   const typeTable = shared ?? scanTypeTable(tokens);
   typeTable.classes = classTable.names;
   // The values the imports of this file bind, once the graph has read the
   // modules that write them. They are read in place of the names that hold
   // them, exactly as the file's own constants are.
-  const imported = (context as { values?: ReadonlyMap<string, ConstantInfo> } | undefined)?.values;
+  const imported = fieldOfOptional(context, "values") as ReadonlyMap<string, ConstantInfo> | undefined;
   if (imported !== undefined) {
     for (const [name, constant] of imported) {
       // A value another module constructs is read where it is written, and its
@@ -24361,7 +24596,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // The type each imported value's declaration writes, for a value whose own
   // module holds rather than writes out: a list built by calls is still a list
   // of the element the annotation names.
-  const linkedValueShapes = (context as { valueShapes?: ReadonlyMap<string, ResolvedType> } | undefined)?.valueShapes;
+  const linkedValueShapes = fieldOfOptional(context, "valueShapes") as ReadonlyMap<string, ResolvedType> | undefined;
   if (linkedValueShapes !== undefined) parser.importedValueShapes = linkedValueShapes;
   const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
   if (linkedFunctions !== undefined) {

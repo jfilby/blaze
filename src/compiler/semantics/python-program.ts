@@ -1,3 +1,53 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function valuesOf(bindings: unknown): Map<string, PyValue> {
+  return fieldOf(bindings, "values") as Map<string, PyValue>;
+}
+
+function dictsOf(bindings: unknown): Map<string, Set<string>> {
+  return fieldOf(bindings, "dicts") as Map<string, Set<string>>;
+}
+
+function valueAt(bindings: unknown, name: string): PyValue | undefined {
+  return valuesOf(bindings).get(name);
+}
+
+function hasValue(bindings: unknown, name: string): boolean {
+  return valuesOf(bindings).has(name);
+}
+
+function setValue(bindings: unknown, name: string, value: PyValue): void {
+  valuesOf(bindings).set(name, value);
+}
+
+function deleteValue(bindings: unknown, name: string): void {
+  valuesOf(bindings).delete(name);
+}
+
+function valueNames(bindings: unknown): string[] {
+  const out: string[] = [];
+  for (const name of valuesOf(bindings).keys()) out[out.length] = name;
+  return out;
+}
+
+function dictOf(bindings: unknown, name: string): Set<string> | undefined {
+  return dictsOf(bindings).get(name);
+}
+
+function hasDict(bindings: unknown, name: string): boolean {
+  return dictsOf(bindings).has(name);
+}
+
+function setDict(bindings: unknown, name: string, keys: Set<string>): void {
+  dictsOf(bindings).set(name, keys);
+}
+
+function deleteDict(bindings: unknown, name: string): void {
+  dictsOf(bindings).delete(name);
+}
+
 /**
  * Frontend: the statements a Python module runs.
  *
@@ -94,7 +144,8 @@ function noBindings(): Bindings {
   return { dicts: new Map(), values: new Map() };
 }
 function cloneBindings(b: Bindings): Bindings {
-  return { dicts: new Map(b.dicts), values: new Map(b.values) };
+  const values = fieldOf(b, "values") as Map<string, PyValue>;
+  return { dicts: new Map(b.dicts), values: new Map(values) };
 }
 
 /**
@@ -127,12 +178,12 @@ class SparseSet {
     const key = this.keyOf(value);
     const index = this.sparse.get(key);
     if (index === undefined) return false;
-    return index < this.dense.length && this.keyOf(this.dense[index]) === key;
+    return index < fieldOf(this, "dense").length && this.keyOf(fieldOf(this, "dense")[index]) === key;
   }
 
   add(value: PyValue): boolean {
     if (this.has(value)) return false;
-    this.sparse.set(this.keyOf(value), this.dense.length);
+    this.sparse.set(this.keyOf(value), fieldOf(this, "dense").length);
     this.dense.push(value);
     return true;
   }
@@ -140,21 +191,23 @@ class SparseSet {
   remove(value: PyValue): boolean {
     const key = this.keyOf(value);
     const index = this.sparse.get(key);
-    if (index === undefined || index >= this.dense.length || this.keyOf(this.dense[index]) !== key) return false;
-    const last = this.dense[this.dense.length - 1];
-    this.dense[index] = last;
+    const dense = fieldOf(this, "dense") as PyValue[];
+    if (index === undefined || index >= dense.length || this.keyOf(dense[index]) !== key) return false;
+    const last = dense[dense.length - 1];
+    dense[index] = last;
     this.sparse.set(this.keyOf(last), index);
-    this.dense.pop();
+    dense.pop();
     this.sparse.delete(key);
     return true;
   }
 
   toArray(): PyValue[] {
-    return [...this.dense];
+    const dense = fieldOf(this, "dense") as PyValue[];
+    return dense.slice();
   }
 
   get size(): number {
-    return this.dense.length;
+    return fieldOf(this, "dense").length;
   }
 
   clear(): void {
@@ -164,14 +217,14 @@ class SparseSet {
 }
 
 function programValue(one: PyValue, bindings: Bindings): ProgramValue {
-  if (one.k === "name" && bindings.values.has(one.name)) {
-    return programValue(bindings.values.get(one.name)!, bindings);
+  if (one.k === "name" && hasValue(bindings, String(one.name))) {
+    return programValue(valueAt(bindings, String(one.name))!, bindings);
   }
   switch (one.k) {
     case "number":
       return one.whole ? { k: "whole", text: one.text } : { k: "number", text: one.text };
     case "text":
-      return { k: "text", parts: text(one.parts, bindings) };
+      return { k: "text", parts: text(fieldOf(one, "parts"), bindings) };
     case "boolean":
       return { k: "boolean", value: one.value };
     case "none":
@@ -185,47 +238,51 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "call": {
       // A name bound to a function (a lambda) is called by inlining its body
       // with the arguments bound to its parameters.
-      if (one.name !== "len" && one.name !== "str" && one.name !== "tl.where" && bindings.values.has(one.name)) {
-        const fn = bindings.values.get(one.name)!;
+      if (one.name !== "len" && one.name !== "str" && one.name !== "tl.where" && hasValue(bindings, String(one.name))) {
+        const fn = valueAt(bindings, String(one.name))!;
         if (fn.k === "lambda") {
           const child = cloneBindings(bindings);
-          fn.params.forEach((param, idx) => {
-            if (idx < one.args.length) child.values.set(param.name, one.args[idx]);
-          });
+          const callParams = fieldOf(fn, "params") as readonly { readonly name: string }[];
+          const callArgs = fieldOf(one, "args") as readonly PyValue[];
+          for (let idx = 0; idx < callParams.length; idx++) {
+            if (idx < callArgs.length) setValue(child, String(fieldOf(callParams[idx], "name")), callArgs[idx]);
+          }
           // Inline: evaluate the body (single expression).
           return programValue(fn.body, child);
         }
       }
       // `len(x)` is the length of the list or of the text `x` holds, and the
       // program model reads a length off the name it is written by.
-      if (one.name === "len" && one.args.length === 1 && one.args[0].k === "name") {
-        return { k: "length", of: one.args[0].name };
+      const lenArgs = fieldOf(one, "args") as PyValue[];
+      if (one.name === "len" && lenArgs.length === 1 && lenArgs[0].k === "name") {
+        return { k: "length", of: fieldOf(lenArgs[0], "name") };
       }
       // The length of the command line is the length of the list of texts
       // Python holds, which is the file the program runs and the arguments it
       // was given.
-      if (one.name === "len" && one.args.length === 1 && isSysArgv(one.args[0])) {
+      const argvArgs = fieldOf(one, "args") as PyValue[];
+      if (one.name === "len" && argvArgs.length === 1 && isSysArgv(argvArgs[0])) {
         return { k: "call", function: "argvLength", args: [] };
       }
       // The length of a text written out is the length of a name: the program
       // model reads a length off the name it is written by, and a text written
       // out is not one.
-      if (one.name === "len" && one.args.length === 1) {
+      if (one.name === "len" && fieldOf(one, "args").length === 1) {
         throw frontendError(
           "the length of a value written out is not read",
           "write the value into a name and take the length of that, as in `s = 'hello'` and then `len(s)`",
         );
       }
       // `str(x)` is the text of the value, which the runtime writes.
-      if (one.name === "str" && one.args.length === 1) {
-        return { k: "text", parts: [{ k: "value", value: programValue(one.args[0], bindings) }] };
+      if (one.name === "str" && fieldOf(one, "args").length === 1) {
+        return { k: "text", parts: [{ k: "value", value: programValue(fieldOf(one, "args")[0], bindings) }] };
       }
       // `tl.where(c, x, y)` is the choice the program model writes, whether the
       // source spelled it `x if c else y` or `tl.where`.
-      if (one.name === "tl.where" && one.args.length === 3) {
+      if (one.name === "tl.where" && fieldOf(one, "args").length === 3) {
         return {
           k: "conditional",
-          condition: programValue(one.args[0], bindings),
+          condition: programValue(fieldOf(one, "args")[0], bindings),
           then: programValue(one.args[1], bindings),
           otherwise: programValue(one.args[2], bindings),
         };
@@ -240,16 +297,16 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       // the program and the file it runs before the arguments, and Python
       // counts the file alone, so the argument a Python program reads at `i`
       // is the one the compiler holds at `i + 1`.
-      if (isSysArgv(one.base)) {
-        return { k: "argv", index: programValue(one.index, bindings), offset: 1 };
+      if (isSysArgv(fieldOf(one, "base"))) {
+        return { k: "argv", index: programValue(fieldOf(one, "index"), bindings), offset: 1 };
       }
       // A dict is an object, and its fields are read by their key: `d["key"]`
       // is a field of the object the name holds, and not an element of a
       // buffer of numbers.
-      if (one.base.k === "name" && one.index.k === "text") {
-        const keys = bindings.dicts.get(one.base.name);
+      if (fieldOf(one, "base").k === "name" && fieldOf(one, "index").k === "text") {
+        const keys = dictOf(bindings, String(fieldOf(fieldOf(one, "base"), "name")));
         if (keys !== undefined) {
-          const key = textOf(one.index);
+          const key = textOf(fieldOf(one, "index"));
           if (key === null) {
             throw frontendError(
               "the key of a dict is written as it is",
@@ -262,13 +319,13 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
               `the keys it holds are ${[...keys].map((held) => `"${held}"`).join(", ")}`,
             );
           }
-          return { k: "field", object: { k: "name", name: one.base.name }, field: key };
+          return { k: "field", object: { k: "name", name: fieldOf(one, "base").name }, field: key };
         }
       }
       // A slice produces a buffer, and indexing into it is resolved at compile
       // time when the slice and the index are both constant.
-      if (one.base.k === "slice") {
-        const sliced = programValue(one.base, bindings);
+      if (fieldOf(one, "base").k === "slice") {
+        const sliced = programValue(fieldOf(one, "base"), bindings);
         if (sliced.k !== "buffer") {
           throw frontendError(
             `a program cannot read an element of ${describeValue(one.base)}`,
@@ -276,23 +333,28 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           );
         }
         let idx: number;
-        if (one.index.k === "number") {
-          idx = Number(one.index.text);
-        } else if (one.index.k === "unary" && one.index.op === "-") {
-          const n = one.index.operand.k === "number" ? Number(one.index.operand.text) : 0;
-          idx = sliced.values.length - n;
+        const index = fieldOf(one, "index");
+        const indexLeft = fieldOf(index, "left");
+        const indexArgs = fieldOf(indexLeft, "args") as readonly { readonly k: string }[];
+        const indexRight = fieldOf(index, "right");
+        if (index.k === "number") {
+          idx = Number(fieldOf(index, "text"));
+        } else if (index.k === "unary" && fieldOf(index, "op") === "-") {
+          const operand = fieldOf(index, "operand");
+          const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
+          idx = fieldOf(sliced, "values").length - n;
         } else if (
-          one.index.k === "binary" && one.index.op === "-" &&
-          one.index.left.k === "call" && one.index.left.name === "len" &&
-          one.index.left.args.length === 1 && one.index.left.args[0].k === "slice"
+          index.k === "binary" && fieldOf(index, "op") === "-" &&
+          indexLeft.k === "call" && String(fieldOf(indexLeft, "name")) === "len" &&
+          indexArgs.length === 1 && indexArgs[0].k === "slice"
         ) {
           // The parser converted a[-n] to a[len(a)-n]; resolve it using
           // the slice's known length.
-          const n = one.index.right.k === "number" ? Number(one.index.right.text) : 0;
-          idx = sliced.values.length - n;
+          const n = indexRight.k === "number" ? Number(fieldOf(indexRight, "text")) : 0;
+          idx = fieldOf(sliced, "values").length - n;
         } else {
           // Try evaluating the index.
-          const indexValue = programValue(one.index, bindings);
+          const indexValue = programValue(fieldOf(one, "index"), bindings);
           if (indexValue.k === "whole" || indexValue.k === "number") {
             idx = Number(indexValue.text);
           } else {
@@ -302,29 +364,33 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
             );
           }
         }
-        if (idx < 0 || idx >= sliced.values.length) {
+        if (idx < 0 || idx >= fieldOf(sliced, "values").length) {
           throw frontendError(
             `index ${idx} is out of range for a slice of length ${sliced.values.length}`,
             "a list is read by its index, as in a[0]",
           );
         }
-        return sliced.values[idx];
+        return fieldOf(sliced, "values")[idx];
       }
       // A list literal is indexed directly.
-      if (one.base.k === "list") {
-        const items = one.base.items;
-        const indexValue = programValue(one.index, bindings);
+      if (fieldOf(one, "base").k === "list") {
+        const items = fieldOf(one, "base").items as readonly PyValue[];
+        const indexValue = programValue(fieldOf(one, "index"), bindings);
         let idx: number;
         if (indexValue.k === "whole" || indexValue.k === "number") {
           idx = Number(indexValue.text);
-        } else if (one.index.k === "unary" && one.index.op === "-") {
-          const n = one.index.operand.k === "number" ? Number(one.index.operand.text) : 0;
-          idx = items.length - n;
         } else {
-          throw frontendError(
-            `a program cannot read an element of a list with a non-constant index`,
-            "a list is read by its index, as in a[0]",
-          );
+          const index = fieldOf(one, "index");
+          if (index.k === "unary" && fieldOf(index, "op") === "-") {
+            const operand = fieldOf(index, "operand");
+            const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
+            idx = items.length - n;
+          } else {
+            throw frontendError(
+              `a program cannot read an element of a list with a non-constant index`,
+              "a list is read by its index, as in a[0]",
+            );
+          }
         }
         if (idx < 0 || idx >= items.length) {
           throw frontendError(
@@ -334,19 +400,19 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         }
         return programValue(items[idx], bindings);
       }
-      if (one.base.k !== "name") {
+      if (fieldOf(one, "base").k !== "name") {
         throw frontendError(
           `a program cannot read an element of ${describeValue(one.base)}`,
           "a list is read by its index, as in a[0]",
         );
       }
-      return { k: "element", buffer: one.base.name, index: programValue(one.index, bindings) };
+      return { k: "element", buffer: fieldOf(one, "base").name, index: programValue(fieldOf(one, "index"), bindings) };
     }
     case "slice": {
       // Resolve the base to the PyValue it holds (a name looks up its value).
       let base = one.base;
-      if (base.k === "name" && bindings.values.has(base.name)) {
-        base = bindings.values.get(base.name)!;
+      if (base.k === "name" && hasValue(bindings, String(base.name))) {
+        base = valueAt(bindings, String(base.name))!;
       }
       // A program can slice a list or a string whose contents are known: a
       // literal or a name bound to one. Anything else is refused.
@@ -355,13 +421,13 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         // part) is used directly; an f-string is evaluated to a string when
         // every interpolated value is a constant.
         let text: string | null = null;
-        if (base.parts.length === 1 && base.parts[0].k === "text") {
-          text = base.parts[0].value;
+        if (fieldOf(base, "parts").length === 1 && base.parts[0].k === "text") {
+          text = fieldOf(base, "parts")[0].value;
         } else {
           // Try to evaluate the f-string to a concrete string.
           const parts: string[] = [];
           let ok = true;
-          for (const part of base.parts) {
+          for (const part of fieldOf(base, "parts")) {
             if (part.k === "text") {
               parts.push(part.value);
             } else {
@@ -382,11 +448,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         const sliceBound = (bound: PyValue | null, defaultValue: number): number => {
           if (bound === null) return defaultValue;
           let resolved = bound;
-          if (resolved.k === "name" && bindings.values.has(resolved.name)) {
-            resolved = bindings.values.get(resolved.name)!;
+          if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
+            resolved = valueAt(bindings, String(resolved.name))!;
           }
           if (resolved.k === "unary" && resolved.op === "-") {
-            const n = numberOf(resolved.operand);
+            const n = numberOf(fieldOf(resolved, "operand"));
             return Math.max(0, len - n);
           }
           return numberOf(resolved);
@@ -394,11 +460,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         let step = 1;
         if (one.step !== null) {
           let resolved = one.step;
-          if (resolved.k === "name" && bindings.values.has(resolved.name)) {
-            resolved = bindings.values.get(resolved.name)!;
+          if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
+            resolved = valueAt(bindings, String(resolved.name))!;
           }
           if (resolved.k === "unary" && resolved.op === "-") {
-            step = -numberOf(resolved.operand);
+            step = -numberOf(fieldOf(resolved, "operand"));
           } else {
             step = numberOf(resolved);
           }
@@ -426,18 +492,18 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           `slice ${describeValue(one.base)}, which is not a list or a string`,
         );
       }
-      const items = base.items;
+      const items = fieldOf(base, "items");
       const len = items.length;
       // A slice bound: null means the default, a number is taken as-is, a name
       // is looked up, and a negative unary counts from the end (`len - n`).
       const sliceBound = (bound: PyValue | null, defaultValue: number): number => {
         if (bound === null) return defaultValue;
         let resolved = bound;
-        if (resolved.k === "name" && bindings.values.has(resolved.name)) {
-          resolved = bindings.values.get(resolved.name)!;
+        if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
+          resolved = valueAt(bindings, String(resolved.name))!;
         }
         if (resolved.k === "unary" && resolved.op === "-") {
-          const n = numberOf(resolved.operand);
+          const n = numberOf(fieldOf(resolved, "operand"));
           return Math.max(0, len - n);
         }
         return numberOf(resolved);
@@ -446,11 +512,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       let step = 1;
       if (one.step !== null) {
         let resolved = one.step;
-        if (resolved.k === "name" && bindings.values.has(resolved.name)) {
-          resolved = bindings.values.get(resolved.name)!;
+        if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
+          resolved = valueAt(bindings, String(resolved.name))!;
         }
         if (resolved.k === "unary" && resolved.op === "-") {
-          step = -numberOf(resolved.operand);
+          step = -numberOf(fieldOf(resolved, "operand"));
         } else {
           step = numberOf(resolved);
         }
@@ -470,14 +536,14 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           sliced.push(items[i]);
         }
       }
-      const whole = sliced.every((item) => item.k === "number" && item.whole);
+      const whole = sliced.every((item) => item.k === "number" && fieldOf(item, "whole"));
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: sliced.map((item) => programValue(item, bindings)) };
     }
     case "field": {
       // A dict has no fields: Python reads one by its key, and a field of it
       // is an attribute the language does not have.
-      if (one.base.k === "name" && bindings.dicts.has(one.base.name)) {
+      if (one.base.k === "name" && hasDict(bindings, String(fieldOf(one, "base").name))) {
         throw frontendError(
           "a dict is read by its key",
           `as in ${one.base.name}["${one.field}"], which is how Python reads a field of a dict`,
@@ -487,11 +553,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     }
     case "membership": {
       let container = one.container;
-      if (container.k === "name" && bindings.values.has(container.name)) container = bindings.values.get(container.name)!;
+      if (container.k === "name" && hasValue(bindings, String(container.name))) container = valueAt(bindings, String(fieldOf(container, "name")))!;
       const items: PyValue[] = [];
-      if (container.k === "list" || container.k === "set") items.push(...container.items);
-      else if (one.container.k === "call" && one.container.name === "range" && one.container.args.length === 1 && one.container.args[0].k === "number") {
-        const n = Number(one.container.args[0].text);
+      if (container.k === "list" || container.k === "set") items.push(...fieldOf(container, "items"));
+      else if (one.container.k === "call" && one.container.name === "range" && fieldOf(one.container, "args").length === 1 && one.container.args[0].k === "number") {
+        const n = Number(fieldOf(one.container, "args")[0].text);
         for (let i = 0; i < n; i++) items.push({ k: "number", text: String(i), whole: true });
       } else {
         throw frontendError("membership needs a list or a range with a constant bound", "write the list out");
@@ -511,7 +577,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         // inlines where the call is written. The arrow registered here is the
         // function the name holds; its body is a placeholder, since a lambda
         // is only ever called.
-        params: one.params.map((param) => ({ name: param.name, type: "bigint" })),
+        params: (fieldOf(one, "params") as readonly { readonly name: string }[]).map((param) => ({ name: String(fieldOf(param, "name")), type: "bigint" })),
         body: [{ kind: "result", value: { k: "whole", text: "0" }, line: 0 }],
       };
     }
@@ -524,9 +590,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "comprehension": {
       const iterableItems: PyValue[] = [];
       if (one.iterable.k === "list") {
-        iterableItems.push(...one.iterable.items);
-      } else if (one.iterable.k === "call" && one.iterable.name === "range" && one.iterable.args.length === 1 && one.iterable.args[0].k === "number") {
-        const n = Number(one.iterable.args[0].text);
+        iterableItems.push(...fieldOf(one.iterable, "items"));
+      } else if (one.iterable.k === "call" && one.iterable.name === "range" && fieldOf(one.iterable, "args").length === 1 && one.iterable.args[0].k === "number") {
+        const n = Number(fieldOf(one.iterable, "args")[0].text);
         for (let i = 0; i < n; i++) iterableItems.push({ k: "number", text: String(i), whole: true });
       } else {
         throw frontendError("a comprehension needs a list or a range with a constant bound", "write the list out, as in [f(x) for x in [1, 2, 3]]");
@@ -543,22 +609,22 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       const names = new Map();
       if (one.iterable.k === "call" && one.iterable.name === "range") names.set(one.target, "int");
-      else if (one.iterable.k === "list" && one.iterable.items.length > 0 && one.iterable.items[0].k === "number") names.set(one.target, one.iterable.items[0].whole ? "int" : "float");
+      else if (one.iterable.k === "list" && fieldOf(one.iterable, "items").length > 0 && one.iterable.items[0].k === "number") names.set(one.target, fieldOf(one.iterable.items[0], "whole") ? "int" : "float");
       const whole = typeOfValue(one.element, names) === "int";
       return { k: "buffer", element: whole ? "i64" : "f64", values };
     }
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the width
       // of an element is what the list holds it at.
-      const whole = one.items.every((item) => item.k === "number" && item.whole);
+      const whole = one.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: one.items.map((item) => programValue(item, bindings)) };
     }
     case "set": {
       // Pick the representation by domain: a bitset for small bounded
       // non-negative integers, a sparse set otherwise.
-      const nums = one.items.filter((i) => i.k === "number" && i.whole).map((i) => Number((i as { k: "number"; text: string }).text));
-      const allNonNegInts = one.items.length > 0 && one.items.every((i) => i.k === "number" && i.whole && Number(i.text) >= 0);
+      const nums = one.items.filter((i) => i.k === "number" && fieldOf(i, "whole")).map((i) => Number((i as { k: "number"; text: string }).text));
+      const allNonNegInts = one.items.length > 0 && one.items.every((i) => i.k === "number" && fieldOf(i, "whole") && Number(i.text) >= 0);
       const max = allNonNegInts ? Math.max(...nums) : -1;
       let deduped: PyValue[];
       if (allNonNegInts && max <= 1024) {
@@ -573,7 +639,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         for (const item of one.items) set.add(item);
         deduped = set.toArray();
       }
-      const whole = deduped.every((item) => item.k === "number" && item.whole);
+      const whole = deduped.every((item) => item.k === "number" && fieldOf(item, "whole"));
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: deduped.map((item) => programValue(item, bindings)) };
     }
@@ -584,54 +650,54 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       return { k: "object", fields: one.entries.map((entry) => ({ name: entry.name, value: programValue(entry.value, bindings) })) };
     case "binary": {
       // Resolve operands that are names bound to values.
-      const resolve = (v: PyValue): PyValue => (v.k === "name" && bindings.values.has(v.name)) ? bindings.values.get(v.name)! : v;
-      const left = resolve(one.left);
-      const right = resolve(one.right);
+      const resolve = (v: PyValue): PyValue => (v.k === "name" && hasValue(bindings, String(v.name))) ? valueAt(bindings, String(v.name))! : v;
+      const left = resolve(fieldOf(one, "left"));
+      const right = resolve(fieldOf(one, "right"));
       // List concatenation: a + b where both are lists produces a new list.
       if (one.op === "+" && left.k === "list" && right.k === "list") {
-        const items = [...left.items, ...right.items];
-        const whole = items.every((item) => item.k === "number" && item.whole);
+        const items = [...fieldOf(left, "items"), ...fieldOf(right, "items")];
+        const whole = items.every((item) => item.k === "number" && fieldOf(item, "whole"));
         const element: PrimitiveTypeName = whole ? "i64" : "f64";
         return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
       }
       // Set operations: union, intersection, difference, symmetric difference.
       if (left.k === "set" && right.k === "set") {
         const leftSet = new SparseSet();
-        for (const item of left.items) leftSet.add(item);
+        for (const item of fieldOf(left, "items")) leftSet.add(item);
         const rightSet = new SparseSet();
-        for (const item of right.items) rightSet.add(item);
+        for (const item of fieldOf(right, "items")) rightSet.add(item);
 
         if (one.op === "|") {
           const result = new SparseSet();
-          for (const item of left.items) result.add(item);
-          for (const item of right.items) result.add(item);
+          for (const item of fieldOf(left, "items")) result.add(item);
+          for (const item of fieldOf(right, "items")) result.add(item);
           const items = result.toArray();
-          const whole = items.every((i) => i.k === "number" && i.whole);
+          const whole = items.every((i) => i.k === "number" && fieldOf(i, "whole"));
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "&") {
           const result = new SparseSet();
-          for (const item of left.items) if (rightSet.has(item)) result.add(item);
+          for (const item of fieldOf(left, "items")) if (rightSet.has(item)) result.add(item);
           const items = result.toArray();
-          const whole = items.every((i) => i.k === "number" && i.whole);
+          const whole = items.every((i) => i.k === "number" && fieldOf(i, "whole"));
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "-") {
           const result = new SparseSet();
-          for (const item of left.items) if (!rightSet.has(item)) result.add(item);
+          for (const item of fieldOf(left, "items")) if (!rightSet.has(item)) result.add(item);
           const items = result.toArray();
-          const whole = items.every((i) => i.k === "number" && i.whole);
+          const whole = items.every((i) => i.k === "number" && fieldOf(i, "whole"));
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "^") {
           const result = new SparseSet();
-          for (const item of left.items) if (!rightSet.has(item)) result.add(item);
-          for (const item of right.items) if (!leftSet.has(item)) result.add(item);
+          for (const item of fieldOf(left, "items")) if (!rightSet.has(item)) result.add(item);
+          for (const item of fieldOf(right, "items")) if (!leftSet.has(item)) result.add(item);
           const items = result.toArray();
-          const whole = items.every((i) => i.k === "number" && i.whole);
+          const whole = items.every((i) => i.k === "number" && fieldOf(i, "whole"));
           const element: PrimitiveTypeName = whole ? "i64" : "f64";
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
@@ -640,7 +706,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           return { k: "boolean", value: ok };
         }
         if (one.op === "<") {
-          const ok = left.items.every((x) => rightSet.has(x)) && left.items.length < right.items.length;
+          const ok = (fieldOf(left, "items") as readonly PyValue[]).every((x) => rightSet.has(x)) && left.items.length < fieldOf(right, "items").length;
           return { k: "boolean", value: ok };
         }
         if (one.op === ">=") {
@@ -648,11 +714,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           return { k: "boolean", value: ok };
         }
         if (one.op === ">") {
-          const ok = right.items.every((x) => leftSet.has(x)) && right.items.length < left.items.length;
+          const ok = (fieldOf(right, "items") as readonly PyValue[]).every((x) => leftSet.has(x)) && right.items.length < fieldOf(left, "items").length;
           return { k: "boolean", value: ok };
         }
         if (one.op === "==" || one.op === "!=") {
-          const ok = left.items.length === right.items.length && left.items.every((x) => rightSet.has(x));
+          const ok = fieldOf(left, "items").length === fieldOf(right, "items").length && left.items.every((x) => rightSet.has(x));
           return { k: "boolean", value: one.op === "==" ? ok : !ok };
         }
       }
@@ -664,7 +730,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           "the operators of a program are the arithmetic, the comparison and the logical ones",
         );
       }
-      return { k: "binary", op: operator, left: programValue(one.left, bindings), right: programValue(one.right, bindings) };
+      return { k: "binary", op: operator, left: programValue(fieldOf(one, "left"), bindings), right: programValue(fieldOf(one, "right"), bindings) };
     }
     case "unary": {
       const operator = UNARY_OPERATORS[one.op];
@@ -674,13 +740,13 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           "the operators of a program are the arithmetic, the comparison and the logical ones",
         );
       }
-      return { k: "unary", op: operator, operand: programValue(one.operand, bindings) };
+      return { k: "unary", op: operator, operand: programValue(fieldOf(one, "operand"), bindings) };
     }
     case "conditional":
       return {
         k: "conditional",
         condition: programValue(one.condition, bindings),
-        then: programValue(one.then, bindings),
+        then: programValue(fieldOf(one, "then"), bindings),
         otherwise: programValue(one.otherwise, bindings),
       };
   }
@@ -691,11 +757,11 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
  *  names bound to a string, and f-strings of constants. */
 function stringOf(value: PyValue, bindings: Bindings): string | null {
   if (value.k === "number") return value.text;
-  if (value.k === "boolean") return value.value ? "True" : "False";
+  if (value.k === "boolean") return fieldOf(value, "value") ? "True" : "False";
   if (value.k === "none") return "None";
   if (value.k === "text") {
     const parts: string[] = [];
-    for (const part of value.parts) {
+    for (const part of fieldOf(value, "parts")) {
       if (part.k === "text") {
         parts.push(part.value);
       } else {
@@ -706,8 +772,8 @@ function stringOf(value: PyValue, bindings: Bindings): string | null {
     }
     return parts.join("");
   }
-  if (value.k === "name" && bindings.values.has(value.name)) {
-    return stringOf(bindings.values.get(value.name)!, bindings);
+  if (value.k === "name" && hasValue(bindings, String(value.name))) {
+    return stringOf(valueAt(bindings, String(value.name))!, bindings);
   }
   return null;
 }
@@ -726,8 +792,8 @@ function numberOf(value: PyValue): number {
 /** The text of a value written as it is, or null when it is not one text. */
 function textOf(value: PyValue): string | null {
   if (value.k !== "text") return null;
-  if (value.parts.length !== 1) return null;
-  const part = value.parts[0];
+  if (fieldOf(value, "parts").length !== 1) return null;
+  const part = fieldOf(value, "parts")[0];
   return part.k === "text" ? part.value : null;
 }
 
@@ -744,8 +810,8 @@ function text(parts: readonly PyTextPart[], bindings: Bindings): ProgramText[] {
 function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
   switch (one.k) {
     case "declare": {
-      const value = programValue(one.value, bindings);
-      bound(bindings, one.name, one.value);
+      const value = programValue(fieldOf(one, "value"), bindings);
+      bound(bindings, one.name, fieldOf(one, "value"));
       return {
         kind: "declare",
         name: one.name,
@@ -776,7 +842,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       return { kind: "assign", name: one.name, op: operator, value, line: one.line };
     }
     case "storeElement": {
-      const target = one.target as { k: "index"; base: PyValue; index: PyValue };
+      const target = fieldOf(one, "target") as { k: "index"; base: PyValue; index: PyValue };
       const base = target.base;
       if (base.k !== "name") {
         throw frontendError('"a[i] = value" is not supported', "the object is a name the program holds");
@@ -787,17 +853,17 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         index: programValue(target.index, bindings),
         op: "=",
         value: programValue(one.value, bindings),
-        line: one.line,
+        line: fieldOf(one, "line"),
       };
     }
     case "storeSlice": {
       const base = one.base;
       // If the RHS is a list literal, handle it.
       if (one.value.k === "list") {
-        const rhsItems = one.value.items;
+        const rhsItems = fieldOf(fieldOf(one, "value"), "items") as PyValue[];
         // Resolve base to its list value if known.
-        const baseVal = bindings.values.get(base);
-        const baseItems = baseVal !== undefined && baseVal.k === "list" ? baseVal.items : [];
+        const baseVal = valueAt(bindings, String(base));
+        const baseItems = baseVal !== undefined && baseVal.k === "list" ? fieldOf(baseVal, "items") : [];
         const baseLen = baseItems.length;
         // Compute slice indices.
         let startBound = 0;
@@ -805,7 +871,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
           if (one.start.k === "number") {
             startBound = Number(one.start.text);
           } else if (one.start.k === "unary" && one.start.op === "-") {
-            const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
+            const operand = fieldOf(one.start, "operand");
+            const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
             startBound = Math.max(0, baseLen - n);
           }
         }
@@ -818,7 +885,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
           if (one.stop.k === "number") {
             stopBound = Number(one.stop.text);
           } else if (one.stop.k === "unary" && one.stop.op === "-") {
-            const n = one.stop.operand.k === "number" ? Number(one.stop.operand.text) : 0;
+            const operand = fieldOf(one.stop, "operand");
+            const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
             stopBound = Math.max(0, baseLen - n);
           }
         }
@@ -861,10 +929,11 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       if (one.start === null) {
         startPy = { k: "number", text: "0", whole: true };
       } else if (one.start.k === "unary" && one.start.op === "-") {
-        const n = one.start.operand.k === "number" ? Number(one.start.operand.text) : 0;
-        const baseVal = bindings.values.get(base);
+        const operand = fieldOf(one.start, "operand");
+        const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
+        const baseVal = valueAt(bindings, String(base));
         let len = 0;
-        if (baseVal !== undefined && baseVal.k === "list") len = baseVal.items.length;
+        if (baseVal !== undefined && baseVal.k === "list") len = fieldOf(baseVal, "items").length;
         startPy = { k: "number", text: String(Math.max(0, len - n)), whole: true };
       } else {
         startPy = one.start;
@@ -931,8 +1000,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     case "return":
       return { kind: "result", value: programValue(one.value ?? { k: "none" }, bindings), line: one.line };
     case "if": {
-      conditionIsBoolean(one.condition, one.line);
-      const condition = programValue(one.condition, bindings);
+      conditionIsBoolean(fieldOf(one, "condition"), fieldOf(one, "line"));
+      const condition = programValue(fieldOf(one, "condition"), bindings);
       // The two arms are lowered against the names the `if` was written with,
       // and neither sees what the other wrote: only one of them runs.
       const thenScope = cloneBindings(bindings);
@@ -941,11 +1010,11 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       const otherwise = one.otherwise.map((inside) => statement(inside, otherwiseScope));
       invalidate(bindings, thenScope);
       invalidate(bindings, otherwiseScope);
-      return { kind: "if", condition, then, otherwise, line: one.line };
+      return { kind: "if", condition, then, otherwise, line: fieldOf(one, "line") };
     }
     case "while": {
-      conditionIsBoolean(one.condition, one.line);
-      const condition = programValue(one.condition, bindings);
+      conditionIsBoolean(fieldOf(one, "condition"), fieldOf(one, "line"));
+      const condition = programValue(fieldOf(one, "condition"), bindings);
       return { kind: "while", condition, body: branch(one.body, bindings), line: one.line };
     }
     case "for":
@@ -977,15 +1046,17 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       return { kind: "block", body, line: one.line };
     }
     case "call": {
-      const called = one.value;
+      const called = fieldOf(one, "value");
       if (called.k !== "call") {
         throw frontendError(`"${describeValue(called)}" is not a call`, "a statement of a program is a call");
       }
-      if ((called as any).grid !== undefined) {
+      if (fieldOf(called, "grid") !== undefined) {
+        const invokeArgs: ProgramValue[] = [];
+        for (const argument of fieldOf(called, "args") as readonly PyValue[]) invokeArgs[invokeArgs.length] = programValue(argument, bindings);
         return {
           kind: "invoke",
-          function: builtinName(called.name),
-          args: called.args.map((argument) => programValue(argument, bindings)),
+          function: builtinName(String(fieldOf(called, "name"))),
+          args: invokeArgs,
           grid: (called as any).grid,
           line: one.line,
         } as any;
@@ -993,7 +1064,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       return {
         kind: "invoke",
         function: builtinName(called.name),
-        args: called.args.map((argument) => programValue(argument, bindings)),
+        args: (fieldOf(called, "args") as readonly PyValue[]).map((argument) => programValue(argument, bindings)),
         line: one.line,
       };
     }
@@ -1011,17 +1082,17 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
  */
 function bound(bindings: Bindings, name: string, value: PyValue): void {
   if (value.k === "dict") {
-    bindings.dicts.set(name, new Set(value.entries.map((entry) => entry.name)));
+    setDict(bindings, name, new Set(value.entries.map((entry) => entry.name)));
   } else {
-    bindings.dicts.delete(name);
+    deleteDict(bindings, name);
   }
-  bindings.values.set(name, value);
+  setValue(bindings, name, value);
 }
 
 /** A name whose value the body no longer knows: it is read as the name it is. */
 function forget(bindings: Bindings, name: string): void {
-  bindings.values.delete(name);
-  bindings.dicts.delete(name);
+  deleteValue(bindings, name);
+  deleteDict(bindings, name);
 }
 
 /**
@@ -1036,11 +1107,17 @@ function forget(bindings: Bindings, name: string): void {
  * turn happened to compute.
  */
 function invalidate(bindings: Bindings, after: Bindings): void {
-  for (const name of new Set([...bindings.values.keys(), ...after.values.keys()])) {
-    if (bindings.values.get(name) !== after.values.get(name)) forget(bindings, name);
+  const seen: Set<string> = new Set();
+  for (const name of valueNames(bindings)) seen.add(name);
+  for (const name of valueNames(after)) seen.add(name);
+  for (const name of seen) {
+    if (valueAt(bindings, name) !== valueAt(after, name)) forget(bindings, name);
   }
-  for (const name of new Set([...bindings.dicts.keys(), ...after.dicts.keys()])) {
-    if (bindings.dicts.get(name) !== after.dicts.get(name)) forget(bindings, name);
+  const dictNames: Set<string> = new Set();
+  for (const name of dictsOf(bindings).keys()) dictNames.add(name);
+  for (const name of dictsOf(after).keys()) dictNames.add(name);
+  for (const name of dictNames) {
+    if (dictOf(bindings, name) !== dictOf(after, name)) forget(bindings, name);
   }
 }
 

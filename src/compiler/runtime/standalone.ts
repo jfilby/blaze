@@ -113,11 +113,11 @@ function cacheKey(
   const model = processors.length === 0 ? "unknown" : String(fieldOf(processors[0], "model") ?? "unknown");
   const machine = `${hostArchitecture()}/${model}`;
   const flags = fieldOf(request, "flags") as readonly string[];
+  const material: string[] = [CACHE_SCHEMA, String(fieldOf(toolchain, "id")), compiler, machine, String(fieldOf(request, "name"))];
+  for (const flag of flags) material[material.length] = flag;
+  material[material.length] = String(fieldOf(request, "source"));
   return createHash("sha256")
-    .update(
-      [CACHE_SCHEMA, String(fieldOf(toolchain, "id")), compiler, machine, String(fieldOf(request, "name")), ...flags, String(fieldOf(request, "source"))].join("\u0000"),
-      "utf8",
-    )
+    .update(material.join("\u0000"), "utf8")
     .digest("hex")
     .slice(0, 32);
 }
@@ -180,7 +180,13 @@ export async function compileRuntimeSource(request: {
   await mkdir(directory, { recursive: true });
   temporary += 1;
   const building = `${directory}/${key}.${processId()}-${temporary}.tmp`;
-  const command = compileCommand(toolchain, ["-std=c11", ...flags, "-c", "-o", building, sourcePath]);
+  const args: string[] = ["-std=c11"];
+  for (const flag of flags) args[args.length] = flag;
+  args[args.length] = "-c";
+  args[args.length] = "-o";
+  args[args.length] = building;
+  args[args.length] = sourcePath;
+  const command = compileCommand(toolchain, args);
   const compiled = run(
     String(fieldOf(command, "command")),
     fieldOf(command, "args") as readonly string[],
@@ -236,17 +242,21 @@ export async function buildStandaloneRuntime(
   // own, and the `-Wl,--gc-sections` at the link then drops the ones this
   // program never reached. A section is only collectable if it is one.
   const toolchain = toolchainForTarget(target);
+  const flags: string[] = [];
+  for (const flag of objectOptions(toolchain, mode, undefined)) flags[flags.length] = flag;
+  for (const flag of cTargetOptions(target)) flags[flags.length] = flag;
+  flags[flags.length] = "-ffunction-sections";
+  flags[flags.length] = "-fdata-sections";
   const compiled = await compileRuntimeSource({
     workDirectory,
     name: RUNTIME_NAME,
     source: runtimeSourceSource(mode),
-    flags: [
-      ...objectOptions(toolchain, mode, undefined),
-      ...cTargetOptions(target),
-      "-ffunction-sections",
-      "-fdata-sections",
-    ],
+    flags,
     target,
   });
-  return { headerPath, ...compiled };
+  return {
+    headerPath,
+    sourcePath: String(fieldOf(compiled, "sourcePath")),
+    objectPath: String(fieldOf(compiled, "objectPath")),
+  };
 }

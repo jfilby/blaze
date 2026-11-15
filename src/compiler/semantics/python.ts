@@ -1,3 +1,19 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
+/** A module with the functions and body a pass rewrote, and every other field as it was. */
+function withModuleBody(module: PyModule, functions: PyFunction[], body: PyStatement[]): PyModule {
+  const copy = structuredClone(module) as PyModule;
+  setFieldOn(copy, "functions", functions);
+  setFieldOn(copy, "body", body);
+  return copy;
+}
+
 /**
  * Frontend: Python module -> module analysis and function contracts.
  *
@@ -200,7 +216,7 @@ export function tokenizePython(source: string, path: string): PyToken[] {
       continue;
     }
 
-    const character = source[index];
+    const character = String(source[index]);
     if (character === "\n") {
       line += 1;
       index += 1;
@@ -295,7 +311,7 @@ export function tokenizePython(source: string, path: string): PyToken[] {
 /** Where the indentation of a line ends. */
 function indentationEnd(source: string, index: number): number {
   let column = index;
-  while (column < source.length && (source[column] === " " || source[column] === "\t")) column += 1;
+  while (column < source.length && (String(source[column]) === " " || String(source[column]) === "\t")) column += 1;
   return column;
 }
 
@@ -303,7 +319,7 @@ function indentationEnd(source: string, index: number): number {
 function indentationWidth(source: string, index: number, column: number): number {
   let width = 0;
   for (let at = index; at < column; at += 1) {
-    width += source[at] === "\t" ? 8 - (width % 8) : 1;
+    width += String(source[at]) === "\t" ? 8 - (width % 8) : 1;
   }
   return width;
 }
@@ -322,7 +338,7 @@ function readString(
   line: number,
   path: string,
 ): { text: string; end: number; line: number } {
-  const quote = source[start];
+  const quote = String(source[start]);
   const raw = prefix.includes("r");
   // A string of three quotes ends at three quotes, and one of one ends at one.
   const closing = source.startsWith(quote.repeat(3), start) ? quote.repeat(3) : quote;
@@ -332,10 +348,10 @@ function readString(
     if (index >= source.length) {
       throw frontendError(`a string of ${path} is never closed`, `line ${line} of ${path}`);
     }
-    const character = source[index];
+    const character = String(source[index]);
     if (character === "\\") {
-      const escape = source[index + 1];
-      if (escape === undefined) {
+      const escape = source[index + 1] === undefined ? "" : String(source[index + 1]);
+      if (escape === "") {
         throw frontendError(`a string of ${path} ends in a backslash`, `line ${line} of ${path}`);
       }
       if (raw) {
@@ -778,7 +794,7 @@ class PythonParser {
   }
 
   private report(message: string, detail: string, token: PyToken = this.peek()): void {
-    this.diagnostics.report(message, detail, token.line);
+    this.diagnostics.report(message, detail, fieldOf(token, "line"));
   }
 
   /** A value standing in for one the parser could not read. */
@@ -878,7 +894,7 @@ class PythonParser {
           const baseClass = classes.find((entry) => entry.name === baseName);
           if (baseClass !== undefined) {
             const existing = new Set(fields.map((field) => field.name));
-            for (const baseField of baseClass.fields) {
+            for (const baseField of fieldOf(baseClass, "fields")) {
               if (!existing.has(baseField.name)) {
                 fields.unshift(baseField);
                 existing.add(baseField.name);
@@ -1447,7 +1463,7 @@ class PythonParser {
           for (let i = cases.length - 1; i >= 0; i--) {
             const entry = cases[i];
             if (entry.wildcard) {
-              otherwise = entry.body;
+              otherwise = fieldOf(entry, "body");
               continue;
             }
             let condition: PyValue = { k: "binary", op: "==", left: subject, right: entry.pattern };
@@ -1506,7 +1522,7 @@ class PythonParser {
       // not cover them: the runtime writes an array as `[1,2]` and Python
       // writes `[1, 2]`, and the runtime writes an object as JSON and Python
       // writes `{'a': 1}`.
-      for (const argument of value.args) {
+      for (const argument of fieldOf(value, "args")) {
         if (argument.k !== "list" && argument.k !== "dict") continue;
         this.report(
           "a list or a dict is not written the way Python writes it",
@@ -1514,7 +1530,7 @@ class PythonParser {
           token,
         );
       }
-      return { k: "print", values: value.args, line: token.line };
+      return { k: "print", values: fieldOf(value, "args"), line: token.line };
     }
     // A string written as a statement of its own says nothing: it is the
     // docstring of a function or of a module, and Python reads it and throws
@@ -1623,7 +1639,7 @@ class PythonParser {
         if (sliceOrIndex.k === "index") {
           return { k: "storeElement", target: sliceOrIndex, value, line: name.line };
         }
-        return { k: "storeSlice", base: name.text, start: sliceOrIndex.start, stop: sliceOrIndex.stop, step: sliceOrIndex.step, value, line: name.line };
+        return { k: "storeSlice", base: name.text, start: fieldOf(sliceOrIndex, "start"), stop: fieldOf(sliceOrIndex, "stop"), step: sliceOrIndex.step, value, line: name.line };
       }
       // `name.field = value`
       if (this.peek().kind === "op" && this.peek().text === ".") {
@@ -1708,7 +1724,7 @@ class PythonParser {
         return { k: "storeElement", target: sliceOrIndex, value, line: name.line };
       }
       // Slice assignment.
-      return { k: "storeSlice", base: name.text, start: sliceOrIndex.start, stop: sliceOrIndex.stop, step: sliceOrIndex.step, value, line: name.line };
+      return { k: "storeSlice", base: name.text, start: fieldOf(sliceOrIndex, "start"), stop: fieldOf(sliceOrIndex, "stop"), step: sliceOrIndex.step, value, line: name.line };
     }
     if (
       name.kind === "name" &&
@@ -1835,7 +1851,7 @@ class PythonParser {
       this.skipStatement();
       return { k: "pass", line: start.line };
     }
-    const bounds = walked.args;
+    const bounds = fieldOf(walked, "args");
     if (bounds.length < 1 || bounds.length > 3) {
       this.report("range takes one, two or three bounds", `near "${this.peek().text}"`, this.peek());
       this.skipStatement();
@@ -2126,13 +2142,14 @@ class PythonParser {
         }
         if (value.k === "index") {
           // Allow grid launch syntax like kernel[grid](args...)
+          const gridBase = fieldOf(value, "base");
           const name =
-            value.base.k === "name"
-              ? value.base.name
-              : value.base.k === "field"
-                ? dottedName(value.base)
+            gridBase.k === "name"
+              ? String(fieldOf(gridBase, "name"))
+              : gridBase.k === "field"
+                ? dottedName(gridBase)
                 : "";
-          const grid = value.index;
+          const grid = fieldOf(value, "index");
           value = { k: "call", name, args, grid } as any;
           continue;
         }
@@ -2195,7 +2212,7 @@ class PythonParser {
             k: "binary",
             op: "-",
             left: { k: "call", name: "len", args: [value] },
-            right: index.operand,
+            right: fieldOf(index, "operand"),
           };
         }
         this.expect("]");
@@ -2355,7 +2372,10 @@ class PythonParser {
       if (this.at(":")) {
         // A dict: key: value pairs.
         const entries: { name: string; value: PyValue }[] = [];
-        const name = first.k === "name" ? first.name : (first.k === "text" ? (first as any).parts?.[0]?.value : null);
+        const firstParts = fieldOf(first, "parts") as { value: string }[];
+        const name = first.k === "name"
+          ? String(fieldOf(first, "name"))
+          : (first.k === "text" ? (firstParts[0] === undefined ? null : String(fieldOf(firstParts[0], "value"))) : null);
         this.next(); // :
         const value = this.expression();
         entries.push({ name: name ?? "", value });
@@ -2431,23 +2451,24 @@ function isEntryGuard(statement: PyStatement): boolean {
   if (statement.k !== "if") return false;
   const condition = statement.condition;
   if (condition.k !== "binary" || condition.op !== "==") return false;
-  return isMainText(condition.left) && isMainText(condition.right);
+  return isMainText(condition.left) && isMainText(fieldOf(condition, "right"));
 }
 
 /** Whether a value is the text `__main__`. */
 function isMainText(value: PyValue): boolean {
+  const parts = fieldOf(value, "parts") as { k: string; value: string }[];
   return (
     value.k === "text" &&
-    value.parts.length === 1 &&
-    value.parts[0].k === "text" &&
-    value.parts[0].value === "__main__"
+    parts.length === 1 &&
+    String(fieldOf(parts[0], "k")) === "text" &&
+    String(fieldOf(parts[0], "value")) === "__main__"
   );
 }
 
 /** Where the `}` that closes an interpolation sits, or -1. */
 function closingBrace(text: string, open: number): number {  let depth = 0;
   for (let index = open; index < text.length; index += 1) {
-    const character = text[index];
+    const character = String(text[index]);
     if (character === "{") depth += 1;
     else if (character === "}") {
       depth -= 1;
@@ -2473,7 +2494,7 @@ export function describeValue(value: PyValue): string {
     case "call":
       return `"${value.name}(...)"`;
     case "index":
-      return `${describeValue(value.base)}[...]`;
+      return `${describeValue(fieldOf(value, "base"))}[...]`;
     case "slice":
       return `${describeValue(value.base)}[...]`;
     case "field":
@@ -2493,9 +2514,9 @@ export function describeValue(value: PyValue): string {
     case "walrus":
       return describeValue(value.value);
     case "binary":
-      return `${describeValue(value.left)} ${value.op} ${describeValue(value.right)}`;
+      return `${describeValue(fieldOf(value, "left"))} ${value.op} ${describeValue(fieldOf(value, "right"))}`;
     case "unary":
-      return `${value.op}${describeValue(value.operand)}`;
+      return `${value.op}${describeValue(fieldOf(value, "operand"))}`;
     case "conditional":
       return "a conditional";
     case "sized":
@@ -2521,18 +2542,18 @@ function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: n
     switch (statement.k) {
       case "declare":
       case "assign":
-        eachValueIn(statement.value, visit, statement.line);
+        eachValueIn(fieldOf(statement, "value"), visit, statement.line);
         break;
       case "return":
         if (statement.value !== null) eachValueIn(statement.value, visit, statement.line);
         break;
       case "if":
-        eachValueIn(statement.condition, visit, statement.line);
+        eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
         eachValue(statement.then, visit);
         eachValue(statement.otherwise, visit);
         break;
       case "while":
-        eachValueIn(statement.condition, visit, statement.line);
+        eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
         eachValue(statement.body, visit);
         break;
       case "for":
@@ -2542,7 +2563,7 @@ function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: n
         eachValue(statement.body, visit);
         break;
       case "print":
-        statement.values.forEach((value) => eachValueIn(value, visit, statement.line));
+        statement.values.forEach((value) => eachValueIn(value, visit, fieldOf(statement, "line")));
         break;
       case "try":
         eachValue(statement.body, visit);
@@ -2550,7 +2571,7 @@ function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: n
         if (statement.finallyBody !== null) eachValue(statement.finallyBody, visit);
         break;
       case "call":
-        eachValueIn(statement.value, visit, statement.line);
+        eachValueIn(fieldOf(statement, "value"), visit, statement.line);
         break;
       case "break":
       case "continue":
@@ -2569,20 +2590,20 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       value.args.forEach((argument) => eachValueIn(argument, visit, line));
       return;
     case "binary":
-      eachValueIn(value.left, visit, line);
-      eachValueIn(value.right, visit, line);
+      eachValueIn(fieldOf(value, "left"), visit, line);
+      eachValueIn(fieldOf(value, "right"), visit, line);
       return;
     case "unary":
       eachValueIn(value.operand, visit, line);
       return;
     case "conditional":
       eachValueIn(value.condition, visit, line);
-      eachValueIn(value.then, visit, line);
+      eachValueIn(fieldOf(value, "then"), visit, line);
       eachValueIn(value.otherwise, visit, line);
       return;
     case "index":
-      eachValueIn(value.base, visit, line);
-      eachValueIn(value.index, visit, line);
+      eachValueIn(fieldOf(value, "base"), visit, line);
+      eachValueIn(fieldOf(value, "index"), visit, line);
       return;
     case "slice":
       eachValueIn(value.base, visit, line);
@@ -2621,7 +2642,7 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       value.entries.forEach((entry) => eachValueIn(entry.value, visit, line));
       return;
     case "text":
-      value.parts.forEach((part) => {
+      (fieldOf(value, "parts") as PyTextPart[]).forEach((part) => {
         if (part.k === "value") eachValueIn(part.value, visit, line);
       });
       return;
@@ -2668,41 +2689,48 @@ function readsCommandLine(body: readonly PyStatement[]): boolean {
  */
 function fillDefaultArguments(module: PyModule): PyModule {
   const defaults = new Map<string, PyValue[]>();
-  for (const fn of module.functions) {
-    defaults.set(fn.name, fn.params.map((param) => param.default as PyValue));
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    defaults.set(fn.name, (fieldOf(fn, "params") as PyParam[]).map((param) => param.default as PyValue));
   }
   function fillValue(value: PyValue): PyValue {
     if (value.k === "call") {
-      const ds = defaults.get(value.name);
-      if (ds !== undefined && value.args.length < ds.length) {
-        const padded = [...value.args];
-        for (let i = value.args.length; i < ds.length; i++) {
-          if (ds[i] !== undefined) padded.push(ds[i]!);
-          else break;
+      const ds = defaults.get(String(fieldOf(value, "name")));
+      const args = fieldOf(value, "args") as PyValue[];
+      if (ds !== undefined && args.length < ds.length) {
+        const padded: PyValue[] = [];
+        for (let i = 0; i < args.length; i++) padded[padded.length] = args[i];
+        for (let i = args.length; i < ds.length; i++) {
+          const fallback = ds[i];
+          if (fallback === undefined) break;
+          padded[padded.length] = fallback;
         }
-        value.args = padded;
+        setFieldOn(value, "args", padded);
       }
-      value.args = value.args.map((inner) => fillValue(inner));
-      if (value.grid !== undefined) value.grid = fillValue(value.grid);
+      const current = fieldOf(value, "args") as PyValue[];
+      const filledArgs: PyValue[] = [];
+      for (const inner of current) filledArgs[filledArgs.length] = fillValue(inner);
+      setFieldOn(value, "args", filledArgs);
+      const grid = fieldOf(value, "grid");
+      if (grid !== undefined) setFieldOn(value, "grid", fillValue(grid));
       return value;
     }
     // Recurse into composite values.
     switch (value.k) {
       case "binary":
-        value.left = fillValue(value.left);
-        value.right = fillValue(value.right);
+        value.left = fillValue(fieldOf(value, "left"));
+        value.right = fillValue(fieldOf(value, "right"));
         break;
       case "unary":
-        value.operand = fillValue(value.operand);
+        value.operand = fillValue(fieldOf(value, "operand"));
         break;
       case "conditional":
         value.condition = fillValue(value.condition);
-        value.then = fillValue(value.then);
+        value.then = fillValue(fieldOf(value, "then"));
         value.otherwise = fillValue(value.otherwise);
         break;
       case "index":
-        value.base = fillValue(value.base);
-        value.index = fillValue(value.index);
+        value.base = fillValue(fieldOf(value, "base"));
+        value.index = fillValue(fieldOf(value, "index"));
         break;
       case "slice":
         value.base = fillValue(value.base);
@@ -2740,7 +2768,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
   function fillStatement(stmt: PyStatement): PyStatement {
     switch (stmt.k) {
       case "declare":
-        stmt.value = fillValue(stmt.value);
+        stmt.value = fillValue(fieldOf(stmt, "value"));
         break;
       case "assign":
         stmt.value = fillValue(stmt.value);
@@ -2750,7 +2778,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
         stmt.value = fillValue(stmt.value);
         break;
       case "storeElement":
-        stmt.target = fillValue(stmt.target) as any;
+        stmt.target = fillValue(fieldOf(stmt, "target")) as any;
         stmt.value = fillValue(stmt.value);
         break;
       case "storeSlice":
@@ -2763,12 +2791,12 @@ function fillDefaultArguments(module: PyModule): PyModule {
         if (stmt.value !== null) stmt.value = fillValue(stmt.value);
         break;
       case "if":
-        stmt.condition = fillValue(stmt.condition);
+        stmt.condition = fillValue(fieldOf(stmt, "condition"));
         stmt.then = stmt.then.map((inner) => fillStatement(inner));
         stmt.otherwise = stmt.otherwise.map((inner) => fillStatement(inner));
         break;
       case "while":
-        stmt.condition = fillValue(stmt.condition);
+        stmt.condition = fillValue(fieldOf(stmt, "condition"));
         stmt.body = stmt.body.map((inner) => fillStatement(inner));
         break;
       case "for":
@@ -2781,7 +2809,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
         stmt.values = stmt.values.map((inner) => fillValue(inner));
         break;
       case "call":
-        stmt.value = fillValue(stmt.value);
+        stmt.value = fillValue(fieldOf(stmt, "value"));
         break;
       case "function":
         stmt.body = stmt.body.map((inner) => fillStatement(inner));
@@ -2794,12 +2822,20 @@ function fillDefaultArguments(module: PyModule): PyModule {
     }
     return stmt;
   }
-  const filledFunctions = module.functions.map((fn) => ({
-    ...fn,
-    body: fn.body.map((inner) => fillStatement(inner)),
-  }));
-  const filledBody = module.body.map((inner) => fillStatement(inner));
-  return { ...module, functions: filledFunctions, body: filledBody };
+  const filledFunctions: PyFunction[] = [];
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const filledBodyOfFn: PyStatement[] = [];
+    for (const inner of fieldOf(fn, "body") as PyStatement[]) filledBodyOfFn[filledBodyOfFn.length] = fillStatement(inner);
+    const copy = structuredClone(fn) as PyFunction;
+    setFieldOn(copy, "body", filledBodyOfFn);
+    filledFunctions[filledFunctions.length] = copy;
+  }
+  const filledBody: PyStatement[] = [];
+  for (const inner of fieldOf(module, "body") as PyStatement[]) filledBody[filledBody.length] = fillStatement(inner);
+  const filled = structuredClone(module) as PyModule;
+  setFieldOn(filled, "functions", filledFunctions);
+  setFieldOn(filled, "body", filledBody);
+  return filled;
 }
 
 /**
@@ -2921,8 +2957,8 @@ function expandWalrus(module: PyModule): PyModule {
   const expandStmt = (stmt: PyStatement, scope: Set<string>): PyStatement[] => {
     switch (stmt.k) {
       case "declare": {
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
+        const r = expandExpr(fieldOf(stmt, "value"), scope);
+        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);
@@ -3026,12 +3062,15 @@ function expandWalrus(module: PyModule): PyModule {
     }
   };
 
-  const expandedFunctions = module.functions.map((fn) => ({
-    ...fn,
-    body: fn.body.flatMap((st) => expandStmt(st, new Set(fn.params.map((p) => p.name)))),
-  }));
-  const expandedBody = module.body.flatMap((st) => expandStmt(st, new Set()));
-  return { ...module, functions: expandedFunctions, body: expandedBody };
+  const expandedFunctions: PyFunction[] = [];
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const copy = structuredClone(fn) as PyFunction;
+    setFieldOn(copy, "body", (fieldOf(fn, "body") as PyStatement[]).flatMap((st) => expandStmt(st, new Set((fieldOf(fn, "params") as PyParam[]).map((p) => String(fieldOf(p, "name")))))));
+    expandedFunctions[expandedFunctions.length] = copy;
+  }
+  const expandedBody: PyStatement[] = [];
+  for (const st of fieldOf(module, "body") as PyStatement[]) for (const one of expandStmt(st, new Set())) expandedBody[expandedBody.length] = one;
+  return withModuleBody(module, expandedFunctions, expandedBody);
 }
 
 /**
@@ -3054,14 +3093,14 @@ function expandComprehensions(module: PyModule): PyModule {
         let sizeExpr: PyValue | null = null;
         let names: Map<string, PyType> = new Map();
         let elementIsInt = false;
-        if (value.iterable.k === "call" && value.iterable.name === "range" && value.iterable.args.length === 1) {
-          sizeExpr = value.iterable.args[0];
+        if (value.iterable.k === "call" && value.iterable.name === "range" && fieldOf(value.iterable, "args").length === 1) {
+          sizeExpr = fieldOf(value.iterable, "args")[0];
           // item is int
           names.set(value.target, "int");
         } else if (value.iterable.k === "list") {
-          sizeExpr = { k: "number", text: String(value.iterable.items.length), whole: true };
+          sizeExpr = { k: "number", text: String(fieldOf(value.iterable, "items").length), whole: true };
           // item is list[i]
-          if (value.iterable.items.length > 0 && value.iterable.items[0].k === "number" && value.iterable.items[0].whole) {
+          if (fieldOf(value.iterable, "items").length > 0 && fieldOf(value.iterable, "items")[0].k === "number" && fieldOf(value.iterable.items[0], "whole")) {
             names.set(value.target, "int");
           } else {
             names.set(value.target, "float");
@@ -3091,12 +3130,12 @@ function expandComprehensions(module: PyModule): PyModule {
           itemBinding = { k: "index", base: value.iterable, index: { k: "name", name: loopVar } };
         }
         const pre: PyStatement[] = [
-          { k: "declare", name: temp, type: null, value: { k: "sized", element, count: sizeExpr }, line: 1 },
+          { k: "declare", name: temp, type: null, value: { k: "sized", element, count: sizeExpr as PyValue }, line: 1 },
           {
             k: "for",
             variable: loopVar,
             from: { k: "number", text: "0", whole: true },
-            to: sizeExpr,
+            to: sizeExpr as PyValue,
             step: null,
             body: [
               { k: "declare", name: value.target, type: null, value: itemBinding, line: 1 },
@@ -3108,31 +3147,31 @@ function expandComprehensions(module: PyModule): PyModule {
         return { value: { k: "name", name: temp }, pre };
       }
       case "binary": {
-        const L = expandExpr(value.left, scope);
-        const R = expandExpr(value.right, scope);
-        return { value: { ...value, left: L.value, right: R.value }, pre: [...L.pre, ...R.pre] };
+        const L = expandExpr(fieldOf(value, "left"), scope);
+        const R = expandExpr(fieldOf(value, "right"), scope);
+        return { value: { ...value, left: L.value, right: R.value }, pre: [...fieldOf(L, "pre"), ...fieldOf(R, "pre")] };
       }
       case "unary": {
-        const O = expandExpr(value.operand, scope);
-        return { value: { ...value, operand: O.value }, pre: O.pre };
+        const O = expandExpr(fieldOf(value, "operand"), scope);
+        return { value: { ...value, operand: O.value }, pre: fieldOf(O, "pre") };
       }
       case "conditional": {
         const C = expandExpr(value.condition, scope);
-        const T = expandExpr(value.then, scope);
+        const T = expandExpr(fieldOf(value, "then"), scope);
         const O = expandExpr(value.otherwise, scope);
-        return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...C.pre, ...T.pre, ...O.pre] };
+        return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...fieldOf(C, "pre"), ...fieldOf(T, "pre"), ...fieldOf(O, "pre")] };
       }
       case "index": {
-        const B = expandExpr(value.base, scope);
-        const I = expandExpr(value.index, scope);
-        return { value: { ...value, base: B.value, index: I.value }, pre: [...B.pre, ...I.pre] };
+        const B = expandExpr(fieldOf(value, "base"), scope);
+        const I = expandExpr(fieldOf(value, "index"), scope);
+        return { value: { ...value, base: B.value, index: I.value }, pre: [...fieldOf(B, "pre"), ...fieldOf(I, "pre")] };
       }
       case "slice": {
         const B = expandExpr(value.base, scope);
         const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start, scope);
         const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop, scope);
         const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step, scope);
-        return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
+        return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...fieldOf(B, "pre"), ...fieldOf(S, "pre"), ...fieldOf(P, "pre"), ...fieldOf(E, "pre")] };
       }
       case "list": {
         const pres4Parts = value.items.map((item) => expandExpr(item, scope));
@@ -3140,14 +3179,14 @@ function expandComprehensions(module: PyModule): PyModule {
         const pres4: PyStatement[] = [];
         for (let at = 0; at < pres4Parts.length; at += 1) {
           const part = pres4Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres4.push(part.pre[k] as PyStatement);
+          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres4.push(fieldOf(part, "pre")[k] as PyStatement);
         }
         return { value: { ...value, items }, pre: pres4 };
       }
       case "membership": {
         const V = expandExpr(value.value, scope);
         const C = expandExpr(value.container, scope);
-        return { value: { ...value, value: V.value, container: C.value }, pre: [...V.pre, ...C.pre] };
+        return { value: { ...value, value: V.value, container: C.value }, pre: [...fieldOf(V, "pre"), ...fieldOf(C, "pre")] };
       }
       case "dict": {
         const pres3Parts = value.entries.map((entry) => expandExpr(entry.value, scope));
@@ -3155,13 +3194,13 @@ function expandComprehensions(module: PyModule): PyModule {
         const pres3: PyStatement[] = [];
         for (let at = 0; at < pres3Parts.length; at += 1) {
           const part = pres3Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres3.push(part.pre[k] as PyStatement);
+          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres3.push(fieldOf(part, "pre")[k] as PyStatement);
         }
         return { value: { ...value, entries }, pre: pres3 };
       }
       case "field": {
         const B = expandExpr(value.base, scope);
-        return { value: { ...value, base: B.value }, pre: B.pre };
+        return { value: { ...value, base: B.value }, pre: fieldOf(B, "pre") };
       }
       case "call": {
         const pres2Parts = value.args.map((arg) => expandExpr(arg, scope));
@@ -3169,7 +3208,7 @@ function expandComprehensions(module: PyModule): PyModule {
         const pres2: PyStatement[] = [];
         for (let at = 0; at < pres2Parts.length; at += 1) {
           const part = pres2Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres2.push(part.pre[k] as PyStatement);
+          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres2.push(fieldOf(part, "pre")[k] as PyStatement);
         }
         const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
         return { value: { ...value, args, grid }, pre: pres2 };
@@ -3190,9 +3229,9 @@ function expandComprehensions(module: PyModule): PyModule {
   const expandStmt = (stmt: PyStatement, scope: Set<string>): PyStatement[] => {
     switch (stmt.k) {
       case "declare": {
-        const r = expandExpr(stmt.value, scope);
+        const r = expandExpr(fieldOf(stmt, "value"), scope);
         if (!scope.has(stmt.name)) scope.add(stmt.name);
-        return [...r.pre, { ...stmt, value: r.value }];
+        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);
@@ -3291,15 +3330,19 @@ function expandComprehensions(module: PyModule): PyModule {
     }
   };
 
-  const expandedFunctions = module.functions.map((fn) => {
-    const fnScope = new Set(fn.params.map((p) => p.name));
-    return {
-      ...fn,
-      body: fn.body.flatMap((st) => expandStmt(st, fnScope)),
-    };
-  });
-  const expandedBody = module.body.flatMap((st) => expandStmt(st, new Set()));
-  return { ...module, functions: expandedFunctions, body: expandedBody };
+  const expandedFunctions: PyFunction[] = [];
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const fnScope = new Set<string>();
+    for (const p of fieldOf(fn, "params") as PyParam[]) fnScope.add(String(fieldOf(p, "name")));
+    const rewritten: PyStatement[] = [];
+    for (const st of fieldOf(fn, "body") as PyStatement[]) for (const one of expandStmt(st, fnScope)) rewritten[rewritten.length] = one;
+    const copy = structuredClone(fn) as PyFunction;
+    setFieldOn(copy, "body", rewritten);
+    expandedFunctions[expandedFunctions.length] = copy;
+  }
+  const expandedBody: PyStatement[] = [];
+  for (const st of fieldOf(module, "body") as PyStatement[]) for (const one of expandStmt(st, new Set())) expandedBody[expandedBody.length] = one;
+  return withModuleBody(module, expandedFunctions, expandedBody);
 }
 
 /**
@@ -3308,8 +3351,8 @@ function expandComprehensions(module: PyModule): PyModule {
  */
 function packRestArguments(module: PyModule): PyModule {
   const restIndex = new Map<string, number>();
-  for (const fn of module.functions) {
-    const idx = fn.params.findIndex((p) => p.rest === true);
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const idx = (fieldOf(fn, "params") as PyParam[]).findIndex((p) => fieldOf(p, "rest") === true);
     if (idx >= 0) restIndex.set(fn.name, idx);
   }
   function packValue(value: PyValue): PyValue {
@@ -3317,12 +3360,12 @@ function packRestArguments(module: PyModule): PyModule {
       const idx = restIndex.get(value.name);
       if (idx !== undefined) {
         const fixed = idx; // number of fixed params before *args
-        if (value.args.length > fixed) {
+        if (fieldOf(value, "args").length > fixed) {
           const fixedArgs = value.args.slice(0, fixed);
           const extra = value.args.slice(fixed);
           value.args = [...fixedArgs, { k: "list", items: extra }];
-        } else if (value.args.length === fixed) {
-          value.args = [...value.args, { k: "list", items: [] }];
+        } else if (fieldOf(value, "args").length === fixed) {
+          value.args = [...fieldOf(value, "args"), { k: "list", items: [] }];
         }
       }
       value.args = value.args.map((inner) => packValue(inner));
@@ -3331,20 +3374,20 @@ function packRestArguments(module: PyModule): PyModule {
     }
     switch (value.k) {
       case "binary":
-        value.left = packValue(value.left);
-        value.right = packValue(value.right);
+        value.left = packValue(fieldOf(value, "left"));
+        value.right = packValue(fieldOf(value, "right"));
         break;
       case "unary":
-        value.operand = packValue(value.operand);
+        value.operand = packValue(fieldOf(value, "operand"));
         break;
       case "conditional":
         value.condition = packValue(value.condition);
-        value.then = packValue(value.then);
+        value.then = packValue(fieldOf(value, "then"));
         value.otherwise = packValue(value.otherwise);
         break;
       case "index":
-        value.base = packValue(value.base);
-        value.index = packValue(value.index);
+        value.base = packValue(fieldOf(value, "base"));
+        value.index = packValue(fieldOf(value, "index"));
         break;
       case "slice":
         value.base = packValue(value.base);
@@ -3385,7 +3428,7 @@ function packRestArguments(module: PyModule): PyModule {
   function packStmt(stmt: PyStatement): PyStatement {
     switch (stmt.k) {
       case "declare":
-        stmt.value = packValue(stmt.value);
+        stmt.value = packValue(fieldOf(stmt, "value"));
         break;
       case "assign":
         stmt.value = packValue(stmt.value);
@@ -3395,7 +3438,7 @@ function packRestArguments(module: PyModule): PyModule {
         stmt.value = packValue(stmt.value);
         break;
       case "storeElement":
-        stmt.target = packValue(stmt.target) as any;
+        stmt.target = packValue(fieldOf(stmt, "target")) as any;
         stmt.value = packValue(stmt.value);
         break;
       case "storeSlice":
@@ -3408,12 +3451,12 @@ function packRestArguments(module: PyModule): PyModule {
         if (stmt.value !== null) stmt.value = packValue(stmt.value);
         break;
       case "if":
-        stmt.condition = packValue(stmt.condition);
+        stmt.condition = packValue(fieldOf(stmt, "condition"));
         stmt.then = stmt.then.map((inner) => packStmt(inner));
         stmt.otherwise = stmt.otherwise.map((inner) => packStmt(inner));
         break;
       case "while":
-        stmt.condition = packValue(stmt.condition);
+        stmt.condition = packValue(fieldOf(stmt, "condition"));
         stmt.body = stmt.body.map((inner) => packStmt(inner));
         break;
       case "for":
@@ -3426,7 +3469,7 @@ function packRestArguments(module: PyModule): PyModule {
         stmt.values = stmt.values.map((inner) => packValue(inner));
         break;
       case "call":
-        stmt.value = packValue(stmt.value);
+        stmt.value = packValue(fieldOf(stmt, "value"));
         break;
       case "function":
         stmt.body = stmt.body.map((inner) => packStmt(inner));
@@ -3439,12 +3482,15 @@ function packRestArguments(module: PyModule): PyModule {
     }
     return stmt;
   }
-  const packedFunctions = module.functions.map((fn) => ({
-    ...fn,
-    body: fn.body.map((inner) => packStmt(inner)),
-  }));
-  const packedBody = module.body.map((inner) => packStmt(inner));
-  return { ...module, functions: packedFunctions, body: packedBody };
+  const packedFunctions: PyFunction[] = [];
+  for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const copy = structuredClone(fn) as PyFunction;
+    setFieldOn(copy, "body", (fieldOf(fn, "body") as PyStatement[]).map((inner) => packStmt(inner)));
+    packedFunctions[packedFunctions.length] = copy;
+  }
+  const packedBody: PyStatement[] = [];
+  for (const inner of fieldOf(module, "body") as PyStatement[]) packedBody[packedBody.length] = packStmt(inner);
+  return withModuleBody(module, packedFunctions, packedBody);
 }
 
 export function parsePython(source: string, path: string, diagnostics: Diagnostics): PyModule {
@@ -3495,7 +3541,7 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       if (value.name === "float") return "float";
       if (value.name === "str") return "text";
       if (value.name === "abs" || value.name === "min" || value.name === "max") {
-        const first = value.args[0];
+        const first = fieldOf(value, "args")[0];
         return first === undefined ? "unknown" : typeOfValue(first, names);
       }
       if (value.name === "math.floor" || value.name === "math.ceil" || value.name === "math.trunc") return "int";
@@ -3505,14 +3551,14 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
       if (value.name === "tl.ceil" || value.name === "tl.math.ceil") return "int";
       if (value.name === "tl.math.exp" || value.name === "tl.math.log" || value.name === "tl.math.sin" || value.name === "tl.math.cos") return "float";
       if (value.name === "tl.abs" || value.name === "tl.math.abs") {
-        const first = value.args[0];
+        const first = fieldOf(value, "args")[0];
         return first === undefined ? "unknown" : typeOfValue(first, names);
       }
       // `tl.where` answers whichever of the two values the condition chose, so
       // the type of the answer is the type the two have in common.
-      if (value.name === "tl.where" && value.args.length === 3) {
-        const then = typeOfValue(value.args[1], names);
-        const otherwise = typeOfValue(value.args[2], names);
+      if (value.name === "tl.where" && fieldOf(value, "args").length === 3) {
+        const then = typeOfValue(fieldOf(value, "args")[1], names);
+        const otherwise = typeOfValue(fieldOf(value, "args")[2], names);
         return then === otherwise ? then : "unknown";
       }
       return "unknown";
@@ -3540,21 +3586,21 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
     case "dict":
       return "dict";
     case "unary":
-      return value.op === "not" ? "bool" : typeOfValue(value.operand, names);
+      return value.op === "not" ? "bool" : typeOfValue(fieldOf(value, "operand"), names);
     case "binary": {
       if (COMPARISONS.includes(value.op)) return "bool";
       // A power is always floating: `2 ** 3` is `8.0`, and a whole number is
       // read back with `int`.
       if (value.op === "**") return "float";
-      const left = typeOfValue(value.left, names);
-      const right = typeOfValue(value.right, names);
+      const left = typeOfValue(fieldOf(value, "left"), names);
+      const right = typeOfValue(fieldOf(value, "right"), names);
       if (left === "float" || right === "float") return "float";
       if (left === "int" && right === "int") return "int";
       if (left === "bool" && right === "bool") return "bool";
       return "unknown";
     }
     case "conditional": {
-      const then = typeOfValue(value.then, names);
+      const then = typeOfValue(fieldOf(value, "then"), names);
       const otherwise = typeOfValue(value.otherwise, names);
       return then === otherwise ? then : "unknown";
     }
@@ -3664,7 +3710,7 @@ export function lowerValue(value: PyValue): Expression {
     case "number":
       return { k: "literal", text: value.text };
     case "text":
-      return { k: "text", parts: value.parts.map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(part.value) })) };
+      return { k: "text", parts: (fieldOf(value, "parts") as PyTextPart[]).map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(part.value) })) };
     case "boolean":
       return { k: "literal", text: value.value ? "1" : "0" };
     case "none":
@@ -3673,22 +3719,24 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "ident", name: value.name };
     case "call": {
       // `len(x)` on a dictionary reads the number of entries it holds.
-      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name" && currentDictNames.has(value.args[0].name)) {
-        return { k: "call", name: "blaze_rt_dict_len", args: [ { k: "ident", name: value.args[0].name } ] } as Expression;
+      const callArgs = fieldOf(value, "args") as PyValue[];
+      const firstArg = callArgs[0];
+      if (value.name === "len" && callArgs.length === 1 && firstArg.k === "name" && currentDictNames.has(String(fieldOf(firstArg, "name")))) {
+        return { k: "call", name: "blaze_rt_dict_len", args: [ { k: "ident", name: String(fieldOf(firstArg, "name")) } ] } as Expression;
       }
       // `len(x)` is the length of the list or of the text `x` holds, and the
       // compiler reads a length off the name it is written by.
-      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
-        return { k: "length", buffer: value.args[0].name };
+      if (value.name === "len" && fieldOf(value, "args").length === 1 && fieldOf(value, "args")[0].k === "name") {
+        return { k: "length", buffer: fieldOf(value, "args")[0].name };
       }
       // `tl.where(c, x, y)` is a choice: the condition answers which of the two
       // values the kernel holds, and the IR carries a choice as a conditional
       // whether the source spelled it `a if c else b` or `tl.where`.
-      if (value.name === "tl.where" && value.args.length === 3) {
+      if (value.name === "tl.where" && fieldOf(value, "args").length === 3) {
         return {
           k: "conditional",
-          condition: lowerValue(value.args[0]),
-          then: lowerValue(value.args[1]),
+          condition: lowerValue(fieldOf(value, "args")[0]),
+          then: lowerValue(fieldOf(value, "args")[1]),
           otherwise: lowerValue(value.args[2]),
         };
       }
@@ -3698,34 +3746,37 @@ export function lowerValue(value: PyValue): Expression {
     }
     case "index": {
       // A dictionary is a hash map: reading d[key] is dict_get.
-      if (value.base.k === "name" && currentDictNames.has(value.base.name)) {
-        const keyStr = value.index.k === "text"
-          ? (value.index.parts?.[0]?.k === "text" ? value.index.parts[0].value : "")
+      const indexBase = fieldOf(value, "base");
+      const indexKey = fieldOf(value, "index");
+      if (indexBase.k === "name" && currentDictNames.has(String(fieldOf(indexBase, "name")))) {
+        const keyParts = fieldOf(indexKey, "parts") as PyTextPart[];
+        const keyStr = indexKey.k === "text"
+          ? (keyParts[0]?.k === "text" ? keyParts[0].value : "")
           : null;
         const keyExpr = keyStr !== null
           ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
-          : lowerValue(value.index);
-        return { k: "call", name: "blaze_rt_dict_get", args: [ { k: "ident", name: value.base.name }, keyExpr ] } as Expression;
+          : lowerValue(indexKey);
+        return { k: "call", name: "blaze_rt_dict_get", args: [ { k: "ident", name: String(fieldOf(indexBase, "name")) }, keyExpr ] } as Expression;
       }
       // A slice indexed at any position can be simplified to an index of the
       // base: `a[i:j][k]` is `a[i+k]`. The IR's slice returns the base (not
       // a sub-buffer), so without this simplification the wrong element is
       // read. When `i` is null it defaults to 0; a step other than 1 is
       // not handled.
-      if (value.base.k === "slice") {
-        const slice = value.base;
+      if (fieldOf(value, "base").k === "slice") {
+        const slice = fieldOf(value, "base");
         const step = slice.step;
         const isUnitStep = step === null || (step.k === "number" && Number(step.text) === 1);
         if (isUnitStep) {
-          const startExpr = slice.start === null
+          const startExpr = fieldOf(slice, "start") === null
             ? { k: "number" as const, text: "0", whole: true }
-            : slice.start;
+            : fieldOf(slice, "start");
           // a[i:j][k] -> a[i + k]
-          const new_index: PyValue = { k: "binary", op: "+", left: startExpr, right: value.index };
+          const new_index: PyValue = { k: "binary", op: "+", left: startExpr, right: fieldOf(value, "index") };
           return { k: "index", base: lowerValue(slice.base), index: lowerValue(new_index) };
         }
       }
-      return { k: "index", base: lowerValue(value.base), index: lowerValue(value.index) };
+      return { k: "index", base: lowerValue(fieldOf(value, "base")), index: lowerValue(fieldOf(value, "index")) };
     }
     case "slice":
       return { k: "slice", base: lowerValue(value.base), start: value.start === null ? null : lowerValue(value.start), stop: value.stop === null ? null : lowerValue(value.stop), step: value.step === null ? null : lowerValue(value.step) };
@@ -3746,7 +3797,7 @@ export function lowerValue(value: PyValue): Expression {
       // A dictionary supports membership by key.
       if (value.container.k === "name" && currentDictNames.has(value.container.name)) {
         const keyExpr = value.value.k === "text"
-          ? { k: "text", parts: value.value.parts }
+          ? { k: "text", parts: fieldOf(value.value, "parts") }
           : lowerValue(value.value);
         const has = { k: "call", name: "blaze_rt_dict_has", args: [ { k: "ident", name: value.container.name }, keyExpr ] } as Expression;
         return value.negated ? { k: "unary", op: "!", operand: has } : has;
@@ -3756,13 +3807,13 @@ export function lowerValue(value: PyValue): Expression {
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the
       // element is the width of what it holds.
-      const whole = value.items.every((item) => item.k === "number" && item.whole);
+      const whole = value.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
       return { k: "buffer", element: whole ? "i64" : "f64", values: value.items.map(lowerValue) };
     }
     case "set": {
       // A set is a buffer of its (deduplicated) elements. Deduplication is
       // done where the values are known; here we keep every element.
-      const whole = value.items.every((item) => item.k === "number" && item.whole);
+      const whole = value.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
       const seen = new Set<string>();
       const deduped = value.items.filter((item) => {
         if (item.k !== "number") return true;
@@ -3773,7 +3824,7 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "buffer", element: whole ? "i64" : "f64", values: deduped.map(lowerValue) };
     }
     case "sized": {
-      return { k: "sized", element: value.element, count: lowerValue(value.count) };
+      return { k: "sized", element: value.element, count: lowerValue(fieldOf(value, "count")) };
     }
     case "dict": {
       // A dictionary is a hash map: build it with dict_set.
@@ -3791,7 +3842,7 @@ export function lowerValue(value: PyValue): Expression {
       // Set operations in a function are not lowered: the function's lists are
       // fixed buffers, and a set operation needs a buffer of a size the
       // compiler cannot always settle on. Write the operation out as a loop.
-      if (value.left.k === "set" && value.right.k === "set") {
+      if (fieldOf(value, "left").k === "set" && fieldOf(value, "right").k === "set") {
         throw frontendError(
           "a set operation is not supported in a function",
           "write the operation out as a loop, as in for x in a: ...",
@@ -3801,20 +3852,20 @@ export function lowerValue(value: PyValue): Expression {
       if (operator === undefined) {
         throw frontendError(`"${value.op}" is not an operator the compiler has`, "the body is refused where it is written");
       }
-      return { k: "binary", op: operator, left: lowerValue(value.left), right: lowerValue(value.right) };
+      return { k: "binary", op: operator, left: lowerValue(fieldOf(value, "left")), right: lowerValue(fieldOf(value, "right")) };
     }
     case "unary": {
       const operator = IR_UNARY[value.op];
       if (operator === undefined) {
         throw frontendError(`"${value.op}" is not an operator the compiler has`, "the body is refused where it is written");
       }
-      return { k: "unary", op: operator, operand: lowerValue(value.operand) };
+      return { k: "unary", op: operator, operand: lowerValue(fieldOf(value, "operand")) };
     }
     case "conditional":
       return {
         k: "conditional",
         condition: lowerValue(value.condition),
-        then: lowerValue(value.then),
+        then: lowerValue(fieldOf(value, "then")),
         otherwise: lowerValue(value.otherwise),
       };
   }
@@ -3873,8 +3924,8 @@ let currentDictNames = new Set<string>();
 export function lowerStatement(statement: PyStatement): Statement {
   switch (statement.k) {
     case "declare": {
-      if (statement.value.k === "dict") currentDictNames.add(statement.name);
-      return { kind: "declare", name: statement.name, type: statement.type, init: lowerValue(statement.value), line: statement.line };
+      if (fieldOf(statement, "value").k === "dict") currentDictNames.add(statement.name);
+      return { kind: "declare", name: statement.name, type: statement.type, init: lowerValue(fieldOf(statement, "value")), line: statement.line };
     }
     case "assign":
       return {
@@ -3914,12 +3965,13 @@ export function lowerStatement(statement: PyStatement): Statement {
       };
     }
     case "storeElement": {
-      const target = statement.target as { k: "index"; base: PyValue; index: PyValue };
+      const target = fieldOf(statement, "target") as { k: "index"; base: PyValue; index: PyValue };
       const base = target.base;
       if (base.k === "name" && currentDictNames.has(base.name)) {
         // A dictionary is a hash map: writing d[key] = value is a call.
+        const indexParts = fieldOf(target.index, "parts") as { k: string; value: string }[];
         const keyStr = target.index.k === "text"
-          ? (target.index.parts?.[0]?.k === "text" ? target.index.parts[0].value : "")
+          ? (indexParts[0] !== undefined && String(fieldOf(indexParts[0], "k")) === "text" ? String(fieldOf(indexParts[0], "value")) : "")
           : null;
         const keyExpr = keyStr !== null
           ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
@@ -3931,7 +3983,7 @@ export function lowerStatement(statement: PyStatement): Statement {
             name: "blaze_rt_dict_set",
             args: [ { k: "ident", name: base.name }, keyExpr, lowerValue(statement.value) ],
           } as Expression,
-          line: statement.line,
+          line: fieldOf(statement, "line"),
         };
       }
       if (base.k !== "name") {
@@ -3943,26 +3995,26 @@ export function lowerStatement(statement: PyStatement): Statement {
         index: lowerValue(target.index),
         op: "=" as AssignOperator,
         value: lowerValue(statement.value),
-        line: statement.line,
+        line: fieldOf(statement, "line"),
       };
     }
     case "storeSlice": {
       throw frontendError('"a[i:j] = value" is not supported in a function', "a function\'s parameters are read only");
     }
     case "return":
-      return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: statement.line };
+      return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: fieldOf(statement, "line") };
     case "if":
-      conditionIsBoolean(statement.condition, statement.line);
+      conditionIsBoolean(fieldOf(statement, "condition"), fieldOf(statement, "line"));
       return {
         kind: "if",
-        condition: lowerValue(statement.condition),
+        condition: lowerValue(fieldOf(statement, "condition")),
         then: statement.then.map(lowerStatement),
         otherwise: statement.otherwise.map(lowerStatement),
-        line: statement.line,
+        line: fieldOf(statement, "line"),
       };
     case "while":
-      conditionIsBoolean(statement.condition, statement.line);
-      return { kind: "while", condition: lowerValue(statement.condition), body: statement.body.map(lowerStatement), line: statement.line };
+      conditionIsBoolean(fieldOf(statement, "condition"), fieldOf(statement, "line"));
+      return { kind: "while", condition: lowerValue(fieldOf(statement, "condition")), body: statement.body.map(lowerStatement), line: statement.line };
     case "for":
       return {
         kind: "loop",
@@ -4001,7 +4053,7 @@ export function lowerStatement(statement: PyStatement): Statement {
         line: statement.line,
       };
     case "call":
-      return { kind: "expression", value: lowerValue(statement.value), line: statement.line };
+      return { kind: "expression", value: lowerValue(fieldOf(statement, "value")), line: statement.line };
     case "function":
       throw frontendError(
         "a function may not be declared inside a function",
@@ -4099,14 +4151,14 @@ const CONTRACT_OPERATORS: readonly string[] = ["+", "-", "*", "/", "==", "!=", "
 class BodyAnalysis {
   private readonly declaration: PyFunction;
   private readonly bindings = new Map<string, string>();
-  private readonly accesses: AccessRange[] = [];
+  readonly accesses: AccessRange[] = [];
   private result: string | null = null;
   /** The type each name holds, as far as the body says. */
   private readonly types = new Map<string, PyType>();
 
   constructor(declaration: PyFunction) {
     this.declaration = declaration;
-    for (const param of declaration.params) {
+    for (const param of fieldOf(declaration, "params")) {
       this.bindings.set(param.name, param.name);
       this.types.set(param.name, pythonTypeOf(param.type));
     }
@@ -4117,7 +4169,7 @@ class BodyAnalysis {
       for (const statement of this.declaration.body) this.execute(statement, null);
     } catch (error) {
       if (!(error instanceof Uncontractable)) throw error;
-      return { result: null, accesses: this.accesses };
+      return { result: null, accesses: fieldOf(this, "accesses") };
     }
     if (this.result === null && this.declaration.returns.kind !== "void") {
       throw frontendError(
@@ -4125,7 +4177,7 @@ class BodyAnalysis {
         "the contract needs an expression the result must equal",
       );
     }
-    return { result: this.result, accesses: this.accesses };
+    return { result: this.result, accesses: fieldOf(this, "accesses") };
   }
 
   private uncontractable(construct: string, line: number, remedy: string): never {
@@ -4138,10 +4190,10 @@ class BodyAnalysis {
   private execute(statement: PyStatement, loop: LoopContext | null): void {
     switch (statement.k) {
       case "declare": {
-        const value = this.serialize(statement.value, loop, statement.line);
+        const value = this.serialize(fieldOf(statement, "value"), loop, statement.line);
         this.bindings.set(statement.name, value);
-        if (statement.type !== null) this.types.set(statement.name, pythonTypeOf(statement.type));
-        else this.types.set(statement.name, typeOfValue(statement.value, this.types));
+        if (statement.type !== null) fieldOf(this, "types").set(statement.name, pythonTypeOf(statement.type));
+        else fieldOf(this, "types").set(statement.name, typeOfValue(fieldOf(statement, "value"), this.types));
         return;
       }
       case "assign": {
@@ -4171,23 +4223,23 @@ class BodyAnalysis {
         this.executeLoop(statement);
         return;
       case "while":
-        this.uncontractable("loops while a condition holds", statement.line, LOOP_REMEDY);
+        this.uncontractable("loops while a condition holds", fieldOf(statement, "line"), LOOP_REMEDY);
       case "if":
-        this.uncontractable("branches", statement.line, LOOP_REMEDY);
+        this.uncontractable("branches", fieldOf(statement, "line"), LOOP_REMEDY);
       case "break":
-        this.uncontractable("leaves a loop", statement.line, LOOP_REMEDY);
+        this.uncontractable("leaves a loop", fieldOf(statement, "line"), LOOP_REMEDY);
       case "continue":
-        this.uncontractable("skips the rest of a loop body", statement.line, LOOP_REMEDY);
+        this.uncontractable("skips the rest of a loop body", fieldOf(statement, "line"), LOOP_REMEDY);
       case "try":
-        this.uncontractable("uses try/except", statement.line, LOOP_REMEDY);
+        this.uncontractable("uses try/except", fieldOf(statement, "line"), LOOP_REMEDY);
       case "print":
-        this.uncontractable("prints", statement.line, "a contracted function returns a value and prints nothing");
+        this.uncontractable("prints", fieldOf(statement, "line"), "a contracted function returns a value and prints nothing");
       case "pass":
         return;
       case "call":
-        this.uncontractable(`calls ${describeValue(statement.value)}`, statement.line, "a contracted function is computed from its parameters alone");
+        this.uncontractable(`calls ${describeValue(fieldOf(statement, "value"))}`, statement.line, "a contracted function is computed from its parameters alone");
       case "function":
-        this.uncontractable("declares a function", statement.line, LOOP_REMEDY);
+        this.uncontractable("declares a function", fieldOf(statement, "line"), LOOP_REMEDY);
     }
   }
 
@@ -4195,14 +4247,14 @@ class BodyAnalysis {
     if (statement.step !== null) {
       this.uncontractable(
         "counts by something other than one",
-        statement.line,
+        fieldOf(statement, "line"),
         "a reduction describes the range it sums over, so the index moves by one",
       );
     }
     if (statement.body.length !== 1) {
       this.uncontractable(
         "has a loop body of more than one statement",
-        statement.line,
+        fieldOf(statement, "line"),
         "a reduction describes a loop that accumulates into one variable",
       );
     }
@@ -4210,14 +4262,14 @@ class BodyAnalysis {
     if (inner.k !== "assign" || (inner.op !== "+=" && inner.op !== "*=")) {
       this.uncontractable(
         "has a loop body that does not accumulate",
-        statement.line,
+        fieldOf(statement, "line"),
         "a reduction describes a loop that accumulates into one variable, as in `total += a[i]`",
       );
     }
-    const from = this.serialize(statement.from, null, statement.line);
-    const to = this.serialize(statement.to, null, statement.line);
+    const from = this.serialize(fieldOf(statement, "from"), null, fieldOf(statement, "line"));
+    const to = this.serialize(fieldOf(statement, "to"), null, fieldOf(statement, "line"));
     const context: LoopContext = { variable: statement.variable, lo: from, hiExclusive: to };
-    const body = this.serialize(inner.value, context, inner.line);
+    const body = this.serialize(inner.value, context, fieldOf(inner, "line"));
     const operator = inner.op === "*=" ? "product" : "sum";
     const reduce = `${operator}(${statement.variable} = ${from}..<${to}, ${body})`;
     const current = this.bindings.get(inner.name);
@@ -4269,14 +4321,14 @@ class BodyAnalysis {
             "a contract states what a function returns, which is a number",
           );
         }
-        return `(${value.op}${this.serialize(value.operand, loop, line)})`;
+        return `(${value.op}${this.serialize(fieldOf(value, "operand"), loop, line)})`;
       }
       case "binary": {
         // List concatenation: a + b where both are lists. The contract
         // language has no concatenation, so the function is uncontractable.
         if (value.op === "+") {
-          const leftType = typeOfValue(value.left, this.types);
-          const rightType = typeOfValue(value.right, this.types);
+          const leftType = typeOfValue(fieldOf(value, "left"), fieldOf(this, "types"));
+          const rightType = typeOfValue(fieldOf(value, "right"), fieldOf(this, "types"));
           if (leftType === "list" && rightType === "list") {
             this.uncontractable("concatenates lists", line, "a contract states what a function returns, which is a number");
           }
@@ -4288,26 +4340,26 @@ class BodyAnalysis {
             "the body states no postcondition, which is what a function that branches or calls has",
           );
         }
-        return `(${this.serialize(value.left, loop, line)} ${value.op} ${this.serialize(value.right, loop, line)})`;
+        return `(${this.serialize(fieldOf(value, "left"), loop, line)} ${value.op} ${this.serialize(fieldOf(value, "right"), loop, line)})`;
       }
       case "index": {
-        if (value.base.k === "slice") {
+        if (fieldOf(value, "base").k === "slice") {
           // Indexing into a slice: serialize the slice, then index into it.
-          const sliceText = this.serialize(value.base, loop, line);
-          const index = this.serialize(value.index, loop, line);
+          const sliceText = this.serialize(fieldOf(value, "base"), loop, line);
+          const index = this.serialize(fieldOf(value, "index"), loop, line);
           return `${sliceText}[${index}]`;
         }
-        if (value.base.k !== "name") {
+        if (fieldOf(value, "base").k !== "name") {
           throw frontendError("only single level indexing is supported", `line ${line}`);
         }
-        const base = value.base;
-        const parameter = this.declaration.params.find((param) => param.name === base.name);
+        const base = fieldOf(value, "base");
+        const parameter = (fieldOf(this.declaration, "params") as PyParam[]).find((param) => String(fieldOf(param, "name")) === base.name);
         if (parameter !== undefined) {
-          const index = this.serialize(value.index, loop, line);
-          if (loop !== null && dependsOn(value.index, loop.variable)) {
-            this.accesses.push({ parameter: parameter.name, lo: loop.lo, hi: loop.hiExclusive });
+          const index = this.serialize(fieldOf(value, "index"), loop, line);
+          if (loop !== null && dependsOn(fieldOf(value, "index"), loop.variable)) {
+            fieldOf(this, "accesses").push({ parameter: parameter.name, lo: fieldOf(loop, "lo"), hi: loop.hiExclusive });
           } else {
-            this.accesses.push({ parameter: parameter.name, lo: index, hi: `(${index} + 1)` });
+            fieldOf(this, "accesses").push({ parameter: parameter.name, lo: index, hi: `(${index} + 1)` });
           }
           return `${parameter.name}[${index}]`;
         }
@@ -4316,7 +4368,7 @@ class BodyAnalysis {
         if (bound === undefined) {
           throw frontendError(`indexing unknown parameter "${base.name}"`, `line ${line}`);
         }
-        const index = this.serialize(value.index, loop, line);
+        const index = this.serialize(fieldOf(value, "index"), loop, line);
         return `${bound}[${index}]`;
       }
     case "comprehension": {
@@ -4342,7 +4394,7 @@ class BodyAnalysis {
           throw frontendError("only single level slicing is supported", `line ${line}`);
         }
         const base = value.base;
-        const parameter = this.declaration.params.find((param) => param.name === base.name);
+        const parameter = (fieldOf(this.declaration, "params") as PyParam[]).find((param) => String(fieldOf(param, "name")) === base.name);
         if (parameter === undefined) {
           // The base may be a bound variable (e.g., another slice), not a parameter.
           const bound = this.bindings.get(base.name);
@@ -4375,7 +4427,7 @@ class BodyAnalysis {
         // Push an access range for the sliced elements of the parameter.
         const lo = value.start === null ? "0" : start;
         const hi = value.stop === null ? `len(${parameter.name})` : stop;
-        this.accesses.push({ parameter: parameter.name, lo, hi });
+        fieldOf(this, "accesses").push({ parameter: parameter.name, lo, hi });
         if (value.step !== null) {
           const step = this.serialize(value.step, loop, line);
           return `${parameter.name}[${start}:${stop}:${step}]`;
@@ -4388,9 +4440,9 @@ class BodyAnalysis {
       case "call": {
         // The contract language has one function of its own: `len(x)`, which
         // is the length of the buffer or of the text `x` holds.
-        const argument = value.args.length === 1 ? value.args[0] : null;
+        const argument = fieldOf(value, "args").length === 1 ? value.args[0] : null;
         if (value.name === "len" && argument !== null && argument.k === "name") {
-          const parameter = this.declaration.params.find((param) => param.name === argument.name);
+          const parameter = (fieldOf(this.declaration, "params") as PyParam[]).find((param) => String(fieldOf(param, "name")) === argument.name);
           if (parameter === undefined) {
             throw frontendError(`the length of unknown "${argument.name}"`, `line ${line}`);
           }
@@ -4437,13 +4489,13 @@ function dependsOn(value: PyValue, name: string): boolean {
     case "none":
       return false;
     case "unary":
-      return dependsOn(value.operand, name);
+      return dependsOn(fieldOf(value, "operand"), name);
     case "await":
       return dependsOn(value.value, name);
     case "binary":
-      return dependsOn(value.left, name) || dependsOn(value.right, name);
+      return dependsOn(fieldOf(value, "left"), name) || dependsOn(fieldOf(value, "right"), name);
     case "index":
-      return dependsOn(value.base, name) || dependsOn(value.index, name);
+      return dependsOn(fieldOf(value, "base"), name) || dependsOn(fieldOf(value, "index"), name);
     case "slice":
       return dependsOn(value.base, name) || (value.start !== null && dependsOn(value.start, name)) || (value.stop !== null && dependsOn(value.stop, name)) || (value.step !== null && dependsOn(value.step, name));
     case "field":
@@ -4469,7 +4521,7 @@ function dependsOn(value: PyValue, name: string): boolean {
     case "conditional":
       return (
         dependsOn(value.condition, name) ||
-        dependsOn(value.then, name) ||
+        dependsOn(fieldOf(value, "then"), name) ||
         dependsOn(value.otherwise, name)
       );
   }
@@ -4502,7 +4554,7 @@ function usageOf(declaration: PyFunction): {
   readsArgv: boolean;
   accesses: AccessRange[];
 } {
-  const parameters = new Set(declaration.params.map((param) => param.name));
+  const parameters = new Set<string>((fieldOf(declaration, "params") as PyParam[]).map((param) => String(fieldOf(param, "name"))));
   const accesses: AccessRange[] = [];
   /** The range a loop index stands for, which its body reads through. */
   const loops = new Map<string, { lo: string; hi: string }>();
@@ -4512,7 +4564,7 @@ function usageOf(declaration: PyFunction): {
 
   /** One access, stated once however many times the body reads it. */
   const access = (parameter: string, lo: string, hi: string): void => {
-    const seen = accesses.some((entry) => entry.parameter === parameter && entry.lo === lo && entry.hi === hi);
+    const seen = accesses.some((entry) => entry.parameter === parameter && fieldOf(entry, "lo") === lo && fieldOf(entry, "hi") === hi);
     if (!seen) accesses.push({ parameter, lo, hi });
   };
 
@@ -4521,7 +4573,7 @@ function usageOf(declaration: PyFunction): {
       case "list":
       case "dict":
         allocates = true;
-        for (const item of value.k === "list" ? value.items : value.entries.map((entry) => entry.value)) {
+        for (const item of value.k === "list" ? fieldOf(value, "items") : value.entries.map((entry) => entry.value)) {
           expression(item);
         }
         return;
@@ -4588,7 +4640,7 @@ function usageOf(declaration: PyFunction): {
     switch (one.k) {
       case "declare":
       case "assign":
-        expression(one.value);
+        expression(fieldOf(one, "value"));
         return;
       case "return":
         if (one.value !== null) expression(one.value);
@@ -4598,12 +4650,12 @@ function usageOf(declaration: PyFunction): {
         for (const value of one.values) expression(value);
         return;
       case "if":
-        expression(one.condition);
+        expression(fieldOf(one, "condition"));
         one.then.forEach((inner) => statement(inner));
         one.otherwise.forEach((inner) => statement(inner));
         return;
       case "while":
-        expression(one.condition);
+        expression(fieldOf(one, "condition"));
         one.body.forEach((inner) => statement(inner));
         return;
       case "for": {
@@ -4627,7 +4679,7 @@ function usageOf(declaration: PyFunction): {
         if (one.finallyBody !== null) one.finallyBody.forEach((inner) => statement(inner));
         return;
       case "call":
-        expression(one.value);
+        expression(fieldOf(one, "value"));
         return;
       case "break":
       case "continue":
@@ -4637,7 +4689,7 @@ function usageOf(declaration: PyFunction): {
     }
   };
 
-  declaration.body.forEach((inner) => statement(inner));
+  (fieldOf(declaration, "body") as PyStatement[]).forEach((inner) => statement(inner));
   return { allocates, prints, readsArgv, accesses };
 }
 
@@ -4650,8 +4702,8 @@ function contractTextOf(value: PyValue): string | null {
       return value.name;
     case "call":
       // The contract language has one function of its own: `len(x)`.
-      if (value.name === "len" && value.args.length === 1 && value.args[0].k === "name") {
-        return `len(${value.args[0].name})`;
+      if (value.name === "len" && fieldOf(value, "args").length === 1 && fieldOf(value, "args")[0].k === "name") {
+        return `len(${fieldOf(value, "args")[0].name})`;
       }
       return null;
     case "unary":
@@ -4660,8 +4712,8 @@ function contractTextOf(value: PyValue): string | null {
       return operand === null ? null : `(${value.op}${operand})`;
     case "binary": {
       if (!CONTRACT_OPERATORS.includes(value.op)) return null;
-      const left = contractTextOf(value.left);
-      const right = contractTextOf(value.right);
+      const left = contractTextOf(fieldOf(value, "left"));
+      const right = contractTextOf(fieldOf(value, "right"));
       return left === null || right === null ? null : `(${left} ${value.op} ${right})`;
     }
     default:
@@ -4693,17 +4745,17 @@ function conversionInStatement(statement: PyStatement): string | null {
     case "storeField":
     case "storeElement":
     case "storeSlice":
-      return conversionInValue(statement.value);
+      return conversionInValue(fieldOf(statement, "value"));
     case "return":
       return statement.value === null ? null : conversionInValue(statement.value);
     case "if":
       return (
-        conversionInValue(statement.condition) ??
+        conversionInValue(fieldOf(statement, "condition")) ??
         conversionIn(statement.then) ??
         conversionIn(statement.otherwise)
       );
     case "while":
-      return conversionInValue(statement.condition) ?? conversionIn(statement.body);
+      return conversionInValue(fieldOf(statement, "condition")) ?? conversionIn(statement.body);
     case "for":
       return (
         conversionInValue(statement.from) ??
@@ -4719,7 +4771,7 @@ function conversionInStatement(statement: PyStatement): string | null {
         (statement.finallyBody === null ? null : conversionIn(statement.finallyBody))
       );
     case "call":
-      return conversionInValue(statement.value);
+      return conversionInValue(fieldOf(statement, "value"));
     case "break":
     case "continue":
     case "pass":
@@ -4735,17 +4787,17 @@ function conversionInValue(value: PyValue): string | null {
       return value.args.map(conversionInValue).find((found) => found !== null) ?? null;
     }
     case "binary":
-      return conversionInValue(value.left) ?? conversionInValue(value.right);
+      return conversionInValue(fieldOf(value, "left")) ?? conversionInValue(fieldOf(value, "right"));
     case "unary":
       return conversionInValue(value.operand);
     case "conditional":
       return (
         conversionInValue(value.condition) ??
-        conversionInValue(value.then) ??
+        conversionInValue(fieldOf(value, "then")) ??
         conversionInValue(value.otherwise)
       );
     case "index":
-      return conversionInValue(value.base) ?? conversionInValue(value.index);
+      return conversionInValue(fieldOf(value, "base")) ?? conversionInValue(fieldOf(value, "index"));
     case "slice":
       return (
         conversionInValue(value.base) ??
@@ -4774,7 +4826,7 @@ function conversionInValue(value: PyValue): string | null {
     case "dict":
       return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
     case "text":
-      return value.parts
+      return (fieldOf(value, "parts") as PyTextPart[])
         .filter((part): part is { k: "value"; value: PyValue } => part.k === "value")
         .map((part) => conversionInValue(part.value))
         .find((found) => found !== null) ?? null;
@@ -4821,10 +4873,11 @@ function settledPythonBody(statements: readonly Statement[], payload: TypeExpr):
       case "result": {
         // `return None` settles the promise with nothing, which is the call
         // that takes no value.
-        if (payload.kind === "void" || statement.value === null || statement.value.k === "null") {
+        const resultValue = fieldOf(statement, "value");
+        if (payload.kind === "void" || resultValue === null || resultValue.k === "null") {
           return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
         }
-        return { ...statement, value: { k: "call", name, args: [statement.value] } };
+        return { ...statement, value: { k: "call", name, args: [resultValue] } };
       }
       case "if":
         return { ...statement, then: statement.then.map((inner) => settle(inner)), otherwise: statement.otherwise.map((inner) => settle(inner)) };
@@ -4833,21 +4886,25 @@ function settledPythonBody(statements: readonly Statement[], payload: TypeExpr):
       case "loop":
       case "forOf":
         return { ...statement, body: statement.body.map((inner) => settle(inner)) };
-      case "try":
+      case "try": {
+        const catchBody = fieldOf(statement, "catchBody") as Statement[] | null;
+        const finallyBody = fieldOf(statement, "finallyBody") as Statement[] | null;
         return {
           ...statement,
           body: statement.body.map((inner) => settle(inner)),
-          catchBody: statement.catchBody === null ? null : statement.catchBody.map((inner) => settle(inner)),
-          finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map((inner) => settle(inner)),
+          catchBody: catchBody === null ? null : catchBody.map((inner) => settle(inner)),
+          finallyBody: finallyBody === null ? null : finallyBody.map((inner) => settle(inner)),
         };
+      }
       default:
         return statement;
     }
   }
-  return [
-    ...statements.map((inner) => settle(inner)),
-    { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: statements[0]?.line ?? 1 },
-  ];
+  const settled: Statement[] = [];
+  for (const inner of statements) settled[settled.length] = settle(inner);
+  const line = statements.length === 0 ? 1 : Number(fieldOf(statements[0], "line"));
+  settled[settled.length] = { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line };
+  return settled;
 }
 
 export const pythonFrontend: Frontend = {
@@ -4871,7 +4928,7 @@ export const pythonFrontend: Frontend = {
         if (stmt.k === "if") { collectLambdas(stmt.then); collectLambdas(stmt.otherwise); }
         if (stmt.k === "while") collectLambdas(stmt.body);
         if (stmt.k === "for") collectLambdas(stmt.body);
-        if (stmt.k === "function") collectLambdas(stmt.body);
+        if (stmt.k === "function") collectLambdas(fieldOf(stmt, "body"));
         if (stmt.k === "try") {
           collectLambdas(stmt.body);
           if (stmt.catchBody !== null) collectLambdas(stmt.catchBody);
@@ -4939,11 +4996,11 @@ export const pythonFrontend: Frontend = {
   },
 
   contractFor(analysis, declared, input) {
-    const declaration = declared.handle as PyFunction;
+    const declaration = fieldOf(declared, "handle") as PyFunction;
     // A module is a library of functions, and a library reads no command line:
     // the command line is read by the program, which is the statements of the
     // entry module.
-    if (readsCommandLine(declaration.body)) {
+    if (readsCommandLine(fieldOf(declaration, "body"))) {
       throw frontendError(
         `${declaration.name} reads the command line, which a module may not`,
         `line ${declaration.line} of ${analysis.path}: the command line is read by the program, as in \`sys.argv\` in the statements of the entry module`,
@@ -4952,7 +5009,7 @@ export const pythonFrontend: Frontend = {
     // A conversion is a program of its own: `int(x)` answers a whole number
     // and `str(x)` a text, and a module of functions has neither.
     if (analysis.body.length === 0) {
-      const conversion = conversionIn(declaration.body);
+      const conversion = conversionIn(fieldOf(declaration, "body"));
       if (conversion !== null) {
         throw frontendError(
           `"${conversion}" is not part of a module`,

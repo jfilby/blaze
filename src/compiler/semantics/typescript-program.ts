@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * Frontend: the statements a TypeScript module runs.
  *
@@ -139,14 +143,14 @@ function holdsBreak(body: readonly ProgramStatement[]): boolean {
 function programBodies(statement: ProgramStatement): ProgramStatement[][] {
   switch (statement.kind) {
     case "if":
-      return [statement.then, statement.otherwise];
+      return [fieldOf(statement, "then"), fieldOf(statement, "otherwise")];
     case "while":
     case "doWhile":
     case "for":
     case "forOf":
     case "block":
     case "function":
-      return [statement.body];
+      return [fieldOf(statement, "body")];
     default:
       return [];
   }
@@ -583,7 +587,7 @@ class ProgramParser {
   private fail(message: string, token: Token = this.peek(), detail = PROGRAM_BODY): void {
     this.reporting += 1;
     if (this.reporting > 1) return;
-    this.diagnostics.report(message, `near "${token.text}"; ${detail}`, token.line);
+    this.diagnostics.report(message, `near "${token.text}"; ${detail}`, fieldOf(token, "line"));
   }
 
   /**
@@ -969,7 +973,7 @@ class ProgramParser {
     this.expect("]");
     this.expect("=");
     const value = this.value();
-    const rest = names.find((entry) => entry.rest);
+    const rest = names.find((entry) => fieldOf(entry, "rest"));
     if (rest !== undefined) {
       this.fail(
         "a rest element of a pattern is the list from that position on",
@@ -1388,7 +1392,7 @@ class ProgramParser {
     }
     let stray = false;
     for (const arm of arms) {
-      if (holdsBreak(arm.body)) stray = true;
+      if (holdsBreak(fieldOf(arm, "body"))) stray = true;
     }
     if (stray) {
       this.fail(
@@ -1400,11 +1404,11 @@ class ProgramParser {
     }
     let fallback = false;
     for (const arm of arms) {
-      if (arm.test === null) fallback = true;
+      if (fieldOf(arm, "test") === null) fallback = true;
     }
     if (fallback) {
       const last = arms[arms.length - 1];
-      if (last === undefined || last.test !== null) {
+      if (last === undefined || fieldOf(last, "test") !== null) {
         this.fail("a default before a case runs into the case after it", this.peek(), "write the default last");
         return [];
       }
@@ -1447,20 +1451,28 @@ class ProgramParser {
    */
   private switchChain(arms: readonly SwitchArm[], held: string, line: number): ProgramStatement[] {
     const last = arms[arms.length - 1];
-    const hasDefault = last !== undefined && last.test === null;
-    const fallback: ProgramStatement[] = hasDefault && last !== undefined ? last.body : [];
+    const hasDefault = last !== undefined && fieldOf(last, "test") === null;
+    const fallback: ProgramStatement[] = hasDefault && last !== undefined ? fieldOf(last, "body") : [];
     const tests: SwitchArm[] = [];
     for (const arm of arms) {
-      if (arm.test !== null) tests.push(arm);
+      if (fieldOf(arm, "test") !== null) tests.push(arm);
     }
     let next: ProgramStatement[] = fallback;
     let chain: ProgramStatement[] = fallback;
     for (let at = tests.length - 1; at >= 0; at -= 1) {
       const arm = tests[at];
       if (arm === undefined) continue;
-      const fallsThrough = !arm.broke && !leavesSwitch(arm.body);
-      const body: ProgramStatement[] = fallsThrough ? [...arm.body, ...next] : arm.body;
-      const caseValue: ProgramValue = arm.test === null ? { k: "number", text: "0" } : arm.test;
+      const fallsThrough = !arm.broke && !leavesSwitch(fieldOf(arm, "body"));
+      let body: ProgramStatement[];
+      if (fallsThrough) {
+        body = [];
+        for (const one of fieldOf(arm, "body") as readonly ProgramStatement[]) body[body.length] = one;
+        for (const one of next) body[body.length] = one;
+      } else {
+        body = fieldOf(arm, "body") as ProgramStatement[];
+      }
+      const armTest = fieldOf(arm, "test") as ProgramValue | null;
+      const caseValue: ProgramValue = armTest === null ? { k: "number", text: "0" } : armTest;
       const same: ProgramValue = { k: "binary", op: "===", left: { k: "name", name: held }, right: caseValue };
       chain = [{ kind: "if", condition: same, then: body, otherwise: chain, line }];
       next = body;
@@ -1647,7 +1659,7 @@ class ProgramParser {
         if (owner !== undefined) {
           const found = this.methodOwner(owner.name, method, true);
           if (found !== null) {
-            return { kind: "invoke", function: this.methodName(found.owner, found.method, methodArgs.length), args: methodArgs, line: name.line };
+            return { kind: "invoke", function: this.methodName(found.owner, fieldOf(found, "method"), methodArgs.length), args: methodArgs, line: name.line };
           }
         }
       }
@@ -1656,7 +1668,7 @@ class ProgramParser {
       if (found !== null) {
         return {
           kind: "invoke",
-          function: this.methodName(found.owner, found.method, methodArgs.length),
+          function: this.methodName(found.owner, fieldOf(found, "method"), methodArgs.length),
           args: [{ k: "name", name: object }, ...methodArgs],
           line: name.line,
         };
@@ -1824,8 +1836,8 @@ class ProgramParser {
     if (value.k === "element") {
       this.pending.push({
         kind: "elementAssign",
-        buffer: value.buffer,
-        index: value.index,
+        buffer: fieldOf(value, "buffer"),
+        index: fieldOf(value, "index"),
         op: operator.text as ProgramAssignOp,
         value: written,
         line,
@@ -1853,7 +1865,7 @@ class ProgramParser {
     const otherwise = this.value();
     // `c ? ["openmp"] : []` is one list of texts: the empty arm is the list
     // the other arm writes, whatever the written-out list is a list of.
-    const empty = (value: ProgramValue): boolean => value.k === "buffer" && value.values.length === 0;
+    const empty = (value: ProgramValue): boolean => value.k === "buffer" && fieldOf(value, "values").length === 0;
     if (then.k === "words" && empty(otherwise)) return { k: "conditional", condition, then, otherwise: { k: "words", values: [] } };
     if (otherwise.k === "words" && empty(then)) return { k: "conditional", condition, then: { k: "words", values: [] }, otherwise };
     return { k: "conditional", condition, then, otherwise };
@@ -1875,7 +1887,7 @@ class ProgramParser {
           this.fail(`instanceof names a class of this module, not "${name}"`, token);
         }
         const held = this.classOfValue(left);
-        const isOne = held !== null && (held === name || (name === "Error" && this.classTable.classes.get(held)?.base === "Error"));
+        const isOne = held !== null && (held === name || (name === "Error" && fieldOf(this.classTable, "classes").get(held)?.base === "Error"));
         left =
           held === null
             ? { k: "binary", op: "!==", left, right: { k: "null" } }
@@ -1952,7 +1964,7 @@ class ProgramParser {
     if (value.k === "boolean") return "boolean";
     if (value.k === "text") return "string";
     if (value.k === "null") return "object";
-    if (value.k === "unary" && (value.op === "-" || value.op === "+")) return this.writtenKind(value.operand);
+    if (value.k === "unary" && (value.op === "-" || value.op === "+")) return this.writtenKind(fieldOf(value, "operand"));
     return null;
   }
 
@@ -2136,7 +2148,7 @@ class ProgramParser {
         if (member === "slice") {
           // `a.slice(n)` on argv reads the same command line, advanced past the
           // first n arguments, so `args[i]` names argument `i + n` of it.
-          let offset = value.k === "argv" ? value.offset : 0;
+          let offset = value.k === "argv" ? fieldOf(value, "offset") : 0;
           if (this.at("(")) {
             this.next();
             if (!this.at(")")) {
@@ -2208,7 +2220,7 @@ class ProgramParser {
               const found = this.methodOwner(owner.name, member, true);
               if (found !== null) {
                 const args = this.arguments();
-                value = { k: "call", function: this.methodName(found.owner, found.method, args.length), args };
+                value = { k: "call", function: this.methodName(found.owner, fieldOf(found, "method"), args.length), args };
                 continue;
               }
             }
@@ -2220,7 +2232,7 @@ class ProgramParser {
             const args = [value, ...this.arguments()];
             value = {
               k: "call",
-              function: this.methodName(found.owner, found.method, args.length - 1),
+              function: this.methodName(found.owner, fieldOf(found, "method"), args.length - 1),
               args,
             };
             continue;
@@ -2405,7 +2417,7 @@ class ProgramParser {
   /** The path a value is called by, for a call written of it. */
   private valuePath(value: ProgramValue): string {
     if (value.k === "name") return value.name;
-    if (value.k === "field") return `${this.valuePath(value.object)}.${value.field}`;
+    if (value.k === "field") return `${this.valuePath(fieldOf(value, "object"))}.${value.field}`;
     if (value.k === "call") return value.function;
     return "this value";
   }
@@ -2832,7 +2844,7 @@ class ProgramParser {
   /* ---------------------------------------------------------------------- */
 
   private classNamed(name: string): ClassInfo | undefined {
-    return this.classTable.classes.get(name);
+    return (fieldOf(this.classTable, "classes") as Map<string, ClassInfo>).get(name);
   }
 
   private classTypeName(typeName: string): string | null {
@@ -2848,14 +2860,15 @@ class ProgramParser {
         return this.classTable.names.has(value.name) ? value.name : null;
       }
       case "field": {
-        if (value.object.k === "name" && !this.valueClasses.has(value.object.name)) {
-          const owner = this.classNamed(value.object.name);
+        const object = fieldOf(value, "object");
+        if (object.k === "name" && !this.valueClasses.has(String(fieldOf(object, "name")))) {
+          const owner = this.classNamed(String(fieldOf(object, "name")));
           if (owner !== undefined) {
             const field = findField(this.classTable, owner.name, value.field, true);
             return field === null ? null : this.classTypeName(field.field.typeName);
           }
         }
-        const base = this.classOfValue(value.object);
+        const base = this.classOfValue(object);
         if (base === null) return null;
         const field = findField(this.classTable, base, value.field, false);
         return field === null ? null : this.classTypeName(field.field.typeName);
@@ -2896,7 +2909,7 @@ class ProgramParser {
     const matches: { owner: string; method: ClassMethod }[] = [];
     for (const info of this.classTable.ordered) {
       const found = findMethod(this.classTable, info.name, name, isStatic);
-      if (found !== null && !matches.some((entry) => entry.method === found.method)) matches.push(found);
+      if (found !== null && !matches.some((entry) => fieldOf(entry, "method") === fieldOf(found, "method"))) matches.push(found);
     }
     return matches.length === 1 ? matches[0] : null;
   }
@@ -2980,7 +2993,7 @@ class ProgramParser {
       }
       return this.nothing();
     }
-    if (!(view in VIEWS)) {
+    if (fieldOf(VIEWS, view) === undefined) {
       this.fail(`a program cannot allocate ${view}; supported: ${Object.keys(VIEWS).join(", ")}`);
       this.skipArguments();
       return this.nothing();
@@ -3081,16 +3094,16 @@ class ProgramParser {
 
   /** The text of a string, split where a template string interpolates. */
   private parts(token: Token): ProgramText[] {
-    if (token.template !== true) return [{ k: "text", value: unescape(token.text, token.line) }];
+    if (fieldOf(token, "template") !== true) return [{ k: "text", value: unescape(token.text, fieldOf(token, "line")) }];
     const parts: ProgramText[] = [];
     let rest = token.text;
     while (rest.length > 0) {
       const open = nextInterpolation(rest);
       if (open < 0) {
-        parts.push({ k: "text", value: unescape(rest, token.line) });
+        parts.push({ k: "text", value: unescape(rest, fieldOf(token, "line")) });
         break;
       }
-      if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), token.line) });
+      if (open > 0) parts.push({ k: "text", value: unescape(rest.slice(0, open), fieldOf(token, "line")) });
       const close = closingBrace(rest, open);
       if (close < 0) {
         this.fail("a template string interpolates nothing", token);
@@ -3126,8 +3139,8 @@ class ProgramParser {
  */
 function textLength(value: ProgramValue): ProgramValue | null {
   if (value.k === "name") return { k: "length", of: value.name };
-  if (value.k === "text" && value.parts.length === 1) {
-    const part = value.parts[0];
+  if (value.k === "text" && fieldOf(value, "parts").length === 1) {
+    const part = fieldOf(value, "parts")[0];
     if (part !== undefined && part.k === "text") return { k: "number", text: String(part.value.length) };
   }
   return null;

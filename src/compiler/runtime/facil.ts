@@ -2070,7 +2070,9 @@ export async function buildFacilRuntime(
 
   /* Bundle facil.io, the adapter and the core runtime into one relocatable object the driver links.
      OpenSSL symbols stay undefined here and are resolved when the final program is linked with -lssl -lcrypto. */
-  const bundle = relocatableLinkCommand(toolchain, bundledObject, [adapterObject, rtObject, ...facilObjects]);
+  const bundleObjects: string[] = [adapterObject, rtObject];
+  for (const one of facilObjects) bundleObjects[bundleObjects.length] = one;
+  const bundle = relocatableLinkCommand(toolchain, bundledObject, bundleObjects);
   const linked = run(String(fieldOf(bundle, "command")), fieldOf(bundle, "args") as string[], { timeoutMs: 120_000 });
   const linkStatus = fieldOf(linked, "code");
   if (fieldOf(linked, "spawnError") !== undefined || linkStatus === null || Number(linkStatus) !== 0) {

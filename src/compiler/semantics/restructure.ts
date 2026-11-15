@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Cost-guided restructuring of hot functions.
  *
@@ -53,6 +61,7 @@
  */
 
 import type { SemanticBlock, SemanticFunction, SemanticLoop, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
+import type { CallEdge } from "../core/types.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
 import { inlineCall, isSafeToCompute, substituteLocals } from "./repair.ts";
 
@@ -103,7 +112,7 @@ function statementCost(
       // A call kept for what it does is the call plus the body behind it.
       return { cost: CALL_COST + costs.cost, statements: 1 + costs.statements };
     case "loop":
-      return { cost: turnsOf(statement.loop) * costs.cost, statements: 1 + costs.statements };
+      return { cost: turnsOf(fieldOf(statement, "loop")) * costs.cost, statements: 1 + costs.statements };
     case "setElement":
     case "fill":
     case "storeField":
@@ -146,7 +155,8 @@ function valueCost(
     // A call written inside an argument is the call plus the callee behind it,
     // and the callee behind a call is only read once: a body that reaches
     // itself has already been refused, so the walk terminates.
-    const callee = value.call.builtin ? undefined : callees.get(value.call.callee);
+    const call = fieldOf(value, "call");
+    const callee = fieldOf(call, "builtin") === true ? undefined : callees.get(String(fieldOf(call, "callee")));
     if (callee === undefined || seen.has(callee.name)) return { cost: CALL_COST, statements: 0 };
     const inner = estimate(callee, callees, new Set([...seen, callee.name]));
     return { cost: CALL_COST + inner.cost, statements: inner.statements };
@@ -172,14 +182,14 @@ function valueCost(
  */
 function turnsOf(loop: SemanticLoop): number {
   if (loop.kind !== "counted") return UNKNOWN_TURNS;
-  const from = constantOf(loop.from);
-  const to = constantOf(loop.to);
+  const from = constantOf(fieldOf(loop, "from"));
+  const to = constantOf(fieldOf(loop, "to"));
   if (from === null || to === null) return UNKNOWN_TURNS;
   const step = loop.step === null ? (loop.down ? -1 : 1) : constantOf(loop.step);
   if (step === null || step === 0) return UNKNOWN_TURNS;
   if (loop.down ? step > 0 : step < 0) return 0;
   const span = Math.abs(to - from);
-  const turns = loop.inclusive ? Math.floor(span / Math.abs(step)) + 1 : Math.ceil(span / Math.abs(step));
+  const turns = fieldOf(loop, "inclusive") ? Math.floor(span / Math.abs(step)) + 1 : Math.ceil(span / Math.abs(step));
   if (!Number.isSafeInteger(turns)) return UNKNOWN_TURNS;
   return Math.min(turns, MAX_ASSUMED_TURNS);
 }
@@ -195,14 +205,14 @@ function constantOf(value: SemanticValue): number | null {
 function valueChildrenOf(value: SemanticValue): readonly SemanticValue[] {
   switch (value.k) {
     case "arith":
-    case "compare": return [value.left, value.right];
+    case "compare": return [fieldOf(value, "left"), fieldOf(value, "right")];
     case "logical":
     case "coalesce": return [value.left, value.right];
     case "select": return [value.condition, value.then, value.otherwise];
-    case "unary": return [value.operand];
+    case "unary": return [fieldOf(value, "operand")];
     case "isNull": return [value.operand];
     case "toText": return [value.of];
-    case "length": return [value.of];
+    case "length": return [fieldOf(value, "of")];
     case "element": return [value.of, value.index];
     case "loadField": return [value.object];
     case "newObject": return value.fields.map((field) => field.value);
@@ -220,13 +230,14 @@ function estimate(fn: SemanticFunction, callees: ReadonlyMap<string, SemanticFun
   let cost = 0;
   let statements = 0;
   for (const block of blocksOf(fn.entry)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements")) {
       const one = statementCost(statement, callees, seen);
       cost += one.cost;
       statements += one.statements;
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null) {
-      cost += valueCost(block.terminator.value, callees, seen).cost;
+    const terminator = fieldOf(block, "terminator");
+    if (terminator.k === "return" && terminator.value !== null) {
+      cost += valueCost(terminator.value, callees, seen).cost;
     }
   }
   return { cost, statements };
@@ -306,7 +317,7 @@ function blocksOf(block: SemanticBlock): SemanticBlock[] {
   const out: SemanticBlock[] = [];
   const walk = (one: SemanticBlock): void => {
     out.push(one);
-    for (const statement of one.statements) {
+    for (const statement of fieldOf(one, "statements")) {
       for (const nested of statementBlocksOf(statement)) walk(nested);
     }
   };
@@ -316,7 +327,7 @@ function blocksOf(block: SemanticBlock): SemanticBlock[] {
 
 /** The number of statements a body holds, nested blocks included. */
 function countStatements(block: SemanticBlock): number {
-  return blocksOf(block).reduce((sum, one) => sum + one.statements.length, 0);
+  return blocksOf(block).reduce((sum, one) => sum + fieldOf(one, "statements").length, 0);
 }
 
 /** Every call a body makes, in the order it first makes each. */
@@ -330,16 +341,19 @@ function directCallees(fn: SemanticFunction): string[] {
       // the graph made a fused body declare `call Math.floor`, which the reader
       // of that body then refused: the contract it is read against names the
       // functions of the program and never the compiler's own.
-      if (one.k !== "call" || one.call.builtin || one.call.through !== undefined || seen.has(one.call.callee)) return;
-      seen.add(one.call.callee);
-      names.push(one.call.callee);
+      const call = fieldOf(one, "call");
+      const callee = String(fieldOf(call, "callee"));
+      if (one.k !== "call" || fieldOf(call, "builtin") === true || fieldOf(call, "through") !== undefined || seen.has(callee)) return;
+      seen.add(callee);
+      names.push(callee);
     });
   };
   for (const block of blocksOf(fn.entry)) {
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements")) {
       for (const value of statementValues(statement)) visit(value);
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null) visit(block.terminator.value);
+    const terminator = fieldOf(block, "terminator");
+    if (terminator.k === "return" && terminator.value !== null) visit(terminator.value);
   }
   return names;
 }
@@ -356,15 +370,16 @@ function callSites(fn: SemanticFunction, callee: string): CallSite[] {
   const walk = (block: SemanticBlock, executions: number): void => {
     const here = (value: SemanticValue): void => {
       walkValues(value, (one) => {
-        if (one.k === "call" && one.call.callee === callee) found.push({ block: block.id, executions });
+        if (one.k === "call" && fieldOf(one, "call").callee === callee) found.push({ block: block.id, executions });
       });
     };
-    for (const statement of block.statements) {
+    for (const statement of fieldOf(block, "statements")) {
       for (const value of statementValues(statement)) here(value);
     }
-    if (block.terminator.k === "return" && block.terminator.value !== null) here(block.terminator.value);
-    for (const statement of block.statements) {
-      const turns = statement.k === "loop" ? turnsOf(statement.loop) : 1;
+    const terminator = fieldOf(block, "terminator");
+    if (terminator.k === "return" && terminator.value !== null) here(terminator.value);
+    for (const statement of fieldOf(block, "statements")) {
+      const turns = statement.k === "loop" ? turnsOf(fieldOf(statement, "loop")) : 1;
       for (const nested of statementBlocksOf(statement)) walk(nested, executions * turns);
     }
   };
@@ -375,14 +390,14 @@ function callSites(fn: SemanticFunction, callee: string): CallSite[] {
 /** The callees a function may name because the program writes them out. */
 function inlineReachable(fn: SemanticFunction, callees: ReadonlyMap<string, SemanticFunction>): Set<string> {
   const reached = new Set<string>();
-  const queue = fn.calls.filter((edge) => edge.strategy === "inline").map((edge) => edge.callee);
+  const queue = (fieldOf(fn, "calls") as readonly CallEdge[]).filter((edge) => edge.strategy === "inline").map((edge) => edge.callee);
   while (queue.length > 0) {
     const name = queue.pop() as string;
     if (reached.has(name)) continue;
     reached.add(name);
     const callee = callees.get(name);
     if (callee === undefined) continue;
-    for (const edge of callee.calls) {
+    for (const edge of fieldOf(callee, "calls") as readonly CallEdge[]) {
       if (edge.strategy === "inline" && !reached.has(edge.callee)) queue.push(edge.callee);
     }
   }
@@ -392,7 +407,7 @@ function inlineReachable(fn: SemanticFunction, callees: ReadonlyMap<string, Sema
 /** Whether `start` can reach `target` through any of its calls. */
 function reaches(start: SemanticFunction, callees: ReadonlyMap<string, SemanticFunction>, target: string): boolean {
   const seen = new Set<string>();
-  const queue = start.calls.map((edge) => edge.callee);
+  const queue = (fieldOf(start, "calls") as readonly CallEdge[]).map((edge) => edge.callee);
   while (queue.length > 0) {
     const name = queue.pop() as string;
     if (name === target) return true;
@@ -400,7 +415,7 @@ function reaches(start: SemanticFunction, callees: ReadonlyMap<string, SemanticF
     seen.add(name);
     const callee = callees.get(name);
     if (callee === undefined) continue;
-    for (const edge of callee.calls) queue.push(edge.callee);
+    for (const edge of fieldOf(callee, "calls")) queue.push(edge.callee);
   }
   return false;
 }
@@ -414,7 +429,7 @@ function reaches(start: SemanticFunction, callees: ReadonlyMap<string, SemanticF
  * rather than written and read back as a fault.
  */
 function innerCallsLegal(fn: SemanticFunction, callees: ReadonlyMap<string, SemanticFunction>, callee: SemanticFunction): boolean {
-  const legal = new Set(fn.calls.map((edge) => edge.callee));
+  const legal = new Set<string>((fieldOf(fn, "calls") as readonly CallEdge[]).map((edge) => String(edge.callee)));
   for (const name of inlineReachable(fn, callees)) legal.add(name);
   for (const name of directCallees(callee)) {
     if (name === fn.name || name === callee.name) return false;
@@ -435,7 +450,7 @@ function innerCallsLegal(fn: SemanticFunction, callees: ReadonlyMap<string, Sema
 function isHot(site: CallSite, profile: FunctionProfile | undefined): boolean {
   if (site.executions > 1) return true;
   if (profile === undefined) return false;
-  return (profile.callCount ?? 0) > 1 || (profile.durationNs ?? 0) > 0;
+  return (profile.callCount ?? 0) > 1 || (fieldOf(profile, "durationNs") ?? 0) > 0;
 }
 
 /**
@@ -453,7 +468,7 @@ function fusionOpportunity(
   const maxCalleeStatements = options.maxCalleeStatements ?? MAX_CALLEE_STATEMENTS;
   const maxCallerStatements = options.maxCallerStatements ?? MAX_CALLER_STATEMENTS;
   const maxCalleeCost = options.maxCalleeCost ?? MAX_CALLEE_COST;
-  for (const edge of fn.calls) {
+  for (const edge of fieldOf(fn, "calls")) {
     const callee = callees.get(edge.callee);
     // The program writes a callee out only when it is unverified, effect-free
     // and non-recursive; that is the shape this asks about, and it is a
@@ -470,7 +485,7 @@ function fusionOpportunity(
     if (callee === undefined) continue;
     if (edge.strategy !== "inline") {
       if (decided !== true) continue;
-      if (callee.allocates || callee.prints || callee.readsArgv) continue;
+      if (fieldOf(callee, "allocates") || fieldOf(callee, "prints") || fieldOf(callee, "readsArgv")) continue;
       if (callee.returns.kind === "ref" || callee.returns.kind === "text") continue;
     }
     if (reaches(callee, callees, callee.name)) return `${callee.name} reaches itself`;
@@ -488,15 +503,15 @@ function fusionOpportunity(
       return `${callee.name} calls something ${fn.name} may not name, and writing it out would put that call here`;
     }
     const body = estimateFunction(callee, callees);
-    if (body.statements > calleeStatements) {
-      return `${callee.name} is ${body.statements} statements, and a fusion may copy at most ${calleeStatements}`;
+    if (fieldOf(body, "statements") > calleeStatements) {
+      return `${callee.name} is ${fieldOf(body, "statements")} statements, and a fusion may copy at most ${calleeStatements}`;
     }
     // The one thing a fusion removes is the call. A body that costs more than
     // the call is worth is code the call was buying for nothing.
     if (body.cost > calleeCost) {
       return `${callee.name} costs ${body.cost}, and removing one call is worth ${CALL_COST}`;
     }
-    if (countStatements(fn.entry) + body.statements > maxCallerStatements) {
+    if (countStatements(fn.entry) + fieldOf(body, "statements") > maxCallerStatements) {
       return `${fn.name} would grow past ${maxCallerStatements} statements`;
     }
     return { calleeName: edge.callee, callee, site };
@@ -524,7 +539,7 @@ function fusionOpportunity(
 function fuse(fn: SemanticFunction, fusion: Fusion): SemanticFunction | string {
   const context = new Map<string, SemanticFunction>();
   const clone = structuredClone(fusion.callee);
-  clone.calls = [];
+  setFieldOn(clone, "calls", []);
   // A body whose early returns would return from the caller is not one a
   // splice can hold — unless the guard and the value it guards are one value
   // of their own. A body that is a guarded return over declarations and a
@@ -532,17 +547,18 @@ function fuse(fn: SemanticFunction, fusion: Fusion): SemanticFunction | string {
   // condition is asked once, and the splice lands whole.
   selectify(clone);
   context.set(fusion.calleeName, clone);
-  const outcome = inlineCall(fn, fusion.site.block, fusion.calleeName, { functions: context });
-  if (!("applied" in outcome)) return outcome.refused;
-  const applied = outcome.applied;
-  const declared = new Set(applied.calls.map((edge) => edge.callee));
+  const outcome = inlineCall(fn, fieldOf(fusion.site, "block"), fusion.calleeName, { functions: context });
+  const applied = fieldOf(outcome, "applied") as SemanticFunction | undefined;
+  if (applied === undefined) return String(fieldOf(outcome, "refused"));
+  const edges = fieldOf(applied, "calls") as { callee: string; strategy: string }[];
+  const declared = new Set(edges.map((edge) => String(fieldOf(edge, "callee"))));
   for (const name of directCallees(applied)) {
-    if (!declared.has(name)) applied.calls.push({ callee: name, strategy: "call" });
+    if (!declared.has(name)) edges.push({ callee: name, strategy: "call" });
   }
   // A callee that allocates, prints or reads the command line was refused
   // above, so the caller inherits none of those. A layout the callee read is
   // still a layout the caller reads, and the caller must carry it.
-  applied.objects = { ...applied.objects, ...fusion.callee.objects };
+  setFieldOn(applied, "objects", { ...fieldOf(applied, "objects"), ...fusion.callee.objects });
   return applied;
 }
 
@@ -564,7 +580,7 @@ export function restructureHotFunction(
   const applied = fuse(fn, fusion);
   if (typeof applied === "string") return { refused: applied };
   const times = fusion.site.executions;
-  const note = `fused ${fusion.calleeName} into ${fusion.site.block} in ${fn.name}, which runs ${times === 1 ? "once" : `${times} times`}`;
+  const note = `fused ${fusion.calleeName} into ${fieldOf(fusion.site, "block")} in ${fn.name}, which runs ${times === 1 ? "once" : `${times} times`}`;
   return { applied, note };
 }
 
@@ -591,25 +607,32 @@ export function restructureHotFunction(
  */
 function selectify(fn: SemanticFunction): void {
   const entry = fn.entry;
-  if (entry.terminator.k !== "return" || entry.terminator.value === null) return;
-  const answer0 = entry.terminator.value;
+  const terminator = fieldOf(entry, "terminator");
+  const answered0 = fieldOf(terminator, "value") as SemanticValue | null;
+  if (terminator.k !== "return" || answered0 === null) return;
+  const answer0 = answered0;
   if (answer0.k === "call" || !isSafeToCompute(answer0)) return;
-  const statements = entry.statements;
+  const statements = fieldOf(entry, "statements");
   let guard = -1;
-  for (const [at, statement] of statements.entries()) {
+  let at = 0;
+  for (const statement of statements) {
+    const otherwise = fieldOf(statement, "otherwise");
+    const then = fieldOf(statement, "then");
+    const thenEnd = fieldOf(then, "terminator");
     if (
       statement.k === "if" &&
-      statement.otherwise === null &&
-      statement.then.terminator.k === "return" &&
-      statement.then.terminator.value !== null
+      otherwise === null &&
+      String(fieldOf(thenEnd, "k")) === "return" &&
+      fieldOf(thenEnd, "value") !== null
     ) {
       guard = at;
     }
+    at += 1;
   }
   if (guard < 0) return;
   const choice = statements[guard] as Extract<SemanticStatement, { k: "if" }>;
-  const answered = choice.then.terminator as { k: "return"; value: SemanticValue };
-  if (answered.value === null || !isSafeToCompute(answered.value)) return;
+  const answered = fieldOf(fieldOf(choice, "then"), "terminator") as { k: "return"; value: SemanticValue };
+  if (fieldOf(answered, "value") === null || !isSafeToCompute(fieldOf(answered, "value"))) return;
   // Everything between the guard and the return is a declaration the return
   // reads, and the declarations stand in one scope of their own: what the
   // return reads of them is the value they were written with, which is what
@@ -617,27 +640,27 @@ function selectify(fn: SemanticFunction): void {
   const between = statements.slice(guard + 1);
   const bindings = new Map<string, SemanticValue>();
   for (const statement of between) {
-    if (statement.k !== "let" || statement.slot.mutable) return;
+    if (statement.k !== "let" || fieldOf(fieldOf(statement, "slot"), "mutable") === true) return;
     if (!isSafeToCompute(statement.value)) return;
     for (const value of statementValues(statement)) {
       walkValues(value, (inner) => {
         if (inner.k === "call") return;
       });
     }
-    bindings.set(statement.slot.name, substituteLocals(structuredClone(statement.value), bindings));
+    bindings.set(String(fieldOf(fieldOf(statement, "slot"), "name")), substituteLocals(structuredClone(statement.value), bindings));
   }
   const answer = substituteLocals(structuredClone(answer0), bindings);
   // The guard reads nothing the declarations bound — they are written after
   // it — and the arms are read once each, where the body read them once each.
-  entry.statements = statements.slice(0, guard);
-  entry.terminator = {
+  setFieldOn(entry, "statements", statements.slice(0, guard));
+  setFieldOn(entry, "terminator", {
     k: "return",
     value: {
       k: "select",
-      type: answer0.type,
-      condition: structuredClone(choice.condition),
-      then: answered.value,
+      type: fieldOf(answer0, "type"),
+      condition: structuredClone(fieldOf(choice, "condition")),
+      then: fieldOf(answered, "value"),
       otherwise: answer,
     },
-  };
+  });
 }

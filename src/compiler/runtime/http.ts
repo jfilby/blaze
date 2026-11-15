@@ -51,6 +51,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Creates an HTTP server listening on a host and a port. A null or empty host listens on every address, IPv6 and IPv4 alike.",
     "Returns an owned server handle; a null handle means the host and port could not be bound.",
+    {},
   ),
   httpEntry(
     "blaze_http_server_run",
@@ -66,6 +67,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["server", "void*"]],
     "Stops the server and releases its handle.",
     "The handle is no longer valid after this; a null handle is ignored.",
+    {},
   ),
   httpEntry(
     "blaze_http_route_register",
@@ -80,6 +82,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Registers a route: method and path are handled by the given function.",
     "The handler is invoked with a borrowed request handle and a borrowed response handle.",
+    {},
   ),
   httpEntry(
     "blaze_http_req_method",
@@ -87,6 +90,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["req", "void*"]],
     "The HTTP method of the request.",
     "Borrowed: valid for the request's lifetime.",
+    {},
   ),
   httpEntry(
     "blaze_http_req_path",
@@ -94,6 +98,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["req", "void*"]],
     "The request path.",
     "Borrowed: valid for the request's lifetime.",
+    {},
   ),
   httpEntry(
     "blaze_http_req_header",
@@ -104,6 +109,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "A request header value, or an empty string when the header is absent.",
     "Borrowed: valid for the request's lifetime.",
+    {},
   ),
   httpEntry(
     "blaze_http_req_body",
@@ -114,6 +120,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "The request body bytes, with their length written through length.",
     "Borrowed: valid for the request's lifetime; length excludes no terminator.",
+    {},
   ),
   httpEntry(
     "blaze_http_resp_status",
@@ -121,6 +128,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["resp", "void*"], ["status", "uint16_t"]],
     "Sets the response status code.",
     "The response is owned by the caller until completed.",
+    {},
   ),
   httpEntry(
     "blaze_http_resp_header",
@@ -132,6 +140,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Sets a response header.",
     "Copies name and value into the response.",
+    {},
   ),
   httpEntry(
     "blaze_http_resp_body",
@@ -143,6 +152,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Sets the response body bytes.",
     "Copies the bytes into the response.",
+    {},
   ),
   httpEntry(
     "blaze_http_resp_complete",
@@ -150,6 +160,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["resp", "void*"]],
     "Sends the response and ends the request.",
     "The response handle is no longer valid after this.",
+    {},
   ),
   httpEntry(
     "blaze_http_server_new_settings",
@@ -166,6 +177,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Creates an HTTP server on a host and a port, with resource limits, a connection timeout and a thread/worker count. A null or empty host listens on every address, IPv6 and IPv4 alike.",
     "Returns an owned server handle; a null handle means the host and port could not be bound.",
+    {},
   ),
   httpEntry(
     "blaze_http_server_new_tls",
@@ -178,6 +190,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Creates an HTTPS (TLS) server on a host and a port. A null or empty host listens on every address, IPv6 and IPv4 alike.",
     "Returns an owned server handle; a null handle means the host and port could not be bound or TLS could not be initialized.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_request",
@@ -193,6 +206,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Performs an HTTP request and returns the response body bytes.",
     "Returns a borrowed pointer to the response body (valid until the next client call); the body byte count is written through length. Returns NULL on failure.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_open",
@@ -200,6 +214,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["url", "const char*"]],
     "Opens a buffered HTTP request handle for the callback form.",
     "Returns an owned handle; the caller sets the request this one carries with blaze_http_client_method and blaze_http_client_header, writes the body with blaze_http_client_write, and completes it with blaze_http_client_end.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_method",
@@ -207,6 +222,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["handle", "void*"], ["method", "const char*"]],
     "Sets the method a buffered request is written out with.",
     "No-op on a null handle.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_header",
@@ -214,6 +230,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["handle", "void*"], ["line", "const char*"]],
     "Appends one header line, as in \"content-type: application/json\", to a buffered request.",
     "No-op on a null handle.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_watch",
@@ -227,6 +244,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Binds one side of a buffered request: what 0 binds the handler of a response and what 1 binds the handler of an error.",
     "The trampoline is a program function the compiler hands over; the adapter calls it with the handle and then the values the handler captured, which it carries as bytes it does not read. The bytes are copied, so the caller may hand over ones that live only as long as the call.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_write",
@@ -234,6 +252,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["handle", "void*"], ["body", "const unsigned char*"], ["body_len", "size_t"]],
     "Appends bytes to a buffered request body.",
     "No-op on a null handle.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_end",
@@ -241,6 +260,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["handle", "void*"]],
     "Completes a buffered request, fires the handler bound to it, and returns the handle.",
     "A successful request fires the response handler the handle was given; a failed one fires the error handler and answers NULL.",
+    {},
   ),
   httpEntry(
     "blaze_http_client_resp_body",
@@ -248,6 +268,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["handle", "void*"], ["length", "size_t*"]],
     "Reads the response body of a completed request.",
     "Returns a borrowed pointer; the byte count is written through length.",
+    {},
   ),
   httpEntry(
     "blaze_http_sse_subscribe",
@@ -255,6 +276,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [["response", "void*"]],
     "Turns a response into an event stream: the connection stays open and every event published afterwards is written to it.",
     "Returns 1 when the connection became an event stream, 0 when it did not. The response is owned by the caller until the stream is closed.",
+    {},
   ),
   httpEntry(
     "blaze_http_sse_publish",
@@ -265,6 +287,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     ],
     "Writes an event to every event stream that is open.",
     "Returns how many streams the event was written to.",
+    {},
   ),
   httpEntry(
     "blaze_http_sse_count",
@@ -272,6 +295,7 @@ export const HTTP_ABI: readonly HttpEntry[] = [
     [],
     "How many event streams are open.",
     "Returns the count.",
+    {},
   ),
 ];
 

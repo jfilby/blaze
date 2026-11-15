@@ -1,3 +1,7 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
 /**
  * The source-level arithmetic lowering the wide-number IR does not hold.
  *
@@ -50,7 +54,7 @@ function modCalls(text: string): ModCall[] {
   const calls: ModCall[] = [];
   let index = 0;
   while (index < text.length) {
-    const character = text[index];
+    const character = String(text[index]);
     if (character === '"' || character === "'" || character === "`") {
       const close = text.indexOf(character, index + 1);
       index = close < 0 ? text.length : close + 1;
@@ -60,15 +64,15 @@ function modCalls(text: string): ModCall[] {
       index += 1;
       continue;
     }
-    const before = index === 0 ? "" : text[index - 1];
-    const after = text[index + 3] ?? "";
+    const before = index === 0 ? "" : String(text[index - 1]);
+    const after = text[index + 3] === undefined ? "" : String(text[index + 3]);
     if (/[A-Za-z0-9_$]/.test(before) || /[A-Za-z0-9_$]/.test(after)) {
       index += 3;
       continue;
     }
     let open = index + 3;
-    while (open < text.length && /\s/.test(text[open] as string)) open += 1;
-    if (text[open] !== "(") {
+    while (open < text.length && /\s/.test(String(text[open]))) open += 1;
+    if (String(text[open]) !== "(") {
       index += 3;
       continue;
     }
@@ -117,14 +121,14 @@ function splitModularValue(
 ): { op: string; left: string; right: string; negated: boolean } | null {
   const start = text.search(/\S/);
   if (start < 0) return null;
-  if (text[start] === "-") {
+  if (String(text[start]) === "-") {
     return { op: "-", left: "", right: text.slice(start + 1).trim(), negated: true };
   }
   let depth = 0;
   let expectValue = true;
   let chosen: { at: number; op: string; precedence: number } | null = null;
   for (let index = 0; index < text.length; index += 1) {
-    const character = text[index] as string;
+    const character = String(text[index]);
     if (character === "(" || character === "[" || character === "{") {
       depth += 1;
       expectValue = true;
@@ -146,7 +150,7 @@ function splitModularValue(
     if (character === "+" || character === "-") {
       // `++` and `+=` are not arithmetic over a value, and a sign where a value
       // is expected is a negation the case above already read.
-      if (text[index + 1] === character || text[index + 1] === "=") {
+      if (String(text[index + 1]) === character || String(text[index + 1]) === "=") {
         index += 1;
         continue;
       }
@@ -156,7 +160,7 @@ function splitModularValue(
       continue;
     }
     if (character === "*") {
-      if (text[index + 1] === "*") {
+      if (String(text[index + 1]) === "*") {
         // `**` binds tighter than `*` and associates to the right, so the
         // leftmost one is the outermost power.
         if (expectValue) continue;
@@ -165,7 +169,7 @@ function splitModularValue(
         expectValue = true;
         continue;
       }
-      if (text[index - 1] === "*" || text[index + 1] === "=") continue;
+      if (String(text[index - 1]) === "*" || String(text[index + 1]) === "=") continue;
       if (expectValue) continue;
       if (chosen === null || chosen.precedence >= 2) chosen = { at: index, op: "*", precedence: 2 };
       expectValue = true;
@@ -177,7 +181,8 @@ function splitModularValue(
   if (chosen === null) return null;
   const split = chosen as { at: number; op: string };
   const width = split.op === "**" ? 2 : 1;
-  return { op: split.op, left: text.slice(0, split.at), right: text.slice(split.at + width), negated: false };
+  const at = Number(fieldOf(split, "at"));
+  return { op: fieldOf(split, "op"), left: text.slice(0, at), right: text.slice(at + width), negated: false };
 }
 
 /**
@@ -204,11 +209,11 @@ function modularValueOrNull(text: string, modulus: string): string | null {
     if (split.op === "**") {
       // A power of a residue is not a residue: `x ** 2n` is a product wider
       // than the width, so it is the kernel's product, one per multiplication.
-      const exponent = /^(?:0[xX][0-9a-fA-F]+|\d+)n?$/.test(split.right.trim())
-        ? BigInt(split.right.trim().replace(/n$/, ""))
+      const exponent = /^(?:0[xX][0-9a-fA-F]+|\d+)n?$/.test(fieldOf(split, "right").trim())
+        ? BigInt(fieldOf(split, "right").trim().replace(/n$/, ""))
         : null;
       if (exponent === null || exponent < 0n || exponent > 64n) return null;
-      const base = modularValueOrNull(split.left, modulus);
+      const base = modularValueOrNull(fieldOf(split, "left"), modulus);
       if (base === null) return null;
       if (exponent === 0n) return "1n";
       let product = base;
@@ -217,14 +222,14 @@ function modularValueOrNull(text: string, modulus: string): string | null {
       }
       return product;
     }
-    if (split.negated) {
-      const right = modularValueOrNull(split.right, modulus);
+    if (fieldOf(split, "negated")) {
+      const right = modularValueOrNull(fieldOf(split, "right"), modulus);
       return right === null ? null : `u256_sub_mod(0n, ${right}, ${modulus})`;
     }
     const kernel = MODULAR_KERNEL[split.op] as string;
     const left = modularValueOrNull(split.left, modulus);
     if (left === null) return null;
-    const right = modularValueOrNull(split.right, modulus);
+    const right = modularValueOrNull(fieldOf(split, "right"), modulus);
     if (right === null) return null;
     return `${kernel}(${left}, ${right}, ${modulus})`;
   }
@@ -269,15 +274,19 @@ export function rewriteModularArithmetic(source: string): string {
     let chosen: { call: ModCall; reduced: string } | null = null;
     for (let index = calls.length - 1; index >= 0; index -= 1) {
       const call = calls[index] as ModCall;
-      const modulus = (call.args[1] ?? CURVE_P).trim() || CURVE_P;
-      const reduced = modularValueOrNull(call.args[0] === undefined ? "0n" : call.args[0], modulus);
+      const args = fieldOf(call, "args") as readonly string[];
+      let modulus = args[1] === undefined ? CURVE_P : String(args[1]).trim();
+      if (modulus === "") modulus = CURVE_P;
+      const value = args[0] === undefined ? "0n" : String(args[0]);
+      const reduced = modularValueOrNull(value, modulus);
       if (reduced !== null) {
         chosen = { call, reduced };
         break;
       }
     }
     if (chosen === null) return text;
-    text = `${text.slice(0, chosen.call.start)}(${chosen.reduced})${text.slice(chosen.call.end)}`;
+    const chosenCall = fieldOf(chosen, "call");
+    text = `${text.slice(0, Number(fieldOf(chosenCall, "start")))}(${fieldOf(chosen, "reduced")})${text.slice(Number(fieldOf(chosenCall, "end")))}`;
   }
 }
 
@@ -320,7 +329,7 @@ function matchBrace(source: string, openIndex: number): number {
   let inString: string | null = null;
   let inLineComment = false;
   while (i < source.length) {
-    const ch = source[i];
+    const ch = String(source[i]);
     if (inLineComment) {
       if (ch === "\n") inLineComment = false;
       i++;
@@ -331,11 +340,11 @@ function matchBrace(source: string, openIndex: number): number {
         i += 2;
         continue;
       }
-      if (ch === inString) inString = null;
+      if (ch === String(inString)) inString = null;
       i++;
       continue;
     }
-    if (ch === "/" && source[i + 1] === "/") {
+    if (ch === "/" && String(source[i + 1]) === "/") {
       inLineComment = true;
       i += 2;
       continue;
@@ -359,7 +368,7 @@ function matchParen(source: string, openIndex: number): number {
   let depth = 0;
   let i = openIndex;
   while (i < source.length) {
-    const ch = source[i];
+    const ch = String(source[i]);
     if (ch === "(") depth++;
     else if (ch === ")") {
       depth--;
@@ -376,11 +385,11 @@ function splitTopLevelArgs(s: string): string[] {
   let cur = "";
   let inStr: string | null = null;
   for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
+    const ch = String(s[i]);
     if (inStr !== null) {
       cur += ch;
-      if (ch === "\\") { cur += s[++i]; continue; }
-      if (ch === inStr) inStr = null;
+      if (ch === "\\") { i += 1; cur += String(s[i]); continue; }
+      if (ch === String(inStr)) inStr = null;
       continue;
     }
     if (ch === "'" || ch === '"') { inStr = ch; cur += ch; continue; }

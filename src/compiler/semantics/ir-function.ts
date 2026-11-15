@@ -1908,8 +1908,25 @@ class FunctionBody {
       const called = functions[directOverload] !== undefined ? directOverload : callName;
       const signature = fieldOfValue(direct, "function") as FunctionSignature;
       const signatureParams = fieldOfValue(signature, "params") as FunctionSignature["params"];
-      this.arity(called, signatureParams.length, callArgs.length, line);
-      const args = callArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
+      // A lifted closure is handed its captured values before the arguments the
+      // source writes. A call the frontend read before those captures were known
+      // can still name only its arguments, so the leading parameters the callee
+      // declares are supplied here from the names the caller has in scope.
+      let writtenArgs = callArgs;
+      const closureSymbol = String(fieldOfValue(signature, "symbol"));
+      if (closureSymbol.startsWith("__closure_") && callArgs.length < signatureParams.length) {
+        const missing = signatureParams.length - callArgs.length;
+        const completed: Expression[] = [];
+        let slot = 0;
+        while (slot < missing) {
+          completed[completed.length] = { k: "ident", name: String(fieldOfValue(signatureParams[slot], "name")) };
+          slot += 1;
+        }
+        for (const argument of callArgs) completed[completed.length] = argument;
+        writtenArgs = completed;
+      }
+      this.arity(called, signatureParams.length, writtenArgs.length, line);
+      const args = writtenArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
       const returns = parseType(String(fieldOfValue(signature, "returns")));
       return {
         value: {
@@ -2964,17 +2981,17 @@ class FunctionBody {
    * number's low limb.
    */
   private wideOperand(value: SemanticValue, type: SemanticType, line: number): SemanticValue {
-    if (!isWideType(type) || isWideType(value.type)) return value;
+    if (!isWideType(type) || isWideType(fieldOfValue(value, "type") as SemanticType)) return value;
     if (value.k === "const") return this.widenLiteral(value, type);
     // A choice of two written values is widened in both arms: it is the value
     // of either, and neither arm needs a store to become the wide number.
     if (value.k === "select") {
-      const then = this.wideOperand(value.then, type, line);
-      const otherwise = this.wideOperand(value.otherwise, type, line);
+      const then = this.wideOperand(fieldOfValue(value, "then") as SemanticValue, type, line);
+      const otherwise = this.wideOperand(fieldOfValue(value, "otherwise") as SemanticValue, type, line);
       // Both arms are written values that widened; a choice with an arm that
       // did not is left as it is, and the kernel's refusal says why.
-      if (!isWideType(then.type) || !isWideType(otherwise.type)) return value;
-      return { ...value, type, then, otherwise };
+      if (!isWideType(fieldOfValue(then, "type") as SemanticType) || !isWideType(fieldOfValue(otherwise, "type") as SemanticType)) return value;
+      return { k: "select", type, condition: fieldOfValue(value, "condition") as SemanticValue, then, otherwise };
     }
     return value;
   }

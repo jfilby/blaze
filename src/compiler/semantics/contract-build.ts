@@ -1,3 +1,11 @@
+function fieldOf(value: unknown, key: string): any {
+  return (value as Record<string, unknown>)[key];
+}
+
+function setFieldOn(value: unknown, key: string, next: unknown): void {
+  (value as Record<string, unknown>)[key] = next;
+}
+
 /**
  * Shared contract assembly.
  *
@@ -73,7 +81,7 @@ export function bufferContract(
   const reads: string[] = [];
   const seenRanges = new Set<string>();
   for (const access of accesses) {
-    const range = `${access.parameter}[${access.lo}:${access.hi}]`;
+    const range = `${access.parameter}[${fieldOf(access, "lo")}:${fieldOf(access, "hi")}]`;
     if (seenRanges.has(range)) continue;
     seenRanges.add(range);
     reads.push(range);
@@ -88,8 +96,8 @@ export function bufferContract(
       requires.push(`${param.name} != null`);
     }
     for (const access of touched) {
-      if (isTautology(access.hi, param.name)) continue;
-      requires.push(`len(${param.name}) >= ${access.hi}`);
+      if (isTautology(fieldOf(access, "hi"), param.name)) continue;
+      requires.push(`len(${param.name}) >= ${fieldOf(access, "hi")}`);
     }
   }
   return { requires, reads };
@@ -114,25 +122,36 @@ export function symbolFor(name: string): string {
  * postcondition it carries when one expression can state what it returns.
  */
 export function assembleContract(assembly: ContractAssembly): FunctionContract {
-  const { name, params, returns, accesses, input, definition } = assembly;
+  const name = String(fieldOf(assembly, "name"));
+  const params = fieldOf(assembly, "params") as readonly { name: string; type: TypeExpr }[];
+  const returns = fieldOf(assembly, "returns") as TypeExpr;
+  const accesses = fieldOf(assembly, "accesses") as readonly AccessRange[];
+  const input = fieldOf(assembly, "input");
+  const definition = fieldOf(assembly, "definition");
+  const declaredSymbol = fieldOf(assembly, "symbol");
   const buffers = bufferContract(params, accesses);
-  const parameters: FunctionParam[] = params.map((param) => ({ name: param.name, type: typeToString(param.type) }));
+  const parameters: FunctionParam[] = [];
+  for (const param of params) parameters[parameters.length] = { name: String(fieldOf(param, "name")), type: typeToString(fieldOf(param, "type")) };
   const effects: Effect[] = [];
-  if (definition.allocates) effects.push("memory");
-  if (definition.prints) effects.push("io");
-  if (definition.readsArgv) effects.push("syscall");
+  if (fieldOf(definition, "allocates")) effects.push("memory");
+  if (fieldOf(definition, "prints")) effects.push("io");
+  if (fieldOf(definition, "readsArgv")) effects.push("syscall");
+  const statedResult = fieldOf(assembly, "result");
+  const body = structuredClone(definition) as unknown as Record<string, unknown>;
+  setFieldOn(body, "objects", {});
+  setFieldOn(body, "calls", []);
 
   return {
     version: "1",
-    function: { name, symbol: assembly.symbol ?? symbolFor(name), params: parameters, returns: typeToString(returns) },
+    function: { name, symbol: declaredSymbol === undefined || declaredSymbol === null ? symbolFor(name) : String(declaredSymbol), params: parameters, returns: typeToString(returns) },
     requires: buffers.requires,
-    ensures: assembly.result === null || (returns.kind !== "primitive" && returns.kind !== "text") ? [] : [`result == ${assembly.result}`],
+    ensures: statedResult === null || (returns.kind !== "primitive" && returns.kind !== "text") ? [] : [`result == ${String(statedResult)}`],
     memory: { reads: buffers.reads, writes: [], aliasing: [] },
     effects,
-    numeric: normalizeNumeric(input.numeric),
-    optimize: normalizeOptimize(input.optimize),
+    numeric: normalizeNumeric(fieldOf(input, "numeric")),
+    optimize: normalizeOptimize(fieldOf(input, "optimize")),
     // The calls are filled in by the whole-program pass in objects.ts, which
     // walks these same bodies knowing which names the program compiles.
-    definition: { ...definition, objects: {}, calls: [] },
+    definition: body as unknown as FunctionDefinition,
   };
 }
