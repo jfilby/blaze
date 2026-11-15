@@ -2461,8 +2461,8 @@ class PythonParser {
 function isEntryGuard(statement: PyStatement): boolean {
   if (statement.k !== "if") return false;
   const condition = fieldOf(statement, "condition");
-  if (condition.k !== "binary" || condition.op !== "==") return false;
-  return isMainText(condition.left) && isMainText(fieldOf(condition, "right"));
+  if (String(fieldOf(condition, "k")) !== "binary" || String(fieldOf(condition, "op")) !== "==") return false;
+  return isMainText(fieldOf(condition, "left") as PyValue) && isMainText(fieldOf(condition, "right") as PyValue);
 }
 
 /** Whether a value is the text `__main__`. */
@@ -3925,8 +3925,8 @@ export function lowerValue(value: PyValue): Expression {
       // not handled.
       if (fieldOf(value, "base").k === "slice") {
         const slice = fieldOf(value, "base");
-        const step = slice.step;
-        const isUnitStep = step === null || (step.k === "number" && Number(step.text) === 1);
+        const step = fieldOf(slice, "step") as PyValue | null;
+        const isUnitStep = step === null || (String(fieldOf(step, "k")) === "number" && Number(fieldOf(step, "text")) === 1);
         if (isUnitStep) {
           const startExpr = fieldOf(slice, "start") === null
             ? { k: "number" as const, text: "0", whole: true }
@@ -4331,14 +4331,15 @@ class BodyAnalysis {
 
   run(): { result: string | null; accesses: AccessRange[] } {
     try {
-      for (const statement of this.declaration.body) this.execute(statement, null);
+      const statements = fieldOf(this.declaration, "body") as PyStatement[];
+      for (const statement of statements) this.execute(statement, null);
     } catch (error) {
       if (!(error instanceof Uncontractable)) throw error;
       return { result: null, accesses: fieldOf(this, "accesses") };
     }
-    if (this.result === null && this.declaration.returns.kind !== "void") {
+    if (this.result === null && String(fieldOf(fieldOf(this.declaration, "returns"), "kind")) !== "void") {
       throw frontendError(
-        `${this.declaration.name} never returns a value`,
+        `${String(fieldOf(this.declaration, "name"))} never returns a value`,
         "the contract needs an expression the result must equal",
       );
     }
@@ -5272,12 +5273,12 @@ export const pythonFrontend: Frontend = {
     }
     // A conversion is a program of its own: `int(x)` answers a whole number
     // and `str(x)` a text, and a module of functions has neither.
-    if (analysis.body.length === 0) {
+    if ((fieldOf(analysis, "body") as PyStatement[]).length === 0) {
       const conversion = conversionIn(fieldOf(declaration, "body"));
       if (conversion !== null) {
         throw frontendError(
           `"${conversion}" is not part of a module`,
-          `line ${declaration.line} of ${analysis.path}: a module is a library of functions, and a conversion is a program of its own`,
+          `line ${Number(fieldOf(declaration, "line"))} of ${analysis.path}: a module is a library of functions, and a conversion is a program of its own`,
         );
       }
     }

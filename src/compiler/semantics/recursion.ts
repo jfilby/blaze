@@ -1146,7 +1146,7 @@ function answeringOf(members: readonly Member[], counter: string, taken: Set<str
   const final = members[members.length - 1] as Member;
   return {
     statements: answeringArms(members, 0, counter, taken),
-    last: { k: "return", value: fieldOf(final, "plan").answer },
+    last: { k: "return", value: fieldOf(fieldOf(final, "plan"), "answer") as SemanticValue },
   };
 }
 
@@ -1162,7 +1162,7 @@ function answeringArms(members: readonly Member[], at: number, counter: string, 
     {
       k: "if",
       condition: isBodyAt(counter, fieldOf(member, "at")),
-      then: { id: freshName(taken, "blaze_answer"), statements: [], releases: [], terminator: { k: "return", value: fieldOf(member, "plan").answer } },
+      then: { id: freshName(taken, "blaze_answer"), statements: [], releases: [], terminator: { k: "return", value: fieldOf(fieldOf(member, "plan"), "answer") as SemanticValue } },
       otherwise: { id: freshName(taken, "blaze_answer"), statements: answeringArms(members, at + 1, counter, taken), releases: [], terminator: { k: "next" } },
       line: UNSTATED_LINE,
     },
@@ -1186,9 +1186,10 @@ function edgesOf(members: readonly Member[], names: Turns): CallEdge[] {
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
   for (const member of members) {
-    for (const edge of fieldOf(member.body, "calls")) {
-      if (names.has(edge.callee) || seen.has(edge.callee)) continue;
-      seen.add(edge.callee);
+    for (const edge of fieldOf(fieldOf(member, "body"), "calls") as CallEdge[]) {
+      const callee = String(fieldOf(edge, "callee"));
+      if (names.has(callee) || seen.has(callee)) continue;
+      seen.add(callee);
       edges.push({ ...edge });
     }
   }

@@ -153,7 +153,7 @@ function blocksOf(statement: SemanticStatement): readonly SemanticBlock[] {
     const otherwise = fieldOf(statement, "otherwise") as SemanticBlock | null;
     return otherwise === null ? [fieldOf(statement, "then") as SemanticBlock] : [fieldOf(statement, "then"), otherwise];
   }
-  if (statement.k === "loop") return [fieldOf(statement, "loop").body];
+  if (statement.k === "loop") return [fieldOf(fieldOf(statement, "loop"), "body") as SemanticBlock];
   if (statement.k === "block") return [fieldOf(statement, "body")];
   return [];
 }
