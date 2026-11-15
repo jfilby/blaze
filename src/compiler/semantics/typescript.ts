@@ -16470,7 +16470,11 @@ class TypeScriptParser {
     // of the service the exported annotation writes.
     if (elements === null) {
       const shape = this.shapeOf(receiver);
-      if (shape !== null && shape.kind === "list") elements = this.typeExprOfShape(shape.of);
+      if (shape !== null && shape.kind === "list") {
+        const of = shape.of;
+        const name = of.kind === "record" ? this.nameForRecord(of) : null;
+        elements = this.typeExprOfShape(of, name === null ? null : this.layoutRefName(name));
+      }
     }
     // `for (const [index, element] of list.entries())` names the two parts of
     // an entry. A pair is not an element a typed array holds, so the loop walks
