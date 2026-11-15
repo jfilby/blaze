@@ -103,6 +103,7 @@ import {
   memberNameOf,
 } from "./typescript-classes.ts";
 import type { PrimitiveTypeName, TypeExpr } from "../core/types.ts";
+import { isInteger, isWideType } from "../core/semantic-ir.ts";
 import type { SemanticType } from "../core/semantic-ir.ts";
 import type {
   AssignOperator,
@@ -4127,6 +4128,8 @@ class TypeScriptParser {
    * declaration it initializes says so.
    */
   private readonly assertedValues = new Set<Expression>();
+  /** The declaration statement each local name was written by. */
+  private readonly declarationStatements = new Map<string, { type: TypeExpr | null }>();
   /**
    * Whether the file's bigints reach past the machine word. A `bigint` is
    * arbitrary precision in the language; this compiler holds it at the machine
@@ -9255,7 +9258,9 @@ class TypeScriptParser {
       this.valueTypes.set(name.text, declaredType ?? asserted ?? initType);
       if (this.isRegexValue(init)) this.valueRegexes.add(name.text);
       else this.valueRegexes.delete(name.text);
-      return { kind: "declare", name: name.text, type: declaredType ?? asserted, init, line: name.line };
+      const declaration = { kind: "declare" as const, name: name.text, type: declaredType ?? asserted, init, line: name.line };
+      this.declarationStatements.set(name.text, declaration);
+      return declaration;
     }
 
     // `void name;` marks a value as read and writes nothing. The statement has
@@ -9882,6 +9887,26 @@ class TypeScriptParser {
       }
       this.next();
       const value = this.readAt(this.valueTypes.get(target.text) ?? null, () => this.readExpression(), this.valueShapes.get(target.text) ?? null);
+      // A whole number written into a name a machine word holds is the wide
+      // number it is written with: the declaration is the wide type, and every
+      // later read of the name is a wide number.
+      const writtenType = this.valueTypeOf(value);
+      const heldType = this.valueTypes.get(target.text) ?? null;
+      if (heldType !== null && isInteger(heldType) && !isWideType(heldType) && isInteger(writtenType) && isWideType(writtenType)) {
+        const declaration = this.declarationStatements.get(target.text);
+        if (declaration !== undefined) declaration.type = writtenType;
+        this.valueTypes.set(target.text, writtenType);
+        // The whole numbers the wide expression is computed with are wide too:
+        // a bigint name multiplied by the wide number is the same bigint, and
+        // the backend widens the machine word it held into the limb it adds.
+        for (const [name, other] of this.declarationStatements) {
+          const type = this.valueTypes.get(name) ?? null;
+          if (type !== null && isInteger(type) && !isWideType(type) && dependsOn(value, name)) {
+            other.type = writtenType;
+            this.valueTypes.set(name, writtenType);
+          }
+        }
+      }
       this.accept(";");
       // What the name holds is what it was just written with, so a name that
       // held an arrow no longer does: a later `g(x)` would call a function the
@@ -12996,22 +13021,18 @@ class TypeScriptParser {
         // `BigInt` of a double is that number without its fraction, which is
         // the reading a store of sixty-four bits makes of it.
         if (target.k === "ident" && target.name === "BigInt") {
+          // `BigInt(x)` is the wide whole number the value names. A literal is
+          // folded by the read that knows its width; a number written at run
+          // time is the call the backend answers with the four limbs of it.
           const args = this.readCallArguments([NUMBER_RESULT]);
           const written = args[0];
-          // A literal is a constant the compiler already holds: `BigInt(128)`
-          // is the wide constant a power is folded with, and the read that
-          // folds it is the one that knows its width.
-          const constant = written !== undefined && (written.k === "literal" || written.k === "bigint" || written.k === "text");
-          const held = written === undefined || constant ? null : this.valueTypeOf(written);
-          if (held !== null && held.kind === "primitive" && held.name !== "i256" && held.name !== "u256") {
-            this.expressionTypes.set(args[0] as Expression, BIGINT_RESULT);
-            replace(args[0] as Expression);
-            continue;
-          }
-          // A form this read does not fold — the digits a text states — is
-          // left as the call the source wrote, for the read that knows it.
+          const held = written === undefined ? null : this.valueTypeOf(written);
+          // The digits a text states are a whole number a machine word holds,
+          // which is the width `BigInt.asIntN` reads; a number written at run
+          // time is the wide number its use asks for.
+          const narrow = held !== null && (held.kind === "text" || (held.kind === "primitive" && (held.name === "i64" || held.name === "u64")));
           const left: Expression = { k: "call", name: "BigInt", args };
-          this.expressionTypes.set(left, BIGINT_RESULT);
+          this.expressionTypes.set(left, narrow ? BIGINT_RESULT : WIDE_RESULT);
           replace(left);
           continue;
         }
@@ -13126,6 +13147,12 @@ class TypeScriptParser {
           const bits = args[0];
           const value = args[1];
           const held = value === undefined ? null : this.valueTypeOf(value);
+          // A width of the whole carrier is the number itself, a wide number
+          // included: `asIntN(64, big)` wraps nothing.
+          if (bits !== undefined && bits.k === "literal" && Number(bits.text) >= 64 && value !== undefined && held !== null && held.kind === "primitive" && (held.name === "u256" || held.name === "i256")) {
+            replace(value);
+            continue;
+          }
           const whole = held !== null && held.kind === "primitive" && (held.name === "i64" || held.name === "u64");
           if (bits === undefined || value === undefined || args.length !== 2 || !whole) {
             this.report(
@@ -14782,7 +14809,12 @@ class TypeScriptParser {
         // A list is asserted at the type it says: `(o.fields as string[])`
         // names texts, so `join` written after it reads the elements the cast
         // states rather than the `unknown` the field was declared at.
-        if (type.kind === "slice" || type.kind === "array" || type.kind === "ref") {
+        // A whole number asserted over a value held as a reference is the
+        // number it is: `fields["magnitude"] as bigint` is a bigint, and the
+        // reads after it are the whole number's. A double or a truth assertion
+        // is not one: a `Record` reads as a value of the fields' own types.
+        const whole = type.kind === "primitive" && type.name !== "f64" && type.name !== "f32" && type.name !== "bool";
+        if (whole || type.kind === "slice" || type.kind === "array" || type.kind === "ref") {
           this.expressionTypes.set(current(), type);
           if (!constAssertion) this.assertedValues.add(current());
         }

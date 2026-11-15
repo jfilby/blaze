@@ -1162,7 +1162,12 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // over a loop index is a double on both sides of the language and here.
       const widened =
         isFloat(fieldOf(value, "type") as SemanticType) && isInteger((fieldOf(value, "left") as SemanticValue).type) && isInteger((fieldOf(value, "right") as SemanticValue).type) && String(fieldOf(value, "op")) !== "min" && String(fieldOf(value, "op")) !== "max";
-      if (!widened && !typeEquals(expected, (fieldOf(value, "left") as SemanticValue).type) && !typeEquals(expected, (fieldOf(value, "right") as SemanticValue).type)) {
+      // A wide whole number is computed with the machine word a narrower whole
+      // number is: the backend widens it into the limb a wide number starts
+      // with, which is the store every target writes.
+      const wideWhole =
+        isWideType(fieldOf(value, "type") as SemanticType) && isInteger((fieldOf(value, "left") as SemanticValue).type) && isInteger((fieldOf(value, "right") as SemanticValue).type);
+      if (!widened && !wideWhole && !typeEquals(expected, (fieldOf(value, "left") as SemanticValue).type) && !typeEquals(expected, (fieldOf(value, "right") as SemanticValue).type)) {
         problems.push(`${prefix}${String(fieldOf(value, "op"))} of a ${typeText((fieldOf(value, "left") as SemanticValue).type)} and a ${typeText((fieldOf(value, "right") as SemanticValue).type)} is a ${typeText(fieldOf(value, "type") as SemanticType)}, which is neither`);
         return problems;
       }
@@ -1188,7 +1193,7 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       // C comparison, and the machine backend asks for the width a wide number
       // does not have. The count of a shift is the one narrower number a wide
       // number may be beside, and it is not a comparison.
-      const pair = widePairProblem(fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type, false);
+      const pair = widePairProblem(fieldOf(value, "left") as SemanticValue, fieldOf(value, "right") as SemanticValue, fieldOf(value, "operand") as SemanticType, false);
       if (pair !== null) problems.push(`${prefix}${String(fieldOf(value, "op"))}: ${pair}`);
       return problems;
     case "logical": {

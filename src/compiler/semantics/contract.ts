@@ -835,9 +835,8 @@ function wholeFromText(text: string): Whole {
 
 /** A whole number as the digits it is, with a minus in front of a negative. */
 function formatWhole(value: Whole): string {
-  const fields = value as unknown as Record<string, unknown>;
-  const negative = fields["negative"] as boolean;
-  let magnitude = fields["magnitude"] as bigint;
+  const negative = value.negative;
+  let magnitude = value.magnitude;
   if (magnitude === 0n) return "0";
   let text = "";
   while (magnitude > 0n) {
@@ -855,9 +854,8 @@ function wholeToNumber(value: Whole): number {
 
 /** The two's-complement bits a whole number is, at 256 bits. */
 function wholeBits(value: Whole): bigint {
-  const fields = value as unknown as Record<string, unknown>;
-  const negative = fields["negative"] as boolean;
-  const magnitude = fields["magnitude"] as bigint;
+  const negative = value.negative;
+  const magnitude = value.magnitude;
   if (!negative) return magnitude & WHOLE_MASK;
   return ((WHOLE_MASK - magnitude) + 1n) & WHOLE_MASK;
 }
@@ -1848,9 +1846,8 @@ export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<stri
 
 /** The host form of a whole number: its sign and its magnitude. */
 function wholeToBigInt(value: Whole): bigint {
-  const fields = value as unknown as Record<string, unknown>;
-  const magnitude = fields["magnitude"] as bigint;
-  return fields["negative"] === true ? -magnitude : magnitude;
+  const magnitude = value.magnitude;
+  return value.negative ? -magnitude : magnitude;
 }
 
 /** Postconditions that the given result violates. */
