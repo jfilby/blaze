@@ -855,6 +855,17 @@ class FunctionBody {
           return;
         }
         const value = this.typed(fieldOfValue(statement, "value") as Expression, this.returns, Number(fieldOfValue(statement, "line"))).value;
+        // A concise body that answers a call returning nothing — `() => f()`
+        // where `f` is a void function — runs the call for what it does and
+        // hands back nothing: a function declared to return nothing cannot
+        // hand back a value, even one of no width.
+        if (String(fieldOfValue(fieldOfValue(this.returns, "type"), "kind")) === "void" && String(fieldOfValue(fieldOfValue(value, "type"), "kind")) === "void") {
+          if (String(fieldOfValue(value, "k")) === "call") this.write({ k: "call", call: fieldOfValue(value, "call") as SemanticCall, line: Number(fieldOfValue(statement, "line")) });
+          this.flush();
+          this.finallysWritten();
+          this.finish({ k: "return", value: null });
+          return;
+        }
         // Whatever the value hoisted is written before the block ends, and what
         // it hoisted into is what the function hands back.
         this.flush();
@@ -1687,7 +1698,14 @@ class FunctionBody {
     if (String(fieldOfValue(inferred, "kind")) === "type") {
       const named = layoutOf(fieldOfValue(inferred, "type") as TypeExpr) as { name?: string } | null;
       const namedName = named === null ? undefined : fieldOfValue(named, "name") as string | undefined;
-      if (namedName !== undefined && (fieldOfValue(this, "objects") as Record<string, ObjectLayout>)[namedName] !== undefined) {
+      const objects = fieldOfValue(this, "objects") as Record<string, ObjectLayout>;
+      const namedLayout = namedName === undefined ? undefined : objects[namedName];
+      // A name two modules declare is two layouts, and the declaration this
+      // read resolved against is the one that holds the field. A layout under
+      // the name that does not hold it is the other declaration's, so the read
+      // is the field search's rather than a field of the wrong object.
+      if (namedName !== undefined && namedLayout !== undefined &&
+          (fieldOfValue(namedLayout, "fields") as readonly { name: string }[]).some((one) => String(fieldOfValue(one, "name")) === field)) {
         return [namedName];
       }
     }
@@ -1814,6 +1832,9 @@ class FunctionBody {
           if (contract !== undefined && fieldOfValue(contract, "promise") !== undefined) payload = parseType(String(fieldOfValue(contract, "promise")));
         }
       }
+      // A promise that carries a list carries a reference to it, so it is
+      // read out of the handle as the list it is rather than as a number.
+      const listPayload = payload.kind === "slice" || payload.kind === "array";
       const callee = payload.kind === "text"
         ? "Promise.await.text"
         : payload.kind === "primitive" && payload.name === "bool"
@@ -1822,11 +1843,11 @@ class FunctionBody {
             ? "Promise.await.whole"
             : payload.kind === "void"
               ? "Promise.await.nothing"
-              : payload.kind === "ref"
+              : payload.kind === "ref" || listPayload
                 ? "Promise.await.value"
                 : "Promise.await";
       const awaited = builtinFor(callee) as BuiltinSignature;
-      const returns = fieldOfValue(awaited, "returns") as SemanticType;
+      const returns = listPayload ? payload as SemanticType : fieldOfValue(awaited, "returns") as SemanticType;
       return {
         value: {
           k: "call",
@@ -2929,6 +2950,12 @@ class FunctionBody {
     const test = (type: SemanticType): boolean => isNumber(type) || isBoolean(type);
     if (isText(left) && test(right)) return TEXT;
     if (isText(right) && test(left)) return TEXT;
+    // A truth beside a number is the test the operator makes: the arm that
+    // answers is the other one, and its type is what the expression holds. A
+    // truth is a number at the machine, so the falsy arm a number writes is the
+    // same zero a false is.
+    if (isBoolean(left) && isNumber(right)) return right;
+    if (isNumber(left) && isBoolean(right)) return left;
     return this.common(left, right, line);
   }
 

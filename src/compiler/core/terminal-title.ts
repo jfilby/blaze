@@ -135,7 +135,7 @@ export function oscTitle(title: string): string {
 /** Write a title to a stream, and to nothing when the stream is not a terminal. */
 export function streamTitleSink(stream: { write(text: string): unknown; isTTY?: boolean }): TitleSink {
   return (title) => {
-    if (stream.isTTY !== true) return;
+    if (String(stream.isTTY) !== "true") return;
     stream.write(oscTitle(title));
   };
 }

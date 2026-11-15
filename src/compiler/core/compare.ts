@@ -64,8 +64,10 @@ function walk(left: Json | undefined, right: Json | undefined, path: string, dif
     }
   }
   if (leftObject || rightObject) {
-    const leftRecord = leftObject ? (left as { [key: string]: Json }) : {};
-    const rightRecord = rightObject ? (right as { [key: string]: Json }) : {};
+    let leftRecord: { [key: string]: Json } = {};
+    if (leftObject) leftRecord = left as { [key: string]: Json };
+    let rightRecord: { [key: string]: Json } = {};
+    if (rightObject) rightRecord = right as { [key: string]: Json };
     const keys = [...new Set([...Object.keys(leftRecord), ...Object.keys(rightRecord)])].sort();
     for (const key of keys) {
       walk(leftRecord[key], rightRecord[key], path === "" ? key : `${path}.${key}`, differences);

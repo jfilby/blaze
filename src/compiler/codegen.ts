@@ -1397,7 +1397,8 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
     sequence: number,
   ): Promise<{ review: Review; durationNs: bigint }> => {
     const startedAt = monotonicTimeNs();
-    const review = await (fieldOf(generationBackend(), "review") as (asked: ReviewRequest, sequence: number) => Promise<Review>)(asked, sequence);
+    const backend = generationBackend();
+    const review = await (fieldOf(backend, "review") as (this: unknown, asked: ReviewRequest, sequence: number) => Promise<Review>).call(backend, asked, sequence);
     return { review, durationNs: monotonicTimeNs() - startedAt };
   };
 
@@ -1500,7 +1501,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
 
   const selected = selectCandidate(outcomes, contract);
   const outputKind = String(fieldOf(request, "output"));
-  const benchmarkVector = fieldOf(vectors, "benchmark") as TestVector | null;
+  const benchmarkVector = vectors === null ? null : fieldOf(vectors, "benchmark") as TestVector | null;
   if (selected === null || /^ir$/.test(outputKind)) {
     return { candidates, outcomes, selected, benchmarkVector, modelDurationNs };
   }

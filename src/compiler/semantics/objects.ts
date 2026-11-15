@@ -64,7 +64,7 @@ import { builtinFor } from "./builtins.ts";
 import { wholeText } from "./whole-arithmetic.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import type { LiteralKeys } from "./program-objects.ts";
-import { fieldOfType, resolveTypeName, type ResolvedType, type TypeTable } from "./typescript-types.ts";
+import { fieldOfType, resolveTypeName, type ResolvedField, type ResolvedType, type TypeField, type TypeTable } from "./typescript-types.ts";
 import type { ProgramValue } from "./module.ts";
 
 /** The number a reference takes: one pointer. */
@@ -1594,6 +1594,45 @@ export function resolveObjects(
   const programShapes = fieldOf(programBody,"shapes") as ReadonlyMap<string, Shape>;
   const shapes = new Map<string, Shape>();
   const owners = new Map<string, string>();
+  // An interface states the fields a value of it holds even where no literal
+  // in the program writes one: a function handed a value of an imported or a
+  // runtime type reads its fields through the declaration, and a declaration
+  // nothing writes is still a layout the reads need. The layout takes the
+  // declaration's name, so a `ref<Info>` names it directly.
+  const declaredLayouts = new Map<string, string>();
+  for (const table of types.values()) {
+    for (const declaration of table.declarations.values()) {
+      // An alias of records — a union of them, or a name for one — is the
+      // same fields a value of it holds, so it is laid out under its own name
+      // beside the interface it names.
+      if (declaration.kind !== "interface" && declaration.kind !== "alias") continue;
+      let resolved: ResolvedType;
+      try {
+        resolved = resolveTypeName(table, declaration.name);
+      } catch {
+        continue;
+      }
+      if (String(fieldOf(resolved,"kind")) !== "record" || (fieldOf(resolved,"index") as ResolvedType | null) !== null) continue;
+      const fields: { name: string; value: Inferred }[] = [];
+      for (const [fieldName, field] of fieldOf(resolved,"fields") as ReadonlyMap<string, ResolvedField>) {
+        // A field the declaration names after another declaration holds that
+        // declaration, not the unshaped reference a record erases to: the
+        // layout names it, and a read of its fields is that layout's.
+        const writtenField = (fieldOf(declaration,"fields") as ReadonlyMap<string, TypeField>).get(fieldName);
+        const writtenType = writtenField === undefined ? "" : writtenField.typeName.trim();
+        const named = String(fieldOf(field.type,"kind")) === "record" &&
+          /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(writtenType) &&
+          (table.declarations.has(writtenType) || table.imported.has(writtenType));
+        const fieldType: TypeExpr = named ? { kind: "ref", of: null, name: writtenType } : contractTypeOf(field.type);
+        fields.push({ name: fieldName, value: { kind: "type", type: fieldType } });
+      }
+      const keyParts: [string, string][] = [];
+      for (const field of fields) keyParts[keyParts.length] = [field.name, describe(field.value)];
+      const key = JSON.stringify(keyParts);
+      if (!shapes.has(key)) shapes.set(key, { key, fields });
+      declaredLayouts.set(declaration.name, key);
+    }
+  }
   // Every function the program compiles is callable, and every one of them has
   // a body, so every one of them is walked here: a body is what lays the
   // objects out, and a function whose shape nothing claims would be an object
@@ -1764,6 +1803,7 @@ export function resolveObjects(
   // A shape no body of the last round wrote is a shape an earlier round read
   // with an answer it did not yet have: it is not an object the program has.
   const used = new Set<string>(programShapes.keys());
+  for (const key of declaredLayouts.values()) used.add(key);
   for (const body of bodies.values()) {
     for (const key of body.registered.keys()) used.add(key);
   }
@@ -1807,6 +1847,14 @@ export function resolveObjects(
 
   const written: Record<string, ObjectLayout> = {};
   for (const [name, shape] of layouts) written[name] = shape;
+  // A declaration's name is the layout a `ref<Name>` reads, whatever `ObjectN`
+  // the shape was named by: the same bytes under the name the source wrote.
+  for (const [name, key] of declaredLayouts) {
+    if (aliases.has(name) || written[name] !== undefined) continue;
+    const layout = names.get(remapped.get(key) ?? key);
+    if (layout !== undefined) aliases.set(name, layout);
+  }
+
   const tagLayouts: Record<string, Record<string, string[]>> = Object.create(null);
   const addLayoutTags = (name: string, shape: Shape): void => {
     const tags = shapeTags.get(shape);

@@ -3136,6 +3136,13 @@ function constantRange(tokens: readonly Token[], start: number, end: number, kno
     // `{ command: "node", flags: [] }` is a value the file wrote, and the name
     // is a key rather than a value the read would have to find.
     if (token.kind === "ident" && tokens[index + 1]?.text === ":") continue;
+    // `as const` states the type of the value the file wrote and changes
+    // nothing about it: a fully written initializer with the assertion on its
+    // end is still the constant it was.
+    if (token.kind === "ident" && token.text === "as" && tokens[index + 1]?.text === "const") {
+      index += 1;
+      continue;
+    }
     // A name the file already declared as a constant is the value it holds:
     // a table of register numbers or of type descriptions is as constant as
     // the numbers it names.
@@ -4456,7 +4463,7 @@ class TypeScriptParser {
     } catch {
       shape = null;
     }
-    if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape);
+    if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape, /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : null);
     if (shape === null || shape.kind === "any") this.notePendingType(text);
     // A field or a class parameter names its type as one text, so `T[]` and
     // `Array<T>` are read here rather than by the token walk an annotation in a
@@ -4502,7 +4509,7 @@ class TypeScriptParser {
     return shape === null || shape.kind === "any" ? null : shape;
   }
 
-  private typeExprOfShape(shape: ResolvedType): TypeExpr {
+  private typeExprOfShape(shape: ResolvedType, name: string | null = null): TypeExpr {
     switch (shape.kind) {
       case "primitive":
         return { kind: "primitive", name: shape.name };
@@ -4525,9 +4532,10 @@ class TypeScriptParser {
       case "record":
         // A record with an index is keyed by text, which is the dictionary the
         // runtime holds: the contract spells the handle. An object of fields is
-        // a reference; the fields themselves are read through `shapeOf`, which
-        // keeps the record the contract cannot spell.
-        return (fieldOf(shape, "index") as ResolvedType | null) !== null ? NUMBER_RESULT : ANY_TYPE;
+        // the reference the layout pass names, so a caller that holds the
+        // declaration reads its fields by the layout the declaration wrote.
+        if ((fieldOf(shape, "index") as ResolvedType | null) !== null) return NUMBER_RESULT;
+        return name === null ? ANY_TYPE : { kind: "ref", of: null, name };
       default:
         return ANY_TYPE;
     }
@@ -8253,7 +8261,7 @@ class TypeScriptParser {
       const declared = this.typeTable.declarations.has(head.text) || (fieldOf(this.typeTable, "imported") as Map<string, TypeDecl>).has(head.text);
       if (declared) {
         const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
-        return this.typeExprOfShape(shape);
+        return this.typeExprOfShape(shape, end - from === 1 ? head.text : null);
       }
       if ((fieldOf(this.typeTable, "classes") as ReadonlySet<string>).has(head.text) && end - from === 1) return this.referenceTo(head.text);
     }
@@ -10942,7 +10950,14 @@ class TypeScriptParser {
           // A value the module holds or another module offers is read through
           // its getter: an array it holds is walked as the value the call
           // answers, not as a name this body does not declare.
-          const own = this.valueGetters.get(of.text);
+          // A value the module holds as state has a getter of its own even
+          // where the map of them is not filled yet: the loop reads the same
+          // value an ordinary read of the name does, through that getter.
+          let own = this.valueGetters.get(of.text);
+          if (own === undefined && (this.state.has(of.text) || this.stateInitializers.has(of.text))) {
+            const getterName = `__value_${of.text}`;
+            own = { name: getterName, type: this.declaredReturns.get(getterName) ?? ANY_TYPE };
+          }
           const imported = this.valueGetterNames.has(of.text) ? this.declaredReturns.get(of.text) ?? ANY_TYPE : null;
           const read: Expression | null = own !== undefined
             ? { k: "call", name: own.name, args: [], returns: own.type }
@@ -14524,7 +14539,7 @@ class TypeScriptParser {
         // A list is asserted at the type it says: `(o.fields as string[])`
         // names texts, so `join` written after it reads the elements the cast
         // states rather than the `unknown` the field was declared at.
-        if (type.kind === "slice" || type.kind === "array") this.expressionTypes.set(current(), type);
+        if (type.kind === "slice" || type.kind === "array" || type.kind === "ref") this.expressionTypes.set(current(), type);
         continue;
       }
       if (this.at("!")) {

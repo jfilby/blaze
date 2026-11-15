@@ -2457,8 +2457,12 @@ export async function runBuild(
         const writeIncremental = (): Promise<void> => storeWrite(store, String(fieldOf(paths, "incremental")), { ...incremental });
         const writeNext = writing.then(writeIncremental, writeIncremental);
         writing = writeNext.then(
-          () => {},
-          () => {},
+          () => {
+            return;
+          },
+          () => {
+            return;
+          },
         );
         await writeNext;
       } else if (checksProgram) {
@@ -2498,7 +2502,9 @@ export async function runBuild(
       // allowed to settle before the first failure is reported: a function
       // still being generated must not go on writing work files after the
       // build has given up on it.
-      const settled = await Promise.allSettled(Array.from({ length: workers }, () => worker()));
+      const started: Promise<void>[] = [];
+      for (let index = 0; index < workers; index += 1) started[started.length] = worker();
+      const settled = await Promise.allSettled(started);
       const settledFields = settled as unknown as Record<string, unknown>[];
       const failure = settledFields.find((entry) => String(entry["status"]) === "rejected");
       if (failure !== undefined && String(failure["status"]) === "rejected") throw failure["reason"];
@@ -3316,12 +3322,12 @@ export async function projectStateLine(project: string, cwd: string): Promise<st
   const names = Object.keys(selected);
   const label = names.length === 0
     ? "-"
-    : names.map((name) => `${name}#${selected[name]}`).join(",");
+    : names.map((name) => `${name}#${String(fieldOf(selected, name))}`).join(",");
   return `${project}  ${String(buildFields["status"])}  ${String(buildFields["model"])}  ${label}`;
 }
 
 /** How many functions the program contract covers, for the build report. */
 function contractedFunctionCount(program: ProgramContract): number {
   const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
-  return files.reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
+  return files.reduce((total: number, file: FileContract) => total + Number(Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length), 0);
 }

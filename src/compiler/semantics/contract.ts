@@ -1256,8 +1256,12 @@ function asNumber(value: Value, type: StaticType): number {
 }
 
 function compareValues(left: Value, right: Value): number {
-  const leftWhole = isWhole(left) ? left : typeof left === "bigint" ? wholeOfValue(left) : null;
-  const rightWhole = isWhole(right) ? right : typeof right === "bigint" ? wholeOfValue(right) : null;
+  let leftWhole: Whole | null = null;
+  if (isWhole(left)) leftWhole = left;
+  else if (typeof left === "bigint") leftWhole = wholeOfValue(left);
+  let rightWhole: Whole | null = null;
+  if (isWhole(right)) rightWhole = right;
+  else if (typeof right === "bigint") rightWhole = wholeOfValue(right);
   if (leftWhole !== null && rightWhole !== null) return compareWhole(leftWhole, rightWhole);
   if (typeof left === "number" && typeof right === "number") {
     // Nothing is ordered against not-a-number. Answering that nothing is
@@ -1267,8 +1271,12 @@ function compareValues(left: Value, right: Value): number {
     if (Number.isNaN(left) || Number.isNaN(right)) return 0 / 0;
     return left < right ? -1 : left > right ? 1 : 0;
   }
-  if (leftWhole !== null && typeof right === "number") return compareWholeToFloat(leftWhole, right);
-  if (typeof left === "number" && rightWhole !== null) return -compareWholeToFloat(rightWhole, left);
+  if (leftWhole !== null) {
+    if (typeof right === "number") return compareWholeToFloat(leftWhole, Number(right));
+  }
+  if (typeof left === "number") {
+    if (rightWhole !== null) return -compareWholeToFloat(rightWhole, Number(left));
+  }
   throw contractError(`cannot compare ${formatValue(left)} with ${formatValue(right)}`);
 }
 

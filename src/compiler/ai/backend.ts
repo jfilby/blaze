@@ -266,13 +266,13 @@ export class ReplayBackend implements AiBackend {
       // failed: carrying a number into the review reader would report the crash
       // as if the model had answered badly.
       const entries: string[] = [];
-      const reviews = recorded as unknown[];
+      const reviews: unknown[] = recorded as unknown as unknown[];
       for (let index = 0; index < reviews.length; index += 1) {
         const entry = reviews[index];
         if (typeof entry !== "string") {
           throw reviewError(`replay file ${file} has a "reviews" entry ${index} that is not text`);
         }
-        entries[entries.length] = entry as string;
+        entries.push(entry as string);
       }
       this.entries = entries;
       return this.entries;

@@ -413,7 +413,7 @@ class ProgramEmitter {
     const target = fieldOf(this, "target") as ProgramTarget;
     const program = fieldOf(this, "program") as SemanticProgram;
     const lowered = fieldOf(this, "loweredElsewhere") as ReadonlySet<string>;
-    const prelude = (fieldOf(target, "prelude") as (program: SemanticProgram) => string)(program);
+    const prelude = (fieldOf(target, "prelude") as (this: ProgramTarget, program: SemanticProgram) => string).call(target, program);
     // A function the program declares is a function of the program: it is
     // written above the body that runs, and the program calls it as it calls
     // any other function — unless the machine backend lowered it into an
@@ -530,7 +530,8 @@ class ProgramEmitter {
     for (const name of fieldOf(entry, "releases") as readonly string[]) releases[releases.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
     this.names.leave();
     const outputs: string[] = [];
-    for (const line of (fieldOf(this.target, "openFunction") as (...args: any[]) => any)(
+    const openFunction = fieldOf(this.target, "openFunction") as (this: ProgramTarget, ...args: any[]) => string[];
+    for (const line of openFunction.call(this.target,
       {
         name: String(fieldOf(fn, "name")),
         symbol: String(fieldOf(fn, "symbol")),
@@ -540,7 +541,8 @@ class ProgramEmitter {
       parameters,
     )) outputs[outputs.length] = line;
     for (const line of body) outputs[outputs.length] = line;
-    for (const line of (fieldOf(this.target, "closeFunction") as (...args: any[]) => any)(releases, returned)) outputs[outputs.length] = line;
+    const closeFunction = fieldOf(this.target, "closeFunction") as (this: ProgramTarget, ...args: any[]) => string[];
+    for (const line of closeFunction.call(this.target, releases, returned)) outputs[outputs.length] = line;
     return outputs;
   }
 

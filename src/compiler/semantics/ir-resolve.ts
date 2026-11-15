@@ -4800,8 +4800,12 @@ class ProgramResolver {
    * not name as the dynamic value it is.
    */
   private awaitCall(operand: DraftValue): DraftCall {
-    const known = fieldOf(promiseOf(operand), "payload") as TypeExpr | undefined;
+    const promise = promiseOf(operand);
+    const known = promise === undefined ? undefined : fieldOf(promise, "payload") as TypeExpr | undefined;
     const payload = known ?? numeric("f64");
+    // A promise that carries a list carries a reference to it, so the handle
+    // is read as that list rather than as the number the generic form answers.
+    const listPayload = known !== undefined && (payload.kind === "slice" || payload.kind === "array");
     const callee = known === undefined
       ? "Promise.await"
       : payload.kind === "text"
@@ -4812,7 +4816,7 @@ class ProgramResolver {
             ? "Promise.await.whole"
             : payload.kind === "void"
               ? "Promise.await.nothing"
-              : payload.kind === "ref"
+              : payload.kind === "ref" || listPayload
                 ? "Promise.await.value"
                 : "Promise.await";
     const builtin = builtinFor(callee) as BuiltinSignature;
@@ -4822,7 +4826,7 @@ class ProgramResolver {
         name: callee,
         symbol: callee,
         params: [{ name: "promise", type: "ref<any>" }],
-        returns: contractText(fieldOf(builtin, "returns") as SemanticType),
+        returns: contractText(listPayload ? payload : fieldOf(builtin, "returns") as SemanticType),
       },
       args: [operand],
       returns: fieldOf(builtin, "returns") as SemanticType,

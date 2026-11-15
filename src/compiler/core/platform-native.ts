@@ -648,9 +648,10 @@ export function parseArgs(
   args: readonly string[],
   optionTable: Record<string, OptionSpec> | undefined,
 ): ParsedArguments {
-  const values: Record<string, string | boolean> = {};
+  const values: Record<string, unknown> = {};
   const positionals: string[] = [];
-  const options = optionTable ?? {};
+  let options: Record<string, OptionSpec> = {};
+  if (optionTable !== undefined) options = optionTable;
   let at = 0;
   while (at < args.length) {
     const argument = args[at] as string;
@@ -697,5 +698,5 @@ export function parseArgs(
       at += 1;
     }
   }
-  return { values, positionals };
+  return { values: values as unknown as Record<string, string | boolean>, positionals };
 }

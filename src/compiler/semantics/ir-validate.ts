@@ -1605,12 +1605,25 @@ function contractType(text: string): SemanticType | null {
  */
 function declaredSignature(context: Context, callee: string): FunctionSignature | null {
   const functions = fieldOf(context, "functions") as readonly FunctionSignature[] | null;
-  if (functions === null) return null;
-  return (
-    functions.find((signature) => String(fieldOf(signature, "name")) === callee) ??
-    functions.find((signature) => String(fieldOf(signature, "symbol")) === callee) ??
-    null
-  );
+  if (functions !== null) {
+    const declared =
+      functions.find((signature) => String(fieldOf(signature, "name")) === callee) ??
+      functions.find((signature) => String(fieldOf(signature, "symbol")) === callee);
+    if (declared !== undefined) return declared;
+  }
+  // A function validated on its own is handed the program's resolved bodies
+  // instead of the whole contract, so the signature it is called against is
+  // read from the body that answers the name.
+  const bodies = fieldOf(context, "callees") as Callees;
+  const held = bodies.get(callee);
+  if (held === undefined) return null;
+  const params = fieldOf(held, "params") as readonly SemanticSlot[];
+  return {
+    name: String(fieldOf(held, "name")),
+    symbol: String(fieldOf(held, "symbol")),
+    params: params.map((param) => ({ name: String(fieldOf(param, "name")), type: contractText(fieldOf(param, "type") as SemanticType) })),
+    returns: contractText(fieldOf(held, "returns") as SemanticType),
+  };
 }
 
 /** Whether a context declares the whole program, and so every callee in it. */
@@ -1664,6 +1677,10 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   }
   const builtin = builtinFor(callee);
   const signature = declaredSignature(context, callee);
+  // A function the program declares shadows a builtin of the same name, so the
+  // builtin is read only where the call is written as one or no function of
+  // the program answers the name.
+  const effectiveBuiltin = builtin !== null && (builtinFlag || signature === null) ? builtin : null;
 
   // A context that declares no program cannot say what a call it cannot name
   // takes or returns, so it may neither refuse the call nor read it against a
@@ -1683,9 +1700,9 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
 
   const params: string[] = [];
   let returns = "void";
-  if (builtin !== null) {
-    for (const type of fieldOf(builtin, "params") as readonly SemanticType[]) params.push(contractText(type));
-    returns = contractText(fieldOf(builtin, "returns") as SemanticType);
+  if (effectiveBuiltin !== null) {
+    for (const type of fieldOf(effectiveBuiltin, "params") as readonly SemanticType[]) params.push(contractText(type));
+    returns = contractText(fieldOf(effectiveBuiltin, "returns") as SemanticType);
   } else if (signature !== null) {
     for (const param of fieldOf(signature, "params") as readonly { type: string }[]) params.push(String(fieldOf(param, "type")));
     returns = String(fieldOf(signature, "returns"));
@@ -1695,7 +1712,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
     problems.push(`${prefix}${callee} is called against a signature of ${(fieldOf(fieldOf(call, "signature"), "params") as readonly unknown[]).length} parameters`);
   }
 
-  const allowed = builtin?.arities ?? [builtin?.arity ?? params.length];
+  const allowed = effectiveBuiltin?.arities ?? [effectiveBuiltin?.arity ?? params.length];
   if (args.length !== params.length && !allowed.includes(args.length)) {
     problems.push(`${prefix}${callee} is called with ${args.length} arguments and takes ${params.length}`);
   }
@@ -1754,7 +1771,7 @@ function oneCallProblems(prefix: string, call: SemanticCall, context: Context): 
   // that handle carries: `m.get(k)` answers the list the map holds, and the
   // runtime function answers the block the list is. The ABI is the same
   // pointer either way, and the read is what knows which.
-  const builtinReturns = builtin === null ? null : fieldOf(builtin, "returns") as TypeExpr;
+  const builtinReturns = effectiveBuiltin === null ? null : fieldOf(effectiveBuiltin, "returns") as TypeExpr;
   const carried = builtinReturns !== null &&
     builtinReturns.kind === "ref" && builtinReturns.of === null && builtinReturns.name === undefined &&
     isReference(fieldOf(call, "returns") as SemanticType);
