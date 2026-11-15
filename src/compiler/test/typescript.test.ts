@@ -6522,8 +6522,8 @@ test("an assertion types the local it initializes", () => {
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   const ir = printSemanticFunction(semanticsOf(phase)["sum"]);
-  assert.match(ir, /let object\[ref<Point>\] point/);
-  assert.match(ir, /load_field\[f64\] local\[ref<Point>\] point Point x/);
+  assert.match(ir, /let object\[ref<Point__[^>]+>\] point/);
+  assert.match(ir, /load_field\[f64\] local\[ref<Point__[^>]+>\] point Point__[^ ]+ x/);
 });
 
 test("a conditional of a named reference and null keeps the declaration", () => {
@@ -6540,8 +6540,8 @@ test("a conditional of a named reference and null keeps the declaration", () => 
   ].join("\n");
   const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
   const ir = printSemanticFunction(semanticsOf(phase)["x"]);
-  assert.match(ir, /let object\[ref<Point>\] chosen/);
-  assert.match(ir, /load_field\[f64\] local\[ref<Point>\] chosen Point x/);
+  assert.match(ir, /let object\[ref<Point__[^>]+>\] chosen/);
+  assert.match(ir, /load_field\[f64\] local\[ref<Point__[^>]+>\] chosen Point__[^ ]+ x/);
 });
 
 test("a loop over a module value reads the value's getter", () => {

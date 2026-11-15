@@ -64,8 +64,15 @@ import { builtinFor } from "./builtins.ts";
 import { wholeText } from "./whole-arithmetic.ts";
 import { isFloatType, parseType, typeToString } from "./contract.ts";
 import type { LiteralKeys } from "./program-objects.ts";
-import { fieldOfType, resolveTypeName, type ResolvedField, type ResolvedType, type TypeField, type TypeTable } from "./typescript-types.ts";
+import { fieldOfType, resolveTypeName, type ResolvedField, type ResolvedType, type TypeDecl, type TypeField, type TypeTable } from "./typescript-types.ts";
 import type { ProgramValue } from "./module.ts";
+
+/** The stem a file's type names are qualified by, as the frontend writes it. */
+function fileNameStem(path: string): string {
+  const file = path.slice(path.lastIndexOf("/") + 1);
+  const stem = file.replace(/\.(?:ts|tsx|js|mjs|cjs)$/i, "").replace(/[^A-Za-z0-9_]/g, "_");
+  return stem === "" ? "file" : stem;
+}
 
 /** The number a reference takes: one pointer. */
 const POINTER_SIZE = 8;
@@ -1600,8 +1607,10 @@ export function resolveObjects(
   // nothing writes is still a layout the reads need. The layout takes the
   // declaration's name, so a `ref<Info>` names it directly.
   const declaredLayouts = new Map<string, string>();
-  for (const table of types.values()) {
-    for (const declaration of table.declarations.values()) {
+  const declaredShapes = new Map<string, Shape>();
+  for (const [path, table] of types) {
+    const stem = (fieldOf(table, "stem") as string | undefined) ?? fileNameStem(path);
+    for (const declaration of (fieldOf(table, "declarations") as ReadonlyMap<string, TypeDecl>).values()) {
       // An alias of records — a union of them, or a name for one — is the
       // same fields a value of it holds, so it is laid out under its own name
       // beside the interface it names.
@@ -1620,10 +1629,30 @@ export function resolveObjects(
         // layout names it, and a read of its fields is that layout's.
         const writtenField = (fieldOf(declaration,"fields") as ReadonlyMap<string, TypeField>).get(fieldName);
         const writtenType = writtenField === undefined ? "" : writtenField.typeName.trim();
-        const named = String(fieldOf(field.type,"kind")) === "record" &&
-          /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(writtenType) &&
-          (table.declarations.has(writtenType) || table.imported.has(writtenType));
-        const fieldType: TypeExpr = named ? { kind: "ref", of: null, name: writtenType } : contractTypeOf(field.type);
+        const fieldDecl = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(writtenType)
+          ? (fieldOf(table, "declarations") as ReadonlyMap<string, TypeDecl>).get(writtenType) ??
+            (fieldOf(table, "imported") as ReadonlyMap<string, TypeDecl>).get(writtenType)
+          : undefined;
+        const fieldStem = fieldDecl === undefined ? stem : (fieldOf(fieldOf(fieldDecl, "scope"), "stem") as string | undefined) ?? stem;
+        const fieldTypeOf = (type: ResolvedType): TypeExpr => {
+          const kind = String(fieldOf(type, "kind"));
+          if (kind === "list") return { kind: "slice", of: fieldTypeOf(fieldOf(type, "of") as ResolvedType) };
+          if (kind === "ref") {
+            const name = fieldOf(type, "name") as string | null;
+            if (name !== null) {
+              const declaration = (fieldOf(table, "declarations") as ReadonlyMap<string, TypeDecl>).get(name) ??
+                (fieldOf(table, "imported") as ReadonlyMap<string, TypeDecl>).get(name);
+              if (declaration !== undefined) {
+                const declaredStem = (fieldOf(fieldOf(declaration, "scope"), "stem") as string | undefined) ?? stem;
+                return { kind: "ref", of: null, name: `${name}__${declaredStem}` };
+              }
+            }
+            return contractTypeOf(type);
+          }
+          return contractTypeOf(type);
+        };
+        const named = String(fieldOf(field.type,"kind")) === "record" && fieldDecl !== undefined;
+        const fieldType: TypeExpr = named ? { kind: "ref", of: null, name: `${writtenType}__${fieldStem}` } : fieldTypeOf(field.type);
         fields.push({ name: fieldName, value: { kind: "type", type: fieldType } });
       }
       // A union's literal carries the arm it wrote, and the declaration's
@@ -1635,7 +1664,8 @@ export function resolveObjects(
       for (const field of fields) keyParts[keyParts.length] = [field.name, describe(field.value)];
       const key = JSON.stringify(keyParts);
       if (!shapes.has(key)) shapes.set(key, { key, fields });
-      declaredLayouts.set(declaration.name, key);
+      declaredShapes.set(key, { key, fields });
+      declaredLayouts.set(`${declaration.name}__${stem}`, key);
     }
   }
   // Every function the program compiles is callable, and every one of them has
@@ -1805,6 +1835,10 @@ export function resolveObjects(
       }
     }
   }
+  // A declaration's shape is not a literal a body wrote, so the rounds do not
+  // keep it: a type nothing constructs is still a layout the reads name.
+  for (const [key, shape] of declaredShapes) if (!shapes.has(key)) shapes.set(key, shape);
+  for (const key of shapes.keys()) if (!names.has(key)) names.set(key, `Object${names.size + 1}`);
   // A shape no body of the last round wrote is a shape an earlier round read
   // with an answer it did not yet have: it is not an object the program has.
   const used = new Set<string>(programShapes.keys());

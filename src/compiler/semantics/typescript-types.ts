@@ -66,6 +66,8 @@ export interface TypeDecl {
 export interface TypeTable {
   /** The declarations the module itself writes. */
   declarations: Map<string, TypeDecl>;
+  /** The file's stem, which makes two modules' same-named types two layouts. */
+  stem?: string;
   /**
    * The table this one is written inside, when a block declares a type of its
    * own.

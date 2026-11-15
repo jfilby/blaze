@@ -79,6 +79,7 @@ import {
   resolveAnnotation,
   resolveTypeName,
   scanTypeTable,
+  typeDeclared,
   typeText,
   type ResolvedField,
   type ResolvedType,
@@ -4222,6 +4223,7 @@ class TypeScriptParser {
     // that sequence.
     this.seedStateAllocations();
     this.typeTable = typeTable ?? scanTypeTable(tokens);
+    if (fieldOf(this.typeTable, "stem") === undefined) setFieldOn(this.typeTable, "stem", this.stem);
     // A name this file imports is a value another module holds. Until the graph
     // binds the declaration, a method written on the name is not a method this
     // read can say does not exist.
@@ -4477,7 +4479,7 @@ class TypeScriptParser {
       const first = (text.match(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)/) ?? [])[1];
       const generic = first !== undefined && text.trim().startsWith(`${first}<`);
       const record = shape.kind === "record" && fieldOf(shape, "arms") === undefined && !generic;
-      return this.typeExprOfShape(shape, /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) || (record && first !== undefined) ? (first ?? text) : null);
+      return this.typeExprOfShape(shape, /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) || (record && first !== undefined) ? this.layoutRefName(String(first ?? text)) : null);
     }
     if (shape === null || shape.kind === "any") this.notePendingType(text);
     // A field or a class parameter names its type as one text, so `T[]` and
@@ -4524,6 +4526,22 @@ class TypeScriptParser {
     return shape === null || shape.kind === "any" ? null : shape;
   }
 
+  /**
+   * The layout name a declared type's fields live under.
+   *
+   * Two modules may declare the same name — `Narrowing` is one in this module
+   * and one in the IR builder — and the layouts are two objects. The module's
+   * stem is what tells them apart, and every reference to the declaration is
+   * written with it.
+   */
+  private layoutRefName(name: string): string {
+    const declaration = typeDeclared(this.typeTable, name);
+    if (declaration === undefined) return name;
+    const scope = fieldOf(declaration, "scope") as TypeTable | undefined;
+    const stem = (scope === undefined ? undefined : fieldOf(scope, "stem")) as string | undefined;
+    return `${name}__${stem ?? this.stem}`;
+  }
+
   private typeExprOfShape(shape: ResolvedType, name: string | null = null): TypeExpr {
     switch (shape.kind) {
       case "primitive":
@@ -4535,7 +4553,7 @@ class TypeScriptParser {
       case "absent":
         return NOTHING;
       case "ref":
-        return shape.name === null ? ANY_TYPE : { kind: "ref", of: null, name: shape.name };
+        return shape.name === null ? ANY_TYPE : { kind: "ref", of: null, name: this.layoutRefName(shape.name) };
       case "function":
         return ANY_TYPE;
       case "map":
@@ -4572,7 +4590,8 @@ class TypeScriptParser {
     // A map of records answers the declaration its entries were written at:
     // the record a field annotation resolves to carries no name, and the
     // declaration whose fields it holds is what a read of an entry names.
-    const valueName = collection.value.kind === "record" ? this.nameForRecord(collection.value) : null;
+    const recordName = collection.value.kind === "record" ? this.nameForRecord(collection.value) : null;
+    const valueName = recordName === null ? null : this.layoutRefName(recordName);
     return {
       kind: "map",
       key: this.typeExprOfShape(collection.key),
@@ -8326,7 +8345,7 @@ class TypeScriptParser {
             break;
           }
         }
-        return this.typeExprOfShape(shape, end - from === 1 ? head.text : recordName);
+        return this.typeExprOfShape(shape, end - from === 1 ? this.layoutRefName(head.text) : recordName === null ? null : this.layoutRefName(recordName));
       }
       if ((fieldOf(this.typeTable, "classes") as ReadonlySet<string>).has(head.text) && end - from === 1) return this.referenceTo(head.text);
     }
@@ -8443,7 +8462,7 @@ class TypeScriptParser {
             const argument = this.tokens[at]?.text;
             if (this.tokens[at]?.kind !== "ident" || argument === undefined) continue;
             if (!(this.typeTable.declarations.has(argument) || this.typeTable.imported.has(argument))) continue;
-            return this.typeExprOfShape(shape, argument);
+            return this.typeExprOfShape(shape, this.layoutRefName(argument));
           }
         }
       } catch {
