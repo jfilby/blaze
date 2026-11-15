@@ -6,6 +6,16 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
   (value as Record<string, unknown>)[key] = next;
 }
 
+/** The statements a value lowered to, then the statement it was written in with that value. */
+function withPre(pre: unknown, stmt: PyStatement, value: unknown): PyStatement[] {
+  const out: PyStatement[] = [];
+  for (const one of pre as readonly PyStatement[]) out[out.length] = one;
+  const copy = structuredClone(stmt) as PyStatement;
+  setFieldOn(copy, "value", value);
+  out[out.length] = copy;
+  return out;
+}
+
 /** A module with the functions and body a pass rewrote, and every other field as it was. */
 function withModuleBody(module: PyModule, functions: PyFunction[], body: PyStatement[]): PyModule {
   const copy = structuredClone(module) as PyModule;
@@ -2892,9 +2902,11 @@ function expandWalrus(module: PyModule): PyModule {
     switch (value.k) {
       case "walrus": {
         const inner = expandExpr(value.value, scope);
+        const innerLine = fieldOf(value.value, "line");
+        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
+          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: walrusLine }
+          : { k: "declare", name: value.name, type: null, value: inner.value, line: walrusLine };
         if (!scope.has(value.name)) scope.add(value.name);
         return {
           value: { k: "name", name: value.name },
@@ -2997,7 +3009,7 @@ function expandWalrus(module: PyModule): PyModule {
     switch (stmt.k) {
       case "declare": {
         const r = expandExpr(fieldOf(stmt, "value"), scope);
-        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
+        return withPre(fieldOf(r, "pre"), stmt, fieldOf(r, "value"));
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);
@@ -3254,9 +3266,11 @@ function expandComprehensions(module: PyModule): PyModule {
       }
       case "walrus": {
         const inner = expandExpr(value.value, scope);
+        const innerLine = fieldOf(value.value, "line");
+        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
+          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: walrusLine }
+          : { k: "declare", name: value.name, type: null, value: inner.value, line: walrusLine };
         if (!scope.has(value.name)) scope.add(value.name);
         return { value: { k: "name", name: value.name }, pre: [...inner.pre, stmt] };
       }
@@ -3270,7 +3284,7 @@ function expandComprehensions(module: PyModule): PyModule {
       case "declare": {
         const r = expandExpr(fieldOf(stmt, "value"), scope);
         if (!scope.has(stmt.name)) scope.add(stmt.name);
-        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
+        return withPre(fieldOf(r, "pre"), stmt, fieldOf(r, "value"));
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);
@@ -3423,26 +3437,26 @@ function packRestArguments(module: PyModule): PyModule {
     }
     switch (value.k) {
       case "binary":
-        value.left = packValue(fieldOf(value, "left"), rest);
-        value.right = packValue(fieldOf(value, "right"), rest);
+        setFieldOn(value, "left", packValue(fieldOf(value, "left"), rest));
+        setFieldOn(value, "right", packValue(fieldOf(value, "right"), rest));
         break;
       case "unary":
-        value.operand = packValue(fieldOf(value, "operand"), rest);
+        setFieldOn(value, "operand", packValue(fieldOf(value, "operand"), rest));
         break;
       case "conditional":
-        value.condition = packValue(value.condition, rest);
-        value.then = packValue(fieldOf(value, "then"), rest);
-        value.otherwise = packValue(value.otherwise, rest);
+        setFieldOn(value, "condition", packValue(fieldOf(value, "condition"), rest));
+        setFieldOn(value, "then", packValue(fieldOf(value, "then"), rest));
+        setFieldOn(value, "otherwise", packValue(fieldOf(value, "otherwise"), rest));
         break;
       case "index":
-        value.base = packValue(fieldOf(value, "base"), rest);
-        value.index = packValue(fieldOf(value, "index"), rest);
+        setFieldOn(value, "base", packValue(fieldOf(value, "base"), rest));
+        setFieldOn(value, "index", packValue(fieldOf(value, "index"), rest));
         break;
       case "slice":
-        value.base = packValue(value.base, rest);
-        if (value.start !== null) value.start = packValue(value.start, rest);
-        if (value.stop !== null) value.stop = packValue(value.stop, rest);
-        if (value.step !== null) value.step = packValue(value.step, rest);
+        setFieldOn(value, "base", packValue(fieldOf(value, "base"), rest));
+        if (fieldOf(value, "start") !== null) setFieldOn(value, "start", packValue(fieldOf(value, "start"), rest));
+        if (fieldOf(value, "stop") !== null) setFieldOn(value, "stop", packValue(fieldOf(value, "stop"), rest));
+        if (fieldOf(value, "step") !== null) setFieldOn(value, "step", packValue(fieldOf(value, "step"), rest));
         break;
       case "list":
         {
@@ -3459,16 +3473,16 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "membership":
-        value.value = packValue(value.value, rest);
-        value.container = packValue(value.container, rest);
+        setFieldOn(value, "value", packValue(fieldOf(value, "value"), rest));
+        setFieldOn(value, "container", packValue(fieldOf(value, "container"), rest));
         break;
       case "comprehension":
-        value.element = packValue(value.element, rest);
-        value.iterable = packValue(value.iterable, rest);
-        if (value.condition !== null) value.condition = packValue(value.condition, rest);
+        setFieldOn(value, "element", packValue(fieldOf(value, "element"), rest));
+        setFieldOn(value, "iterable", packValue(fieldOf(value, "iterable"), rest));
+        if (fieldOf(value, "condition") !== null) setFieldOn(value, "condition", packValue(fieldOf(value, "condition"), rest));
         break;
       case "lambda":
-        value.body = packValue(value.body, rest);
+        setFieldOn(value, "body", packValue(fieldOf(value, "body"), rest));
         break;
       case "dict":
         {
@@ -3482,7 +3496,7 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "field":
-        value.base = packValue(value.base, rest);
+        setFieldOn(value, "base", packValue(fieldOf(value, "base"), rest));
         break;
       case "walrus":
         value.value = packValue(value.value, rest);
@@ -3493,30 +3507,30 @@ function packRestArguments(module: PyModule): PyModule {
   function packStmt(stmt: PyStatement, rest: Map<string, number>): PyStatement {
     switch (stmt.k) {
       case "declare":
-        stmt.value = packValue(fieldOf(stmt, "value"), rest);
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "assign":
-        stmt.value = packValue(stmt.value, rest);
+        setFieldOn(stmt, "value", packValue(stmt.value, rest));
         break;
       case "storeField":
-        stmt.target = packValue(stmt.target, rest);
-        stmt.value = packValue(stmt.value, rest);
+        setFieldOn(stmt, "target", packValue(stmt.target, rest));
+        setFieldOn(stmt, "value", packValue(stmt.value, rest));
         break;
       case "storeElement":
-        stmt.target = packValue(fieldOf(stmt, "target"), rest) as any;
-        stmt.value = packValue(stmt.value, rest);
+        setFieldOn(stmt, "target", packValue(fieldOf(stmt, "target"), rest) as any);
+        setFieldOn(stmt, "value", packValue(stmt.value, rest));
         break;
       case "storeSlice":
-        if (stmt.start !== null) stmt.start = packValue(stmt.start, rest);
-        if (stmt.stop !== null) stmt.stop = packValue(stmt.stop, rest);
-        if (stmt.step !== null) stmt.step = packValue(stmt.step, rest);
-        stmt.value = packValue(stmt.value, rest);
+        if (stmt.start !== null) setFieldOn(stmt, "start", packValue(stmt.start, rest));
+        if (stmt.stop !== null) setFieldOn(stmt, "stop", packValue(stmt.stop, rest));
+        if (stmt.step !== null) setFieldOn(stmt, "step", packValue(stmt.step, rest));
+        setFieldOn(stmt, "value", packValue(stmt.value, rest));
         break;
       case "return":
-        if (stmt.value !== null) stmt.value = packValue(stmt.value, rest);
+        if (stmt.value !== null) setFieldOn(stmt, "value", packValue(stmt.value, rest));
         break;
       case "if":
-        stmt.condition = packValue(fieldOf(stmt, "condition"), rest);
+        setFieldOn(stmt, "condition", packValue(fieldOf(stmt, "condition"), rest));
         {
         const thenBody: PyStatement[] = [];
         for (const inner of fieldOf(stmt, "then") as PyStatement[]) thenBody[thenBody.length] = packStmt(inner, rest);
@@ -3529,7 +3543,7 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "while":
-        stmt.condition = packValue(fieldOf(stmt, "condition"), rest);
+        setFieldOn(stmt, "condition", packValue(fieldOf(stmt, "condition"), rest));
         {
         const body: PyStatement[] = [];
         for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
@@ -3537,9 +3551,9 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "for":
-        stmt.from = packValue(stmt.from, rest);
-        stmt.to = packValue(stmt.to, rest);
-        if (stmt.step !== null) stmt.step = packValue(stmt.step, rest);
+        setFieldOn(stmt, "from", packValue(stmt.from, rest));
+        setFieldOn(stmt, "to", packValue(stmt.to, rest));
+        if (stmt.step !== null) setFieldOn(stmt, "step", packValue(stmt.step, rest));
         {
         const body: PyStatement[] = [];
         for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
@@ -3554,7 +3568,7 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "call":
-        stmt.value = packValue(fieldOf(stmt, "value"), rest);
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "function":
         {
@@ -5029,10 +5043,13 @@ function settlePromise(statement: Statement, payload: TypeExpr, name: string): S
       // `return None` settles the promise with nothing, which is the call
       // that takes no value.
       const resultValue = fieldOf(statement, "value");
+      const settled = structuredClone(statement) as Statement;
       if (String(fieldOf(payload, "kind")) === "void" || resultValue === null || String(fieldOf(resultValue, "k")) === "null") {
-        return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
+        setFieldOn(settled, "value", { k: "call", name: "Promise.settle.nothing", args: [] });
+        return settled;
       }
-      return { ...statement, value: { k: "call", name, args: [resultValue] } };
+      setFieldOn(settled, "value", { k: "call", name, args: [resultValue] });
+      return settled;
     }
     case "if": {
       const copy = structuredClone(statement) as Statement;
@@ -5203,30 +5220,39 @@ export const pythonFrontend: Frontend = {
     // every way out of the body settles that promise. The function's own type
     // is the handle the runtime holds the promise in, and the payload travels
     // beside the contract so a caller's `await` knows what it reads.
-    const async = declaration.async === true;
-    const statements = expandStoreSlices(declaration.body).map(lowerStatement);
+    const async = String(fieldOf(declaration, "async")) === "true";
+    const returns = fieldOf(declaration, "returns") as TypeExpr;
+    const statements: ReturnType<typeof lowerStatement>[] = [];
+    for (const one of expandStoreSlices(fieldOf(declaration, "body") as PyStatement[])) statements[statements.length] = lowerStatement(one);
+    const parameters: { name: string; type: TypeExpr }[] = [];
+    for (const param of fieldOf(declaration, "params") as PyParam[]) {
+      parameters[parameters.length] = { name: String(fieldOf(param, "name")), type: fieldOf(param, "type") as TypeExpr };
+    }
     const contract = assembleContract({
-      name: declaration.name,
-      params: declaration.params.map((param) => ({ name: param.name, type: param.type })),
-      returns: async ? { kind: "ref", of: null } : declaration.returns,
-      result: async ? null : body.result,
-      accesses: usage.accesses,
+      name: String(fieldOf(declaration, "name")),
+      params: parameters,
+      returns: async ? { kind: "ref", of: null } : returns,
+      result: async ? null : fieldOf(body, "result"),
+      accesses: fieldOf(usage, "accesses") as AccessRange[],
       definition: {
-        statements: async ? settledPythonBody(statements, declaration.returns) : statements,
-        allocates: usage.allocates,
-        prints: usage.prints,
-        readsArgv: usage.readsArgv,
+        statements: async ? settledPythonBody(statements, returns) : statements,
+        allocates: fieldOf(usage, "allocates") === true,
+        prints: fieldOf(usage, "prints") === true,
+        readsArgv: fieldOf(usage, "readsArgv") === true,
       },
       input,
     });
-    return async ? { ...contract, promise: typeToString(declaration.returns) } : contract;
+    if (!async) return contract;
+    setFieldOn(contract, "promise", typeToString(returns));
+    return contract;
   },
 
   resolveImport(specifier) {
-    if (specifier === "") {
+    const target = String(specifier);
+    if (target === "") {
       throw frontendError("cannot import nothing", "a module imports the functions of another file of the project");
     }
-    if (specifier.includes(".")) {
+    if (target.includes(".")) {
       throw frontendError(
         `cannot import "${specifier}"`,
         "a module of the project is a file beside the entry file, named without its extension, as in `from helpers import dot`",

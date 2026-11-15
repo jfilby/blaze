@@ -2033,28 +2033,47 @@ function copyFields(node: Record<string, unknown>, into: Record<string, unknown>
  * the source made. The captures are that function's leading parameters, so a
  * call that wrote exactly the arrow's own parameters is short of them.
  */
-function callsPrepended<T>(node: T, target: string, captures: readonly string[], arity: number): T {
+function callsPrepended<T>(node: T, target: string, captures: readonly string[], own: readonly { default?: Expression }[]): T {
   if (Array.isArray(node)) {
     const list = node as unknown[];
     const rewritten: unknown[] = [];
-    for (const entry of list) rewritten.push(callsPrepended(entry, target, captures, arity));
+    for (const entry of list) rewritten.push(callsPrepended(entry, target, captures, own));
     return rewritten as T;
   }
   if (node === null || typeof node !== "object") return node;
   const fields = node as Record<string, unknown>;
   if (String(fieldOf(fields, "k")) === "call" && String(fieldOf(fields, "name")) === target) {
     const args = fieldOf(fields, "args") as unknown[] | undefined;
-    if (args !== undefined && args.length === arity) {
-      const written: unknown[] = [];
-      for (const name of captures) written.push({ k: "ident", name });
-      for (const argument of args) written.push(argument);
-      const made: Record<string, unknown> = {};
-      copyFields(fields, made);
-      setFieldOn(made, "args", written);
-      return made as T;
+    if (args !== undefined && args.length <= own.length) {
+      // The call wrote the arrow's own arguments, or left the trailing ones out
+      // because they have defaults: a default is the value the callee answers
+      // for, so it is written where the call left it out.
+      const filled: unknown[] = [];
+      let complete = true;
+      for (let at = 0; at < own.length; at += 1) {
+        if (at < args.length) {
+          filled.push(args[at]);
+          continue;
+        }
+        const fallback = fieldOf(own[at], "default") as Expression | undefined;
+        if (fallback === undefined) {
+          complete = false;
+          break;
+        }
+        filled.push(fallback);
+      }
+      if (complete) {
+        const written: unknown[] = [];
+        for (const name of captures) written.push({ k: "ident", name });
+        for (const argument of filled) written.push(argument);
+        const made: Record<string, unknown> = {};
+        copyFields(fields, made);
+        setFieldOn(made, "args", written);
+        return made as T;
+      }
     }
   }
-  return rewrittenCopy(fields, (entry) => callsPrepended(entry, target, captures, arity)) as T;
+  return rewrittenCopy(fields, (entry) => callsPrepended(entry, target, captures, own)) as T;
 }
 
 /**
@@ -5460,6 +5479,7 @@ class TypeScriptParser {
     promise?: TypeExpr,
   ): DeclaredFunction {
     this.finishBoxes(body, params, true);
+    this.resolveArrowCalls();
     return {
       name,
       exported,
@@ -7508,6 +7528,7 @@ class TypeScriptParser {
     const declared = (returns: TypeExpr, body: Statement[], shape: ResolvedType | null = null): TypeScriptFunction => {
       this.valueCollections = fileCollections;
       this.finishBoxes(body, params, true);
+      this.resolveArrowCalls();
       const fn: TypeScriptFunction = {
         name: name.text,
         params,
@@ -13106,8 +13127,9 @@ class TypeScriptParser {
           if (source !== undefined) {
             const shape = this.shapeOf(source);
             const pair = shape !== null && shape.kind === "list" ? shape.of : null;
-            if (pair !== null && pair.kind === "record" && pair.fields.has("first") && pair.fields.has("second")) {
-              const valueShape = (pair.fields.get("second") as ResolvedField).type;
+            const pairFields = pair === null ? null : (fieldOf(pair, "fields") as Map<string, ResolvedField> | undefined) ?? null;
+            if (pair !== null && pair.kind === "record" && pairFields !== null && pairFields.has("first") && pairFields.has("second")) {
+              const valueShape = (pairFields.get("second") as ResolvedField).type;
               const collection: CollectionValue = {
                 kind: "map",
                 key: TEXT_RESULT,
@@ -15470,7 +15492,7 @@ class TypeScriptParser {
       if (lifted !== undefined) {
         let rewritten = fieldOf(lifted, "body") as Statement[];
         if (declared !== null) rewritten = callsRewritten(rewritten, declared, binding.function, binding.captures);
-        setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, params.length));
+        setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, params));
       }
       // A closure written inside this arrow calls it too. The values this arrow
       // captured are that closure's own only where it captured them itself, so
@@ -15487,7 +15509,7 @@ class TypeScriptParser {
         if (!holdsAll) continue;
         let innerBody = fieldOf(closure, "body") as Statement[];
         if (declared !== null) innerBody = callsRewritten(innerBody, declared, binding.function, binding.captures);
-        setFieldOn(closure, "body", callsPrepended(innerBody, binding.function, binding.captures, params.length));
+        setFieldOn(closure, "body", callsPrepended(innerBody, binding.function, binding.captures, params));
       }
     }
     // The shape the arrow's declaration writes is what a call of it answers,
@@ -15643,6 +15665,27 @@ class TypeScriptParser {
         boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) });
       }
       this.arrowBoxes.delete(name);
+    }
+  }
+
+  /**
+   * Calls an arrow of this body wrote of another arrow of the same body.
+   *
+   * A closure written above the arrow it calls was read before that arrow had a
+   * name, so the call is the plain call the source wrote. Each arrow of the
+   * body is renamed here, once every declaration has been read and the values
+   * each of them captured are known.
+   */
+  private resolveArrowCalls(): void {
+    for (const [source, other] of this.valueArrows) {
+      const captured = fieldOf(other, "captures") as string[];
+      const target = String(fieldOf(other, "function"));
+      for (const liftedName of this.arrowLifts) {
+        if (liftedName === target) continue;
+        const lifted = this.liftedArrows.get(liftedName);
+        if (lifted === undefined) continue;
+        setFieldOn(lifted, "body", callsRewritten(fieldOf(lifted, "body") as Statement[], source, target, captured));
+      }
     }
   }
 
