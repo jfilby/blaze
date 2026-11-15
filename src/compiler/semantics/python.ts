@@ -6,15 +6,6 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
   (value as Record<string, unknown>)[key] = next;
 }
 
-/** The statements a value lowered to, then the statement it was written in with that value. */
-function withPre(pre: unknown, stmt: PyStatement, value: unknown): PyStatement[] {
-  const out: PyStatement[] = [];
-  for (const one of pre as readonly PyStatement[]) out[out.length] = one;
-  const copy = structuredClone(stmt) as PyStatement;
-  setFieldOn(copy, "value", value);
-  out[out.length] = copy;
-  return out;
-}
 
 /** A module with the functions and body a pass rewrote, and every other field as it was. */
 function withModuleBody(module: PyModule, functions: PyFunction[], body: PyStatement[]): PyModule {
@@ -2902,11 +2893,9 @@ function expandWalrus(module: PyModule): PyModule {
     switch (value.k) {
       case "walrus": {
         const inner = expandExpr(value.value, scope);
-        const innerLine = fieldOf(value.value, "line");
-        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: walrusLine }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: walrusLine };
+          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
+          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
         if (!scope.has(value.name)) scope.add(value.name);
         return {
           value: { k: "name", name: value.name },
@@ -3009,7 +2998,7 @@ function expandWalrus(module: PyModule): PyModule {
     switch (stmt.k) {
       case "declare": {
         const r = expandExpr(fieldOf(stmt, "value"), scope);
-        return withPre(fieldOf(r, "pre"), stmt, fieldOf(r, "value"));
+        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);
@@ -3266,11 +3255,9 @@ function expandComprehensions(module: PyModule): PyModule {
       }
       case "walrus": {
         const inner = expandExpr(value.value, scope);
-        const innerLine = fieldOf(value.value, "line");
-        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: walrusLine }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: walrusLine };
+          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
+          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
         if (!scope.has(value.name)) scope.add(value.name);
         return { value: { k: "name", name: value.name }, pre: [...inner.pre, stmt] };
       }
@@ -3284,7 +3271,7 @@ function expandComprehensions(module: PyModule): PyModule {
       case "declare": {
         const r = expandExpr(fieldOf(stmt, "value"), scope);
         if (!scope.has(stmt.name)) scope.add(stmt.name);
-        return withPre(fieldOf(r, "pre"), stmt, fieldOf(r, "value"));
+        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
       }
       case "assign": {
         const r = expandExpr(stmt.value, scope);

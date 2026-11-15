@@ -3543,6 +3543,20 @@ export interface TypeScriptFunction {
   variadic?: { element: TypeExpr; fixed: number };
   /** A signature with no body, which the implementation below it carries. */
   overload?: true;
+  /**
+   * The values a lifted arrow captured, in the order its leading parameters
+   * take them. They are recorded so a call of the function can hand them over,
+   * whether the call was written before or after they were known.
+   */
+  captures?: string[];
+  /** How many of the parameters are the arrow's own, after the captures. */
+  written?: number;
+  /**
+   * The names in scope where the arrow was written. A call this closure writes
+   * of another closure can hand over that closure's captures only where they
+   * are names of this one's own scope.
+   */
+  scopeNames?: string[];
 }
 
 /** Whether the file's bigints reach past the machine word. */
@@ -15727,6 +15741,8 @@ class TypeScriptParser {
       body,
       line,
       closure: true,
+      captures: captured.map((one) => one.name),
+      written: written.length,
     };
     // A speculative read may have lifted the same name before it was restored;
     // the closure the file finally holds is the one read last, and the stale
@@ -24761,19 +24777,24 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
         // The class functions were lowered from declarations the program
         // parser never sees, so they travel with the body: they are the
         // constructors and methods the statements call.
+        const programAnalysis: ModuleAnalysis = {
+          path,
+          imports: analysis.imports,
+          typeImports: analysis.typeImports,
+          types: analysis.types,
+          functions: analysis.functions,
+          default: null,
+          body: statements,
+          wideBigint,
+        };
+        if (scanned.state.size > 0) setFieldOn(programAnalysis, "state", scanned.state);
+        if (parser["valueGetters"].size > 0) {
+          const getterNames = new Map<string, string>();
+          for (const [getterName, getter] of (parser["valueGetters"] as Map<string, { name: string }>)) getterNames.set(String(getterName), String(fieldOf(getter, "name")));
+          setFieldOn(programAnalysis, "valueGetters", getterNames);
+        }
         return {
-          analysis: {
-            path,
-            imports: analysis.imports,
-            typeImports: analysis.typeImports,
-            types: analysis.types,
-            functions: analysis.functions,
-            default: null,
-            body: statements,
-            ...(scanned.state.size === 0 ? {} : { state: scanned.state }),
-            ...(parser["valueGetters"].size === 0 ? {} : { valueGetters: new Map([...parser["valueGetters"]].map((entry) => [entry[0], entry[1].name])) }),
-            wideBigint,
-          },
+          analysis: programAnalysis,
           // The program parser read the whole text, so the module parse's
           // refusals are the attempt it replaced and not the file's.
           refused: [],
