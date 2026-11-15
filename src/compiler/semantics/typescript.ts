@@ -2125,7 +2125,7 @@ function walkFunction(
       case "null":
         return;
       case "ident":
-        onName(expression.name, bound(expression.name));
+        onName((fieldOf(expression, "name")), bound((fieldOf(expression, "name"))));
         return;
       case "argv":
         read((fieldOf(expression, "index") as Expression | null));
@@ -2134,23 +2134,23 @@ function walkFunction(
         onName(expression.buffer, bound(expression.buffer));
         return;
       case "lengthOf":
-        read(expression.of);
+        read(fieldOf(expression, "of") as Expression);
         return;
       case "index":
         read((fieldOf(expression, "base") as Expression));
         read((fieldOf(expression, "index") as Expression));
         return;
       case "slice":
-        read(expression.base);
+        read(fieldOf(expression, "base") as Expression);
         read(expression.start);
         read(expression.stop);
-        read(expression.step);
+        read((fieldOf(expression, "step")));
         return;
       case "member":
-        read(expression.base);
+        read(fieldOf(expression, "base") as Expression);
         return;
       case "call":
-        onCall(expression.name);
+        onCall((fieldOf(expression, "name")));
         for (const argument of (fieldOf(expression, "args") as Expression[])) read(argument);
         return;
       case "object":
@@ -2171,22 +2171,22 @@ function walkFunction(
         for (const part of (fieldOf(expression, "parts") as TextPart[])) if (part.k === "value") read(part.value);
         return;
       case "fixed":
-        read(expression.of);
+        read(fieldOf(expression, "of") as Expression);
         return;
       case "binary":
         read((fieldOf(expression, "left") as Expression));
         read((fieldOf(expression, "right") as Expression));
         return;
       case "unary":
-        read(expression.operand);
+        read(fieldOf(expression, "operand") as Expression);
         return;
       case "conditional":
-        read(expression.condition);
+        read(fieldOf(expression, "condition") as Expression);
         read(fieldOf(expression, "then"));
-        read(expression.otherwise);
+        read(fieldOf(expression, "otherwise") as Expression);
         return;
       case "update":
-        onName(expression.name, bound(expression.name));
+        onName((fieldOf(expression, "name")), bound((fieldOf(expression, "name"))));
         return;
       case "arrow":
         // An arrow reads the values it captured from the function around it, so
@@ -2194,15 +2194,15 @@ function walkFunction(
         for (const capture of expression.captures) onName(capture, bound(capture));
         return;
       case "capture":
-        read(expression.closure);
+        read((fieldOf(expression, "closure")));
         return;
       case "invoke":
-        read(expression.callee);
-        for (const argument of expression.args) read(argument);
+        read(fieldOf(expression, "callee") as Expression);
+        for (const argument of (fieldOf(expression, "args") as Expression[])) read(argument);
         return;
       case "append":
         read(appendArray(expression));
-        for (const value of expression.values) read(value);
+        for (const value of (fieldOf(expression, "values"))) read(value);
         return;
     }
   };
@@ -2214,70 +2214,70 @@ function walkFunction(
       switch (statement.kind) {
         case "declare":
           read((fieldOf(statement, "init") as Expression));
-          scopes[scopes.length - 1].add(statement.name);
+          scopes[scopes.length - 1].add((fieldOf(statement, "name")));
           break;
         case "loop":
           read((fieldOf(statement, "from") as Expression));
           read((fieldOf(statement, "to") as Expression));
-          read(statement.step);
+          read(fieldOf(statement, "step") as Expression | null);
           // The loop variable is bound by the loop, not by the function, so a
           // read after the loop is a read of the value around it.
-          scopes.push(new Set([statement.variable]));
-          statements(statement.body);
+          scopes.push(new Set([(fieldOf(statement, "variable"))]));
+          statements((fieldOf(statement, "body") as Statement[]));
           scopes.pop();
           break;
         case "assign":
-          onName(statement.target, bound(statement.target));
-          read(statement.value);
+          onName((fieldOf(statement, "target")), bound((fieldOf(statement, "target"))));
+          read((fieldOf(statement, "value")));
           break;
         case "memberAssign":
           onName(statement.base, bound(statement.base));
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "update":
-          onName(statement.name, bound(statement.name));
+          onName((fieldOf(statement, "name")), bound((fieldOf(statement, "name"))));
           break;
         case "result":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "throw":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "if":
-          read(statement.condition);
-          statements(statement.then);
-          statements(statement.otherwise);
+          read((fieldOf(statement, "condition")));
+          statements((fieldOf(statement, "then")));
+          statements((fieldOf(statement, "otherwise")));
           break;
         case "while":
         case "doWhile":
-          read(statement.condition);
-          statements(statement.body);
+          read((fieldOf(statement, "condition")));
+          statements((fieldOf(statement, "body") as Statement[]));
           break;
         case "forOf":
-          onName(statement.of, bound(statement.of));
+          onName((fieldOf(statement, "of")), bound((fieldOf(statement, "of"))));
           // The element a `for-of` binds is the loop's own name.
-          scopes.push(new Set([statement.variable]));
-          statements(statement.body);
+          scopes.push(new Set([(fieldOf(statement, "variable"))]));
+          statements((fieldOf(statement, "body") as Statement[]));
           scopes.pop();
           break;
         case "print":
         case "expression":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "indexAssign":
-          onName(statement.buffer, bound(statement.buffer));
+          onName((fieldOf(statement, "buffer")), bound((fieldOf(statement, "buffer"))));
           read(statement.index);
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "try":
-          statements(statement.body);
-          if (statement.catchBody !== null) {
+          statements((fieldOf(statement, "body") as Statement[]));
+          if ((fieldOf(statement, "catchBody")) !== null) {
             // The catch parameter is bound by the arm it catches in.
-            scopes.push(new Set(statement.catchParam === null ? [] : [statement.catchParam]));
-            statements(statement.catchBody);
+            scopes.push(new Set((fieldOf(statement, "catchParam")) === null ? [] : [(fieldOf(statement, "catchParam"))]));
+            statements((fieldOf(statement, "catchBody")));
             scopes.pop();
           }
-          if (statement.finallyBody !== null) statements(statement.finallyBody);
+          if ((fieldOf(statement, "finallyBody")) !== null) statements((fieldOf(statement, "finallyBody")));
           break;
         default:
           break;
@@ -2321,12 +2321,12 @@ function arrowCaptures(
       case "null":
         return;
       case "ident":
-        if (!bound(expression.name) && capturable(expression.name) && !captures.includes(expression.name)) {
-          captures.push(expression.name);
+        if (!bound((fieldOf(expression, "name"))) && capturable((fieldOf(expression, "name"))) && !captures.includes((fieldOf(expression, "name")))) {
+          captures.push((fieldOf(expression, "name")));
         }
         return;
       case "argv":
-        read(expression.index);
+        read(fieldOf(expression, "index") as Expression);
         return;
       case "length":
         if (!bound(expression.buffer) && capturable(expression.buffer) && !captures.includes(expression.buffer)) {
@@ -2334,58 +2334,59 @@ function arrowCaptures(
         }
         return;
       case "lengthOf":
-        read(expression.of);
+        read(fieldOf(expression, "of") as Expression);
         return;
       case "index":
-        read(expression.base);
-        read(expression.index);
+        read(fieldOf(expression, "base") as Expression);
+        read(fieldOf(expression, "index") as Expression);
         return;
       case "slice":
-        read(expression.base);
+        read(fieldOf(expression, "base") as Expression);
         read(expression.start);
         read(expression.stop);
-        read(expression.step);
+        read((fieldOf(expression, "step")));
         return;
       case "member":
-        read(expression.base);
+        read(fieldOf(expression, "base") as Expression);
         return;
       case "call":
-        for (const argument of expression.args) read(argument);
+        for (const argument of (fieldOf(expression, "args") as Expression[])) read(argument);
         return;
       case "object":
-        for (const field of expression.fields) read(field.value);
+        for (const field of (fieldOf(expression, "fields"))) read(field.value);
         return;
       case "sized":
         read(expression.count);
         return;
       case "buffer":
-        for (const value of expression.values) read(value);
-        if (expression.view !== undefined) {
-          read(expression.view.of);
-          read(expression.view.offset);
-          read(expression.view.count);
+        for (const value of (fieldOf(expression, "values"))) read(value);
+        const view = fieldOfOptional(expression, "view") as { of: Expression; offset: Expression; count: Expression } | undefined;
+        if (view !== undefined) {
+          read(fieldOf(view, "of") as Expression);
+          read(fieldOf(view, "offset") as Expression);
+          read(fieldOf(view, "count") as Expression);
         }
         return;
       case "text":
-        for (const part of expression.parts) if (part.k === "value") read(part.value);
+        for (const part of (fieldOf(expression, "parts"))) if (part.k === "value") read(part.value);
         return;
       case "fixed":
-        read(expression.of);
+        read(fieldOf(expression, "of") as Expression);
         return;
       case "binary":
-        read(expression.left);
-        read(expression.right);
+        read(fieldOf(expression, "left") as Expression);
+        read(fieldOf(expression, "right") as Expression);
         return;
       case "unary":
-        read(expression.operand);
+        read(fieldOf(expression, "operand") as Expression);
         return;
       case "conditional":
-        read(expression.condition);
-        read(expression.then);
-        read(expression.otherwise);
+        read(fieldOf(expression, "condition") as Expression);
+        read(fieldOf(expression, "then") as Expression);
+        read(fieldOf(expression, "otherwise") as Expression);
         return;
       case "update":
-        write(expression.name);
+        write((fieldOf(expression, "name")));
         return;
       case "arrow":
         // An arrow written inside this one is a closure built here, and the
@@ -2395,15 +2396,15 @@ function arrowCaptures(
         for (const capture of expression.captures) read({ k: "ident", name: capture });
         return;
       case "capture":
-        read(expression.closure);
+        read((fieldOf(expression, "closure")));
         return;
       case "invoke":
-        read(expression.callee);
-        for (const argument of expression.args) read(argument);
+        read(fieldOf(expression, "callee") as Expression);
+        for (const argument of (fieldOf(expression, "args") as Expression[])) read(argument);
         return;
       case "append":
         read(appendArray(expression));
-        for (const value of expression.values) read(value);
+        for (const value of (fieldOf(expression, "values"))) read(value);
         return;
     }
   };
@@ -2418,66 +2419,66 @@ function arrowCaptures(
       switch (statement.kind) {
         case "declare":
           read((fieldOf(statement, "init") as Expression));
-          scopes[scopes.length - 1].add(statement.name);
+          scopes[scopes.length - 1].add((fieldOf(statement, "name")));
           break;
         case "loop":
           read((fieldOf(statement, "from") as Expression));
           read((fieldOf(statement, "to") as Expression));
-          read(statement.step);
-          scopes.push(new Set([statement.variable]));
-          statements(statement.body);
+          read(fieldOf(statement, "step") as Expression | null);
+          scopes.push(new Set([(fieldOf(statement, "variable"))]));
+          statements((fieldOf(statement, "body") as Statement[]));
           scopes.pop();
           break;
         case "assign":
-          write(statement.target);
-          read(statement.value);
+          write((fieldOf(statement, "target")));
+          read((fieldOf(statement, "value")));
           break;
         case "memberAssign":
           read({ k: "ident", name: statement.base });
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "update":
-          write(statement.name);
+          write((fieldOf(statement, "name")));
           break;
         case "result":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "throw":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "if":
-          read(statement.condition);
-          statements(statement.then);
-          statements(statement.otherwise);
+          read((fieldOf(statement, "condition")));
+          statements((fieldOf(statement, "then")));
+          statements((fieldOf(statement, "otherwise")));
           break;
         case "while":
         case "doWhile":
-          read(statement.condition);
-          statements(statement.body);
+          read((fieldOf(statement, "condition")));
+          statements((fieldOf(statement, "body") as Statement[]));
           break;
         case "forOf":
-          read({ k: "ident", name: statement.of });
-          scopes.push(new Set([statement.variable]));
-          statements(statement.body);
+          read({ k: "ident", name: (fieldOf(statement, "of")) });
+          scopes.push(new Set([(fieldOf(statement, "variable"))]));
+          statements((fieldOf(statement, "body") as Statement[]));
           scopes.pop();
           break;
         case "print":
         case "expression":
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "indexAssign":
-          read({ k: "ident", name: statement.buffer });
+          read({ k: "ident", name: (fieldOf(statement, "buffer")) });
           read(statement.index);
-          read(statement.value);
+          read((fieldOf(statement, "value")));
           break;
         case "try":
-          statements(statement.body);
-          if (statement.catchBody !== null) {
-            scopes.push(new Set(statement.catchParam === null ? [] : [statement.catchParam]));
-            statements(statement.catchBody);
+          statements((fieldOf(statement, "body") as Statement[]));
+          if ((fieldOf(statement, "catchBody")) !== null) {
+            scopes.push(new Set((fieldOf(statement, "catchParam")) === null ? [] : [(fieldOf(statement, "catchParam"))]));
+            statements((fieldOf(statement, "catchBody")));
             scopes.pop();
           }
-          if (statement.finallyBody !== null) statements(statement.finallyBody);
+          if ((fieldOf(statement, "finallyBody")) !== null) statements((fieldOf(statement, "finallyBody")));
           break;
         default:
           break;
@@ -12543,13 +12544,20 @@ class TypeScriptParser {
       then: Expression;
       child: OptionalLink | null;
     }
-    let base = this.readPrimary();
-    let optionalRoot: OptionalLink | null = null;
-    let optional: OptionalLink | null = null;
-    const current = (): Expression => (optional === null ? base : optional.then);
+    // The chain is held in one-element lists rather than in bindings: a list is
+    // a reference, so an arrow below writes the element and the body around it
+    // reads what it wrote, with no box and no captured binding.
+    const baseSlot: Expression[] = [this.readPrimary()];
+    const rootSlot: (OptionalLink | null)[] = [null];
+    const tailSlot: (OptionalLink | null)[] = [null];
+    const current = (): Expression => {
+      const tail = tailSlot[0];
+      return tail === null ? baseSlot[0] : tail.then;
+    };
     const replace = (next: Expression): void => {
-      if (optional === null) base = next;
-      else optional.then = next;
+      const tail = tailSlot[0];
+      if (tail === null) baseSlot[0] = next;
+      else tail.then = next;
     };
     const beginOptional = (): void => {
       let target = current();
@@ -12575,16 +12583,20 @@ class TypeScriptParser {
         then: target,
         child: null,
       };
-      if (optionalRoot === null) optionalRoot = link;
-      else (optional as OptionalLink).child = link;
-      optional = link;
+      if (rootSlot[0] === null) rootSlot[0] = link;
+      else {
+        const tail = tailSlot[0];
+        if (tail !== null) tail.child = link;
+      }
+      tailSlot[0] = link;
     };
     const finish = (): Expression => {
       const fold = (link: OptionalLink): Expression => {
         const inside = link.child === null ? link.then : fold(link.child);
         return { k: "conditional", condition: link.condition, then: inside, otherwise: { k: "null" } };
       };
-      return optionalRoot === null ? base : fold(optionalRoot);
+      const root = rootSlot[0];
+      return root === null ? baseSlot[0] : fold(root);
     };
     for (;;) {
       // `?.` is the optional access. A lone `?` is the conditional operator,
@@ -15437,7 +15449,8 @@ class TypeScriptParser {
       const paramFunction = paramFunctions[at] ?? null;
       if (paramFunction !== null) this.valueFunctions.set(param.name, paramFunction);
       const paramTypeName = paramTypeNames[at] ?? "";
-      if (paramTypeName !== "" && fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(paramTypeName)) {
+      const classNames = fieldOf(fieldOf(this, "classTable"), "names") as Set<string>;
+      if (paramTypeName !== "" && classNames.has(paramTypeName)) {
         (fieldOf(this, "valueClasses") as Map<string, string>).set(param.name, paramTypeName);
       }
       if (waitsForLink && (hints?.[at] === undefined || unknownReference(hints[at].type))) {
@@ -15835,6 +15848,14 @@ class TypeScriptParser {
     return undefined;
   }
 
+  /** The lifted function of that name, or undefined where none was lifted. */
+  private liftedArrow(name: string): TypeScriptFunction | undefined {
+    for (const [lifted, closure] of this.liftedArrows) {
+      if (String(lifted) === name) return closure;
+    }
+    return undefined;
+  }
+
   /** Whether a closure's captures are exactly its leading parameters. */
   private holdsCaptureInvariant(closure: TypeScriptFunction): boolean {
     const params = fieldOf(closure, "params") as { name: string }[];
@@ -15916,7 +15937,7 @@ class TypeScriptParser {
     const rewritten = this.callsConverted(body, (call) => {
       const calleeName = String(fieldOf(call, "name"));
       if (calleeName === self || calleeName.startsWith("__closure_code_")) return null;
-      const callee = this.liftedArrows.get(calleeName);
+      const callee = this.liftedArrow(calleeName);
       if (callee === undefined) return null;
       if (!this.holdsCaptureInvariant(callee)) return null;
       const calleeCaptures = fieldOf(callee, "captures") as string[];
@@ -16073,7 +16094,8 @@ class TypeScriptParser {
       // A text codec is no value of its own: the name holds the zero it is, so
       // a closure that captures one is handed a number and not a reference to
       // a type no layout names.
-      return type.kind === "ref" && (type.name === "__TextEncoder" || type.name === "__TextDecoder")
+      const typeName = String(fieldOf(type, "name") ?? "");
+      return type.kind === "ref" && (typeName === "__TextEncoder" || typeName === "__TextDecoder")
         ? NUMBER_RESULT
         : type;
     });
@@ -21143,7 +21165,10 @@ class TypeScriptParser {
 
   /** `{ left: a, right: b }`: an object allocated where it is written. */
   private readObject(): Expression {
-    const fields: { name: string; value: Expression }[] = [];
+    // The list is held in a one-element list rather than a binding: the `put`
+    // closure below writes it, and a list is a reference both sides write,
+    // where a captured binding would need a box.
+    const fieldSlot: WrittenField[][] = [[]];
     /**
      * The entries an object read at a `Record` is made of, in the order the
      * source wrote them: a field is one entry, and a spread of a dictionary is
@@ -21191,14 +21216,14 @@ class TypeScriptParser {
         if (binding !== undefined) value.code = this.closureCode(binding);
       }
       parts.push({ field: { name, value } });
-      const at = fields.findIndex((field) => field.name === name);
+      const at = fieldSlot[0].findIndex((field) => field.name === name);
       if (at >= 0 && (spread || spreadFields.has(name))) {
-        fields[at] = { name, value };
+        fieldSlot[0][at] = { name, value };
         if (spread) spreadFields.add(name);
         else spreadFields.delete(name);
         return;
       }
-      fields.push({ name, value });
+      fieldSlot[0].push({ name, value });
       if (spread) spreadFields.add(name);
     };
     /** The dictionary the whole literal is, from the use or from a spread. */
@@ -21410,7 +21435,7 @@ class TypeScriptParser {
     // one of those values: `{ ...process.env }` has the fields the host says,
     // and a field written beside it would be one this read could not place.
     if (opaqueSpread) {
-      if (fields.length === 0) {
+      if (fieldSlot[0].length === 0) {
         const marker: Expression = { k: "literal", text: "0" };
         this.expressionTypes.set(marker, { kind: "ref", of: null });
         return marker;
@@ -21435,8 +21460,8 @@ class TypeScriptParser {
         return call;
       };
       let written = result();
-      for (let at = 0; at < fields.length; at += 1) {
-        const field = fields[at] as { name: string; value: Expression };
+      for (let at = 0; at < fieldSlot[0].length; at += 1) {
+        const field = fieldSlot[0][at] as { name: string; value: Expression };
         const held = this.valueTypeOf(field.value);
         const kind = held.kind === "text"
           ? "text"
@@ -21468,7 +21493,7 @@ class TypeScriptParser {
       : null);
     if (dictionaryTarget !== null) {
       const collection = dictionaryTarget;
-      const pairs = fields.map((field) => ({
+      const pairs = fieldSlot[0].map((field) => ({
         key: computedKeys.get(field.name)
           ?? ({ k: "text", parts: [{ k: "text", value: field.name }] } as Expression),
         value: field.value,
@@ -21532,9 +21557,9 @@ class TypeScriptParser {
     // That is one layout for every arm, which is what a read of a field of
     // another arm, and the `in` that guards it, is a read of.
     if (expected !== null && expected.index === null && (fieldOf(expected, "arms") as ResolvedType[] | undefined) !== undefined) {
-      const written = new Map(fields.map((field) => [field.name, field]));
+      const written = new Map(fieldSlot[0].map((field) => [field.name, field]));
       let arm = (fieldOf(expected, "arms") as ResolvedType[]).findIndex(
-        (one: ResolvedType) => one.kind === "record" && fields.every((field) => (fieldOf(one, "fields") as Map<string, ResolvedField>).has(field.name)),
+        (one: ResolvedType) => one.kind === "record" && fieldSlot[0].every((field) => (fieldOf(one, "fields") as Map<string, ResolvedField>).has(field.name)),
       );
       if (arm < 0) arm = 0;
       const padded: { name: string; value: Expression }[] = [];
@@ -21547,7 +21572,7 @@ class TypeScriptParser {
       padded.push({ name: "__arm", value: armValue });
       return { k: "object", fields: padded, written: [...written.keys()] };
     }
-    return { k: "object", fields };
+    return { k: "object", fields: fieldSlot[0] };
   }
 
   /**
@@ -24703,27 +24728,49 @@ function inlineDestructured(value: Expression, bindings: ReadonlyMap<string, num
         }
         return one;
       case "member":
-        return { ...one, base: walk((fieldOf(one, "base") as Expression)) };
+        return { k: "member", base: walk((fieldOf(one, "base") as Expression)), field: String(fieldOf(one, "field")) };
       case "index":
-        return { ...one, base: walk((fieldOf(one, "base") as Expression)), index: walk((fieldOf(one, "index") as Expression)) };
-      case "call":
-        return { ...one, args: one.args.map((inner) => walk(inner)) };
+        return { k: "index", base: walk((fieldOf(one, "base") as Expression)), index: walk((fieldOf(one, "index") as Expression)) };
+      case "call": {
+        const made: Expression = {
+          k: "call",
+          name: String(fieldOf(one, "name")),
+          args: (fieldOf(one, "args") as Expression[]).map((inner) => walk(inner)),
+        };
+        const returns = fieldOfOptional(one, "returns") as TypeExpr | undefined;
+        if (returns !== undefined) setFieldOn(made, "returns", returns);
+        return made;
+      }
       case "binary":
-        return { ...one, left: walk((fieldOf(one, "left") as Expression)), right: walk((fieldOf(one, "right") as Expression)) };
+        return { k: "binary", op: fieldOf(one, "op") as BinaryOp, left: walk((fieldOf(one, "left") as Expression)), right: walk((fieldOf(one, "right") as Expression)) };
       case "unary":
-        return { ...one, operand: walk(one.operand) };
+        return { k: "unary", op: fieldOf(one, "op") as UnaryOp, operand: walk((fieldOf(one, "operand") as Expression)) };
       case "conditional":
-        return { ...one, condition: walk(one.condition), then: walk(fieldOf(one, "then")), otherwise: walk(one.otherwise) };
+        return { k: "conditional", condition: walk((fieldOf(one, "condition") as Expression)), then: walk((fieldOf(one, "then") as Expression)), otherwise: walk((fieldOf(one, "otherwise") as Expression)) };
       case "lengthOf":
-        return { ...one, of: walk(one.of) };
-      case "fixed":
-        return { ...one, of: walk(one.of) };
+        return { k: "lengthOf", of: walk((fieldOf(one, "of") as Expression)) };
+      case "fixed": {
+        const made: Expression = {
+          k: "fixed",
+          of: walk((fieldOf(one, "of") as Expression)),
+          digits: Number(fieldOf(one, "digits")),
+        };
+        const precision = fieldOfOptional(one, "precision") as true | undefined;
+        if (precision !== undefined) setFieldOn(made, "precision", precision);
+        return made;
+      }
       case "text":
-        return { ...one, parts: (fieldOf(one, "parts") as TextPart[]).map((part: TextPart) => (part.k === "value" ? { ...part, value: walk(part.value) } : part)) };
+        return { k: "text", parts: (fieldOf(one, "parts") as TextPart[]).map((part: TextPart) => (part.k === "value" ? { ...part, value: walk(part.value) } : part)) };
       case "object":
-        return { ...one, fields: (fieldOf(one, "fields") as { name: string; value: Expression; }[]).map((field: WrittenField) => ({ ...field, value: walk(field.value) })) };
+        const made: Expression = {
+          k: "object",
+          fields: (fieldOf(one, "fields") as { name: string; value: Expression; }[]).map((field: WrittenField) => ({ ...field, value: walk(field.value) })),
+        };
+        const written = fieldOfOptional(one, "written") as readonly string[] | undefined;
+        if (written !== undefined) setFieldOn(made, "written", written);
+        return made;
       case "buffer":
-        return { ...one, values: one.values.map((inner) => walk(inner)) };
+        return { k: "buffer", element: String(fieldOf(one, "element")), values: (fieldOf(one, "values") as Expression[]).map((inner) => walk(inner)) };
       case "arrow":
         return one;
       default:
@@ -24747,8 +24794,10 @@ function substituteEntryPair(
   function walk(one: Expression): Expression | null {
     switch (one.k) {
       case "index": {
-        if ((fieldOf(one, "base") as Expression).k === "ident" && fieldOf(fieldOf(one, "base"), "name") === temp && (fieldOf(one, "index") as Expression).k === "literal") {
-          const pos = Number((fieldOf(one, "index") as { k: "literal"; text: string }).text);
+        const pairBase = fieldOf(one, "base") as Expression;
+        const pairIndex = fieldOf(one, "index") as Expression;
+        if (String(fieldOf(pairBase, "k")) === "ident" && String(fieldOf(pairBase, "name")) === temp && String(fieldOf(pairIndex, "k")) === "literal") {
+          const pos = Number(String(fieldOf(pairIndex, "text")));
           if (!Number.isInteger(pos)) return null;
           if (pos === 0) return keyRead();
           if (pos === 1) return valueRead();
@@ -24757,13 +24806,13 @@ function substituteEntryPair(
         const base = walk((fieldOf(one, "base") as Expression));
         const index = walk((fieldOf(one, "index") as Expression));
         if (base === null || index === null) return null;
-        return { ...one, base, index };
+        return { k: "index", base, index };
       }
       case "ident":
-        return one.name === temp ? null : one;
+        return String(fieldOf(one, "name")) === temp ? null : one;
       case "member": {
         const base = walk(one.base);
-        return base === null ? null : { ...one, base };
+        return base === null ? null : { k: "member", base, field: String(fieldOf(one, "field")) };
       }
       case "call": {
         const args: Expression[] = [];
@@ -24772,32 +24821,49 @@ function substituteEntryPair(
           if (written === null) return null;
           args.push(written);
         }
-        return { ...one, args };
+        const call: Expression = { k: "call", name: String(fieldOf(one, "name")), args };
+        const returns = fieldOfOptional(one, "returns") as TypeExpr | undefined;
+        if (returns !== undefined) setFieldOn(call, "returns", returns);
+        return call;
       }
       case "binary": {
         const left = walk((fieldOf(one, "left") as Expression));
         const right = walk((fieldOf(one, "right") as Expression));
         if (left === null || right === null) return null;
-        return { ...one, left, right };
+        return { k: "binary", op: fieldOf(one, "op") as BinaryOp, left, right };
       }
       case "unary": {
-        const operand = walk(one.operand);
-        return operand === null ? null : { ...one, operand };
+        const operand = walk(fieldOf(one, "operand") as Expression);
+        return operand === null ? null : { k: "unary", op: fieldOf(one, "op") as UnaryOp, operand };
       }
       case "conditional": {
-        const condition = walk(one.condition);
-        const then = walk(one.then);
-        const otherwise = walk(one.otherwise);
+        const condition = walk(fieldOf(one, "condition") as Expression);
+        const then = walk(fieldOf(one, "then") as Expression);
+        const otherwise = walk(fieldOf(one, "otherwise") as Expression);
         if (condition === null || then === null || otherwise === null) return null;
-        return { ...one, condition, then, otherwise };
+        return { k: "conditional", condition, then, otherwise };
       }
       case "lengthOf": {
-        const of = walk(one.of);
-        return of === null ? null : { ...one, of };
+        const of = walk(fieldOf(one, "of") as Expression);
+        if (of === null) return null;
+        if (String(fieldOf(one, "k")) === "fixed") {
+          const made: Expression = { k: "fixed", of, digits: Number(fieldOf(one, "digits")) };
+          const precision = fieldOfOptional(one, "precision") as true | undefined;
+          if (precision !== undefined) setFieldOn(made, "precision", precision);
+          return made;
+        }
+        return { k: "lengthOf", of };
       }
       case "fixed": {
-        const of = walk(one.of);
-        return of === null ? null : { ...one, of };
+        const of = walk(fieldOf(one, "of") as Expression);
+        if (of === null) return null;
+        if (String(fieldOf(one, "k")) === "fixed") {
+          const made: Expression = { k: "fixed", of, digits: Number(fieldOf(one, "digits")) };
+          const precision = fieldOfOptional(one, "precision") as true | undefined;
+          if (precision !== undefined) setFieldOn(made, "precision", precision);
+          return made;
+        }
+        return { k: "lengthOf", of };
       }
       case "text":
         return {
@@ -24815,7 +24881,10 @@ function substituteEntryPair(
           if (written === null) return null;
           fields.push({ name: field.name, value: written });
         }
-        return { ...one, fields };
+        const made: Expression = { k: "object", fields };
+        const written = fieldOfOptional(one, "written") as readonly string[] | undefined;
+        if (written !== undefined) setFieldOn(made, "written", written);
+        return made;
       }
       case "buffer": {
         const values: Expression[] = [];
@@ -24824,7 +24893,7 @@ function substituteEntryPair(
           if (written === null) return null;
           values.push(written);
         }
-        return { ...one, values };
+        return { k: "buffer", element: String(fieldOf(one, "element")), values };
       }
       case "arrow":
         return one;
@@ -24842,8 +24911,8 @@ function pairOfBody(body: readonly Statement[]): { first: Expression; second: Ex
     for (const statement of statements) {
       if (statement.kind === "result" && statement.value !== null) results.push(statement.value);
       if (statement.kind === "if") {
-        collect(statement.then ?? []);
-        collect(statement.otherwise ?? []);
+        collect((fieldOfOptional(statement, "then") as Statement[] | undefined) ?? []);
+        collect((fieldOfOptional(statement, "otherwise") as Statement[] | undefined) ?? []);
       }
     }
   };
@@ -24875,31 +24944,53 @@ function substituteParams(value: Expression, params: ReadonlySet<string>, elemen
       case "ident":
         return params.has(one.name) ? element() : one;
       case "member":
-        return { ...one, base: walk((fieldOf(one, "base") as Expression)) };
+        return { k: "member", base: walk((fieldOf(one, "base") as Expression)), field: String(fieldOf(one, "field")) };
       case "index":
-        return { ...one, base: walk((fieldOf(one, "base") as Expression)), index: walk((fieldOf(one, "index") as Expression)) };
-      case "call":
-        return { ...one, args: one.args.map((inner) => walk(inner)) };
+        return { k: "index", base: walk((fieldOf(one, "base") as Expression)), index: walk((fieldOf(one, "index") as Expression)) };
+      case "call": {
+        const made: Expression = {
+          k: "call",
+          name: String(fieldOf(one, "name")),
+          args: (fieldOf(one, "args") as Expression[]).map((inner) => walk(inner)),
+        };
+        const returns = fieldOfOptional(one, "returns") as TypeExpr | undefined;
+        if (returns !== undefined) setFieldOn(made, "returns", returns);
+        return made;
+      }
       case "binary":
-        return { ...one, left: walk((fieldOf(one, "left") as Expression)), right: walk((fieldOf(one, "right") as Expression)) };
+        return { k: "binary", op: fieldOf(one, "op") as BinaryOp, left: walk((fieldOf(one, "left") as Expression)), right: walk((fieldOf(one, "right") as Expression)) };
       case "unary":
-        return { ...one, operand: walk(one.operand) };
+        return { k: "unary", op: fieldOf(one, "op") as UnaryOp, operand: walk((fieldOf(one, "operand") as Expression)) };
       case "conditional":
-        return { ...one, condition: walk(one.condition), then: walk(fieldOf(one, "then")), otherwise: walk(one.otherwise) };
+        return { k: "conditional", condition: walk((fieldOf(one, "condition") as Expression)), then: walk((fieldOf(one, "then") as Expression)), otherwise: walk((fieldOf(one, "otherwise") as Expression)) };
       case "lengthOf":
-        return { ...one, of: walk(one.of) };
+        return { k: "lengthOf", of: walk((fieldOf(one, "of") as Expression)) };
       case "length":
         // `name.length` is held as the name the length is of, and the name a
         // loop reads it on is the element.
         return params.has(one.buffer) ? { k: "lengthOf", of: element() } : one;
-      case "fixed":
-        return { ...one, of: walk(one.of) };
+      case "fixed": {
+        const made: Expression = {
+          k: "fixed",
+          of: walk((fieldOf(one, "of") as Expression)),
+          digits: Number(fieldOf(one, "digits")),
+        };
+        const precision = fieldOfOptional(one, "precision") as true | undefined;
+        if (precision !== undefined) setFieldOn(made, "precision", precision);
+        return made;
+      }
       case "text":
-        return { ...one, parts: (fieldOf(one, "parts") as TextPart[]).map((part: TextPart) => (part.k === "value" ? { ...part, value: walk(part.value) } : part)) };
+        return { k: "text", parts: (fieldOf(one, "parts") as TextPart[]).map((part: TextPart) => (part.k === "value" ? { ...part, value: walk(part.value) } : part)) };
       case "object":
-        return { ...one, fields: (fieldOf(one, "fields") as { name: string; value: Expression; }[]).map((field: WrittenField) => ({ ...field, value: walk(field.value) })) };
+        const made: Expression = {
+          k: "object",
+          fields: (fieldOf(one, "fields") as { name: string; value: Expression; }[]).map((field: WrittenField) => ({ ...field, value: walk(field.value) })),
+        };
+        const written = fieldOfOptional(one, "written") as readonly string[] | undefined;
+        if (written !== undefined) setFieldOn(made, "written", written);
+        return made;
       case "buffer":
-        return { ...one, values: one.values.map((inner) => walk(inner)) };
+        return { k: "buffer", element: String(fieldOf(one, "element")), values: (fieldOf(one, "values") as Expression[]).map((inner) => walk(inner)) };
       case "arrow":
         return one;
       default:
@@ -24976,22 +25067,51 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
         // A function that returns nothing settles the promise with nothing,
         // which is the call that takes no value.
         if (payload.kind === "void" || (fieldOf(statement, "value") as Expression) === null || (fieldOf(statement, "value") as Expression).k === "null") {
-          return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
+          return { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: Number(fieldOf(statement, "line")) };
         }
-        return { ...statement, value: { k: "call", name, args: [(fieldOf(statement, "value") as Expression)] } };
+        return { kind: "expression", value: { k: "call", name, args: [(fieldOf(statement, "value") as Expression)] }, line: Number(fieldOf(statement, "line")) };
       case "if":
         return {
-          ...statement,
-          then: statement.then.map((inner) => settle(inner)),
-          otherwise: statement.otherwise.map((inner) => settle(inner)),
+          kind: "if",
+          condition: fieldOf(statement, "condition") as Expression,
+          then: (fieldOf(statement, "then") as Statement[]).map((inner) => settle(inner)),
+          otherwise: (fieldOf(statement, "otherwise") as Statement[]).map((inner) => settle(inner)),
+          line: Number(fieldOf(statement, "line")),
         };
       case "while":
+        return {
+          kind: "while",
+          condition: fieldOf(statement, "condition") as Expression,
+          body: (fieldOf(statement, "body") as Statement[]).map((inner) => settle(inner)),
+          line: Number(fieldOf(statement, "line")),
+        };
       case "doWhile":
-        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
+        return {
+          kind: "doWhile",
+          condition: fieldOf(statement, "condition") as Expression,
+          body: (fieldOf(statement, "body") as Statement[]).map((inner) => settle(inner)),
+          line: Number(fieldOf(statement, "line")),
+        };
       case "loop":
-        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
+        return {
+          kind: "loop",
+          variable: String(fieldOf(statement, "variable")),
+          from: fieldOf(statement, "from") as Expression,
+          to: fieldOf(statement, "to") as Expression,
+          inclusive: fieldOf(statement, "inclusive") === true,
+          step: fieldOf(statement, "step") as Expression | null,
+          down: fieldOf(statement, "down") === true,
+          body: (fieldOf(statement, "body") as Statement[]).map((inner) => settle(inner)),
+          line: Number(fieldOf(statement, "line")),
+        };
       case "forOf":
-        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
+        return {
+          kind: "forOf",
+          variable: String(fieldOf(statement, "variable")),
+          of: String(fieldOf(statement, "of")),
+          body: (fieldOf(statement, "body") as Statement[]).map((inner) => settle(inner)),
+          line: Number(fieldOf(statement, "line")),
+        };
       case "try":
         return {
           ...statement,

@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -88,7 +88,7 @@ import {
   type CodegenWorkspace,
   type PreparedRuntime,
 } from "./codegen.ts";
-import { CompilerError, toCompilerError } from "./core/errors.ts";
+import { CompilerError, isCompilerError, toCompilerError } from "./core/errors.ts";
 import { createJsonStore, flushToDisk, hashText, hashValue, type JsonStore, storeResolve, storeWrite, storeExists, storeRemove, storeMkdirp, storeRead, storeReadIfValid } from "./core/json-store.ts";
 import { byName } from "./core/named-record.ts";
 import { frontendFor } from "./semantics/frontend.ts";
@@ -151,6 +151,61 @@ import {
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
+}
+
+/** The parts of a failure a caller reports, without reading its fields. */
+/** Runs the command line and reports whatever it throws, then sets the exit code. */
+export async function runAndReport(run: (args: readonly string[]) => Promise<number>, args: readonly string[]): Promise<void> {
+  try {
+    hostSetExitCode(await run(args));
+  } catch (cause) {
+    reportFailure(cause);
+  }
+}
+
+/** Whether a number is zero. */
+export function isZero(value: number): boolean {
+  return value === 0;
+}
+
+/** Whether a number is over a cap, where a negative cap means no cap. */
+export function exceeds(value: number, maximum: number): boolean {
+  return maximum >= 0 && value > maximum;
+}
+
+/** A value as the number it is, for a program whose value the reader erased. */
+export function numeric(value: any): number {
+  return typeof value === "number" ? value : Number(value);
+}
+
+/** Reports a failure the program could not catch, and sets the exit code. */
+export function reportFailure(cause: any): void {
+  if (isCompilerError(cause)) {
+    const stage = String(fieldOf(cause, "stage"));
+    const message = String(fieldOf(cause, "message"));
+    const detailValue = fieldOf(cause, "detail");
+    const detail = detailValue === undefined || detailValue === null ? undefined : String(detailValue);
+    if (String(fieldOf(cause, "category")) === "CancelledError") {
+      hostWriteOut(`\n· ${message}\n`);
+      if (detail !== undefined && detail.trim() !== "") hostWriteOut(`\n${detail.trim()}\n`);
+      hostSetExitCode(1);
+      return;
+    }
+    hostWriteError(`\n✗ ${stage} failed: ${message}\n`);
+    const functionName = fieldOf(cause, "functionName");
+    const candidate = fieldOf(cause, "candidate");
+    const context: string[] = [];
+    if (functionName !== undefined && functionName !== null) context[context.length] = `  function:  ${String(functionName)}`;
+    if (candidate !== undefined && candidate !== null) context[context.length] = `  candidate: ${String(candidate)}`;
+    if (context.length > 0) hostWriteError(`${context.join("\n")}\n`);
+    if (detail !== undefined && detail.trim() !== "") hostWriteError(`\n${detail.trim()}\n`);
+    const project = fieldOf(cause, "project");
+    if (project !== undefined && project !== null) hostWriteError(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${String(project)}/build.json\n`);
+    hostSetExitCode(1);
+    return;
+  }
+  hostWriteError(`\n✗ cli failed: ${String(cause)}\n`);
+  hostSetExitCode(1);
 }
 
 function setFieldOn(value: unknown, key: string, next: unknown): void {

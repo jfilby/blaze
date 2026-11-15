@@ -68,588 +68,871 @@ export const ARGV_LENGTH = "argvLength";
 /** The name the nth argument a program was given is read under. */
 export const ARGV = "argv";
 
-export const BUILTINS: Record<string, BuiltinSignature> = {
-  "Math.max": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_number_same": { params: [F64, F64], returns: BOOLEAN, arity: 2 },
-  "blaze_rt_text_length": { params: [TEXT], returns: F64, arity: 1 },
-  "encodeURIComponent": { params: [TEXT], returns: TEXT, arity: 1 },
-  // The deep copy answers the type of the value it is handed; the resolver
+function builtinTable(): Map<string, BuiltinSignature> {
+  const table: Map<string, BuiltinSignature> = new Map();
+
+
+  table.set("Math.max", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_number_same", { params: [F64, F64], returns: BOOLEAN, arity: 2 });
+
+  table.set("blaze_rt_text_length", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set("encodeURIComponent", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(// The deep copy answers the type of the value it is handed; the resolver
   // overrides the declaration's unshaped answer with that type.
-  "structuredClone": { params: [ANY], returns: ANY, arity: 1 },
-  "process.execPath": { params: [], returns: TEXT, arity: 0 },
-  "blaze_rt_state_get": { params: [TEXT], returns: F64, arity: 1 },
-  "blaze_rt_state_set": { params: [TEXT, ANY], returns: F64, arity: 2 },
-  "blaze_rt_as_int_n": { params: [F64, I64], returns: I64, arity: 2 },
-  "blaze_rt_as_uint_n": { params: [F64, I64], returns: I64, arity: 2 },
-  "blaze_rt_now_ms": { params: [], returns: F64, arity: 0 },
-  // The cells a module-level number lives in. A compiled function has no
+  "structuredClone", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("process.execPath", { params: [], returns: TEXT, arity: 0 });
+
+  table.set("blaze_rt_state_get", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set("blaze_rt_state_set", { params: [TEXT, ANY], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_as_int_n", { params: [F64, I64], returns: I64, arity: 2 });
+
+  table.set("blaze_rt_as_uint_n", { params: [F64, I64], returns: I64, arity: 2 });
+
+  table.set("blaze_rt_now_ms", { params: [], returns: F64, arity: 0 });
+
+  table.set(// The cells a module-level number lives in. A compiled function has no
   // environment, so a counter the file declares at its top is a value the
   // runtime holds and the functions share.
-  "blaze_rt_global_get": { params: [F64], returns: F64, arity: 1 },
-  "blaze_rt_global_set": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_global_post_inc": { params: [F64], returns: F64, arity: 1 },
-  "blaze_rt_global_post_dec": { params: [F64], returns: F64, arity: 1 },
-  "blaze_rt_timestamp_iso": { params: [], returns: TEXT, arity: 0 },
-  "blaze_rt_date_iso": { params: [F64], returns: TEXT, arity: 1 },
-  // A SHA-256 hasher is one handle the runtime keeps: the program makes it,
+  "blaze_rt_global_get", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("blaze_rt_global_set", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_global_post_inc", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("blaze_rt_global_post_dec", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("blaze_rt_timestamp_iso", { params: [], returns: TEXT, arity: 0 });
+
+  table.set("blaze_rt_date_iso", { params: [F64], returns: TEXT, arity: 1 });
+
+  table.set(// A SHA-256 hasher is one handle the runtime keeps: the program makes it,
   // feeds it texts and reads the digest it answers.
-  "blaze_rt_sha256_create": { params: [], returns: F64, arity: 0 },
-  "blaze_rt_sha256_update": { params: [F64, TEXT], returns: F64, arity: 2 },
-  "blaze_rt_sha256_digest": { params: [F64], returns: TEXT, arity: 1 },
-  "blaze_rt_string_new": { params: [POINTER, F64], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_new": { params: [], returns: F64, arity: 0 },
-  "blaze_rt_dict_get": { params: [F64, TEXT], returns: F64, arity: 2 },
-  "blaze_rt_dict_set": { params: [F64, TEXT, F64], returns: F64, arity: 3 },
-  "blaze_rt_dict_get_ref": { params: [F64, TEXT], returns: ANY, arity: 2 },
-  // The block is handed over as the pointer it is, not as the dynamic value a
+  "blaze_rt_sha256_create", { params: [], returns: F64, arity: 0 });
+
+  table.set("blaze_rt_sha256_update", { params: [F64, TEXT], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_sha256_digest", { params: [F64], returns: TEXT, arity: 1 });
+
+  table.set("blaze_rt_string_new", { params: [POINTER, F64], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_new", { params: [], returns: F64, arity: 0 });
+
+  table.set("blaze_rt_dict_get", { params: [F64, TEXT], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_set", { params: [F64, TEXT, F64], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_get_ref", { params: [F64, TEXT], returns: ANY, arity: 2 });
+
+  table.set(// The block is handed over as the pointer it is, not as the dynamic value a
   // sequence becomes: the runtime copies the elements and keeps the pointer.
-  "blaze_rt_dict_set_seq": { params: [F64, TEXT, POINTER, F64, F64], returns: F64, arity: 5 },
-  "blaze_rt_dict_get_seq": { params: [F64, TEXT], returns: ANY, arity: 2 },
-  "blaze_rt_dict_set_seq_numkey": { params: [F64, F64, POINTER, F64, F64], returns: F64, arity: 5 },
-  "blaze_rt_dict_get_seq_numkey": { params: [F64, F64], returns: ANY, arity: 2 },
-  "blaze_rt_dict_set_ref": { params: [F64, TEXT, ANY], returns: F64, arity: 3 },
-  "blaze_rt_dict_get_text": { params: [F64, TEXT], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_set_text": { params: [F64, TEXT, TEXT], returns: F64, arity: 3 },
-  "blaze_rt_dict_has": { params: [F64, TEXT], returns: F64, arity: 2 },
-  /** Whether a value the read cannot shape holds a key of its own: a dynamic
+  "blaze_rt_dict_set_seq", { params: [F64, TEXT, POINTER, F64, F64], returns: F64, arity: 5 });
+
+  table.set("blaze_rt_dict_get_seq", { params: [F64, TEXT], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_set_seq_numkey", { params: [F64, F64, POINTER, F64, F64], returns: F64, arity: 5 });
+
+  table.set("blaze_rt_dict_get_seq_numkey", { params: [F64, F64], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_set_ref", { params: [F64, TEXT, ANY], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_get_text", { params: [F64, TEXT], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_set_text", { params: [F64, TEXT, TEXT], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_has", { params: [F64, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** Whether a value the read cannot shape holds a key of its own: a dynamic
    *  object, a dictionary and a compiled record are each asked the way their
    *  own entries are read. */
-  "blaze_rt_own_key": { params: [F64, TEXT], returns: F64, arity: 2 },
-  /** `Array.isArray(value)` over a value the read does not type: the runtime
+  "blaze_rt_own_key", { params: [F64, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** `Array.isArray(value)` over a value the read does not type: the runtime
    *  holds the kind, and answers one for the array it holds and nothing
    *  otherwise. */
-  "blaze_rt_is_array": { params: [ANY], returns: BOOLEAN, arity: 1 },
-  /** The fields of a value the read cannot name, read by position: the key is
+  "blaze_rt_is_array", { params: [ANY], returns: BOOLEAN, arity: 1 });
+
+  table.set(/** The fields of a value the read cannot name, read by position: the key is
    *  the text one field holds and the value is the handle beside it. */
   /** How many entries a dynamic array or object holds: an object's count is
    *  the number of fields it carries. */
-  "blaze_rt_array_length": { params: [ANY], returns: F64, arity: 1 },
-  /** How long a value is, whichever of the runtime's shapes it has. */
-  "blaze_rt_length": { params: [ANY], returns: F64, arity: 1 },
-  /** A dynamic array: the list a value the read cannot type holds. */
-  "blaze_rt_dyn_array_new": { params: [], returns: ANY, arity: 0 },
-  /** Appends one value to a dynamic array, and answers the array. */
-  "blaze_rt_array_push": { params: [F64, ANY], returns: ANY, arity: 2 },
-  /** Reads one element of a dynamic array. */
-  "blaze_rt_array_get": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_array_set": { params: [F64, F64, ANY], returns: { kind: "void" }, arity: 3 },
-  "blaze_rt_json_field_key": { params: [F64, F64], returns: TEXT, arity: 2 },
-  "blaze_rt_json_field_value": { params: [F64, F64], returns: ANY, arity: 2 },
-  /** Whether a compiled object was laid out with a field of this name: the
+  "blaze_rt_array_length", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set(/** How long a value is, whichever of the runtime's shapes it has. */
+  "blaze_rt_length", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set(/** A dynamic array: the list a value the read cannot type holds. */
+  "blaze_rt_dyn_array_new", { params: [], returns: ANY, arity: 0 });
+
+  table.set(/** Appends one value to a dynamic array, and answers the array. */
+  "blaze_rt_array_push", { params: [F64, ANY], returns: ANY, arity: 2 });
+
+  table.set(/** Reads one element of a dynamic array. */
+  "blaze_rt_array_get", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_array_set", { params: [F64, F64, ANY], returns: { kind: "void" }, arity: 3 });
+
+  table.set("blaze_rt_json_field_key", { params: [F64, F64], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_json_field_value", { params: [F64, F64], returns: ANY, arity: 2 });
+
+  table.set(/** Whether a compiled object was laid out with a field of this name: the
    *  object carries the names its layout wrote. */
-  "blaze_rt_object_has_field": { params: [POINTER, TEXT], returns: F64, arity: 2 },
-  "blaze_rt_dict_len": { params: [F64], returns: F64, arity: 1 },
-  "blaze_rt_dict_key_at": { params: [F64, F64], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_value_at": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_dict_value_at_ref": { params: [F64, F64], returns: ANY, arity: 2 },
-  "blaze_rt_dict_value_at_text": { params: [F64, F64], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_set_refkey": { params: [F64, ANY, F64], returns: F64, arity: 3 },
-  "blaze_rt_dict_get_refkey": { params: [F64, ANY], returns: F64, arity: 2 },
-  "blaze_rt_dict_get_refkey_text": { params: [F64, ANY], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_get_refkey_ref": { params: [F64, ANY], returns: ANY, arity: 2 },
-  "blaze_rt_dict_set_refkey_text": { params: [F64, ANY, TEXT], returns: F64, arity: 3 },
-  "blaze_rt_dict_set_refkey_ref": { params: [F64, ANY, ANY], returns: F64, arity: 3 },
-  "blaze_rt_dict_has_refkey": { params: [F64, ANY], returns: F64, arity: 2 },
-  "blaze_rt_dict_delete_refkey": { params: [F64, ANY], returns: F64, arity: 2 },
-  "blaze_rt_dict_key_ref_at": { params: [F64, F64], returns: ANY, arity: 2 },
-  "blaze_rt_dict_delete": { params: [F64, TEXT], returns: F64, arity: 2 },
-  "blaze_rt_dict_set_numkey": { params: [F64, F64, F64], returns: F64, arity: 3 },
-  "blaze_rt_dict_get_numkey": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_dict_get_numkey_text": { params: [F64, F64], returns: TEXT, arity: 2 },
-  "blaze_rt_dict_get_numkey_ref": { params: [F64, F64], returns: ANY, arity: 2 },
-  "blaze_rt_dict_set_numkey_text": { params: [F64, F64, TEXT], returns: F64, arity: 3 },
-  "blaze_rt_dict_set_numkey_ref": { params: [F64, F64, ANY], returns: F64, arity: 3 },
-  "blaze_rt_dict_has_numkey": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_dict_delete_numkey": { params: [F64, F64], returns: F64, arity: 2 },
-  "blaze_rt_dict_key_num_at": { params: [F64, F64], returns: F64, arity: 2 },
-  "Math.min": { params: [F64, F64], returns: F64, arity: 2 },
-  "Math.sqrt": { params: [F64], returns: F64, arity: 1 },
-  "Math.log": { params: [F64], returns: F64, arity: 1 },
-  "Math.log10": { params: [F64], returns: F64, arity: 1 },
-  "Math.imul": { params: [F64, F64], returns: F64, arity: 2 },
-  "parseFloat": { params: [TEXT], returns: F64, arity: 1 },
-  "isNaN": { params: [F64], returns: BOOLEAN, arity: 1 },
-  "Math.pow": { params: [F64, F64], returns: F64, arity: 2 },
-  "Math.sign": { params: [F64], returns: F64, arity: 1 },
-  "Math.abs": { params: [F64], returns: F64, arity: 1 },
-  "Math.floor": { params: [F64], returns: F64, arity: 1 },
-  /** `Math.fround(x)` is the nearest single precision number to x, read back
+  "blaze_rt_object_has_field", { params: [POINTER, TEXT], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_len", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("blaze_rt_dict_key_at", { params: [F64, F64], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_value_at", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_value_at_ref", { params: [F64, F64], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_value_at_text", { params: [F64, F64], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_set_refkey", { params: [F64, ANY, F64], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_get_refkey", { params: [F64, ANY], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_get_refkey_text", { params: [F64, ANY], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_get_refkey_ref", { params: [F64, ANY], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_set_refkey_text", { params: [F64, ANY, TEXT], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_set_refkey_ref", { params: [F64, ANY, ANY], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_has_refkey", { params: [F64, ANY], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_delete_refkey", { params: [F64, ANY], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_key_ref_at", { params: [F64, F64], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_delete", { params: [F64, TEXT], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_set_numkey", { params: [F64, F64, F64], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_get_numkey", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_get_numkey_text", { params: [F64, F64], returns: TEXT, arity: 2 });
+
+  table.set("blaze_rt_dict_get_numkey_ref", { params: [F64, F64], returns: ANY, arity: 2 });
+
+  table.set("blaze_rt_dict_set_numkey_text", { params: [F64, F64, TEXT], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_set_numkey_ref", { params: [F64, F64, ANY], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_dict_has_numkey", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_delete_numkey", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("blaze_rt_dict_key_num_at", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("Math.min", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("Math.sqrt", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.log", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.log10", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.imul", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("parseFloat", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set("isNaN", { params: [F64], returns: BOOLEAN, arity: 1 });
+
+  table.set("Math.pow", { params: [F64, F64], returns: F64, arity: 2 });
+
+  table.set("Math.sign", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.abs", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.floor", { params: [F64], returns: F64, arity: 1 });
+
+  table.set(/** `Math.fround(x)` is the nearest single precision number to x, read back
    *  as a double: the width a float32 field holds. */
-  "Math.fround": { params: [F64], returns: F64, arity: 1 },
-  "Math.round": { params: [F64], returns: F64, arity: 1 },
-  "Math.trunc": { params: [F64], returns: F64, arity: 1 },
-  "Math.ceil": { params: [F64], returns: F64, arity: 1 },
-  "Math.random": { params: [], returns: F64, arity: 0 },
-  /**
+  "Math.fround", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.round", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.trunc", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.ceil", { params: [F64], returns: F64, arity: 1 });
+
+  table.set("Math.random", { params: [], returns: F64, arity: 0 });
+
+  table.set(/**
    * The magnitude of a whole number, which is a whole number. The `Math.abs`
    * above answers a fraction, and a language whose whole numbers are whole
    * answers the magnitude of one as a whole number: the two are two kinds of
    * number, and the printer writes them differently.
    */
-  "whole.abs": { params: [I64], returns: I64, arity: 1 },
-  /** The smaller of two whole numbers, which is a whole number. */
-  "whole.min": { params: [I64, I64], returns: I64, arity: 2 },
-  /** The larger of two whole numbers, which is a whole number. */
-  "whole.max": { params: [I64, I64], returns: I64, arity: 2 },
-  /**
+  "whole.abs", { params: [I64], returns: I64, arity: 1 });
+
+  table.set(/** The smaller of two whole numbers, which is a whole number. */
+  "whole.min", { params: [I64, I64], returns: I64, arity: 2 });
+
+  table.set(/** The larger of two whole numbers, which is a whole number. */
+  "whole.max", { params: [I64, I64], returns: I64, arity: 2 });
+
+  table.set(/**
    * A number as a whole number: the floor of it, the ceiling of it, and the
    * whole part of it. The three are the answers of the languages whose whole
    * numbers are whole numbers, and each is a whole number.
    */
-  "whole.floor": { params: [F64], returns: I64, arity: 1 },
-  "whole.ceil": { params: [F64], returns: I64, arity: 1 },
-  "whole.trunc": { params: [F64], returns: I64, arity: 1 },
-  [SHARED]: { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 },
-  [ARGV_LENGTH]: { params: [], returns: USIZE, arity: 0 },
-  /**
+  "whole.floor", { params: [F64], returns: I64, arity: 1 });
+
+  table.set("whole.ceil", { params: [F64], returns: I64, arity: 1 });
+
+  table.set("whole.trunc", { params: [F64], returns: I64, arity: 1 });
+
+  table.set(SHARED, { params: [USIZE], returns: { kind: "ptr", of: { kind: "primitive", name: "u8" } }, arity: 1 });
+
+  table.set(ARGV_LENGTH, { params: [], returns: USIZE, arity: 0 });
+
+  table.set(/**
    * `argv(n)` is the nth argument the program was given, read as the number
    * it states: the runtime reads each argument once, before the program runs,
    * and the answer is the number the language gives — 0b101 is five and " 10 "
    * is ten. The argument the program was not given is NaN.
    */
-  [ARGV]: { params: [USIZE], returns: F64, arity: 1 },
-  /** `u256_from_u64x2(low, high)` builds a `u256` from two 64-bit halves, so a
+  ARGV, { params: [USIZE], returns: F64, arity: 1 });
+
+  table.set(/** `u256_from_u64x2(low, high)` builds a `u256` from two 64-bit halves, so a
    *  value that fits in 128 bits can be constructed from its low and high limbs
    *  and the upper limbs are zero. */
-  "u256_from_u64x2": { params: [U64, U64], returns: U256, arity: 2 },
-  /** `u256_from_u64x4(l0, l1, l2, l3)` builds a `u256` from four 64-bit limbs,
+  "u256_from_u64x2", { params: [U64, U64], returns: U256, arity: 2 });
+
+  table.set(/** `u256_from_u64x4(l0, l1, l2, l3)` builds a `u256` from four 64-bit limbs,
    *  least significant first, so any 256-bit value can be constructed. */
-  "u256_from_u64x4": { params: [U64, U64, U64, U64], returns: U256, arity: 4 },
-  /** `u256_add_mod(a, b, m)` computes (a + b) mod m without u256 wraparound. */
-  "u256_add_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
-  /** `u256_sub_mod(a, b, m)` computes (a - b) mod m without u256 wraparound. */
-  "u256_sub_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
-  /** `u256_mul_mod(a, b, m)` computes (a * b) mod m without u256 wraparound. */
-  "u256_mul_mod": { params: [U256, U256, U256], returns: U256, arity: 3 },
-  /** `u256_div(a, b)` computes integer division a / b. */
-  "u256_div": { params: [U256, U256], returns: U256, arity: 2 },
-  /** `u256_invert_mod(a, m)` computes the number `x` below `m` for which
+  "u256_from_u64x4", { params: [U64, U64, U64, U64], returns: U256, arity: 4 });
+
+  table.set(/** `u256_add_mod(a, b, m)` computes (a + b) mod m without u256 wraparound. */
+  "u256_add_mod", { params: [U256, U256, U256], returns: U256, arity: 3 });
+
+  table.set(/** `u256_sub_mod(a, b, m)` computes (a - b) mod m without u256 wraparound. */
+  "u256_sub_mod", { params: [U256, U256, U256], returns: U256, arity: 3 });
+
+  table.set(/** `u256_mul_mod(a, b, m)` computes (a * b) mod m without u256 wraparound. */
+  "u256_mul_mod", { params: [U256, U256, U256], returns: U256, arity: 3 });
+
+  table.set(/** `u256_div(a, b)` computes integer division a / b. */
+  "u256_div", { params: [U256, U256], returns: U256, arity: 2 });
+
+  table.set(/** `u256_invert_mod(a, m)` computes the number `x` below `m` for which
    *  `a * x` is one modulo `m`. The modulus must be odd; a value with no
    *  inverse answers zero. */
-  "u256_invert_mod": { params: [U256, U256], returns: U256, arity: 2 },
-  "require": { params: [ANY], returns: ANY, arity: 1 },
-  /** `text.indexOf(needle)` answers where the needle first says itself in the
+  "u256_invert_mod", { params: [U256, U256], returns: U256, arity: 2 });
+
+  table.set("require", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** `text.indexOf(needle)` answers where the needle first says itself in the
    *  text, counted in bytes from the front, and -1 where it never does. */
-  "text.indexOf": { params: [TEXT, TEXT], returns: F64, arity: 2 },
-  /** `text.codePointAt(at)` answers the code point at a byte position. */
-  "text.codePointAt": { params: [TEXT, F64], returns: F64, arity: 2 },
-  /** `new TextEncoder().encode(text)` answers the bytes the text is written
+  "text.indexOf", { params: [TEXT, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** `text.codePointAt(at)` answers the code point at a byte position. */
+  "text.codePointAt", { params: [TEXT, F64], returns: F64, arity: 2 });
+
+  table.set(/** `new TextEncoder().encode(text)` answers the bytes the text is written
    *  as: the one encoding a compiled text is written in is utf8. */
   /** The float a window of bytes holds at a byte offset, and the bytes a float
    *  is written into: the reinterpretation a `DataView` asks for, which is the
    *  C library's copy of four or eight bytes. */
-  "blaze_rt_view_load_float": { params: [POINTER, F64, F64], returns: F64, arity: 3 },
-  "blaze_rt_view_store_float": { params: [POINTER, F64, F64, F64], returns: { kind: "void" }, arity: 4 },
-  "TextEncoder.encode": {
+  "blaze_rt_view_load_float", { params: [POINTER, F64, F64], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_view_store_float", { params: [POINTER, F64, F64, F64], returns: { kind: "void" }, arity: 4 });
+
+  table.set("TextEncoder.encode", {
     params: [TEXT],
     returns: { kind: "slice", of: { kind: "primitive", name: "u8" } },
     arity: 1,
-  },
-  /** `text.slice(start, stop)` answers the text between two indexes, and
+  });
+
+  table.set(/** `text.slice(start, stop)` answers the text between two indexes, and
    *  `text.slice(start)` the text from one index to the end. An index below
    *  zero counts back from the end, and an index past the end stops there. */
-  "text.slice": { params: [TEXT, F64, F64], returns: TEXT, arities: [2, 3] },
-  /** `text.trim()` answers the text with the whitespace at both ends gone:
+  "text.slice", { params: [TEXT, F64, F64], returns: TEXT, arities: [2, 3] });
+
+  table.set(/** `text.trim()` answers the text with the whitespace at both ends gone:
    *  the ends of a line a file is read with arrive still attached to it. */
-  "text.trim": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** `text.trimStart()` and `text.trimEnd()` answer the text with the
+  "text.trim", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** `text.trimStart()` and `text.trimEnd()` answer the text with the
    *  whitespace at one end gone, which is what cuts a line of a file apart. */
-  "text.trimStart": { params: [TEXT], returns: TEXT, arity: 1 },
-  "text.trimEnd": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** `text.toLowerCase()` and `text.toUpperCase()` fold the ASCII letters of
+  "text.trimStart", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set("text.trimEnd", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** `text.toLowerCase()` and `text.toUpperCase()` fold the ASCII letters of
    *  the text and copy every other byte as it is. */
-  "text.toLowerCase": { params: [TEXT], returns: TEXT, arity: 1 },
-  "text.toUpperCase": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** A regular expression is the pattern and the flags it was written with,
+  "text.toLowerCase", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set("text.toUpperCase", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** A regular expression is the pattern and the flags it was written with,
    *  and the runtime compiles it once per shape. `test` answers whether the
    *  text holds a match, `exec` and `match` answer the groups, `match_all`
    *  answers every match, `replace` builds the text with the matches
    *  replaced, `split` cuts the text where they lie, and `search` answers
    *  where the first one starts. */
-  "blaze_rt_regex_test": { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 },
-  "blaze_rt_regex_search": { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 },
-  "blaze_rt_regex_exec": {
+  "blaze_rt_regex_test", { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_regex_search", { params: [TEXT, TEXT, TEXT], returns: F64, arity: 3 });
+
+  table.set("blaze_rt_regex_exec", {
     params: [TEXT, TEXT, TEXT],
     returns: { kind: "slice", of: TEXT },
     arity: 3,
-  },
-  "blaze_rt_regex_match": {
+  });
+
+  table.set("blaze_rt_regex_match", {
     params: [TEXT, TEXT, TEXT],
     returns: { kind: "slice", of: TEXT },
     arity: 3,
-  },
-  "blaze_rt_regex_match_all": {
+  });
+
+  table.set("blaze_rt_regex_match_all", {
     params: [TEXT, TEXT, TEXT],
     returns: { kind: "slice", of: { kind: "slice", of: TEXT } },
     arity: 3,
-  },
-  "blaze_rt_regex_replace": { params: [TEXT, TEXT, TEXT, TEXT], returns: TEXT, arity: 4 },
-  "blaze_rt_regex_split": {
+  });
+
+  table.set("blaze_rt_regex_replace", { params: [TEXT, TEXT, TEXT, TEXT], returns: TEXT, arity: 4 });
+
+  table.set("blaze_rt_regex_split", {
     params: [TEXT, TEXT, TEXT],
     returns: { kind: "slice", of: TEXT },
     arity: 3,
-  },
-  /** `JSON.stringify(value)` writes a value as the JSON text that holds it: the
+  });
+
+  table.set(/** `JSON.stringify(value)` writes a value as the JSON text that holds it: the
    *  answer is a text, which is what a map key, a template and a hash are. */
-  "JSON.stringify": { params: [ANY], returns: TEXT, arity: 1 },
-  /** `JSON.stringify(value, null, n)` of a value the compiler cannot name is a
+  "JSON.stringify", { params: [ANY], returns: TEXT, arity: 1 });
+
+  table.set(/** `JSON.stringify(value, null, n)` of a value the compiler cannot name is a
    *  walk of the record the value is: the header of a block carries the layout
    *  it was laid out with, and the document is written from it at the indent
    *  the source asked for. */
-  "JSON.stringify.pretty": { params: [ANY, F64], returns: TEXT, arity: 2 },
-  /** A record copied: the spread of a value the compiler cannot name is the
+  "JSON.stringify.pretty", { params: [ANY, F64], returns: TEXT, arity: 2 });
+
+  table.set(/** A record copied: the spread of a value the compiler cannot name is the
    *  copy of its block, and each field written beside it is set on the copy at
    *  the offset and kind the record's layout states. The copy keeps the layout,
    *  so the value reads through the shape the base did. */
-  "object.copy": { params: [ANY], returns: ANY, arity: 1 },
-  "object.set.text": { params: [ANY, TEXT, TEXT], returns: ANY, arity: 3 },
-  "object.set.ref": { params: [ANY, TEXT, ANY], returns: ANY, arity: 3 },
-  "object.set.number": { params: [ANY, TEXT, F64], returns: ANY, arity: 3 },
-  /** A list written into a field is the pointer to its block: an untyped
+  "object.copy", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("object.set.text", { params: [ANY, TEXT, TEXT], returns: ANY, arity: 3 });
+
+  table.set("object.set.ref", { params: [ANY, TEXT, ANY], returns: ANY, arity: 3 });
+
+  table.set("object.set.number", { params: [ANY, TEXT, F64], returns: ANY, arity: 3 });
+
+  table.set(/** A list written into a field is the pointer to its block: an untyped
    *  reference would box it into a dynamic value, and the block is already the
    *  list the field holds. */
-  "object.set.list": { params: [ANY, TEXT, { kind: "slice", of: ANY }], returns: ANY, arity: 3 },
-  /** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
+  "object.set.list", { params: [ANY, TEXT, { kind: "slice", of: ANY }], returns: ANY, arity: 3 });
+
+  table.set(/** `Number.parseInt(text, radix)` reads the number a text states in its radix. */
   /** `Number.parseInt(text, radix)` reads the number a text states in its radix.
    *  The digits are the text itself, so the first parameter is a text: an
    *  untyped reference would box the pointer into a dynamic value the runtime
    *  would hand to the parser as a number. */
-  "Number.parseInt": { params: [TEXT, F64], returns: F64, arity: 2 },
-  /** `String.fromCodePoint(n)` is the text of the one code point it names. */
-  "String.fromCodePoint": { params: [F64], returns: TEXT, arity: 1 },
-  "JSON.parse": { params: [ANY], returns: ANY, arity: 1 },
-  /** `JSON.get(value, key)` reads one field of a dynamic object the runtime
+  "Number.parseInt", { params: [TEXT, F64], returns: F64, arity: 2 });
+
+  table.set(/** `String.fromCodePoint(n)` is the text of the one code point it names. */
+  "String.fromCodePoint", { params: [F64], returns: TEXT, arity: 1 });
+
+  table.set("JSON.parse", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** `JSON.get(value, key)` reads one field of a dynamic object the runtime
    *  parsed, and answers the value the field names. A field the object does
    *  not carry, and a value that is not an object at all, answer nothing. */
-  "JSON.get": { params: [ANY, TEXT], returns: ANY, arity: 2 },
-  /** `JSON.typeof(value)` is the name `typeof` answers for a value the
+  "JSON.get", { params: [ANY, TEXT], returns: ANY, arity: 2 });
+
+  table.set(/** `JSON.typeof(value)` is the name `typeof` answers for a value the
    *  compiler could not read the type of: the kind the runtime registered the
    *  value as, or the number or the text the value itself is. */
-  "JSON.typeof": { params: [ANY], returns: TEXT, arity: 1 },
-  "crypto.createHash": { params: [ANY], returns: ANY, arity: 1 },
-  /** The path and the mode are the texts they are written as; the answer is
+  "JSON.typeof", { params: [ANY], returns: TEXT, arity: 1 });
+
+  table.set("crypto.createHash", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** The path and the mode are the texts they are written as; the answer is
    *  the text the runtime carries a handle for. */
-  "fs.readFileSync": { params: [TEXT, TEXT], returns: ANY, arity: 2, effects: ["filesystem"] },
-  /** `fs.writeFileSync(path, text)` writes the text to the file, replacing
+  "fs.readFileSync", { params: [TEXT, TEXT], returns: ANY, arity: 2, effects: ["filesystem"] });
+
+  table.set(/** `fs.writeFileSync(path, text)` writes the text to the file, replacing
    *  what it held: the answer is one when the text was written, which a
    *  statement drops. */
-  "fs.writeFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2 },
-  /** `fs.existsSync(path)` asks whether the path names anything. The answer
+  "fs.writeFileSync", { params: [TEXT, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** `fs.existsSync(path)` asks whether the path names anything. The answer
    *  is one or zero, which a test reads as the truth a boolean is. */
-  "fs.existsSync": { params: [TEXT], returns: F64, arity: 1 },
-  /** The kind of thing a path names: zero for nothing, one for a file, two for
+  "fs.existsSync", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/** The kind of thing a path names: zero for nothing, one for a file, two for
    *  a directory, three for anything else. It is what a stat is built from. */
-  "pathKind": { params: [TEXT], returns: F64, arity: 1 },
-  /** The size in bytes of the file a path names, or -1 where there is none. */
-  "fileSize": { params: [TEXT], returns: F64, arity: 1 },
-  /** The entries a directory holds, as JSON: an array of objects whose `name`
+  "pathKind", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/** The size in bytes of the file a path names, or -1 where there is none. */
+  "fileSize", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/** The entries a directory holds, as JSON: an array of objects whose `name`
    *  is the entry's and whose `kind` is one for a file, two for a directory
    *  and three for anything else. The names are sorted so a build reads the
    *  same directory the same way twice. */
-  "dirList": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** Makes the directory the path names, and the directories above it. The
+  "dirList", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** Makes the directory the path names, and the directories above it. The
    *  answer is one where it is there after the call and zero where it is not. */
-  "makeDir": { params: [TEXT], returns: F64, arity: 1 },
-  /** Moves the file or directory a path names to another path in the same
+  "makeDir", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/** Moves the file or directory a path names to another path in the same
    *  file system. The answer is one where it moved and zero where it did not. */
-  "renamePath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
-  /** Removes the file or directory a path names. A recursive remove takes the
+  "renamePath", { params: [TEXT, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** Removes the file or directory a path names. A recursive remove takes the
    *  entries a directory holds with it; a path that is not there is removed
    *  already, so the answer is one. */
-  "removePath": { params: [TEXT, F64], returns: F64, arity: 2 },
-  /** Copies a file to another path, replacing what the other held. */
-  "copyPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
-  /** Appends text to a file, making the file where it is not there yet. */
-  "appendPath": { params: [TEXT, TEXT], returns: F64, arity: 2 },
-  /** Whether a stream the process writes to is a terminal: one is the output
+  "removePath", { params: [TEXT, F64], returns: F64, arity: 2 });
+
+  table.set(/** Copies a file to another path, replacing what the other held. */
+  "copyPath", { params: [TEXT, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** Appends text to a file, making the file where it is not there yet. */
+  "appendPath", { params: [TEXT, TEXT], returns: F64, arity: 2 });
+
+  table.set(/** Whether a stream the process writes to is a terminal: one is the output
    *  stream, two the error stream. The answer is one or zero. */
-  "streamIsTTY": { params: [F64], returns: F64, arity: 1 },
-  /** Sets the status the process leaves with when it ends. */
-  "setExitCode": { params: [F64], returns: F64, arity: 1 },
-  /** The status the process will leave with, which starts at zero. */
-  "exitCode": { params: [], returns: F64, arity: 0 },
-  /** One line read from the input of the process, without its newline; the
+  "streamIsTTY", { params: [F64], returns: F64, arity: 1 });
+
+  table.set(/** Sets the status the process leaves with when it ends. */
+  "setExitCode", { params: [F64], returns: F64, arity: 1 });
+
+  table.set(/** The status the process will leave with, which starts at zero. */
+  "exitCode", { params: [], returns: F64, arity: 0 });
+
+  table.set(/** One line read from the input of the process, without its newline; the
    *  empty text where there is no line to read. */
-  "readLine": { params: [], returns: TEXT, arity: 0 },
-  /** Runs a command line through the host's shell and answers the JSON of the
+  "readLine", { params: [], returns: TEXT, arity: 0 });
+
+  table.set(/** Runs a command line through the host's shell and answers the JSON of the
    *  run: its status, its signal, whether it was stopped at its deadline, and
    *  what it wrote to the two streams. The input is written to its stdin. */
-  "runCommand": { params: [TEXT, TEXT, F64, TEXT], returns: TEXT, arity: 4 },
-  /** The name of the platform the process runs on, as the compiler spells it:
+  "runCommand", { params: [TEXT, TEXT, F64, TEXT], returns: TEXT, arity: 4 });
+
+  table.set(/** The name of the platform the process runs on, as the compiler spells it:
    *  "linux", "darwin" or another name the host answers. */
-  "hostPlatformName": { params: [], returns: TEXT, arity: 0 },
-  /** The architecture the process runs on, as the compiler spells it: "x64",
+  "hostPlatformName", { params: [], returns: TEXT, arity: 0 });
+
+  table.set(/** The architecture the process runs on, as the compiler spells it: "x64",
    *  "arm64" and the names the host answers. */
-  "hostArchName": { params: [], returns: TEXT, arity: 0 },
-  /** The text of the file a path names, read as the mode asks. */
-  "readTextFile": { params: [TEXT, TEXT], returns: TEXT, arity: 2 },
-  /** Flushes a file's writes to the disk, so a record that was written is the
+  "hostArchName", { params: [], returns: TEXT, arity: 0 });
+
+  table.set(/** The text of the file a path names, read as the mode asks. */
+  "readTextFile", { params: [TEXT, TEXT], returns: TEXT, arity: 2 });
+
+  table.set(/** Flushes a file's writes to the disk, so a record that was written is the
    *  one a crash finds. */
-  "syncFile": { params: [TEXT], returns: F64, arity: 1 },
-  /** The value the environment sets a name to, and the empty text where it
+  "syncFile", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/** The value the environment sets a name to, and the empty text where it
    *  sets nothing. */
-  "envGet": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** The directory the process runs in, as the path it is. */
-  "cwdPath": { params: [], returns: TEXT, arity: 0 },
-  /** The process's own id, which a temporary name may carry. */
-  "processId": { params: [], returns: F64, arity: 0 },
-  /** The process id under the name the platform adapter reads, which the
+  "envGet", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** The directory the process runs in, as the path it is. */
+  "cwdPath", { params: [], returns: TEXT, arity: 0 });
+
+  table.set(/** The process's own id, which a temporary name may carry. */
+  "processId", { params: [], returns: F64, arity: 0 });
+
+  table.set(/** The process id under the name the platform adapter reads, which the
    *  boundary's own `processId` would shadow. */
-  "hostProcessId": { params: [], returns: F64, arity: 0 },
-  /** How many processors the host makes available. */
-  "cpuCount": { params: [], returns: F64, arity: 0 },
-  /** Waits for the milliseconds the call names. */
-  "sleepMs": { params: [F64], returns: F64, arity: 1 },
-  /** The file services the compiler's host adapter asks for by their source
+  "hostProcessId", { params: [], returns: F64, arity: 0 });
+
+  table.set(/** How many processors the host makes available. */
+  "cpuCount", { params: [], returns: F64, arity: 0 });
+
+  table.set(/** Waits for the milliseconds the call names. */
+  "sleepMs", { params: [F64], returns: F64, arity: 1 });
+
+  table.set(/** The file services the compiler's host adapter asks for by their source
    *  names: a question about a path answers a number, and the entries of a
    *  directory are counted and read by position. */
-  "fs.appendFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.fileSizeSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
-  "fs.fileKindSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
-  "fs.mkdirSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.rmSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.renameSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.copyFileSync": { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.dirCountSync": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
-  "fs.dirNameSync": { params: [TEXT, F64], returns: TEXT, arity: 2, effects: ["filesystem"] },
-  "fs.dirIsDirSync": { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] },
-  "fs.fsyncPath": { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] },
-  "timers.sleepMs": { params: [F64], returns: F64, arity: 1, effects: ["clock"] },
-  /** A program started and waited for: the command the adapter builds, the
+  "fs.appendFileSync", { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.fileSizeSync", { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] });
+
+  table.set("fs.fileKindSync", { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] });
+
+  table.set("fs.mkdirSync", { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.rmSync", { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.renameSync", { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.copyFileSync", { params: [TEXT, TEXT], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.dirCountSync", { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] });
+
+  table.set("fs.dirNameSync", { params: [TEXT, F64], returns: TEXT, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.dirIsDirSync", { params: [TEXT, F64], returns: F64, arity: 2, effects: ["filesystem"] });
+
+  table.set("fs.fsyncPath", { params: [TEXT], returns: F64, arity: 1, effects: ["filesystem"] });
+
+  table.set("timers.sleepMs", { params: [F64], returns: F64, arity: 1, effects: ["clock"] });
+
+  table.set(/** A program started and waited for: the command the adapter builds, the
    *  exit status it answered, what it wrote, and the questions about a start
    *  that failed or a deadline that stopped it. */
-  "exec.new": { params: [], returns: F64, arity: 0, effects: ["memory"] },
-  "exec.arg": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
-  "exec.cwd": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
-  "exec.env": { params: [F64, TEXT, TEXT], returns: F64, arity: 3, effects: ["memory"] },
-  "exec.input": { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] },
-  "exec.run": { params: [F64, F64], returns: F64, arity: 2, effects: ["syscall", "io", "memory"] },
-  "exec.signal": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
-  "exec.errno": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
-  "exec.timedOut": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
-  "exec.stdout": { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] },
-  "exec.stderr": { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] },
-  "exec.free": { params: [F64], returns: F64, arity: 1, effects: ["memory"] },
-  /** The process and the host it runs on. */
-  "process.cwd": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
-  "process.pid": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
-  "os.tmpdir": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
-  "os.platform": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
-  "os.arch": { params: [], returns: TEXT, arity: 0, effects: ["syscall"] },
-  "crypto.randomUUID": { params: [], returns: TEXT, arity: 0, effects: ["random"] },
-  "env.count": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
-  "env.at": { params: [F64], returns: TEXT, arity: 1, effects: ["syscall"] },
-  "os.cpuCount": { params: [], returns: F64, arity: 0, effects: ["syscall"] },
-  /** `process.env.NAME` reads an environment variable as the text it is set
+  "exec.new", { params: [], returns: F64, arity: 0, effects: ["memory"] });
+
+  table.set("exec.arg", { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] });
+
+  table.set("exec.cwd", { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] });
+
+  table.set("exec.env", { params: [F64, TEXT, TEXT], returns: F64, arity: 3, effects: ["memory"] });
+
+  table.set("exec.input", { params: [F64, TEXT], returns: F64, arity: 2, effects: ["memory"] });
+
+  table.set("exec.run", { params: [F64, F64], returns: F64, arity: 2, effects: ["syscall", "io", "memory"] });
+
+  table.set("exec.signal", { params: [F64], returns: F64, arity: 1, effects: ["memory"] });
+
+  table.set("exec.errno", { params: [F64], returns: F64, arity: 1, effects: ["memory"] });
+
+  table.set("exec.timedOut", { params: [F64], returns: F64, arity: 1, effects: ["memory"] });
+
+  table.set("exec.stdout", { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] });
+
+  table.set("exec.stderr", { params: [F64], returns: TEXT, arity: 1, effects: ["memory"] });
+
+  table.set("exec.free", { params: [F64], returns: F64, arity: 1, effects: ["memory"] });
+
+  table.set(/** The process and the host it runs on. */
+  "process.cwd", { params: [], returns: TEXT, arity: 0, effects: ["syscall"] });
+
+  table.set("process.pid", { params: [], returns: F64, arity: 0, effects: ["syscall"] });
+
+  table.set("os.tmpdir", { params: [], returns: TEXT, arity: 0, effects: ["syscall"] });
+
+  table.set("os.platform", { params: [], returns: TEXT, arity: 0, effects: ["syscall"] });
+
+  table.set("os.arch", { params: [], returns: TEXT, arity: 0, effects: ["syscall"] });
+
+  table.set("crypto.randomUUID", { params: [], returns: TEXT, arity: 0, effects: ["random"] });
+
+  table.set("env.count", { params: [], returns: F64, arity: 0, effects: ["syscall"] });
+
+  table.set("env.at", { params: [F64], returns: TEXT, arity: 1, effects: ["syscall"] });
+
+  table.set("os.cpuCount", { params: [], returns: F64, arity: 0, effects: ["syscall"] });
+
+  table.set(/** `process.env.NAME` reads an environment variable as the text it is set
    *  to. A name the environment does not set is the empty text, which is what
    *  a program reads a configuration value that is not there as. */
-  "process.env": { params: [TEXT], returns: TEXT, arity: 1 },
-  "hasher.update": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  "hasher.update.digest": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  "array.new": { params: [], returns: ANY, arity: 0 },
-  "array.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  /** `a[i]` where `a` is a dynamic array: the element the runtime holds. */
-  "array.get": { params: [ANY, USIZE], returns: F64, arity: 2 },
-  /** `a.length` where `a` is a dynamic array: how many elements it holds. */
-  "array.length": { params: [ANY], returns: USIZE, arity: 1 },
-  /** The values of a map, laid down as the list a program holds: the runtime
+  "process.env", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set("hasher.update", { params: [ANY, ANY, ANY], returns: ANY, arity: 3 });
+
+  table.set("hasher.update.digest", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set("array.new", { params: [], returns: ANY, arity: 0 });
+
+  table.set("array.push", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set(/** `a[i]` where `a` is a dynamic array: the element the runtime holds. */
+  "array.get", { params: [ANY, USIZE], returns: F64, arity: 2 });
+
+  table.set(/** `a.length` where `a` is a dynamic array: how many elements it holds. */
+  "array.length", { params: [ANY], returns: USIZE, arity: 1 });
+
+  table.set(/** The values of a map, laid down as the list a program holds: the runtime
    *  answers the block, and the block's header states how many there are. */
-  "map.values": { params: [ANY], returns: { kind: "slice", of: F64 }, arity: 1 },
-  /** A list copied, and two lists joined: a program holds a list as the block
+  "map.values", { params: [ANY], returns: { kind: "slice", of: F64 }, arity: 1 });
+
+  table.set(/** A list copied, and two lists joined: a program holds a list as the block
    *  its header measures, so a spread of one is those bytes again. The element
    *  type of the answer is the source's, which the read fixes at the call. */
-  "array.copy": { params: [{ kind: "slice", of: ANY }], returns: ANY, arity: 1 },
-  "array.join": { params: [{ kind: "slice", of: ANY }, { kind: "slice", of: ANY }], returns: ANY, arity: 2 },
-  "fetch": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
-  /** `http.request(url, method, headers, body)` performs one request synchronously,
+  "array.copy", { params: [{ kind: "slice", of: ANY }], returns: ANY, arity: 1 });
+
+  table.set("array.join", { params: [{ kind: "slice", of: ANY }, { kind: "slice", of: ANY }], returns: ANY, arity: 2 });
+
+  table.set("fetch", { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 });
+
+  table.set(/** `http.request(url, method, headers, body)` performs one request synchronously,
    * and `http.request(url, options, callback)` opens a buffered request whose
    * `data`/`end`/`error` events fire when the request is sent: the callback is
    * given the response, every `res.on` listener of it fires when the response
    * has arrived, and `req.on("error")` fires when the request could not be made. */
-  "http.request": { params: [ANY, ANY, ANY, ANY], returns: ANY, arities: [3, 4] },
-  "Bun.serve": { params: [ANY], returns: ANY, arity: 1 },
-  "process.exit": { params: [ANY], returns: ANY, arity: 1 },
-  /** `process.hrtime.bigint()` reads a monotonic clock in nanoseconds: the
+  "http.request", { params: [ANY, ANY, ANY, ANY], returns: ANY, arities: [3, 4] });
+
+  table.set("Bun.serve", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("process.exit", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** `process.hrtime.bigint()` reads a monotonic clock in nanoseconds: the
    * reading is a whole number, and two readings of it differ by a duration. */
-  "process.hrtime.bigint": { params: [], returns: I64, arity: 0, effects: ["clock"] },
-  /** `process.stderr.write(text)` writes the text to the error stream, where
+  "process.hrtime.bigint", { params: [], returns: I64, arity: 0, effects: ["clock"] });
+
+  table.set(/** `process.stderr.write(text)` writes the text to the error stream, where
    * the runtime reports its own failures. It is not buffered with the output. */
-  "process.stderr.write": { params: [TEXT], returns: { kind: "void" }, arity: 1 },
-  /** Writing to the output without the newline a `console.log` ends it with:
+  "process.stderr.write", { params: [TEXT], returns: { kind: "void" }, arity: 1 });
+
+  table.set(/** Writing to the output without the newline a `console.log` ends it with:
    *  a command that prints a document writes it a part at a time. */
-  "stdoutWrite": { params: [TEXT], returns: { kind: "void" }, arity: 1 },
-  /** The arguments the process was started with, as the texts they are: a
+  "stdoutWrite", { params: [TEXT], returns: { kind: "void" }, arity: 1 });
+
+  table.set(/** The arguments the process was started with, as the texts they are: a
    *  compiler reads a project file, a flag and a directory, not numbers. */
-  "hostArgumentCount": { params: [], returns: F64, arity: 0 },
-  "hostArgument": { params: [F64], returns: TEXT, arity: 1 },
-  "parseInt": { params: [ANY], returns: F64, arity: 1 },
-  /** `Number(value)` reads the number a value is written at: a string is the
+  "hostArgumentCount", { params: [], returns: F64, arity: 0 });
+
+  table.set("hostArgument", { params: [F64], returns: TEXT, arity: 1 });
+
+  table.set("parseInt", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set(/** `Number(value)` reads the number a value is written at: a string is the
    * number its text states, a dynamic value is the number it holds, and a
    * reading of text is what `+text` is the sign in front of one. */
-  "Number": { params: [ANY], returns: F64, arity: 1 },
-  "BigInt": { params: [F64], returns: U256, arity: 1 },
-  /** `http.serve(port)` starts an HTTP server on the port and runs it until the
+  "Number", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set("BigInt", { params: [F64], returns: U256, arity: 1 });
+
+  table.set(/** `http.serve(port)` starts an HTTP server on the port and runs it until the
    * process is stopped. Every route answers with "Hello, World". The call never
    * returns while the server runs. */
-  "http.serve": { params: [USIZE], returns: { kind: "void" }, arity: 1 },
-  /** `http.serveSettings(port, maxClients, maxBodySize, maxHeaderSize, timeout, threads, workers)`
+  "http.serve", { params: [USIZE], returns: { kind: "void" }, arity: 1 });
+
+  table.set(/** `http.serveSettings(port, maxClients, maxBodySize, maxHeaderSize, timeout, threads, workers)`
    * starts an HTTP server with resource limits, a connection timeout (seconds)
    * and a thread/worker count. The call never returns while the server runs. */
-  "http.serveSettings": {
+  "http.serveSettings", {
     params: [USIZE, USIZE, USIZE, USIZE, USIZE, USIZE, USIZE],
     returns: { kind: "void" },
     arity: 7,
-  },
-  /** `http.serveTls(port, cert, key)` starts an HTTPS (TLS) server on the port
+  });
+
+  table.set(/** `http.serveTls(port, cert, key)` starts an HTTPS (TLS) server on the port
    * using the given certificate and private key files. The call never returns
    * while the server runs. */
-  "http.serveTls": { params: [USIZE, ANY, ANY], returns: { kind: "void" }, arity: 3 },
-  /* ---------------------------------------------------------------------- */
+  "http.serveTls", { params: [USIZE, ANY, ANY], returns: { kind: "void" }, arity: 3 });
+
+  table.set(/* ---------------------------------------------------------------------- */
   /* Triton / kernel builtins                                                 */
   /* ---------------------------------------------------------------------- */
-  "tl.load": { params: [ANY, ANY, ANY], returns: F64, arities: [1, 2, 3] },
-  "tl.store": { params: [ANY, ANY, ANY, ANY], returns: { kind: "void" }, arities: [2, 3, 4] },
-  "tl.program_id": { params: [ANY], returns: F64, arities: [0, 1] },
-  "tl.num_programs": { params: [ANY], returns: F64, arities: [0, 1] },
-  "tl.arange": { params: [ANY, ANY], returns: F64, arity: 2 },
-  "tl.full": { params: [ANY, ANY, ANY], returns: F64, arities: [2, 3] },
-  "tl.zeros": { params: [ANY, ANY], returns: F64, arities: [1, 2] },
-  "tl.ones": { params: [ANY, ANY], returns: F64, arities: [1, 2] },
-  "tl.where": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  "tl.math.exp": { params: [ANY], returns: F64, arity: 1 },
-  "tl.math.log": { params: [ANY], returns: F64, arity: 1 },
-  "tl.math.sin": { params: [ANY], returns: F64, arity: 1 },
-  "tl.math.cos": { params: [ANY], returns: F64, arity: 1 },
-  /** `blaze_error_clear()` clears the pending error flag a try block starts with. */
-  "blaze_error_clear": { params: [], returns: { kind: "void" }, arity: 0 },
-  /** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */
-  "blaze_had_error": { params: [], returns: F64, arity: 0 },
-  /** `blaze_last_error()` is the message of the last failure, for `catch (e)`. */
-  "blaze_last_error": { params: [], returns: TEXT, arity: 0 },
-  "http.createServer": { params: [ANY], returns: ANY, arity: 1 },
-  "server.listen": { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 },
-  "server.close": { params: [ANY], returns: ANY, arity: 1 },
-  "Promise": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
-  /**
+  "tl.load", { params: [ANY, ANY, ANY], returns: F64, arities: [1, 2, 3] });
+
+  table.set("tl.store", { params: [ANY, ANY, ANY, ANY], returns: { kind: "void" }, arities: [2, 3, 4] });
+
+  table.set("tl.program_id", { params: [ANY], returns: F64, arities: [0, 1] });
+
+  table.set("tl.num_programs", { params: [ANY], returns: F64, arities: [0, 1] });
+
+  table.set("tl.arange", { params: [ANY, ANY], returns: F64, arity: 2 });
+
+  table.set("tl.full", { params: [ANY, ANY, ANY], returns: F64, arities: [2, 3] });
+
+  table.set("tl.zeros", { params: [ANY, ANY], returns: F64, arities: [1, 2] });
+
+  table.set("tl.ones", { params: [ANY, ANY], returns: F64, arities: [1, 2] });
+
+  table.set("tl.where", { params: [ANY, ANY, ANY], returns: ANY, arity: 3 });
+
+  table.set("tl.math.exp", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set("tl.math.log", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set("tl.math.sin", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set("tl.math.cos", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set(/** `blaze_error_clear()` clears the pending error flag a try block starts with. */
+  "blaze_error_clear", { params: [], returns: { kind: "void" }, arity: 0 });
+
+  table.set(/** `blaze_had_error()` is 1 when the last awaited call failed, else 0. */
+  "blaze_had_error", { params: [], returns: F64, arity: 0 });
+
+  table.set(/** `blaze_last_error()` is the message of the last failure, for `catch (e)`. */
+  "blaze_last_error", { params: [], returns: TEXT, arity: 0 });
+
+  table.set("http.createServer", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("server.listen", { params: [ANY, ANY, ANY, ANY], returns: ANY, arity: 4 });
+
+  table.set("server.close", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("Promise", { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set(/**
    * `await v` on a promise carrying a number: the value it was settled with.
    * The promise a program makes is settled before it is read, so the await is
    * the reading of it rather than a wait.
    */
-  "Promise.await": { params: [ANY], returns: F64, arity: 1, effects: ["memory"] },
-  /**
+  "Promise.await", { params: [ANY], returns: F64, arity: 1, effects: ["memory"] });
+
+  table.set(/**
    * `await v` on a promise carrying a whole number: a language whose whole
    * numbers are whole reads one out as it was settled, not as a fraction.
    */
-  "Promise.await.whole": { params: [ANY], returns: I64, arity: 1, effects: ["memory"] },
-  /** `await v` on a promise carrying a string. */
-  "Promise.await.text": { params: [ANY], returns: TEXT, arity: 1, effects: ["memory"] },
-  /** `await v` on a promise carrying a truth. */
-  "Promise.await.bool": { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1, effects: ["memory"] },
-  /**
+  "Promise.await.whole", { params: [ANY], returns: I64, arity: 1, effects: ["memory"] });
+
+  table.set(/** `await v` on a promise carrying a string. */
+  "Promise.await.text", { params: [ANY], returns: TEXT, arity: 1, effects: ["memory"] });
+
+  table.set(/** `await v` on a promise carrying a truth. */
+  "Promise.await.bool", { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1, effects: ["memory"] });
+
+  table.set(/**
    * `await v` on a promise whose value the compiler does not know, or on one
    * carrying a value of a shape the caller reads dynamically.
    */
-  "Promise.await.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
-  /** `await v` on a promise carrying nothing: the promise is still read, so
+  "Promise.await.value", { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set(/** `await v` on a promise carrying nothing: the promise is still read, so
    *  the failure it may hold becomes the failure a catch arm sees. */
-  "Promise.await.nothing": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: ["memory"] },
-  /** `Promise.resolve(v)` answers a settled promise carrying `v`. */
-  "Promise.resolve": { params: [F64], returns: ANY, arities: [0, 1], effects: ["memory"] },
-  "Promise.resolve.text": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.resolve.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.resolve.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.resolve.nothing": { params: [], returns: ANY, arity: 0, effects: ["memory"] },
-  /**
+  "Promise.await.nothing", { params: [ANY], returns: { kind: "void" }, arity: 1, effects: ["memory"] });
+
+  table.set(/** `Promise.resolve(v)` answers a settled promise carrying `v`. */
+  "Promise.resolve", { params: [F64], returns: ANY, arities: [0, 1], effects: ["memory"] });
+
+  table.set("Promise.resolve.text", { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.resolve.bool", { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.resolve.value", { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.resolve.nothing", { params: [], returns: ANY, arity: 0, effects: ["memory"] });
+
+  table.set(/**
    * The promise an async function answers on its way out. It carries the value
    * the body returned, unless the body left a failure pending — what an awaited
    * call that failed does — and then it is a promise that has failed, carrying
    * the message. Awaiting it reports that failure where the await is written.
    */
-  "Promise.settle": { params: [F64], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.settle.text": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.settle.bool": { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.settle.value": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
-  "Promise.settle.nothing": { params: [], returns: ANY, arity: 0, effects: ["memory"] },
-  /**
+  "Promise.settle", { params: [F64], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.settle.text", { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.settle.bool", { params: [{ kind: "primitive", name: "bool" }], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.settle.value", { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("Promise.settle.nothing", { params: [], returns: ANY, arity: 0, effects: ["memory"] });
+
+  table.set(/**
    * `Date.parse(text)` answers the milliseconds a date text names since the
    * epoch, as the language fixes it: a text that is not a date answers NaN.
    */
-  "Date.parse": { params: [TEXT], returns: F64, arity: 1 },
-  /**
+  "Date.parse", { params: [TEXT], returns: F64, arity: 1 });
+
+  table.set(/**
    * The POSIX path operations `posix` names: the directory part of a path, the
    * path with its `.` and `..` parts resolved, and two paths joined. The
    * compiler reads its own imports through them, and a path is a text the
    * runtime writes.
    */
-  "posix.dirname": { params: [TEXT], returns: TEXT, arity: 1 },
-  "posix.normalize": { params: [TEXT], returns: TEXT, arity: 1 },
-  "posix.join": { params: [TEXT, TEXT, TEXT], returns: TEXT, arities: [2, 3] },
-  "posix.extname": { params: [TEXT], returns: TEXT, arity: 1 },
-  /** `Promise.reject(message)` answers a promise that has already failed. */
-  "Promise.reject": { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] },
-  /**
+  "posix.dirname", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set("posix.normalize", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set("posix.join", { params: [TEXT, TEXT, TEXT], returns: TEXT, arities: [2, 3] });
+
+  table.set("posix.extname", { params: [TEXT], returns: TEXT, arity: 1 });
+
+  table.set(/** `Promise.reject(message)` answers a promise that has already failed. */
+  "Promise.reject", { params: [TEXT], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set(/**
    * Whether a promise failed, and the message it failed with. A promise a
    * compiled program makes is settled before it is read, so `p.then(onOk,
    * onErr)` asks these where it stands.
    */
-  "Promise.failed": { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1 },
-  "Promise.message": { params: [ANY], returns: TEXT, arity: 1 },
-  /**
+  "Promise.failed", { params: [ANY], returns: { kind: "primitive", name: "bool" }, arity: 1 });
+
+  table.set("Promise.message", { params: [ANY], returns: TEXT, arity: 1 });
+
+  table.set(/**
    * `asyncio.run(coroutine)` is the value the coroutine's promise carries: a
    * Python program has no top-level `await`, so this is how it reads one.
    */
-  "asyncio.run": { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] },
-  "resolve": { params: [ANY], returns: ANY, arity: 1 },
-  "reject": { params: [ANY], returns: ANY, arity: 1 },
-  /** The longer names a Promise executor is written with for the same pair:
+  "asyncio.run", { params: [ANY], returns: ANY, arity: 1, effects: ["memory"] });
+
+  table.set("resolve", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("reject", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** The longer names a Promise executor is written with for the same pair:
    * the parameters `onFulfilled` and `onRejected` resolve the promise the
    * executor call is written in, exactly where `resolve` and `reject` do. */
-  "onFulfilled": { params: [ANY], returns: ANY, arity: 1 },
-  "onRejected": { params: [ANY], returns: ANY, arity: 1 },
-  "req.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  /** `req.path` is the path the request was sent to, and `req.method` the
+  "onFulfilled", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("onRejected", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("req.on", { params: [ANY, ANY, ANY], returns: ANY, arity: 3 });
+
+  table.set(/** `req.path` is the path the request was sent to, and `req.method` the
    *  method it was sent with: the two a program routes on. Both are read as
    *  text, so a program compares them with the strings it wrote. */
-  "req.path": { params: [ANY], returns: ANY, arity: 1 },
-  "req.method": { params: [ANY], returns: ANY, arity: 1 },
-  /** The events of a response an `http.request(url, options, callback)` call
+  "req.path", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set("req.method", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** The events of a response an `http.request(url, options, callback)` call
    * handed to its callback: the `data` and `end` listeners fire when the
    * response has arrived and an `error` listener when it never did. */
-  "res.on": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  /** `req.write(text)` buffers the body bytes a client request is sent with. */
-  "req.write": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  /** `req.end()` sends the buffered request, and the events the callback of
+  "res.on", { params: [ANY, ANY, ANY], returns: ANY, arity: 3 });
+
+  table.set(/** `req.write(text)` buffers the body bytes a client request is sent with. */
+  "req.write", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set(/** `req.end()` sends the buffered request, and the events the callback of
    * the `http.request` call registered fire when it is sent. */
-  "req.end": { params: [ANY], returns: ANY, arity: 1 },
-  /** `req.text()` is the body of the request, as text. */
-  "req.text": { params: [ANY], returns: ANY, arity: 1 },
-  /**
+  "req.end", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/** `req.text()` is the body of the request, as text. */
+  "req.text", { params: [ANY], returns: ANY, arity: 1 });
+
+  table.set(/**
    * `req.header(name)` is the value of a header of the request, as text. A
    * header the request does not carry is an empty string, and the name the
    * header is asked for is read the way the protocol spells it: the search
    * is case-insensitive, because the peer spells the name its own way.
    */
-  "req.header": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  "res.writeHead": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  /** `res.setHeader(name, value)` sets a header of the response, and is
+  "req.header", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set("res.writeHead", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set(/** `res.setHeader(name, value)` sets a header of the response, and is
    *  written before the body is sent. */
-  "res.setHeader": { params: [ANY, ANY, ANY], returns: ANY, arity: 3 },
-  /** A response may end with a body or with none: `res.end()` is the empty
+  "res.setHeader", { params: [ANY, ANY, ANY], returns: ANY, arity: 3 });
+
+  table.set(/** A response may end with a body or with none: `res.end()` is the empty
    * response a `res.writeHead(204)` answers with. */
-  "res.end": { params: [ANY, ANY], returns: ANY, arities: [1, 2] },
-  "tasks.push": { params: [ANY, ANY], returns: ANY, arity: 2 },
-  /** `http.sseSubscribe(res)` turns a response into an event stream: the
+  "res.end", { params: [ANY, ANY], returns: ANY, arities: [1, 2] });
+
+  table.set("tasks.push", { params: [ANY, ANY], returns: ANY, arity: 2 });
+
+  table.set(/** `http.sseSubscribe(res)` turns a response into an event stream: the
    *  connection stays open and every event published afterwards is written to
    *  it. It answers 1 when the connection became an event stream, 0 when it
    *  did not. */
-  "http.sseSubscribe": { params: [ANY], returns: F64, arity: 1 },
-  /** `http.ssePublish(text)` writes an event to every event stream that is
-   *  open, and answers how many of them it was written to. */
-  "http.ssePublish": { params: [ANY], returns: F64, arity: 1 },
-  /** `http.sseCount()` answers how many event streams are open. */
-  "http.sseCount": { params: [], returns: F64, arity: 0 },
+  "http.sseSubscribe", { params: [ANY], returns: F64, arity: 1 });
 
-  /* ---------------------------------------------------------------------- */
+  table.set(/** `http.ssePublish(text)` writes an event to every event stream that is
+   *  open, and answers how many of them it was written to. */
+  "http.ssePublish", { params: [ANY], returns: F64, arity: 1 });
+
+  table.set(/** `http.sseCount()` answers how many event streams are open. */
+  "http.sseCount", { params: [], returns: F64, arity: 0 });
+
+
+  table.set(/* ---------------------------------------------------------------------- */
   /* The HTTP API a module function may use                                  */
   /* ---------------------------------------------------------------------- */
 
@@ -666,34 +949,43 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    */
 
   /** The path the request was sent to, as text. */
-  "http.requestPath": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
-  /** The method the request was sent with, as text. */
-  "http.requestMethod": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
-  /**
+  "http.requestPath", { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true });
+
+  table.set(/** The method the request was sent with, as text. */
+  "http.requestMethod", { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true });
+
+  table.set(/**
    * The value of a header of the request, as text. A header the request does
    * not carry is an empty string, which is what a program reads it as.
    */
-  "http.requestHeader": { params: [ANY, ANY], returns: TEXT, arity: 2, moduleOnly: true },
-  /** The body of the request, as text. */
-  "http.requestBody": { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true },
-  /** Sets the status the response is answered with. */
-  "http.responseStatus": { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true },
-  /** Sets a header of the response. It is written before the body is sent. */
-  "http.responseHeader": { params: [ANY, ANY, ANY], returns: { kind: "void" }, arity: 3, moduleOnly: true },
-  /** Sets the body of the response, as text. */
-  "http.responseBody": { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true },
-  /**
+  "http.requestHeader", { params: [ANY, ANY], returns: TEXT, arity: 2, moduleOnly: true });
+
+  table.set(/** The body of the request, as text. */
+  "http.requestBody", { params: [ANY], returns: TEXT, arity: 1, moduleOnly: true });
+
+  table.set(/** Sets the status the response is answered with. */
+  "http.responseStatus", { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true });
+
+  table.set(/** Sets a header of the response. It is written before the body is sent. */
+  "http.responseHeader", { params: [ANY, ANY, ANY], returns: { kind: "void" }, arity: 3, moduleOnly: true });
+
+  table.set(/** Sets the body of the response, as text. */
+  "http.responseBody", { params: [ANY, ANY], returns: { kind: "void" }, arity: 2, moduleOnly: true });
+
+  table.set(/**
    * Sends the response and ends the request. It is written with a body and
    * without one: the body is set and then the response is sent.
    */
-  "http.responseEnd": { params: [ANY, ANY], returns: { kind: "void" }, arities: [1, 2], moduleOnly: true },
-  /** `performance.now()` is the milliseconds on a monotonic clock: the time a
+  "http.responseEnd", { params: [ANY, ANY], returns: { kind: "void" }, arities: [1, 2], moduleOnly: true });
+
+  table.set(/** `performance.now()` is the milliseconds on a monotonic clock: the time a
    *  duration is measured over, which a clock that can be moved is no good
    *  for. It reads the clock, so it is not a value the optimizer may compute
    *  twice or move. */
-  "performance.now": { params: [], returns: F64, arity: 0, effects: ["clock"] },
+  "performance.now", { params: [], returns: F64, arity: 0, effects: ["clock"] });
 
-  /* ---------------------------------------------------------------------- */
+
+  table.set(/* ---------------------------------------------------------------------- */
   /* The SQLite facility.                                                     */
   /* ---------------------------------------------------------------------- */
 
@@ -702,53 +994,77 @@ export const BUILTINS: Record<string, BuiltinSignature> = {
    * is not there; `":memory:"` is a database in memory. It answers a handle,
    * which is a number the program holds.
    */
-  "sqlite.open": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
-  /** `sqlite.close(db)` closes the connection and finalizes what it holds. */
-  "sqlite.close": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS },
-  /**
+  "sqlite.open", { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.close(db)` closes the connection and finalizes what it holds. */
+  "sqlite.close", { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/**
    * `sqlite.exec(db, sql)` runs the statements of the SQL that answer no
    * rows. It answers 1 when they ran and 0 when they did not.
    */
-  "sqlite.exec": { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
-  /** `sqlite.prepare(db, sql)` compiles one statement and answers a handle. */
-  "sqlite.prepare": { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
-  /**
+  "sqlite.exec", { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.prepare(db, sql)` compiles one statement and answers a handle. */
+  "sqlite.prepare", { params: [ANY, ANY], returns: F64, arity: 2, effects: SQLITE_EFFECTS });
+
+  table.set(/**
    * `sqlite.bindText(stmt, index, text)` binds a parameter to text. The index
    * is 1-based, as SQLite counts them.
    */
-  "sqlite.bindText": { params: [ANY, F64, ANY], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS },
-  /** `sqlite.bindNumber(stmt, index, number)` binds a parameter to a number. */
-  "sqlite.bindNumber": { params: [ANY, F64, F64], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS },
-  /** `sqlite.bindNull(stmt, index)` binds a parameter to null. */
-  "sqlite.bindNull": { params: [ANY, F64], returns: { kind: "void" }, arity: 2, effects: SQLITE_EFFECTS },
-  /**
+  "sqlite.bindText", { params: [ANY, F64, ANY], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.bindNumber(stmt, index, number)` binds a parameter to a number. */
+  "sqlite.bindNumber", { params: [ANY, F64, F64], returns: { kind: "void" }, arity: 3, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.bindNull(stmt, index)` binds a parameter to null. */
+  "sqlite.bindNull", { params: [ANY, F64], returns: { kind: "void" }, arity: 2, effects: SQLITE_EFFECTS });
+
+  table.set(/**
    * `sqlite.step(stmt)` runs the statement one row at a time. It answers 1
    * while there is a row and 0 when there is none.
    */
-  "sqlite.step": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
-  /** `sqlite.columnCount(stmt)` answers how many columns the row has. */
-  "sqlite.columnCount": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
-  /**
+  "sqlite.step", { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.columnCount(stmt)` answers how many columns the row has. */
+  "sqlite.columnCount", { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/**
    * `sqlite.columnType(stmt, index)` answers the kind of the column: 0 null,
    * 1 integer, 2 float, 3 text, 4 blob. The index of a column is 0-based, as
    * SQLite counts them.
    */
-  "sqlite.columnType": { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
-  /** `sqlite.columnNumber(stmt, index)` answers the column as a number. */
-  "sqlite.columnNumber": { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS },
-  /** `sqlite.columnText(stmt, index)` answers the column as text. */
-  "sqlite.columnText": { params: [ANY, F64], returns: ANY, arity: 2, effects: SQLITE_EFFECTS },
-  /** `sqlite.finalize(stmt)` releases the statement. */
-  "sqlite.finalize": { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS },
-  /** `sqlite.changes(db)` answers how many rows the last statement changed. */
-  "sqlite.changes": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
-  /** `sqlite.lastInsertRowid(db)` answers the rowid of the last row inserted. */
-  "sqlite.lastInsertRowid": { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS },
-  /** `sqlite.error(db)` answers the message of the last failure of the connection. */
-  "sqlite.error": { params: [ANY], returns: ANY, arity: 1, effects: SQLITE_EFFECTS },
-};
+  "sqlite.columnType", { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS });
 
-export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);
+  table.set(/** `sqlite.columnNumber(stmt, index)` answers the column as a number. */
+  "sqlite.columnNumber", { params: [ANY, F64], returns: F64, arity: 2, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.columnText(stmt, index)` answers the column as text. */
+  "sqlite.columnText", { params: [ANY, F64], returns: ANY, arity: 2, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.finalize(stmt)` releases the statement. */
+  "sqlite.finalize", { params: [ANY], returns: { kind: "void" }, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.changes(db)` answers how many rows the last statement changed. */
+  "sqlite.changes", { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.lastInsertRowid(db)` answers the rowid of the last row inserted. */
+  "sqlite.lastInsertRowid", { params: [ANY], returns: F64, arity: 1, effects: SQLITE_EFFECTS });
+
+  table.set(/** `sqlite.error(db)` answers the message of the last failure of the connection. */
+  "sqlite.error", { params: [ANY], returns: ANY, arity: 1, effects: SQLITE_EFFECTS });
+;
+
+  return table;
+}
+
+export const BUILTINS: Map<string, BuiltinSignature> = builtinTable();
+
+export const BUILTIN_NAMES: readonly string[] = (() => {
+  const names: string[] = [];
+  for (const name of BUILTINS.keys()) names[names.length] = name;
+  return names;
+})();
 
 /**
  * The builtin a source name calls, or null when the name is not one of them.
@@ -760,7 +1076,7 @@ export const BUILTIN_NAMES: readonly string[] = Object.keys(BUILTINS);
  * instead of reporting the call the program does not compile.
  */
 export function builtinFor(name: string): BuiltinSignature | null {
-  return Object.prototype.hasOwnProperty.call(BUILTINS, name) ? BUILTINS[name] : null;
+  return BUILTINS.get(name) ?? null;
 }
 
 /** The builtins a `Math.` call may name, as the error message lists them. */

@@ -127,9 +127,13 @@ export const SGLANG_ABI: readonly SglangEntry[] = [
 ];
 
 /** Symbols generated Sglang/kernel code may reference. Nothing else resolves at link time. */
-export const SGLANG_SYMBOLS: Record<string, true> = Object.fromEntries(
-  SGLANG_ABI.map((item) => [item.symbol, true as const]),
-);
+function sglangSymbols(): Record<string, true> {
+  const symbols: Record<string, true> = {};
+  for (const item of SGLANG_ABI) symbols[String(fieldOf(item, "symbol"))] = true;
+  return symbols;
+}
+
+export const SGLANG_SYMBOLS: Record<string, true> = sglangSymbols();
 
 /** True when generated code is allowed to reference a Sglang symbol. */
 export function isSglangSymbol(symbol: string): boolean {
@@ -155,13 +159,21 @@ const SGLANG_HEADER_EPILOGUE = `
 
 /** The C header a program that uses the Sglang runtime includes. */
 export function sglangHeaderSource(): string {
-  const declarations = SGLANG_ABI.map((item) => {
+  const declarations: string[] = [];
+  for (const item of SGLANG_ABI) {
     const suffix = fieldOf(item, "noreturn") === true ? " /* never returns */" : "";
-    return `${item.returns === "void" ? "void" : item.returns} ${item.symbol}(${
-      fieldOf(item, "params").length === 0 ? "void" : item.params.map(([name, type]) => `${type} ${name}`).join(", ")
-    })${suffix};`;
-  }).join("\n");
-  return `${SGLANG_HEADER_PREAMBLE}\n${declarations}\n\n${SGLANG_HEADER_EPILOGUE}`;
+    const returns = String(fieldOf(item, "returns"));
+    const params = fieldOf(item, "params") as readonly (readonly [string, string])[];
+    let paramsText = "void";
+    if (params.length > 0) {
+      const parts: string[] = [];
+      for (const param of params) parts[parts.length] = `${String(param[1])} ${String(param[0])}`;
+      paramsText = parts.join(", ");
+    }
+    declarations[declarations.length] = `${returns === "void" ? "void" : returns} ${String(fieldOf(item, "symbol"))}(${paramsText})${suffix};`;
+  }
+  const declarationsText = declarations.join("\n");
+  return `${SGLANG_HEADER_PREAMBLE}\n${declarationsText}\n\n${SGLANG_HEADER_EPILOGUE}`;
 }
 
 /** True when a source uses Sglang/kernel facilities. */

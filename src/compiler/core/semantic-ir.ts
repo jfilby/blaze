@@ -62,10 +62,12 @@ export const NUMERIC: readonly PrimitiveTypeName[] = [
 ];
 
 function kindOf(type: SemanticType): string {
+  if (type === undefined || type === null) return "ref";
   return String((type as unknown as Record<string, unknown>)["kind"]);
 }
 
 function nameOf(type: SemanticType): PrimitiveTypeName {
+  if (type === undefined || type === null) return undefined as unknown as PrimitiveTypeName;
   return (type as unknown as Record<string, unknown>)["name"] as PrimitiveTypeName;
 }
 

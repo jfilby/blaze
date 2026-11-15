@@ -6974,8 +6974,9 @@ function callsOf(block: SemanticBlock): CallEdge[] {
     for (const statement of fieldOf(one, "statements") as readonly SemanticStatement[]) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
+          if (inner.k !== "call") return;
           const callee = String(fieldOf(fieldOf(inner, "call"), "callee"));
-          if (inner.k !== "call" || seen.has(callee)) return;
+          if (seen.has(callee)) return;
           seen.add(callee);
           edges.push({ callee, strategy: "call" });
         });
@@ -6985,8 +6986,9 @@ function callsOf(block: SemanticBlock): CallEdge[] {
     const terminator = fieldOf(one, "terminator") as SemanticBlock["terminator"];
     if (terminator.k === "return" && fieldOf(terminator, "value") !== null) {
       walkValues(fieldOf(terminator, "value") as SemanticValue, (inner) => {
+        if (inner.k !== "call") return;
         const callee = String(fieldOf(fieldOf(inner, "call"), "callee"));
-        if (inner.k !== "call" || seen.has(callee)) return;
+        if (seen.has(callee)) return;
         seen.add(callee);
         edges.push({ callee, strategy: "call" });
       });

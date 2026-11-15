@@ -2,6 +2,17 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** The elements a list value holds. */
+function itemsOf(value: PyValue): PyValue[] {
+  return fieldOf(value, "items") as PyValue[];
+}
+
+/** Whether every element of a list is a member of a set. */
+function allIn(items: readonly PyValue[], set: SparseSet): boolean {
+  for (const item of items) if (!set.has(item)) return false;
+  return true;
+}
+
 function valuesOf(bindings: unknown): Map<string, PyValue> {
   return fieldOf(bindings, "values") as Map<string, PyValue>;
 }
@@ -217,8 +228,8 @@ class SparseSet {
 }
 
 function programValue(one: PyValue, bindings: Bindings): ProgramValue {
-  if (one.k === "name" && hasValue(bindings, String(one.name))) {
-    return programValue(valueAt(bindings, String(one.name))!, bindings);
+  if (one.k === "name" && hasValue(bindings, String(String(fieldOf(one, "name"))))) {
+    return programValue(valueAt(bindings, String(String(fieldOf(one, "name"))))!, bindings);
   }
   switch (one.k) {
     case "number":
@@ -226,20 +237,20 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "text":
       return { k: "text", parts: text(fieldOf(one, "parts"), bindings) };
     case "boolean":
-      return { k: "boolean", value: one.value };
+      return { k: "boolean", value: fieldOf(one, "value") === true };
     case "none":
       return { k: "null" };
     case "name":
-      return { k: "name", name: one.name };
+      return { k: "name", name: String(fieldOf(one, "name")) };
     case "await":
       // `await v` is the value the promise `v` carries, which the program body
       // reads where it is written.
-      return { k: "call", function: "Promise.await", args: [programValue(one.value, bindings)] };
+      return { k: "call", function: "Promise.await", args: [programValue(fieldOf(one, "value") as PyValue, bindings)] };
     case "call": {
       // A name bound to a function (a lambda) is called by inlining its body
       // with the arguments bound to its parameters.
-      if (one.name !== "len" && one.name !== "str" && one.name !== "tl.where" && hasValue(bindings, String(one.name))) {
-        const fn = valueAt(bindings, String(one.name))!;
+      if (String(fieldOf(one, "name")) !== "len" && String(fieldOf(one, "name")) !== "str" && String(fieldOf(one, "name")) !== "tl.where" && hasValue(bindings, String(String(fieldOf(one, "name"))))) {
+        const fn = valueAt(bindings, String(String(fieldOf(one, "name"))))!;
         if (fn.k === "lambda") {
           const child = cloneBindings(bindings);
           const callParams = fieldOf(fn, "params") as readonly { readonly name: string }[];
@@ -254,33 +265,33 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       // `len(x)` is the length of the list or of the text `x` holds, and the
       // program model reads a length off the name it is written by.
       const lenArgs = fieldOf(one, "args") as PyValue[];
-      if (one.name === "len" && lenArgs.length === 1 && lenArgs[0].k === "name") {
+      if (String(fieldOf(one, "name")) === "len" && lenArgs.length === 1 && lenArgs[0].k === "name") {
         return { k: "length", of: fieldOf(lenArgs[0], "name") };
       }
       // The length of the command line is the length of the list of texts
       // Python holds, which is the file the program runs and the arguments it
       // was given.
       const argvArgs = fieldOf(one, "args") as PyValue[];
-      if (one.name === "len" && argvArgs.length === 1 && isSysArgv(argvArgs[0])) {
+      if (String(fieldOf(one, "name")) === "len" && argvArgs.length === 1 && isSysArgv(argvArgs[0])) {
         return { k: "call", function: "argvLength", args: [] };
       }
       // The length of a text written out is the length of a name: the program
       // model reads a length off the name it is written by, and a text written
       // out is not one.
-      if (one.name === "len" && fieldOf(one, "args").length === 1) {
+      if (String(fieldOf(one, "name")) === "len" && fieldOf(one, "args").length === 1) {
         throw frontendError(
           "the length of a value written out is not read",
           "write the value into a name and take the length of that, as in `s = 'hello'` and then `len(s)`",
         );
       }
       // `str(x)` is the text of the value, which the runtime writes.
-      if (one.name === "str" && fieldOf(one, "args").length === 1) {
+      if (String(fieldOf(one, "name")) === "str" && fieldOf(one, "args").length === 1) {
         return { k: "text", parts: [{ k: "value", value: programValue(fieldOf(one, "args")[0], bindings) }] };
       }
       // `tl.where(c, x, y)` is the choice the program model writes, whether the
       // source spelled it `x if c else y` or `tl.where`.
       const whereArgs = fieldOf(one, "args") as readonly PyValue[];
-      if (one.name === "tl.where" && whereArgs.length === 3) {
+      if (String(fieldOf(one, "name")) === "tl.where" && whereArgs.length === 3) {
         return {
           k: "conditional",
           condition: programValue(whereArgs[0], bindings),
@@ -289,9 +300,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         };
       }
       if (fieldOf(one, "grid") !== undefined) {
-        return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)), grid: programValue((one as any).grid, bindings) } as any;
+        return { k: "call", function: builtinName(String(fieldOf(one, "name"))), args: one.args.map((argument) => programValue(argument, bindings)), grid: programValue((one as any).grid, bindings) } as any;
       }
-      return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)) };
+      return { k: "call", function: builtinName(String(fieldOf(one, "name"))), args: one.args.map((argument) => programValue(argument, bindings)) };
     }
     case "index": {
       // `sys.argv[i]` is the command line of the program: the compiler counts
@@ -345,7 +356,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
           idx = fieldOf(sliced, "values").length - n;
         } else if (
-          index.k === "binary" && fieldOf(index, "op") === "-" &&
+          index.k === "binary" && String(fieldOf(index, "op")) === "-" &&
           indexLeft.k === "call" && String(fieldOf(indexLeft, "name")) === "len" &&
           indexArgs.length === 1 && indexArgs[0].k === "slice"
         ) {
@@ -374,15 +385,15 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         return fieldOf(sliced, "values")[idx];
       }
       // A list literal is indexed directly.
-      if (fieldOf(one, "base").k === "list") {
-        const items = fieldOf(one, "base").items as readonly PyValue[];
+      if (String(fieldOf(fieldOf(one, "base"), "k")) === "list") {
+        const items = fieldOf(fieldOf(one, "base"), "items") as readonly PyValue[];
         const indexValue = programValue(fieldOf(one, "index"), bindings);
         let idx: number;
         if (indexValue.k === "whole" || indexValue.k === "number") {
           idx = Number(indexValue.text);
         } else {
           const index = fieldOf(one, "index");
-          if (index.k === "unary" && fieldOf(index, "op") === "-") {
+          if (index.k === "unary" && String(fieldOf(index, "op")) === "-") {
             const operand = fieldOf(index, "operand");
             const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
             idx = items.length - n;
@@ -422,8 +433,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         // part) is used directly; an f-string is evaluated to a string when
         // every interpolated value is a constant.
         let text: string | null = null;
-        if (fieldOf(base, "parts").length === 1 && base.parts[0].k === "text") {
-          text = fieldOf(base, "parts")[0].value;
+        const baseParts = fieldOf(base, "parts") as { k: string; value: string }[];
+        if (baseParts.length === 1 && String(fieldOf(baseParts[0], "k")) === "text") {
+          text = String(fieldOf(baseParts[0], "value"));
         } else {
           // Try to evaluate the f-string to a concrete string.
           const parts: string[] = [];
@@ -459,8 +471,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           return numberOf(resolved);
         };
         let step = 1;
-        if (one.step !== null) {
-          let resolved = one.step;
+        const stepRaw = fieldOf(one, "step") as PyValue | null;
+        if (stepRaw !== null) {
+          let resolved = stepRaw;
           if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
             resolved = valueAt(bindings, String(resolved.name))!;
           }
@@ -511,8 +524,9 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       };
       // Step is taken as-is (it may be negative), not as `len - n`.
       let step = 1;
-      if (one.step !== null) {
-        let resolved = one.step;
+      const stepRaw = fieldOf(one, "step") as PyValue | null;
+      if (stepRaw !== null) {
+        let resolved = stepRaw;
         if (resolved.k === "name" && hasValue(bindings, String(resolved.name))) {
           resolved = valueAt(bindings, String(resolved.name))!;
         }
@@ -554,19 +568,25 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     }
     case "membership": {
       let container = one.container;
-      if (container.k === "name" && hasValue(bindings, String(container.name))) container = valueAt(bindings, String(fieldOf(container, "name")))!;
+      if (String(fieldOf(container, "k")) === "name" && hasValue(bindings, String(fieldOf(container, "name")))) container = valueAt(bindings, String(fieldOf(container, "name")))!;
       const items: PyValue[] = [];
-      if (container.k === "list" || container.k === "set") items.push(...fieldOf(container, "items"));
-      else if (one.container.k === "call" && one.container.name === "range" && fieldOf(one.container, "args").length === 1 && one.container.args[0].k === "number") {
-        const n = Number(fieldOf(one.container, "args")[0].text);
-        for (let i = 0; i < n; i++) items.push({ k: "number", text: String(i), whole: true });
-      } else {
-        throw frontendError("membership needs a list or a range with a constant bound", "write the list out");
+      if (String(fieldOf(container, "k")) === "list" || String(fieldOf(container, "k")) === "set") {
+        for (const item of fieldOf(container, "items") as PyValue[]) items[items.length] = item;
+      }
+      else {
+        const oneContainer = fieldOf(one, "container") as PyValue;
+        const containerArgs = fieldOf(oneContainer, "args") as PyValue[];
+        if (String(fieldOf(oneContainer, "k")) === "call" && String(fieldOf(oneContainer, "name")) === "range" && containerArgs.length === 1 && String(fieldOf(containerArgs[0], "k")) === "number") {
+          const n = Number(fieldOf(containerArgs[0], "text"));
+          for (let i = 0; i < n; i++) items.push({ k: "number", text: String(i), whole: true });
+        } else {
+          throw frontendError("membership needs a list or a range with a constant bound", "write the list out");
+        }
       }
       const set = new SparseSet();
       for (const item of items) set.add(item);
-      const found = set.has(one.value);
-      return { k: "boolean", value: one.negated ? !found : found };
+      const found = set.has(fieldOf(one, "value") as PyValue);
+      return { k: "boolean", value: fieldOf(one, "negated") === true ? !found : found };
     }
     case "lambda": {
       // The parameters of a lambda are whole numbers unless a use says
@@ -585,15 +605,17 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
     case "walrus": {
       // Should have been lifted by expandWalrus; evaluate the value as a
       // fallback.
-      bound(bindings, one.name, one.value);
-      return programValue(one.value, bindings);
+      bound(bindings, String(fieldOf(one, "name")), fieldOf(one, "value") as PyValue);
+      return programValue(fieldOf(one, "value") as PyValue, bindings);
     }
     case "comprehension": {
       const iterableItems: PyValue[] = [];
-      if (one.iterable.k === "list") {
-        iterableItems.push(...fieldOf(one.iterable, "items"));
-      } else if (one.iterable.k === "call" && one.iterable.name === "range" && fieldOf(one.iterable, "args").length === 1 && one.iterable.args[0].k === "number") {
-        const n = Number(fieldOf(one.iterable, "args")[0].text);
+      const oneIterable = fieldOf(one, "iterable") as PyValue;
+      const iterableArgs = fieldOf(oneIterable, "args") as PyValue[];
+      if (String(fieldOf(oneIterable, "k")) === "list") {
+        for (const item of fieldOf(oneIterable, "items") as PyValue[]) iterableItems[iterableItems.length] = item;
+      } else if (String(fieldOf(oneIterable, "k")) === "call" && String(fieldOf(oneIterable, "name")) === "range" && iterableArgs.length === 1 && String(fieldOf(iterableArgs[0], "k")) === "number") {
+        const n = Number(fieldOf(iterableArgs[0], "text"));
         for (let i = 0; i < n; i++) iterableItems.push({ k: "number", text: String(i), whole: true });
       } else {
         throw frontendError("a comprehension needs a list or a range with a constant bound", "write the list out, as in [f(x) for x in [1, 2, 3]]");
@@ -609,15 +631,27 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         values.push(programValue(one.element, child));
       }
       const names = new Map();
-      if (one.iterable.k === "call" && one.iterable.name === "range") names.set(one.target, "int");
-      else if (one.iterable.k === "list" && fieldOf(one.iterable, "items").length > 0 && one.iterable.items[0].k === "number") names.set(one.target, fieldOf(one.iterable.items[0], "whole") ? "int" : "float");
+      const iterable = fieldOf(one, "iterable") as ProgramValue;
+      const target = String(fieldOf(one, "target"));
+      if (String(fieldOf(iterable, "k")) === "call" && String(fieldOf(iterable, "name")) === "range") names.set(target, "int");
+      else if (String(fieldOf(iterable, "k")) === "list") {
+        const items = fieldOf(iterable, "items") as ProgramValue[];
+        if (items.length > 0 && String(fieldOf(items[0], "k")) === "number") names.set(target, fieldOf(items[0], "whole") === true ? "int" : "float");
+      }
       const whole = typeOfValue(one.element, names) === "int";
       return { k: "buffer", element: whole ? "i64" : "f64", values };
     }
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the width
       // of an element is what the list holds it at.
-      const whole = one.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
+      const listItems = fieldOf(one, "items") as ProgramValue[];
+      let whole = true;
+      for (const item of listItems) {
+        if (String(fieldOf(item, "k")) !== "number" || fieldOf(item, "whole") !== true) {
+          whole = false;
+          break;
+        }
+      }
       const element: PrimitiveTypeName = whole ? "i64" : "f64";
       return { k: "buffer", element, values: one.items.map((item) => programValue(item, bindings)) };
     }
@@ -655,11 +689,21 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       const left = resolve(fieldOf(one, "left"));
       const right = resolve(fieldOf(one, "right"));
       // List concatenation: a + b where both are lists produces a new list.
-      if (one.op === "+" && left.k === "list" && right.k === "list") {
-        const items = [...fieldOf(left, "items"), ...fieldOf(right, "items")];
-        const whole = items.every((item) => item.k === "number" && fieldOf(item, "whole"));
+      if (String(fieldOf(one, "op")) === "+" && left.k === "list" && right.k === "list") {
+        const items: PyValue[] = [];
+        for (const item of fieldOf(left, "items") as PyValue[]) items[items.length] = item;
+        for (const item of fieldOf(right, "items") as PyValue[]) items[items.length] = item;
+        let whole = true;
+        for (const item of items) {
+          if (String(fieldOf(item, "k")) !== "number" || fieldOf(item, "whole") !== true) {
+            whole = false;
+            break;
+          }
+        }
         const element: PrimitiveTypeName = whole ? "i64" : "f64";
-        return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
+        const values: ProgramValue[] = [];
+        for (const item of items) values[values.length] = programValue(item, bindings);
+        return { k: "buffer", element, values };
       }
       // Set operations: union, intersection, difference, symmetric difference.
       if (left.k === "set" && right.k === "set") {
@@ -703,28 +747,28 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
           return { k: "buffer", element, values: items.map((item) => programValue(item, bindings)) };
         }
         if (one.op === "<=") {
-          const ok = left.items.every((x) => rightSet.has(x));
+          const ok = allIn(itemsOf(left), rightSet);
           return { k: "boolean", value: ok };
         }
         if (one.op === "<") {
-          const ok = (fieldOf(left, "items") as readonly PyValue[]).every((x) => rightSet.has(x)) && left.items.length < fieldOf(right, "items").length;
+          const ok = allIn(itemsOf(left), rightSet) && itemsOf(left).length < itemsOf(right).length;
           return { k: "boolean", value: ok };
         }
         if (one.op === ">=") {
-          const ok = right.items.every((x) => leftSet.has(x));
+          const ok = allIn(itemsOf(right), leftSet);
           return { k: "boolean", value: ok };
         }
         if (one.op === ">") {
-          const ok = (fieldOf(right, "items") as readonly PyValue[]).every((x) => leftSet.has(x)) && right.items.length < fieldOf(left, "items").length;
+          const ok = allIn(itemsOf(right), leftSet) && itemsOf(right).length < itemsOf(left).length;
           return { k: "boolean", value: ok };
         }
         if (one.op === "==" || one.op === "!=") {
-          const ok = fieldOf(left, "items").length === fieldOf(right, "items").length && left.items.every((x) => rightSet.has(x));
-          return { k: "boolean", value: one.op === "==" ? ok : !ok };
+          const ok = itemsOf(left).length === itemsOf(right).length && allIn(itemsOf(left), rightSet);
+          return { k: "boolean", value: String(fieldOf(one, "op")) === "==" ? ok : !ok };
         }
       }
       // String concatenation is handled by the binary operator.
-      const operator = BINARY_OPERATORS[one.op];
+      const operator = BINARY_OPERATORS[String(fieldOf(one, "op"))];
       if (operator === undefined) {
         throw frontendError(
           `"${one.op}" is not an operator a program has`,
@@ -812,14 +856,14 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
   switch (one.k) {
     case "declare": {
       const value = programValue(fieldOf(one, "value"), bindings);
-      bound(bindings, one.name, fieldOf(one, "value"));
+      bound(bindings, String(fieldOf(one, "name")), fieldOf(one, "value"));
       return {
         kind: "declare",
-        name: one.name,
+        name: String(fieldOf(one, "name")),
         mutable: true,
         type: null,
         value,
-        line: one.line,
+        line: Number(fieldOf(one, "line")),
       };
     }
     case "assign": {
@@ -830,7 +874,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
           "a program assigns a name a value, as in `x = 1`",
         );
       }
-      const value = programValue(one.value, bindings);
+      const value = programValue(fieldOf(one, "value") as PyValue, bindings);
       // An assignment states a new value for the name, and whether that value
       // may be read out of the binding is a question about the name it writes:
       // a plain assignment binds the value the source wrote, and a compound one
@@ -838,9 +882,9 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       // side would answer a number the program never held. The block that holds
       // the write invalidates what it wrote when it ends, so a loop or a branch
       // cannot leave a value behind that only one turn or one arm computed.
-      if (one.op === "=") bound(bindings, one.name, one.value);
-      else forget(bindings, one.name);
-      return { kind: "assign", name: one.name, op: operator, value, line: one.line };
+      if (one.op === "=") bound(bindings, String(fieldOf(one, "name")), fieldOf(one, "value") as PyValue);
+      else forget(bindings, String(fieldOf(one, "name")));
+      return { kind: "assign", name: String(fieldOf(one, "name")), op: operator, value, line: Number(fieldOf(one, "line")) };
     }
     case "storeElement": {
       const target = fieldOf(one, "target") as { k: "index"; base: PyValue; index: PyValue };
@@ -860,8 +904,9 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     case "storeSlice": {
       const base = one.base;
       // If the RHS is a list literal, handle it.
-      if (one.value.k === "list") {
-        const rhsItems = fieldOf(fieldOf(one, "value"), "items") as PyValue[];
+      const storeValue = fieldOf(one, "value") as PyValue;
+      if (storeValue.k === "list") {
+        const rhsItems = fieldOf(storeValue, "items") as PyValue[];
         // Resolve base to its list value if known.
         const baseVal = valueAt(bindings, String(base));
         const baseItems = baseVal !== undefined && baseVal.k === "list" ? fieldOf(baseVal, "items") : [];
@@ -879,7 +924,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         }
         if (startBound < 0) startBound = 0;
         if (startBound > baseLen) startBound = baseLen;
-        const step = one.step === null ? 1 : (one.step.k === "number" ? Number(one.step.text) : 1);
+        const stepValue = fieldOf(one, "step") as PyValue | null;
+        const step = stepValue === null ? 1 : (String(fieldOf(stepValue, "k")) === "number" ? Number(fieldOf(stepValue, "text")) : 1);
         // Compute stop bound.
         let stopBound = baseLen;
         if (one.stop !== null) {
@@ -908,10 +954,10 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
               index: { k: "whole", text: String(idx) },
               op: "=",
               value: programValue(rhsItems[j], bindings),
-              line: one.line,
+              line: Number(fieldOf(one, "line")),
             });
           }
-          return { kind: "block", body: assignments, line: one.line };
+          return { kind: "block", body: assignments, line: Number(fieldOf(one, "line")) };
         }
         // Different length: the compiler's lists are fixed buffers, so
         // changing the length is not supported.
@@ -922,7 +968,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
       }
       // Variable RHS: generate a runtime loop.
       const loopVar = "_i";
-      const rhsValue = one.value;
+      const rhsValue = fieldOf(one, "value") as PyValue;
       // Number of iterations
       const nPy: PyValue = { k: "call", name: "len", args: [rhsValue] };
       // Resolve negative start to a positive index at compile time if possible.
@@ -940,7 +986,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         startPy = one.start;
       }
       // Step expression
-      const stepPy: PyValue = one.step === null ? { k: "number", text: "1", whole: true } : one.step;
+      const stepSource = fieldOf(one, "step") as PyValue | null;
+      const stepPy: PyValue = stepSource === null ? { k: "number", text: "1", whole: true } : stepSource;
       // Loop body: base[start + _i * step] = rhs[_i]
       const loopBody: PyStatement[] = [
         {
@@ -965,7 +1012,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
             base: rhsValue,
             index: { k: "name", name: loopVar },
           },
-          line: one.line,
+          line: Number(fieldOf(one, "line")),
         },
       ];
       const loopStmt: PyStatement = {
@@ -975,7 +1022,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         to: nPy,
         step: null,
         body: loopBody,
-        line: one.line,
+        line: Number(fieldOf(one, "line")),
       };
       return statement(loopStmt, bindings);
     }
@@ -988,18 +1035,18 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
           "the object is a name the program holds",
         );
       }
-      const value = programValue(one.value, bindings);
+      const value = programValue(fieldOf(one, "value") as PyValue, bindings);
       return {
         kind: "fieldAssign",
-        object: base.name,
+        object: String(fieldOf(base, "name")),
         op: "=",
         field: target.field,
         value,
-        line: one.line,
+        line: Number(fieldOf(one, "line")),
       };
     }
     case "return":
-      return { kind: "result", value: programValue(one.value ?? { k: "none" }, bindings), line: one.line };
+      return { kind: "result", value: programValue(fieldOf(one, "value") as PyValue ?? { k: "none" }, bindings), line: Number(fieldOf(one, "line")) };
     case "if": {
       conditionIsBoolean(fieldOf(one, "condition"), fieldOf(one, "line"));
       const condition = programValue(fieldOf(one, "condition"), bindings);
@@ -1016,35 +1063,41 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     case "while": {
       conditionIsBoolean(fieldOf(one, "condition"), fieldOf(one, "line"));
       const condition = programValue(fieldOf(one, "condition"), bindings);
-      return { kind: "while", condition, body: branch(one.body, bindings), line: one.line };
+      return { kind: "while", condition, body: branch(fieldOf(one, "body") as PyStatement[], bindings), line: Number(fieldOf(one, "line")) };
     }
     case "for":
       return {
         kind: "for",
-        variable: one.variable,
-        from: programValue(one.from, bindings),
-        to: programValue(one.to, bindings),
+        variable: String(fieldOf(one, "variable")),
+        from: programValue(fieldOf(one, "from") as PyValue, bindings),
+        to: programValue(fieldOf(one, "to") as PyValue, bindings),
         inclusive: false,
         down: false,
         type: null,
-        step: one.step === null ? null : programValue(one.step, bindings),
-        body: branch(one.body, bindings),
-        line: one.line,
+        step: fieldOf(one, "step") === null ? null : programValue(fieldOf(one, "step") as PyValue, bindings),
+        body: branch(fieldOf(one, "body") as PyStatement[], bindings),
+        line: Number(fieldOf(one, "line")),
       };
     case "break":
-      return { kind: "break", line: one.line };
+      return { kind: "break", line: Number(fieldOf(one, "line")) };
     case "continue":
-      return { kind: "continue", line: one.line };
+      return { kind: "continue", line: Number(fieldOf(one, "line")) };
     case "pass":
-      return { kind: "block", body: [], line: one.line };
+      return { kind: "block", body: [], line: Number(fieldOf(one, "line")) };
     case "print":
-      return { kind: "print", values: one.values.map((value) => programValue(value, bindings)), line: one.line };
+      const printValues: ProgramValue[] = [];
+      for (const value of fieldOf(one, "values") as PyValue[]) printValues[printValues.length] = programValue(value, bindings);
+      return { kind: "print", values: printValues, line: Number(fieldOf(one, "line")) };
     case "try": {
       // A compiled program cannot raise, so there is nothing to catch: the
       // body runs and the block that catches is not read. The block that runs
       // whatever happens does run, and it runs after the body.
-      const body = branch([...one.body, ...(one.finallyBody ?? [])], bindings);
-      return { kind: "block", body, line: one.line };
+      const combined: PyStatement[] = [];
+      for (const statement of fieldOf(one, "body") as PyStatement[]) combined[combined.length] = statement;
+      const finallyBody = fieldOf(one, "finallyBody") as PyStatement[] | null;
+      if (finallyBody !== null) for (const statement of finallyBody) combined[combined.length] = statement;
+      const body = branch(combined, bindings);
+      return { kind: "block", body, line: Number(fieldOf(one, "line")) };
     }
     case "call": {
       const called = fieldOf(one, "value");
@@ -1066,7 +1119,7 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
         kind: "invoke",
         function: builtinName(called.name),
         args: (fieldOf(called, "args") as readonly PyValue[]).map((argument) => programValue(argument, bindings)),
-        line: one.line,
+        line: Number(fieldOf(one, "line")),
       };
     }
     case "function":

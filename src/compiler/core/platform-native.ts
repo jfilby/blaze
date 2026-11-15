@@ -580,9 +580,10 @@ export function hostSetExitCode(code: number): void {
 }
 
 /** The answer to one question, or undefined when there is nobody to ask. */
-export async function hostAsk(question: string): Promise<string | undefined> {
+export async function hostAsk(question: string): Promise<string> {
   stdoutWrite(question);
-  return readLine();
+  const answer = readLine();
+  return answer === undefined ? "" : answer;
 }
 
 /** A detach that has nothing to detach: the native process owns no handlers. */

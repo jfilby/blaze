@@ -15,21 +15,27 @@
  */
 
 import { existsSync, writeFileSync, readFile, resolveFrom, parseArgs, isDirectoryPath, hostArguments, hostAsk, hostCwd, hostSetExitCode, hostStdoutIsTTY, hostWriteError, hostWriteOut } from "./core/platform.ts";
-import { CompilerError, isCompilerError } from "./core/errors.ts";
+import { CompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
-  STATE_DIRECTORY,
   inspectProject,
+  exceeds,
+  isZero,
+  numeric,
   projectStateLine,
   listProjects,
   projectIdFor,
   runBuild,
   runSemanticIr,
+  reportFailure,
   runStored,
   type BuildOptions,
   type Reporter,
   type SemanticIrOptions,
 } from "./compiler.ts";
+
+/** The directory a build writes its state to. */
+const STATE_DIRECTORY = ".blaze";
 import { compareBuildRecords, compareProjectStates } from "./core/compare.ts";
 import {
   BACKENDS,
@@ -198,25 +204,25 @@ function initProject(): void {
  */
 async function terminalConfirm(question: string): Promise<boolean> {
   const answer = await hostAsk(question);
-  if (answer === undefined) return true;
+  if (answer === "") return true;
   const choice = answer.trim().toLowerCase();
   return choice === "y" || choice === "yes";
 }
 
-function optionNumber(value: string | undefined, name: string, minimum = 1, maximum?: number): number | undefined {
-  if (value === undefined) return undefined;
+function optionNumber(value: string, name: string, minimum: number, maximum: number): number | undefined {
+  if (value === "") return undefined;
   // Strictly: `parseInt` reads "4x" as 4 and the flag then asks for something
   // the user did not type, which is the one reading a number must not allow.
   // A zero is refused for a count that cannot be zero and allowed for the two
   // the compiler takes one of: no re-requests, and no random cases.
-  const whole = minimum === 0 ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
+  const whole = isZero(minimum) ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
   if (!whole.test(value)) {
-    throw new Error(`${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer, got "${value}"`);
+    throw new Error(`${name} must be ${isZero(minimum) ? "a non-negative" : "a positive"} integer, got "${value}"`);
   }
-  const parsed = Number(value);
+  const parsed = numeric(value);
   // The cap on re-requests is the compiler's, not the command line's: without
   // it here a build sits in its backoff loop for as long as the user asked.
-  if (maximum !== undefined && parsed > maximum) {
+  if (exceeds(parsed, maximum)) {
     throw new Error(`${name} must be at most ${maximum}, got "${value}"`);
   }
   return parsed;
@@ -279,27 +285,27 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     ...(verify === undefined ? {} : { verify: verify as VerificationMode }),
     ...(runtime === undefined ? {} : { runtime: runtime as RuntimeKind }),
     ...(backend === undefined ? {} : { backend: backend as BackendKind }),
-    ...(optionNumber(values["max-candidates"] as string | undefined, "--max-candidates", 1, undefined) === undefined
+    ...(optionNumber(String(values["max-candidates"] ?? ""), "--max-candidates", 1, -1) === undefined
       ? {}
-      : { maxCandidates: optionNumber(values["max-candidates"] as string | undefined, "--max-candidates", 1, undefined) }),
-    ...(optionNumber(values["max-attempts"] as string | undefined, "--max-attempts", 1, undefined) === undefined
+      : { maxCandidates: optionNumber(String(values["max-candidates"] ?? ""), "--max-candidates", 1, -1) }),
+    ...(optionNumber(String(values["max-attempts"] ?? ""), "--max-attempts", 1, -1) === undefined
       ? {}
-      : { maxAttempts: optionNumber(values["max-attempts"] as string | undefined, "--max-attempts", 1, undefined) }),
-    ...(optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) === undefined
+      : { maxAttempts: optionNumber(String(values["max-attempts"] ?? ""), "--max-attempts", 1, -1) }),
+    ...(optionNumber(String(values["max-retries"] ?? ""), "--max-retries", 0, MAX_RETRIES) === undefined
       ? {}
-      : { maxRetries: optionNumber(values["max-retries"] as string | undefined, "--max-retries", 0, MAX_RETRIES) }),
-    ...(optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency", 1, undefined) === undefined
+      : { maxRetries: optionNumber(String(values["max-retries"] ?? ""), "--max-retries", 0, MAX_RETRIES) }),
+    ...(optionNumber(String(values["candidate-concurrency"] ?? ""), "--candidate-concurrency", 1, -1) === undefined
       ? {}
-      : { candidateConcurrency: optionNumber(values["candidate-concurrency"] as string | undefined, "--candidate-concurrency", 1, undefined) }),
-    ...(optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency", 1, undefined) === undefined
+      : { candidateConcurrency: optionNumber(String(values["candidate-concurrency"] ?? ""), "--candidate-concurrency", 1, -1) }),
+    ...(optionNumber(String(values["function-concurrency"] ?? ""), "--function-concurrency", 1, -1) === undefined
       ? {}
-      : { functionConcurrency: optionNumber(values["function-concurrency"] as string | undefined, "--function-concurrency", 1, undefined) }),
-    ...(optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0, undefined) === undefined
+      : { functionConcurrency: optionNumber(String(values["function-concurrency"] ?? ""), "--function-concurrency", 1, -1) }),
+    ...(optionNumber(String(values["random-cases"] ?? ""), "--random-cases", 0, -1) === undefined
       ? {}
-      : { randomCases: optionNumber(values["random-cases"] as string | undefined, "--random-cases", 0, undefined) }),
-    ...(optionNumber(values["max-length"] as string | undefined, "--max-length", 1, undefined) === undefined
+      : { randomCases: optionNumber(String(values["random-cases"] ?? ""), "--random-cases", 0, -1) }),
+    ...(optionNumber(String(values["max-length"] ?? ""), "--max-length", 1, -1) === undefined
       ? {}
-      : { maxLength: optionNumber(values["max-length"] as string | undefined, "--max-length", 1, undefined) }),
+      : { maxLength: optionNumber(String(values["max-length"] ?? ""), "--max-length", 1, -1) }),
   };
 }
 
@@ -309,34 +315,6 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
  * diagnostic file for a build that never started would send a reader looking
  * for an error that is not there.
  */
-function reportCancelled(message: string, detail: string | undefined): void {
-  hostWriteOut(`\n· ${message}\n`);
-  if (detail !== undefined && detail.trim() !== "") {
-    hostWriteOut(`\n${detail.trim()}\n`);
-  }
-}
-
-function reportError(
-  stage: string,
-  message: string,
-  detail: string | undefined,
-  functionName: string | undefined,
-  candidate: string | undefined,
-  project: string | undefined,
-): void {
-  hostWriteError(`\n✗ ${stage} failed: ${message}\n`);
-  const context = [
-    functionName === undefined ? undefined : `  function:  ${functionName}`,
-    candidate === undefined ? undefined : `  candidate: ${candidate}`,
-  ].filter((line) => line !== undefined);
-  if (context.length > 0) hostWriteError(`${context.join("\n")}\n`);
-  if (detail !== undefined && detail.trim() !== "") {
-    hostWriteError(`\n${detail.trim()}\n`);
-  }
-  if (project !== undefined) {
-    hostWriteError(`\nThe build record keeps the full diagnostic in ${STATE_DIRECTORY}/projects/${project}/build.json\n`);
-  }
-}
 
 async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseArgs([...argv], {
@@ -473,15 +451,5 @@ async function main(argv: readonly string[]): Promise<number> {
 try {
   hostSetExitCode(await main(hostArguments()));
 } catch (cause) {
-  if (isCompilerError(cause)) {
-    // A declined recompile is the one exit that is not a fault: nothing was
-    // built, nothing was damaged, and the last build is still the project's.
-    if (cause.category === "CancelledError") reportCancelled(cause.message, cause.detail);
-    else reportError(cause.stage, cause.message, cause.detail, cause.functionName, cause.candidate, cause.project);
-  } else {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    const stack = cause instanceof Error ? cause.stack : undefined;
-    reportError("cli", message, stack, undefined, undefined, undefined);
-  }
-  hostSetExitCode(1);
+  reportFailure(cause as any);
 }

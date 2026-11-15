@@ -470,10 +470,14 @@ export function sqliteObjectKey(
  * two apart; a missing file is not an object either.
  */
 export async function sqliteObjectUsable(path: string): Promise<boolean> {
-  return stat(path).then(
-    (info) => info.isFile() && info.size > 0,
-    () => false,
-  );
+  let usable = false;
+  try {
+    const info = await stat(path);
+    usable = Number(fieldOf(info, "size")) > 0;
+  } catch {
+    usable = false;
+  }
+  return usable;
 }
 
 /**

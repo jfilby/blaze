@@ -308,8 +308,8 @@ export function hostSetExitCode(code: number): void {
 }
 
 /** The answer to one question, or undefined when there is nobody to ask. */
-export async function hostAsk(question: string): Promise<string | undefined> {
-  if (process.stdin.isTTY !== true) return undefined;
+export async function hostAsk(question: string): Promise<string> {
+  if (process.stdin.isTTY !== true) return "";
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   try {
     return await prompt.question(question);

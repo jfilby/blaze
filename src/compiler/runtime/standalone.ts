@@ -168,10 +168,13 @@ export async function compileRuntimeSource(request: {
   const directory = `${workDirectory}/${RUNTIME_CACHE_DIRECTORY}`;
   const cached = `${directory}/${key}.o`;
 
-  const present = await stat(cached).then(
-    (entry) => (fieldOf(entry, "isFile") as () => boolean).call(entry) && Number(fieldOf(entry, "size")) > 0,
-    () => false,
-  );
+  let present = false;
+  try {
+    const entry = await stat(cached);
+    present = Number(fieldOf(entry, "size")) > 0;
+  } catch {
+    present = false;
+  }
   if (present) {
     await copyFile(cached, objectPath);
     return { sourcePath, objectPath };

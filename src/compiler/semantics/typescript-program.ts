@@ -101,7 +101,7 @@ import type {
 } from "./module.ts";
 import type { Diagnostics, Token } from "./typescript.ts";
 import { ARGV_LENGTH, REFUSED_KEYWORDS, closingBrace, nextInterpolation, refusedKeyword, tokenize, unescape } from "./typescript.ts";
-import { BUILTINS, MATH_NAMES } from "./builtins.ts";
+import { builtinFor, MATH_NAMES } from "./builtins.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
 import {
   findField,
@@ -1779,10 +1779,13 @@ class ProgramParser {
    * that declares the arrow, so the queue is read here and the statements stay
    * inside the function the arrow is.
    */
-  private arrowBody(read: () => ProgramValue, line: number): ProgramStatement[] {
+  private beginArrow(): ProgramStatement[] {
     const outer = this.pending;
     this.pending = [];
-    const value = read();
+    return outer;
+  }
+
+  private arrowBody(outer: ProgramStatement[], value: ProgramValue, line: number): ProgramStatement[] {
     const queued = this.drainPending();
     this.pending = outer;
     const statements: ProgramStatement[] = [];
@@ -2472,7 +2475,7 @@ class ProgramParser {
             const body = this.braces();
             return { k: "arrow", params, body: [...prelude, ...body], async: true };
           }
-          return { k: "arrow", params, body: [...prelude, ...this.arrowBody(() => this.value(), line)], async: true };
+          return { k: "arrow", params, body: [...prelude, ...this.arrowBody(this.beginArrow(), this.value(), line)], async: true };
         }
       }
       if (this.peek().kind === "ident" && this.peek(1).text === "=>") {
@@ -2483,7 +2486,7 @@ class ProgramParser {
           const body = this.braces();
           return { k: "arrow", params: [{ name, type: null }], body, async: true };
         }
-        return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(() => this.value(), line), async: true };
+        return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(this.beginArrow(), this.value(), line), async: true };
       }
       // `async function () { ... }`: a function expression written the long
       // way, which is the same arrow with a promise behind it.
@@ -2557,7 +2560,7 @@ class ProgramParser {
         const body = this.braces();
         return { k: "arrow", params: [{ name, type: null }], body };
       }
-      return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(() => this.value(), line) };
+      return { k: "arrow", params: [{ name, type: null }], body: this.arrowBody(this.beginArrow(), this.value(), line) };
     }
     if (token.kind === "ident") {
       if (token.text === "new") {
@@ -2671,7 +2674,7 @@ class ProgramParser {
         return this.argv("Deno.args");
       }
       if (token.text === "Math" && this.peek(1).text === ".") return this.math();
-      if (token.text in VIEWS && this.peek(1).text === ".") return this.viewWidth(token);
+      if (fieldOf(VIEWS, String(fieldOf(token, "text"))) !== undefined && String(fieldOf(this.peek(1), "text")) === ".") return this.viewWidth(token);
       if (token.text === "this") {
         this.next();
         if (this.currentClass === null) {
@@ -2713,7 +2716,7 @@ class ProgramParser {
           const body = this.braces();
           return { k: "arrow", params, body: [...prelude, ...body] };
         }
-        return { k: "arrow", params, body: [...prelude, ...this.arrowBody(() => this.value(), line)] };
+        return { k: "arrow", params, body: [...prelude, ...this.arrowBody(this.beginArrow(), this.value(), line)] };
       }
     }
     if (this.accept("(")) {
@@ -2821,15 +2824,21 @@ class ProgramParser {
     this.next();
     const builtin = this.identifier("the function of Math");
     if (!MATH_NAMES.includes(`Math.${builtin}`)) {
-      this.fail(`Math.${builtin} is not a function of a program; call one of ${MATH_NAMES.join(", ")}`, token);
+      let available = "";
+      for (const name of MATH_NAMES) {
+        if (available !== "") available += ", ";
+        available += name;
+      }
+      this.fail("Math." + builtin + " is not a function of a program; call one of " + available, token);
       this.skipArguments();
       return { k: "name", name: "Math" };
     }
     this.expect("(");
     const args = this.arguments();
-    const arity = BUILTINS[`Math.${builtin}`].arity;
+    const spec = builtinFor(`Math.${builtin}`);
+    const arity = Number(fieldOf(spec, "arity"));
     if (args.length !== arity) {
-      this.fail(`Math.${builtin} takes ${arity} argument${arity === 1 ? "" : "s"}`);
+      this.fail("Math." + builtin + " takes " + String(arity) + (arity === 1 ? " argument" : " arguments"));
     }
     return { k: "call", function: `Math.${builtin}`, args };
   }

@@ -1746,6 +1746,15 @@ class FunctionBody {
       }
     }
     if (disagreeing.length === 0) return considered.map((one) => one.name);
+    // A box is a one-field record the frontend builds for a captured list. The
+    // boxes a program writes may hold different element types, but the field is
+    // at the same place in each and the closure reads it as the list it was
+    // handed; the widest list is the one that carries every element.
+    if (field === "__boxed") {
+      for (const one of considered) {
+        if (one.read === "slice<ref<any>> at 0") return [one.name];
+      }
+    }
     throw this.error(
       `reads or writes "${what}.${field}", which ${[first.name, ...disagreeing].join(" and ")} could each be a field of`,
       line,
