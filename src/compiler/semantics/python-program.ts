@@ -279,15 +279,16 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
       }
       // `tl.where(c, x, y)` is the choice the program model writes, whether the
       // source spelled it `x if c else y` or `tl.where`.
-      if (one.name === "tl.where" && fieldOf(one, "args").length === 3) {
+      const whereArgs = fieldOf(one, "args") as readonly PyValue[];
+      if (one.name === "tl.where" && whereArgs.length === 3) {
         return {
           k: "conditional",
-          condition: programValue(fieldOf(one, "args")[0], bindings),
-          then: programValue(one.args[1], bindings),
-          otherwise: programValue(one.args[2], bindings),
+          condition: programValue(whereArgs[0], bindings),
+          then: programValue(whereArgs[1], bindings),
+          otherwise: programValue(whereArgs[2], bindings),
         };
       }
-      if ((one as any).grid !== undefined) {
+      if (fieldOf(one, "grid") !== undefined) {
         return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)), grid: programValue((one as any).grid, bindings) } as any;
       }
       return { k: "call", function: builtinName(one.name), args: one.args.map((argument) => programValue(argument, bindings)) };
@@ -1057,8 +1058,8 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
           kind: "invoke",
           function: builtinName(String(fieldOf(called, "name"))),
           args: invokeArgs,
-          grid: (called as any).grid,
-          line: one.line,
+          grid: fieldOf(called, "grid"),
+          line: Number(fieldOf(one, "line")),
         } as any;
       }
       return {

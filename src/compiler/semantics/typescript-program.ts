@@ -663,7 +663,7 @@ class ProgramParser {
       const token = this.next();
       if (token.kind !== "punct") continue;
       if (token.text === "(" || token.text === "[" || token.text === "{") depth += 1;
-      else if (token.text === stop && depth === 0) return;
+      else if (String(fieldOf(token, "text")) === String(stop) && depth === 0) return;
       else if (token.text === ")" || token.text === "]" || token.text === "}") depth -= 1;
     }
   }

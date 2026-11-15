@@ -1976,31 +1976,52 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
  */
 function callsRewritten<T>(node: T, source: string, target: string, captures: readonly string[]): T {
   if (Array.isArray(node)) {
-    return node.map((entry) => callsRewritten(entry, source, target, captures)) as T;
+    const list = node as unknown[];
+    const rewritten: unknown[] = [];
+    for (const entry of list) rewritten.push(callsRewritten(entry, source, target, captures));
+    return rewritten as T;
   }
-  if (node !== null && typeof node === "object") {
-    const call = node as { k?: unknown; name?: unknown; args?: unknown };
-    const callArgs = fieldOf(call, "args") as Expression[] | undefined;
-    const isCall = String(fieldOf(call, "k")) === "call";
-    if (isCall && String(fieldOf(call, "name")) === source && Array.isArray(callArgs)) {
-      const written: Expression[] = [];
+  if (node === null || typeof node !== "object") return node;
+  const fields = node as Record<string, unknown>;
+  if (String(fieldOf(fields, "k")) === "call") {
+    const args = fieldOf(fields, "args") as unknown[] | undefined;
+    if (String(fieldOf(fields, "name")) === source && args !== undefined) {
+      const written: unknown[] = [];
       for (const name of captures) written.push({ k: "ident", name });
-      for (const argument of callArgs as Expression[]) written.push(argument);
-      return {
-        ...(node as object),
-        name: target,
-        args: written,
-      } as T;
+      for (const argument of args) written.push(argument);
+      const made: Record<string, unknown> = {};
+      copyFields(fields, made);
+      setFieldOn(made, "args", written);
+      setFieldOn(made, "name", target);
+      return made as T;
     }
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([name, entry]) => [
-        name,
-        callsRewritten(entry, source, target, captures),
-      ]),
-    ) as T;
   }
-  return node;
+  return rewrittenCopy(fields, (entry) => callsRewritten(entry, source, target, captures)) as T;
 }
+
+/** A node's fields, each written into a new object as `apply` answers it. */
+function rewrittenCopy(node: Record<string, unknown>, apply: (value: unknown) => unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(node)) {
+    const entry = node[key];
+    if (Array.isArray(entry)) {
+      const list: unknown[] = [];
+      for (const one of entry as unknown[]) list.push(apply(one));
+      out[key] = list;
+    } else if (entry !== null && typeof entry === "object") {
+      out[key] = apply(entry);
+    } else {
+      out[key] = entry;
+    }
+  }
+  return out;
+}
+
+/** A node's fields, and the list elements they hold, copied as they are. */
+function copyFields(node: Record<string, unknown>, into: Record<string, unknown>): void {
+  for (const key of Object.keys(node)) into[key] = node[key];
+}
+
 
 /**
  * A call of a lifted function from inside itself, written with the arrow's own
@@ -2014,21 +2035,26 @@ function callsRewritten<T>(node: T, source: string, target: string, captures: re
  */
 function callsPrepended<T>(node: T, target: string, captures: readonly string[], arity: number): T {
   if (Array.isArray(node)) {
-    return node.map((entry) => callsPrepended(entry, target, captures, arity)) as T;
+    const list = node as unknown[];
+    const rewritten: unknown[] = [];
+    for (const entry of list) rewritten.push(callsPrepended(entry, target, captures, arity));
+    return rewritten as T;
   }
-  if (node !== null && typeof node === "object") {
-    const args = fieldOf(node, "args") as Expression[] | undefined;
-    if (String(fieldOf(node, "k")) === "call" && String(fieldOf(node, "name")) === target && Array.isArray(args) && args.length === arity) {
-      const written: Expression[] = [];
+  if (node === null || typeof node !== "object") return node;
+  const fields = node as Record<string, unknown>;
+  if (String(fieldOf(fields, "k")) === "call" && String(fieldOf(fields, "name")) === target) {
+    const args = fieldOf(fields, "args") as unknown[] | undefined;
+    if (args !== undefined && args.length === arity) {
+      const written: unknown[] = [];
       for (const name of captures) written.push({ k: "ident", name });
-      for (const argument of args as Expression[]) written.push(argument);
-      return { ...(node as object), args: written } as T;
+      for (const argument of args) written.push(argument);
+      const made: Record<string, unknown> = {};
+      copyFields(fields, made);
+      setFieldOn(made, "args", written);
+      return made as T;
     }
-    return Object.fromEntries(
-      Object.entries(node as Record<string, unknown>).map(([key, entry]) => [key, callsPrepended(entry, target, captures, arity)]),
-    ) as T;
   }
-  return node;
+  return rewrittenCopy(fields, (entry) => callsPrepended(entry, target, captures, arity)) as T;
 }
 
 /**
@@ -12985,16 +13011,19 @@ class TypeScriptParser {
             }
             if (usable) {
               for (const hold of holds) {
-                this.pendingBefore.push({ kind: "declare", name: hold.name, type: null, init: hold.source, line: Number(fieldOf(this.peek(), "line")) });
-                this.valueTypes.set(hold.name, hold.type);
+                const heldName = String(fieldOf(hold, "name"));
+                this.pendingBefore.push({ kind: "declare", name: heldName, type: null, init: fieldOf(hold, "source") as Expression, line: Number(fieldOf(this.peek(), "line")) });
+                this.valueTypes.set(heldName, fieldOf(hold, "type") as TypeExpr);
               }
               for (const write of writes) {
+                const writtenField = String(fieldOf(write, "field"));
+                const writtenFrom = String(fieldOf(write, "from"));
                 this.pendingBefore.push({
                   kind: "memberAssign",
                   base: targetName,
-                  field: write.field,
+                  field: writtenField,
                   op: "=",
-                  value: { k: "member", base: { k: "ident", name: write.from }, field: write.field },
+                  value: { k: "member", base: { k: "ident", name: writtenFrom }, field: writtenField },
                   line: Number(fieldOf(this.peek(), "line")),
                 });
               }
@@ -15174,8 +15203,9 @@ class TypeScriptParser {
             );
           }
         }
-        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape, ...(fallback === undefined ? {} : { default: fallback }) };
-        if (rest) parameter.rest = true;
+        const parameter: ArrowParam = { name: name.text, type, typeName, functionType, shape };
+        if (fallback !== undefined) setFieldOn(parameter, "default", fallback);
+        if (rest) setFieldOn(parameter, "rest", true);
         params.push(parameter);
         if (!this.accept(",")) break;
         // A list of parameters may end with a comma, as it may on a function.
@@ -15222,6 +15252,7 @@ class TypeScriptParser {
     // arrow is written in are not loops it can leave either: `break` in the
     // body leaves a loop of that body, and one written around the arrow is a
     // loop the function the arrow lifted to is not inside.
+    const liftedBefore = this.arrowLifts.length;
     const savedTypes = this.valueTypes;
     const savedDeclaredValues = this.declaredValues;
     const savedShapes = this.valueShapes;
@@ -15440,6 +15471,23 @@ class TypeScriptParser {
         let rewritten = fieldOf(lifted, "body") as Statement[];
         if (declared !== null) rewritten = callsRewritten(rewritten, declared, binding.function, binding.captures);
         setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, params.length));
+      }
+      // A closure written inside this arrow calls it too. The values this arrow
+      // captured are that closure's own only where it captured them itself, so
+      // the call is handed them only where its parameters name them.
+      for (const inner of this.arrowLifts.slice(liftedBefore)) {
+        if (inner === binding.function) continue;
+        const closure = this.liftedArrows.get(inner);
+        if (closure === undefined) continue;
+        const innerParams = (fieldOf(closure, "params") as { name: string }[]).map((param: { name: string }) => param.name);
+        let holdsAll = true;
+        for (const capture of binding.captures) {
+          if (!innerParams.includes(capture)) holdsAll = false;
+        }
+        if (!holdsAll) continue;
+        let innerBody = fieldOf(closure, "body") as Statement[];
+        if (declared !== null) innerBody = callsRewritten(innerBody, declared, binding.function, binding.captures);
+        setFieldOn(closure, "body", callsPrepended(innerBody, binding.function, binding.captures, params.length));
       }
     }
     // The shape the arrow's declaration writes is what a call of it answers,

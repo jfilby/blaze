@@ -256,7 +256,7 @@ export function tokenizePython(source: string, path: string): PyToken[] {
       const letters = /^[A-Za-z]+/.exec(source.slice(index));
       const prefix = letters === null ? "" : letters[0].toLowerCase();
       const after = index + (letters === null ? 0 : letters[0].length);
-      if (letters !== null && STRING_PREFIXES.has(prefix) && (source[after] === '"' || source[after] === "'")) {
+      if (letters !== null && STRING_PREFIXES.has(prefix) && (String(source[after]) === '"' || String(source[after]) === "'")) {
         const string = readString(source, after, prefix, line, path);
         tokens.push({ kind: "string", text: string.text, line, prefix });
         index = string.end;
@@ -2382,7 +2382,10 @@ class PythonParser {
         while (this.accept(",")) {
           if (this.at("}")) break;
           const key = this.expression();
-          const keyName = key.k === "name" ? key.name : (key.k === "text" ? (key as any).parts?.[0]?.value : null);
+          const keyParts = fieldOf(key, "parts") as { value: string }[];
+          const keyName = key.k === "name"
+            ? String(fieldOf(key, "name"))
+            : (key.k === "text" ? (keyParts[0] === undefined ? null : String(fieldOf(keyParts[0], "value"))) : null);
           this.expect(":");
           const val = this.expression();
           entries.push({ name: keyName ?? "", value: val });
@@ -3830,12 +3833,13 @@ export function lowerValue(value: PyValue): Expression {
       // `tl.where(c, x, y)` is a choice: the condition answers which of the two
       // values the kernel holds, and the IR carries a choice as a conditional
       // whether the source spelled it `a if c else b` or `tl.where`.
-      if (value.name === "tl.where" && fieldOf(value, "args").length === 3) {
+      const whereArgs = fieldOf(value, "args") as PyValue[];
+      if (value.name === "tl.where" && whereArgs.length === 3) {
         return {
           k: "conditional",
-          condition: lowerValue(fieldOf(value, "args")[0]),
-          then: lowerValue(fieldOf(value, "args")[1]),
-          otherwise: lowerValue(value.args[2]),
+          condition: lowerValue(whereArgs[0]),
+          then: lowerValue(whereArgs[1]),
+          otherwise: lowerValue(whereArgs[2]),
         };
       }
       // For kernel operations not directly supported by the IR yet, still lower
@@ -4067,8 +4071,9 @@ export function lowerStatement(statement: PyStatement): Statement {
       const base = target.base;
       if (base.k === "name" && currentDictNames.has(base.name)) {
         // A dictionary is a hash map: writing d[key] = value is a call.
+        const keyParts = fieldOf(target.index, "parts") as { k: string; value: string }[];
         const keyStr = target.index.k === "text"
-          ? (fieldOf(target.index, "parts")?.[0]?.k === "text" ? target.index.parts[0].value : "")
+          ? (keyParts[0] !== undefined && String(fieldOf(keyParts[0], "k")) === "text" ? String(fieldOf(keyParts[0], "value")) : "")
           : null;
         const keyExpr = keyStr !== null
           ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
@@ -4645,149 +4650,203 @@ function pythonTypeOf(type: TypeExpr): PyType {
  * What a body does: whether it allocates, prints or reads the command line,
  * and the buffer ranges it reads.
  */
+interface UsageState {
+  parameters: Set<string>;
+  accesses: AccessRange[];
+  loops: Map<string, { lo: string; hi: string }>;
+  allocates: boolean;
+  prints: boolean;
+  readsArgv: boolean;
+}
+
+/** One access, stated once however many times the body reads it. */
+function usageAccess(state: UsageState, parameter: string, lo: string, hi: string): void {
+  const accesses = fieldOf(state, "accesses") as AccessRange[];
+  for (const entry of accesses) {
+    if (String(fieldOf(entry, "parameter")) === parameter && String(fieldOf(entry, "lo")) === lo && String(fieldOf(entry, "hi")) === hi) return;
+  }
+  accesses[accesses.length] = { parameter, lo, hi };
+}
+
+function usageExpression(value: PyValue, state: UsageState): void {
+  const parameters = fieldOf(state, "parameters") as Set<string>;
+  const loops = fieldOf(state, "loops") as Map<string, { lo: string; hi: string }>;
+  switch (value.k) {
+    case "list":
+    case "dict": {
+      setFieldOn(state, "allocates", true);
+      const items: PyValue[] = [];
+      if (value.k === "list") {
+        for (const one of fieldOf(value, "items") as PyValue[]) items[items.length] = one;
+      } else {
+        for (const entry of fieldOf(value, "entries") as PyValue[]) items[items.length] = fieldOf(entry, "value");
+      }
+      for (const item of items) usageExpression(item, state);
+      return;
+    }
+    case "call":
+      for (const argument of fieldOf(value, "args") as PyValue[]) usageExpression(argument, state);
+      return;
+    case "binary":
+      usageExpression(fieldOf(value, "left") as PyValue, state);
+      usageExpression(fieldOf(value, "right") as PyValue, state);
+      return;
+    case "unary":
+      usageExpression(fieldOf(value, "operand") as PyValue, state);
+      return;
+    case "conditional":
+      usageExpression(fieldOf(value, "condition") as PyValue, state);
+      usageExpression(fieldOf(value, "then") as PyValue, state);
+      usageExpression(fieldOf(value, "otherwise") as PyValue, state);
+      return;
+    case "index": {
+      const base = fieldOf(value, "base") as PyValue;
+      const index = fieldOf(value, "index") as PyValue;
+      const baseName = String(fieldOf(base, "name"));
+      if (String(fieldOf(base, "k")) === "name" && parameters.has(baseName)) {
+        // A buffer the body indexes is a buffer it reads, at a position the
+        // contract states as a number. An index the contract language cannot
+        // name leaves the position unknown.
+        const loop = String(fieldOf(index, "k")) === "name" ? loops.get(String(fieldOf(index, "name"))) : undefined;
+        if (loop !== undefined) usageAccess(state, baseName, String(fieldOf(loop, "lo")), String(fieldOf(loop, "hi")));
+        else {
+          const at = contractTextOf(index);
+          if (at !== null) usageAccess(state, baseName, at, `(${at} + 1)`);
+        }
+      }
+      usageExpression(base, state);
+      usageExpression(index, state);
+      return;
+    }
+    case "slice": {
+      const base = fieldOf(value, "base") as PyValue;
+      const baseName = String(fieldOf(base, "name"));
+      if (String(fieldOf(base, "k")) === "name" && parameters.has(baseName)) {
+        const start = fieldOf(value, "start") as PyValue | null;
+        const stop = fieldOf(value, "stop") as PyValue | null;
+        const statedStart = start === null ? "0" : (contractTextOf(start) ?? "0");
+        const statedStop = stop === null ? `len(${baseName})` : (contractTextOf(stop) ?? `len(${baseName})`);
+        usageAccess(state, baseName, statedStart, statedStop);
+      }
+      usageExpression(base, state);
+      const start = fieldOf(value, "start") as PyValue | null;
+      if (start !== null) usageExpression(start, state);
+      const stop = fieldOf(value, "stop") as PyValue | null;
+      if (stop !== null) usageExpression(stop, state);
+      const step = fieldOf(value, "step") as PyValue | null;
+      if (step !== null) usageExpression(step, state);
+      return;
+    }
+    case "field":
+      usageExpression(fieldOf(value, "base") as PyValue, state);
+      return;
+    case "text":
+      for (const part of fieldOf(value, "parts") as PyTextPart[]) {
+        if (String(fieldOf(part, "k")) === "value") usageExpression(fieldOf(part, "value") as PyValue, state);
+      }
+      return;
+    case "number":
+    case "boolean":
+    case "none":
+    case "name":
+      return;
+  }
+}
+
+function usageStatement(one: PyStatement, state: UsageState): void {
+  const loops = fieldOf(state, "loops") as Map<string, { lo: string; hi: string }>;
+  switch (one.k) {
+    case "declare":
+    case "assign":
+      usageExpression(fieldOf(one, "value") as PyValue, state);
+      return;
+    case "return": {
+      const value = fieldOf(one, "value") as PyValue | null;
+      if (value !== null) usageExpression(value, state);
+      return;
+    }
+    case "print":
+      setFieldOn(state, "prints", true);
+      for (const value of fieldOf(one, "values") as PyValue[]) usageExpression(value, state);
+      return;
+    case "if": {
+      usageExpression(fieldOf(one, "condition") as PyValue, state);
+      const thenBody = fieldOf(one, "then") as PyStatement[];
+      for (const inner of thenBody) usageStatement(inner, state);
+      const otherwiseBody = fieldOf(one, "otherwise") as PyStatement[];
+      for (const inner of otherwiseBody) usageStatement(inner, state);
+      return;
+    }
+    case "while": {
+      usageExpression(fieldOf(one, "condition") as PyValue, state);
+      const body = fieldOf(one, "body") as PyStatement[];
+      for (const inner of body) usageStatement(inner, state);
+      return;
+    }
+    case "for": {
+      const from = fieldOf(one, "from") as PyValue;
+      const to = fieldOf(one, "to") as PyValue;
+      usageExpression(from, state);
+      usageExpression(to, state);
+      const step = fieldOf(one, "step") as PyValue | null;
+      if (step !== null) usageExpression(step, state);
+      // The index of a counted loop stands for the whole range the loop
+      // walks, so a buffer its body reads is read over that range.
+      const fromText = contractTextOf(from);
+      const toText = contractTextOf(to);
+      const variable = String(fieldOf(one, "variable"));
+      const outer = loops.get(variable);
+      if (fromText !== null && toText !== null) loops.set(variable, { lo: fromText, hi: toText });
+      const body = fieldOf(one, "body") as PyStatement[];
+      for (const inner of body) usageStatement(inner, state);
+      if (outer === undefined) loops.delete(variable);
+      else loops.set(variable, outer);
+      return;
+    }
+    case "try": {
+      const body = fieldOf(one, "body") as PyStatement[];
+      for (const inner of body) usageStatement(inner, state);
+      const catchBody = fieldOf(one, "catchBody") as PyStatement[] | null;
+      if (catchBody !== null) for (const inner of catchBody) usageStatement(inner, state);
+      const finallyBody = fieldOf(one, "finallyBody") as PyStatement[] | null;
+      if (finallyBody !== null) for (const inner of finallyBody) usageStatement(inner, state);
+      return;
+    }
+    case "call":
+      usageExpression(fieldOf(one, "value") as PyValue, state);
+      return;
+    case "break":
+    case "continue":
+    case "pass":
+    case "function":
+      return;
+  }
+}
+
 function usageOf(declaration: PyFunction): {
   allocates: boolean;
   prints: boolean;
   readsArgv: boolean;
   accesses: AccessRange[];
 } {
-  const parameters = new Set<string>((fieldOf(declaration, "params") as PyParam[]).map((param) => String(fieldOf(param, "name"))));
-  const accesses: AccessRange[] = [];
-  /** The range a loop index stands for, which its body reads through. */
-  const loops = new Map<string, { lo: string; hi: string }>();
-  let allocates = false;
-  let prints = false;
-  let readsArgv = false;
-
-  /** One access, stated once however many times the body reads it. */
-  const access = (parameter: string, lo: string, hi: string): void => {
-    const seen = accesses.some((entry) => entry.parameter === parameter && fieldOf(entry, "lo") === lo && fieldOf(entry, "hi") === hi);
-    if (!seen) accesses.push({ parameter, lo, hi });
+  const state: UsageState = {
+    parameters: new Set<string>(),
+    accesses: [],
+    loops: new Map(),
+    allocates: false,
+    prints: false,
+    readsArgv: false,
   };
-
-  const expression = (value: PyValue): void => {
-    switch (value.k) {
-      case "list":
-      case "dict":
-        allocates = true;
-        for (const item of value.k === "list" ? fieldOf(value, "items") : value.entries.map((entry) => entry.value)) {
-          expression(item);
-        }
-        return;
-      case "call":
-        for (const argument of value.args) expression(argument);
-        return;
-      case "binary":
-        expression(value.left);
-        expression(value.right);
-        return;
-      case "unary":
-        expression(value.operand);
-        return;
-      case "conditional":
-        expression(value.condition);
-        expression(value.then);
-        expression(value.otherwise);
-        return;
-      case "index": {
-        if (value.base.k === "name" && parameters.has(value.base.name)) {
-          // A buffer the body indexes is a buffer it reads, at a position the
-          // contract states as a number. An index the contract language cannot
-          // name leaves the position unknown.
-          const loop = value.index.k === "name" ? loops.get(value.index.name) : undefined;
-          if (loop !== undefined) access(value.base.name, loop.lo, loop.hi);
-          else {
-            const at = contractTextOf(value.index);
-            if (at !== null) access(value.base.name, at, `(${at} + 1)`);
-          }
-        }
-        expression(value.base);
-        expression(value.index);
-        return;
-      }
-      case "slice": {
-        if (value.base.k === "name" && parameters.has(value.base.name)) {
-          const lo = value.start === null ? "0" : (contractTextOf(value.start) ?? "0");
-          const hi = value.stop === null ? `len(${value.base.name})` : (contractTextOf(value.stop) ?? `len(${value.base.name})`);
-          access(value.base.name, lo, hi);
-        }
-        expression(value.base);
-        if (value.start !== null) expression(value.start);
-        if (value.stop !== null) expression(value.stop);
-        if (value.step !== null) expression(value.step);
-        return;
-      }
-      case "field":
-        expression(value.base);
-        return;
-      case "text":
-        for (const part of value.parts) {
-          if (part.k === "value") expression(part.value);
-        }
-        return;
-      case "number":
-      case "boolean":
-      case "none":
-      case "name":
-        return;
-    }
+  const parameters = fieldOf(state, "parameters") as Set<string>;
+  for (const param of fieldOf(declaration, "params") as PyParam[]) parameters.add(String(fieldOf(param, "name")));
+  const body = fieldOf(declaration, "body") as PyStatement[];
+  for (const inner of body) usageStatement(inner, state);
+  return {
+    allocates: fieldOf(state, "allocates") === true,
+    prints: fieldOf(state, "prints") === true,
+    readsArgv: fieldOf(state, "readsArgv") === true,
+    accesses: fieldOf(state, "accesses") as AccessRange[],
   };
-
-  const statement = (one: PyStatement): void => {
-    switch (one.k) {
-      case "declare":
-      case "assign":
-        expression(fieldOf(one, "value"));
-        return;
-      case "return":
-        if (one.value !== null) expression(one.value);
-        return;
-      case "print":
-        prints = true;
-        for (const value of one.values) expression(value);
-        return;
-      case "if":
-        expression(fieldOf(one, "condition"));
-        one.then.forEach((inner) => statement(inner));
-        one.otherwise.forEach((inner) => statement(inner));
-        return;
-      case "while":
-        expression(fieldOf(one, "condition"));
-        one.body.forEach((inner) => statement(inner));
-        return;
-      case "for": {
-        expression(one.from);
-        expression(one.to);
-        if (one.step !== null) expression(one.step);
-        // The index of a counted loop stands for the whole range the loop
-        // walks, so a buffer its body reads is read over that range.
-        const from = contractTextOf(one.from);
-        const to = contractTextOf(one.to);
-        const outer = loops.get(one.variable);
-        if (from !== null && to !== null) loops.set(one.variable, { lo: from, hi: to });
-        one.body.forEach((inner) => statement(inner));
-        if (outer === undefined) loops.delete(one.variable);
-        else loops.set(one.variable, outer);
-        return;
-      }
-      case "try":
-        one.body.forEach((inner) => statement(inner));
-        if (one.catchBody !== null) one.catchBody.forEach((inner) => statement(inner));
-        if (one.finallyBody !== null) one.finallyBody.forEach((inner) => statement(inner));
-        return;
-      case "call":
-        expression(fieldOf(one, "value"));
-        return;
-      case "break":
-      case "continue":
-      case "pass":
-      case "function":
-        return;
-    }
-  };
-
-  (fieldOf(declaration, "body") as PyStatement[]).forEach((inner) => statement(inner));
-  return { allocates, prints, readsArgv, accesses };
 }
 
 /** The contract text of a value, or null when a contract cannot state it. */
@@ -4970,7 +5029,7 @@ function settlePromise(statement: Statement, payload: TypeExpr, name: string): S
       // `return None` settles the promise with nothing, which is the call
       // that takes no value.
       const resultValue = fieldOf(statement, "value");
-      if (fieldOf(payload, "kind") === "void" || resultValue === null || fieldOf(resultValue, "k") === "null") {
+      if (String(fieldOf(payload, "kind")) === "void" || resultValue === null || String(fieldOf(resultValue, "k")) === "null") {
         return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
       }
       return { ...statement, value: { k: "call", name, args: [resultValue] } };
