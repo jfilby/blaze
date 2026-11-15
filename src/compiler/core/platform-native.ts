@@ -580,7 +580,7 @@ export function hostSetExitCode(code: number): void {
 }
 
 /** The answer to one question, or undefined when there is nobody to ask. */
-export async function hostAsk(question: string): Promise<string> {
+export function hostAsk(question: string): string {
   stdoutWrite(question);
   const answer = readLine();
   return answer === undefined ? "" : answer;

@@ -19,8 +19,7 @@ import { CompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
   inspectProject,
-  isEmptyText,
-  isYes,
+  argumentTail,
   differentBool,
   exceeds,
   isZero,
@@ -205,10 +204,12 @@ function initProject(): void {
  * is worse than no prompt — and the announcement the question follows is on
  * stdout either way, so a log says what happened.
  */
-async function terminalConfirm(question: string): Promise<boolean> {
-  const answer = await hostAsk(question);
-  if (isEmptyText(answer)) return true;
-  return isYes(answer);
+function terminalConfirm(question: string): boolean {
+  const answer = hostAsk(question);
+  if (answer === "") return true;
+  if (answer.trim() === "y" || answer.trim() === "Y") return true;
+  if (answer.trim() === "yes" || answer.trim() === "YES") return true;
+  return false;
 }
 
 function optionNumber(value: string, name: string, minimum: number, maximum: number): number | undefined {
@@ -278,7 +279,7 @@ function buildOptions(values: Record<string, unknown>, arguments_: readonly stri
     confirm: terminalConfirm,
     // What is left on the command line after the command and the project is
     // what the program is given: `blaze build 12` checks it the way it runs.
-    arguments: [...arguments_],
+    arguments: arguments_,
     ...(values.debug ? { debug: true } : {}),
     ...(typeof values.model === "string" ? { model: values.model } : {}),
     ...(output === undefined ? {} : { output: output as OutputKind }),
@@ -341,14 +342,16 @@ async function main(argv: readonly string[]): Promise<number> {
       all: { type: "boolean" },
   });
   const values = parsed.values as unknown as Record<string, unknown>;
-  const [command, argument, ...rest] = parsed.positionals;
+  const positionals = parsed.positionals as readonly string[];
+  const command = positionals[0];
+  const argument = positionals[1];
 
   if (values.help || command === undefined) {
     hostWriteOut(USAGE);
     return command === undefined && !values.help ? 1 : 0;
   }
 
-  const options = buildOptions(values, rest);
+  const options = buildOptions(values, argumentTail(positionals, 2));
 
   switch (command) {
     case "build":
@@ -408,21 +411,21 @@ async function main(argv: readonly string[]): Promise<number> {
       return 0;
     }
     case "compare": {
-      if (argument === undefined || rest[0] === undefined) {
+      if (argument === undefined || positionals[2] === undefined) {
         hostWriteError(`blaze compare needs two build records\n\n${USAGE}`);
         return 1;
       }
       const leftDirectory = isDirectoryPath(argument);
-      if (differentBool(leftDirectory, isDirectoryPath(rest[0]))) {
+      if (differentBool(leftDirectory, isDirectoryPath(positionals[2] as string))) {
         throw new Error("compare needs two build records or two project state directories");
       }
       let report = "";
       if (leftDirectory) {
-        report = await compareStatesReport(argument, rest[0]);
+        report = await compareStatesReport(argument, positionals[2] as string);
       } else {
         report = compareRecordsReport(
           JSON.parse(await readFile(argument, "utf8")) as BuildStatus,
-          JSON.parse(await readFile(rest[0], "utf8")) as BuildStatus,
+          JSON.parse(await readFile(positionals[2] as string, "utf8")) as BuildStatus,
         );
       }
       if (report === "") {

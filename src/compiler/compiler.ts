@@ -165,38 +165,51 @@ export async function runAndReport(run: (args: readonly string[]) => Promise<num
 
 /** Whether a text is a decimal whole number, optionally allowing zero. */
 export function isIntegerText(value: string, allowZero: boolean): boolean {
-  if (value.length === 0) return false;
+  if (value === "") return false;
   let start = 0;
   if (value.slice(0, 1) === "0") {
     if (!allowZero) return false;
     start = 1;
   }
   for (let index = start; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 48 || code > 57) return false;
+    const character = value.slice(index, index + 1);
+    if (character === "0") continue;
+    if (character === "1") continue;
+    if (character === "2") continue;
+    if (character === "3") continue;
+    if (character === "4") continue;
+    if (character === "5") continue;
+    if (character === "6") continue;
+    if (character === "7") continue;
+    if (character === "8") continue;
+    if (character === "9") continue;
+    return false;
   }
   return true;
 }
 
+/** The arguments after the first few, as a list of their own. */
+export function argumentTail(values: readonly string[], start: number): readonly string[] {
+  const out: string[] = [];
+  for (let index = start; index < values.length; index += 1) out[out.length] = values[index] as string;
+  return out;
+}
+
 /** Whether two truths differ. */
 export function differentBool(left: boolean, right: boolean): boolean {
-  return left !== right;
+  if (left) {
+    if (right) return false;
+    return true;
+  }
+  if (right) return true;
+  return false;
 }
 
-/** Whether a text is empty. */
-export function isEmptyText(value: string): boolean {
-  return value.length === 0;
-}
-
-/** Whether a text answers yes. */
-export function isYes(answer: string): boolean {
-  const choice = answer.trim().toLowerCase();
-  return choice === "y" || choice === "yes";
-}
 
 /** Whether a number is zero. */
 export function isZero(value: number): boolean {
-  return value === 0;
+  if (value) return false;
+  return true;
 }
 
 /** Whether a number is over a cap, where a negative cap means no cap. */
@@ -270,7 +283,7 @@ export interface BuildOptions {
    * test, a script — answers for itself, so nothing ever blocks on a terminal
    * that is not there.
    */
-  confirm?: (question: string) => Promise<boolean>;
+  confirm?: (question: string) => boolean;
   /**
    * Rebuild every function whatever the engine says, and without asking: the
    * stored candidates and objects are kept, and what was reviewed from
@@ -1915,7 +1928,7 @@ export async function runBuild(
       "The stored objects were built by different rules, so every function is reviewed again from the semantic IR",
     );
     if ((fields["recompile"] as boolean | undefined) !== true && fields["confirm"] !== undefined) {
-      const recompile = await (fields["confirm"] as (question: string) => Promise<boolean>)("Recompile every function from scratch? [y/N] ");
+      const recompile = (fields["confirm"] as (question: string) => boolean)("Recompile every function from scratch? [y/N] ");
       if (!recompile) {
         throw new CompilerError("CancelledError", "engine", `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`, "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it", "", "", "");
       }

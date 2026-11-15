@@ -652,7 +652,7 @@ test("an engine that changed is announced, and declining leaves the last build a
           cwd: directory,
           reuse: false,
           model: `replay:${replay}`,
-          confirm: async (question) => {
+          confirm: (question) => {
             asked.push(question);
             return false;
           },
@@ -713,7 +713,7 @@ test("--recompile rebuilds every function even though the engine has not moved",
       reuse: false,
       recompile: true,
       model: `replay:${replay}`,
-      confirm: async (question) => {
+      confirm: (question) => {
         asked.push(question);
         return true;
       },

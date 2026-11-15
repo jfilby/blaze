@@ -12,7 +12,7 @@
  * them, and that is the point of the boundary.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   copyFile,
@@ -53,7 +53,6 @@ import {
 import { availableParallelism, cpus, tmpdir } from "node:os";
 import { clearInterval as nodeClearInterval, clearTimeout, setInterval as nodeSetInterval } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createInterface } from "node:readline/promises";
 import { parseArgs as nodeParseArgs } from "node:util";
 import { spawn, spawnSync as nodeSpawnSync, type SpawnOptions } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -307,15 +306,20 @@ export function hostSetExitCode(code: number): void {
   process.exitCode = code;
 }
 
-/** The answer to one question, or undefined when there is nobody to ask. */
-export async function hostAsk(question: string): Promise<string> {
+/** The answer to one question, or empty when there is nobody to ask. */
+export function hostAsk(question: string): string {
   if (process.stdin.isTTY !== true) return "";
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await prompt.question(question);
-  } finally {
-    prompt.close();
+  process.stdout.write(question);
+  const buffer = Buffer.alloc(1);
+  let out = "";
+  for (;;) {
+    const count = readSync(0, buffer, 0, 1, null);
+    if (count === 0) break;
+    const character = buffer.toString("utf8", 0, count);
+    if (character === "\n") break;
+    if (character !== "\r") out += character;
   }
+  return out;
 }
 
 /** Calls the handler when the process exits; the answer detaches it. */
