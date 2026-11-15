@@ -11671,12 +11671,7 @@ class TypeScriptParser {
     if (type.kind === "slice" || type.kind === "array") return answer(true);
     if (type.kind === "primitive" || type.kind === "text" || type.kind === "void") return answer(false);
     if (type.kind === "ref" && type.name !== undefined) return answer(false);
-    const asked: Expression = {
-      k: "binary",
-      op: "===",
-      left: { k: "call", name: "blaze_rt_is_array", args: [value] },
-      right: { k: "literal", text: "1" },
-    };
+    const asked: Expression = { k: "call", name: "blaze_rt_is_array", args: [value] };
     this.expressionTypes.set(asked, BOOLEAN_RESULT);
     this.arrayTests.set(asked, value);
     return asked;
