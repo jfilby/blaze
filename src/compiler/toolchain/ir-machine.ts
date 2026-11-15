@@ -2640,7 +2640,7 @@ class Machine {
    * Anything else the lowering is asked to walk is refused rather than walked
    * over a number nobody read.
    */
-  private readonly arrayCounts = new Map<string, bigint | Held>();
+  private readonly arrayCounts = new Map<string, number | Held>();
   /**
    * The names that hold a window of another block, whose pointer is the block
    * moved to where the window starts. The header in front of such a pointer is
@@ -3303,7 +3303,7 @@ class Machine {
    * pointer turned, and a count it does not say is one a fill cannot be
    * written over.
    */
-  private boundElementsOf(value: SemanticValue): bigint | Held | null {
+  private boundElementsOf(value: SemanticValue): number | Held | null {
     if (String(fieldOf(value, "k")) !== "buffer") {
       // A name holds the count it was bound with whatever the array it holds is
       // spelled as: a slice and an array are both a pointer and a length here,
@@ -3314,15 +3314,15 @@ class Machine {
       return null;
     }
     const length = fieldOf(value, "length");
-    if (String(length) !== "null") return BigInt(length as number);
+    if (String(length) !== "null") return length as number;
     const count = fieldOf(value, "count");
     if (String(count) !== "null") return this.heldElements(count as SemanticValue);
     const values = fieldOf(value, "values") as readonly unknown[];
-    return values.length === 0 ? null : BigInt(values.length);
+    return values.length === 0 ? null : values.length;
   }
 
   /** The count a name is bound with, kept against the name the target reads it as. */
-  private rememberElements(name: string, count: bigint | Held | null): void {
+  private rememberElements(name: string, count: number | Held | null): void {
     const emitted = this.names.read(name);
     if (count === null) this.arrayCounts.delete(emitted);
     else this.arrayCounts.set(emitted, count);
@@ -3369,8 +3369,8 @@ class Machine {
     }
     // A count written out is laid down the way the C backend writes it: a
     // whole number of its own, in the slot the call reads it out of.
-    if (typeof count === "bigint") {
-      this.at({ k: "const", type: USIZE, text: count.toString() }, USIZE);
+    if (typeof count === "number") {
+      this.at({ k: "const", type: USIZE, text: String(count) }, USIZE);
       const held = this.hold(USIZE, "blaze_length");
       this.store(held);
       return held;
@@ -10567,8 +10567,8 @@ class Machine {
       // the elements a list was written with or the count a block was joined at.
       const count = this.arrayCounts.get(this.names.read(fieldOf(of, "name")));
       if (count !== undefined) {
-        if (typeof count === "bigint") {
-          this.code.movRegImm(RAX, count);
+        if (typeof count === "number") {
+          this.code.movRegImm(RAX, BigInt(count));
         } else {
           this.load(count);
         }

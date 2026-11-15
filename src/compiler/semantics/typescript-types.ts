@@ -68,6 +68,8 @@ export interface TypeTable {
   declarations: Map<string, TypeDecl>;
   /** The file's stem, which makes two modules' same-named types two layouts. */
   stem?: string;
+  /** Whether `bigint` in this file is the wide whole number its values reach. */
+  wideBigint?: boolean;
   /**
    * The table this one is written inside, when a block declares a type of its
    * own.
@@ -1226,7 +1228,10 @@ class TypeText {
       this.union();
       return ANY_TYPE;
     }
-    if (lower in PRIMITIVES) return { kind: "primitive", name: PRIMITIVES[lower] as PrimitiveTypeName };
+    if (lower in PRIMITIVES) {
+      if (lower === "bigint" && this.table.wideBigint === true) return { kind: "primitive", name: "u256" };
+      return { kind: "primitive", name: PRIMITIVES[lower] as PrimitiveTypeName };
+    }
     if (lower in TYPED_ARRAYS) return { kind: "list", of: { kind: "primitive", name: TYPED_ARRAYS[lower] as PrimitiveTypeName } };
     // `Omit<T, "k">` and `Pick<T, "k">` are the record they name with fields
     // left out or kept. The keys are written as string literals, so they are

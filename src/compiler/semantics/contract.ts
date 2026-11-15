@@ -663,7 +663,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? String(fieldOf(error, "message")) : String(error);
 }
 
-export function isWhole(value: Value): value is Whole {
+export function isWhole(value: unknown): value is Whole {
   return typeof value === "object" && value !== null && (value as unknown as Record<string, unknown>)["magnitude"] !== undefined;
 }
 
@@ -912,20 +912,19 @@ function wrapWholeBits(bits: bigint, name: PrimitiveTypeName): Whole {
 }
 
 /** The whole number an external test or harness value names. */
-function wholeOfValue(value: bigint | Whole): Whole {
+function wholeOfValue(value: unknown): Whole {
   if (isWhole(value)) return value;
-  if (value < 0n) return { negative: true, magnitude: (0n - value) & WHOLE_MASK };
-  return { negative: false, magnitude: value & WHOLE_MASK };
+  const number = value as bigint;
+  if (number < 0n) return { negative: true, magnitude: (0n - number) & WHOLE_MASK };
+  return { negative: false, magnitude: number & WHOLE_MASK };
 }
 
 /** Left compared with right, as the mathematical values they are. */
 function compareWhole(left: Whole, right: Whole): number {
-  const leftFields = left as unknown as Record<string, unknown>;
-  const rightFields = right as unknown as Record<string, unknown>;
-  const leftNegative = leftFields["negative"] as boolean;
-  const rightNegative = rightFields["negative"] as boolean;
-  const leftMagnitude = leftFields["magnitude"] as bigint;
-  const rightMagnitude = rightFields["magnitude"] as bigint;
+  const leftNegative = left.negative;
+  const rightNegative = right.negative;
+  const leftMagnitude = left.magnitude;
+  const rightMagnitude = right.magnitude;
   if (leftNegative !== rightNegative) return leftNegative ? -1 : 1;
   if (leftMagnitude === rightMagnitude) return 0;
   const less = leftMagnitude < rightMagnitude;

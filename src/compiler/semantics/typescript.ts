@@ -8680,6 +8680,7 @@ class TypeScriptParser {
     }
     if (!namesAType) return callback(undefined);
     const declared = scanTypeTable(this.tokens.slice(open + 1, close));
+    declared.wideBigint = this.wideBigint;
     if (declared.declarations.size === 0) return callback(undefined);
     const table: TypeTable = {
       declarations: declared.declarations,
@@ -11788,8 +11789,32 @@ class TypeScriptParser {
       const token = this.peek();
       if (token.kind !== "punct" || !operators.includes(token.text)) return left;
       this.next();
-      left = { k: "binary", op: token.text as BinaryOp, left, right: callback(undefined) };
+      const right = callback(undefined);
+      // A machine-word whole number beside a wide one is the wide number the
+      // operation is: the local it names is declared wide and every read of it
+      // is the wide value.
+      const leftType = this.valueTypeOf(left);
+      const rightType = this.valueTypeOf(right);
+      if (isInteger(leftType) && isWideType(leftType)) this.promoteWholeOperand(right, leftType);
+      if (isInteger(rightType) && isWideType(rightType)) this.promoteWholeOperand(left, rightType);
+      left = { k: "binary", op: token.text as BinaryOp, left, right };
     }
+  }
+
+  /** A whole value read beside a wide one is declared at the wide type. */
+  private promoteWholeOperand(value: Expression, wide: TypeExpr): void {
+    if (value.k === "binary") {
+      this.promoteWholeOperand(value.left, wide);
+      this.promoteWholeOperand((fieldOf(value, "right") as Expression), wide);
+      return;
+    }
+    if (value.k !== "ident") return;
+    const type = this.valueTypes.get(value.name) ?? null;
+    if (type === null || !isInteger(type) || isWideType(type)) return;
+    const declaration = this.declarationStatements.get(value.name);
+    if (declaration === undefined) return;
+    declaration.type = wide;
+    this.valueTypes.set(value.name, wide);
   }
 
   private readLogicalOr(): Expression {
@@ -25575,6 +25600,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
     scanned.exportedState,
   );
   parser.wideBigint = wideBigint;
+  parser.typeTable.wideBigint = wideBigint;
   // The type each imported value's declaration writes, for a value whose own
   // module holds rather than writes out: a list built by calls is still a list
   // of the element the annotation names.
