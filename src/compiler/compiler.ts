@@ -529,18 +529,28 @@ async function storedPaths(store: JsonStore, root: string, project: string): Pro
   // More than one is two projects with the same name and different paths, which
   // a name alone cannot tell apart. The one that wrote its record last is the one
   // whose answers are the most recent ones, and that is what this reads.
-  const written: [string, number][] = await Promise.all(
+  const written: ProjectWrite[] = await Promise.all(
     found.map(async (entry) => {
       const paths = projectPaths(project, entry);
-      const pathFields = paths as unknown as Record<string, unknown>;
-      const recordPath = String(pathFields["build"]);
+      const recordPath = String(fieldOf(paths, "build"));
       const build = (await storeExists(store, recordPath)) ? await storeRead<BuildStatus>(store, recordPath) : undefined;
       const buildFields = build as unknown as Record<string, unknown> | undefined;
-      return [entry, Date.parse(buildFields === undefined ? "" : String(buildFields["updatedAt"] ?? "")) || 0] as [string, number];
+      const updated = buildFields === undefined ? "" : String(fieldOf(buildFields, "updatedAt"));
+      const time = updated === "" ? 0 : Date.parse(updated);
+      return { entry: entry, time: time };
     }),
   );
-  written.sort((left, right) => right[1] - left[1]);
-  return projectPaths(project, written[0]?.[0] as string);
+  written.sort(byNewest);
+  return projectPaths(project, written.length === 0 ? project : written[0].entry);
+}
+
+interface ProjectWrite {
+  entry: string;
+  time: number;
+}
+
+function byNewest(left: ProjectWrite, right: ProjectWrite): number {
+  return Number(fieldOf(right, "time")) - Number(fieldOf(left, "time"));
 }
 
 function projectPaths(id: string, storeId: string): ProjectPaths {
@@ -970,7 +980,8 @@ function functionContext(phase: { program: ProgramContract; objectNames: Record<
   const program = fields["program"] as ProgramContract;
   const objectNames = fields["objectNames"] as Record<string, string>;
   const functions: Record<string, FunctionContract> = {};
-  for (const file of fieldOf(program, "files") as FileContract[]) {
+  const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
+  for (const file of files) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -1017,7 +1028,8 @@ function semanticFunctions(
   objectKeys: LiteralKeys,
 ): Record<string, SemanticFunction> {
   const functions: Record<string, FunctionContract> = {};
-  for (const file of fieldOf(program, "files") as FileContract[]) {
+  const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
+  for (const file of files) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -1027,7 +1039,7 @@ function semanticFunctions(
   const language = (program as unknown as Record<string, unknown>)["language"] as string;
   const context: FunctionContext = { objectNames, functions, language };
   const resolved: Record<string, SemanticFunction> = {};
-  for (const file of fieldOf(program, "files") as FileContract[]) {
+  for (const file of files) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       const fn = (contract as unknown as Record<string, unknown>)["function"] as Record<string, unknown>;
@@ -1052,7 +1064,7 @@ function semanticFunctions(
   // checked against the others: a loop marked parallel is proved against what
   // the functions it calls write, and that is a question about the program.
   const callees = new Map(Object.entries(resolved));
-  for (const file of fieldOf(program, "files") as FileContract[]) {
+  for (const file of files) {
     const declared = (file as unknown as Record<string, unknown>)["functions"] as Record<string, FunctionContract>;
     for (const contract of Object.values(declared)) {
       // A function is checked before it is shown to anything, so a function
@@ -1144,7 +1156,8 @@ function unitNameKey(unit: unknown, units: readonly CompilationUnit[]): string {
 
 function compilationUnits(program: ProgramContract, isProgram: boolean): CompilationUnit[] {
   const units: CompilationUnit[] = [];
-  for (const file of fieldOf(program, "files") as FileContract[]) {
+  const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
+  for (const file of files) {
     const fields = file as unknown as Record<string, unknown>;
     const declared = fields["functions"] as Record<string, FunctionContract>;
     const filePath = fields["path"] as string;
@@ -1187,7 +1200,7 @@ async function programFunctions(
     functions.push({ fn, contract });
     known.add(String((fn as unknown as Record<string, unknown>)["symbol"]));
   }
-  const bodies = (driver as unknown as Record<string, unknown>)["bodies"] as SemanticFunction[];
+  const bodies: SemanticFunction[] = (driver as unknown as Record<string, unknown>)["bodies"] as unknown as SemanticFunction[];
   for (const body of bodies) {
     const symbol = String((body as unknown as Record<string, unknown>)["symbol"]);
     if (known.has(symbol)) continue;
@@ -1306,7 +1319,7 @@ export function programLoweringOf(
   target: TargetSpec,
 ): ProgramLowering {
   const fields = driver as unknown as Record<string, unknown>;
-  const bodies = fields["bodies"] as SemanticFunction[];
+  const bodies: SemanticFunction[] = fields["bodies"] as unknown as SemanticFunction[];
   const signatures = fields["functions"] as SemanticFunction[];
   const callable = new Set<string>([
     ...bodies.map((body) => String((body as unknown as Record<string, unknown>)["symbol"])),
@@ -1325,9 +1338,8 @@ export function programLoweringOf(
     if (!lowered.has(symbol)) continue;
     const refusal = machineRefusal({ fn: body, callable, target });
     if (refusal !== null) {
-      const refusalFields = refusal as unknown as Record<string, unknown>;
-      const reason = String(refusalFields["reason"]);
-      const detail = refusalFields["detail"] as string | undefined;
+      const reason = String(fieldOf(refusal, "reason"));
+      const detail = fieldOf(refusal, "detail") as string | undefined;
       lowered.delete(symbol);
       notes.push(
         `the machine backend refused to lower ${String((body as unknown as Record<string, unknown>)["name"])} (${reason}); the driver keeps its C`,
@@ -1345,7 +1357,11 @@ export function programLoweringOf(
       const edgeFields = edge as unknown as Record<string, unknown>;
       const caller = String(edgeFields["caller"]);
       const callee = String(edgeFields["callee"]);
-      if (lowered.has(caller) === lowered.has(callee)) continue;
+      if (lowered.has(caller)) {
+        if (lowered.has(callee)) continue;
+      } else {
+        if (!lowered.has(callee)) continue;
+      }
       const found = bodies.find((body) => String((body as unknown as Record<string, unknown>)["symbol"]) === callee);
       if (found === undefined) continue;
       const foundFields = found as unknown as Record<string, unknown>;
@@ -1385,7 +1401,7 @@ export function programLoweringOf(
 function callsWithin(program: SemanticProgram): { caller: string; callee: string }[] {
   const edges: { caller: string; callee: string }[] = [];
   const fields = program as unknown as Record<string, unknown>;
-  const bodies = fields["bodies"] as SemanticFunction[];
+  const bodies: SemanticFunction[] = fields["bodies"] as unknown as SemanticFunction[];
   for (const body of bodies) {
     const bodyFields = body as unknown as Record<string, unknown>;
     const entry = bodyFields["entry"] as SemanticBlock;
@@ -1403,9 +1419,9 @@ function directCalleesOf(block: SemanticBlock): string[] {
   const blocks: SemanticBlock[] = [block];
   while (blocks.length > 0) {
     const visited = blocks.pop() as SemanticBlock;
-    const visitedFields = visited as unknown as Record<string, unknown>;
-    for (const statement of visitedFields["statements"] as Record<string, unknown>[]) {
-      for (const value of statementValues(statement as unknown as SemanticStatement)) {
+    const statements: SemanticStatement[] = fieldOf(visited, "statements") as unknown as SemanticStatement[];
+    for (const statement of statements) {
+      for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
           const fields = inner as unknown as Record<string, unknown>;
           const kind = String(fields["k"]);
@@ -1416,13 +1432,13 @@ function directCalleesOf(block: SemanticBlock): string[] {
           if (kind === "functionRef") names.push(String(fields["name"]));
         });
       }
-      if (String(statement["k"]) === "call") {
-        const call = statement["call"] as Record<string, unknown>;
-        names.push(String(call["callee"]));
+      if (String(fieldOf(statement, "k")) === "call") {
+        const call = fieldOf(statement, "call") as Record<string, unknown>;
+        names.push(String(fieldOf(call, "callee")));
       }
       for (const inner of statementBlocksOf(statement as unknown as SemanticStatement)) blocks.push(inner);
     }
-    const terminator = visitedFields["terminator"] as Record<string, unknown>;
+    const terminator = fieldOf(visited, "terminator") as Record<string, unknown>;
     if (String(terminator["k"]) === "return" && terminator["value"] !== null) {
       walkValues(terminator["value"] as SemanticValue, (inner) => {
         const fields = inner as unknown as Record<string, unknown>;
@@ -1804,14 +1820,13 @@ export async function runBuild(
   const absoluteInput = resolveFrom(String(fields["cwd"]), inputPath);
   const id = projectIdFor(absoluteInput);
   const paths = projectPaths(id, projectStoreId(absoluteInput));
-  const pathFields = paths as unknown as Record<string, unknown>;
-  const workPath = String(pathFields["work"]);
-  const buildRecordPath = String(pathFields["build"]);
-  const inputStorePath = String(pathFields["input"]);
-  const candidatesPath = String(pathFields["candidates"]);
-  const verificationPath = String(pathFields["verification"]);
-  const benchmarkPath = String(pathFields["benchmark"]);
-  const generationPath = String(pathFields["generation"]);
+  const workPath = String(fieldOf(paths, "work"));
+  const buildRecordPath = String(fieldOf(paths, "build"));
+  const inputStorePath = String(fieldOf(paths, "input"));
+  const candidatesPath = String(fieldOf(paths, "candidates"));
+  const verificationPath = String(fieldOf(paths, "verification"));
+  const benchmarkPath = String(fieldOf(paths, "benchmark"));
+  const generationPath = String(fieldOf(paths, "generation"));
 
   // These read the project and reject it before there is a build record to
   // reject it in, so a project that no longer names a build that can run used
@@ -1921,7 +1936,7 @@ export async function runBuild(
   // itself. `--recompile` is the same answer given in advance.
   const previousEngine = previousFields === undefined ? undefined : previousFields["engine"] as string | undefined;
   const engineChanged = previousEngine !== undefined && String(previousEngine) !== engine;
-  if (engineChanged && (fields["reuse"] as boolean) !== true) {
+  if (engineChanged && String(fieldOf(fields, "reuse")) !== "true") {
     reporter(
       "engine",
       "info",
@@ -1932,8 +1947,8 @@ export async function runBuild(
       "info",
       "The stored objects were built by different rules, so every function is reviewed again from the semantic IR",
     );
-    if ((fields["recompile"] as boolean | undefined) !== true && fields["confirm"] !== undefined) {
-      const recompile = (fields["confirm"] as (question: string) => boolean)("Recompile every function from scratch? [y/N] ");
+    if (String(fieldOf(fields, "recompile")) !== "true" && fieldOf(fields, "confirm") !== undefined) {
+      const recompile = (fieldOf(fields, "confirm") as (question: string) => boolean)("Recompile every function from scratch? [y/N] ");
       if (!recompile) {
         throw new CompilerError("CancelledError", "engine", `the engine changed (${previousEngine} -> ${engine}) and the recompile was declined`, "nothing was built and the last build is still the project's; run blaze build --recompile to rebuild it", "", "", "");
       }
@@ -1946,11 +1961,11 @@ export async function runBuild(
   // would have let them through. A `--reuse` build discards nothing — it asks
   // no model for anything, so there is nothing to rebuild, and it reports the
   // mismatch against what it was promised instead.
-  const discardStored = (fields["recompile"] as boolean | undefined) === true || (engineChanged && (fields["reuse"] as boolean) !== true);
+  const discardStored = String(fieldOf(fields, "recompile")) === "true" || (engineChanged && String(fieldOf(fields, "reuse")) !== "true");
 
   await storeMkdirp(store, String(fieldOf(paths, "root")));
   await storeMkdirp(store, workPath);
-  if ((fields["recompile"] as boolean | undefined) === true) {
+  if (String(fieldOf(fields, "recompile")) === "true") {
     try { await storeRemove(store, join(workPath, "program.c")); } catch {}
   }
   await storeMkdirp(store, String(fieldOf(paths, "output")));
@@ -1981,7 +1996,7 @@ export async function runBuild(
     engine,
     // The flag is the record of a build that was told to recompile. An engine
     // change that forced one is already visible as the stamp, which moved.
-    recompiled: (fields["recompile"] as boolean | undefined) === true,
+    recompiled: String(fieldOf(fields, "recompile")) === "true",
   };
   await writeBuildRecord(store, buildPathOf(paths), build);
 
@@ -2021,16 +2036,20 @@ export async function runBuild(
     const objectKeys = phaseFields["objectKeys"] as LiteralKeys;
     const modules = phaseFields["modules"] as SourceModule[];
     const programFields = program as unknown as Record<string, unknown>;
-    const files = programFields["files"] as FileContract[];
+    const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
     const entry = programFields["entry"] as Record<string, unknown>;
     const units = compilationUnits(program, body !== undefined);
     const semantics = semanticFunctions(program, objectNames, body, objectLayouts, objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
+    const postconditions = Object.values(semantics).reduce((total: number, fn) => {
+      const ensures: string[] | undefined = fieldOf(fn, "ensures") as unknown as string[] | undefined;
+      return total + (ensures === undefined ? 0 : ensures.length);
+    }, 0);
     reporter(
       "ir",
       "ok",
-      `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${Object.values(semantics).reduce((total, fn) => total + ((fn as unknown as Record<string, unknown>)["ensures"] as string[]).length, 0)} postcondition(s) to check them against`,
+      `Semantic IR: ${Object.keys(semantics).length} function(s) resolved and validated, ${postconditions} postcondition(s) to check them against`,
     );
     const sourceHash = hashValue(modules.map((module) => {
       const moduleFields = module as unknown as Record<string, unknown>;
@@ -2105,7 +2124,8 @@ export async function runBuild(
         // driver, and so does everything whose call to it would hand over
         // what only one convention carries.
         bodyLowering = programLoweringOf(driver, new Set(units.map(unitKey)), target);
-        for (const note of (bodyLowering as unknown as Record<string, unknown>)["notes"] as string[]) reporter("assemble", "info", note);
+        const notes: string[] = fieldOf(bodyLowering, "notes") as unknown as string[];
+        for (const note of notes) reporter("assemble", "info", String(note));
       }
     }
     await writeBuildRecord(store, buildPathOf(paths), build);
@@ -2289,18 +2309,17 @@ export async function runBuild(
         id,
       });
       const sequenceStart = written.get(key) ?? 0;
-      const reuseFields = reuse as unknown as Record<string, unknown>;
-      const reuseLevel = reuseFields["level"] === null ? null : String(reuseFields["level"]);
-      const reuseEntry = reuseFields["entry"] as Record<string, unknown> | undefined;
-      const reuseMissing = reuseFields["missing"] as string[];
+      const reuseLevel = fieldOf(reuse, "level") === null ? null : String(fieldOf(reuse, "level"));
+      const reuseEntry = fieldOf(reuse, "entry") as Record<string, unknown> | undefined;
+      const reuseMissing: string[] = fieldOf(reuse, "missing") as unknown as string[];
 
       if (mismatch === undefined && reuseLevel === "object" && reuseEntry !== undefined) {
         const result = reusedResult(reuseEntry as unknown as IncrementalEntry);
-        const resultFields = result as unknown as Record<string, unknown>;
+        const candidates: Candidate[] = fieldOf(result, "candidates") as unknown as Candidate[];
         // A repair round generates after the stored candidates, so it never
         // writes over the object this build is about to link.
-        written.set(functionName, sequenceStart + (resultFields["candidates"] as Candidate[]).length);
-        reusedByFunction.set(key, String(reuseEntry["selected"]));
+        written.set(functionName, sequenceStart + candidates.length);
+        reusedByFunction.set(key, String(fieldOf(reuseEntry, "selected")));
         generatedByFunction.set(artifactKey, unitGenerationOf(unit as CompilationUnit, result as CodegenResult));
         return;
       }
@@ -2365,11 +2384,11 @@ export async function runBuild(
                     // names a line of it, so it is the only way to see the answer the
                     // refusal is about. It is printed beside the prompt, under the
                     // same `--debug`.
-                    if ((fields["debug"] as boolean | undefined) === true && answer !== undefined) {
+                    if (String(fieldOf(fields, "debug")) === "true" && answer !== undefined) {
                       printAnswer(answerDumpOf(stage as AnswerDump["stage"], Number(candidate), attempt, retry, String(answer)));
                     }
                   },
-                  ...((fields["debug"] as boolean | undefined) === true ? { onPrompt: printPrompt } : {}),
+                  ...(String(fieldOf(fields, "debug")) === "true" ? { onPrompt: printPrompt } : {}),
                 });
               },
             }
@@ -2543,7 +2562,7 @@ export async function runBuild(
         compilerVersion: COMPILER_VERSION,
         functions: JSON.parse(JSON.stringify(generationFunctions)),
         modelDurationNs: String(
-          generated.reduce((total, entry) => {
+          generated.reduce((total: number, entry) => {
             const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
             return total + Number(resultFields["modelDurationNs"]);
           }, 0),
@@ -2604,7 +2623,7 @@ export async function runBuild(
       // and an object that calls it calls a function the linker can see.
       const loweredBodies: string[] = [];
       const driverFields = driver === undefined ? {} : driver as unknown as Record<string, unknown>;
-      const driverBodies = (driverFields["bodies"] ?? []) as SemanticFunction[];
+      const driverBodies: SemanticFunction[] = driver === undefined ? [] : fieldOf(driver, "bodies") as unknown as SemanticFunction[];
       const driverEntry = driverFields["entry"] as SemanticBlock | undefined;
       if (backendKind === "machine" && bodyLowering !== undefined) {
         const loweringFields = bodyLowering as unknown as Record<string, unknown>;
@@ -2626,10 +2645,10 @@ export async function runBuild(
         const result = entryFields["result"] as Record<string, unknown>;
         const selected = result["selected"];
         if (selected === null || selected === undefined) continue;
-        const outcomes = result["outcomes"] as Record<string, unknown>[];
-        const outcome = outcomes.find((one) => String(one["candidate"]) === String(selected));
-        const threading = outcome === undefined ? undefined : outcome["threads"] as string[] | undefined;
-        for (const raw of threading ?? []) {
+        const outcomes: Record<string, unknown>[] = fieldOf(result, "outcomes") as unknown as Record<string, unknown>[];
+        const outcome = outcomes.find((one) => String(fieldOf(one, "candidate")) === String(selected));
+        const threading: string[] = outcome === undefined ? [] : fieldOf(outcome, "threads") as unknown as string[];
+        for (const raw of threading) {
           const name = raw as Threading;
           if (!threads.includes(name)) threads.push(name);
         }
@@ -2660,9 +2679,9 @@ export async function runBuild(
         const driverHttp: boolean = runtimeKind === "facil";
         const driverBackend: BackendKind = backendKind;
         const driverSqlite: boolean = usesSqlite;
-        const driverTls: boolean = (http as unknown as Record<string, unknown>)["tls"] as boolean;
-        const runtimeLibraryValues = runtime === undefined ? undefined : (runtime as unknown as Record<string, unknown>)["libraryObjects"] as Record<string, unknown>[] | undefined;
-        const driverLibraries: string[] = (runtimeLibraryValues ?? []).map((library) => String(library["objectPath"]));
+        const driverTls: boolean = String(fieldOf(http, "tls")) === "true";
+        const runtimeLibraries: Record<string, unknown>[] = runtime === undefined ? [] : fieldOf(runtime, "libraryObjects") as unknown as Record<string, unknown>[];
+        const driverLibraries: string[] = runtimeLibraries.map((library) => String(fieldOf(library, "objectPath")));
         const driverThreads: Threading[] = threads;
         const driverOutput: string = programPath;
         runner = runnerOf(await buildProgramDriverFor(
@@ -2736,7 +2755,7 @@ export async function runBuild(
       reporter(
         "verify",
         "ok",
-        (inputFields["verifyProgram"] as boolean | undefined) === false
+        String(fieldOf(inputFields, "verifyProgram")) === "false"
           ? "Program output is not checked (verifyProgram = false)"
           : `Program output is not checked: the program is built for ${String(fieldOf(target, "os"))}, and this host is ${hostPlatform()}`,
       );
@@ -2920,7 +2939,7 @@ export async function runBuild(
       selected,
       outcomes,
       String(
-        generated.reduce((total, entry) => {
+        generated.reduce((total: number, entry) => {
           const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
           return total + Number(resultFields["modelDurationNs"]);
         }, 0),
@@ -3003,7 +3022,7 @@ export async function runStored(
   const loadedFields = loaded as unknown as Record<string, unknown>;
   const paths = loadedFields["paths"] as ProjectPaths;
   const program = loadedFields["program"] as ProgramContract;
-  const units = loadedFields["units"] as CompilationUnit[];
+  const units: CompilationUnit[] = loadedFields["units"] as unknown as CompilationUnit[];
   const programFields = program as unknown as Record<string, unknown>;
   const files = programFields["files"] as FileContract[];
   const entry = programFields["entry"] as Record<string, unknown>;
@@ -3153,7 +3172,7 @@ export async function runStored(
       const verificationFields = resultVerification as unknown as Record<string, unknown>;
       reporter(
         "verify",
-        (verificationFields["passed"] as boolean) === true ? "ok" : "fail",
+        String(fieldOf(verificationFields, "passed")) === "true" ? "ok" : "fail",
         `Correctness verified for ${functionName} (${verificationFields["cases"] === undefined ? "0" : String(verificationFields["cases"])} test vectors)`,
       );
     } else {
@@ -3214,8 +3233,8 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const semantics = semanticFunctions(contract, objectNames, body, objectLayouts, objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
-  if (fields["function"] !== undefined || (fields["all"] as boolean | undefined) === true) {
-    if (fields["function"] === undefined) {
+  if (fieldOf(fields, "function") !== undefined || String(fieldOf(fields, "all")) === "true") {
+    if (fieldOf(fields, "function") === undefined) {
       return (fieldOf(contract, "files") as FileContract[])
         .map((file) => {
           const fileFields = file as unknown as Record<string, unknown>;
@@ -3263,7 +3282,7 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
   return storeRead<BuildStatus>(store, buildRecordPath);
 }
 
-export async function listProjects(cwd: string): Promise<string[]> {
+export async function listProjects(cwd: string): Promise<string> {
   const root = join(cwd, STATE_DIRECTORY);
   const projectsRoot = join(root, "projects");
   let names: string[] = [];
@@ -3272,9 +3291,9 @@ export async function listProjects(cwd: string): Promise<string[]> {
   } catch {
     names = [];
   }
-  const found: string[] = [];
+  let found = "";
   for (const name of names) {
-    if (isDirectoryPath(join(projectsRoot, name))) found[found.length] = name;
+    if (isDirectoryPath(join(projectsRoot, name))) found += (found === "" ? "" : "\n") + name;
   }
   return found;
 }
@@ -3282,9 +3301,9 @@ export async function listProjects(cwd: string): Promise<string[]> {
 /** The lines `projects` prints, with no empty list to read in the program. */
 export async function projectsReport(cwd: string): Promise<string> {
   const projects = await listProjects(cwd);
-  if (projects.length === 0) return `no projects in ${STATE_DIRECTORY}/projects\n`;
+  if (projects === "") return `no projects in ${STATE_DIRECTORY}/projects\n`;
   let out = "";
-  for (const project of projects) out += `${await projectStateLine(project, cwd)}\n`;
+  for (const project of projects.split("\n")) out += `${await projectStateLine(project, cwd)}\n`;
   return out;
 }
 
@@ -3303,5 +3322,6 @@ export async function projectStateLine(project: string, cwd: string): Promise<st
 
 /** How many functions the program contract covers, for the build report. */
 function contractedFunctionCount(program: ProgramContract): number {
-  return (fieldOf(program, "files") as FileContract[]).reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
+  const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
+  return files.reduce((total, file) => total + Object.keys((file as unknown as Record<string, unknown>)["functions"] as Record<string, unknown>).length, 0);
 }
