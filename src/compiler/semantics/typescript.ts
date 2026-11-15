@@ -3551,12 +3551,6 @@ export interface TypeScriptFunction {
   captures?: string[];
   /** How many of the parameters are the arrow's own, after the captures. */
   written?: number;
-  /**
-   * The names in scope where the arrow was written. A call this closure writes
-   * of another closure can hand over that closure's captures only where they
-   * are names of this one's own scope.
-   */
-  scopeNames?: string[];
 }
 
 /** Whether the file's bigints reach past the machine word. */
@@ -15666,16 +15660,23 @@ class TypeScriptParser {
         const at = (fieldOf(binding, "captures") as string[]).indexOf(name);
         if (at < 0) continue;
         const boxed = (fieldOf(entry, "list") as boolean) ? ANY_TYPE : { kind: "slice" as const, of: element };
+        // The parameter that carries the name is the one renamed, and the
+        // binding is renamed with it: the captures and the leading parameters
+        // are the same values in the same order, so the two move together.
+        const liftedParams = fieldOf(lifted, "params") as { name: string; type: TypeExpr }[];
+        let renamed = false;
+        for (const param of liftedParams) {
+          if (String(fieldOf(param, "name")) !== name) continue;
+          setFieldOn(param, "name", box);
+          setFieldOn(param, "type", boxed);
+          renamed = true;
+          break;
+        }
+        if (!renamed) continue;
         const capturedNames = fieldOf(binding, "captures") as string[];
         const capturedTypes = fieldOf(binding, "captureTypes") as TypeExpr[];
         capturedNames[at] = box;
         capturedTypes[at] = boxed;
-        const liftedParams = fieldOf(lifted, "params") as { name: string; type: TypeExpr }[];
-        const param = liftedParams[at];
-        if (param !== undefined) {
-          setFieldOn(param, "name", box);
-          setFieldOn(param, "type", boxed);
-        }
         boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) });
       }
       this.arrowBoxes.delete(name);

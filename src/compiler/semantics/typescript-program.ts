@@ -1785,7 +1785,10 @@ class ProgramParser {
     const value = read();
     const queued = this.drainPending();
     this.pending = outer;
-    return [...queued, { kind: "result", value, line }];
+    const statements: ProgramStatement[] = [];
+    for (const one of queued) statements[statements.length] = one;
+    statements[statements.length] = { kind: "result", value, line };
+    return statements;
   }
 
   /**
@@ -1893,7 +1896,9 @@ class ProgramParser {
           this.fail(`instanceof names a class of this module, not "${name}"`, token);
         }
         const held = this.classOfValue(left);
-        const isOne = held !== null && (held === name || (name === "Error" && fieldOf(this.classTable, "classes").get(held)?.base === "Error"));
+        const classes = fieldOf(this.classTable, "classes") as Map<string, { base: string | null }>;
+        const base = held !== null && name === "Error" ? classes.get(held) : undefined;
+        const isOne = held !== null && (held === name || (name === "Error" && base !== undefined && String(fieldOf(base, "base")) === "Error"));
         left =
           held === null
             ? { k: "binary", op: "!==", left, right: { k: "null" } }
@@ -2567,11 +2572,12 @@ class ProgramParser {
         }
         const constructed = this.peek();
         if (constructed.kind === "ident" && classTableHas(this.classTable, fieldOf(constructed, "text"))) {
-          const info = this.classNamed(constructed.text) as ClassInfo;
+          const info = this.classNamed(String(fieldOf(constructed, "text"))) as ClassInfo;
           this.next();
           this.expect("(");
           const args = this.arguments();
-          const params = info.constructor?.params ?? [];
+          const constructedWith = fieldOf(info, "constructor") as ClassMethod | null;
+          const params = constructedWith === null ? [] : (fieldOf(constructedWith, "params") as ClassMethod["params"]);
           const method: ClassMethod = {
             name: "constructor",
             params,
@@ -2805,7 +2811,8 @@ class ProgramParser {
       );
       return this.nothing();
     }
-    return { k: "number", text: String(VIEW_BYTES[VIEWS[view.text] as string]) };
+    const viewName = String(fieldOf(view, "text"));
+    return { k: "number", text: String(VIEW_BYTES[VIEWS[viewName] as string]) };
   }
 
   /** `Math.max(a, b)` and the five other functions of a program. */

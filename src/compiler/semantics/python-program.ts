@@ -340,7 +340,7 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         const indexRight = fieldOf(index, "right");
         if (index.k === "number") {
           idx = Number(fieldOf(index, "text"));
-        } else if (index.k === "unary" && fieldOf(index, "op") === "-") {
+        } else if (index.k === "unary" && String(fieldOf(index, "op")) === "-") {
           const operand = fieldOf(index, "operand");
           const n = operand.k === "number" ? Number(fieldOf(operand, "text")) : 0;
           idx = fieldOf(sliced, "values").length - n;
@@ -844,16 +844,16 @@ function statement(one: PyStatement, bindings: Bindings): ProgramStatement {
     }
     case "storeElement": {
       const target = fieldOf(one, "target") as { k: "index"; base: PyValue; index: PyValue };
-      const base = target.base;
+      const base = fieldOf(target, "base") as PyValue;
       if (base.k !== "name") {
         throw frontendError('"a[i] = value" is not supported', "the object is a name the program holds");
       }
       return {
         kind: "elementAssign",
-        buffer: base.name,
-        index: programValue(target.index, bindings),
+        buffer: String(fieldOf(base, "name")),
+        index: programValue(fieldOf(target, "index") as PyValue, bindings),
         op: "=",
-        value: programValue(one.value, bindings),
+        value: programValue(fieldOf(one, "value") as PyValue, bindings),
         line: fieldOf(one, "line"),
       };
     }

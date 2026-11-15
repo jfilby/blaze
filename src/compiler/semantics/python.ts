@@ -2887,229 +2887,241 @@ function fillDefaultArguments(module: PyModule): PyModule {
  * holds the expression, and the walrus is replaced by a read of the name.
  */
 function expandWalrus(module: PyModule): PyModule {
-  type Expanded = { value: PyValue; pre: PyStatement[] };
-
-  const expandExpr = (value: PyValue, scope: Set<string>): Expanded => {
+  /** Appends the statements a value has to run before it, and answers the value. */
+  const expandExpr = (value: PyValue, scope: Set<string>, pre: PyStatement[]): PyValue => {
     switch (value.k) {
       case "walrus": {
-        const inner = expandExpr(value.value, scope);
-        const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
-        if (!scope.has(value.name)) scope.add(value.name);
-        return {
-          value: { k: "name", name: value.name },
-          pre: [...inner.pre, stmt],
-        };
+        const held = expandExpr(value.value, scope, pre);
+        const innerLine = fieldOf(value.value, "line");
+        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
+        const declared = scope.has(value.name);
+        const stmt: PyStatement = declared
+          ? { k: "assign", name: value.name, op: "=", value: held, line: walrusLine }
+          : { k: "declare", name: value.name, type: null, value: held, line: walrusLine };
+        if (!declared) scope.add(value.name);
+        pre[pre.length] = stmt;
+        return { k: "name", name: value.name };
       }
       case "binary": {
-        const L = expandExpr(value.left, scope);
-        const R = expandExpr(value.right, scope);
-        return { value: { ...value, left: L.value, right: R.value }, pre: [...L.pre, ...R.pre] };
+        const left = expandExpr(fieldOf(value, "left") as PyValue, scope, pre);
+        const right = expandExpr(fieldOf(value, "right") as PyValue, scope, pre);
+        return { ...value, left, right };
       }
-      case "unary": {
-        const O = expandExpr(value.operand, scope);
-        return { value: { ...value, operand: O.value }, pre: O.pre };
-      }
+      case "unary":
+        return { ...value, operand: expandExpr(fieldOf(value, "operand") as PyValue, scope, pre) };
       case "conditional": {
-        const C = expandExpr(value.condition, scope);
-        const T = expandExpr(value.then, scope);
-        const O = expandExpr(value.otherwise, scope);
-        return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...C.pre, ...T.pre, ...O.pre] };
+        const condition = expandExpr(fieldOf(value, "condition") as PyValue, scope, pre);
+        const then = expandExpr(fieldOf(value, "then") as PyValue, scope, pre);
+        const otherwise = expandExpr(fieldOf(value, "otherwise") as PyValue, scope, pre);
+        return { ...value, condition, then, otherwise };
       }
       case "index": {
-        const B = expandExpr(value.base, scope);
-        const I = expandExpr(value.index, scope);
-        return { value: { ...value, base: B.value, index: I.value }, pre: [...B.pre, ...I.pre] };
+        const base = expandExpr(fieldOf(value, "base") as PyValue, scope, pre);
+        const index = expandExpr(fieldOf(value, "index") as PyValue, scope, pre);
+        return { ...value, base, index };
       }
       case "slice": {
-        const B = expandExpr(value.base, scope);
-        const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start, scope);
-        const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop, scope);
-        const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step, scope);
-        return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...B.pre, ...S.pre, ...P.pre, ...E.pre] };
+        const base = expandExpr(fieldOf(value, "base") as PyValue, scope, pre);
+        const startValue = fieldOf(value, "start") as PyValue | null;
+        const stopValue = fieldOf(value, "stop") as PyValue | null;
+        const stepValue = fieldOf(value, "step") as PyValue | null;
+        const start = startValue === null ? null : expandExpr(startValue, scope, pre);
+        const stop = stopValue === null ? null : expandExpr(stopValue, scope, pre);
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, pre);
+        return { ...value, base, start, stop, step };
       }
-      case "list": {
-        const pres9Parts = value.items.map((item) => expandExpr(item, scope));
-        const items = pres9Parts.map((part) => part.value);
-        const pres9: PyStatement[] = [];
-        for (let at = 0; at < pres9Parts.length; at += 1) {
-          const part = pres9Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres9.push(part.pre[k] as PyStatement);
-        }
-        return { value: { ...value, items }, pre: pres9 };
-      }
+      case "list":
       case "set": {
-        const pres8Parts = value.items.map((item) => expandExpr(item, scope));
-        const items = pres8Parts.map((part) => part.value);
-        const pres8: PyStatement[] = [];
-        for (let at = 0; at < pres8Parts.length; at += 1) {
-          const part = pres8Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres8.push(part.pre[k] as PyStatement);
-        }
-        return { value: { ...value, items }, pre: pres8 };
+        const items: PyValue[] = [];
+        for (const one of fieldOf(value, "items") as PyValue[]) items[items.length] = expandExpr(one, scope, pre);
+        return { ...value, items };
       }
       case "membership": {
-        const V = expandExpr(value.value, scope);
-        const C = expandExpr(value.container, scope);
-        return { value: { ...value, value: V.value, container: C.value }, pre: [...V.pre, ...C.pre] };
+        const held = expandExpr(fieldOf(value, "value") as PyValue, scope, pre);
+        const container = expandExpr(fieldOf(value, "container") as PyValue, scope, pre);
+        return { ...value, value: held, container };
       }
       case "comprehension": {
-        const E = expandExpr(value.element, scope);
-        const I = expandExpr(value.iterable, scope);
-        const C = value.condition === null ? { value: null, pre: [] } : expandExpr(value.condition, scope);
-        return { value: { ...value, element: E.value, iterable: I.value, condition: C.value }, pre: [...E.pre, ...I.pre, ...C.pre] };
+        const element = expandExpr(fieldOf(value, "element") as PyValue, scope, pre);
+        const iterable = expandExpr(fieldOf(value, "iterable") as PyValue, scope, pre);
+        const conditionValue = fieldOf(value, "condition") as PyValue | null;
+        const condition = conditionValue === null ? null : expandExpr(conditionValue, scope, pre);
+        return { ...value, element, iterable, condition };
       }
       case "dict": {
-        const pres7Parts = value.entries.map((entry) => expandExpr(entry.value, scope));
-        const entries = value.entries.map((entry, at) => ({ ...entry, value: (pres7Parts[at] as Expanded).value }));
-        const pres7: PyStatement[] = [];
-        for (let at = 0; at < pres7Parts.length; at += 1) {
-          const part = pres7Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres7.push(part.pre[k] as PyStatement);
+        const entries: (typeof value.entries)[number][] = [];
+        for (const entry of fieldOf(value, "entries") as (typeof value.entries)[number][]) {
+          const entryValue = expandExpr(fieldOf(entry, "value") as PyValue, scope, pre);
+          const copy = structuredClone(entry) as (typeof value.entries)[number];
+          setFieldOn(copy, "value", entryValue);
+          entries[entries.length] = copy;
         }
-        return { value: { ...value, entries }, pre: pres7 };
+        return { ...value, entries };
       }
-      case "field": {
-        const B = expandExpr(value.base, scope);
-        return { value: { ...value, base: B.value }, pre: B.pre };
-      }
+      case "field":
+        return { ...value, base: expandExpr(fieldOf(value, "base") as PyValue, scope, pre) };
       case "call": {
-        const pres6Parts = value.args.map((arg) => expandExpr(arg, scope));
-        const args = pres6Parts.map((part) => part.value);
-        const pres6: PyStatement[] = [];
-        for (let at = 0; at < pres6Parts.length; at += 1) {
-          const part = pres6Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres6.push(part.pre[k] as PyStatement);
-        }
-        const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
-        return { value: { ...value, args, grid }, pre: pres6 };
+        const args: PyValue[] = [];
+        for (const one of fieldOf(value, "args") as PyValue[]) args[args.length] = expandExpr(one, scope, pre);
+        const gridValue = fieldOf(value, "grid") as PyValue | undefined;
+        const grid = gridValue === undefined ? undefined : expandExpr(gridValue, scope, pre);
+        return { ...value, args, grid };
       }
       case "lambda":
         // Walrus inside a lambda is not lifted (a lambda has no statement
         // list); leave the node as it is.
-        return { value, pre: [] };
+        return value;
       default:
-        return { value, pre: [] };
+        return value;
     }
   };
 
-  const expandStmt = (stmt: PyStatement, scope: Set<string>): PyStatement[] => {
+  const expandStmt = (stmt: PyStatement, scope: Set<string>, out: PyStatement[]): void => {
     switch (stmt.k) {
-      case "declare": {
-        const r = expandExpr(fieldOf(stmt, "value"), scope);
-        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
-      }
-      case "assign": {
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
-      }
+      case "declare":
+      case "call":
+        out[out.length] = { ...stmt, value: expandExpr(fieldOf(stmt, "value") as PyValue, scope, out) };
+        return;
+      case "assign":
+        out[out.length] = { ...stmt, value: expandExpr(fieldOf(stmt, "value") as PyValue, scope, out) };
+        return;
       case "storeElement": {
-        const t = expandExpr(stmt.target, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
-      }
-      case "storeSlice": {
-        const s = stmt.start === null ? { value: null, pre: [] } : expandExpr(stmt.start, scope);
-        const p = stmt.stop === null ? { value: null, pre: [] } : expandExpr(stmt.stop, scope);
-        const e = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...s.pre, ...p.pre, ...e.pre, ...v.pre, { ...stmt, start: s.value, stop: p.value, step: e.value, value: v.value }];
+        const target = expandExpr(fieldOf(stmt, "target") as PyValue, scope, out);
+        const value = expandExpr(fieldOf(stmt, "value") as PyValue, scope, out);
+        out[out.length] = { ...stmt, target, value };
+        return;
       }
       case "storeField": {
-        const t = expandExpr(stmt.target, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
+        const target = expandExpr(fieldOf(stmt, "target") as PyValue, scope, out);
+        const value = expandExpr(fieldOf(stmt, "value") as PyValue, scope, out);
+        out[out.length] = { ...stmt, target, value };
+        return;
+      }
+      case "storeSlice": {
+        const startValue = fieldOf(stmt, "start") as PyValue | null;
+        const stopValue = fieldOf(stmt, "stop") as PyValue | null;
+        const stepValue = fieldOf(stmt, "step") as PyValue | null;
+        const start = startValue === null ? null : expandExpr(startValue, scope, out);
+        const stop = stopValue === null ? null : expandExpr(stopValue, scope, out);
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, out);
+        const value = expandExpr(fieldOf(stmt, "value") as PyValue, scope, out);
+        out[out.length] = { ...stmt, start, stop, step, value };
+        return;
       }
       case "return": {
-        if (stmt.value === null) return [stmt];
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
+        const held = fieldOf(stmt, "value") as PyValue | null;
+        if (held === null) {
+          out[out.length] = stmt;
+          return;
+        }
+        out[out.length] = { ...stmt, value: expandExpr(held, scope, out) };
+        return;
       }
       case "if": {
-        const c = expandExpr(stmt.condition, scope);
-        const thenBody = stmt.then.flatMap((s) => expandStmt(s, scope));
-        const elseBody = stmt.otherwise.flatMap((s) => expandStmt(s, scope));
-        return [...c.pre, { ...stmt, condition: c.value, then: thenBody, otherwise: elseBody }];
+        const condition = expandExpr(fieldOf(stmt, "condition") as PyValue, scope, out);
+        const thenBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "then") as PyStatement[]) expandStmt(inner, scope, thenBody);
+        const otherwiseBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "otherwise") as PyStatement[]) expandStmt(inner, scope, otherwiseBody);
+        out[out.length] = { ...stmt, condition, then: thenBody, otherwise: otherwiseBody };
+        return;
       }
       case "while": {
-        const c = expandExpr(stmt.condition, scope);
-        const body = stmt.body.flatMap((s) => expandStmt(s, scope));
-        if (c.pre.length === 0) {
-          return [...c.pre, { ...stmt, condition: c.value, body }];
+        const conditionPre: PyStatement[] = [];
+        const condition = expandExpr(fieldOf(stmt, "condition") as PyValue, scope, conditionPre);
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        if (conditionPre.length === 0) {
+          out[out.length] = { ...stmt, condition, body };
+          return;
         }
         // A condition with side effects (such as a walrus) must be
         // re-evaluated every turn, so it cannot be lifted out of the loop.
         // Re-run its assignments and test it each turn, using a flag to leave
         // the loop when it turns false, since a `break` here would not be
         // carried to the right place.
-        const flag = `_walrus_cond_${stmt.line}`;
-        return [
-          { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line: stmt.line },
-          {
-            k: "while",
-            condition: { k: "name", name: flag },
-            body: [
-              ...c.pre,
-              {
-                k: "if",
-                condition: { k: "unary", op: "not", operand: c.value },
-                then: [{ k: "assign", name: flag, op: "=", value: { k: "boolean", value: false }, line: stmt.line }],
-                otherwise: body,
-                line: stmt.line,
-              },
-            ],
-            line: stmt.line,
-          },
-        ];
+        const line = Number(fieldOf(stmt, "line"));
+        const flag = `_walrus_cond_${line}`;
+        out[out.length] = { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line };
+        const turnBody: PyStatement[] = [];
+        for (const one of conditionPre) turnBody[turnBody.length] = one;
+        turnBody[turnBody.length] = {
+          k: "if",
+          condition: { k: "unary", op: "not", operand: condition },
+          then: [{ k: "assign", name: flag, op: "=", value: { k: "boolean", value: false }, line }],
+          otherwise: body,
+          line,
+        };
+        out[out.length] = {
+          k: "while",
+          condition: { k: "name", name: flag },
+          body: turnBody,
+          line,
+        };
+        return;
       }
       case "for": {
-        const f = expandExpr(stmt.from, scope);
-        const t = expandExpr(stmt.to, scope);
-        const s = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
-        const body = stmt.body.flatMap((s) => expandStmt(s, scope));
-        return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
+        const from = expandExpr(fieldOf(stmt, "from") as PyValue, scope, out);
+        const to = expandExpr(fieldOf(stmt, "to") as PyValue, scope, out);
+        const stepValue = fieldOf(stmt, "step") as PyValue | null;
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, out);
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        out[out.length] = { ...stmt, from, to, step, body };
+        return;
       }
       case "print": {
-        const pres5Parts = stmt.values.map((v) => expandExpr(v, scope));
-        const values = pres5Parts.map((part) => part.value);
-        const pres5: PyStatement[] = [];
-        for (let at = 0; at < pres5Parts.length; at += 1) {
-          const part = pres5Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres5.push(part.pre[k] as PyStatement);
-        }
-        return [...pres5, { ...stmt, values }];
-      }
-      case "call": {
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
+        const values: PyValue[] = [];
+        for (const one of fieldOf(stmt, "values") as PyValue[]) values[values.length] = expandExpr(one, scope, out);
+        out[out.length] = { ...stmt, values };
+        return;
       }
       case "function": {
-        const fnParams = (stmt as any).params.map((p: any) => p.name);
-        const fnScope = new Set([...scope, ...fnParams]);
-        return [{ ...stmt, body: stmt.body.flatMap((s: any) => expandStmt(s, fnScope)) }];
+        const fnParams = fieldOf(stmt, "params") as { name: string }[];
+        const fnScope: Set<string> = new Set();
+        for (const name of scope) fnScope.add(name);
+        for (const param of fnParams) fnScope.add(String(fieldOf(param, "name")));
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, fnScope, body);
+        out[out.length] = { ...stmt, body };
+        return;
       }
       case "try": {
-        return [{
-          ...stmt,
-          body: stmt.body.flatMap((s) => expandStmt(s, scope)),
-          catchBody: stmt.catchBody === null ? null : stmt.catchBody.flatMap((s) => expandStmt(s, scope)),
-          finallyBody: stmt.finallyBody === null ? null : stmt.finallyBody.flatMap((s) => expandStmt(s, scope)),
-        }];
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        const catchValue = fieldOf(stmt, "catchBody") as PyStatement[] | null;
+        let catchBody: PyStatement[] | null = null;
+        if (catchValue !== null) {
+          catchBody = [];
+          for (const inner of catchValue) expandStmt(inner, scope, catchBody);
+        }
+        const finallyValue = fieldOf(stmt, "finallyBody") as PyStatement[] | null;
+        let finallyBody: PyStatement[] | null = null;
+        if (finallyValue !== null) {
+          finallyBody = [];
+          for (const inner of finallyValue) expandStmt(inner, scope, finallyBody);
+        }
+        out[out.length] = { ...stmt, body, catchBody, finallyBody };
+        return;
       }
       default:
-        return [stmt];
+        out[out.length] = stmt;
+        return;
     }
   };
 
   const expandedFunctions: PyFunction[] = [];
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
+    const fnScope: Set<string> = new Set();
+    for (const param of fieldOf(fn, "params") as PyParam[]) fnScope.add(String(fieldOf(param, "name")));
+    const rewritten: PyStatement[] = [];
+    for (const st of fieldOf(fn, "body") as PyStatement[]) expandStmt(st, fnScope, rewritten);
     const copy = structuredClone(fn) as PyFunction;
-    setFieldOn(copy, "body", (fieldOf(fn, "body") as PyStatement[]).flatMap((st) => expandStmt(st, new Set((fieldOf(fn, "params") as PyParam[]).map((p) => String(fieldOf(p, "name")))))));
+    setFieldOn(copy, "body", rewritten);
     expandedFunctions[expandedFunctions.length] = copy;
   }
   const expandedBody: PyStatement[] = [];
-  for (const st of fieldOf(module, "body") as PyStatement[]) for (const one of expandStmt(st, new Set())) expandedBody[expandedBody.length] = one;
+  for (const st of fieldOf(module, "body") as PyStatement[]) expandStmt(st, new Set(), expandedBody);
   return withModuleBody(module, expandedFunctions, expandedBody);
 }
 
@@ -3124,270 +3136,276 @@ function expandWalrus(module: PyModule): PyModule {
  * for the refusal that follows.
  */
 function expandComprehensions(module: PyModule): PyModule {
-  type Expanded = { value: PyValue; pre: PyStatement[] };
-
-  const expandExpr = (value: PyValue, scope: Set<string>): Expanded => {
+  /** Appends the statements a value has to run before it, and answers the value. */
+  const expandExpr = (value: PyValue, scope: Set<string>, pre: PyStatement[]): PyValue => {
     switch (value.k) {
       case "comprehension": {
         // Determine the size and the item expression.
+        const iterable = fieldOf(value, "iterable") as PyValue;
+        const element = fieldOf(value, "element") as PyValue;
+        const target = String(fieldOf(value, "target"));
         let sizeExpr: PyValue | null = null;
-        let names: Map<string, PyType> = new Map();
-        let elementIsInt = false;
-        if (value.iterable.k === "call" && value.iterable.name === "range" && fieldOf(value.iterable, "args").length === 1) {
-          sizeExpr = fieldOf(value.iterable, "args")[0];
+        const names: Map<string, PyType> = new Map();
+        if (String(fieldOf(iterable, "k")) === "call" && String(fieldOf(iterable, "name")) === "range" && (fieldOf(iterable, "args") as PyValue[]).length === 1) {
+          sizeExpr = (fieldOf(iterable, "args") as PyValue[])[0];
           // item is int
-          names.set(value.target, "int");
-        } else if (value.iterable.k === "list") {
-          sizeExpr = { k: "number", text: String(fieldOf(value.iterable, "items").length), whole: true };
+          names.set(target, "int");
+        } else if (String(fieldOf(iterable, "k")) === "list") {
+          const iterableItems = fieldOf(iterable, "items") as PyValue[];
+          sizeExpr = { k: "number", text: String(iterableItems.length), whole: true };
           // item is list[i]
-          if (fieldOf(value.iterable, "items").length > 0 && fieldOf(value.iterable, "items")[0].k === "number" && fieldOf(value.iterable.items[0], "whole")) {
-            names.set(value.target, "int");
+          if (iterableItems.length > 0 && String(fieldOf(iterableItems[0], "k")) === "number" && fieldOf(iterableItems[0], "whole") === true) {
+            names.set(target, "int");
           } else {
-            names.set(value.target, "float");
+            names.set(target, "float");
           }
-        } else if (value.iterable.k === "name") {
-          sizeExpr = { k: "call", name: "len", args: [value.iterable] };
+        } else if (String(fieldOf(iterable, "k")) === "name") {
+          sizeExpr = { k: "call", name: "len", args: [iterable] };
           // assume list[int] -> int; list[float] -> float unknown, default float
-          names.set(value.target, "float");
+          names.set(target, "float");
         } else {
-          return { value, pre: [] }; // leave for refusal
+          return value; // leave for refusal
         }
-        if (value.condition !== null) {
+        if (fieldOf(value, "condition") !== null) {
           // Filtered comprehensions are not lifted (size unknown).
-          return { value, pre: [] };
+          return value;
         }
-        elementIsInt = typeOfValue(value.element, names) === "int";
-        const element: "i64" | "f64" = elementIsInt ? "i64" : "f64";
-        const temp = `_comp_${1}`;
+        const elementIsInt = typeOfValue(element, names) === "int";
+        const elementType: "i64" | "f64" = elementIsInt ? "i64" : "f64";
+        const temp = "_comp_1";
         const loopVar = "_ci";
         // item binding expression: for range, item = loopVar; for others, item = iterable[loopVar]
         let itemBinding: PyValue;
-        if (value.iterable.k === "call" && value.iterable.name === "range") {
+        if (String(fieldOf(iterable, "k")) === "call" && String(fieldOf(iterable, "name")) === "range") {
           itemBinding = { k: "name", name: loopVar };
-        } else if (value.iterable.k === "list") {
-          itemBinding = { k: "index", base: value.iterable, index: { k: "name", name: loopVar } };
         } else {
-          itemBinding = { k: "index", base: value.iterable, index: { k: "name", name: loopVar } };
+          itemBinding = { k: "index", base: iterable, index: { k: "name", name: loopVar } };
         }
-        const pre: PyStatement[] = [
-          { k: "declare", name: temp, type: null, value: { k: "sized", element, count: sizeExpr as PyValue }, line: 1 },
-          {
-            k: "for",
-            variable: loopVar,
-            from: { k: "number", text: "0", whole: true },
-            to: sizeExpr as PyValue,
-            step: null,
-            body: [
-              { k: "declare", name: value.target, type: null, value: itemBinding, line: 1 },
-              { k: "storeElement", target: { k: "index", base: { k: "name", name: temp }, index: { k: "name", name: loopVar } }, value: value.element, line: 1 },
-            ],
-            line: 1,
-          },
+        const sized = sizeExpr as PyValue;
+        pre[pre.length] = { k: "declare", name: temp, type: null, value: { k: "sized", element: elementType, count: sized }, line: 1 };
+        const loopBody: PyStatement[] = [
+          { k: "declare", name: target, type: null, value: itemBinding, line: 1 },
+          { k: "storeElement", target: { k: "index", base: { k: "name", name: temp }, index: { k: "name", name: loopVar } }, value: element, line: 1 },
         ];
-        return { value: { k: "name", name: temp }, pre };
+        pre[pre.length] = {
+          k: "for",
+          variable: loopVar,
+          from: { k: "number", text: "0", whole: true },
+          to: sized,
+          step: null,
+          body: loopBody,
+          line: 1,
+        };
+        return { k: "name", name: temp };
       }
       case "binary": {
-        const L = expandExpr(fieldOf(value, "left"), scope);
-        const R = expandExpr(fieldOf(value, "right"), scope);
-        return { value: { ...value, left: L.value, right: R.value }, pre: [...fieldOf(L, "pre"), ...fieldOf(R, "pre")] };
+        const left = expandExpr(fieldOf(value, "left") as PyValue, scope, pre);
+        const right = expandExpr(fieldOf(value, "right") as PyValue, scope, pre);
+        return { ...value, left, right };
       }
-      case "unary": {
-        const O = expandExpr(fieldOf(value, "operand"), scope);
-        return { value: { ...value, operand: O.value }, pre: fieldOf(O, "pre") };
-      }
+      case "unary":
+        return { ...value, operand: expandExpr(fieldOf(value, "operand") as PyValue, scope, pre) };
       case "conditional": {
-        const C = expandExpr(value.condition, scope);
-        const T = expandExpr(fieldOf(value, "then"), scope);
-        const O = expandExpr(value.otherwise, scope);
-        return { value: { ...value, condition: C.value, then: T.value, otherwise: O.value }, pre: [...fieldOf(C, "pre"), ...fieldOf(T, "pre"), ...fieldOf(O, "pre")] };
+        const condition = expandExpr(fieldOf(value, "condition") as PyValue, scope, pre);
+        const then = expandExpr(fieldOf(value, "then") as PyValue, scope, pre);
+        const otherwise = expandExpr(fieldOf(value, "otherwise") as PyValue, scope, pre);
+        return { ...value, condition, then, otherwise };
       }
       case "index": {
-        const B = expandExpr(fieldOf(value, "base"), scope);
-        const I = expandExpr(fieldOf(value, "index"), scope);
-        return { value: { ...value, base: B.value, index: I.value }, pre: [...fieldOf(B, "pre"), ...fieldOf(I, "pre")] };
+        const base = expandExpr(fieldOf(value, "base") as PyValue, scope, pre);
+        const index = expandExpr(fieldOf(value, "index") as PyValue, scope, pre);
+        return { ...value, base, index };
       }
       case "slice": {
-        const B = expandExpr(value.base, scope);
-        const S = value.start === null ? { value: null, pre: [] } : expandExpr(value.start, scope);
-        const P = value.stop === null ? { value: null, pre: [] } : expandExpr(value.stop, scope);
-        const E = value.step === null ? { value: null, pre: [] } : expandExpr(value.step, scope);
-        return { value: { ...value, base: B.value, start: S.value, stop: P.value, step: E.value }, pre: [...fieldOf(B, "pre"), ...fieldOf(S, "pre"), ...fieldOf(P, "pre"), ...fieldOf(E, "pre")] };
+        const base = expandExpr(fieldOf(value, "base") as PyValue, scope, pre);
+        const startValue = fieldOf(value, "start") as PyValue | null;
+        const stopValue = fieldOf(value, "stop") as PyValue | null;
+        const stepValue = fieldOf(value, "step") as PyValue | null;
+        const start = startValue === null ? null : expandExpr(startValue, scope, pre);
+        const stop = stopValue === null ? null : expandExpr(stopValue, scope, pre);
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, pre);
+        return { ...value, base, start, stop, step };
       }
       case "list": {
-        const pres4Parts = value.items.map((item) => expandExpr(item, scope));
-        const items = pres4Parts.map((part) => part.value);
-        const pres4: PyStatement[] = [];
-        for (let at = 0; at < pres4Parts.length; at += 1) {
-          const part = pres4Parts[at] as Expanded;
-          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres4.push(fieldOf(part, "pre")[k] as PyStatement);
-        }
-        return { value: { ...value, items }, pre: pres4 };
+        const items: PyValue[] = [];
+        for (const one of fieldOf(value, "items") as PyValue[]) items[items.length] = expandExpr(one, scope, pre);
+        return { ...value, items };
       }
       case "membership": {
-        const V = expandExpr(value.value, scope);
-        const C = expandExpr(value.container, scope);
-        return { value: { ...value, value: V.value, container: C.value }, pre: [...fieldOf(V, "pre"), ...fieldOf(C, "pre")] };
+        const held = expandExpr(fieldOf(value, "value") as PyValue, scope, pre);
+        const container = expandExpr(fieldOf(value, "container") as PyValue, scope, pre);
+        return { ...value, value: held, container };
       }
       case "dict": {
-        const pres3Parts = value.entries.map((entry) => expandExpr(entry.value, scope));
-        const entries = value.entries.map((entry, at) => ({ ...entry, value: (pres3Parts[at] as Expanded).value }));
-        const pres3: PyStatement[] = [];
-        for (let at = 0; at < pres3Parts.length; at += 1) {
-          const part = pres3Parts[at] as Expanded;
-          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres3.push(fieldOf(part, "pre")[k] as PyStatement);
+        const entries: (typeof value.entries)[number][] = [];
+        for (const entry of fieldOf(value, "entries") as (typeof value.entries)[number][]) {
+          const entryValue = expandExpr(fieldOf(entry, "value") as PyValue, scope, pre);
+          const copy = structuredClone(entry) as (typeof value.entries)[number];
+          setFieldOn(copy, "value", entryValue);
+          entries[entries.length] = copy;
         }
-        return { value: { ...value, entries }, pre: pres3 };
+        return { ...value, entries };
       }
-      case "field": {
-        const B = expandExpr(value.base, scope);
-        return { value: { ...value, base: B.value }, pre: fieldOf(B, "pre") };
-      }
+      case "field":
+        return { ...value, base: expandExpr(fieldOf(value, "base") as PyValue, scope, pre) };
       case "call": {
-        const pres2Parts = value.args.map((arg) => expandExpr(arg, scope));
-        const args = pres2Parts.map((part) => part.value);
-        const pres2: PyStatement[] = [];
-        for (let at = 0; at < pres2Parts.length; at += 1) {
-          const part = pres2Parts[at] as Expanded;
-          for (let k = 0; k < fieldOf(part, "pre").length; k += 1) pres2.push(fieldOf(part, "pre")[k] as PyStatement);
-        }
-        const grid = value.grid === undefined ? undefined : expandExpr(value.grid, scope).value;
-        return { value: { ...value, args, grid }, pre: pres2 };
+        const args: PyValue[] = [];
+        for (const one of fieldOf(value, "args") as PyValue[]) args[args.length] = expandExpr(one, scope, pre);
+        const gridValue = fieldOf(value, "grid") as PyValue | undefined;
+        const grid = gridValue === undefined ? undefined : expandExpr(gridValue, scope, pre);
+        return { ...value, args, grid };
       }
       case "walrus": {
-        const inner = expandExpr(value.value, scope);
-        const stmt: PyStatement = scope.has(value.name)
-          ? { k: "assign", name: value.name, op: "=", value: inner.value, line: (value.value as any)?.line ?? 1 }
-          : { k: "declare", name: value.name, type: null, value: inner.value, line: (value.value as any)?.line ?? 1 };
-        if (!scope.has(value.name)) scope.add(value.name);
-        return { value: { k: "name", name: value.name }, pre: [...inner.pre, stmt] };
+        const held = expandExpr(value.value, scope, pre);
+        const innerLine = fieldOf(value.value, "line");
+        const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
+        const declared = scope.has(value.name);
+        const stmt: PyStatement = declared
+          ? { k: "assign", name: value.name, op: "=", value: held, line: walrusLine }
+          : { k: "declare", name: value.name, type: null, value: held, line: walrusLine };
+        if (!declared) scope.add(value.name);
+        pre[pre.length] = stmt;
+        return { k: "name", name: value.name };
       }
       default:
-        return { value, pre: [] };
+        return value;
     }
   };
 
-  const expandStmt = (stmt: PyStatement, scope: Set<string>): PyStatement[] => {
+  const expandStmt = (stmt: PyStatement, scope: Set<string>, out: PyStatement[]): void => {
     switch (stmt.k) {
-      case "declare": {
-        const r = expandExpr(fieldOf(stmt, "value"), scope);
+      case "declare":
+        out[out.length] = { ...stmt, value: expandExpr(fieldOf(stmt, "value") as PyValue, scope, out) };
         if (!scope.has(stmt.name)) scope.add(stmt.name);
-        return [...fieldOf(r, "pre"), { ...stmt, value: r.value }];
-      }
-      case "assign": {
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
-      }
-      case "storeElement": {
-        const t = expandExpr(stmt.target, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
+        return;
+      case "assign":
+      case "call":
+        out[out.length] = { ...stmt, value: expandExpr(fieldOf(stmt, "value") as PyValue, scope, out) };
+        return;
+      case "storeElement":
+      case "storeField": {
+        const target = expandExpr(fieldOf(stmt, "target") as PyValue, scope, out);
+        const value = expandExpr(fieldOf(stmt, "value") as PyValue, scope, out);
+        out[out.length] = { ...stmt, target, value };
+        return;
       }
       case "storeSlice": {
-        const s = stmt.start === null ? { value: null, pre: [] } : expandExpr(stmt.start, scope);
-        const p = stmt.stop === null ? { value: null, pre: [] } : expandExpr(stmt.stop, scope);
-        const e = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...s.pre, ...p.pre, ...e.pre, ...v.pre, { ...stmt, start: s.value, stop: p.value, step: e.value, value: v.value }];
-      }
-      case "storeField": {
-        const t = expandExpr(stmt.target, scope);
-        const v = expandExpr(stmt.value, scope);
-        return [...t.pre, ...v.pre, { ...stmt, target: t.value, value: v.value }];
+        const startValue = fieldOf(stmt, "start") as PyValue | null;
+        const stopValue = fieldOf(stmt, "stop") as PyValue | null;
+        const stepValue = fieldOf(stmt, "step") as PyValue | null;
+        const start = startValue === null ? null : expandExpr(startValue, scope, out);
+        const stop = stopValue === null ? null : expandExpr(stopValue, scope, out);
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, out);
+        const value = expandExpr(fieldOf(stmt, "value") as PyValue, scope, out);
+        out[out.length] = { ...stmt, start, stop, step, value };
+        return;
       }
       case "return": {
-        if (stmt.value === null) return [stmt];
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
+        const held = fieldOf(stmt, "value") as PyValue | null;
+        if (held === null) {
+          out[out.length] = stmt;
+          return;
+        }
+        out[out.length] = { ...stmt, value: expandExpr(held, scope, out) };
+        return;
       }
       case "if": {
-        const c = expandExpr(stmt.condition, scope);
-        const thenBody = stmt.then.flatMap((s) => expandStmt(s, scope));
-        const elseBody = stmt.otherwise.flatMap((s) => expandStmt(s, scope));
-        return [...c.pre, { ...stmt, condition: c.value, then: thenBody, otherwise: elseBody }];
+        const condition = expandExpr(fieldOf(stmt, "condition") as PyValue, scope, out);
+        const thenBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "then") as PyStatement[]) expandStmt(inner, scope, thenBody);
+        const otherwiseBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "otherwise") as PyStatement[]) expandStmt(inner, scope, otherwiseBody);
+        out[out.length] = { ...stmt, condition, then: thenBody, otherwise: otherwiseBody };
+        return;
       }
       case "while": {
-        const c = expandExpr(stmt.condition, scope);
-        const body = stmt.body.flatMap((s) => expandStmt(s, scope));
-        if (c.pre.length === 0) {
-          return [...c.pre, { ...stmt, condition: c.value, body }];
+        const conditionPre: PyStatement[] = [];
+        const condition = expandExpr(fieldOf(stmt, "condition") as PyValue, scope, conditionPre);
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        if (conditionPre.length === 0) {
+          out[out.length] = { ...stmt, condition, body };
+          return;
         }
-        const flag = `_walrus_cond_${stmt.line}`;
-        return [
-          { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line: stmt.line },
-          {
-            k: "while",
-            condition: { k: "name", name: flag },
-            body: [
-              ...c.pre,
-              {
-                k: "if",
-                condition: { k: "unary", op: "not", operand: c.value },
-                then: [{ k: "assign", name: flag, op: "=", value: { k: "boolean", value: false }, line: stmt.line }],
-                otherwise: body,
-                line: stmt.line,
-              },
-            ],
-            line: stmt.line,
-          },
-        ];
+        const line = Number(fieldOf(stmt, "line"));
+        const flag = `_walrus_cond_${line}`;
+        out[out.length] = { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line };
+        const turnBody: PyStatement[] = [];
+        for (const one of conditionPre) turnBody[turnBody.length] = one;
+        turnBody[turnBody.length] = {
+          k: "if",
+          condition: { k: "unary", op: "not", operand: condition },
+          then: [{ k: "assign", name: flag, op: "=", value: { k: "boolean", value: false }, line }],
+          otherwise: body,
+          line,
+        };
+        out[out.length] = { k: "while", condition: { k: "name", name: flag }, body: turnBody, line };
+        return;
       }
       case "for": {
-        const f = expandExpr(stmt.from, scope);
-        const t = expandExpr(stmt.to, scope);
-        const s = stmt.step === null ? { value: null, pre: [] } : expandExpr(stmt.step, scope);
-        const body = stmt.body.flatMap((st) => expandStmt(st, scope));
-        return [...f.pre, ...t.pre, ...s.pre, { ...stmt, from: f.value, to: t.value, step: s.value, body }];
+        const from = expandExpr(fieldOf(stmt, "from") as PyValue, scope, out);
+        const to = expandExpr(fieldOf(stmt, "to") as PyValue, scope, out);
+        const stepValue = fieldOf(stmt, "step") as PyValue | null;
+        const step = stepValue === null ? null : expandExpr(stepValue, scope, out);
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        out[out.length] = { ...stmt, from, to, step, body };
+        return;
       }
       case "print": {
-        const pres1Parts = stmt.values.map((v) => expandExpr(v, scope));
-        const values = pres1Parts.map((part) => part.value);
-        const pres1: PyStatement[] = [];
-        for (let at = 0; at < pres1Parts.length; at += 1) {
-          const part = pres1Parts[at] as Expanded;
-          for (let k = 0; k < part.pre.length; k += 1) pres1.push(part.pre[k] as PyStatement);
-        }
-        return [...pres1, { ...stmt, values }];
-      }
-      case "call": {
-        const r = expandExpr(stmt.value, scope);
-        return [...r.pre, { ...stmt, value: r.value }];
+        const values: PyValue[] = [];
+        for (const one of fieldOf(stmt, "values") as PyValue[]) values[values.length] = expandExpr(one, scope, out);
+        out[out.length] = { ...stmt, values };
+        return;
       }
       case "function": {
-        const fnParams = (stmt as any).params.map((p: any) => p.name);
-        const fnScope = new Set([...scope, ...fnParams]);
-        return [{ ...stmt, body: stmt.body.flatMap((s: any) => expandStmt(s, fnScope)) }];
+        const fnScope: Set<string> = new Set();
+        for (const name of scope) fnScope.add(name);
+        for (const param of fieldOf(stmt, "params") as { name: string }[]) fnScope.add(String(fieldOf(param, "name")));
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, fnScope, body);
+        out[out.length] = { ...stmt, body };
+        return;
       }
       case "try": {
-        return [{
-          ...stmt,
-          body: stmt.body.flatMap((s) => expandStmt(s, scope)),
-          catchBody: stmt.catchBody === null ? null : stmt.catchBody.flatMap((s) => expandStmt(s, scope)),
-          finallyBody: stmt.finallyBody === null ? null : stmt.finallyBody.flatMap((s) => expandStmt(s, scope)),
-        }];
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) expandStmt(inner, scope, body);
+        const catchValue = fieldOf(stmt, "catchBody") as PyStatement[] | null;
+        let catchBody: PyStatement[] | null = null;
+        if (catchValue !== null) {
+          catchBody = [];
+          for (const inner of catchValue) expandStmt(inner, scope, catchBody);
+        }
+        const finallyValue = fieldOf(stmt, "finallyBody") as PyStatement[] | null;
+        let finallyBody: PyStatement[] | null = null;
+        if (finallyValue !== null) {
+          finallyBody = [];
+          for (const inner of finallyValue) expandStmt(inner, scope, finallyBody);
+        }
+        out[out.length] = { ...stmt, body, catchBody, finallyBody };
+        return;
       }
       default:
-        return [stmt];
+        out[out.length] = stmt;
+        return;
     }
   };
 
   const expandedFunctions: PyFunction[] = [];
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
-    const fnScope = new Set<string>((fieldOf(fn, "params") as PyParam[]).map((p) => String(fieldOf(p, "name"))));
+    const fnScope: Set<string> = new Set();
+    for (const param of fieldOf(fn, "params") as PyParam[]) fnScope.add(String(fieldOf(param, "name")));
     const rewritten: PyStatement[] = [];
-    for (const st of fieldOf(fn, "body") as PyStatement[]) for (const one of expandStmt(st, fnScope)) rewritten[rewritten.length] = one;
+    for (const st of fieldOf(fn, "body") as PyStatement[]) expandStmt(st, fnScope, rewritten);
     const copy = structuredClone(fn) as PyFunction;
     setFieldOn(copy, "body", rewritten);
     expandedFunctions[expandedFunctions.length] = copy;
   }
   const expandedBody: PyStatement[] = [];
-  for (const st of fieldOf(module, "body") as PyStatement[]) for (const one of expandStmt(st, new Set())) expandedBody[expandedBody.length] = one;
+  for (const st of fieldOf(module, "body") as PyStatement[]) expandStmt(st, new Set(), expandedBody);
   return withModuleBody(module, expandedFunctions, expandedBody);
 }
 
-/**
- * Packs the trailing arguments of a call to a function with `*args` into a
- * single list, so the function receives them the way its parameter declares.
- */
 function packRestArguments(module: PyModule): PyModule {
   const restIndex = new Map<string, number>();
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
