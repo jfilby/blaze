@@ -1175,11 +1175,11 @@ function valueTypeProblems(prefix: string, value: SemanticValue, context: Contex
       if (!isBoolean(fieldOf(value, "type") as SemanticType)) {
         problems.push(`${prefix}a comparison is written as a ${typeText(fieldOf(value, "type") as SemanticType)}`);
       }
-      if (!comparableTo(fieldOf(value, "left") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type)) {
-        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "left") as SemanticValue).type)} as a ${typeText((fieldOf(value, "operand") as SemanticValue).type)}`);
+      if (!comparableTo(fieldOf(value, "left") as SemanticValue, fieldOf(value, "operand") as SemanticType)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "left") as SemanticValue).type)} as a ${typeText(fieldOf(value, "operand") as SemanticType)}`);
       }
-      if (!comparableTo(fieldOf(value, "right") as SemanticValue, (fieldOf(value, "operand") as SemanticValue).type)) {
-        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "right") as SemanticValue).type)} as a ${typeText((fieldOf(value, "operand") as SemanticValue).type)}`);
+      if (!comparableTo(fieldOf(value, "right") as SemanticValue, fieldOf(value, "operand") as SemanticType)) {
+        problems.push(`${prefix}${String(fieldOf(value, "op"))} compares a ${typeText((fieldOf(value, "right") as SemanticValue).type)} as a ${typeText(fieldOf(value, "operand") as SemanticType)}`);
       }
       // A wide number is compared by the kernel, over two of them. The operand
       // is what the comparison is read at, so a wide number beside an operand

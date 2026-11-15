@@ -36,7 +36,7 @@
  * failed build is as inspectable as a successful one.
  */
 
-import { existsSync, readFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdirEntries, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
+import { existsSync, readFileSync, copyFile, hostWriteError, hostWriteOut, hostSetExitCode, mkdir, readdir, readFile, rename, writeFile, basename, basenameSuffix, dirname, extname, hostEnvironment, hostPlatform, join, relative, resolveFrom, isDirectoryPath } from "./core/platform.ts";
 import { createBackend, describeProviderStop, quoteReply, type AnswerDump, type PromptDump, type ProviderStop } from "./ai/backend.ts";
 import { parse as parseToml } from "#host/toml";
 import { normalizeOptimize, parseContract, type ParsedContract } from "./semantics/contract.ts";
@@ -515,11 +515,16 @@ const STORE_HASH_LENGTH = 12;
  */
 async function storedPaths(store: JsonStore, root: string, project: string): Promise<ProjectPaths> {
   const prefix = `${project}-`;
-  const entries = await readdirEntries(join(root, "projects")).catch(() => []);
-  const names = entries.map((entry) => String((entry as unknown as Record<string, unknown>)["name"]));
-  const found = names.filter(
-    (entry) => entry.startsWith(prefix) && entry.length === prefix.length + STORE_HASH_LENGTH,
-  );
+  let names: string[] = [];
+  try {
+    names = await readdir(join(root, "projects"));
+  } catch {
+    names = [];
+  }
+  const found: string[] = [];
+  for (const entry of names) {
+    if (entry.startsWith(prefix) && entry.length === prefix.length + STORE_HASH_LENGTH) found[found.length] = entry;
+  }
   if (found.length === 0) return projectPaths(project, project);
   // More than one is two projects with the same name and different paths, which
   // a name alone cannot tell apart. The one that wrote its record last is the one
@@ -3261,9 +3266,17 @@ export async function inspectProject(project: string, cwd: string): Promise<Buil
 export async function listProjects(cwd: string): Promise<string[]> {
   const root = join(cwd, STATE_DIRECTORY);
   const projectsRoot = join(root, "projects");
-  const entries = await readdirEntries(projectsRoot).catch(() => []);
-  const names = entries.map((entry) => String((entry as unknown as Record<string, unknown>)["name"]));
-  return names.filter((name) => isDirectoryPath(join(projectsRoot, name)));
+  let names: string[] = [];
+  try {
+    names = await readdir(projectsRoot);
+  } catch {
+    names = [];
+  }
+  const found: string[] = [];
+  for (const name of names) {
+    if (isDirectoryPath(join(projectsRoot, name))) found[found.length] = name;
+  }
+  return found;
 }
 
 /** The lines `projects` prints, with no empty list to read in the program. */
