@@ -1998,9 +1998,10 @@ function evaluatedOnceProblems(tree: Tree): string[] {
   const problems: string[] = [];
   const decide = (prefix: string, root: SemanticValue): void => {
     walked(root, (inner) => {
-      if (inner.k !== "logical" && inner.k !== "coalesce") return;
-      if (!hasCall(inner.left)) return;
+      const kind = String(fieldOf(inner, "k"));
+      if (kind !== "logical" && kind !== "coalesce") return;
       const left = fieldOf(inner, "left") as SemanticValue;
+      if (!hasCall(left)) return;
       const callee = left.k === "call" ? String(fieldOf(left, "callee")) : "a function";
       problems.push(`${prefix}${inner.k} decides on an arm that calls ${callee}, which is written twice`);
     });

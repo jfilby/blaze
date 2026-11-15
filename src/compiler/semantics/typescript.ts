@@ -4555,6 +4555,25 @@ class TypeScriptParser {
    * into the module's type table under a name derived from its field names, so
    * the layout pass lays it out and every read of the annotation names it.
    */
+  /** A contract type as the TypeScript annotation a field is written with. */
+  private annotationText(type: TypeExpr): string {
+    const kind = String(fieldOf(type, "kind"));
+    if (kind === "text") return "string";
+    if (kind === "void") return "void";
+    if (kind === "primitive") {
+      const name = String(fieldOf(type, "name"));
+      if (name === "bool") return "boolean";
+      if (name.startsWith("f") || name.startsWith("i") || name.startsWith("u")) return "number";
+      return name;
+    }
+    if (kind === "ref") {
+      const name = fieldOf(type, "name") as string | undefined;
+      return name === undefined ? "any" : name.split("__")[0];
+    }
+    if (kind === "slice" || kind === "array") return `${this.annotationText(fieldOf(type, "of") as TypeExpr)}[]`;
+    return "any";
+  }
+
   private inlineRecordName(shape: ResolvedType, line: number): string | null {
     if (shape.kind !== "record" || fieldOf(shape, "index") !== null || fieldOf(shape, "arms") !== undefined) return null;
     const fields = fieldOf(shape, "fields") as Map<string, ResolvedField>;
@@ -4566,7 +4585,7 @@ class TypeScriptParser {
       const type = this.typeExprOfShape(fieldOf(field, "type") as ResolvedType);
       declaredFields.set(fieldName, {
         name: fieldName,
-        typeName: typeToString(type),
+        typeName: this.annotationText(type),
         optional: fieldOf(field, "optional") === true,
         line,
       });
@@ -4577,11 +4596,12 @@ class TypeScriptParser {
     for (;;) {
       const existing = this.typeTable.declarations.get(name);
       if (existing === undefined) break;
-      let same = existing.kind === "interface" && existing.fields.size === declaredFields.size;
+      const existingFields = fieldOf(existing, "fields") as ReadonlyMap<string, TypeField>;
+      let same = String(fieldOf(existing, "kind")) === "interface" && existingFields.size === declaredFields.size;
       if (same) {
         for (const [fieldName, field] of declaredFields) {
-          const other = existing.fields.get(fieldName);
-          if (other === undefined || other.typeName !== field.typeName) {
+          const other = existingFields.get(fieldName);
+          if (other === undefined || fieldOf(other, "typeName") !== fieldOf(field, "typeName")) {
             same = false;
             break;
           }
@@ -5507,9 +5527,10 @@ class TypeScriptParser {
       }
     }
     for (const param of params) {
-      if (!param.property || seen.has(param.name)) continue;
-      seen.add(param.name);
-      fields.push({ name: param.name, typeName: param.typeName, initStart: -1, initEnd: -1, line: param.line });
+      const paramName = String(fieldOf(param, "name"));
+      if (fieldOf(param, "property") !== true || seen.has(paramName)) continue;
+      seen.add(paramName);
+      fields.push({ name: paramName, typeName: String(fieldOf(param, "typeName")), initStart: -1, initEnd: -1, line: Number(fieldOf(param, "line")) });
     }
     // The one base a class may extend is `Error`, and the one field it brings
     // is the message `super(...)` writes and a reader of the error reads.
@@ -8530,10 +8551,10 @@ class TypeScriptParser {
     // `Omit<Full, "c">` is the fields of `Full` without one, and a read of them
     // is a read through `Full`'s layout. The declaration the utility starts
     // from is the layout its fields are read at.
-    if (first.text === "Omit" || first.text === "Pick" || first.text === "Partial" || first.text === "Required" || first.text === "Readonly") {
+    if (first.text === "Omit" || first.text === "Pick" || first.text === "Partial" || first.text === "Required" || first.text === "Readonly" || first.text === "Extract" || first.text === "Exclude") {
       try {
         const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
-        if (shape.kind === "record" && fieldOf(shape, "arms") === undefined) {
+        if (shape.kind === "record") {
           for (let at = from + 1; at < end; at += 1) {
             const argument = this.tokens[at]?.text;
             if (this.tokens[at]?.kind !== "ident" || argument === undefined) continue;
@@ -14663,16 +14684,17 @@ class TypeScriptParser {
           replace(made);
           continue;
         }
+        const restElement = fieldOf(variadic, "element") as TypeExpr;
         const rest: Expression = {
           k: "buffer",
-          element: typeToString(variadic.element),
-          values: args.slice(variadic.fixed),
+          element: typeToString(restElement),
+          values: args.slice(Number(fieldOf(variadic, "fixed"))),
         };
-        this.expressionTypes.set(rest, { kind: "slice", of: variadic.element });
+        this.expressionTypes.set(rest, { kind: "slice", of: restElement });
         const made: Expression = {
           k: "call",
           name: this.calledName(target.name),
-          args: [...args.slice(0, variadic.fixed), rest],
+          args: [...args.slice(0, Number(fieldOf(variadic, "fixed"))), rest],
         };
         if (target.name === String(fieldOf(this, "arrowDeclared") ?? "")) this.arrowSelfCalls.push(made);
         replace(made);
@@ -24477,7 +24499,8 @@ class BodyAnalysis {
    */
   run(): { result: string | null; accesses: AccessRange[] } {
     try {
-      for (const statement of this.declaration.body) this.execute(statement, null);
+      const statements = fieldOf(this.declaration, "body") as Statement[];
+      for (const statement of statements) this.execute(statement, null);
     } catch (error) {
       if (!(error instanceof Uncontractable)) throw error;
       return { result: null, accesses: (fieldOf(this, "accesses") as AccessRange[]) };
@@ -25490,7 +25513,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
       // expression is a range in that file's text. The shape it was exported
       // at crosses the link; the range does not, because reading it against
       // this file's tokens reads a range this file does not have.
-      if ((constant as { constructed?: boolean }).constructed === true) continue;
+      if (String(fieldOf(constant, "constructed")) === "true") continue;
       scanned.constants.set(name, constant);
     }
   }
