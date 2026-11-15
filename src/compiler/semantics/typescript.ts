@@ -1982,7 +1982,7 @@ function callsRewritten<T>(node: T, source: string, target: string, captures: re
     const call = node as { k?: unknown; name?: unknown; args?: unknown };
     const callArgs = fieldOf(call, "args") as Expression[] | undefined;
     const isCall = String(fieldOf(call, "k")) === "call";
-    if (isCall && call.name === source && Array.isArray(callArgs)) {
+    if (isCall && String(fieldOf(call, "name")) === source && Array.isArray(callArgs)) {
       const written: Expression[] = [];
       for (const name of captures) written.push({ k: "ident", name });
       for (const argument of callArgs as Expression[]) written.push(argument);
@@ -2604,23 +2604,26 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
     }
     case "while":
     case "doWhile":
-      setFieldOn(statement, "condition", boxExpression(statement.condition, name, box));
-      boxBlock(statement.body, name, box);
+      setFieldOn(statement, "condition", boxExpression(fieldOf(statement, "condition") as Expression, name, box));
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
       return statement;
     case "loop":
-      setFieldOn(statement, "from", boxExpression(statement.from, name, box));
-      setFieldOn(statement, "to", boxExpression(statement.to, name, box));
-      setFieldOn(statement, "step", statement.step === null ? null : boxExpression(statement.step, name, box));
-      boxBlock(statement.body, name, box);
+      setFieldOn(statement, "from", boxExpression(fieldOf(statement, "from") as Expression, name, box));
+      setFieldOn(statement, "to", boxExpression(fieldOf(statement, "to") as Expression, name, box));
+      const step = fieldOf(statement, "step") as Expression | null;
+      setFieldOn(statement, "step", step === null ? null : boxExpression(step, name, box));
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
       return statement;
     case "forOf":
-      setFieldOn(statement, "of", String(fieldOf(statement, "of")) === name && !(fieldOf(box, "list") as boolean) ? String(fieldOf(box, "name")) : statement.of);
-      boxBlock(statement.body, name, box);
+      setFieldOn(statement, "of", String(fieldOf(statement, "of")) === name && !(fieldOf(box, "list") as boolean) ? String(fieldOf(box, "name")) : fieldOf(statement, "of"));
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
       return statement;
     case "try":
-      boxBlock(statement.body, name, box);
-      if (statement.catchBody !== null) boxBlock(statement.catchBody, name, box);
-      if (statement.finallyBody !== null) boxBlock(statement.finallyBody, name, box);
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
+      const caught = fieldOf(statement, "catchBody") as Statement[] | null;
+      if (caught !== null) boxBlock(caught, name, box);
+      const final = fieldOf(statement, "finallyBody") as Statement[] | null;
+      if (final !== null) boxBlock(final, name, box);
       return statement;
     case "break":
     case "continue":
@@ -12868,7 +12871,7 @@ class TypeScriptParser {
             (first.k === "object" && firstFields !== undefined && firstFields.length === 0) ||
             // An object literal written at a `Record` is the empty dictionary
             // the literal's type names: the allocation writes no entry.
-            (first.k === "call" && first.name === "blaze_rt_dict_new" && first.args.length === 0)
+            (first.k === "call" && first.name === "blaze_rt_dict_new" && (fieldOf(first, "args") as Expression[]).length === 0)
           );
           if (
             first !== undefined &&
@@ -12923,7 +12926,8 @@ class TypeScriptParser {
             // literal of this body wrote cannot grow, and is refused below.
             const added: { field: string; type: TypeExpr }[] = [];
             let widened = targetShape;
-            for (let at = 1; at < args.length && usable; at += 1) {
+            let at = 1;
+            while (at < args.length && usable) {
               const source = args[at] as Expression;
               const shape = this.shapeOf(source);
               if (shape === null || shape.kind !== "record" || shape.index !== null) {
@@ -15393,6 +15397,17 @@ class TypeScriptParser {
       (capture) => !params.some((param) => param.name === capture) && findDeclaration(body, capture) === null,
     );
     const binding = this.liftArrow(liftedName, params, returns, body, captures.captures, line);
+    // An arrow a declaration binds calls itself by the name it was written
+    // under, and the function it became takes the values it captured in front
+    // of its own. The calls were read before the values were known — and a box
+    // is made after the arrow's body is read — so every call of that name is
+    // renamed here, once the captures are the ones the lifted function takes.
+    if (declared !== null) {
+      const lifted = this.liftedArrows.get(binding.function);
+      if (lifted !== undefined) {
+        setFieldOn(lifted, "body", callsRewritten(fieldOf(lifted, "body") as Statement[], declared, binding.function, binding.captures));
+      }
+    }
     // The shape the arrow's declaration writes is what a call of it answers,
     // beside the type the contract can spell. An arrow that writes no
     // declaration answers the shape its body's one result wrote.
@@ -15543,7 +15558,7 @@ class TypeScriptParser {
           setFieldOn(param, "name", box);
           setFieldOn(param, "type", boxed);
         }
-        boxStatements(lifted.body, name, { name: box, list: entry.list });
+        boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) });
       }
       this.arrowBoxes.delete(name);
     }
@@ -24598,13 +24613,13 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // of the element the annotation names.
   const linkedValueShapes = fieldOfOptional(context, "valueShapes") as ReadonlyMap<string, ResolvedType> | undefined;
   if (linkedValueShapes !== undefined) parser.importedValueShapes = linkedValueShapes;
-  const linkedFunctions = (context as { functions?: ReadonlyMap<string, ImportedFunction> } | undefined)?.functions;
+  const linkedFunctions = fieldOfOptional(context, "functions") as ReadonlyMap<string, ImportedFunction> | undefined;
   if (linkedFunctions !== undefined) {
     for (const [linked, signature] of linkedFunctions) parser.seedFunction(linked, signature);
   }
   // The read the graph makes after binding says every name its imports bind;
   // a read that stands alone waits for a link that may never come.
-  parser.linked = (context as { linked?: boolean } | undefined)?.linked === true;
+  setFieldOn(parser, "linked", fieldOfOptional(context, "linked") === true);
   const analysis = parser.parseModule(path, entry);
   const stateGetters = parser.materializeStateGetters();
   if (stateGetters.length > 0) analysis.functions.push(...stateGetters);

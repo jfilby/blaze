@@ -2,6 +2,12 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** Whether the program's class table names a class, read without a method on a field read. */
+function classTableHas(table: unknown, name: unknown): boolean {
+  const names = fieldOf(table, "names") as Set<string>;
+  return names.has(String(name));
+}
+
 /**
  * Frontend: the statements a TypeScript module runs.
  *
@@ -933,7 +939,7 @@ class ProgramParser {
     let annotationClass: string | null = null;
     if (this.accept(":")) {
       const annotation = this.peek();
-      if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) annotationClass = annotation.text;
+      if (annotation.kind === "ident" && classTableHas(this.classTable, fieldOf(annotation, "text"))) annotationClass = annotation.text;
       type = this.annotation("the type of a declared value");
     }
     this.expect("=");
@@ -1030,7 +1036,7 @@ class ProgramParser {
     this.skipType(new Set([",", ")", "=", ";", "}", "{"]));
     // A class names a value the program holds as a reference, which is the one
     // type the source needs no fields spelled for.
-    if (this.classTable.names.has(token.text)) return "any";
+    if (classTableHas(this.classTable, fieldOf(token, "text"))) return "any";
     return name;
   }
 
@@ -1327,7 +1333,7 @@ class ProgramParser {
         this.accept("?");
         if (this.accept(":")) {
           const annotation = this.peek();
-          if (annotation.kind === "ident" && this.classTable.names.has(annotation.text)) held = annotation.text;
+          if (annotation.kind === "ident" && classTableHas(this.classTable, fieldOf(annotation, "text"))) held = annotation.text;
           type = this.annotation("the type of a parameter");
         }
         if (held !== null) this.valueClasses.set(parameter, held);
@@ -1883,7 +1889,7 @@ class ProgramParser {
       if (level === 7 && token.kind === "ident" && token.text === "instanceof") {
         this.next();
         const name = this.identifier("the name of a class");
-        if (!this.classTable.names.has(name) && name !== "Error") {
+        if (!classTableHas(this.classTable, name) && name !== "Error") {
           this.fail(`instanceof names a class of this module, not "${name}"`, token);
         }
         const held = this.classOfValue(left);
@@ -2560,7 +2566,7 @@ class ProgramParser {
           return { k: "call", function: "Promise", args: [callback] };
         }
         const constructed = this.peek();
-        if (constructed.kind === "ident" && this.classTable.names.has(constructed.text)) {
+        if (constructed.kind === "ident" && classTableHas(this.classTable, fieldOf(constructed, "text"))) {
           const info = this.classNamed(constructed.text) as ClassInfo;
           this.next();
           this.expect("(");
@@ -2848,7 +2854,7 @@ class ProgramParser {
   }
 
   private classTypeName(typeName: string): string | null {
-    return this.classTable.names.has(typeName) ? typeName : null;
+    return classTableHas(this.classTable, typeName) ? typeName : null;
   }
 
   /** The class a value is known to hold, or null where nothing says. */
@@ -2857,7 +2863,7 @@ class ProgramParser {
       case "name": {
         const known = this.valueClasses.get(value.name);
         if (known !== undefined) return known;
-        return this.classTable.names.has(value.name) ? value.name : null;
+        return classTableHas(this.classTable, fieldOf(value, "name")) ? value.name : null;
       }
       case "field": {
         const object = fieldOf(value, "object");
@@ -2881,7 +2887,7 @@ class ProgramParser {
   }
 
   private callReturnClass(name: string): string | null {
-    if (this.classTable.names.has(name)) return name;
+    if (classTableHas(this.classTable, name)) return name;
     for (const info of this.classTable.ordered) {
       if (name.startsWith(`${info.name}__`) && /^\d+$/.test(name.slice(info.name.length + 2))) return info.name;
       const prefix = `${info.name}_`;
