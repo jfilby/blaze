@@ -12,15 +12,15 @@
  * them, and that is the point of the boundary.
  */
 
-import { existsSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   copyFile,
   mkdir,
   mkdtemp,
   open as nodeOpen,
-  readFile,
   readdir as nodeReaddir,
+  readFile,
   rename,
   rm as nodeRm,
   stat as nodeStat,
@@ -72,7 +72,6 @@ export {
   randomUUID,
   readFile,
   readFileSync,
-  nodeReaddir as readdir,
   rename,
   rm as nodeRm,
   sleep,
@@ -113,6 +112,11 @@ export function clearInterval(timer: unknown): void {
  * directory reads the same in a native adapter that never had a Node module to
  * import.
  */
+/** The names of the entries directly inside a directory. */
+export function readdir(path: string): string[] {
+  return readdirSync(path);
+}
+
 export async function readdirEntries(path: string): Promise<DirectoryEntry[]> {
   return nodeReaddir(path, { withFileTypes: true });
 }

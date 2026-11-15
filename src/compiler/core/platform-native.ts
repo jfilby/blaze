@@ -210,10 +210,10 @@ export function existsSync(path: string): boolean {
 }
 
 /** The names of the entries directly inside a directory. */
-export async function readdir(path: string): Promise<string[]> {
-  const entries = await readdirEntries(path);
+export function readdir(path: string): string[] {
   const names: string[] = [];
-  for (const entry of entries) names.push(String((entry as unknown as Record<string, unknown>)["name"]));
+  const count = fs.dirCountSync(path);
+  for (let at = 0; at < count; at += 1) names[names.length] = fs.dirNameSync(path, at);
   return names;
 }
 
