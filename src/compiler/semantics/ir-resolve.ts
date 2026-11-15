@@ -3501,7 +3501,7 @@ class ProgramResolver {
         };
       }
       case "boolean":
-        return { k: "boolean", value: value.value };
+        return { k: "boolean", value: fieldOf(value, "value") };
       case "null":
         return { k: "null", type: expect };
       case "arrow": {

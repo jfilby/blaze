@@ -3551,6 +3551,13 @@ export interface TypeScriptFunction {
   captures?: string[];
   /** How many of the parameters are the arrow's own, after the captures. */
   written?: number;
+  /**
+   * The captures a box renamed: `from` is the name the arrow captured and `to`
+   * is the box the value lives in now.
+   */
+  renamed?: { from: string; to: string }[];
+  /** The names in scope where the arrow was written, for the calls it writes. */
+  scopeNames?: string[];
 }
 
 /** Whether the file's bigints reach past the machine word. */
@@ -3797,6 +3804,8 @@ class TypeScriptParser {
    * the name in another scope, where the box is not a value.
    */
   private arrowLifts: string[] = [];
+  /** The names each block being read declares at its own level, innermost last. */
+  private scopeFrames: string[][] = [];
   /**
    * Calls of a function declared in the block being read, written above it.
    *
@@ -5277,6 +5286,7 @@ class TypeScriptParser {
     // named here and finished here.
     this.arrowBoxes = new Map();
     this.arrowLifts = [];
+    this.scopeFrames = [];
     if (self) this.valueClasses.set(this.selfName, info.name);
     for (const param of params) {
       const paramName = String(fieldOf(param, "name"));
@@ -6698,6 +6708,9 @@ class TypeScriptParser {
       for (const [getterName, getter] of valueGetters) getterNames.set(String(getterName), String(fieldOf(getter, "name")));
       setFieldOn(analysis, "valueGetters", getterNames);
     }
+    // Every arrow is lifted by now, so a call one closure writes of another is
+    // given that one's captures, and the caller takes the ones it lacks.
+    this.convertClosureCalls();
     return analysis;
   }
 
@@ -7518,6 +7531,7 @@ class TypeScriptParser {
     this.valueFunctions = new Map();
     this.arrowBoxes = new Map();
     this.arrowLifts = [];
+    this.scopeFrames = [];
     // A collection a file declares at the top is a name its functions read, so
     // what each of them holds is carried into the function being read. What the
     // function declares of its own is the function's: the bindings the body
@@ -7704,6 +7718,7 @@ class TypeScriptParser {
       this.accept(";");
       return declared(returnType, [{ kind: "result", value, line: name.line }], returnShape);
     }
+    this.scopeFrames = [];
     return declared(
       returnType,
       [...prelude, ...this.readReturning(returnType, () => this.readFunctionBlock(), returnShape)],
@@ -8475,7 +8490,9 @@ class TypeScriptParser {
     // statements are read: a closure written above one reads it, because the
     // binding is hoisted to the block and the closure runs after the
     // declaration has run.
-    this.prescanLocals();
+    const frame: string[] = [];
+    this.scopeFrames.push(frame);
+    this.prescanLocals(frame);
     // A block reads the values a test settled in the block around it, and
     // everything it settles itself is forgotten where the block ends.
     const outer = this.narrowed;
@@ -8524,6 +8541,7 @@ class TypeScriptParser {
     } finally {
       this.narrowed = outer;
       this.narrowedShapes = outerShapes;
+      this.scopeFrames.pop();
     }
     return statements;
   }
@@ -8543,7 +8561,7 @@ class TypeScriptParser {
    * Only the block's own level is scanned: a name a block inside it declares is
    * that block's, and is read where the block is.
    */
-  private prescanLocals(): void {
+  private prescanLocals(into?: string[]): void {
     const open = this.position - 1;
     if (this.tokens[open]?.text !== "{") return;
     const close = this.blockEnd(open);
@@ -8561,7 +8579,9 @@ class TypeScriptParser {
       if (depth !== 0) continue;
       if (token.text !== "const" && token.text !== "let" && token.text !== "var") continue;
       const name = tokens[at + 1];
-      if (name === undefined || name.kind !== "ident" || this.valueTypes.has(name.text)) continue;
+      if (name === undefined || name.kind !== "ident") continue;
+      if (into !== undefined && !into.includes(name.text)) into[into.length] = name.text;
+      if (this.valueTypes.has(name.text)) continue;
       const cursor = at + 2;
       if (tokens[cursor]?.text === ":") {
         // The annotation runs to the `=` of the value it initialises, or to the
@@ -13335,7 +13355,7 @@ class TypeScriptParser {
           const named = receiver !== undefined && receiver.k === "ident" ? receiver.name : null;
           const constant = named === null ? undefined : this.constants.get(named);
           const declared = named === null ? undefined : this.shapes.get(named);
-          let fieldNames: readonly string[] | undefined = declared?.names;
+          let fieldNames: readonly string[] | undefined = fieldOfOptional(declared, "names") as readonly string[] | undefined;
           if (receiver !== undefined && receiver.k === "object") {
             fieldNames = receiver.fields.map((field) => field.name);
           }
@@ -15677,6 +15697,10 @@ class TypeScriptParser {
         const capturedTypes = fieldOf(binding, "captureTypes") as TypeExpr[];
         capturedNames[at] = box;
         capturedTypes[at] = boxed;
+        const recorded = fieldOf(lifted, "renamed") as { from: string; to: string }[] | undefined;
+        const pairs: { from: string; to: string }[] = recorded === undefined ? [] : recorded;
+        pairs[pairs.length] = { from: String(name), to: box };
+        if (recorded === undefined) setFieldOn(lifted, "renamed", pairs);
         boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) });
       }
       this.arrowBoxes.delete(name);
@@ -15702,6 +15726,246 @@ class TypeScriptParser {
         setFieldOn(lifted, "body", callsRewritten(fieldOf(lifted, "body") as Statement[], source, target, captured));
       }
     }
+  }
+
+  /** The names in scope where the arrow being read is written. */
+  private scopeSnapshot(): string[] {
+    const names: string[] = [];
+    const add = (name: string): void => {
+      if (name !== "" && !names.includes(name)) names[names.length] = name;
+    };
+    for (const name of this.valueTypes.keys()) add(String(name));
+    for (const frame of this.scopeFrames) {
+      for (const name of frame) add(name);
+    }
+    return names;
+  }
+
+  /** The name a capture reads by now, after any box renamed it. */
+  private currentName(closure: TypeScriptFunction, name: string): string | null {
+    const pairs = fieldOf(closure, "renamed") as { from: string; to: string }[] | undefined;
+    if (pairs === undefined) return name;
+    for (const pair of pairs) {
+      if (String(fieldOf(pair, "from")) === name) return null;
+    }
+    return name;
+  }
+
+  /** Whether a closure's captures are exactly its leading parameters. */
+  private holdsCaptureInvariant(closure: TypeScriptFunction): boolean {
+    const params = fieldOf(closure, "params") as { name: string }[];
+    const captures = fieldOf(closure, "captures") as string[] | undefined;
+    if (captures === undefined) return false;
+    const written = Number(fieldOf(closure, "written"));
+    if (params.length !== captures.length + written) return false;
+    for (let at = 0; at < captures.length; at += 1) {
+      const param = params[at];
+      if (param === undefined) return false;
+      const captureName = String(captures[at]);
+      if (String(fieldOf(param, "name")) !== captureName) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Hands a closure the values of the closure it calls.
+   *
+   * A lifted arrow takes the values it captured as its leading parameters, and
+   * a body that calls another lifted arrow writes only the arguments that arrow
+   * was declared with. The call site hands the callee's captures over first,
+   * and the caller holds them: a name the caller holds is passed as it is, and
+   * one it holds not but its own body holds becomes a capture of its own. A
+   * name a box renamed in the caller is not a value it can hand over, and the
+   * call is left as it was.
+   */
+  private convertClosureCalls(): void {
+    let changed = true;
+    let rounds = 0;
+    while (changed && rounds < 16) {
+      changed = false;
+      rounds += 1;
+      for (const [name, closure] of this.liftedArrows) {
+        if (name.startsWith("__closure_code_")) continue;
+        if (!this.holdsCaptureInvariant(closure)) continue;
+        const body = fieldOf(closure, "body") as Statement[];
+        setFieldOn(closure, "body", this.convertedBody(body, closure));
+        if (this.convertedCaptures(closure)) changed = true;
+      }
+    }
+    this.resyncCodeWrappers();
+  }
+
+  /**
+   * A closure entered as a value unpacks its captures from the closure itself,
+   * and the entry was written when the captures were known: a capture added
+   * afterwards is unpacked here too, at the same positions.
+   */
+  private resyncCodeWrappers(): void {
+    for (const [name, wrapper] of this.liftedArrows) {
+      if (!name.startsWith("__closure_code_")) continue;
+      const body = fieldOf(wrapper, "body") as Statement[];
+      const statement = body[0];
+      if (statement === undefined) continue;
+      const value = fieldOf(statement, "value") as Record<string, unknown> | null;
+      if (value === null || String(fieldOf(value, "k")) !== "call") continue;
+      const callee = this.liftedArrows.get(String(fieldOf(value, "name")));
+      if (callee === undefined) continue;
+      const captures = fieldOf(callee, "captures") as string[] | undefined;
+      if (captures === undefined) continue;
+      const params = fieldOf(wrapper, "params") as { name: string }[];
+      const passed: unknown[] = [];
+      for (let at = 0; at < captures.length; at += 1) {
+        passed.push({ k: "capture", closure: { k: "ident", name: "self" }, index: at, type: this.typeOfNameIn(callee, captures[at]) ?? ANY_TYPE });
+      }
+      for (let at = 1; at < params.length; at += 1) passed.push({ k: "ident", name: String(fieldOf(params[at], "name")) });
+      const made: Record<string, unknown> = {};
+      copyFields(value, made);
+      setFieldOn(made, "args", passed);
+      setFieldOn(statement, "value", made);
+      setFieldOn(wrapper, "body", [statement]);
+    }
+  }
+
+  /** One closure's body, with every call of another closure given its captures. */
+  private convertedBody(body: Statement[], closure: TypeScriptFunction): Statement[] {
+    const self = String(fieldOf(closure, "name"));
+    const rewritten = this.callsConverted(body, (call) => {
+      const calleeName = String(fieldOf(call, "name"));
+      if (calleeName === self || calleeName.startsWith("__closure_code_")) return null;
+      const callee = this.liftedArrows.get(calleeName);
+      if (callee === undefined) return null;
+      if (!this.holdsCaptureInvariant(callee)) return null;
+      const calleeCaptures = fieldOf(callee, "captures") as string[];
+      if (!this.canConvertCall(closure, calleeCaptures)) return null;
+      return calleeCaptures;
+    });
+    return rewritten as Statement[];
+  }
+
+  /** Whether a caller can hand a callee every value that callee captured. */
+  private canConvertCall(closure: TypeScriptFunction, captures: readonly string[]): boolean {
+    const self = String(fieldOf(closure, "name"));
+    const params = fieldOf(closure, "params") as { name: string }[];
+    const scope = fieldOf(closure, "scopeNames") as string[] | undefined;
+    const body = fieldOf(closure, "body") as Statement[];
+    for (const one of captures) {
+      if (one === self) continue;
+      // A box renamed this value in the caller: the caller holds the box, and
+      // the box is not what the callee asked for.
+      if (this.currentName(closure, one) === null) return false;
+      if (params.some((param) => param.name === one)) continue;
+      if (scope === undefined || !scope.includes(one)) return false;
+      if (findDeclaration(body, one) !== null) return false;
+    }
+    return true;
+  }
+
+  /** A body with each call of a lifted closure given that closure's captures. */
+  private callsConverted(node: unknown, capturesOf: (call: Record<string, unknown>) => string[] | null): unknown {
+    if (Array.isArray(node)) {
+      const list: unknown[] = [];
+      for (const entry of node as unknown[]) list.push(this.callsConverted(entry, capturesOf));
+      return list;
+    }
+    if (node === null || typeof node !== "object") return node;
+    const fields = node as Record<string, unknown>;
+    if (String(fieldOf(fields, "k")) === "call") {
+      const captures = capturesOf(fields);
+      if (captures !== null) {
+        const args = fieldOf(fields, "args") as unknown[] | undefined;
+        if (args !== undefined) {
+          const callee = this.liftedArrows.get(String(fieldOf(fields, "name"))) as TypeScriptFunction;
+          const writtenCount = Number(fieldOf(callee, "written"));
+          let leading = 0;
+          while (leading < args.length && leading < captures.length && this.namedIdent(args[leading], captures[leading])) leading += 1;
+          if (leading < captures.length && args.length === writtenCount) leading = 0;
+          const passed: unknown[] = [];
+          for (const capture of captures) passed.push({ k: "ident", name: capture });
+          for (let at = leading; at < args.length; at += 1) passed.push(args[at]);
+          const made: Record<string, unknown> = {};
+          copyFields(fields, made);
+          const rewrittenArgs: unknown[] = [];
+          for (const argument of passed) rewrittenArgs.push(this.callsConverted(argument, capturesOf));
+          setFieldOn(made, "args", rewrittenArgs);
+          return made;
+        }
+      }
+    }
+    return rewrittenCopy(fields, (entry) => this.callsConverted(entry, capturesOf));
+  }
+
+  /** Whether a value read is the plain identifier `name`. */
+  private namedIdent(value: unknown, name: string): boolean {
+    if (value === null || typeof value !== "object") return false;
+    const fields = value as Record<string, unknown>;
+    if (String(fieldOf(fields, "k")) !== "ident") return false;
+    return String(fieldOf(fields, "name")) === name;
+  }
+
+  /** The values a closure's body needs that it does not hold yet, as captures. */
+  private convertedCaptures(closure: TypeScriptFunction): boolean {
+    let changed = false;
+    const self = String(fieldOf(closure, "name"));
+    const params = fieldOf(closure, "params") as { name: string; type: TypeExpr }[];
+    const scope = fieldOf(closure, "scopeNames") as string[] | undefined;
+    const body = fieldOf(closure, "body") as Statement[];
+    for (const called of this.calledConverted(body)) {
+      const callee = this.liftedArrows.get(String(called));
+      if (callee === undefined) continue;
+      if (!this.holdsCaptureInvariant(callee)) continue;
+      const calleeCaptures = fieldOf(callee, "captures") as string[];
+      if (!this.canConvertCall(closure, calleeCaptures)) continue;
+      for (const needed of calleeCaptures) {
+        if (needed === self) continue;
+        const held = fieldOf(closure, "captures") as string[] | undefined;
+        if (held === undefined || held.includes(needed)) continue;
+        if (params.some((param) => param.name === needed)) continue;
+        if (scope === undefined || !scope.includes(needed)) continue;
+        const type = this.typeOfNameIn(callee, needed);
+        if (type === null) continue;
+        params.splice(held.length, 0, { name: needed, type });
+        held[held.length] = needed;
+        const binding = this.arrowBindings.get(self);
+        if (binding !== undefined) {
+          const boundCaptures = fieldOf(binding, "captures") as string[];
+          const boundTypes = fieldOf(binding, "captureTypes") as TypeExpr[];
+          boundCaptures.splice(held.length - 1, 0, needed);
+          boundTypes.splice(held.length - 1, 0, type);
+        }
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /** The type a closure's parameter of that name is written at. */
+  private typeOfNameIn(closure: TypeScriptFunction, name: string): TypeExpr | null {
+    const params = fieldOf(closure, "params") as { name: string; type: TypeExpr }[];
+    for (const param of params) {
+      if (String(fieldOf(param, "name")) !== name) continue;
+      return fieldOf(param, "type") as TypeExpr;
+    }
+    return null;
+  }
+
+  /** Every closure a body calls by name. */
+  private calledConverted(body: Statement[]): string[] {
+    const found: string[] = [];
+    const read = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const entry of node as unknown[]) read(entry);
+        return;
+      }
+      if (node === null || typeof node !== "object") return;
+      const fields = node as Record<string, unknown>;
+      if (String(fieldOf(fields, "k")) === "call") {
+        const name = String(fieldOf(fields, "name"));
+        if (this.liftedArrows.has(name) && !name.startsWith("__closure_code_") && !found.includes(name)) found[found.length] = name;
+      }
+      for (const key of Object.keys(fields)) read(fields[key]);
+    };
+    read(body);
+    return found;
   }
 
   /**
@@ -15744,6 +16008,7 @@ class TypeScriptParser {
       closure: true,
       captures: captured.map((one) => one.name),
       written: written.length,
+      scopeNames: this.scopeSnapshot(),
     };
     // A speculative read may have lifted the same name before it was restored;
     // the closure the file finally holds is the one read last, and the stale
