@@ -2003,6 +2003,35 @@ function callsRewritten<T>(node: T, source: string, target: string, captures: re
 }
 
 /**
+ * A call of a lifted function from inside itself, written with the arrow's own
+ * arguments only, is handed the values the arrow captured in front of them.
+ *
+ * A recursive arrow is read before the values it captures are known — and a box
+ * a captured name is made into is made after its body is read — so a call it
+ * writes of itself is named for the lifted function and then read as the write
+ * the source made. The captures are that function's leading parameters, so a
+ * call that wrote exactly the arrow's own parameters is short of them.
+ */
+function callsPrepended<T>(node: T, target: string, captures: readonly string[], arity: number): T {
+  if (Array.isArray(node)) {
+    return node.map((entry) => callsPrepended(entry, target, captures, arity)) as T;
+  }
+  if (node !== null && typeof node === "object") {
+    const args = fieldOf(node, "args") as Expression[] | undefined;
+    if (String(fieldOf(node, "k")) === "call" && String(fieldOf(node, "name")) === target && Array.isArray(args) && args.length === arity) {
+      const written: Expression[] = [];
+      for (const name of captures) written.push({ k: "ident", name });
+      for (const argument of args as Expression[]) written.push(argument);
+      return { ...(node as object), args: written } as T;
+    }
+    return Object.fromEntries(
+      Object.entries(node as Record<string, unknown>).map(([key, entry]) => [key, callsPrepended(entry, target, captures, arity)]),
+    ) as T;
+  }
+  return node;
+}
+
+/**
  * Renames every call of `source` in a statement list to `target`, handing it
  * the captured values in front of the arguments it was written with.
  *
@@ -8837,18 +8866,12 @@ class TypeScriptParser {
         const lifted = this.liftedArrows.get(init.name);
         const binding = this.arrowBindings.get(init.name);
         if (lifted !== undefined && binding !== undefined && callsOf(lifted).has(name.text)) {
-          if ((fieldOf(binding, "captures") as string[]).length > 0) {
-            // A recursive arrow that captures takes the captured values again
-            // at every call, and a call written before the arrow is complete
-            // cannot say which of them it means.
-            this.report(
-              `${name.text} calls itself, which an arrow function is not`,
-              "declare the function with `function` and call it by the name it is declared under",
-              name,
-            );
-          } else {
-            lifted.body = callsRewritten(lifted.body, name.text, binding.function, (fieldOf(binding, "captures") as string[]));
-          }
+          // The captures are the lifted function's leading parameters, and a
+          // call written inside the body reads them by those names, so the call
+          // hands them over in front of its own arguments. A box a capture was
+          // made into is a parameter of the lifted function too, so the same
+          // rewrite answers that as well.
+          lifted.body = callsRewritten(lifted.body, name.text, binding.function, (fieldOf(binding, "captures") as string[]));
         }
         if (binding !== undefined) this.valueArrows.set(name.text, binding);
         this.valueTypes.set(name.text, ANY_TYPE);
@@ -12936,10 +12959,12 @@ class TypeScriptParser {
               }
               const held = `__assign${this.fieldCount++}`;
               holds.push({ name: held, source, type: this.typeExprOfShape(shape) });
-              for (const [field, declared] of shape.fields) {
-                if (!widened.fields.has(field)) {
+              const shapeFields = fieldOf(shape, "fields") as Map<string, ResolvedField>;
+              for (const [field, declared] of shapeFields) {
+                const widenedFields = fieldOf(widened, "fields") as Map<string, ResolvedField>;
+                if (!widenedFields.has(field)) {
                   added.push({ field, type: this.typeExprOfShape(declared.type) });
-                  const fields = new Map(widened.fields);
+                  const fields = new Map(widenedFields);
                   fields.set(field, { type: declared.type, optional: false });
                   widened = { kind: "record", fields, index: widened.index };
                 }
@@ -14246,7 +14271,12 @@ class TypeScriptParser {
         // they were written.
         const variadic = this.variadicFunctions.get(target.name);
         if (variadic === undefined) {
-          replace({ k: "call", name: this.calledName(target.name), args });
+          const made: Expression = { k: "call", name: this.calledName(target.name), args };
+          // A call of the name the arrow being read is bound to is a call of
+          // the lifted function itself: the values it captured are written in
+          // front of the arguments once they are known.
+          if (target.name === String(fieldOf(this, "arrowDeclared") ?? "")) this.arrowSelfCalls.push(made);
+          replace(made);
           continue;
         }
         const rest: Expression = {
@@ -14255,11 +14285,13 @@ class TypeScriptParser {
           values: args.slice(variadic.fixed),
         };
         this.expressionTypes.set(rest, { kind: "slice", of: variadic.element });
-        replace({
+        const made: Expression = {
           k: "call",
           name: this.calledName(target.name),
           args: [...args.slice(0, variadic.fixed), rest],
-        });
+        };
+        if (target.name === String(fieldOf(this, "arrowDeclared") ?? "")) this.arrowSelfCalls.push(made);
+        replace(made);
         continue;
       }
       if (this.at("++") || this.at("--")) {
@@ -15402,10 +15434,12 @@ class TypeScriptParser {
     // of its own. The calls were read before the values were known — and a box
     // is made after the arrow's body is read — so every call of that name is
     // renamed here, once the captures are the ones the lifted function takes.
-    if (declared !== null) {
+    {
       const lifted = this.liftedArrows.get(binding.function);
       if (lifted !== undefined) {
-        setFieldOn(lifted, "body", callsRewritten(fieldOf(lifted, "body") as Statement[], declared, binding.function, binding.captures));
+        let rewritten = fieldOf(lifted, "body") as Statement[];
+        if (declared !== null) rewritten = callsRewritten(rewritten, declared, binding.function, binding.captures);
+        setFieldOn(lifted, "body", callsPrepended(rewritten, binding.function, binding.captures, params.length));
       }
     }
     // The shape the arrow's declaration writes is what a call of it answers,

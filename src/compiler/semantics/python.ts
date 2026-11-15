@@ -2690,11 +2690,14 @@ function readsCommandLine(body: readonly PyStatement[]): boolean {
 function fillDefaultArguments(module: PyModule): PyModule {
   const defaults = new Map<string, PyValue[]>();
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
-    defaults.set(fn.name, (fieldOf(fn, "params") as PyParam[]).map((param) => param.default as PyValue));
+    const params = fieldOf(fn, "params") as PyParam[];
+    const values: PyValue[] = [];
+    for (const param of params) values[values.length] = fieldOf(param, "default") as PyValue;
+    defaults.set(String(fieldOf(fn, "name")), values);
   }
-  function fillValue(value: PyValue): PyValue {
+  function fillValue(value: PyValue, table: Map<string, PyValue[]>): PyValue {
     if (value.k === "call") {
-      const ds = defaults.get(String(fieldOf(value, "name")));
+      const ds = table.get(String(fieldOf(value, "name")));
       const args = fieldOf(value, "args") as PyValue[];
       if (ds !== undefined && args.length < ds.length) {
         const padded: PyValue[] = [];
@@ -2708,130 +2711,163 @@ function fillDefaultArguments(module: PyModule): PyModule {
       }
       const current = fieldOf(value, "args") as PyValue[];
       const filledArgs: PyValue[] = [];
-      for (const inner of current) filledArgs[filledArgs.length] = fillValue(inner);
+      for (const inner of current) filledArgs[filledArgs.length] = fillValue(inner, table);
       setFieldOn(value, "args", filledArgs);
       const grid = fieldOf(value, "grid");
-      if (grid !== undefined) setFieldOn(value, "grid", fillValue(grid));
+      if (grid !== undefined) setFieldOn(value, "grid", fillValue(grid, table));
       return value;
     }
     // Recurse into composite values.
     switch (value.k) {
       case "binary":
-        value.left = fillValue(fieldOf(value, "left"));
-        value.right = fillValue(fieldOf(value, "right"));
+        setFieldOn(value, "left", fillValue(fieldOf(value, "left"), table));
+        setFieldOn(value, "right", fillValue(fieldOf(value, "right"), table));
         break;
       case "unary":
-        value.operand = fillValue(fieldOf(value, "operand"));
+        setFieldOn(value, "operand", fillValue(fieldOf(value, "operand"), table));
         break;
       case "conditional":
-        value.condition = fillValue(value.condition);
-        value.then = fillValue(fieldOf(value, "then"));
-        value.otherwise = fillValue(value.otherwise);
+        setFieldOn(value, "condition", fillValue(fieldOf(value, "condition"), table));
+        setFieldOn(value, "then", fillValue(fieldOf(value, "then"), table));
+        setFieldOn(value, "otherwise", fillValue(fieldOf(value, "otherwise"), table));
         break;
       case "index":
-        value.base = fillValue(fieldOf(value, "base"));
-        value.index = fillValue(fieldOf(value, "index"));
+        setFieldOn(value, "base", fillValue(fieldOf(value, "base"), table));
+        setFieldOn(value, "index", fillValue(fieldOf(value, "index"), table));
         break;
       case "slice":
-        value.base = fillValue(value.base);
-        if (value.start !== null) value.start = fillValue(value.start);
-        if (value.stop !== null) value.stop = fillValue(value.stop);
-        if (value.step !== null) value.step = fillValue(value.step);
+        setFieldOn(value, "base", fillValue(fieldOf(value, "base"), table));
+        if (fieldOf(value, "start") !== null) setFieldOn(value, "start", fillValue(fieldOf(value, "start"), table));
+        if (fieldOf(value, "stop") !== null) setFieldOn(value, "stop", fillValue(fieldOf(value, "stop"), table));
+        if (fieldOf(value, "step") !== null) setFieldOn(value, "step", fillValue(fieldOf(value, "step"), table));
         break;
       case "list":
-        value.items = value.items.map((inner) => fillValue(inner));
+      case "set": {
+        const items: PyValue[] = [];
+        for (const inner of fieldOf(value, "items") as PyValue[]) items[items.length] = fillValue(inner, table);
+        setFieldOn(value, "items", items);
         break;
-      case "set":
-        value.items = value.items.map((inner) => fillValue(inner));
-        break;
+      }
       case "membership":
-        value.value = fillValue(value.value);
-        value.container = fillValue(value.container);
+        setFieldOn(value, "value", fillValue(fieldOf(value, "value"), table));
+        setFieldOn(value, "container", fillValue(fieldOf(value, "container"), table));
         break;
       case "comprehension":
-        value.element = fillValue(value.element);
-        value.iterable = fillValue(value.iterable);
-        if (value.condition !== null) value.condition = fillValue(value.condition);
+        setFieldOn(value, "element", fillValue(fieldOf(value, "element"), table));
+        setFieldOn(value, "iterable", fillValue(fieldOf(value, "iterable"), table));
+        if (fieldOf(value, "condition") !== null) setFieldOn(value, "condition", fillValue(fieldOf(value, "condition"), table));
         break;
       case "lambda":
-        value.body = fillValue(value.body);
+        setFieldOn(value, "body", fillValue(fieldOf(value, "body"), table));
         break;
-      case "dict":
-        value.entries = value.entries.map((entry) => ({ ...entry, value: fillValue(entry.value) }));
+      case "dict": {
+        const entries: PyValue[] = [];
+        for (const one of fieldOf(value, "entries") as PyValue[]) {
+          const copy = structuredClone(one) as PyValue;
+          setFieldOn(copy, "value", fillValue(fieldOf(one, "value"), table));
+          entries[entries.length] = copy;
+        }
+        setFieldOn(value, "entries", entries);
         break;
+      }
       case "field":
-        value.base = fillValue(value.base);
+        setFieldOn(value, "base", fillValue(fieldOf(value, "base"), table));
         break;
     }
     return value;
   }
-  function fillStatement(stmt: PyStatement): PyStatement {
+  function fillStatement(stmt: PyStatement, table: Map<string, PyValue[]>): PyStatement {
     switch (stmt.k) {
       case "declare":
-        stmt.value = fillValue(fieldOf(stmt, "value"));
+      case "call":
+        setFieldOn(stmt, "value", fillValue(fieldOf(stmt, "value"), table));
         break;
       case "assign":
-        stmt.value = fillValue(stmt.value);
+        setFieldOn(stmt, "value", fillValue(fieldOf(stmt, "value"), table));
         break;
       case "storeField":
-        stmt.target = fillValue(stmt.target);
-        stmt.value = fillValue(stmt.value);
-        break;
       case "storeElement":
-        stmt.target = fillValue(fieldOf(stmt, "target")) as any;
-        stmt.value = fillValue(stmt.value);
+        setFieldOn(stmt, "target", fillValue(fieldOf(stmt, "target"), table));
+        setFieldOn(stmt, "value", fillValue(fieldOf(stmt, "value"), table));
         break;
       case "storeSlice":
-        if (stmt.start !== null) stmt.start = fillValue(stmt.start);
-        if (stmt.stop !== null) stmt.stop = fillValue(stmt.stop);
-        if (stmt.step !== null) stmt.step = fillValue(stmt.step);
-        stmt.value = fillValue(stmt.value);
+        if (fieldOf(stmt, "start") !== null) setFieldOn(stmt, "start", fillValue(fieldOf(stmt, "start"), table));
+        if (fieldOf(stmt, "stop") !== null) setFieldOn(stmt, "stop", fillValue(fieldOf(stmt, "stop"), table));
+        if (fieldOf(stmt, "step") !== null) setFieldOn(stmt, "step", fillValue(fieldOf(stmt, "step"), table));
+        setFieldOn(stmt, "value", fillValue(fieldOf(stmt, "value"), table));
         break;
       case "return":
-        if (stmt.value !== null) stmt.value = fillValue(stmt.value);
+        if (fieldOf(stmt, "value") !== null) setFieldOn(stmt, "value", fillValue(fieldOf(stmt, "value"), table));
         break;
-      case "if":
-        stmt.condition = fillValue(fieldOf(stmt, "condition"));
-        stmt.then = stmt.then.map((inner) => fillStatement(inner));
-        stmt.otherwise = stmt.otherwise.map((inner) => fillStatement(inner));
+      case "if": {
+        setFieldOn(stmt, "condition", fillValue(fieldOf(stmt, "condition"), table));
+        const thenBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "then") as PyStatement[]) thenBody[thenBody.length] = fillStatement(inner, table);
+        const otherwiseBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "otherwise") as PyStatement[]) otherwiseBody[otherwiseBody.length] = fillStatement(inner, table);
+        setFieldOn(stmt, "then", thenBody);
+        setFieldOn(stmt, "otherwise", otherwiseBody);
         break;
-      case "while":
-        stmt.condition = fillValue(fieldOf(stmt, "condition"));
-        stmt.body = stmt.body.map((inner) => fillStatement(inner));
+      }
+      case "while": {
+        setFieldOn(stmt, "condition", fillValue(fieldOf(stmt, "condition"), table));
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = fillStatement(inner, table);
+        setFieldOn(stmt, "body", body);
         break;
-      case "for":
-        stmt.from = fillValue(stmt.from);
-        stmt.to = fillValue(stmt.to);
-        if (stmt.step !== null) stmt.step = fillValue(stmt.step);
-        stmt.body = stmt.body.map((inner) => fillStatement(inner));
+      }
+      case "for": {
+        setFieldOn(stmt, "from", fillValue(fieldOf(stmt, "from"), table));
+        setFieldOn(stmt, "to", fillValue(fieldOf(stmt, "to"), table));
+        if (fieldOf(stmt, "step") !== null) setFieldOn(stmt, "step", fillValue(fieldOf(stmt, "step"), table));
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = fillStatement(inner, table);
+        setFieldOn(stmt, "body", body);
         break;
-      case "print":
-        stmt.values = stmt.values.map((inner) => fillValue(inner));
+      }
+      case "print": {
+        const values: PyValue[] = [];
+        for (const inner of fieldOf(stmt, "values") as PyValue[]) values[values.length] = fillValue(inner, table);
+        setFieldOn(stmt, "values", values);
         break;
-      case "call":
-        stmt.value = fillValue(fieldOf(stmt, "value"));
+      }
+      case "function": {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = fillStatement(inner, table);
+        setFieldOn(stmt, "body", body);
         break;
-      case "function":
-        stmt.body = stmt.body.map((inner) => fillStatement(inner));
+      }
+      case "try": {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = fillStatement(inner, table);
+        setFieldOn(stmt, "body", body);
+        const catchBody = fieldOf(stmt, "catchBody") as PyStatement[] | null;
+        if (catchBody !== null) {
+          const caught: PyStatement[] = [];
+          for (const inner of catchBody) caught[caught.length] = fillStatement(inner, table);
+          setFieldOn(stmt, "catchBody", caught);
+        }
+        const finallyBody = fieldOf(stmt, "finallyBody") as PyStatement[] | null;
+        if (finallyBody !== null) {
+          const cleaned: PyStatement[] = [];
+          for (const inner of finallyBody) cleaned[cleaned.length] = fillStatement(inner, table);
+          setFieldOn(stmt, "finallyBody", cleaned);
+        }
         break;
-      case "try":
-        stmt.body = stmt.body.map((inner) => fillStatement(inner));
-        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map((inner) => fillStatement(inner));
-        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map((inner) => fillStatement(inner));
-        break;
+      }
     }
     return stmt;
   }
   const filledFunctions: PyFunction[] = [];
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
     const filledBodyOfFn: PyStatement[] = [];
-    for (const inner of fieldOf(fn, "body") as PyStatement[]) filledBodyOfFn[filledBodyOfFn.length] = fillStatement(inner);
+    for (const inner of fieldOf(fn, "body") as PyStatement[]) filledBodyOfFn[filledBodyOfFn.length] = fillStatement(inner, defaults);
     const copy = structuredClone(fn) as PyFunction;
     setFieldOn(copy, "body", filledBodyOfFn);
     filledFunctions[filledFunctions.length] = copy;
   }
   const filledBody: PyStatement[] = [];
-  for (const inner of fieldOf(module, "body") as PyStatement[]) filledBody[filledBody.length] = fillStatement(inner);
+  for (const inner of fieldOf(module, "body") as PyStatement[]) filledBody[filledBody.length] = fillStatement(inner, defaults);
   const filled = structuredClone(module) as PyModule;
   setFieldOn(filled, "functions", filledFunctions);
   setFieldOn(filled, "body", filledBody);
@@ -3332,8 +3368,7 @@ function expandComprehensions(module: PyModule): PyModule {
 
   const expandedFunctions: PyFunction[] = [];
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
-    const fnScope = new Set<string>();
-    for (const p of fieldOf(fn, "params") as PyParam[]) fnScope.add(String(fieldOf(p, "name")));
+    const fnScope = new Set<string>((fieldOf(fn, "params") as PyParam[]).map((p) => String(fieldOf(p, "name"))));
     const rewritten: PyStatement[] = [];
     for (const st of fieldOf(fn, "body") as PyStatement[]) for (const one of expandStmt(st, fnScope)) rewritten[rewritten.length] = one;
     const copy = structuredClone(fn) as PyFunction;
@@ -3352,132 +3387,195 @@ function expandComprehensions(module: PyModule): PyModule {
 function packRestArguments(module: PyModule): PyModule {
   const restIndex = new Map<string, number>();
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
-    const idx = (fieldOf(fn, "params") as PyParam[]).findIndex((p) => fieldOf(p, "rest") === true);
-    if (idx >= 0) restIndex.set(fn.name, idx);
+    let idx = -1;
+    const params = fieldOf(fn, "params") as PyParam[];
+    for (let at = 0; at < params.length; at++) if (fieldOf(params[at], "rest") === true) idx = at;
+    if (idx >= 0) restIndex.set(String(fieldOf(fn, "name")), idx);
   }
-  function packValue(value: PyValue): PyValue {
+  function packValue(value: PyValue, rest: Map<string, number>): PyValue {
     if (value.k === "call") {
-      const idx = restIndex.get(value.name);
+      const idx = rest.get(String(fieldOf(value, "name")));
       if (idx !== undefined) {
         const fixed = idx; // number of fixed params before *args
-        if (fieldOf(value, "args").length > fixed) {
-          const fixedArgs = value.args.slice(0, fixed);
-          const extra = value.args.slice(fixed);
-          value.args = [...fixedArgs, { k: "list", items: extra }];
-        } else if (fieldOf(value, "args").length === fixed) {
-          value.args = [...fieldOf(value, "args"), { k: "list", items: [] }];
+        const original = fieldOf(value, "args") as PyValue[];
+        if (original.length > fixed) {
+          const fixedArgs: PyValue[] = [];
+          for (let at = 0; at < fixed; at++) fixedArgs[fixedArgs.length] = original[at];
+          const extra: PyValue[] = [];
+          for (let at = fixed; at < original.length; at++) extra[extra.length] = original[at];
+          fixedArgs[fixedArgs.length] = { k: "list", items: extra };
+          setFieldOn(value, "args", fixedArgs);
+        } else if (original.length === fixed) {
+          const padded: PyValue[] = [];
+          for (const one of original) padded[padded.length] = one;
+          padded[padded.length] = { k: "list", items: [] };
+          setFieldOn(value, "args", padded);
         }
       }
-      value.args = value.args.map((inner) => packValue(inner));
-      if (value.grid !== undefined) value.grid = packValue(value.grid);
+      const packedArgs: PyValue[] = [];
+      for (const inner of fieldOf(value, "args") as PyValue[]) packedArgs[packedArgs.length] = packValue(inner, rest);
+      setFieldOn(value, "args", packedArgs);
+      if (fieldOf(value, "grid") !== undefined) setFieldOn(value, "grid", packValue(fieldOf(value, "grid"), rest));
       return value;
     }
     switch (value.k) {
       case "binary":
-        value.left = packValue(fieldOf(value, "left"));
-        value.right = packValue(fieldOf(value, "right"));
+        value.left = packValue(fieldOf(value, "left"), rest);
+        value.right = packValue(fieldOf(value, "right"), rest);
         break;
       case "unary":
-        value.operand = packValue(fieldOf(value, "operand"));
+        value.operand = packValue(fieldOf(value, "operand"), rest);
         break;
       case "conditional":
-        value.condition = packValue(value.condition);
-        value.then = packValue(fieldOf(value, "then"));
-        value.otherwise = packValue(value.otherwise);
+        value.condition = packValue(value.condition, rest);
+        value.then = packValue(fieldOf(value, "then"), rest);
+        value.otherwise = packValue(value.otherwise, rest);
         break;
       case "index":
-        value.base = packValue(fieldOf(value, "base"));
-        value.index = packValue(fieldOf(value, "index"));
+        value.base = packValue(fieldOf(value, "base"), rest);
+        value.index = packValue(fieldOf(value, "index"), rest);
         break;
       case "slice":
-        value.base = packValue(value.base);
-        if (value.start !== null) value.start = packValue(value.start);
-        if (value.stop !== null) value.stop = packValue(value.stop);
-        if (value.step !== null) value.step = packValue(value.step);
+        value.base = packValue(value.base, rest);
+        if (value.start !== null) value.start = packValue(value.start, rest);
+        if (value.stop !== null) value.stop = packValue(value.stop, rest);
+        if (value.step !== null) value.step = packValue(value.step, rest);
         break;
       case "list":
-        value.items = value.items.map((inner) => packValue(inner));
+        {
+        const items: PyValue[] = [];
+        for (const inner of value.items) items[items.length] = packValue(inner, rest);
+        value.items = items;
+      }
         break;
       case "set":
-        value.items = value.items.map((inner) => packValue(inner));
+        {
+        const items: PyValue[] = [];
+        for (const inner of value.items) items[items.length] = packValue(inner, rest);
+        value.items = items;
+      }
         break;
       case "membership":
-        value.value = packValue(value.value);
-        value.container = packValue(value.container);
+        value.value = packValue(value.value, rest);
+        value.container = packValue(value.container, rest);
         break;
       case "comprehension":
-        value.element = packValue(value.element);
-        value.iterable = packValue(value.iterable);
-        if (value.condition !== null) value.condition = packValue(value.condition);
+        value.element = packValue(value.element, rest);
+        value.iterable = packValue(value.iterable, rest);
+        if (value.condition !== null) value.condition = packValue(value.condition, rest);
         break;
       case "lambda":
-        value.body = packValue(value.body);
+        value.body = packValue(value.body, rest);
         break;
       case "dict":
-        value.entries = value.entries.map((e) => ({ ...e, value: packValue(e.value) }));
+        {
+        const entries: PyValue[] = [];
+        for (const one of fieldOf(value, "entries") as PyValue[]) {
+          const copy = structuredClone(one) as PyValue;
+          setFieldOn(copy, "value", packValue(fieldOf(one, "value"), rest));
+          entries[entries.length] = copy;
+        }
+        setFieldOn(value, "entries", entries);
+      }
         break;
       case "field":
-        value.base = packValue(value.base);
+        value.base = packValue(value.base, rest);
         break;
       case "walrus":
-        value.value = packValue(value.value);
+        value.value = packValue(value.value, rest);
         break;
     }
     return value;
   }
-  function packStmt(stmt: PyStatement): PyStatement {
+  function packStmt(stmt: PyStatement, rest: Map<string, number>): PyStatement {
     switch (stmt.k) {
       case "declare":
-        stmt.value = packValue(fieldOf(stmt, "value"));
+        stmt.value = packValue(fieldOf(stmt, "value"), rest);
         break;
       case "assign":
-        stmt.value = packValue(stmt.value);
+        stmt.value = packValue(stmt.value, rest);
         break;
       case "storeField":
-        stmt.target = packValue(stmt.target);
-        stmt.value = packValue(stmt.value);
+        stmt.target = packValue(stmt.target, rest);
+        stmt.value = packValue(stmt.value, rest);
         break;
       case "storeElement":
-        stmt.target = packValue(fieldOf(stmt, "target")) as any;
-        stmt.value = packValue(stmt.value);
+        stmt.target = packValue(fieldOf(stmt, "target"), rest) as any;
+        stmt.value = packValue(stmt.value, rest);
         break;
       case "storeSlice":
-        if (stmt.start !== null) stmt.start = packValue(stmt.start);
-        if (stmt.stop !== null) stmt.stop = packValue(stmt.stop);
-        if (stmt.step !== null) stmt.step = packValue(stmt.step);
-        stmt.value = packValue(stmt.value);
+        if (stmt.start !== null) stmt.start = packValue(stmt.start, rest);
+        if (stmt.stop !== null) stmt.stop = packValue(stmt.stop, rest);
+        if (stmt.step !== null) stmt.step = packValue(stmt.step, rest);
+        stmt.value = packValue(stmt.value, rest);
         break;
       case "return":
-        if (stmt.value !== null) stmt.value = packValue(stmt.value);
+        if (stmt.value !== null) stmt.value = packValue(stmt.value, rest);
         break;
       case "if":
-        stmt.condition = packValue(fieldOf(stmt, "condition"));
-        stmt.then = stmt.then.map((inner) => packStmt(inner));
-        stmt.otherwise = stmt.otherwise.map((inner) => packStmt(inner));
+        stmt.condition = packValue(fieldOf(stmt, "condition"), rest);
+        {
+        const thenBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "then") as PyStatement[]) thenBody[thenBody.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "then", thenBody);
+      }
+        {
+        const otherwiseBody: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "otherwise") as PyStatement[]) otherwiseBody[otherwiseBody.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "otherwise", otherwiseBody);
+      }
         break;
       case "while":
-        stmt.condition = packValue(fieldOf(stmt, "condition"));
-        stmt.body = stmt.body.map((inner) => packStmt(inner));
+        stmt.condition = packValue(fieldOf(stmt, "condition"), rest);
+        {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "body", body);
+      }
         break;
       case "for":
-        stmt.from = packValue(stmt.from);
-        stmt.to = packValue(stmt.to);
-        if (stmt.step !== null) stmt.step = packValue(stmt.step);
-        stmt.body = stmt.body.map((inner) => packStmt(inner));
+        stmt.from = packValue(stmt.from, rest);
+        stmt.to = packValue(stmt.to, rest);
+        if (stmt.step !== null) stmt.step = packValue(stmt.step, rest);
+        {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "body", body);
+      }
         break;
       case "print":
-        stmt.values = stmt.values.map((inner) => packValue(inner));
+        {
+        const values: PyValue[] = [];
+        for (const inner of fieldOf(stmt, "values") as PyValue[]) values[values.length] = packValue(inner, rest);
+        setFieldOn(stmt, "values", values);
+      }
         break;
       case "call":
-        stmt.value = packValue(fieldOf(stmt, "value"));
+        stmt.value = packValue(fieldOf(stmt, "value"), rest);
         break;
       case "function":
-        stmt.body = stmt.body.map((inner) => packStmt(inner));
+        {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "body", body);
+      }
         break;
       case "try":
-        stmt.body = stmt.body.map((inner) => packStmt(inner));
-        if (stmt.catchBody !== null) stmt.catchBody = stmt.catchBody.map((inner) => packStmt(inner));
-        if (stmt.finallyBody !== null) stmt.finallyBody = stmt.finallyBody.map((inner) => packStmt(inner));
+        {
+        const body: PyStatement[] = [];
+        for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
+        setFieldOn(stmt, "body", body);
+      }
+        if (stmt.catchBody !== null) {
+          const caught: PyStatement[] = [];
+          for (const inner of fieldOf(stmt, "catchBody") as PyStatement[]) caught[caught.length] = packStmt(inner, rest);
+          setFieldOn(stmt, "catchBody", caught);
+        }
+        if (stmt.finallyBody !== null) {
+          const cleaned: PyStatement[] = [];
+          for (const inner of fieldOf(stmt, "finallyBody") as PyStatement[]) cleaned[cleaned.length] = packStmt(inner, rest);
+          setFieldOn(stmt, "finallyBody", cleaned);
+        }
         break;
     }
     return stmt;
@@ -3485,11 +3583,11 @@ function packRestArguments(module: PyModule): PyModule {
   const packedFunctions: PyFunction[] = [];
   for (const fn of fieldOf(module, "functions") as PyFunction[]) {
     const copy = structuredClone(fn) as PyFunction;
-    setFieldOn(copy, "body", (fieldOf(fn, "body") as PyStatement[]).map((inner) => packStmt(inner)));
+    setFieldOn(copy, "body", (fieldOf(fn, "body") as PyStatement[]).map((inner) => packStmt(inner, restIndex)));
     packedFunctions[packedFunctions.length] = copy;
   }
   const packedBody: PyStatement[] = [];
-  for (const inner of fieldOf(module, "body") as PyStatement[]) packedBody[packedBody.length] = packStmt(inner);
+  for (const inner of fieldOf(module, "body") as PyStatement[]) packedBody[packedBody.length] = packStmt(inner, restIndex);
   return withModuleBody(module, packedFunctions, packedBody);
 }
 
@@ -3969,9 +4067,8 @@ export function lowerStatement(statement: PyStatement): Statement {
       const base = target.base;
       if (base.k === "name" && currentDictNames.has(base.name)) {
         // A dictionary is a hash map: writing d[key] = value is a call.
-        const indexParts = fieldOf(target.index, "parts") as { k: string; value: string }[];
         const keyStr = target.index.k === "text"
-          ? (indexParts[0] !== undefined && String(fieldOf(indexParts[0], "k")) === "text" ? String(fieldOf(indexParts[0], "value")) : "")
+          ? (fieldOf(target.index, "parts")?.[0]?.k === "text" ? target.index.parts[0].value : "")
           : null;
         const keyExpr = keyStr !== null
           ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
@@ -4855,9 +4952,10 @@ function conversionInValue(value: PyValue): string | null {
 function promiseSettleName(payload: TypeExpr): string {
   if (payload.kind === "text") return "Promise.settle.text";
   if (payload.kind === "void") return "Promise.settle.nothing";
-  if (payload.kind === "primitive") {
-    if (payload.name === "bool") return "Promise.settle.bool";
-    if (!["i256", "u256"].includes(payload.name)) return "Promise.settle";
+  if (String(fieldOf(payload, "kind")) === "primitive") {
+    const primitive = String(fieldOf(payload, "name"));
+    if (primitive === "bool") return "Promise.settle.bool";
+    if (!["i256", "u256"].includes(primitive)) return "Promise.settle";
   }
   return "Promise.settle.value";
 }
@@ -4866,42 +4964,65 @@ function promiseSettleName(payload: TypeExpr): string {
  * An async function's body with every way out of it settling the promise the
  * function answers. A body that falls off the end settles it with nothing.
  */
+function settlePromise(statement: Statement, payload: TypeExpr, name: string): Statement {
+  switch (statement.kind) {
+    case "result": {
+      // `return None` settles the promise with nothing, which is the call
+      // that takes no value.
+      const resultValue = fieldOf(statement, "value");
+      if (fieldOf(payload, "kind") === "void" || resultValue === null || fieldOf(resultValue, "k") === "null") {
+        return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
+      }
+      return { ...statement, value: { k: "call", name, args: [resultValue] } };
+    }
+    case "if": {
+      const copy = structuredClone(statement) as Statement;
+      const thenBody: Statement[] = [];
+      for (const inner of fieldOf(statement, "then") as readonly Statement[]) thenBody[thenBody.length] = settlePromise(inner, payload, name);
+      const otherwiseBody: Statement[] = [];
+      for (const inner of fieldOf(statement, "otherwise") as readonly Statement[]) otherwiseBody[otherwiseBody.length] = settlePromise(inner, payload, name);
+      setFieldOn(copy, "then", thenBody);
+      setFieldOn(copy, "otherwise", otherwiseBody);
+      return copy;
+    }
+    case "while":
+    case "doWhile":
+    case "loop":
+    case "forOf": {
+      const copy = structuredClone(statement) as Statement;
+      const body: Statement[] = [];
+      for (const inner of fieldOf(statement, "body") as readonly Statement[]) body[body.length] = settlePromise(inner, payload, name);
+      setFieldOn(copy, "body", body);
+      return copy;
+    }
+    case "try": {
+      const copy = structuredClone(statement) as Statement;
+      const catchBody = fieldOf(statement, "catchBody") as readonly Statement[] | null;
+      const finallyBody = fieldOf(statement, "finallyBody") as readonly Statement[] | null;
+      const body: Statement[] = [];
+      for (const inner of fieldOf(statement, "body") as readonly Statement[]) body[body.length] = settlePromise(inner, payload, name);
+      setFieldOn(copy, "body", body);
+      if (catchBody !== null) {
+        const caught: Statement[] = [];
+        for (const inner of catchBody) caught[caught.length] = settlePromise(inner, payload, name);
+        setFieldOn(copy, "catchBody", caught);
+      }
+      if (finallyBody !== null) {
+        const cleaned: Statement[] = [];
+        for (const inner of finallyBody) cleaned[cleaned.length] = settlePromise(inner, payload, name);
+        setFieldOn(copy, "finallyBody", cleaned);
+      }
+      return copy;
+    }
+    default:
+      return statement;
+  }
+}
+
 function settledPythonBody(statements: readonly Statement[], payload: TypeExpr): Statement[] {
   const name = promiseSettleName(payload);
-  function settle(statement: Statement): Statement {
-    switch (statement.kind) {
-      case "result": {
-        // `return None` settles the promise with nothing, which is the call
-        // that takes no value.
-        const resultValue = fieldOf(statement, "value");
-        if (payload.kind === "void" || resultValue === null || resultValue.k === "null") {
-          return { ...statement, value: { k: "call", name: "Promise.settle.nothing", args: [] } };
-        }
-        return { ...statement, value: { k: "call", name, args: [resultValue] } };
-      }
-      case "if":
-        return { ...statement, then: statement.then.map((inner) => settle(inner)), otherwise: statement.otherwise.map((inner) => settle(inner)) };
-      case "while":
-      case "doWhile":
-      case "loop":
-      case "forOf":
-        return { ...statement, body: statement.body.map((inner) => settle(inner)) };
-      case "try": {
-        const catchBody = fieldOf(statement, "catchBody") as Statement[] | null;
-        const finallyBody = fieldOf(statement, "finallyBody") as Statement[] | null;
-        return {
-          ...statement,
-          body: statement.body.map((inner) => settle(inner)),
-          catchBody: catchBody === null ? null : catchBody.map((inner) => settle(inner)),
-          finallyBody: finallyBody === null ? null : finallyBody.map((inner) => settle(inner)),
-        };
-      }
-      default:
-        return statement;
-    }
-  }
   const settled: Statement[] = [];
-  for (const inner of statements) settled[settled.length] = settle(inner);
+  for (const inner of statements) settled[settled.length] = settlePromise(inner, payload, name);
   const line = statements.length === 0 ? 1 : Number(fieldOf(statements[0], "line"));
   settled[settled.length] = { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line };
   return settled;

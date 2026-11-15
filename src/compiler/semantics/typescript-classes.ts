@@ -487,7 +487,7 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       } else {
         index += 1;
       }
-      if (accessor === "set") {
+      if (String(accessor) === "set") {
         problems.push({
           message: "a set accessor is not supported",
           detail: "write the member as a method and call it",
@@ -505,7 +505,7 @@ function readClass(tokens: readonly Token[], start: number, problems: ClassTable
       }
       // A getter is a method with no parameters whose name is read as a member:
       // it is emitted beside the methods and called where the member is read.
-      if (accessor === "get") {
+      if (String(accessor) === "get") {
         (isStatic ? staticGetters : getters).push({
           name: memberName,
           params: [],
@@ -756,7 +756,15 @@ export function findField(
     // `constructor(private readonly table: Table)` declares a field as well as a
     // parameter, and the field is the one the instance carries: a read written
     // through `this` is that field whichever way it was declared.
-    const written = isStatic ? undefined : info.constructor?.params.find((entry) => entry.property && entry.name === name);
+    let written: { name: string; typeName: string; initStart: number; initEnd: number; line: number } | undefined = undefined;
+    if (!isStatic && info.constructor !== null) {
+      const constructorParams = fieldOf(info.constructor, "params") as { property: boolean; name: string; typeName: string; line: number }[];
+      for (const entry of constructorParams) {
+        if (fieldOf(entry, "property") === true && String(fieldOf(entry, "name")) === name) {
+          written = { name: String(fieldOf(entry, "name")), typeName: String(fieldOf(entry, "typeName")), initStart: -1, initEnd: -1, line: Number(fieldOf(entry, "line")) };
+        }
+      }
+    }
     if (written !== undefined) {
       return { owner: info.name, field: { name: written.name, typeName: written.typeName, initStart: -1, initEnd: -1, line: written.line } };
     }
