@@ -1738,7 +1738,11 @@ export function resolveObjects(
           }
           if (kind === "record") {
             const named = recordDeclaration(table, type);
-            if (named !== null) return { kind: "ref", of: null, name: `${named.name}__${named.stem === "" ? stem : named.stem}` };
+            if (named !== null) {
+              const declaredName = String(fieldOf(named, "name"));
+              const declaredStem = String(fieldOf(named, "stem"));
+              return { kind: "ref", of: null, name: `${declaredName}__${declaredStem === "" ? stem : declaredStem}` };
+            }
           }
           return contractTypeOf(type);
         };

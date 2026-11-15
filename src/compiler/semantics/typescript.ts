@@ -16465,11 +16465,29 @@ class TypeScriptParser {
     // class is what says what it is.
     const sequence = this.valueTypeOf(receiver);
     let elements = sequence.kind === "slice" || sequence.kind === "array" ? sequence.of : null;
+    if (elements !== null && unknownReference(elements)) elements = null;
     // A list another module offers is the shape its declaration names, and its
     // contract type erases to the reference: `HOST_SERVICES.map(...)` is a list
     // of the service the exported annotation writes.
     if (elements === null) {
-      const shape = this.shapeOf(receiver);
+      let shape = this.shapeOf(receiver);
+      // A field read through a named reference whose shape the body does not
+      // hold is the field its declaration writes. The reference names the
+      // declaration, and the declaration is what the list's element is.
+      if (shape !== null && shape.kind === "list" && shape.of.kind === "record" &&
+          (fieldOf(shape.of, "fields") as ReadonlyMap<string, unknown>).size === 0 && receiver.k === "member") {
+        const base = this.valueTypeOf(receiver.base);
+        const named = base.kind === "ref" && base.name !== undefined ? base.name.split("__")[0] : null;
+        if (named !== null) {
+          try {
+            const record = resolveTypeName(this.typeTable, named);
+            const field = fieldOfType(this.typeTable, record, String(fieldOf(receiver, "field")));
+            if (field !== null) shape = fieldOf(field, "type") as ResolvedType;
+          } catch {
+            // The reference is no declaration this table holds.
+          }
+        }
+      }
       if (shape !== null && shape.kind === "list") {
         const of = shape.of;
         const name = of.kind === "record" ? this.nameForRecord(of) : null;
@@ -16631,18 +16649,24 @@ class TypeScriptParser {
       const shape = this.elementShapeOf(receiver, elements);
       if (lifted !== undefined) {
         const params = fieldOf(lifted, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
-        for (let at = 0; at < params.length && at < expected.length; at += 1) {
-          if (!unknownReference(params[at].type)) continue;
-          params[at].type = expected[at];
-          if (at === 0 && shape !== null) params[at].shape = shape;
+        let at = 0;
+        while (at < params.length && at < expected.length) {
+          if (unknownReference(params[at].type)) {
+            params[at].type = expected[at];
+            if (at === 0 && shape !== null) params[at].shape = shape;
+          }
+          at += 1;
         }
       }
       if (binding !== undefined) {
         const params = fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
-        for (let at = 0; at < params.length && at < expected.length; at += 1) {
-          if (!unknownReference(params[at].type)) continue;
-          params[at].type = expected[at];
-          if (at === 0 && shape !== null) params[at].shape = shape;
+        let slot = 0;
+        while (slot < params.length && slot < expected.length) {
+          if (unknownReference(params[slot].type)) {
+            params[slot].type = expected[slot];
+            if (slot === 0 && shape !== null) params[slot].shape = shape;
+          }
+          slot += 1;
         }
       }
     }
