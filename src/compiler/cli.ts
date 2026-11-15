@@ -19,11 +19,14 @@ import { CompilerError } from "./core/errors.ts";
 import {
   MAX_RETRIES,
   inspectProject,
+  isEmptyText,
+  isYes,
+  differentBool,
   exceeds,
   isZero,
+  isIntegerText,
   numeric,
-  projectStateLine,
-  listProjects,
+  projectsReport,
   projectIdFor,
   runBuild,
   runSemanticIr,
@@ -36,7 +39,7 @@ import {
 
 /** The directory a build writes its state to. */
 const STATE_DIRECTORY = ".blaze";
-import { compareBuildRecords, compareProjectStates } from "./core/compare.ts";
+import { compareRecordsReport, compareStatesReport } from "./core/compare.ts";
 import {
   BACKENDS,
   BUILD_MODES,
@@ -204,9 +207,8 @@ function initProject(): void {
  */
 async function terminalConfirm(question: string): Promise<boolean> {
   const answer = await hostAsk(question);
-  if (answer === "") return true;
-  const choice = answer.trim().toLowerCase();
-  return choice === "y" || choice === "yes";
+  if (isEmptyText(answer)) return true;
+  return isYes(answer);
 }
 
 function optionNumber(value: string, name: string, minimum: number, maximum: number): number | undefined {
@@ -215,8 +217,7 @@ function optionNumber(value: string, name: string, minimum: number, maximum: num
   // the user did not type, which is the one reading a number must not allow.
   // A zero is refused for a count that cannot be zero and allowed for the two
   // the compiler takes one of: no re-requests, and no random cases.
-  const whole = isZero(minimum) ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/;
-  if (!whole.test(value)) {
+  if (!isIntegerText(value, isZero(minimum))) {
     throw new Error(`${name} must be ${isZero(minimum) ? "a non-negative" : "a positive"} integer, got "${value}"`);
   }
   const parsed = numeric(value);
@@ -412,34 +413,27 @@ async function main(argv: readonly string[]): Promise<number> {
         return 1;
       }
       const leftDirectory = isDirectoryPath(argument);
-      if (leftDirectory !== isDirectoryPath(rest[0])) {
+      if (differentBool(leftDirectory, isDirectoryPath(rest[0]))) {
         throw new Error("compare needs two build records or two project state directories");
       }
-      let differences: string[] = [];
+      let report = "";
       if (leftDirectory) {
-        differences = await compareProjectStates(argument, rest[0]);
+        report = await compareStatesReport(argument, rest[0]);
       } else {
-        differences = compareBuildRecords(
+        report = compareRecordsReport(
           JSON.parse(await readFile(argument, "utf8")) as BuildStatus,
           JSON.parse(await readFile(rest[0], "utf8")) as BuildStatus,
         );
       }
-      if (differences.length === 0) {
+      if (report === "") {
         hostWriteOut("The build records agree\n");
         return 0;
       }
-      hostWriteOut(`The build records differ:\n${differences.map((line) => `  ${line}`).join("\n")}\n`);
+      hostWriteOut(`The build records differ:\n${report}\n`);
       return 1;
     }
     case "projects": {
-      const projects = await listProjects(hostCwd());
-      if (projects.length === 0) {
-        hostWriteOut(`no projects in ${STATE_DIRECTORY}/projects\n`);
-        return 0;
-      }
-      for (const project of projects) {
-        hostWriteOut(`${await projectStateLine(project, hostCwd())}\n`);
-      }
+      hostWriteOut(await projectsReport(hostCwd()));
       return 0;
     }
     default:

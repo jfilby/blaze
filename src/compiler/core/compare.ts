@@ -149,6 +149,22 @@ async function compareSelectedCandidates(
  * name, and comparing the candidates alone would miss a different backend or
  * runtime; a conformance run needs both answers.
  */
+/** The differences between two build records, one per line, or empty. */
+export function compareRecordsReport(left: BuildStatus, right: BuildStatus): string {
+  const differences = compareBuildRecords(left, right);
+  let out = "";
+  for (const line of differences) out += `  ${line}\n`;
+  return out;
+}
+
+/** The differences between two project state directories, one per line. */
+export async function compareStatesReport(leftRoot: string, rightRoot: string): Promise<string> {
+  const differences = await compareProjectStates(leftRoot, rightRoot);
+  let out = "";
+  for (const line of differences) out += `  ${line}\n`;
+  return out;
+}
+
 export async function compareProjectStates(leftRoot: string, rightRoot: string): Promise<string[]> {
   const leftBuild = JSON.parse(await readFile(join(leftRoot, "build.json"), "utf8")) as BuildStatus;
   const rightBuild = JSON.parse(await readFile(join(rightRoot, "build.json"), "utf8")) as BuildStatus;

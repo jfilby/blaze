@@ -163,6 +163,37 @@ export async function runAndReport(run: (args: readonly string[]) => Promise<num
   }
 }
 
+/** Whether a text is a decimal whole number, optionally allowing zero. */
+export function isIntegerText(value: string, allowZero: boolean): boolean {
+  if (value.length === 0) return false;
+  let start = 0;
+  if (value.slice(0, 1) === "0") {
+    if (!allowZero) return false;
+    start = 1;
+  }
+  for (let index = start; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+/** Whether two truths differ. */
+export function differentBool(left: boolean, right: boolean): boolean {
+  return left !== right;
+}
+
+/** Whether a text is empty. */
+export function isEmptyText(value: string): boolean {
+  return value.length === 0;
+}
+
+/** Whether a text answers yes. */
+export function isYes(answer: string): boolean {
+  const choice = answer.trim().toLowerCase();
+  return choice === "y" || choice === "yes";
+}
+
 /** Whether a number is zero. */
 export function isZero(value: number): boolean {
   return value === 0;
@@ -3220,6 +3251,15 @@ export async function listProjects(cwd: string): Promise<string[]> {
   const entries = await readdirEntries(projectsRoot).catch(() => []);
   const names = entries.map((entry) => String((entry as unknown as Record<string, unknown>)["name"]));
   return names.filter((name) => isDirectoryPath(join(projectsRoot, name)));
+}
+
+/** The lines `projects` prints, with no empty list to read in the program. */
+export async function projectsReport(cwd: string): Promise<string> {
+  const projects = await listProjects(cwd);
+  if (projects.length === 0) return `no projects in ${STATE_DIRECTORY}/projects\n`;
+  let out = "";
+  for (const project of projects) out += `${await projectStateLine(project, cwd)}\n`;
+  return out;
 }
 
 /** One line of `blaze projects`: the project and the build it last had. */
