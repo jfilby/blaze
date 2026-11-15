@@ -4569,12 +4569,48 @@ class TypeScriptParser {
     if (collection.kind === "set") {
       return { kind: "set", key: TEXT_RESULT, value: this.typeExprOfShape((fieldOf(collection, "of") as ResolvedType)), valueShape: fieldOf(collection, "of") };
     }
+    // A map of records answers the declaration its entries were written at:
+    // the record a field annotation resolves to carries no name, and the
+    // declaration whose fields it holds is what a read of an entry names.
+    const valueName = collection.value.kind === "record" ? this.nameForRecord(collection.value) : null;
     return {
       kind: "map",
       key: this.typeExprOfShape(collection.key),
-      value: this.typeExprOfShape(collection.value),
+      value: this.typeExprOfShape(collection.value, valueName),
       valueShape: collection.value,
     };
+  }
+
+  /** The declaration whose fields are a record's, or null where none is one. */
+  private nameForRecord(shape: ResolvedType): string | null {
+    if (shape.kind !== "record" || fieldOf(shape, "index") !== null || fieldOf(shape, "arms") !== undefined) return null;
+    const names: string[] = [];
+    for (const name of this.typeTable.declarations.keys()) names.push(name);
+    for (const name of this.typeTable.imported.keys()) names.push(name);
+    for (const name of names) {
+      let candidate: ResolvedType;
+      try {
+        candidate = resolveTypeName(this.typeTable, name);
+      } catch {
+        continue;
+      }
+      if (candidate.kind !== "record" || fieldOf(candidate, "index") !== null || fieldOf(candidate, "arms") !== undefined) continue;
+      if (this.sameRecord(shape, candidate)) return name;
+    }
+    return null;
+  }
+
+  /** Whether two records declare the same fields at the same types. */
+  private sameRecord(left: ResolvedType, right: ResolvedType): boolean {
+    const leftFields = fieldOf(left, "fields") as ReadonlyMap<string, ResolvedField>;
+    const rightFields = fieldOf(right, "fields") as ReadonlyMap<string, ResolvedField>;
+    if (leftFields.size !== rightFields.size) return false;
+    for (const [name, field] of leftFields) {
+      const other = rightFields.get(name);
+      if (other === undefined || fieldOf(field, "optional") !== fieldOf(other, "optional")) return false;
+      if (typeToString(this.typeExprOfShape(fieldOf(field, "type") as ResolvedType)) !== typeToString(this.typeExprOfShape(fieldOf(other, "type") as ResolvedType))) return false;
+    }
+    return true;
   }
 
   /**
@@ -9959,7 +9995,11 @@ class TypeScriptParser {
     const named = base.k === "ident" ? (base.name === "this" && this.currentClass !== null ? this.selfName : base.name) : null;
     if (named !== null) return named;
     const held = `__place${this.fieldCount++}`;
-    this.pendingBefore.push({ kind: "declare", name: held, type: null, init: base, line });
+    // A cast read twice is a value of the type it was asserted as: the name
+    // that carries it states that type, so the field the chain reads is the
+    // layout the assertion named rather than the dynamic reference.
+    const asserted = this.assertedValues.has(base) ? this.expressionTypes.get(base) ?? null : null;
+    this.pendingBefore.push({ kind: "declare", name: held, type: asserted, init: base, line });
     this.valueTypes.set(held, this.valueTypeOf(base));
     const shape = this.shapeOf(base);
     if (shape !== null) this.valueShapes.set(held, shape);
@@ -19767,8 +19807,10 @@ class TypeScriptParser {
       const read = call(heldName, [receiver, args[0] as Expression], collection.value);
       // The runtime answers the block the list is; the read of the entry is
       // the list the map holds, and the call is typed as it so a field, an
-      // index or a length written on it reads the list.
-      if (sequence) (read as Expression & { returns?: TypeExpr }).returns = collection.value;
+      // index or a length written on it reads the list. A reference is the
+      // declaration the entry holds, and the call states it for the body that
+      // resolves the statement rather than only for this read.
+      if (sequence || kind === "reference") (read as Expression & { returns?: TypeExpr }).returns = collection.value;
       const held: Expression = kind === "bool"
         ? { k: "binary", op: "!=", left: read, right: { k: "literal", text: "0" } }
         : read;
