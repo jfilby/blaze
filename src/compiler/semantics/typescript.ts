@@ -16643,21 +16643,9 @@ class TypeScriptParser {
     // parameter is the element the list holds, and the index and the list are
     // the two the helper hands a callback that asks for them.
     if (callback.k === "arrow") {
-      const lifted = this.liftedArrows.get(callback.name);
       const binding = this.arrowBindings.get(callback.name);
       const expected: TypeExpr[] = [elements, NUMBER_RESULT, { kind: "slice", of: elements }];
       const shape = this.elementShapeOf(receiver, elements);
-      if (lifted !== undefined) {
-        const params = fieldOf(lifted, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
-        let at = 0;
-        while (at < params.length && at < expected.length) {
-          if (unknownReference(params[at].type)) {
-            params[at].type = expected[at];
-            if (at === 0 && shape !== null) params[at].shape = shape;
-          }
-          at += 1;
-        }
-      }
       if (binding !== undefined) {
         const params = fieldOf(binding, "params") as { name: string; type: TypeExpr; shape?: ResolvedType | null }[];
         let slot = 0;
