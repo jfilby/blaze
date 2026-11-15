@@ -1626,6 +1626,11 @@ export function resolveObjects(
         const fieldType: TypeExpr = named ? { kind: "ref", of: null, name: writtenType } : contractTypeOf(field.type);
         fields.push({ name: fieldName, value: { kind: "type", type: fieldType } });
       }
+      // A union's literal carries the arm it wrote, and the declaration's
+      // layout carries it too: the read of `.__arm` is the tag of this layout.
+      if (fieldOf(resolved, "arms") !== undefined) {
+        fields.push({ name: "__arm", value: { kind: "type", type: { kind: "primitive", name: "f64" } } });
+      }
       const keyParts: [string, string][] = [];
       for (const field of fields) keyParts[keyParts.length] = [field.name, describe(field.value)];
       const key = JSON.stringify(keyParts);

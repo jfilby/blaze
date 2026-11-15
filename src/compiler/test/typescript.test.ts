@@ -6506,3 +6506,58 @@ test("a let holding a regular expression is the pattern it wrote", () => {
   const read = readTypeScriptModule(source, "main.ts", false);
   assert.deepEqual(read.refused, []);
 });
+
+test("an assertion types the local it initializes", () => {
+  // A cast is a promise about a value whose declaration the read cannot
+  // resolve: the local carries the asserted declaration, so a field read
+  // through it is the declaration's field.
+  const source = [
+    "interface Point { x: number; y: number; }",
+    "function sum(value: unknown): number {",
+    "  const point = value as Point;",
+    "  return point.x + point.y;",
+    "}",
+    "console.log(sum({ x: 1, y: 2 }));",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const ir = printSemanticFunction(semanticsOf(phase)["sum"]);
+  assert.match(ir, /let object\[ref<Point>\] point/);
+  assert.match(ir, /load_field\[f64\] local\[ref<Point>\] point Point x/);
+});
+
+test("a conditional of a named reference and null keeps the declaration", () => {
+  // The absent arm is the null the other arm may be, not a second type: a
+  // value chosen between a named record and null is that record.
+  const source = [
+    "interface Point { x: number; y: number; }",
+    "function x(value: Point | null, flag: boolean): number {",
+    "  const chosen = value !== null && flag ? value : null;",
+    "  return chosen === null ? 0 : chosen.x;",
+    "}",
+    "console.log(x({ x: 1, y: 2 }, true));",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const ir = printSemanticFunction(semanticsOf(phase)["x"]);
+  assert.match(ir, /let object\[ref<Point>\] chosen/);
+  assert.match(ir, /load_field\[f64\] local\[ref<Point>\] chosen Point x/);
+});
+
+test("a loop over a module value reads the value's getter", () => {
+  // `as const` makes the list state the module holds, so a function that walks
+  // it reads the getter the module offers rather than a name it does not hold.
+  const source = [
+    "const LAYOUT = [{ name: `.text`, size: 8 }] as const;",
+    "function first(): string {",
+    "  for (const section of LAYOUT) return section.name;",
+    "  return ``;",
+    "}",
+    "console.log(first());",
+    "",
+  ].join("\n");
+  const phase = phaseOf("typescript", { "main.ts": source }, "main.ts");
+  const ir = printSemanticFunction(semanticsOf(phase)["first"]);
+  assert.match(ir, /call\[ref<any>\] __value_LAYOUT/);
+  assert.match(ir, /load_field\[text\] local\[f64\] section Object\d+ name/);
+});

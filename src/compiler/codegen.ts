@@ -1398,7 +1398,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   ): Promise<{ review: Review; durationNs: bigint }> => {
     const startedAt = monotonicTimeNs();
     const backend = generationBackend();
-    const review = await (fieldOf(backend, "review") as (this: unknown, asked: ReviewRequest, sequence: number) => Promise<Review>).call(backend, asked, sequence);
+    const review = await backend.review(asked, sequence);
     return { review, durationNs: monotonicTimeNs() - startedAt };
   };
 

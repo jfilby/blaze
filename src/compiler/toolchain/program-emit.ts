@@ -413,7 +413,7 @@ class ProgramEmitter {
     const target = fieldOf(this, "target") as ProgramTarget;
     const program = fieldOf(this, "program") as SemanticProgram;
     const lowered = fieldOf(this, "loweredElsewhere") as ReadonlySet<string>;
-    const prelude = (fieldOf(target, "prelude") as (this: ProgramTarget, program: SemanticProgram) => string).call(target, program);
+    const prelude = target.prelude(program);
     // A function the program declares is a function of the program: it is
     // written above the body that runs, and the program calls it as it calls
     // any other function — unless the machine backend lowered it into an
@@ -530,8 +530,7 @@ class ProgramEmitter {
     for (const name of fieldOf(entry, "releases") as readonly string[]) releases[releases.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
     this.names.leave();
     const outputs: string[] = [];
-    const openFunction = fieldOf(this.target, "openFunction") as (this: ProgramTarget, ...args: any[]) => string[];
-    for (const line of openFunction.call(this.target,
+    for (const line of this.target.openFunction(
       {
         name: String(fieldOf(fn, "name")),
         symbol: String(fieldOf(fn, "symbol")),
@@ -541,8 +540,7 @@ class ProgramEmitter {
       parameters,
     )) outputs[outputs.length] = line;
     for (const line of body) outputs[outputs.length] = line;
-    const closeFunction = fieldOf(this.target, "closeFunction") as (this: ProgramTarget, ...args: any[]) => string[];
-    for (const line of closeFunction.call(this.target, releases, returned)) outputs[outputs.length] = line;
+    for (const line of this.target.closeFunction(releases, returned)) outputs[outputs.length] = line;
     return outputs;
   }
 
@@ -1338,11 +1336,11 @@ class ProgramEmitter {
         for (const field of fieldOf(value, "fields") as readonly { readonly name: string; readonly value: SemanticValue }[]) {
           const held = fieldOf(field, "value") as SemanticValue;
           fields[fields.length] = {
-            field: String((fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(field, "name")))),
+            field: String(this.target.escape(String(fieldOf(field, "name")))),
             value: this.expression(held, fieldOf(held, "type") as SemanticType),
           };
         }
-        return String((fieldOf(this.target, "buildObject") as (...args: any[]) => any)(String(fieldOf(value, "layout")), fields));
+        return String(this.target.buildObject(String(fieldOf(value, "layout")), fields));
       }
       case "call":
         return this.call(fieldOf(value, "call") as SemanticCall);

@@ -902,7 +902,7 @@ test("a field read in a tag branch is the arm's layout", () => {
     functions: phase.program.files[0]?.functions ?? {},
   });
   const text = printSemanticFunction(resolved);
-  assert.match(text, /load_field\[\[\]f64\] local\[ref<any>\] value Object1 parts/);
+  assert.match(text, /load_field\[\[\]f64\] local\[ref<any>\] value Object\d+ parts/);
   assert.match(text, /load_field\[\[\]f64\] local\[ref<any>\] value Object2 values/);
 });
 

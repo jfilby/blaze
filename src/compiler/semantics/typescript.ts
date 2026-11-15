@@ -3817,7 +3817,7 @@ class TypeScriptParser {
    * instead. Both the arrow and the function around it read and write the
    * element, and the write is the write the source wrote.
    */
-  private arrowBoxes = new Map<string, { box: string; element: TypeExpr; list: boolean }>();
+  private arrowBoxes = new Map<string, { box: string; element: TypeExpr; list: boolean; line: number }>();
   /**
    * The arrows lifted while the body being read was read, in the order they
    * were lifted.
@@ -4117,6 +4117,14 @@ class TypeScriptParser {
    * what `a.filter(f).map(g)` does.
    */
   private expressionTypes = new Map<Expression, TypeExpr>();
+  /**
+   * The expressions whose type was stated by an assertion.
+   *
+   * A cast is a promise about a value the read may not hold: the contract is
+   * what a later resolver reads, and the assertion is not in it unless the
+   * declaration it initializes says so.
+   */
+  private readonly assertedValues = new Set<Expression>();
   /**
    * Whether the file's bigints reach past the machine word. A `bigint` is
    * arbitrary precision in the language; this compiler holds it at the machine
@@ -4463,7 +4471,14 @@ class TypeScriptParser {
     } catch {
       shape = null;
     }
-    if (shape !== null && shape.kind !== "any") return this.typeExprOfShape(shape, /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) ? text : null);
+    if (shape !== null && shape.kind !== "any") {
+      // A union with one record and an absent member is that record, and the
+      // name it writes first is the layout the fields are read through.
+      const first = (text.match(/^\s*([A-Za-z_$][A-Za-z0-9_$]*)/) ?? [])[1];
+      const generic = first !== undefined && text.trim().startsWith(`${first}<`);
+      const record = shape.kind === "record" && fieldOf(shape, "arms") === undefined && !generic;
+      return this.typeExprOfShape(shape, /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text) || (record && first !== undefined) ? (first ?? text) : null);
+    }
     if (shape === null || shape.kind === "any") this.notePendingType(text);
     // A field or a class parameter names its type as one text, so `T[]` and
     // `Array<T>` are read here rather than by the token walk an annotation in a
@@ -8261,7 +8276,21 @@ class TypeScriptParser {
       const declared = this.typeTable.declarations.has(head.text) || (fieldOf(this.typeTable, "imported") as Map<string, TypeDecl>).has(head.text);
       if (declared) {
         const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
-        return this.typeExprOfShape(shape, end - from === 1 ? head.text : null);
+        const generic = this.tokens[from + 1]?.text === "<";
+        const record = shape.kind === "record" && fieldOf(shape, "arms") === undefined;
+        // `Omit<Full, "c">` reads the fields of the declaration it starts from;
+        // the layout it names is that declaration's, not the utility's.
+        let recordName = record && !generic ? head.text : null;
+        if (record && generic) {
+          for (let at = from + 1; at < end; at += 1) {
+            const name = this.tokens[at]?.text;
+            if (this.tokens[at]?.kind !== "ident" || name === undefined) continue;
+            if (!(this.typeTable.declarations.has(name) || this.typeTable.imported.has(name))) continue;
+            recordName = name;
+            break;
+          }
+        }
+        return this.typeExprOfShape(shape, end - from === 1 ? head.text : recordName);
       }
       if ((fieldOf(this.typeTable, "classes") as ReadonlySet<string>).has(head.text) && end - from === 1) return this.referenceTo(head.text);
     }
@@ -8366,6 +8395,26 @@ class TypeScriptParser {
     // object by its fields and the class's own name is an alias of it, so the
     // annotation is the reference a caller reads its fields through.
     if ((fieldOf(this.classTable, "names") as Set<string>).has(name)) return this.referenceTo(name);
+    // A mapped utility names the fields of a declaration this file may not hold:
+    // `Omit<Full, "c">` is the fields of `Full` without one, and a read of them
+    // is a read through `Full`'s layout. The declaration the utility starts
+    // from is the layout its fields are read at.
+    if (first.text === "Omit" || first.text === "Pick" || first.text === "Partial" || first.text === "Required" || first.text === "Readonly") {
+      try {
+        const shape = resolveAnnotation(this.tokens, from, end, this.typeTable);
+        if (shape.kind === "record" && fieldOf(shape, "arms") === undefined) {
+          for (let at = from + 1; at < end; at += 1) {
+            const argument = this.tokens[at]?.text;
+            if (this.tokens[at]?.kind !== "ident" || argument === undefined) continue;
+            if (!(this.typeTable.declarations.has(argument) || this.typeTable.imported.has(argument))) continue;
+            return this.typeExprOfShape(shape, argument);
+          }
+        }
+      } catch {
+        // The utility is one this table cannot expand, which is the opaque
+        // reference the fallback below answers.
+      }
+    }
     return mapTypeScriptType(name, `line ${first.line} of ${this.path}`);
   }
 
@@ -9033,7 +9082,7 @@ class TypeScriptParser {
       // dynamic array, and the name holds that handle: it is not a block of
       // references the compiler would have to box.
       const initType = init.k === "buffer" && (fieldOf(init, "dynamic") as boolean | undefined) === true ? ANY_TYPE : this.valueTypeOf(init);
-      this.valueTypes.set(name.text, type ?? initType);
+      const asserted = type === null && this.assertedValues.has(init) ? this.expressionTypes.get(init) ?? null : null;
       this.declaredValues.set(name.text, init);
       // A name declared again is the value it was declared with, and nothing a
       // test settled about a name of the same spelling still holds.
@@ -9043,9 +9092,18 @@ class TypeScriptParser {
       const declaredShape = annotationShape ?? (init.k === "buffer" && (fieldOf(init, "dynamic") as boolean | undefined) === true ? null : this.shapeOf(init));
       if (declaredShape !== null) this.valueShapes.set(name.text, declaredShape);
       else this.valueShapes.delete(name.text);
+      // A name declared with a value of a named record holds that record: the
+      // initializer is a conditional the read types as a reference, and the
+      // shape is what says which declaration the reference points at.
+      let declaredType: TypeExpr | null = type;
+      if (declaredType === null && declaredShape !== null && String(fieldOf(declaredShape, "kind")) === "ref") {
+        const declaredName = fieldOf(declaredShape, "name") as string | null;
+        if (declaredName !== null) declaredType = { kind: "ref", of: null, name: declaredName };
+      }
+      this.valueTypes.set(name.text, declaredType ?? asserted ?? initType);
       if (this.isRegexValue(init)) this.valueRegexes.add(name.text);
       else this.valueRegexes.delete(name.text);
-      return { kind: "declare", name: name.text, type, init, line: name.line };
+      return { kind: "declare", name: name.text, type: declaredType ?? asserted, init, line: name.line };
     }
 
     // `void name;` marks a value as read and writes nothing. The statement has
@@ -10954,9 +11012,31 @@ class TypeScriptParser {
           // where the map of them is not filled yet: the loop reads the same
           // value an ordinary read of the name does, through that getter.
           let own = this.valueGetters.get(of.text);
-          if (own === undefined && (this.state.has(of.text) || this.stateInitializers.has(of.text))) {
+          let heldType = own === undefined ? undefined : own.type;
+          let heldShape: ResolvedType | null = null;
+          if ((own === undefined || heldType === undefined || unknownReference(heldType)) && (this.state.has(of.text) || this.stateInitializers.has(of.text))) {
             const getterName = `__value_${of.text}`;
-            own = { name: getterName, type: this.declaredReturns.get(getterName) ?? ANY_TYPE };
+            heldType = this.declaredReturns.get(getterName) ?? ANY_TYPE;
+            // A value the module holds as a list is the list the source wrote,
+            // so the loop reads its element shape from the initializer even
+            // before the getter's own return type is settled. The assertion a
+            // list is written with is not part of the list's range.
+            const range = this.stateInitializers.get(of.text);
+            if (range !== undefined && this.allTokens[range.start]?.text === "[") {
+              const expandedState = this.constantValue(of.text, { range: { start: range.start, end: range.end } });
+              if (expandedState !== null) {
+                const shape = this.shapeOf(expandedState);
+                const read = this.valueTypeOf(expandedState);
+                // A list read without a use is the runtime's dynamic list:
+                // its shape is the list the elements wrote, and that is the
+                // type the loop walks.
+                heldType = read.kind === "slice" || read.kind === "array" || read.kind === "text"
+                  ? read
+                  : shape === null ? read : this.typeExprOfShape(shape);
+                heldShape = shape;
+              }
+            }
+            own = { name: getterName, type: heldType ?? ANY_TYPE };
           }
           const imported = this.valueGetterNames.has(of.text) ? this.declaredReturns.get(of.text) ?? ANY_TYPE : null;
           const read: Expression | null = own !== undefined
@@ -10965,7 +11045,8 @@ class TypeScriptParser {
               ? { k: "call", name: of.text, args: [], returns: imported }
               : null;
           if (read !== null) {
-            this.expressionTypes.set(read, imported ?? own?.type ?? ANY_TYPE);
+            this.expressionTypes.set(read, imported ?? heldType ?? ANY_TYPE);
+            if (heldShape !== null) this.expressionShapes.set(read, heldShape);
             const held = this.valueTypeOf(read);
             if (held.kind === "slice" || held.kind === "array" || held.kind === "text") {
               written = read;
@@ -14539,7 +14620,10 @@ class TypeScriptParser {
         // A list is asserted at the type it says: `(o.fields as string[])`
         // names texts, so `join` written after it reads the elements the cast
         // states rather than the `unknown` the field was declared at.
-        if (type.kind === "slice" || type.kind === "array" || type.kind === "ref") this.expressionTypes.set(current(), type);
+        if (type.kind === "slice" || type.kind === "array" || type.kind === "ref") {
+          this.expressionTypes.set(current(), type);
+          this.assertedValues.add(current());
+        }
         continue;
       }
       if (this.at("!")) {
@@ -15699,10 +15783,11 @@ class TypeScriptParser {
       const type = this.valueTypes.get(name) ?? ANY_TYPE;
       const box = `__box_${this.stem}_${this.boxCount}`;
       this.boxCount += 1;
+      const line = body.length === 0 ? 0 : Number(fieldOf(body[0], "line"));
       // A list has no element that holds a list, so a name that holds one is
       // held in a one-field object instead and both sides write the field.
       const list = type.kind === "slice" || type.kind === "array" || type.kind === "ptr";
-      this.arrowBoxes.set(name, { box, element: type, list });
+      this.arrowBoxes.set(name, { box, element: type, list, line });
       this.valueTypes.set(box, list ? ANY_TYPE : { kind: "slice", of: type });
     }
     for (const name of written) {
@@ -15731,6 +15816,11 @@ class TypeScriptParser {
       const box = String(fieldOf(entry, "box"));
       const held = findDeclaration(body, name);
       const parameter = params.find((one) => one.name === name);
+      // A declaration in an inner body that comes after the arrow wrote the
+      // name is a different variable of the same spelling: the arrow wrote
+      // the name around it, and the box belongs to that body. The outer body
+      // settles it, so this one is left as the declaration it is.
+      if (!outermost && held !== null && Number(fieldOf(held, "line")) > Number(fieldOf(entry, "line"))) continue;
       if (held === null && parameter === undefined) {
         if (!outermost) continue;
         this.report(
@@ -17634,7 +17724,16 @@ class TypeScriptParser {
     // A value chosen between two arms is the type the arms have in common,
     // read from what each arm answers. `a.trim() || b.trim()` is a text even
     // though the scope holds no name for either answer, so the method written
-    // after the choice is a text method.
+    // after the choice is a text method. An arm written as null is the absent
+    // case, and the other arm is what the choice holds where it is there — a
+    // named reference stays the declaration it names.
+    if (value.k === "conditional") {
+      const otherwiseNull = fieldOf(value, "otherwise").k === "null";
+      const thenNull = fieldOf(value, "then").k === "null";
+      if (otherwiseNull && !thenNull) return this.valueTypeOf(fieldOf(value, "then") as Expression);
+      if (thenNull && !otherwiseNull) return this.valueTypeOf(fieldOf(value, "otherwise") as Expression);
+      return commonResult(this.valueTypeOf(fieldOf(value, "then") as Expression), this.valueTypeOf(fieldOf(value, "otherwise") as Expression));
+    }
     if (value.k === "binary" && (value.op === "&&" || value.op === "||" || value.op === "??")) {
       return commonResult(this.valueTypeOf(value.left), this.valueTypeOf((fieldOf(value, "right") as Expression)));
     }
@@ -19688,7 +19787,7 @@ class TypeScriptParser {
           ? { k: "null" }
           : { k: "literal", text: "0" };
       const chosen: Expression = { k: "conditional", condition: has, then: held, otherwise };
-      const answer = sequence ? collection.value : kind === "reference" ? ANY_TYPE : kind === "bool" ? BOOLEAN_RESULT : collection.value;
+      const answer = sequence ? collection.value : kind === "reference" ? collection.value : kind === "bool" ? BOOLEAN_RESULT : collection.value;
       this.expressionTypes.set(chosen, answer);
       // A map whose value the source named keeps the fields that name holds,
       // so a member chain written through the value reads them.

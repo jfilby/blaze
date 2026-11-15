@@ -1495,7 +1495,7 @@ class FunctionBody {
           // source did not say which layout it is.
           inferred: describe(fieldOfValue(then, "inferred") as Inferred) === describe(fieldOfValue(otherwise, "inferred") as Inferred)
             ? fieldOfValue(then, "inferred") as Inferred
-            : type.kind === "slice" || type.kind === "array" || type.kind === "primitive" || type.kind === "text"
+            : type.kind === "slice" || type.kind === "array" || type.kind === "primitive" || type.kind === "text" || type.kind === "ref"
               ? asType(type)
               : ANY,
         };
