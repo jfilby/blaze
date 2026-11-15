@@ -19791,10 +19791,17 @@ class TypeScriptParser {
       this.expressionTypes.set(chosen, answer);
       // A map whose value the source named keeps the fields that name holds,
       // so a member chain written through the value reads them.
-      const valueShape = collection.valueShape ?? this.shapeOfTypeExpr(collection.value);
-      if (kind === "reference" && valueShape.kind !== "any") this.expressionShapes.set(chosen, valueShape);
+      // A shape the declaration read as an empty record is a shape it has not
+      // resolved: the value type it kept is the declaration the entries hold,
+      // and that declaration is where the fields are read.
+      const knownShape = collection.valueShape ?? null;
+      const emptyShape = knownShape !== null && String(fieldOf(knownShape, "kind")) === "record" &&
+        (fieldOf(knownShape, "fields") as ReadonlyMap<string, unknown>).size === 0 &&
+        fieldOf(knownShape, "index") === null;
+      const valueShape: ResolvedType | null = knownShape === null || emptyShape ? this.shapeOfTypeExpr(collection.value) ?? null : knownShape;
+      if (kind === "reference" && valueShape !== null && valueShape.kind !== "any") this.expressionShapes.set(chosen, valueShape);
       if (sequence) {
-        const element = valueShape.kind === "list" ? valueShape.of : { kind: "any" as const };
+        const element = valueShape !== null && valueShape.kind === "list" ? valueShape.of : { kind: "any" as const };
         this.expressionShapes.set(chosen, { kind: "list", of: element });
       }
       // A set or a map held in a dictionary is one handle, and the entry holds
