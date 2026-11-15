@@ -1471,7 +1471,7 @@ class PythonParser {
             if (entry.guard !== null) {
               condition = { k: "binary", op: "and", left: condition, right: entry.guard };
             }
-            otherwise = [{ k: "if", condition, then: entry.body, otherwise, line: token.line }];
+            otherwise = [{ k: "if", condition, then: fieldOf(entry, "body"), otherwise, line: token.line }];
           }
           if (otherwise.length === 0) return { k: "pass", line: token.line };
           return otherwise[0];
@@ -2107,7 +2107,7 @@ class PythonParser {
           value.k === "name"
             ? value.name
             : value.k === "field"
-              ? `${value.base.k === "name" ? value.base.name : describeValue(value.base)}.${value.field}`
+              ? `${fieldOf(value, "base").k === "name" ? fieldOf(value, "base").name : describeValue(fieldOf(value, "base"))}.${value.field}`
               : "the function";
         if (!this.at(")")) {
           for (;;) {
@@ -2453,7 +2453,7 @@ class PythonParser {
  */
 function isEntryGuard(statement: PyStatement): boolean {
   if (statement.k !== "if") return false;
-  const condition = statement.condition;
+  const condition = fieldOf(statement, "condition");
   if (condition.k !== "binary" || condition.op !== "==") return false;
   return isMainText(condition.left) && isMainText(fieldOf(condition, "right"));
 }
@@ -2490,7 +2490,7 @@ export function describeValue(value: PyValue): string {
     case "text":
       return "a string";
     case "boolean":
-      return fieldOf(value, "value") === true ? "True" : "False";
+      return value.value === true ? "True" : "False";
     case "none":
       return "None";
     case "name":
@@ -2500,9 +2500,9 @@ export function describeValue(value: PyValue): string {
     case "index":
       return `${describeValue(fieldOf(value, "base"))}[...]`;
     case "slice":
-      return `${describeValue(value.base)}[...]`;
+      return `${describeValue(fieldOf(value, "base"))}[...]`;
     case "field":
-      return `${describeValue(value.base)}.${value.field}`;
+      return `${describeValue(fieldOf(value, "base"))}.${value.field}`;
     case "list":
       return "a list";
     case "set":
@@ -2516,7 +2516,7 @@ export function describeValue(value: PyValue): string {
     case "dict":
       return "a dict";
     case "walrus":
-      return describeValue(value.value);
+      return describeValue(fieldOf(value, "value"));
     case "binary":
       return `${describeValue(fieldOf(value, "left"))} ${value.op} ${describeValue(fieldOf(value, "right"))}`;
     case "unary":
@@ -2549,28 +2549,28 @@ function eachValue(body: readonly PyStatement[], visit: (value: PyValue, line: n
         eachValueIn(fieldOf(statement, "value"), visit, statement.line);
         break;
       case "return":
-        if (statement.value !== null) eachValueIn(statement.value, visit, statement.line);
+        if (fieldOf(statement, "value") !== null) eachValueIn(fieldOf(statement, "value"), visit, statement.line);
         break;
       case "if":
-        eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
+        eachValueIn(fieldOf(statement, "condition"), visit, statement.line);
         eachValue(fieldOf(statement, "then"), visit);
         eachValue(fieldOf(statement, "otherwise"), visit);
         break;
       case "while":
-        eachValueIn(fieldOf(statement, "condition"), visit, fieldOf(statement, "line"));
-        eachValue(statement.body, visit);
+        eachValueIn(fieldOf(statement, "condition"), visit, statement.line);
+        eachValue(fieldOf(statement, "body"), visit);
         break;
       case "for":
-        eachValueIn(statement.from, visit, statement.line);
-        eachValueIn(statement.to, visit, statement.line);
-        if (statement.step !== null) eachValueIn(statement.step, visit, statement.line);
-        eachValue(statement.body, visit);
+        eachValueIn(fieldOf(statement, "from"), visit, statement.line);
+        eachValueIn(fieldOf(statement, "to"), visit, statement.line);
+        if (fieldOf(statement, "step") !== null) eachValueIn(fieldOf(statement, "step"), visit, statement.line);
+        eachValue(fieldOf(statement, "body"), visit);
         break;
       case "print":
-        statement.values.forEach((value) => eachValueIn(value, visit, fieldOf(statement, "line")));
+        (fieldOf(statement, "values") as PyValue[]).forEach((value: PyValue) => eachValueIn(value, visit, statement.line));
         break;
       case "try":
-        eachValue(statement.body, visit);
+        eachValue(fieldOf(statement, "body"), visit);
         if (statement.catchBody !== null) eachValue(statement.catchBody, visit);
         if (statement.finallyBody !== null) eachValue(statement.finallyBody, visit);
         break;
@@ -2591,7 +2591,7 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
   visit(value, line);
   switch (value.k) {
     case "call":
-      value.args.forEach((argument) => eachValueIn(argument, visit, line));
+      (fieldOf(value, "args") as PyValue[]).forEach((argument: PyValue) => eachValueIn(argument, visit, line));
       return;
     case "binary":
       eachValueIn(fieldOf(value, "left"), visit, line);
@@ -2601,53 +2601,53 @@ function eachValueIn(value: PyValue, visit: (value: PyValue, line: number) => vo
       eachValueIn(fieldOf(value, "operand") as PyValue, visit, line);
       return;
     case "conditional":
-      eachValueIn(value.condition, visit, line);
+      eachValueIn(fieldOf(value, "condition"), visit, line);
       eachValueIn(fieldOf(value, "then"), visit, line);
-      eachValueIn(value.otherwise, visit, line);
+      eachValueIn(fieldOf(value, "otherwise"), visit, line);
       return;
     case "index":
       eachValueIn(fieldOf(value, "base"), visit, line);
       eachValueIn(fieldOf(value, "index"), visit, line);
       return;
     case "slice":
-      eachValueIn(value.base, visit, line);
-      if (value.start !== null) eachValueIn(value.start, visit, line);
-      if (value.stop !== null) eachValueIn(value.stop, visit, line);
-      if (value.step !== null) eachValueIn(value.step, visit, line);
+      eachValueIn(fieldOf(value, "base"), visit, line);
+      if (fieldOf(value, "start") !== null) eachValueIn(fieldOf(value, "start"), visit, line);
+      if (fieldOf(value, "stop") !== null) eachValueIn(fieldOf(value, "stop"), visit, line);
+      if (fieldOf(value, "step") !== null) eachValueIn(fieldOf(value, "step"), visit, line);
       return;
     case "field":
-      eachValueIn(value.base, visit, line);
+      eachValueIn(fieldOf(value, "base"), visit, line);
       return;
     case "list":
-      value.items.forEach((item) => eachValueIn(item, visit, line));
+      (fieldOf(value, "items") as PyValue[]).forEach((item: PyValue) => eachValueIn(item, visit, line));
       return;
     case "set":
-      value.items.forEach((item) => eachValueIn(item, visit, line));
+      (fieldOf(value, "items") as PyValue[]).forEach((item: PyValue) => eachValueIn(item, visit, line));
       return;
     case "sized":
       eachValueIn(value.count, visit, line);
       return;
     case "membership":
-      eachValueIn(value.value, visit, line);
-      eachValueIn(value.container, visit, line);
+      eachValueIn(fieldOf(value, "value"), visit, line);
+      eachValueIn(fieldOf(value, "container"), visit, line);
       return;
     case "comprehension":
-      eachValueIn(value.element, visit, line);
-      eachValueIn(value.iterable, visit, line);
-      if (value.condition !== null) eachValueIn(value.condition, visit, line);
+      eachValueIn(fieldOf(value, "element"), visit, line);
+      eachValueIn(fieldOf(value, "iterable"), visit, line);
+      if (fieldOf(value, "condition") !== null) eachValueIn(fieldOf(value, "condition"), visit, line);
       return;
     case "lambda":
-      eachValueIn(value.body, visit, line);
+      eachValueIn(fieldOf(value, "body"), visit, line);
       return;
     case "walrus":
-      eachValueIn(value.value, visit, line);
+      eachValueIn(fieldOf(value, "value"), visit, line);
       return;
     case "dict":
-      value.entries.forEach((entry) => eachValueIn(entry.value, visit, line));
+      (fieldOf(value, "entries") as PyValue[]).forEach((entry: PyValue) => eachValueIn(fieldOf(entry, "value"), visit, line));
       return;
     case "text":
       (fieldOf(value, "parts") as PyTextPart[]).forEach((part) => {
-        if (part.k === "value") eachValueIn(part.value, visit, line);
+        if (part.k === "value") eachValueIn(fieldOf(part, "value"), visit, line);
       });
       return;
     case "number":
@@ -2676,7 +2676,7 @@ function readsCommandLine(body: readonly PyStatement[]): boolean {
   let found = false;
   eachValue(body, (value) => {
     if (value.k !== "field" || value.field !== "argv") return;
-    if (value.base.k === "name" && value.base.name === "sys") found = true;
+    if (fieldOf(value, "base").k === "name" && fieldOf(value, "base").name === "sys") found = true;
   });
   return found;
 }
@@ -2768,7 +2768,7 @@ function fillDefaultArguments(module: PyModule): PyModule {
         const entries: PyValue[] = [];
         for (const one of fieldOf(value, "entries") as PyValue[]) {
           const copy = structuredClone(one) as PyValue;
-          setFieldOn(copy, "value", fillValue(fieldOf(one, "value"), table));
+          setFieldOn(copy, "value", fillValue(fieldOf(one, "value") as PyValue, table));
           entries[entries.length] = copy;
         }
         setFieldOn(value, "entries", entries);
@@ -2891,8 +2891,8 @@ function expandWalrus(module: PyModule): PyModule {
   const expandExpr = (value: PyValue, scope: Set<string>, pre: PyStatement[]): PyValue => {
     switch (value.k) {
       case "walrus": {
-        const held = expandExpr(value.value, scope, pre);
-        const innerLine = fieldOf(value.value, "line");
+        const held = expandExpr(fieldOf(value, "value"), scope, pre);
+        const innerLine = fieldOf(fieldOf(value, "value"), "line");
         const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const declared = scope.has(value.name);
         const stmt: PyStatement = declared
@@ -3040,7 +3040,7 @@ function expandWalrus(module: PyModule): PyModule {
         // Re-run its assignments and test it each turn, using a flag to leave
         // the loop when it turns false, since a `break` here would not be
         // carried to the right place.
-        const line = Number(fieldOf(stmt, "line"));
+        const line = Number(stmt.line);
         const flag = `_walrus_cond_${line}`;
         out[out.length] = { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line };
         const turnBody: PyStatement[] = [];
@@ -3256,8 +3256,8 @@ function expandComprehensions(module: PyModule): PyModule {
         return { ...value, args, grid };
       }
       case "walrus": {
-        const held = expandExpr(value.value, scope, pre);
-        const innerLine = fieldOf(value.value, "line");
+        const held = expandExpr(fieldOf(value, "value"), scope, pre);
+        const innerLine = fieldOf(fieldOf(value, "value"), "line");
         const walrusLine = innerLine === undefined ? 1 : Number(innerLine);
         const declared = scope.has(value.name);
         const stmt: PyStatement = declared
@@ -3327,7 +3327,7 @@ function expandComprehensions(module: PyModule): PyModule {
           out[out.length] = { ...stmt, condition, body };
           return;
         }
-        const line = Number(fieldOf(stmt, "line"));
+        const line = Number(stmt.line);
         const flag = `_walrus_cond_${line}`;
         out[out.length] = { k: "declare", name: flag, type: null, value: { k: "boolean", value: true }, line };
         const turnBody: PyStatement[] = [];
@@ -3466,14 +3466,14 @@ function packRestArguments(module: PyModule): PyModule {
       case "list":
         {
         const items: PyValue[] = [];
-        for (const inner of value.items) items[items.length] = packValue(inner, rest);
+        for (const inner of fieldOf(value, "items")) items[items.length] = packValue(inner, rest);
         value.items = items;
       }
         break;
       case "set":
         {
         const items: PyValue[] = [];
-        for (const inner of value.items) items[items.length] = packValue(inner, rest);
+        for (const inner of fieldOf(value, "items")) items[items.length] = packValue(inner, rest);
         value.items = items;
       }
         break;
@@ -3494,7 +3494,7 @@ function packRestArguments(module: PyModule): PyModule {
         const entries: PyValue[] = [];
         for (const one of fieldOf(value, "entries") as PyValue[]) {
           const copy = structuredClone(one) as PyValue;
-          setFieldOn(copy, "value", packValue(fieldOf(one, "value"), rest));
+          setFieldOn(copy, "value", packValue(fieldOf(one, "value") as PyValue, rest));
           entries[entries.length] = copy;
         }
         setFieldOn(value, "entries", entries);
@@ -3504,7 +3504,7 @@ function packRestArguments(module: PyModule): PyModule {
         setFieldOn(value, "base", packValue(fieldOf(value, "base"), rest));
         break;
       case "walrus":
-        value.value = packValue(value.value, rest);
+        value.value = packValue(fieldOf(value, "value"), rest);
         break;
     }
     return value;
@@ -3515,24 +3515,24 @@ function packRestArguments(module: PyModule): PyModule {
         setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "assign":
-        setFieldOn(stmt, "value", packValue(stmt.value, rest));
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "storeField":
-        setFieldOn(stmt, "target", packValue(stmt.target, rest));
-        setFieldOn(stmt, "value", packValue(stmt.value, rest));
+        setFieldOn(stmt, "target", packValue(fieldOf(stmt, "target"), rest));
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "storeElement":
         setFieldOn(stmt, "target", packValue(fieldOf(stmt, "target"), rest) as any);
-        setFieldOn(stmt, "value", packValue(stmt.value, rest));
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "storeSlice":
-        if (stmt.start !== null) setFieldOn(stmt, "start", packValue(stmt.start, rest));
-        if (stmt.stop !== null) setFieldOn(stmt, "stop", packValue(stmt.stop, rest));
-        if (stmt.step !== null) setFieldOn(stmt, "step", packValue(stmt.step, rest));
-        setFieldOn(stmt, "value", packValue(stmt.value, rest));
+        if (fieldOf(stmt, "start") !== null) setFieldOn(stmt, "start", packValue(fieldOf(stmt, "start"), rest));
+        if (fieldOf(stmt, "stop") !== null) setFieldOn(stmt, "stop", packValue(fieldOf(stmt, "stop"), rest));
+        if (fieldOf(stmt, "step") !== null) setFieldOn(stmt, "step", packValue(fieldOf(stmt, "step"), rest));
+        setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "return":
-        if (stmt.value !== null) setFieldOn(stmt, "value", packValue(stmt.value, rest));
+        if (fieldOf(stmt, "value") !== null) setFieldOn(stmt, "value", packValue(fieldOf(stmt, "value"), rest));
         break;
       case "if":
         setFieldOn(stmt, "condition", packValue(fieldOf(stmt, "condition"), rest));
@@ -3556,9 +3556,9 @@ function packRestArguments(module: PyModule): PyModule {
       }
         break;
       case "for":
-        setFieldOn(stmt, "from", packValue(stmt.from, rest));
-        setFieldOn(stmt, "to", packValue(stmt.to, rest));
-        if (stmt.step !== null) setFieldOn(stmt, "step", packValue(stmt.step, rest));
+        setFieldOn(stmt, "from", packValue(fieldOf(stmt, "from"), rest));
+        setFieldOn(stmt, "to", packValue(fieldOf(stmt, "to"), rest));
+        if (fieldOf(stmt, "step") !== null) setFieldOn(stmt, "step", packValue(fieldOf(stmt, "step"), rest));
         {
         const body: PyStatement[] = [];
         for (const inner of fieldOf(stmt, "body") as PyStatement[]) body[body.length] = packStmt(inner, rest);
@@ -3702,7 +3702,7 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
     case "lambda":
       return "unknown";
     case "walrus":
-      return typeOfValue(value.value, names);
+      return typeOfValue(fieldOf(value, "value"), names);
     case "dict":
       return "dict";
     case "unary":
@@ -3721,7 +3721,7 @@ export function typeOfValue(value: PyValue, names: Map<string, PyType>): PyType 
     }
     case "conditional": {
       const then = typeOfValue(fieldOf(value, "then"), names);
-      const otherwise = typeOfValue(value.otherwise, names);
+      const otherwise = typeOfValue(fieldOf(value, "otherwise"), names);
       return then === otherwise ? then : "unknown";
     }
   }
@@ -3754,7 +3754,7 @@ const IR_OPERATORS: Record<string, BinaryOp> = {
 function dottedName(value: PyValue): string {
   if (value.k === "name") return value.name;
   if (value.k === "field") {
-    return `${dottedName(value.base)}.${value.field}`;
+    return `${dottedName(fieldOf(value, "base"))}.${value.field}`;
   }
   return "";
 }
@@ -3770,7 +3770,7 @@ function dottedName(value: PyValue): string {
  */
 function isModulePath(value: PyValue): boolean {
   if (value.k === "name") return value.name === "tl" || KNOWN_MODULES.includes(value.name);
-  if (value.k === "field") return isModulePath(value.base);
+  if (value.k === "field") return isModulePath(fieldOf(value, "base"));
   return false;
 }
 
@@ -3830,9 +3830,9 @@ export function lowerValue(value: PyValue): Expression {
     case "number":
       return { k: "literal", text: value.text };
     case "text":
-      return { k: "text", parts: (fieldOf(value, "parts") as PyTextPart[]).map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(part.value) })) };
+      return { k: "text", parts: (fieldOf(value, "parts") as PyTextPart[]).map((part) => (part.k === "text" ? part : { k: "value", value: lowerValue(fieldOf(part, "value")) })) };
     case "boolean":
-      return { k: "literal", text: fieldOf(value, "value") === true ? "1" : "0" };
+      return { k: "literal", text: value.value === true ? "1" : "0" };
     case "none":
       return { k: "null" };
     case "name":
@@ -3863,7 +3863,7 @@ export function lowerValue(value: PyValue): Expression {
       }
       // For kernel operations not directly supported by the IR yet, still lower
       // them as calls so they can be refused later with proper diagnostics
-      return { k: "call", name: builtinName(value.name), args: value.args.map(lowerValue) };
+      return { k: "call", name: builtinName(value.name), args: (fieldOf(value, "args") as PyValue[]).map(lowerValue) };
     }
     case "index": {
       // A dictionary is a hash map: reading d[key] is dict_get.
@@ -3900,9 +3900,9 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "index", base: lowerValue(fieldOf(value, "base")), index: lowerValue(fieldOf(value, "index")) };
     }
     case "slice":
-      return { k: "slice", base: lowerValue(value.base), start: value.start === null ? null : lowerValue(value.start), stop: value.stop === null ? null : lowerValue(value.stop), step: value.step === null ? null : lowerValue(value.step) };
+      return { k: "slice", base: lowerValue(fieldOf(value, "base")), start: value.start === null ? null : lowerValue(fieldOf(value, "start")), stop: value.stop === null ? null : lowerValue(fieldOf(value, "stop")), step: value.step === null ? null : lowerValue(fieldOf(value, "step")) };
     case "field":
-      return { k: "member", base: lowerValue(value.base), field: value.field };
+      return { k: "member", base: lowerValue(fieldOf(value, "base")), field: value.field };
     case "comprehension": {
       throw frontendError("a comprehension is not supported in a function", "write the loop out");
     }
@@ -3916,11 +3916,11 @@ export function lowerValue(value: PyValue): Expression {
     }
     case "membership": {
       // A dictionary supports membership by key.
-      if (value.container.k === "name" && currentDictNames.has(value.container.name)) {
-        const keyExpr = value.value.k === "text"
-          ? { k: "text", parts: fieldOf(value.value, "parts") }
-          : lowerValue(value.value);
-        const has = { k: "call", name: "blaze_rt_dict_has", args: [ { k: "ident", name: value.container.name }, keyExpr ] } as Expression;
+      if (fieldOf(value, "container").k === "name" && currentDictNames.has(fieldOf(value, "container").name)) {
+        const keyExpr = fieldOf(value, "value").k === "text"
+          ? { k: "text", parts: fieldOf(fieldOf(value, "value"), "parts") }
+          : lowerValue(fieldOf(value, "value"));
+        const has = { k: "call", name: "blaze_rt_dict_has", args: [ { k: "ident", name: fieldOf(value, "container").name }, keyExpr ] } as Expression;
         return value.negated ? { k: "unary", op: "!", operand: has } : has;
       }
       throw frontendError("membership is not supported in a function", "write the loop out");
@@ -3928,15 +3928,15 @@ export function lowerValue(value: PyValue): Expression {
     case "list": {
       // A list written out is a buffer of the numbers it holds, and the
       // element is the width of what it holds.
-      const whole = value.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
-      return { k: "buffer", element: whole ? "i64" : "f64", values: value.items.map(lowerValue) };
+      const whole = (fieldOf(value, "items") as PyValue[]).every((item: PyValue) => item.k === "number" && fieldOf(item, "whole"));
+      return { k: "buffer", element: whole ? "i64" : "f64", values: (fieldOf(value, "items") as PyValue[]).map(lowerValue) };
     }
     case "set": {
       // A set is a buffer of its (deduplicated) elements. Deduplication is
       // done where the values are known; here we keep every element.
-      const whole = value.items.every((item) => item.k === "number" && fieldOf(item, "whole"));
+      const whole = (fieldOf(value, "items") as PyValue[]).every((item: PyValue) => item.k === "number" && fieldOf(item, "whole"));
       const seen = new Set<string>();
-      const deduped = value.items.filter((item) => {
+      const deduped = (fieldOf(value, "items") as PyValue[]).filter((item) => {
         if (item.k !== "number") return true;
         if (seen.has(item.text)) return false;
         seen.add(item.text);
@@ -3945,20 +3945,20 @@ export function lowerValue(value: PyValue): Expression {
       return { k: "buffer", element: whole ? "i64" : "f64", values: deduped.map(lowerValue) };
     }
     case "sized": {
-      return { k: "sized", element: value.element, count: lowerValue(fieldOf(value, "count")) };
+      return { k: "sized", element: fieldOf(value, "element"), count: lowerValue(fieldOf(value, "count")) };
     }
     case "dict": {
       // A dictionary is a hash map: build it with dict_set.
       let expr: Expression = { k: "call", name: "blaze_rt_dict_new", args: [] } as Expression;
-      for (const entry of value.entries) {
-        expr = { k: "call", name: "blaze_rt_dict_set", args: [expr, { k: "text", parts: [{ k: "text", value: entry.name }] } as unknown as Expression, lowerValue(entry.value)] } as Expression;
+      for (const entry of fieldOf(value, "entries")) {
+        expr = { k: "call", name: "blaze_rt_dict_set", args: [expr, { k: "text", parts: [{ k: "text", value: entry.name }] } as unknown as Expression, lowerValue(fieldOf(entry, "value"))] } as Expression;
       }
       return expr;
     }
     case "await":
       // `await v` is the value the promise `v` carries; the IR reads the value
       // out of the promise at the use.
-      return { k: "call", name: "Promise.await", args: [lowerValue(value.value)] };
+      return { k: "call", name: "Promise.await", args: [lowerValue(fieldOf(value, "value"))] };
     case "binary": {
       // Set operations in a function are not lowered: the function's lists are
       // fixed buffers, and a set operation needs a buffer of a size the
@@ -3985,9 +3985,9 @@ export function lowerValue(value: PyValue): Expression {
     case "conditional":
       return {
         k: "conditional",
-        condition: lowerValue(value.condition),
+        condition: lowerValue(fieldOf(value, "condition")),
         then: lowerValue(fieldOf(value, "then")),
-        otherwise: lowerValue(value.otherwise),
+        otherwise: lowerValue(fieldOf(value, "otherwise")),
       };
   }
 }
@@ -3999,13 +3999,14 @@ function expandStoreSlices(statements: PyStatement[]): PyStatement[] {
   for (const stmt of statements) {
     if (stmt.k === "storeSlice") {
       const s = stmt as { k: "storeSlice"; base: string; start: PyValue | null; stop: PyValue | null; step: PyValue | null; value: PyValue; line: number };
-      const base = s.base;
-      const rhsItems = s.value.k === "list" ? s.value.items : [];
+      const base = fieldOf(s, "base");
+      const rhsValue = fieldOf(s, "value") as PyValue;
+      const rhsItems = String(fieldOf(rhsValue, "k")) === "list" ? (fieldOf(rhsValue, "items") as PyValue[]) : [];
       let startBound = 0;
-      if (s.start !== null && s.start.k === "number") {
-        startBound = Number(s.start.text);
+      if (fieldOf(s, "start") !== null && fieldOf(s, "start").k === "number") {
+        startBound = Number(fieldOf(s, "start").text);
       }
-      const step = s.step === null ? 1 : (s.step.k === "number" ? Number(s.step.text) : 1);
+      const step = s.step === null ? 1 : (fieldOf(s, "step").k === "number" ? Number(fieldOf(s, "step").text) : 1);
       for (let j = 0; j < rhsItems.length; j++) {
         const idx = startBound + j * step;
         result.push({
@@ -4016,19 +4017,19 @@ function expandStoreSlices(statements: PyStatement[]): PyStatement[] {
         });
       }
       // If RHS is not a list, keep as-is (will fail in lowerStatement).
-      if (s.value.k !== "list") {
+      if (fieldOf(s, "value").k !== "list") {
         result.push(stmt);
       }
     } else if (stmt.k === "if") {
-      result.push({ ...stmt, then: expandStoreSlices(stmt.then), otherwise: expandStoreSlices(stmt.otherwise) });
+      result.push({ ...stmt, then: expandStoreSlices(fieldOf(stmt, "then")), otherwise: expandStoreSlices(fieldOf(stmt, "otherwise")) });
     } else if (stmt.k === "while") {
-      result.push({ ...stmt, body: expandStoreSlices(stmt.body) });
+      result.push({ ...stmt, body: expandStoreSlices(fieldOf(stmt, "body")) });
     } else if (stmt.k === "for") {
-      result.push({ ...stmt, body: expandStoreSlices(stmt.body) });
+      result.push({ ...stmt, body: expandStoreSlices(fieldOf(stmt, "body")) });
     } else if (stmt.k === "try") {
       result.push({
         ...stmt,
-        body: expandStoreSlices(stmt.body),
+        body: expandStoreSlices(fieldOf(stmt, "body")),
         catchBody: stmt.catchBody === null ? null : expandStoreSlices(stmt.catchBody),
         finallyBody: stmt.finallyBody === null ? null : expandStoreSlices(stmt.finallyBody),
       });
@@ -4053,21 +4054,21 @@ export function lowerStatement(statement: PyStatement): Statement {
         kind: "assign",
         target: statement.name,
         op: statement.op as AssignOperator,
-        value: lowerValue(statement.value),
+        value: lowerValue(fieldOf(statement, "value")),
         line: statement.line,
       };
     case "storeField": {
-      const target = statement.target as { k: "field"; base: PyValue; field: string };
-      const base = target.base;
+      const target = fieldOf(statement, "target") as { k: "field"; base: PyValue; field: string };
+      const base = fieldOf(target, "base");
       if (base.k === "name" && currentDictNames.has(base.name)) {
         return {
           kind: "expression",
           value: {
             k: "call",
             name: "blaze_rt_dict_set",
-            args: [ { k: "ident", name: base.name }, { k: "text", parts: [{ k: "text", value: target.field }] } as Expression, lowerValue(statement.value) ],
+            args: [ { k: "ident", name: base.name }, { k: "text", parts: [{ k: "text", value: String(fieldOf(target, "field")) }] } as Expression, lowerValue(fieldOf(statement, "value") as PyValue) ],
           } as Expression,
-          line: statement.line,
+          line: Number(statement.line),
         };
       }
       if (base.k !== "name") {
@@ -4081,30 +4082,30 @@ export function lowerStatement(statement: PyStatement): Statement {
         base: base.name,
         field: target.field,
         op: "=" as AssignOperator,
-        value: lowerValue(statement.value),
+        value: lowerValue(fieldOf(statement, "value")),
         line: statement.line,
       };
     }
     case "storeElement": {
       const target = fieldOf(statement, "target") as { k: "index"; base: PyValue; index: PyValue };
-      const base = target.base;
+      const base = fieldOf(target, "base");
       if (base.k === "name" && currentDictNames.has(base.name)) {
         // A dictionary is a hash map: writing d[key] = value is a call.
-        const keyParts = fieldOf(target.index, "parts") as { k: string; value: string }[];
-        const keyStr = target.index.k === "text"
+        const keyParts = fieldOf(fieldOf(target, "index"), "parts") as { k: string; value: string }[];
+        const keyStr = fieldOf(target, "index").k === "text"
           ? (keyParts[0] !== undefined && String(fieldOf(keyParts[0], "k")) === "text" ? String(fieldOf(keyParts[0], "value")) : "")
           : null;
         const keyExpr = keyStr !== null
           ? ({ k: "text", parts: [{ k: "text", value: keyStr }] } as unknown as Expression)
-          : lowerValue(target.index);
+          : lowerValue(fieldOf(target, "index"));
         return {
           kind: "expression",
           value: {
             k: "call",
             name: "blaze_rt_dict_set",
-            args: [ { k: "ident", name: base.name }, keyExpr, lowerValue(statement.value) ],
+            args: [ { k: "ident", name: base.name }, keyExpr, lowerValue(fieldOf(statement, "value")) ],
           } as Expression,
-          line: fieldOf(statement, "line"),
+          line: statement.line,
         };
       }
       if (base.k !== "name") {
@@ -4113,39 +4114,39 @@ export function lowerStatement(statement: PyStatement): Statement {
       return {
         kind: "indexAssign",
         buffer: base.name,
-        index: lowerValue(target.index),
+        index: lowerValue(fieldOf(target, "index")),
         op: "=" as AssignOperator,
-        value: lowerValue(statement.value),
-        line: fieldOf(statement, "line"),
+        value: lowerValue(fieldOf(statement, "value")),
+        line: statement.line,
       };
     }
     case "storeSlice": {
       throw frontendError('"a[i:j] = value" is not supported in a function', "a function\'s parameters are read only");
     }
     case "return":
-      return { kind: "result", value: lowerValue(statement.value ?? { k: "none" }), line: fieldOf(statement, "line") };
+      return { kind: "result", value: lowerValue(fieldOf(statement, "value") ?? { k: "none" }), line: statement.line };
     case "if":
-      conditionIsBoolean(fieldOf(statement, "condition"), fieldOf(statement, "line"));
+      conditionIsBoolean(fieldOf(statement, "condition"), statement.line);
       return {
         kind: "if",
         condition: lowerValue(fieldOf(statement, "condition")),
-        then: statement.then.map(lowerStatement),
-        otherwise: statement.otherwise.map(lowerStatement),
-        line: fieldOf(statement, "line"),
+        then: (fieldOf(statement, "then") as PyStatement[]).map(lowerStatement),
+        otherwise: (fieldOf(statement, "otherwise") as PyStatement[]).map(lowerStatement),
+        line: statement.line,
       };
     case "while":
-      conditionIsBoolean(fieldOf(statement, "condition"), fieldOf(statement, "line"));
-      return { kind: "while", condition: lowerValue(fieldOf(statement, "condition")), body: statement.body.map(lowerStatement), line: statement.line };
+      conditionIsBoolean(fieldOf(statement, "condition"), statement.line);
+      return { kind: "while", condition: lowerValue(fieldOf(statement, "condition")), body: (fieldOf(statement, "body") as PyStatement[]).map(lowerStatement), line: statement.line };
     case "for":
       return {
         kind: "loop",
         variable: statement.variable,
-        from: lowerValue(statement.from),
-        to: lowerValue(statement.to),
+        from: lowerValue(fieldOf(statement, "from")),
+        to: lowerValue(fieldOf(statement, "to")),
         inclusive: false,
-        step: statement.step === null ? null : lowerValue(statement.step),
+        step: statement.step === null ? null : lowerValue(fieldOf(statement, "step")),
         down: false,
-        body: statement.body.map(lowerStatement),
+        body: (fieldOf(statement, "body") as PyStatement[]).map(lowerStatement),
         line: statement.line,
       };
     case "break":
@@ -4158,7 +4159,7 @@ export function lowerStatement(statement: PyStatement): Statement {
       // A print writes its values with a space between them, and then the
       // line the console ends it with.
       const parts: TextPart[] = [];
-      statement.values.forEach((value, position) => {
+      (fieldOf(statement, "values") as PyValue[]).forEach((value: PyValue, position: number) => {
         if (position > 0) parts.push({ k: "text", value: " " });
         parts.push({ k: "value", value: lowerValue(value) });
       });
@@ -4167,7 +4168,7 @@ export function lowerStatement(statement: PyStatement): Statement {
     case "try":
       return {
         kind: "try",
-        body: statement.body.map(lowerStatement),
+        body: (fieldOf(statement, "body") as PyStatement[]).map(lowerStatement),
         catchParam: null,
         catchBody: statement.catchBody === null ? null : statement.catchBody.map(lowerStatement),
         finallyBody: statement.finallyBody === null ? null : statement.finallyBody.map(lowerStatement),
@@ -4311,86 +4312,87 @@ class BodyAnalysis {
   private execute(statement: PyStatement, loop: LoopContext | null): void {
     switch (statement.k) {
       case "declare": {
-        const value = this.serialize(fieldOf(statement, "value"), loop, statement.line);
+        const value = this.serialize(fieldOf(statement, "value"), loop, Number(statement.line));
         this.bindings.set(statement.name, value);
-        if (statement.type !== null) fieldOf(this, "types").set(statement.name, pythonTypeOf(statement.type));
-        else fieldOf(this, "types").set(statement.name, typeOfValue(fieldOf(statement, "value"), this.types));
+        if (statement.type !== null) fieldOf(this, "types").set(String(fieldOf(statement, "name")), pythonTypeOf(statement.type as TypeExpr));
+        else fieldOf(this, "types").set(String(fieldOf(statement, "name")), typeOfValue(fieldOf(statement, "value") as PyValue, this.types));
         return;
       }
       case "assign": {
-        const value = this.serialize(statement.value, loop, statement.line);
-        const current = this.bindings.get(statement.name);
+        const value = this.serialize(fieldOf(statement, "value") as PyValue, loop, Number(statement.line));
+        const current = this.bindings.get(String(fieldOf(statement, "name")));
         if (current === undefined) {
-          throw frontendError(`assignment to undeclared "${statement.name}"`, `line ${statement.line}`);
+          throw frontendError(`assignment to undeclared "${String(fieldOf(statement, "name"))}"`, `line ${Number(statement.line)}`);
         }
-        const operator = statement.op === "=" ? statement.op : statement.op.slice(0, -1);
-        if (statement.op !== "=" && !CONTRACT_OPERATORS.includes(operator)) {
+        const opText = String(statement.op);
+        const operator = opText === "=" ? opText : opText.slice(0, -1);
+        if (opText !== "=" && !CONTRACT_OPERATORS.includes(operator)) {
           this.uncontractable(
-            `applies "${statement.op}" to "${statement.name}"`,
-            statement.line,
+            `applies "${opText}" to "${String(fieldOf(statement, "name"))}"`,
+            Number(statement.line),
             "a contract is one expression the result must equal, and the contract language states + - * and the comparisons",
           );
         }
         this.bindings.set(
-          statement.name,
-          statement.op === "=" ? value : `(${current} ${operator} ${value})`,
+          String(fieldOf(statement, "name")),
+          opText === "=" ? value : `(${current} ${operator} ${value})`,
         );
         return;
       }
       case "return":
-        this.result = this.serialize(statement.value ?? { k: "none" }, loop, statement.line, true);
+        this.result = this.serialize(fieldOf(statement, "value") ?? { k: "none" }, loop, Number(statement.line), true);
         return;
       case "for":
         this.executeLoop(statement);
         return;
       case "while":
-        this.uncontractable("loops while a condition holds", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("loops while a condition holds", statement.line, LOOP_REMEDY);
       case "if":
-        this.uncontractable("branches", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("branches", statement.line, LOOP_REMEDY);
       case "break":
-        this.uncontractable("leaves a loop", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("leaves a loop", statement.line, LOOP_REMEDY);
       case "continue":
-        this.uncontractable("skips the rest of a loop body", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("skips the rest of a loop body", statement.line, LOOP_REMEDY);
       case "try":
-        this.uncontractable("uses try/except", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("uses try/except", statement.line, LOOP_REMEDY);
       case "print":
-        this.uncontractable("prints", fieldOf(statement, "line"), "a contracted function returns a value and prints nothing");
+        this.uncontractable("prints", statement.line, "a contracted function returns a value and prints nothing");
       case "pass":
         return;
       case "call":
         this.uncontractable(`calls ${describeValue(fieldOf(statement, "value"))}`, statement.line, "a contracted function is computed from its parameters alone");
       case "function":
-        this.uncontractable("declares a function", fieldOf(statement, "line"), LOOP_REMEDY);
+        this.uncontractable("declares a function", statement.line, LOOP_REMEDY);
     }
   }
 
   private executeLoop(statement: PyStatement & { k: "for" }): void {
-    if (statement.step !== null) {
+    if (fieldOf(statement, "step") !== null) {
       this.uncontractable(
         "counts by something other than one",
-        fieldOf(statement, "line"),
+        statement.line,
         "a reduction describes the range it sums over, so the index moves by one",
       );
     }
-    if (statement.body.length !== 1) {
+    if (fieldOf(statement, "body").length !== 1) {
       this.uncontractable(
         "has a loop body of more than one statement",
-        fieldOf(statement, "line"),
+        statement.line,
         "a reduction describes a loop that accumulates into one variable",
       );
     }
-    const inner = statement.body[0];
+    const inner = fieldOf(statement, "body")[0];
     if (inner.k !== "assign" || (inner.op !== "+=" && inner.op !== "*=")) {
       this.uncontractable(
         "has a loop body that does not accumulate",
-        fieldOf(statement, "line"),
+        statement.line,
         "a reduction describes a loop that accumulates into one variable, as in `total += a[i]`",
       );
     }
-    const from = this.serialize(fieldOf(statement, "from"), null, fieldOf(statement, "line"));
-    const to = this.serialize(fieldOf(statement, "to"), null, fieldOf(statement, "line"));
+    const from = this.serialize(fieldOf(statement, "from"), null, statement.line);
+    const to = this.serialize(fieldOf(statement, "to"), null, statement.line);
     const context: LoopContext = { variable: statement.variable, lo: from, hiExclusive: to };
-    const body = this.serialize(inner.value, context, fieldOf(inner, "line"));
+    const body = this.serialize(fieldOf(inner, "value"), context, inner.line);
     const operator = inner.op === "*=" ? "product" : "sum";
     const reduce = `${operator}(${statement.variable} = ${from}..<${to}, ${body})`;
     const current = this.bindings.get(inner.name);
@@ -4417,9 +4419,9 @@ class BodyAnalysis {
   private serialize(value: PyValue, loop: LoopContext | null, line: number, asResult: boolean = false): string {
     switch (value.k) {
       case "number":
-        return value.text;
+        return String(fieldOf(value, "text"));
       case "boolean":
-        return value.value ? "true" : "false";
+        return value.value === true ? "true" : "false";
       case "none":
         return "null";
       case "text":
@@ -4511,10 +4513,10 @@ class BodyAnalysis {
         this.uncontractable("tests membership", line, "a loop that looks for the value");
       }
       case "slice": {
-        if (value.base.k !== "name") {
+        if (fieldOf(value, "base").k !== "name") {
           throw frontendError("only single level slicing is supported", `line ${line}`);
         }
-        const base = value.base;
+        const base = fieldOf(value, "base");
         const parameter = (fieldOf(this.declaration, "params") as PyParam[]).find((param) => String(fieldOf(param, "name")) === base.name);
         if (parameter === undefined) {
           // The base may be a bound variable (e.g., another slice), not a parameter.
@@ -4527,13 +4529,13 @@ class BodyAnalysis {
           if (asResult) {
             this.uncontractable("returns a slice", line, "a contract states what a function returns, which is a number");
           }
-          const start = value.start === null ? "" : this.serialize(value.start, loop, line);
-          const stop = value.stop === null ? "" : this.serialize(value.stop, loop, line);
-          if (value.step !== null) {
-            const step = this.serialize(value.step, loop, line);
+          const start = value.start === null ? "" : this.serialize(fieldOf(value, "start"), loop, line);
+          const stop = value.stop === null ? "" : this.serialize(fieldOf(value, "stop"), loop, line);
+          if (fieldOf(value, "step") !== null) {
+            const step = this.serialize(fieldOf(value, "step"), loop, line);
             return `${bound}[${start}:${stop}:${step}]`;
           }
-          if (value.stop !== null || value.start !== null) {
+          if (fieldOf(value, "stop") !== null || fieldOf(value, "start") !== null) {
             return `${bound}[${start}:${stop}]`;
           }
           return `${bound}[:]`;
@@ -4543,17 +4545,17 @@ class BodyAnalysis {
         if (asResult) {
           this.uncontractable("returns a slice", line, "a contract states what a function returns, which is a number");
         }
-        const start = value.start === null ? "" : this.serialize(value.start, loop, line);
-        const stop = value.stop === null ? "" : this.serialize(value.stop, loop, line);
+        const start = value.start === null ? "" : this.serialize(fieldOf(value, "start"), loop, line);
+        const stop = value.stop === null ? "" : this.serialize(fieldOf(value, "stop"), loop, line);
         // Push an access range for the sliced elements of the parameter.
         const lo = value.start === null ? "0" : start;
         const hi = value.stop === null ? `len(${parameter.name})` : stop;
         fieldOf(this, "accesses").push({ parameter: parameter.name, lo, hi });
-        if (value.step !== null) {
-          const step = this.serialize(value.step, loop, line);
+        if (fieldOf(value, "step") !== null) {
+          const step = this.serialize(fieldOf(value, "step"), loop, line);
           return `${parameter.name}[${start}:${stop}:${step}]`;
         }
-        if (value.stop !== null || value.start !== null) {
+        if (fieldOf(value, "stop") !== null || fieldOf(value, "start") !== null) {
           return `${parameter.name}[${start}:${stop}]`;
         }
         return `${parameter.name}[:]`;
@@ -4561,7 +4563,7 @@ class BodyAnalysis {
       case "call": {
         // The contract language has one function of its own: `len(x)`, which
         // is the length of the buffer or of the text `x` holds.
-        const argument = fieldOf(value, "args").length === 1 ? value.args[0] : null;
+        const argument = fieldOf(value, "args").length === 1 ? fieldOf(value, "args")[0] : null;
         if (value.name === "len" && argument !== null && argument.k === "name") {
           const parameter = (fieldOf(this.declaration, "params") as PyParam[]).find((param) => String(fieldOf(param, "name")) === argument.name);
           if (parameter === undefined) {
@@ -4612,38 +4614,38 @@ function dependsOn(value: PyValue, name: string): boolean {
     case "unary":
       return dependsOn(fieldOf(value, "operand"), name);
     case "await":
-      return dependsOn(value.value, name);
+      return dependsOn(fieldOf(value, "value"), name);
     case "binary":
       return dependsOn(fieldOf(value, "left"), name) || dependsOn(fieldOf(value, "right"), name);
     case "index":
       return dependsOn(fieldOf(value, "base"), name) || dependsOn(fieldOf(value, "index"), name);
     case "slice":
-      return dependsOn(value.base, name) || (value.start !== null && dependsOn(value.start, name)) || (value.stop !== null && dependsOn(value.stop, name)) || (value.step !== null && dependsOn(value.step, name));
+      return dependsOn(fieldOf(value, "base"), name) || (fieldOf(value, "start") !== null && dependsOn(fieldOf(value, "start"), name)) || (fieldOf(value, "stop") !== null && dependsOn(fieldOf(value, "stop"), name)) || (fieldOf(value, "step") !== null && dependsOn(fieldOf(value, "step"), name));
     case "field":
-      return dependsOn(value.base, name);
+      return dependsOn(fieldOf(value, "base"), name);
     case "call":
-      return value.args.some((argument) => dependsOn(argument, name));
+      return (fieldOf(value, "args") as PyValue[]).some((argument: PyValue) => dependsOn(argument, name));
     case "list":
-      return value.items.some((item) => dependsOn(item, name));
+      return (fieldOf(value, "items") as PyValue[]).some((item) => dependsOn(item, name));
     case "comprehension":
-      return dependsOn(value.element, name) || dependsOn(value.iterable, name) || (value.condition !== null && dependsOn(value.condition, name));
+      return dependsOn(fieldOf(value, "element"), name) || dependsOn(fieldOf(value, "iterable"), name) || (fieldOf(value, "condition") !== null && dependsOn(fieldOf(value, "condition"), name));
     case "membership":
-      return dependsOn(value.value, name) || dependsOn(value.container, name);
+      return dependsOn(fieldOf(value, "value"), name) || dependsOn(fieldOf(value, "container"), name);
     case "lambda":
-      return dependsOn(value.body, name);
+      return dependsOn(fieldOf(value, "body"), name);
     case "walrus":
       return dependsOn((value as { k: "walrus"; name: string; value: PyValue }).value, name);
     case "set":
-      return value.items.some((item) => dependsOn(item, name));
+      return (fieldOf(value, "items") as PyValue[]).some((item) => dependsOn(item, name));
     case "sized":
       return dependsOn((value as { k: "sized"; element: "i64" | "f64"; count: PyValue }).count, name);
     case "dict":
-      return value.entries.some((entry) => dependsOn(entry.value, name));
+      return (fieldOf(value, "entries") as PyValue[]).some((entry) => dependsOn(fieldOf(entry, "value"), name));
     case "conditional":
       return (
-        dependsOn(value.condition, name) ||
+        dependsOn(fieldOf(value, "condition"), name) ||
         dependsOn(fieldOf(value, "then"), name) ||
-        dependsOn(value.otherwise, name)
+        dependsOn(fieldOf(value, "otherwise"), name)
       );
   }
 }
@@ -4698,7 +4700,7 @@ function usageExpression(value: PyValue, state: UsageState): void {
       if (value.k === "list") {
         for (const one of fieldOf(value, "items") as PyValue[]) items[items.length] = one;
       } else {
-        for (const entry of fieldOf(value, "entries") as PyValue[]) items[items.length] = fieldOf(entry, "value");
+        for (const entry of fieldOf(value, "entries") as PyValue[]) items[items.length] = fieldOf(entry, "value") as PyValue;
       }
       for (const item of items) usageExpression(item, state);
       return;
@@ -4882,7 +4884,7 @@ function contractTextOf(value: PyValue): string | null {
       }
       return null;
     case "unary":
-      const unaryOp = String(fieldOf(value, "op"));
+      const unaryOp = String(value.op);
       if (unaryOp !== "-" && unaryOp !== "+") return null;
       const operand = contractTextOf(fieldOf(value, "operand") as PyValue);
       return operand === null ? null : `(${unaryOp}${operand})`;
@@ -4923,26 +4925,26 @@ function conversionInStatement(statement: PyStatement): string | null {
     case "storeSlice":
       return conversionInValue(fieldOf(statement, "value"));
     case "return":
-      return statement.value === null ? null : conversionInValue(statement.value);
+      return statement.value === null ? null : conversionInValue(fieldOf(statement, "value"));
     case "if":
       return (
         conversionInValue(fieldOf(statement, "condition")) ??
-        conversionIn(statement.then) ??
-        conversionIn(statement.otherwise)
+        conversionIn(fieldOf(statement, "then")) ??
+        conversionIn(fieldOf(statement, "otherwise"))
       );
     case "while":
-      return conversionInValue(fieldOf(statement, "condition")) ?? conversionIn(statement.body);
+      return conversionInValue(fieldOf(statement, "condition")) ?? conversionIn(fieldOf(statement, "body"));
     case "for":
       return (
-        conversionInValue(statement.from) ??
-        conversionInValue(statement.to) ??
-        conversionIn(statement.body)
+        conversionInValue(fieldOf(statement, "from")) ??
+        conversionInValue(fieldOf(statement, "to")) ??
+        conversionIn(fieldOf(statement, "body"))
       );
     case "print":
-      return statement.values.map(conversionInValue).find((found) => found !== null) ?? null;
+      return (fieldOf(statement, "values") as PyValue[]).map(conversionInValue).find((found) => found !== null) ?? null;
     case "try":
       return (
-        conversionIn(statement.body) ??
+        conversionIn(fieldOf(statement, "body")) ??
         (statement.catchBody === null ? null : conversionIn(statement.catchBody)) ??
         (statement.finallyBody === null ? null : conversionIn(statement.finallyBody))
       );
@@ -4960,7 +4962,7 @@ function conversionInValue(value: PyValue): string | null {
   switch (value.k) {
     case "call": {
       if (value.name === "int" || value.name === "float" || value.name === "str") return value.name;
-      return value.args.map(conversionInValue).find((found) => found !== null) ?? null;
+      return (fieldOf(value, "args") as PyValue[]).map(conversionInValue).find((found) => found !== null) ?? null;
     }
     case "binary":
       return conversionInValue(fieldOf(value, "left")) ?? conversionInValue(fieldOf(value, "right"));
@@ -4968,43 +4970,43 @@ function conversionInValue(value: PyValue): string | null {
       return conversionInValue(fieldOf(value, "operand") as PyValue);
     case "conditional":
       return (
-        conversionInValue(value.condition) ??
+        conversionInValue(fieldOf(value, "condition")) ??
         conversionInValue(fieldOf(value, "then")) ??
-        conversionInValue(value.otherwise)
+        conversionInValue(fieldOf(value, "otherwise"))
       );
     case "index":
       return conversionInValue(fieldOf(value, "base")) ?? conversionInValue(fieldOf(value, "index"));
     case "slice":
       return (
-        conversionInValue(value.base) ??
-        (value.start === null ? null : conversionInValue(value.start)) ??
-        (value.stop === null ? null : conversionInValue(value.stop)) ??
-        (value.step === null ? null : conversionInValue(value.step))
+        conversionInValue(fieldOf(value, "base")) ??
+        (value.start === null ? null : conversionInValue(fieldOf(value, "start"))) ??
+        (value.stop === null ? null : conversionInValue(fieldOf(value, "stop"))) ??
+        (value.step === null ? null : conversionInValue(fieldOf(value, "step")))
       );
     case "field":
-      return conversionInValue(value.base);
+      return conversionInValue(fieldOf(value, "base"));
     case "list":
-      return value.items.map(conversionInValue).find((found) => found !== null) ?? null;
+      return (fieldOf(value, "items") as PyValue[]).map(conversionInValue).find((found) => found !== null) ?? null;
     case "comprehension":
-      return conversionInValue(value.element) ?? conversionInValue(value.iterable) ?? (value.condition === null ? null : conversionInValue(value.condition));
+      return conversionInValue(fieldOf(value, "element")) ?? conversionInValue(fieldOf(value, "iterable")) ?? (value.condition === null ? null : conversionInValue(fieldOf(value, "condition")));
     case "membership":
-      return conversionInValue(value.value) ?? conversionInValue(value.container);
+      return conversionInValue(fieldOf(value, "value")) ?? conversionInValue(fieldOf(value, "container"));
     case "lambda":
-      return conversionInValue(value.body);
+      return conversionInValue(fieldOf(value, "body"));
     case "walrus":
       return conversionInValue((value as { k: "walrus"; name: string; value: PyValue }).value);
     case "set":
-      return value.items.map((item) => conversionInValue(item)).find((x) => x !== null) ?? null;
+      return (fieldOf(value, "items") as PyValue[]).map((item) => conversionInValue(item)).find((x) => x !== null) ?? null;
     case "sized":
       return conversionInValue((value as { k: "sized"; element: "i64" | "f64"; count: PyValue }).count);
     default:
       return null;
     case "dict":
-      return value.entries.map((entry) => conversionInValue(entry.value)).find((found) => found !== null) ?? null;
+      return (fieldOf(value, "entries") as PyValue[]).map((entry) => conversionInValue(fieldOf(entry, "value"))).find((found) => found !== null) ?? null;
     case "text":
       return (fieldOf(value, "parts") as PyTextPart[])
         .filter((part): part is { k: "value"; value: PyValue } => part.k === "value")
-        .map((part) => conversionInValue(part.value))
+        .map((part) => conversionInValue(fieldOf(part, "value")))
         .find((found) => found !== null) ?? null;
     case "number":
     case "boolean":
@@ -5127,13 +5129,13 @@ export const pythonFrontend: Frontend = {
     // A name bound to a function (a lambda) may be called as one.
     const collectLambdas = (stmts: PyStatement[]): void => {
       for (const stmt of stmts) {
-        if (stmt.k === "declare" && stmt.value.k === "lambda") known.add(stmt.name);
-        if (stmt.k === "if") { collectLambdas(stmt.then); collectLambdas(stmt.otherwise); }
-        if (stmt.k === "while") collectLambdas(stmt.body);
-        if (stmt.k === "for") collectLambdas(stmt.body);
+        if (stmt.k === "declare" && fieldOf(stmt, "value").k === "lambda") known.add(stmt.name);
+        if (stmt.k === "if") { collectLambdas(fieldOf(stmt, "then")); collectLambdas(fieldOf(stmt, "otherwise")); }
+        if (stmt.k === "while") collectLambdas(fieldOf(stmt, "body"));
+        if (stmt.k === "for") collectLambdas(fieldOf(stmt, "body"));
         if (stmt.k === "function") collectLambdas(fieldOf(stmt, "body"));
         if (stmt.k === "try") {
-          collectLambdas(stmt.body);
+          collectLambdas(fieldOf(stmt, "body"));
           if (stmt.catchBody !== null) collectLambdas(stmt.catchBody);
           if (stmt.finallyBody !== null) collectLambdas(stmt.finallyBody);
         }

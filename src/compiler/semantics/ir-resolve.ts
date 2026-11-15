@@ -2132,8 +2132,9 @@ class ProgramResolver {
       // A string the function was given is passed by value as well: it is the
       // function's own binding, and a function that reads it reads a copy.
       if (held.kind === "text") {
-        if (!held.mutable && held.value !== null) continue;
-        captures.push({ name, type: TEXT, held, boxed: held.mutable && held.parameter !== true });
+        const mutable = fieldOf(held, "mutable");
+        if (!mutable && fieldOf(held, "value") !== null) continue;
+        captures.push({ name, type: TEXT, held, boxed: mutable && fieldOf(held, "parameter") !== true });
         continue;
       }
       const type = heldType(held);
@@ -2887,9 +2888,9 @@ class ProgramResolver {
         });
       }
       case "reference": {
-        const held = value.held;
+        const held = fieldOf(value, "held") as Held;
         if (held.kind === "number") {
-          return declare({ kind: "number", mutable, type: annotation !== null && primitive(annotation) !== null ? primitive(annotation)! : fieldOf(held, "type") as PrimitiveTypeName, text: String(fieldOf(held, "text")), ...(held.bigint === true ? { bigint: true } : {}) });
+          return declare({ kind: "number", mutable, type: annotation !== null && primitive(annotation) !== null ? primitive(annotation)! : fieldOf(held, "type") as PrimitiveTypeName, text: String(fieldOf(held, "text")), ...(fieldOf(held, "bigint") === true ? { bigint: true } : {}) });
         }
         if (held.kind === "array") {
           const alias: ArrayHeld = {

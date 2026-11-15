@@ -2586,15 +2586,15 @@ function unsupportedUpdateIn(statements: readonly Statement[], name: string): bo
           expressionReadsUpdate((fieldOf(statement, "from") as Expression), name) ||
           expressionReadsUpdate((fieldOf(statement, "to") as Expression), name) ||
           (statement.step !== null && expressionReadsUpdate(statement.step, name)) ||
-          unsupportedUpdateIn(statement.body, name)
+          unsupportedUpdateIn((fieldOf(statement, "body") as Statement[]), name)
         ) return true;
         break;
       case "forOf":
-        if (unsupportedUpdateIn(statement.body, name)) return true;
+        if (unsupportedUpdateIn((fieldOf(statement, "body") as Statement[]), name)) return true;
         break;
       case "try":
         if (
-          unsupportedUpdateIn(statement.body, name) ||
+          unsupportedUpdateIn((fieldOf(statement, "body") as Statement[]), name) ||
           (statement.catchBody !== null && unsupportedUpdateIn(statement.catchBody, name)) ||
           (statement.finallyBody !== null && unsupportedUpdateIn(statement.finallyBody, name))
         ) return true;
@@ -2851,17 +2851,28 @@ function boxExpression(value: Expression, name: string, box: Boxed): Expression 
         params: fieldOf(value, "params") as TypeExpr[],
         returns: fieldOf(value, "returns") as TypeExpr,
       };
-    case "append":
+    case "append": {
       // A push on a boxed list is a push on the list the box holds; the values
       // pushed are ordinary reads and are rewritten.
-      return {
-        ...value,
-        ...(value.base === null && value.target === name && (fieldOf(box, "list") as boolean)
-          ? { target: BOXED_FIELD, base: String(fieldOf(box, "name")) }
-          : {}),
-        ...(value.index === undefined ? {} : { index: boxExpression(value.index, name, box) }),
-        values: value.values.map((element) => boxExpression(element, name, box)),
+      const target = String(fieldOf(value, "target"));
+      const base = fieldOf(value, "base") as string | null;
+      const boxed = base === null && target === name && (fieldOf(box, "list") as boolean);
+      const made: Expression = {
+        k: "append",
+        target: boxed ? BOXED_FIELD : target,
+        base: boxed ? String(fieldOf(box, "name")) : base,
+        helper: String(fieldOf(value, "helper")),
+        op: fieldOf(value, "op") as "push" | "pop",
+        values: (fieldOf(value, "values") as Expression[]).map((element) => boxExpression(element, name, box)),
       };
+      const index = fieldOf(value, "index") as Expression | undefined;
+      if (index !== undefined) setFieldOn(made, "index", boxExpression(index, name, box));
+      const spreads = fieldOfOptional(value, "spreads") as readonly boolean[] | undefined;
+      if (spreads !== undefined) setFieldOn(made, "spreads", spreads);
+      const element = fieldOfOptional(value, "element") as string | undefined;
+      if (element !== undefined) setFieldOn(made, "element", element);
+      return made;
+    }
   }
 }
 
@@ -2959,7 +2970,7 @@ function readsUpdate(statement: Statement, name: string): boolean {
     case "doWhile":
       return expression((fieldOf(statement, "condition") as Expression)) || readsUpdateIn((fieldOf(statement, "body") as Statement[]), name);
     case "loop":
-      return expression((fieldOf(statement, "from") as Expression)) || expression((fieldOf(statement, "to") as Expression)) || expression(statement.step) || readsUpdateIn(statement.body, name);
+      return expression((fieldOf(statement, "from") as Expression)) || expression((fieldOf(statement, "to") as Expression)) || expression(fieldOf(statement, "step") as Expression | null) || readsUpdateIn((fieldOf(statement, "body") as Statement[]), name);
     case "forOf":
       return readsUpdateIn(statement.body, name);
     case "try":
@@ -2983,7 +2994,8 @@ function expressionReadsUpdate(value: Expression, name: string): boolean {
     case "length":
       return false;
     case "argv":
-      return value.index !== null && expressionReadsUpdate(value.index, name);
+      const argvIndex = fieldOf(value, "index") as Expression | null;
+      return argvIndex !== null && expressionReadsUpdate(argvIndex, name);
     case "lengthOf":
       return expressionReadsUpdate(value.of, name);
     case "index":
@@ -3016,7 +3028,7 @@ function expressionReadsUpdate(value: Expression, name: string): boolean {
     case "binary":
       return expressionReadsUpdate((fieldOf(value, "left") as Expression), name) || expressionReadsUpdate((fieldOf(value, "right") as Expression), name);
     case "unary":
-      return expressionReadsUpdate(value.operand, name);
+      return expressionReadsUpdate(fieldOf(value, "operand") as Expression, name);
     case "conditional":
       return expressionReadsUpdate(value.condition, name) ||
         expressionReadsUpdate(fieldOf(value, "then"), name) ||
@@ -3024,11 +3036,12 @@ function expressionReadsUpdate(value: Expression, name: string): boolean {
     case "arrow":
       return false;
     case "capture":
-      return expressionReadsUpdate(value.closure, name);
+      return expressionReadsUpdate(fieldOf(value, "closure") as Expression, name);
     case "invoke":
-      return expressionReadsUpdate(value.callee, name) || value.args.some((argument) => expressionReadsUpdate(argument, name));
+      return expressionReadsUpdate(fieldOf(value, "callee") as Expression, name) ||
+        (fieldOf(value, "args") as Expression[]).some((argument) => expressionReadsUpdate(argument, name));
     case "append":
-      return value.values.some((element) => expressionReadsUpdate(element, name));
+      return (fieldOf(value, "values") as Expression[]).some((element) => expressionReadsUpdate(element, name));
   }
 }
 
@@ -3443,34 +3456,6 @@ interface ArrowParameterType {
 }
 
 /** One parameter an arrow is written with, before its body is read. */
-type ArrowParam = {
-  name: string;
-  type: TypeExpr;
-  typeName: string;
-  functionType: FunctionType | null;
-  shape: ResolvedType | null;
-  /** The parameter is the rest of the call's arguments, as one list. */
-  rest?: boolean;
-  /** The value a call writes when it leaves the parameter out. */
-  default?: Expression;
-};
-
-/** One arrow parameter, built once so every call site writes the same fields. */
-function arrowParameter(
-  name: string,
-  type: TypeExpr,
-  typeName: string,
-  functionType: FunctionType | null,
-  shape: ResolvedType | null,
-): ArrowParam {
-  return {
-    name: name,
-    type: type,
-    typeName: typeName,
-    functionType: functionType,
-    shape: shape,
-  };
-}
 
 /**
  * What a name holds when it is a map or a set.
@@ -15205,7 +15190,12 @@ class TypeScriptParser {
     // Whether the element this callback is handed is one the link will name.
     const waitsForLink = this.pendingArrow;
     this.pendingArrow = false;
-    const arrowParams: ArrowParam[] = [];
+    const arrowParams: TypeScriptFunction["params"] = [];
+    /** The annotation name, signature and shape of each parameter, by position. */
+    const paramTypeNames: string[] = [];
+    const paramFunctions: (FunctionType | null)[] = [];
+    const paramShapes: (ResolvedType | null)[] = [];
+    let restAt = -1;
     /** What a parameter written as a pattern binds, read where the body starts. */
     const prelude: Statement[] = [];
     if (this.accept("(")) {
@@ -15239,7 +15229,10 @@ class TypeScriptParser {
               : binding);
           }
           const temp = `__param${this.destructureCount++}`;
-          arrowParams.push({ name: temp, type: type, typeName: "", functionType: null, shape: shape });
+          arrowParams.push({ name: temp, type: type });
+          paramTypeNames[paramTypeNames.length] = "";
+          paramFunctions[paramFunctions.length] = null;
+          paramShapes[paramShapes.length] = shape;
           prelude.push(...this.patternPrelude(bindings, temp, type, line, shape));
           if (!this.accept(",")) break;
           continue;
@@ -15300,10 +15293,11 @@ class TypeScriptParser {
             );
           }
         }
-        const parameter: ArrowParam = arrowParameter(name.text, type, typeName, functionType, shape);
-        if (fallback !== undefined) setFieldOn(parameter, "default", fallback);
-        if (rest) setFieldOn(parameter, "rest", true);
-        arrowParams.push(parameter);
+        arrowParams.push({ name: name.text, type: type, ...(fallback === undefined ? {} : { default: fallback }) });
+        paramTypeNames[paramTypeNames.length] = typeName;
+        paramFunctions[paramFunctions.length] = functionType;
+        paramShapes[paramShapes.length] = shape;
+        if (rest) restAt = arrowParams.length - 1;
         if (!this.accept(",")) break;
         // A list of parameters may end with a comma, as it may on a function.
         if (this.at(")")) break;
@@ -15316,13 +15310,10 @@ class TypeScriptParser {
       }
       const hinted = hints?.[0] ?? null;
       const parameterType: TypeExpr = (fieldOfOptional(hinted, "type") as TypeExpr | null) ?? ANY_TYPE;
-      arrowParams.push(arrowParameter(
-        name.text,
-        parameterType,
-        parameterType.kind === "ref" && parameterType.name !== undefined ? parameterType.name : "",
-        null,
-        (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null,
-      ));
+      arrowParams.push({ name: name.text, type: parameterType });
+      paramTypeNames[paramTypeNames.length] = parameterType.kind === "ref" && parameterType.name !== undefined ? parameterType.name : "";
+      paramFunctions[paramFunctions.length] = null;
+      paramShapes[paramShapes.length] = (fieldOfOptional(hinted, "shape") as ResolvedType | null) ?? null;
     }
     let stated: TypeExpr | null = null;
     let statedShape: ResolvedType | null = null;
@@ -15384,16 +15375,15 @@ class TypeScriptParser {
         function: liftedName,
         captures: [],
         captureTypes: [],
-        params: arrowParams.map((param) => ({
+        params: arrowParams.map((param, at) => ({
           name: param.name,
           type: param.type,
-          shape: (fieldOf(param, "shape") as ResolvedType | null),
-          ...(param.default === undefined ? {} : { default: param.default }),
+          shape: paramShapes[at] ?? null,
+          ...(fieldOf(param, "default") === undefined ? {} : { default: fieldOf(param, "default") as Expression }),
         })),
         returns: stated ?? ANY_TYPE,
         returnsShape: statedShape,
       };
-      const restAt = arrowParams.findIndex((param) => (fieldOf(param, "rest") as boolean | undefined) === true);
       if (restAt >= 0) provisional.rest = restAt;
       this.valueArrows.set(declared, provisional);
     }
@@ -15409,10 +15399,13 @@ class TypeScriptParser {
     this.pendingValues = new Set(savedPendingValues);
     arrowParams.forEach((param, at) => {
       this.valueTypes.set(param.name, param.type);
-      if ((fieldOf(param, "shape") as ResolvedType | null) !== null) (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(param.name, (fieldOf(param, "shape") as ResolvedType));
-      if (param.functionType !== null) this.valueFunctions.set(param.name, param.functionType);
-      if (param.typeName !== "" &&fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(param.typeName)) {
-        (fieldOf(this, "valueClasses") as Map<string, string>).set(param.name, param.typeName);
+      const paramShape = paramShapes[at] ?? null;
+      if (paramShape !== null) (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(param.name, paramShape);
+      const paramFunction = paramFunctions[at] ?? null;
+      if (paramFunction !== null) this.valueFunctions.set(param.name, paramFunction);
+      const paramTypeName = paramTypeNames[at] ?? "";
+      if (paramTypeName !== "" && fieldOf((fieldOf(this, "classTable") as ClassTable), "names").has(paramTypeName)) {
+        (fieldOf(this, "valueClasses") as Map<string, string>).set(param.name, paramTypeName);
       }
       if (waitsForLink && (hints?.[at] === undefined || unknownReference(hints[at].type))) {
         this.pendingValues.add(param.name);
@@ -15798,6 +15791,14 @@ class TypeScriptParser {
     return name;
   }
 
+  /** The binding of a lifted arrow, or undefined where it has none. */
+  private boundArrow(name: string): ArrowBinding | undefined {
+    for (const [bound, binding] of this.arrowBindings) {
+      if (String(bound) === name) return binding;
+    }
+    return undefined;
+  }
+
   /** Whether a closure's captures are exactly its leading parameters. */
   private holdsCaptureInvariant(closure: TypeScriptFunction): boolean {
     const params = fieldOf(closure, "params") as { name: string }[];
@@ -15957,10 +15958,8 @@ class TypeScriptParser {
     const scope = fieldOf(closure, "scopeNames") as string[] | undefined;
     const body = fieldOf(closure, "body") as Statement[];
     const callees = this.calledConverted(body);
-    for (let at = 0; at < callees.length; at += 1) {
-      const calleeName = String(callees[at]);
-      const callee = this.liftedArrows.get(calleeName);
-      if (callee === undefined) continue;
+    for (const [calleeName, callee] of this.liftedArrows) {
+      if (!callees.includes(String(calleeName))) continue;
       if (!this.holdsCaptureInvariant(callee)) continue;
       const calleeCaptures = fieldOf(callee, "captures") as string[];
       if (!this.canConvertCall(closure, calleeCaptures)) continue;
@@ -15975,7 +15974,7 @@ class TypeScriptParser {
         if (type === null) continue;
         params.splice(held.length, 0, { name: needed, type });
         held[held.length] = needed;
-        const binding = this.arrowBindings.get(self);
+        const binding = this.boundArrow(self);
         if (binding !== undefined) {
           const boundCaptures = fieldOf(binding, "captures") as string[];
           const boundTypes = fieldOf(binding, "captureTypes") as TypeExpr[];
@@ -24200,11 +24199,11 @@ class BodyAnalysis {
         this.executeLoop(statement);
         return;
       case "while":
-        this.uncontractable("loops while a condition holds", statement.line, LOOP_REMEDY);
+        this.uncontractable("loops while a condition holds", Number(fieldOf(statement, "line")), LOOP_REMEDY);
       case "doWhile":
-        this.uncontractable("loops until a condition fails", statement.line, LOOP_REMEDY);
+        this.uncontractable("loops until a condition fails", Number(fieldOf(statement, "line")), LOOP_REMEDY);
       case "forOf":
-        this.uncontractable(`walks "${statement.of}"`, statement.line, LOOP_REMEDY);
+        this.uncontractable(`walks "${String(fieldOf(statement, "of"))}"`, Number(fieldOf(statement, "line")), LOOP_REMEDY);
       case "break":
         this.uncontractable("leaves a loop", (fieldOf(statement, "line") as number), LOOP_REMEDY);
       case "continue":
@@ -24270,8 +24269,8 @@ class BodyAnalysis {
     const inner = statement.body[0];
     if (inner.kind === "indexAssign") {
       this.uncontractable(
-        `writes into "${inner.buffer}"`,
-        inner.line,
+        `writes into "${String(fieldOf(inner, "buffer"))}"`,
+        Number(fieldOf(inner, "line")),
         "a reduction reads what it is given, so a contracted function writes nothing",
       );
     }
@@ -24575,7 +24574,7 @@ function dependsOn(expression: Expression, name: string): boolean {
     case "capture":
       return dependsOn(expression.closure, name);
     case "invoke":
-      return dependsOn(expression.callee, name) || expression.args.some((argument) => dependsOn(argument, name));
+      return dependsOn(fieldOf(expression, "callee") as Expression, name) || (fieldOf(expression, "args") as Expression[]).some((argument) => dependsOn(argument, name));
     case "append":
       return dependsOn(appendArray(expression), name) || expression.values.some((value) => dependsOn(value, name));
   }
@@ -24617,7 +24616,7 @@ function describe(expression: Expression): string {
     case "binary":
       return `${describe((fieldOf(expression, "left") as Expression))} ${expression.op} ${describe((fieldOf(expression, "right") as Expression))}`;
     case "unary":
-      return `${expression.op}${describe(expression.operand)}`;
+      return `${String(fieldOf(expression, "op"))}${describe(fieldOf(expression, "operand") as Expression)}`;
     case "conditional":
       return "a conditional";
     case "null":
@@ -24627,9 +24626,9 @@ function describe(expression: Expression): string {
     case "capture":
       return "a value a closure captured";
     case "invoke":
-      return `a call of ${describe(expression.callee)}`;
+      return `a call of ${describe(fieldOf(expression, "callee") as Expression)}`;
     case "append":
-      return `${describe(appendArray(expression))}.${expression.op}`;
+      return `${describe(appendArray(expression))}.${String(fieldOf(expression, "op"))}`;
   }
 }
 
