@@ -100,14 +100,29 @@ test("an invalid handle is not a promise", async () => {
 });
 
 test("a stale promise handle is rejected", async () => {
-  const out = await probe(`
-    BlazeValue p = blaze_promise_new();
-    blaze_promise_resolve(p, 5.0);
-    printf("%g", blaze_promise_await(p));
-  `);
-  assert.equal(out, "5");
-  // The registry generation that makes a released handle stale is asserted by
-  // the value-ABI probes; a promise participates in the same registry.
+  const directory = await scratch("blaze-promise-stale-");
+  await writeFile(join(directory, "blaze_rt.h"), runtimeHeaderSource());
+  await writeFile(join(directory, "blaze_rt.c"), runtimeSourceSource("debug"));
+  await writeFile(join(directory, "probe.c"), `#include "blaze_rt.c"
+int main(void) {
+  BlazeValue p = blaze_promise_new();
+  blaze_promise_resolve(p, 5.0);
+  double before = blaze_promise_await(p);
+  BlazeValue asHandle = p;
+  asHandle.tag = BLAZE_VALUE_HANDLE;
+  blaze_registry_release(&asHandle, BLAZE_EXTERNAL_PROMISE, "test");
+  double after = blaze_promise_await(p);
+  printf("%g %g", before, after);
+}
+`, "utf8");
+  const binary = join(directory, "probe");
+  const built = run("gcc", ["-std=c11", "-O1", "-o", binary, join(directory, "probe.c"), "-I", directory, "-lm"], { timeoutMs: 120_000 });
+  assert.equal(built.code, 0, built.stderr);
+  const result = run(binary, [], { timeoutMs: 30_000 });
+  // A released promise fails validation; awaiting it answers zero rather than
+  // reading the memory its entry no longer owns.
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^5 /);
 });
 
 test("the machine backend marshals promise values through the tagged ABI", async () => {
