@@ -470,88 +470,54 @@ function qualifySymbols(
   }
 }
 
-/** The calls a module-level value is read and written through. */
-const GLOBAL_SLOT_CALLS: ReadonlySet<string> = new Set([
-  "blaze_rt_global_get",
-  "blaze_rt_global_set",
-  "blaze_rt_global_post_inc",
-  "blaze_rt_global_post_dec",
-]);
-
-/** Every slot a body names, with the literal that names it. */
-function eachGlobalSlot(
-  node: unknown,
-  handle: (literal: Record<string, unknown>, slot: number) => void,
-): void {
+/**
+ * Collects the first-class globals a body names. A global is a value of its
+ * own in the IR, so discovery reads its identifier rather than a runtime call
+ * name or a decimal string literal.
+ */
+function eachGlobal(node: unknown, handle: (global: Record<string, unknown>) => void): void {
   if (Array.isArray(node)) {
     const values = node as unknown[];
-    for (const value of values) eachGlobalSlot(value, handle);
+    for (const value of values) eachGlobal(value, handle);
     return;
   }
   if (typeof node !== "object" || node === null) return;
   const record = node as Record<string, unknown>;
-  if (record["k"] === "call" && typeof record["name"] === "string" && GLOBAL_SLOT_CALLS.has(record["name"])) {
-    const args = record["args"];
-    const first = Array.isArray(args) ? args[0] : undefined;
-    if (typeof first === "object" && first !== null) {
-      const literal = first as Record<string, unknown>;
-      if (literal["k"] === "literal" && typeof literal["text"] === "string" && /^[0-9]+$/.test(literal["text"])) {
-        handle(literal, Number(literal["text"]));
-      }
-    }
-  }
-  for (const value of Object.values(record)) eachGlobalSlot(value, handle);
+  if (record["k"] === "global") handle(record);
+  for (const value of Object.values(record)) eachGlobal(value, handle);
 }
 
 /**
- * The cells a program's modules hold, numbered once for the program.
- *
- * A module numbers its own top-level values from zero, and a compiled program
- * has one array of cells: two files that each count would share the first
- * cell. The contract phase is where the modules meet, so each file's cells are
- * moved past the cells of the files before it: the body and every function of
- * a file are shifted by the same base, and the entry's statements travel with
- * its file.
+ * Allocates the program's global cells once. The identifiers are sorted before
+ * slots are handed out, so the assignment does not depend on the order files
+ * were read or functions were written. Every reference to one identifier gets
+ * the same slot, and a body that names no global gets none.
  */
-function shiftGlobalSlots(
+function allocateGlobals(
   records: readonly ModuleRecord[],
   contracts: ReadonlyMap<string, FileContract>,
   body: ProgramBody | undefined,
 ): void {
-  let base = 0;
+  const refs = new Map<string, Record<string, unknown>[]>();
+  const collect = (node: unknown): void => {
+    eachGlobal(node, (global) => {
+      const id = String(global["id"]);
+      const held = refs.get(id);
+      if (held === undefined) refs.set(id, [global]);
+      else held.push(global);
+    });
+  };
   for (const record of records) {
-    const recordPath = String(fieldOf(record, "path"));
-    const file = contracts.get(recordPath);
-    const fileFunctions = file === undefined
-      ? []
-      : Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>);
-    let highest = -1;
-    const count = (node: unknown): void => {
-      eachGlobalSlot(node, (_literal, slot) => {
-        if (slot > highest) highest = slot;
-      });
-    };
-    if (file !== undefined) {
-      for (const contract of fileFunctions) count(fieldOf(fieldOf(contract, "definition"), "statements"));
+    const file = contracts.get(String(fieldOf(record, "path")));
+    if (file === undefined) continue;
+    for (const contract of Object.values(fieldOf(file, "functions") as Record<string, FunctionContract>)) {
+      collect(fieldOf(fieldOf(contract, "definition"), "statements"));
     }
-    const ownsBody = body !== undefined && String(fieldOf(body, "file")) === recordPath;
-    if (ownsBody) count(fieldOf(body, "statements"));
-    const cells = highest + 1;
-    if (cells > 0) {
-      if (file !== undefined) {
-        for (const contract of fileFunctions) {
-          eachGlobalSlot(fieldOf(fieldOf(contract, "definition"), "statements"), (literal, slot) => {
-            (literal as Record<string, unknown>)["text"] = String(slot + base);
-          });
-        }
-      }
-      if (ownsBody) {
-        eachGlobalSlot(fieldOf(body, "statements"), (literal, slot) => {
-          (literal as Record<string, unknown>)["text"] = String(slot + base);
-        });
-      }
-    }
-    base += cells;
+  }
+  if (body !== undefined) collect(fieldOf(body, "statements"));
+  const ids = [...refs.keys()].sort();
+  for (let slot = 0; slot < ids.length; slot += 1) {
+    for (const global of refs.get(ids[slot]) as Record<string, unknown>[]) global["slot"] = slot;
   }
 }
 
@@ -713,7 +679,7 @@ export function runContractPhase(request: ContractPhaseRequest): ContractPhase {
   validateFunctionNames(files);
   // The cells a module's top-level values live in are the program's, so the
   // files' own numbering is moved past one another before any body is walked.
-  shiftGlobalSlots(records, contracts, body);
+  allocateGlobals(records, contracts, body);
   // The objects a program allocates are named once for the whole program,
   // because a field is often what another function returns. A program body
   // writes objects of its own beside the ones the functions write, so its

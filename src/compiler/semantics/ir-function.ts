@@ -1274,6 +1274,8 @@ class FunctionBody {
 
   private typed(expression: Expression, expect: Inferred | null, line: number): Typed {
     switch (expression.k) {
+      case "global":
+        return { value: { k: "global", type: F64, id: String(fieldOfValue(expression, "id")), slot: fieldOfValue(expression, "slot") as number | null }, inferred: asType(F64) };
       case "literal": {
         // A number written in the source is a double unless a use fixes it to
         // another width, and a whole literal is still a double. `true` and

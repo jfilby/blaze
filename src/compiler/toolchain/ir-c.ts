@@ -534,13 +534,13 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_as_uint_n":
       return `blaze_rt_as_uint_n(${args[0]}, ${args[1]})`;
     case "blaze_rt_global_get":
-      return `blaze_value_number_of(blaze_rt_global_get(${args[0]}))`;
+      return `blaze_number_of_value(blaze_rt_global_get(${args[0]}))`;
     case "blaze_rt_global_set":
-      return `blaze_value_number_of(blaze_rt_global_set(${args[0]}, blaze_value_number(${args[1]})))`;
+      return `blaze_number_of_value(blaze_rt_global_set(${args[0]}, blaze_value_number(${args[1]})))`;
     case "blaze_rt_global_post_inc":
-      return `blaze_value_number_of(blaze_rt_global_post_inc(${args[0]}))`;
+      return `blaze_number_of_value(blaze_rt_global_post_inc(${args[0]}))`;
     case "blaze_rt_global_post_dec":
-      return `blaze_value_number_of(blaze_rt_global_post_dec(${args[0]}))`;
+      return `blaze_number_of_value(blaze_rt_global_post_dec(${args[0]}))`;
     case "blaze_rt_now_ms":
       return `blaze_rt_now_ms()`;
     case "blaze_rt_timestamp_iso":
@@ -1936,6 +1936,11 @@ class FunctionEmitter {
         return this.buildObject(value as SemanticValue & { k: "newObject" });
       case "loadField":
         return `((struct ${fieldOf(value,"layout")}*)(uintptr_t)(${this.raw(fieldOf(value,"object"), depth)}))->${cMemberName(fieldOf(value,"field"))}`;
+      case "global": {
+        const slot = fieldOf(value, "slot");
+        if (typeof slot !== "number") throw new Error(`a global without a resolved slot: ${String(fieldOf(value, "id"))}`);
+        return String(slot);
+      }
       case "length": {
         // An array parameter carries its length beside it, so asking for its
         // length answers that hidden parameter rather than reading a header

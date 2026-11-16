@@ -54,6 +54,8 @@ export type Expression =
    * field it is written into is a truth.
    */
   | { k: "literal"; text: string; boolean?: true }
+  /** A first-class reference to a program-level global cell. */
+  | { k: "global"; text: string; id: string; slot: number | null }
   | { k: "bigint"; text: string }
   | { k: "ident"; name: string }
   | { k: "null" }

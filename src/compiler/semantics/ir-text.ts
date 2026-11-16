@@ -433,6 +433,8 @@ export function printSemanticValue(value: SemanticValue): string {
     }
     case "local":
       return `local[${typeText(fieldOf(value, "type") as SemanticType)}] ${String(fieldOf(value, "name"))}`;
+    case "global":
+      return `global[${typeText(fieldOf(value, "type") as SemanticType)}] ${String(fieldOf(value, "id"))} ${String(fieldOf(value, "slot"))}`;
     case "length":
       return `[length[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)}]`;
     case "element":
@@ -1360,6 +1362,13 @@ class IrScanner {
       case "local": {
         const type = this.typed();
         return this.bare(bracketed, { k: "local", type, name: this.word() });
+      }
+      case "global": {
+        const type = this.typed();
+        const id = this.word();
+        const written = this.word();
+        const slot = written === "null" ? null : Number(written);
+        return this.bare(bracketed, { k: "global", type, id, slot });
       }
       case "new_object": {
         const type = this.typed();

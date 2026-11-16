@@ -224,6 +224,10 @@ static inline double blaze_value_number_of(const BlazeValue* value) {
   memcpy(&number, &value->payload, sizeof number);
   return number;
 }
+
+static inline double blaze_number_of_value(BlazeValue value) {
+  return blaze_value_number_of(&value);
+}
 `;
 }
 

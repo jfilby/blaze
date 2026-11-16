@@ -431,6 +431,12 @@ export type SemanticValue =
   | { k: "nothing"; type: SemanticType }
   /** A value the program declared, read by the name it was declared as. */
   | { k: "local"; type: SemanticType; name: string }
+  /**
+   * A cell of the program's global storage. `id` is stable across files and
+   * runs; `slot` is the index the contract phase gave the cell. A global is a
+   * compiler entity, not a call convention discovered from a runtime name.
+   */
+  | { k: "global"; type: SemanticType; id: string; slot: number | null }
   /** The length of an array, a slice or a string. */
   | { k: "length"; type: SemanticType; of: SemanticValue }
   /** One element of an array or a slice. */
@@ -597,6 +603,8 @@ function vfList(value: unknown, key: string): unknown[] {
 export function walkValues(value: SemanticValue, visit: (value: SemanticValue) => void): void {
   visit(value);
   switch (String(vf(value,"k"))) {
+    case "global":
+      return;
     case "text":
       for (const part of vfList(value,"parts")) if (String(vf(part,"k")) === "value") walkValues(vf(part,"value"), visit);
       return;

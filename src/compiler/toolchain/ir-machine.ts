@@ -8030,6 +8030,13 @@ class Machine {
         this.readAt(fieldOf(value, "type") as SemanticType, offset);
         return;
       }
+      case "global": {
+        const slot = fieldOf(value, "slot");
+        if (typeof slot !== "number") throw new Error(`a global without a resolved slot: ${String(fieldOf(value, "id"))}`);
+        this.code.movRegImm(RAX, BigInt(slot));
+        this.code.cvtIntToFloat(XMM0, RAX, false);
+        return;
+      }
       case "length":
         this.length(fieldOf(value, "of") as SemanticValue);
         return;

@@ -5,17 +5,6 @@ bugs: each one works, is documented where it is used, and was chosen because the
 alternative was larger. They are collected here so the cost of each is visible
 in one place, and so nobody mistakes them for principles.
 
-## Global slots discovered by regex over literal text
-
-`src/compiler/semantics/program.ts:473-551` hard-codes four call names
-(`blaze_rt_global_get`, `_set`, `_post_inc`, `_post_dec`), matches `/^[0-9]+$/`
-against a decimal string literal in an untyped tree walk, finds the highest slot
-per file, and rewrites those literal strings to shift each file past the
-previous one. A global cell is not a first-class IR value; it is a naming
-convention the contract phase has to know about. Correctness rests on the exact
-literal shape the frontend emitted, and the scheme shares the runtime's 4096-slot
-ceiling — where an out-of-range index aliases slot 0 without complaint.
-
 ## The self-hosting story is scaffolding
 
 - `src/compiler/ai/review-native.ts:19-21` throws for every provider: the first

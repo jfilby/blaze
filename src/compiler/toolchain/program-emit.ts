@@ -1315,6 +1315,11 @@ class ProgramEmitter {
         if (this.boxedTexts.has(name)) return `*${this.names.read(name)}`;
         return this.names.read(name);
       }
+      case "global": {
+        const slot = fieldOf(value, "slot");
+        if (typeof slot !== "number") throw new Error(`a global without a resolved slot: ${String(fieldOf(value, "id"))}`);
+        return String(slot);
+      }
       case "length":
         return this.length(value as SemanticValue & { k: "length" });
       case "element":

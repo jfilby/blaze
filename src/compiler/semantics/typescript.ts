@@ -1165,7 +1165,7 @@ interface ScannedFile {
    * the functions share, which the runtime keeps in a global cell. The slot is
    * assigned where the declaration is read, in the order the file writes them.
    */
-  numeric: Map<string, number>;
+  numeric: Map<string, string>;
   /**
    * The field names of a top-level object literal whose values are computed.
    * The names are what the source wrote even when the values are not constants,
@@ -1452,7 +1452,7 @@ function writtenName(tokens: readonly Token[], name: string): boolean {
   return false;
 }
 
-function scanConstants(tokens: readonly Token[]): ScannedFile {
+function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
   const trusted = constantImports(tokens);
   const found = new Map<string, ConstantInfo>();
   const shapes = new Map<string, ConstantInfo>();
@@ -1462,7 +1462,7 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
   const state = new Set<string>();
   const initializers = new Map<string, { start: number; end: number }>();
   const exportedState = new Set<string>();
-  const numeric = new Map<string, number>();
+  const numeric = new Map<string, string>();
   // A name a function or a class declares is that body's own, and a name that
   // is also a constant of the file is not the constant where it is declared.
   // The declarations are collected first so a body is never read as the file's
@@ -1693,7 +1693,9 @@ function scanConstants(tokens: readonly Token[]): ScannedFile {
         // `let temporaryWrites = 0` is the one shape this reads, because a
         // number is the value a global cell can hold.
         if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !bodyDeclarations.has(name)) {
-          numeric.set(name, numeric.size);
+          // The id travels in IR text, where a word is letters, digits, `_`,
+          // `$` and `.`; the path's separators are spelled out as underscores.
+          numeric.set(name, `${path.replace(/[^A-Za-z0-9_$.]/g, "_")}__${name}`);
         }
         const element = allocationElement(tokens, start);
         if (element !== null) allocations.set(name, element);
@@ -2718,6 +2720,8 @@ function boxBlock(statements: Statement[], name: string, box: Boxed): Statement[
 /** One expression, with every read of `name` rewritten to its box. */
 function boxExpression(value: Expression, name: string, box: Boxed): Expression {
   switch (value.k) {
+    case "global":
+      return value;
     case "ident":
       return value.name === name ? boxedRead(box) : value;
     case "literal":
@@ -2989,6 +2993,8 @@ function readsUpdate(statement: Statement, name: string): boolean {
 
 function expressionReadsUpdate(value: Expression, name: string): boolean {
   switch (value.k) {
+    case "global":
+      return false;
     case "update":
       return value.name === name;
     case "literal":
@@ -4200,7 +4206,7 @@ class TypeScriptParser {
     constantAnnotations: ReadonlyMap<string, { start: number; end: number; exported: boolean }> = new Map(),
     constantCollections: ReadonlyMap<string, { start: number; end: number }> = new Map(),
     stateAllocations: ReadonlyMap<string, string> = new Map(),
-    numericGlobals: ReadonlyMap<string, number> = new Map(),
+    numericGlobals: ReadonlyMap<string, string> = new Map(),
     stateInitializers: ReadonlyMap<string, { start: number; end: number }> = new Map(),
     exportedState: ReadonlySet<string> = new Set(),
   ) {
@@ -4242,7 +4248,7 @@ class TypeScriptParser {
   /** The names the running program holds, which a module function cannot read. */
   private readonly state: ReadonlySet<string>;
   /** The module-level numbers the runtime holds in cells, by the cell's slot. */
-  private readonly numericGlobals: ReadonlyMap<string, number>;
+  private readonly numericGlobals: ReadonlyMap<string, string>;
   /** The initializer of each module value, by the name it is bound to. */
   private readonly stateInitializers: ReadonlyMap<string, { start: number; end: number }>;
   /** The state names the file offers. */
@@ -10532,7 +10538,7 @@ class TypeScriptParser {
           value: {
             k: "call",
             name: op === "++" ? "blaze_rt_global_post_inc" : "blaze_rt_global_post_dec",
-            args: [{ k: "literal", text: String(slot) }],
+            args: [this.globalRef(slot)],
           },
           line: token.line,
         };
@@ -12800,25 +12806,30 @@ class TypeScriptParser {
    * A name the body declares shadows the module's: a parameter or a local of
    * the same spelling is the local, whatever the file writes at its top.
    */
-  private numericGlobal(name: string): number | null {
+  private numericGlobal(name: string): string | null {
     const slot = this.numericGlobals.get(name);
     if (slot === undefined) return null;
     if (this.valueTypes.has(name) || this.valueShapes.has(name) || this.valueArrows.has(name) || this.valueClasses.has(name)) return null;
     return slot;
   }
 
+  /** The first-class reference to a module-level cell. */
+  private globalRef(id: string): Expression {
+    return { k: "global", text: "f64", id, slot: null };
+  }
+
   /** The call that reads a global cell. */
-  private globalRead(slot: number): Expression {
-    const call: Expression = { k: "call", name: "blaze_rt_global_get", args: [{ k: "literal", text: String(slot) }] };
+  private globalRead(id: string): Expression {
+    const call: Expression = { k: "call", name: "blaze_rt_global_get", args: [this.globalRef(id)] };
     this.expressionTypes.set(call, NUMBER_RESULT);
     return call;
   }
 
   /** The statement that writes a global cell. */
-  private globalWrite(slot: number, value: Expression, line: number): Statement {
+  private globalWrite(id: string, value: Expression, line: number): Statement {
     return {
       kind: "expression",
-      value: { k: "call", name: "blaze_rt_global_set", args: [{ k: "literal", text: String(slot) }, value] },
+      value: { k: "call", name: "blaze_rt_global_set", args: [this.globalRef(id), value] },
       line,
     };
   }
@@ -12836,7 +12847,7 @@ class TypeScriptParser {
         const call: Expression = {
           k: "call",
           name: op === "++" ? "blaze_rt_global_post_inc" : "blaze_rt_global_post_dec",
-          args: [{ k: "literal", text: String(slot) }],
+          args: [this.globalRef(slot)],
         };
         this.expressionTypes.set(call, NUMBER_RESULT);
         return call;
@@ -24781,6 +24792,8 @@ class BodyAnalysis {
 
   private serialize(expression: Expression, loop: LoopContext | null, line: number): string {
     switch (expression.k) {
+      case "global":
+        return String(expression.slot ?? 0);
       case "literal":
         // A truth is written as the truth it is: `result == 0` compares a bool
         // with a number, and the contract language has no such comparison.
@@ -24964,6 +24977,8 @@ type ReduceOperator = "sum" | "product";
 
 function dependsOn(expression: Expression, name: string): boolean {
   switch (expression.k) {
+    case "global":
+      return false;
     case "ident":
       return expression.name === name;
     case "literal":
@@ -25027,6 +25042,8 @@ function dependsOn(expression: Expression, name: string): boolean {
 /** How an expression is named in an error: the call, or the value itself. */
 function describe(expression: Expression): string {
   switch (expression.k) {
+    case "global":
+      return `global ${expression.id}`;
     case "call":
       return expression.name;
     case "ident":
@@ -25561,7 +25578,7 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // that read is the one that reads the methods written on them.
   const sharedClasses = fieldOfOptional(context, "classes") as ClassTable | undefined;
   const classTable = sharedClasses ?? scanClasses(tokens);
-  const scanned = scanConstants(tokens);
+  const scanned = scanConstants(tokens, path);
   // The interfaces and aliases are read before the bodies that name them.
   // A file read again after its imports are bound keeps the table the first
   // read built, so the declarations the importing files already hold keep

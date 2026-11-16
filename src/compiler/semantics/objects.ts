@@ -506,6 +506,8 @@ class BodyTypes {
 
   private expression(expression: Expression): Inferred {
     switch (String(String(String(fieldOf(expression,"k"))))) {
+      case "global":
+        return { kind: "type", type: F64 };
       case "literal":
         return { kind: "type", type: fieldOf(expression,"boolean") ? BOOL : F64 };
       case "bigint": {

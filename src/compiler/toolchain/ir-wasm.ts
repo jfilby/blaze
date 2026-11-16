@@ -1483,6 +1483,12 @@ class Body {
         this.convert(fieldOf(local,"type") as SemanticType, at);
         return;
       }
+      case "global": {
+        const slot = fieldOf(value, "slot");
+        if (typeof slot !== "number") throw new Error(`a global without a resolved slot: ${String(fieldOf(value, "id"))}`);
+        this.float(slot, true);
+        return;
+      }
       case "length": {
         // A module is handed a pointer to the elements of a buffer and no
         // length beside it, so the host writes the count in the word the
