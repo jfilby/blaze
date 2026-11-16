@@ -1171,7 +1171,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         return `${RUNTIME_NAME}_json_get(${argument(0)}, ${argument(1)})`;
       // The name `typeof` answers for a value the read could not type.
       case "JSON.typeof":
-        return `${RUNTIME_NAME}_type_of(${argument(0)})`;
+        return `${RUNTIME_NAME}_type_of(blaze_value_from_dynamic(${argument(0)}))`;
       // Whether a value the read could not type is an array: the runtime holds
       // the kind, and answers one for the array it holds and nothing otherwise.
       case "blaze_rt_is_array":

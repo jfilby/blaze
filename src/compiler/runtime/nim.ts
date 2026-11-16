@@ -1259,23 +1259,18 @@ proc blaze_rt_is_array*(value: BlazeValue): float64 {.exportc, cdecl.} =
   if blazeDynValues[index].kind == dynArray: return 1.0
   return 0.0
 
-proc blaze_rt_type_of*(value: float64): cstring {.exportc, cdecl.} =
+proc blaze_rt_type_of*(value: BlazeValue): cstring {.exportc, cdecl.} =
   ## The name typeof answers for a value the compiler could not read the type
-  ## of: the kind the runtime registered the value as, or the number or the text
-  ## the value itself is.
-  let index = blazeDynIndex(value)
-  if index < 0:
-    if value >= 4096.0: return blazeTextOf("string")
-    return blazeTextOf("number")
-  case blazeDynValues[index].kind
-  of dynNumber:
-    blazeTextOf("number")
-  of dynBool:
-    blazeTextOf("boolean")
-  of dynText:
-    blazeTextOf("string")
-  else:
-    blazeTextOf("object")
+  ## of: the tag and kind the runtime registered the value with.
+  if value.tag == BlazeTagBoolean: return blazeTextOf("boolean")
+  if value.tag != BlazeTagHandle: return blazeTextOf("number")
+  if value.kind == uint32(BlazeKindString): return blazeTextOf("string")
+  if value.kind == uint32(BlazeKindNumber): return blazeTextOf("number")
+  if value.kind == uint32(BlazeKindBoolean): return blazeTextOf("boolean")
+  if value.kind == uint32(BlazeKindArray) or value.kind == uint32(BlazeKindRecord) or
+     value.kind == uint32(BlazeKindObject) or value.kind == uint32(BlazeKindDictionary):
+    return blazeTextOf("object")
+  blazeTextOf("number")
 
 proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} =
   ## The text a value is written as, which is the way the language writes it.
@@ -1348,21 +1343,20 @@ proc blaze_rt_array_length*(array: BlazeValue): float64 {.exportc, cdecl.} =
   if item.kind != dynArray: return 0.0
   float64(item.items.len)
 
-proc blaze_rt_length*(value: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_length*(value: BlazeValue): float64 {.exportc, cdecl.} =
   ## How long a value is, whichever of the runtime's shapes it has: a dynamic
-  ## array or object counts its items, a dictionary or record counts its
-  ## fields, and a text counts its characters.
-  let at = blazeDynIndex(value)
-  if at >= 0:
+  ## array or object counts its items, a dictionary counts its fields, and a
+  ## text counts its characters. A value of no such kind has no length.
+  if value.tag != BlazeTagHandle: return 0.0
+  if value.kind == uint32(BlazeKindString): return float64(blaze_rt_text_length(cast[cstring](cast[uint](blazeDynamicFromValue(value)))))
+  if value.kind == uint32(BlazeKindArray) or value.kind == uint32(BlazeKindObject):
+    let at = blazeDynIndex(blazeDynamicFromValue(value))
+    if at < 0: return 0.0
     let item = blazeDynValues[at]
-    if item.kind == dynArray: return float64(item.items.len)
     if item.kind == dynObject: return float64(item.items.len div 2)
-    if item.kind == dynText: return float64(blaze_rt_text_length(item.text))
-    return 0.0
-  if value < 4096.0: return 0.0
-  let counted = blaze_rt_dict_len(value)
-  if counted != 0.0: return counted
-  float64(blaze_rt_text_length(cast[cstring](cast[uint](value))))
+    return float64(item.items.len)
+  if value.kind == uint32(BlazeKindDictionary): return blaze_rt_dict_len(blazeDynamicFromValue(value))
+  0.0
 
 proc blaze_rt_array_set*(array: BlazeValue, index: float64, value: BlazeValue) {.exportc, cdecl.} =
   ## One element written, where the array holds it. An index that names no
@@ -1702,10 +1696,11 @@ proc blaze_rt_date_iso*(milliseconds: float64): cstring {.exportc, cdecl.} =
   let full = stamp & "." & align($millis, 3, '0') & "Z"
   blaze_rt_string_new(cast[pointer](cstring(full)), csize_t(full.len))
 
-proc blaze_rt_number_same*(left, right: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_number_same*(left, right: BlazeValue): float64 {.exportc, cdecl.} =
   ## Two numbers are the same when the bits they are held as are: -0 and 0 are
   ## different, and a NaN is the same as itself, which == answers the other way.
-  if cast[uint64](left) == cast[uint64](right): 1.0 else: 0.0
+  if left.tag != BlazeTagNumber or right.tag != BlazeTagNumber: return 0.0
+  if left.payload == right.payload: 1.0 else: 0.0
 
 proc blaze_rt_dict_set_seq*(dict: float64, key: cstring, value: pointer, count, size: float64): float64 {.exportc, cdecl.} =
   let bytes = csize_t(count) * csize_t(size)

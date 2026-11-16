@@ -1114,7 +1114,7 @@ entry(
   entry(
     "blaze_rt_number_same",
     "double",
-    [["left", "double"], ["right", "double"]],
+    [["left", "BlazeValue"], ["right", "BlazeValue"]],
     "Compares two numbers the way `Object.is` does.",
     "Two numbers are the same when their bits are: -0 and 0 are different, and a NaN is the same as itself. Returns 1 or 0.",
     { tags: ["object"] },
@@ -1333,7 +1333,7 @@ entry(
   entry(
     "blaze_rt_type_of",
     "const char*",
-    [["value", "double"]],
+    [["value", "BlazeValue"]],
     "The name `typeof` answers for a value whose type the compiler does not know.",
     "A value the runtime registered answers the kind it was registered as; a value that is not one is a number, or a text where the number is a pointer.",
     { tags: ["object"] },
@@ -1998,7 +1998,7 @@ entry(
     { tags: ["host"] },
   ),
   
-  entry("blaze_rt_length", "double", [["value", "double"]], "Reads how long a value is: the items of a dynamic array or object, the fields of a dictionary or record, or the characters of a text.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_length", "double", [["value", "BlazeValue"]], "Reads how long a value is: the items of a dynamic array or object, the fields of a dictionary or record, or the characters of a text.", "Returns the count.", { tags: ["object"] }),
   
   entry(
     "blaze_rt_path_exists",
@@ -4632,12 +4632,9 @@ ${guarded ? "  if (text == NULL) return 0;" : ""}
 /* Object.is on two numbers: the bits are what the question is about, so -0 and
    0 are different and a NaN is the same as itself, which == answers the other
    way round for both. */
-double blaze_rt_number_same(double left, double right) {
-  uint64_t a;
-  uint64_t b;
-  memcpy(&a, &left, sizeof a);
-  memcpy(&b, &right, sizeof b);
-  return a == b ? 1.0 : 0.0;
+double blaze_rt_number_same(BlazeValue left, BlazeValue right) {
+  if (left.tag != BLAZE_VALUE_NUMBER || right.tag != BLAZE_VALUE_NUMBER) return 0.0;
+  return left.payload == right.payload ? 1.0 : 0.0;
 }
 
 /* A whole number wrapped to a width: the low bits of the number, and for the
@@ -6422,6 +6419,12 @@ static double blaze_dyn_untagged(BlazeValue value) {
    that names a live registry entry is that entry's tagged value; anything else
    is a number, with every bit of its IEEE-754 representation preserved. */
 BlazeValue blaze_value_from_dynamic(double value) {
+  /* A lowering that still carries a reference in a double may hand over the
+     address itself. The pointer registry names such a value without reading
+     anything before it; a handle payload names a boxed value; otherwise it is
+     a number. */
+  BlazeValue byPointer = blaze_pointer_value((const void*)(uintptr_t)value);
+  if (byPointer.tag == BLAZE_VALUE_HANDLE) return byPointer;
   BlazeValue tagged = blaze_dyn_tagged(value);
   if (tagged.kind == 0) return blaze_value_number(value);
   return tagged;
@@ -6586,21 +6589,16 @@ double blaze_rt_is_array(BlazeValue value) {
   blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(value));
   return d != NULL && d->kind == BLAZE_DYN_ARRAY ? 1.0 : 0.0;
 }
-const char* blaze_rt_type_of(double value) {
-  blaze_dyn* d = blaze_dyn_lookup(value);
-  if (!d) {
-    // A value that names a registered pointer has the kind the entry was
-    // registered with. Nothing is read before the address and no magnitude is
-    // taken as evidence that the value is one.
-    const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
-    if (blaze_value_is_handle(&held, BLAZE_HANDLE_RECORD)) return "object";
-    if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return "string";
-    return "number";
-  }
-  if (d->kind == BLAZE_DYN_NUMBER) return "number";
-  if (d->kind == BLAZE_DYN_BOOL) return "boolean";
-  if (d->kind == BLAZE_DYN_TEXT) return "string";
-  return "object";
+const char* blaze_rt_type_of(BlazeValue value) {
+  if (value.tag == BLAZE_VALUE_NUMBER) return "number";
+  if (value.tag == BLAZE_VALUE_BOOLEAN) return "boolean";
+  if (value.tag != BLAZE_VALUE_HANDLE) return "number";
+  if (value.kind == BLAZE_HANDLE_STRING) return "string";
+  if (value.kind == BLAZE_HANDLE_RECORD || value.kind == BLAZE_HANDLE_DICTIONARY ||
+      value.kind == BLAZE_HANDLE_ARRAY || value.kind == BLAZE_HANDLE_OBJECT) return "object";
+  if (value.kind == BLAZE_HANDLE_NUMBER) return "number";
+  if (value.kind == BLAZE_HANDLE_BOOLEAN) return "boolean";
+  return "number";
 }
 const char* blaze_rt_to_text(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
@@ -9181,21 +9179,21 @@ const char* blaze_rt_host_architecture(void) {
 #endif
   return blaze_rt_string_new((const unsigned char*)name, strlen(name));
 }
-double blaze_rt_length(double value) {
+double blaze_rt_length(BlazeValue value) {
   // How long a value is, whichever of the runtime's shapes it has: a dynamic
   // array or object counts its items, a dictionary or record counts its
   // fields, and a text counts its code points. A value that is none of them
   // is as long as nothing.
-  blaze_dyn* d = blaze_dyn_lookup(value);
-  if (d != NULL) {
-    if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return (double)d->count;
-    return 0.0;
+  if (value.tag == BLAZE_VALUE_HANDLE && value.kind == BLAZE_HANDLE_STRING) {
+    return (double)blaze_registry_length(&value, BLAZE_HANDLE_STRING, "blaze_rt_length") - 1;
   }
-  const double counted = blaze_rt_dict_len(value);
-  if (counted != 0.0) return counted;
-  const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
-  if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return (double)blaze_rt_text_length((const char*)(uintptr_t)value);
-  return counted;
+  if (value.tag != BLAZE_VALUE_HANDLE) return 0.0;
+  if (value.kind == BLAZE_HANDLE_ARRAY || value.kind == BLAZE_HANDLE_OBJECT) {
+    blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(value));
+    return d == NULL ? 0.0 : (double)d->count;
+  }
+  if (value.kind == BLAZE_HANDLE_DICTIONARY) return blaze_rt_dict_len(blaze_dyn_untagged(value));
+  return 0.0;
 }
 double blaze_rt_path_exists(const char* path) {
   if (path == NULL) return 0.0;

@@ -360,7 +360,7 @@ function builtinExpression(name: string, args: string[]): string {
       // The name `typeof` answers for a value the read could not type: the
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
-      return `${RUNTIME_NAME}_type_of(${args[0]})`;
+      return `${RUNTIME_NAME}_type_of(blaze_value_from_dynamic(${args[0]}))`;
     case "envGet":
       return `${RUNTIME_NAME}_env_get(${args[0]})`;
     case "readTextFile":
@@ -522,7 +522,7 @@ function builtinExpression(name: string, args: string[]): string {
       // call that would otherwise run twice.
       return `({ double blaze_operand = ${args[0]}; double blaze_rounded = floor(blaze_operand + 0.5); (blaze_rounded == 0.0 && blaze_operand < 0.0) ? -0.0 : blaze_rounded; })`;
     case "blaze_rt_number_same":
-      return `blaze_rt_number_same(${args[0]}, ${args[1]})`;
+      return `blaze_rt_number_same(blaze_value_from_dynamic(${args[0]}), blaze_value_from_dynamic(${args[1]}))`;
     case "blaze_rt_text_length":
       return `((double)blaze_rt_text_length(${args[0]}))`;
     case "encodeURIComponent":
@@ -616,7 +616,7 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_array_length":
       return `blaze_rt_array_length(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_length":
-      return `blaze_rt_length(${args[0]})`;
+      return `blaze_rt_length(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_dyn_array_new":
       return `blaze_dynamic_from_value(blaze_rt_dyn_array_new())`;
     case "blaze_rt_array_push":
