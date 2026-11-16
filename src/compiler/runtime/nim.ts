@@ -1472,7 +1472,8 @@ proc blaze_rt_dict_new*(): float64 {.exportc, cdecl.} =
   ## An empty dictionary, held by the runtime like an array is.
   blazeDynRegister BlazeDyn(kind: dynDict)
 
-proc blaze_rt_dict_get*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_get*(dictValue: BlazeValue, key: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## The value a key holds, or NaN where the dictionary holds no such key. A
   ## key that is absent is a thing of its own, and a NaN is told apart from
   ## every value a key can hold, which is what the C runtime answers.
@@ -1482,7 +1483,8 @@ proc blaze_rt_dict_get*(dict: float64, key: cstring): float64 {.exportc, cdecl.}
   if position < 0: return NaN
   blazeDynValues[at].entries[position][1]
 
-proc blaze_rt_dict_has*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_has*(dictValue: BlazeValue, key: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## Whether a key holds a value, answered as 1 or 0.
   let at = blazeDictIndex(dict)
   if at < 0 or key == nil: return 0.0
@@ -1551,7 +1553,8 @@ proc blaze_rt_array_join*(left, right: pointer): pointer {.exportc, cdecl.} =
       copyMem(cast[pointer](cast[uint](joined) + uint(leftBytes)), right, csize_t(rightBytes))
   joined
 
-proc blaze_rt_dict_values*(dict: float64): ptr float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_values*(dictValue: BlazeValue): ptr float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## Lays a dictionary's values down as a block, in the order the keys were
   ## first written. The block's header states how many values it holds.
   let at = blazeDictIndex(dict)
@@ -1562,7 +1565,8 @@ proc blaze_rt_dict_values*(dict: float64): ptr float64 {.exportc, cdecl.} =
       values[position] = blazeDynValues[at].entries[position][1]
   cast[ptr float64](values)
 
-proc blaze_rt_dict_set*(dict: float64, key: cstring, value: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_set*(dictValue: BlazeValue, key: cstring, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## A value written under a key, and the dictionary handed back. A key the
   ## dictionary already holds is written over where it stands, so the count of
   ## entries does not change; a key it does not hold is added after the ones
@@ -1577,13 +1581,15 @@ proc blaze_rt_dict_set*(dict: float64, key: cstring, value: float64): float64 {.
     blazeDynValues[at].entries.add (text, value)
   dict
 
-proc blaze_rt_dict_len*(dict: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_len*(dictValue: BlazeValue): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## How many entries the dictionary holds.
   let at = blazeDictIndex(dict)
   if at < 0: return 0.0
   float64(blazeDynValues[at].entries.len)
 
-proc blaze_rt_dict_delete*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_delete*(dictValue: BlazeValue, key: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   ## One entry removed by its key, and the dictionary handed back. A key it does
   ## not hold is not an error: the dictionary is the one it was.
   let at = blazeDictIndex(dict)
@@ -1598,21 +1604,25 @@ proc blaze_rt_dict_delete*(dict: float64, key: cstring): float64 {.exportc, cdec
 ## meant. A text entry is the pointer the float64 carries, which is the same
 ## address the C runtime writes.
 
-proc blaze_rt_dict_get_ref*(dict: float64, key: cstring): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_get(dict, key)
+proc blaze_rt_dict_get_ref*(dictValue: BlazeValue, key: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get(blazeValueFromDynamic(dict), key)
 
-proc blaze_rt_dict_set_ref*(dict: float64, key: cstring, value: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set(dict, key, value)
+proc blaze_rt_dict_set_ref*(dictValue: BlazeValue, key: cstring, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set(blazeValueFromDynamic(dict), key, value)
 
-proc blaze_rt_dict_get_text*(dict: float64, key: cstring): cstring {.exportc, cdecl.} =
+proc blaze_rt_dict_get_text*(dictValue: BlazeValue, key: cstring): cstring {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   let at = blazeDictIndex(dict)
   if at < 0 or key == nil: return ""
   let position = blazeDictFind(at, $key)
   if position < 0: return ""
   cast[cstring](uint(blazeDynValues[at].entries[position][1]))
 
-proc blaze_rt_dict_set_text*(dict: float64, key: cstring, value: cstring): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set(dict, key, float64(cast[uint](value)))
+proc blaze_rt_dict_set_text*(dictValue: BlazeValue, key: cstring, value: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set(blazeValueFromDynamic(dict), key, float64(cast[uint](value)))
 
 ## A list is a block and a length, and an entry is one float64: the block is
 ## copied into a block this runtime laid out, whose size carries the length, and
@@ -1702,69 +1712,84 @@ proc blaze_rt_number_same*(left, right: BlazeValue): float64 {.exportc, cdecl.} 
   if left.tag != BlazeTagNumber or right.tag != BlazeTagNumber: return 0.0
   if left.payload == right.payload: 1.0 else: 0.0
 
-proc blaze_rt_dict_set_seq*(dict: float64, key: cstring, value: pointer, count, size: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_set_seq*(dictValue: BlazeValue, key: cstring, value: pointer, count, size: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   let bytes = csize_t(count) * csize_t(size)
   let copy = blaze_rt_allocate(bytes)
   if copy != nil and count > 0.0 and value != nil:
     copyMem(copy, value, bytes)
-  blaze_rt_dict_set(dict, key, float64(cast[uint](copy)))
+  blaze_rt_dict_set(blazeValueFromDynamic(dict), key, float64(cast[uint](copy)))
 
-proc blaze_rt_dict_get_seq*(dict: float64, key: cstring): pointer {.exportc, cdecl.} =
+proc blaze_rt_dict_get_seq*(dictValue: BlazeValue, key: cstring): pointer {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   let at = blazeDictIndex(dict)
   if at < 0 or key == nil: return nil
   let position = blazeDictFind(at, $key)
   if position < 0: return nil
   cast[pointer](uint(blazeDynValues[at].entries[position][1]))
 
-proc blaze_rt_dict_key_at*(dict: float64, index: float64): cstring {.exportc, cdecl.} =
+proc blaze_rt_dict_key_at*(dictValue: BlazeValue, index: float64): cstring {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   let at = blazeDictIndex(dict)
   let position = int(index)
   if at < 0 or position < 0 or position >= blazeDynValues[at].entries.len: return ""
   blazeDynValues[at].entries[position][0].cstring
 
-proc blaze_rt_dict_value_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_dict_value_at*(dictValue: BlazeValue, index: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
   let at = blazeDictIndex(dict)
   let position = int(index)
   if at < 0 or position < 0 or position >= blazeDynValues[at].entries.len: return 0.0
   blazeDynValues[at].entries[position][1]
 
-proc blaze_rt_dict_value_at_ref*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_value_at(dict, index)
+proc blaze_rt_dict_value_at_ref*(dictValue: BlazeValue, index: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_value_at(blazeValueFromDynamic(dict), index)
 
-proc blaze_rt_dict_value_at_text*(dict: float64, index: float64): cstring {.exportc, cdecl.} =
-  cast[cstring](uint(blaze_rt_dict_value_at(dict, index)))
+proc blaze_rt_dict_value_at_text*(dictValue: BlazeValue, index: float64): cstring {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  cast[cstring](uint(blaze_rt_dict_value_at(blazeValueFromDynamic(dict), index)))
 
 ## A reference key is the address the handle carries, written as the whole
 ## number it is: one reference is one address, so the address is the key. The C
 ## runtime writes the same address in base sixteen; the two dictionaries do not
 ## cross runtimes, so what each writes is what it reads.
 
-proc blaze_rt_dict_set_refkey*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set(dict, $uint64(key), value)
+proc blaze_rt_dict_set_refkey*(dictValue: BlazeValue, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set(blazeValueFromDynamic(dict), $uint64(key), value)
 
-proc blaze_rt_dict_get_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_get(dict, $uint64(key))
+proc blaze_rt_dict_get_refkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get(blazeValueFromDynamic(dict), $uint64(key))
 
-proc blaze_rt_dict_get_refkey_text*(dict: float64, key: float64): cstring {.exportc, cdecl.} =
-  blaze_rt_dict_get_text(dict, $uint64(key))
+proc blaze_rt_dict_get_refkey_text*(dictValue: BlazeValue, key: float64): cstring {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_text(blazeValueFromDynamic(dict), $uint64(key))
 
-proc blaze_rt_dict_get_refkey_ref*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_get_refkey(dict, key)
+proc blaze_rt_dict_get_refkey_ref*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_refkey(blazeValueFromDynamic(dict), key)
 
-proc blaze_rt_dict_set_refkey_text*(dict: float64, key: float64, value: cstring): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set_text(dict, $uint64(key), value)
+proc blaze_rt_dict_set_refkey_text*(dictValue: BlazeValue, key: float64, value: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set_text(blazeValueFromDynamic(dict), $uint64(key), value)
 
-proc blaze_rt_dict_set_refkey_ref*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set_refkey(dict, key, value)
+proc blaze_rt_dict_set_refkey_ref*(dictValue: BlazeValue, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set_refkey(blazeValueFromDynamic(dict), key, value)
 
-proc blaze_rt_dict_has_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_has(dict, $uint64(key))
+proc blaze_rt_dict_has_refkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_has(blazeValueFromDynamic(dict), $uint64(key))
 
-proc blaze_rt_dict_delete_refkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_delete(dict, $uint64(key))
+proc blaze_rt_dict_delete_refkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_delete(blazeValueFromDynamic(dict), $uint64(key))
 
-proc blaze_rt_dict_key_ref_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
-  let key = blaze_rt_dict_key_at(dict, index)
+proc blaze_rt_dict_key_ref_at*(dictValue: BlazeValue, index: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  let key = blaze_rt_dict_key_at(blazeValueFromDynamic(dict), index)
   if key == nil or ord(key[0]) == 0: return 0.0
   float64(parseUInt($key))
 
@@ -1778,38 +1803,48 @@ proc blazeNumKey(key: float64): string =
   elif key != key: bits = 0x7ff8000000000000'u64
   $bits
 
-proc blaze_rt_dict_set_numkey*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set(dict, blazeNumKey(key), value)
+proc blaze_rt_dict_set_numkey*(dictValue: BlazeValue, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set(blazeValueFromDynamic(dict), blazeNumKey(key), value)
 
-proc blaze_rt_dict_get_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_get(dict, blazeNumKey(key))
+proc blaze_rt_dict_get_numkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get(blazeValueFromDynamic(dict), blazeNumKey(key))
 
-proc blaze_rt_dict_get_numkey_text*(dict: float64, key: float64): cstring {.exportc, cdecl.} =
-  blaze_rt_dict_get_text(dict, blazeNumKey(key))
+proc blaze_rt_dict_get_numkey_text*(dictValue: BlazeValue, key: float64): cstring {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_text(blazeValueFromDynamic(dict), blazeNumKey(key))
 
-proc blaze_rt_dict_get_numkey_ref*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_get_numkey(dict, key)
+proc blaze_rt_dict_get_numkey_ref*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_numkey(blazeValueFromDynamic(dict), key)
 
 proc blaze_rt_dict_set_seq_numkey*(dict, key: float64, value: pointer, count, size: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set_seq(dict, blazeNumKey(key), value, count, size)
+  blaze_rt_dict_set_seq(blazeValueFromDynamic(dict), blazeNumKey(key), value, count, size)
 
-proc blaze_rt_dict_get_seq_numkey*(dict: float64, key: float64): pointer {.exportc, cdecl.} =
-  blaze_rt_dict_get_seq(dict, blazeNumKey(key))
+proc blaze_rt_dict_get_seq_numkey*(dictValue: BlazeValue, key: float64): pointer {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_get_seq(blazeValueFromDynamic(dict), blazeNumKey(key))
 
-proc blaze_rt_dict_set_numkey_text*(dict: float64, key: float64, value: cstring): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set_text(dict, blazeNumKey(key), value)
+proc blaze_rt_dict_set_numkey_text*(dictValue: BlazeValue, key: float64, value: cstring): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set_text(blazeValueFromDynamic(dict), blazeNumKey(key), value)
 
-proc blaze_rt_dict_set_numkey_ref*(dict: float64, key: float64, value: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_set_numkey(dict, key, value)
+proc blaze_rt_dict_set_numkey_ref*(dictValue: BlazeValue, key: float64, value: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_set_numkey(blazeValueFromDynamic(dict), key, value)
 
-proc blaze_rt_dict_has_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_has(dict, blazeNumKey(key))
+proc blaze_rt_dict_has_numkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_has(blazeValueFromDynamic(dict), blazeNumKey(key))
 
-proc blaze_rt_dict_delete_numkey*(dict: float64, key: float64): float64 {.exportc, cdecl.} =
-  blaze_rt_dict_delete(dict, blazeNumKey(key))
+proc blaze_rt_dict_delete_numkey*(dictValue: BlazeValue, key: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  blaze_rt_dict_delete(blazeValueFromDynamic(dict), blazeNumKey(key))
 
-proc blaze_rt_dict_key_num_at*(dict: float64, index: float64): float64 {.exportc, cdecl.} =
-  let key = blaze_rt_dict_key_at(dict, index)
+proc blaze_rt_dict_key_num_at*(dictValue: BlazeValue, index: float64): float64 {.exportc, cdecl.} =
+  let dict = blazeDynamicFromValue(dictValue)
+  let key = blaze_rt_dict_key_at(blazeValueFromDynamic(dict), index)
   if key == nil or ord(key[0]) == 0: return 0.0
   cast[float64](parseUInt($key))
 

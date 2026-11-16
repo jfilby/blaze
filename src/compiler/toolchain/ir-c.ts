@@ -576,27 +576,27 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_dict_new":
       return `blaze_rt_dict_new()`;
     case "blaze_rt_dict_get":
-      return `blaze_rt_dict_get(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set":
-      return `blaze_rt_dict_set(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_ref":
-      return `blaze_rt_dict_get_ref(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_seq":
-      return `blaze_rt_dict_set_seq(${args[0]}, ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
+      return `blaze_rt_dict_set_seq(blaze_value_from_dynamic(${args[0]}), ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
     case "blaze_rt_dict_get_seq":
-      return `((void*)blaze_rt_dict_get_seq(${args[0]}, ${args[1]}))`;
+      return `((void*)blaze_rt_dict_get_seq(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
     case "blaze_rt_dict_set_seq_numkey":
-      return `blaze_rt_dict_set_seq_numkey(${args[0]}, ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
+      return `blaze_rt_dict_set_seq_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}, (void*)(uintptr_t)(${args[2]}), ${args[3]}, ${args[4]})`;
     case "blaze_rt_dict_get_seq_numkey":
-      return `((void*)blaze_rt_dict_get_seq_numkey(${args[0]}, ${args[1]}))`;
+      return `((void*)blaze_rt_dict_get_seq_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
     case "blaze_rt_dict_set_ref":
-      return `blaze_rt_dict_set_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_text":
-      return `blaze_rt_dict_get_text(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_text(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_text":
-      return `blaze_rt_dict_set_text(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_text(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_has":
-      return `blaze_rt_dict_has(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_has(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_own_key":
       return `blaze_rt_own_key(${args[0]}, ${args[1]})`;
     case "blaze_rt_sha256_create":
@@ -630,53 +630,53 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_json_field_value":
       return `blaze_rt_json_field_value(${args[0]}, ${args[1]})`;
     case "blaze_rt_dict_len":
-      return `blaze_rt_dict_len(${args[0]})`;
+      return `blaze_rt_dict_len(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_dict_key_at":
-      return `blaze_rt_dict_key_at(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_key_at(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_value_at":
-      return `blaze_rt_dict_value_at(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_value_at(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_value_at_ref":
-      return `blaze_rt_dict_value_at_ref(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_value_at_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_value_at_text":
-      return `blaze_rt_dict_value_at_text(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_value_at_text(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_refkey":
-      return `blaze_rt_dict_set_refkey(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_refkey":
-      return `blaze_rt_dict_get_refkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_get_refkey_text":
-      return `blaze_rt_dict_get_refkey_text(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_refkey_text(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_get_refkey_ref":
-      return `blaze_rt_dict_get_refkey_ref(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_refkey_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_refkey_text":
-      return `blaze_rt_dict_set_refkey_text(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_refkey_text(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_set_refkey_ref":
-      return `blaze_rt_dict_set_refkey_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_refkey_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_has_refkey":
-      return `blaze_rt_dict_has_refkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_has_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_delete_refkey":
-      return `blaze_rt_dict_delete_refkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_delete_refkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_key_ref_at":
-      return `blaze_rt_dict_key_ref_at(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_key_ref_at(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_delete":
-      return `blaze_rt_dict_delete(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_delete(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_numkey":
-      return `blaze_rt_dict_set_numkey(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_get_numkey":
-      return `blaze_rt_dict_get_numkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_get_numkey_text":
-      return `blaze_rt_dict_get_numkey_text(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_numkey_text(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_get_numkey_ref":
-      return `blaze_rt_dict_get_numkey_ref(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_get_numkey_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_set_numkey_text":
-      return `blaze_rt_dict_set_numkey_text(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_numkey_text(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_set_numkey_ref":
-      return `blaze_rt_dict_set_numkey_ref(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_dict_set_numkey_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]})`;
     case "blaze_rt_dict_has_numkey":
-      return `blaze_rt_dict_has_numkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_has_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_delete_numkey":
-      return `blaze_rt_dict_delete_numkey(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_delete_numkey(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_dict_key_num_at":
-      return `blaze_rt_dict_key_num_at(${args[0]}, ${args[1]})`;
+      return `blaze_rt_dict_key_num_at(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     // The regular-expression helpers. The pattern and the flags are texts, and
     // so is the text they are matched against; a match is a block of texts, and
     // a match of matches is a block of those.

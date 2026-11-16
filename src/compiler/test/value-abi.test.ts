@@ -234,9 +234,10 @@ test("a dictionary is named by a typed handle, not by its address", async () => 
     "dict",
     `  const double dict = blaze_rt_dict_new();
      if (dict <= 0.0 || dict >= 4096.0) return 1;
-     blaze_rt_dict_set(dict, "x", 7.0);
-     if (blaze_rt_dict_get(dict, "x") != 7.0) return 2;
-     blaze_rt_dict_get(1e12, "x");
+     BlazeValue handle = blaze_value_from_dynamic(dict);
+     blaze_rt_dict_set(handle, "x", 7.0);
+     if (blaze_rt_dict_get(handle, "x") != 7.0) return 2;
+     blaze_rt_dict_get(blaze_value_from_dynamic(1e12), "x");
      return 0;`,
   );
   const result = run(binary, [], { timeoutMs: 30_000 });

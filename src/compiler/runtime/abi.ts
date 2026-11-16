@@ -1240,20 +1240,20 @@ entry(
   entry("blaze_rt_dyn_array_new", "BlazeValue", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_is_array", "double", [["value", "BlazeValue"]], "Asks whether a dynamic value is an array.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_new", "double", [], "Creates an empty dictionary.", "Returns a managed handle.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get", "double", [["dict", "double"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get", "double", [["dict", "BlazeValue"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set", "double", [["dict", "BlazeValue"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   /**
    * A value a program holds a reference in. A reference is carried as a double
    * like every other handle this runtime answers, so the entry is the same one
    * a number is written in: the two names say which the source meant, and let
    * the frontend type the read without a cast the generated C cannot write.
    */
-  entry("blaze_rt_dict_get_ref", "double", [["dict", "double"], ["key", "const char*"]], "Reads one reference of a dictionary by its string key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_ref", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one reference of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_ref", "double", [["dict", "BlazeValue"], ["key", "const char*"]], "Reads one reference of a dictionary by its string key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_ref", "double", [["dict", "BlazeValue"], ["key", "const char*"], ["value", "double"]], "Writes one reference of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
   entry(
     "blaze_rt_dict_set_seq",
     "double",
-    [["dict", "double"], ["key", "const char*"], ["value", "void*"], ["count", "double"], ["size", "double"]],
+    [["dict", "BlazeValue"], ["key", "const char*"], ["value", "void*"], ["count", "double"], ["size", "double"]],
     "Copies a block of elements into a managed block and writes it into a dictionary by its string key.",
     "The copy is a block the runtime lays out, so its length travels with it. Returns the dictionary.",
     { tags: ["object"] },
@@ -1261,7 +1261,7 @@ entry(
   entry(
     "blaze_rt_dict_get_seq",
     "void*",
-    [["dict", "double"], ["key", "const char*"]],
+    [["dict", "BlazeValue"], ["key", "const char*"]],
     "Reads one block of elements of a dictionary by its string key.",
     "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
     { tags: ["object"] },
@@ -1269,7 +1269,7 @@ entry(
   entry(
     "blaze_rt_dict_set_seq_numkey",
     "double",
-    [["dict", "double"], ["key", "double"], ["value", "void*"], ["count", "double"], ["size", "double"]],
+    [["dict", "BlazeValue"], ["key", "double"], ["value", "void*"], ["count", "double"], ["size", "double"]],
     "Copies a block of elements into a managed block and writes it into a dictionary under a number key.",
     "The copy is a block the runtime lays out, so its length travels with it. Returns the dictionary.",
     { tags: ["object"] },
@@ -1277,14 +1277,14 @@ entry(
   entry(
     "blaze_rt_dict_get_seq_numkey",
     "void*",
-    [["dict", "double"], ["key", "double"]],
+    [["dict", "BlazeValue"], ["key", "double"]],
     "Reads one block of elements of a dictionary by a number key.",
     "Returns the block, or NULL when the key is absent. The block's length is the size the runtime laid out.",
     { tags: ["object"] },
   ),
-  entry("blaze_rt_dict_get_text", "const char*", [["dict", "double"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_text", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_has", "double", [["dict", "double"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_text", "const char*", [["dict", "BlazeValue"], ["key", "const char*"]], "Reads one text of a dictionary by its string key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_text", "double", [["dict", "BlazeValue"], ["key", "const char*"], ["value", "const char*"]], "Writes one text of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has", "double", [["dict", "BlazeValue"], ["key", "const char*"]], "Asks whether a dictionary holds a key.", "Returns 1 or 0.", { tags: ["object"] }),
   entry(
     "blaze_rt_own_key",
     "double",
@@ -1296,39 +1296,39 @@ entry(
     "A dynamic object, a dictionary the runtime created and a record this compiler laid out answer the keys they hold; every other value answers 0.",
     { tags: ["object"] },
   ),
-  entry("blaze_rt_dict_len", "double", [["dict", "double"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_dict_len", "double", [["dict", "BlazeValue"]], "Reads how many entries a dictionary holds.", "Returns the count.", { tags: ["object"] }),
   entry("blaze_rt_array_copy", "void*", [["block", "void*"]], "Copies a block of elements.", "Returns a block of its own holding the same bytes; the header states how many elements it holds.", { tags: ["object"] }),
   entry("blaze_rt_array_join", "void*", [["left", "void*"], ["right", "void*"]], "Joins two blocks of elements.", "Returns a block holding the left's bytes followed by the right's; the header states how many elements it holds.", { tags: ["object"] }),
-  entry("blaze_rt_dict_values", "double*", [["dict", "double"]], "Lays a dictionary's values down as a block.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
-  entry("blaze_rt_dict_key_at", "const char*", [["dict", "double"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
-  entry("blaze_rt_dict_value_at", "double", [["dict", "double"], ["index", "double"]], "Reads the value of one entry of a dictionary by its position.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
-  entry("blaze_rt_dict_value_at_ref", "double", [["dict", "double"], ["index", "double"]], "Reads the reference held by one entry of a dictionary by its position.", "Returns the reference, or zero when the position names no entry.", { tags: ["object"] }),
-  entry("blaze_rt_dict_value_at_text", "const char*", [["dict", "double"], ["index", "double"]], "Reads the text held by one entry of a dictionary by its position.", "Returns the text, or the empty text when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_values", "double*", [["dict", "BlazeValue"]], "Lays a dictionary's values down as a block.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_at", "const char*", [["dict", "BlazeValue"], ["index", "double"]], "Reads the key of one entry of a dictionary by its position.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at", "double", [["dict", "BlazeValue"], ["index", "double"]], "Reads the value of one entry of a dictionary by its position.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_ref", "double", [["dict", "BlazeValue"], ["index", "double"]], "Reads the reference held by one entry of a dictionary by its position.", "Returns the reference, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_text", "const char*", [["dict", "BlazeValue"], ["index", "double"]], "Reads the text held by one entry of a dictionary by its position.", "Returns the text, or the empty text when the position names no entry.", { tags: ["object"] }),
   /**
    * A dictionary keyed by a reference. A reference is a handle, and an entry key
    * is the text the runtime keeps, so the handle is written as the hexadecimal
    * of the address it carries: one reference is one key, and a reference the
    * program no longer holds is not one another entry already has.
    */
-  entry("blaze_rt_dict_set_refkey", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_refkey", "double", [["dict", "double"], ["key", "double"]], "Reads one value of a dictionary by a reference key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_refkey_text", "const char*", [["dict", "double"], ["key", "double"]], "Reads one text of a dictionary by a reference key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_refkey_ref", "double", [["dict", "double"], ["key", "double"]], "Reads one reference of a dictionary by a reference key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_refkey_text", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_refkey_ref", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_has_refkey", "double", [["dict", "double"], ["key", "double"]], "Asks whether a dictionary holds a reference key.", "Returns 1 or 0.", { tags: ["object"] }),
-  entry("blaze_rt_dict_delete_refkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a reference key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_key_ref_at", "double", [["dict", "double"], ["index", "double"]], "Reads the reference key of one entry of a dictionary by its position.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_numkey", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_numkey", "double", [["dict", "double"], ["key", "double"]], "Reads one value of a dictionary by a number key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_numkey_text", "const char*", [["dict", "double"], ["key", "double"]], "Reads one text of a dictionary by a number key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_get_numkey_ref", "double", [["dict", "double"], ["key", "double"]], "Reads one reference of a dictionary by a number key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_numkey_text", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_set_numkey_ref", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
-  entry("blaze_rt_dict_has_numkey", "double", [["dict", "double"], ["key", "double"]], "Asks whether a dictionary holds a number key.", "Returns 1 or 0.", { tags: ["object"] }),
-  entry("blaze_rt_dict_delete_numkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a number key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
-  entry("blaze_rt_dict_key_num_at", "double", [["dict", "double"], ["index", "double"]], "Reads the number key of one entry of a dictionary by its position.", "Returns the key as the number it was written as, or zero when the position names no entry.", { tags: ["object"] }),
-  entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Reads one value of a dictionary by a reference key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_text", "const char*", [["dict", "BlazeValue"], ["key", "double"]], "Reads one text of a dictionary by a reference key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_ref", "double", [["dict", "BlazeValue"], ["key", "double"]], "Reads one reference of a dictionary by a reference key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_text", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_ref", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_refkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Asks whether a dictionary holds a reference key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_refkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Removes one entry of a dictionary by a reference key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_ref_at", "double", [["dict", "BlazeValue"], ["index", "double"]], "Reads the reference key of one entry of a dictionary by its position.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "double"]], "Writes one value of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Reads one value of a dictionary by a number key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_text", "const char*", [["dict", "BlazeValue"], ["key", "double"]], "Reads one text of a dictionary by a number key.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_ref", "double", [["dict", "BlazeValue"], ["key", "double"]], "Reads one reference of a dictionary by a number key.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_text", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "const char*"]], "Writes one text of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_ref", "double", [["dict", "BlazeValue"], ["key", "double"], ["value", "double"]], "Writes one reference of a dictionary under a number key.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_numkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Asks whether a dictionary holds a number key.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_numkey", "double", [["dict", "BlazeValue"], ["key", "double"]], "Removes one entry of a dictionary by a number key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_num_at", "double", [["dict", "BlazeValue"], ["index", "double"]], "Reads the number key of one entry of a dictionary by its position.", "Returns the key as the number it was written as, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete", "double", [["dict", "BlazeValue"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_to_text", "const char*", [["value", "BlazeValue"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
     "blaze_rt_type_of",
@@ -3948,6 +3948,7 @@ static uint64_t blaze_registry_length(const BlazeValue* value, uint32_t kind, co
 /* The entry a handle payload names, or NULL where the slot is out of range,
    released or stale. Defined with the boxed-value registry below. */
 static blaze_rt_entry* blaze_registry_entry_of_payload(uint64_t payload);
+static double blaze_dyn_untagged(BlazeValue value);
 
 /* Releases a slot and makes every handle that named it stale. An external
    buffer is borrowed and is never freed here. */
@@ -5345,7 +5346,8 @@ void* blaze_rt_array_join(void* left, void* right) {
    first written. A program reads the entries of a map by walking this: the
    header of the block states how many there are, and the block is the list the
    program holds. */
-double* blaze_rt_dict_values(double dict) {
+double* blaze_rt_dict_values(BlazeValue dictValue) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   const size_t count = d == NULL ? 0 : d->count;
   double* values = (double*)blaze_rt_allocate(count * sizeof(double));
@@ -5362,7 +5364,8 @@ static blaze_rt_dict_entry* blaze_rt_dict_find(blaze_rt_dict* d, const char* key
   return NULL;
 }
 
-double blaze_rt_dict_get(double dict, const char* key) {
+double blaze_rt_dict_get(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) {
     const int at = blaze_rt_dynamic_field(object, key);
@@ -5375,7 +5378,8 @@ double blaze_rt_dict_get(double dict, const char* key) {
   return e->value;
 }
 
-double blaze_rt_dict_has(double dict, const char* key) {
+double blaze_rt_dict_has(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
@@ -5407,7 +5411,8 @@ double blaze_rt_own_key(double value, const char* key) {
   return 0.0;
 }
 
-double blaze_rt_dict_set(double dict, const char* key, double value) {
+double blaze_rt_dict_set(BlazeValue dictValue, const char* key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
@@ -5427,7 +5432,8 @@ double blaze_rt_dict_set(double dict, const char* key, double value) {
   return blaze_dict_handle(d);
 }
 
-double blaze_rt_dict_len(double dict) {
+double blaze_rt_dict_len(BlazeValue dictValue) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) return (double)object->count;
   // The dictionary is asked before the record, because the record test reads
@@ -5443,7 +5449,8 @@ double blaze_rt_dict_len(double dict) {
   return 0.0;
 }
 
-double blaze_rt_dict_delete(double dict, const char* key) {
+double blaze_rt_dict_delete(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) {
     /* A parsed object is read, not edited here: removing a field of one is a
@@ -5469,8 +5476,9 @@ double blaze_rt_dict_delete(double dict, const char* key) {
    entry points are the number ones under a name that says which the source
    meant: the frontend types the read without casting a double to a pointer in
    the C it writes. */
-double blaze_rt_dict_get_ref(double dict, const char* key) {
-  return blaze_rt_dict_get(dict, key);
+double blaze_rt_dict_get_ref(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_get(blaze_value_from_dynamic(dict), key);
 }
 
 /* A sequence is a block and a length, and a dictionary entry is one double:
@@ -5478,16 +5486,18 @@ double blaze_rt_dict_get_ref(double dict, const char* key) {
    header says how many bytes it holds, so the pointer alone carries the length
    the read needs. The copy is what keeps a list written out at the call site —
    a block of the stack the name that wrote it frees — from outliving it. */
-double blaze_rt_dict_set_seq(double dict, const char* key, void* value, double count, double size) {
+double blaze_rt_dict_set_seq(BlazeValue dictValue, const char* key, void* value, double count, double size) {
+  const double dict = blaze_dyn_untagged(dictValue);
   const size_t elements = (size_t)count;
   const size_t bytes = elements * (size_t)size;
   void* copy = blaze_rt_allocate(bytes);
   if (copy == NULL) blaze_rt_raise("out of memory");
   if (bytes > 0 && value != NULL) memcpy(copy, value, bytes);
-  return blaze_rt_dict_set(dict, key, (double)(uintptr_t)copy);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)copy);
 }
 
-void* blaze_rt_dict_get_seq(double dict, const char* key) {
+void* blaze_rt_dict_get_seq(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_rt_dict* d = blaze_rt_dict_known(dict);
   if (d == NULL || key == NULL) return NULL;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
@@ -5496,13 +5506,15 @@ void* blaze_rt_dict_get_seq(double dict, const char* key) {
 }
 
 
-double blaze_rt_dict_set_ref(double dict, const char* key, double value) {
-  return blaze_rt_dict_set(dict, key, value);
+double blaze_rt_dict_set_ref(BlazeValue dictValue, const char* key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, value);
 }
 
 /* A text is a pointer held in the same double an entry carries, and the two
    directions are the casts the ABI spells once here rather than at every use. */
-const char* blaze_rt_dict_get_text(double dict, const char* key) {
+const char* blaze_rt_dict_get_text(BlazeValue dictValue, const char* key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) {
     const int at = blaze_rt_dynamic_field(object, key);
@@ -5517,11 +5529,13 @@ const char* blaze_rt_dict_get_text(double dict, const char* key) {
   return (const char*)(uintptr_t)e->value;
 }
 
-double blaze_rt_dict_set_text(double dict, const char* key, const char* value) {
-  return blaze_rt_dict_set(dict, key, (double)(uintptr_t)value);
+double blaze_rt_dict_set_text(BlazeValue dictValue, const char* key, const char* value) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)value);
 }
 
-const char* blaze_rt_dict_key_at(double dict, double index) {
+const char* blaze_rt_dict_key_at(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_json_field_key(dict, index);
   const blaze_rt_dict* d = blaze_rt_dict_known(dict);
@@ -5539,7 +5553,8 @@ const char* blaze_rt_dict_key_at(double dict, double index) {
   return "";
 }
 
-double blaze_rt_dict_value_at(double dict, double index) {
+double blaze_rt_dict_value_at(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) return blaze_rt_json_field_value(dict, index);
   const blaze_rt_dict* d = blaze_rt_dict_known(dict);
@@ -5563,12 +5578,13 @@ double blaze_rt_dict_value_at(double dict, double index) {
   return 0.0;
 }
 
-double blaze_rt_dict_value_at_ref(double dict, double index) {
+double blaze_rt_dict_value_at_ref(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
   // A compiled record's field is boxed as the dynamic value it is, so the loop
   // that reads the key and the value holds a value a typeof and a stringify
   // read. A dictionary is read before the record test, for the reason the length
   // is.
-  if (dict == 0.0 || blaze_rt_dict_known(dict) != NULL) return blaze_rt_dict_value_at(dict, index);
+  if (dict == 0.0 || blaze_rt_dict_known(dict) != NULL) return blaze_rt_dict_value_at(blaze_value_from_dynamic(dict), index);
   const char* layout = blaze_rt_record_layout(dict);
   if (layout != NULL) {
     size_t where = 0;
@@ -5576,10 +5592,11 @@ double blaze_rt_dict_value_at_ref(double dict, double index) {
     if (blaze_rt_record_field(layout, (int)index, &where, &kind) == NULL) return 0.0;
     return blaze_rt_record_value((const unsigned char*)(uintptr_t)dict + where, kind);
   }
-  return blaze_rt_dict_value_at(dict, index);
+  return blaze_rt_dict_value_at(blaze_value_from_dynamic(dict), index);
 }
 
-const char* blaze_rt_dict_value_at_text(double dict, double index) {
+const char* blaze_rt_dict_value_at_text(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
   blaze_dyn* object = NULL;
   if (blaze_rt_dict_dynamic(dict, &object)) {
     blaze_dyn* held = blaze_dyn_lookup(blaze_rt_json_field_value(dict, index));
@@ -5613,46 +5630,55 @@ static const char* blaze_rt_dict_refkey(double key, char* buffer, size_t size) {
   return buffer;
 }
 
-double blaze_rt_dict_set_refkey(double dict, double key, double value) {
+double blaze_rt_dict_set_refkey(BlazeValue dictValue, double key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_set(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
 }
 
-double blaze_rt_dict_get_refkey(double dict, double key) {
+double blaze_rt_dict_get_refkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_get(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_get(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_get_refkey_ref(double dict, double key) {
-  return blaze_rt_dict_get_refkey(dict, key);
+double blaze_rt_dict_get_refkey_ref(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_get_refkey(blaze_value_from_dynamic(dict), key);
 }
 
-const char* blaze_rt_dict_get_refkey_text(double dict, double key) {
+const char* blaze_rt_dict_get_refkey_text(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_get_text(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_get_text(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_set_refkey_text(double dict, double key, const char* value) {
+double blaze_rt_dict_set_refkey_text(BlazeValue dictValue, double key, const char* value) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_set_text(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
+  return blaze_rt_dict_set_text(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer), value);
 }
 
-double blaze_rt_dict_set_refkey_ref(double dict, double key, double value) {
-  return blaze_rt_dict_set_refkey(dict, key, value);
+double blaze_rt_dict_set_refkey_ref(BlazeValue dictValue, double key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_set_refkey(blaze_value_from_dynamic(dict), key, value);
 }
 
-double blaze_rt_dict_has_refkey(double dict, double key) {
+double blaze_rt_dict_has_refkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_has(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_has(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_delete_refkey(double dict, double key) {
+double blaze_rt_dict_delete_refkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_delete(dict, blaze_rt_dict_refkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_delete(blaze_value_from_dynamic(dict), blaze_rt_dict_refkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_key_ref_at(double dict, double index) {
-  const char* key = blaze_rt_dict_key_at(dict, index);
+double blaze_rt_dict_key_ref_at(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  const char* key = blaze_rt_dict_key_at(blaze_value_from_dynamic(dict), index);
   if (key == NULL || key[0] == '\\0') return 0.0;
   return (double)(uintptr_t)strtoull(key, NULL, 16);
 }
@@ -5671,58 +5697,69 @@ static const char* blaze_rt_dict_numkey(double key, char* buffer, size_t size) {
   return buffer;
 }
 
-double blaze_rt_dict_set_numkey(double dict, double key, double value) {
+double blaze_rt_dict_set_numkey(BlazeValue dictValue, double key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_set(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
 }
 
-double blaze_rt_dict_get_numkey(double dict, double key) {
+double blaze_rt_dict_get_numkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_get(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_get(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_get_numkey_ref(double dict, double key) {
-  return blaze_rt_dict_get_numkey(dict, key);
+double blaze_rt_dict_get_numkey_ref(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_get_numkey(blaze_value_from_dynamic(dict), key);
 }
 
-const char* blaze_rt_dict_get_numkey_text(double dict, double key) {
+const char* blaze_rt_dict_get_numkey_text(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_get_text(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_get_text(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_set_numkey_text(double dict, double key, const char* value) {
+double blaze_rt_dict_set_numkey_text(BlazeValue dictValue, double key, const char* value) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_set_text(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
+  return blaze_rt_dict_set_text(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer), value);
 }
 
-double blaze_rt_dict_set_numkey_ref(double dict, double key, double value) {
-  return blaze_rt_dict_set_numkey(dict, key, value);
+double blaze_rt_dict_set_numkey_ref(BlazeValue dictValue, double key, double value) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  return blaze_rt_dict_set_numkey(blaze_value_from_dynamic(dict), key, value);
 }
 
-double blaze_rt_dict_has_numkey(double dict, double key) {
+double blaze_rt_dict_has_numkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_has(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_has(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
 /* A sequence under a number key: the copy and the block are the text-keyed
    ones, and the key is the text the number is written as. */
-double blaze_rt_dict_set_seq_numkey(double dict, double key, void* value, double count, double size) {
+double blaze_rt_dict_set_seq_numkey(BlazeValue dictValue, double key, void* value, double count, double size) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_set_seq(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer), value, count, size);
+  return blaze_rt_dict_set_seq(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer), value, count, size);
 }
 
-void* blaze_rt_dict_get_seq_numkey(double dict, double key) {
+void* blaze_rt_dict_get_seq_numkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_get_seq(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_get_seq(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_delete_numkey(double dict, double key) {
+double blaze_rt_dict_delete_numkey(BlazeValue dictValue, double key) {
+  const double dict = blaze_dyn_untagged(dictValue);
   char buffer[32];
-  return blaze_rt_dict_delete(dict, blaze_rt_dict_numkey(key, buffer, sizeof buffer));
+  return blaze_rt_dict_delete(blaze_value_from_dynamic(dict), blaze_rt_dict_numkey(key, buffer, sizeof buffer));
 }
 
-double blaze_rt_dict_key_num_at(double dict, double index) {
-  const char* key = blaze_rt_dict_key_at(dict, index);
+double blaze_rt_dict_key_num_at(BlazeValue dictValue, double index) {
+  const double dict = blaze_dyn_untagged(dictValue);
+  const char* key = blaze_rt_dict_key_at(blaze_value_from_dynamic(dict), index);
   uint64_t bits = 0;
   double answer;
   if (key == NULL || key[0] == '\\0') return 0.0;
@@ -9215,7 +9252,7 @@ double blaze_rt_length(BlazeValue value) {
     blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(value));
     return d == NULL ? 0.0 : (double)d->count;
   }
-  if (value.kind == BLAZE_HANDLE_DICTIONARY) return blaze_rt_dict_len(blaze_dyn_untagged(value));
+  if (value.kind == BLAZE_HANDLE_DICTIONARY) return blaze_rt_dict_len(value);
   return 0.0;
 }
 double blaze_rt_path_exists(const char* path) {

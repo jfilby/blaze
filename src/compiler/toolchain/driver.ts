@@ -1327,25 +1327,25 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "blaze_rt_dict_new":
         return `${RUNTIME_NAME}_dict_new()`;
       case "blaze_rt_dict_set":
-        return `${RUNTIME_NAME}_dict_set(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+        return `${RUNTIME_NAME}_dict_set(blaze_value_from_dynamic(${argument(0)}), ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_dict_has":
-        return `${RUNTIME_NAME}_dict_has(${argument(0)}, ${argument(1)})`;
+        return `${RUNTIME_NAME}_dict_has(blaze_value_from_dynamic(${argument(0)}), ${argument(1)})`;
       case "blaze_rt_dict_delete":
-        return `${RUNTIME_NAME}_dict_delete(${argument(0)}, ${argument(1)})`;
+        return `${RUNTIME_NAME}_dict_delete(blaze_value_from_dynamic(${argument(0)}), ${argument(1)})`;
       case "blaze_rt_dict_len":
-        return `${RUNTIME_NAME}_dict_len(${argument(0)})`;
+        return `${RUNTIME_NAME}_dict_len(blaze_value_from_dynamic(${argument(0)}))`;
       case "blaze_rt_dict_set_text":
-        return `${RUNTIME_NAME}_dict_set_text(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+        return `${RUNTIME_NAME}_dict_set_text(blaze_value_from_dynamic(${argument(0)}), ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_dict_set_ref":
-        return `${RUNTIME_NAME}_dict_set_ref(${argument(0)}, ${argument(1)}, ${argument(2)})`;
+        return `${RUNTIME_NAME}_dict_set_ref(blaze_value_from_dynamic(${argument(0)}), ${argument(1)}, ${argument(2)})`;
       case "blaze_rt_json_field_key":
         return `${RUNTIME_NAME}_json_field_key(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_json_field_value":
         return `${RUNTIME_NAME}_json_field_value(${argument(0)}, ${argument(1)})`;
       case "blaze_rt_dict_get":
-        return `${RUNTIME_NAME}_dict_get(${argument(0)}, ${argument(1)})`;
+        return `${RUNTIME_NAME}_dict_get(blaze_value_from_dynamic(${argument(0)}), ${argument(1)})`;
       case "map.values":
-        return `${RUNTIME_NAME}_dict_values(${argument(0)})`;
+        return `${RUNTIME_NAME}_dict_values(blaze_value_from_dynamic(${argument(0)}))`;
       case "array.copy":
         return `${RUNTIME_NAME}_array_copy(${argument(0)})`;
       case "array.join":
