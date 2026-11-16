@@ -221,11 +221,16 @@ class Bytes {
    */
   varbig(value: bigint): void {
     let rest = value;
+    // The rest of the number is compared with zero and with all ones: the
+    // wide form of a number has no signed spelling, and these are the two
+    // ends the signed encoding stops at.
+    const zero = rest - rest;
+    const ones = zero - 1n;
     for (;;) {
       const low = Number(rest & 0x7fn);
       rest >>= 7n;
       const sign = low & 0x40;
-      if ((rest === 0n && sign === 0) || (rest === -1n && sign !== 0)) {
+      if ((rest === zero && sign === 0) || (rest === ones && sign !== 0)) {
         this.byte(low);
         return;
       }
@@ -480,7 +485,7 @@ const SCRATCH_LIMIT = 65536;
  * six is zero for every number the width can hold, because none of them has that
  * bit set. The number a literal wraps to is the low 256 bits of the literal.
  */
-const WIDE_MASK = (1n << 256n) - 1n;
+const WIDE_MASK = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn;
 
 /** The four limbs of a whole number, lowest first. */
 function byteViewOf(value: bigint): bigint[] {
@@ -1234,7 +1239,7 @@ class Body {
     // same local reads nothing: the value is on the stack for the write and
     // the write puts back what it took off. Both go, which is one instruction
     // and one index less wherever a statement reads a name into itself.
-    if (this.readLocal === fieldOf(local,"index") as number) {
+    if (this.readLocal === Number(fieldOf(local,"index"))) {
       this.code.truncate(this.readAt);
       this.readLocal = -1;
       this.readAt = -1;
@@ -1273,8 +1278,8 @@ class Body {
 
   /** Converts what is on the stack into the type a use reads it in. */
   private convert(from: SemanticType, to: SemanticType): void {
-    const held = fieldOf(facts(from),"held");
-    const wanted = fieldOf(facts(to),"held");
+    const held = Number(fieldOf(facts(from),"held"));
+    const wanted = Number(fieldOf(facts(to),"held"));
     if (held === wanted) return;
     if (held === I32 && wanted === I64) {
       this.op(fieldOf(facts(from),"unsigned") ? 0xad : 0xac);
@@ -1380,15 +1385,25 @@ class Body {
    */
   private known(value: SemanticValue): boolean | null {
     const kind = String(fieldOf(value,"k"));
-    if (kind === "bool") return fieldOf(value,"value") as boolean;
+    if (kind === "bool") {
+      if (fieldOf(value,"value")) return true;
+      return false;
+    }
     if (kind !== "const") return null;
     const type = fieldOf(value,"type") as SemanticType;
     if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) return null;
-    const held = fieldOf(facts(type),"held");
+    const held = Number(fieldOf(facts(type),"held"));
     const text = String(fieldOf(value,"text"));
-    if (held === I32) return (Number(BigInt(text)) | 0) !== 0;
-    if (held === I64) return BigInt(text) !== 0n;
-    return Number(text) !== 0;
+    if (held === I32) {
+      if ((Number(text) | 0) !== 0) return true;
+      return false;
+    }
+    if (held === I64) {
+      if (Number(text) !== 0) return true;
+      return false;
+    }
+    if (Number(text) !== 0) return true;
+    return false;
   }
 
   /**

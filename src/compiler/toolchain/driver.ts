@@ -432,6 +432,11 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** One field of a value that states a list. */
+function listOf(value: unknown): unknown[] {
+  return Array.isArray(value) ? value as unknown[] : [];
+}
+
 class CDriver implements ProgramTarget {
   /** The objects built so far, so each one built as a value is named apart. */
   private builds = 0;
@@ -546,7 +551,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
    * that compiled the handler carries a reference.
    */
   private bridges(program: SemanticProgram): string {
-    const handlers = (fieldOf(program,"httpHandlers") as string[] | undefined) ?? [];
+    const writtenHandlers = fieldOf(program,"httpHandlers");
+    const handlers: string[] = Array.isArray(writtenHandlers) ? writtenHandlers as string[] : [];
     if (handlers.length === 0) return "";
     const lines: string[] = [];
     for (const symbol of handlers) {
@@ -1372,7 +1378,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           // and nothing else, so the names the handler captured are left where
           // the trampoline reads them from.
           const rawCaptures = cb === undefined ? undefined : fieldOf(cb,"captures");
-          const captures = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
+          const captures: any[] = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
           if (captures.length > 0) {
             const held = captures.map(
               (capture: any, index: number) => `blaze_capture_${cbName}_${index} = ${this.captureEntry(capture)}`,
@@ -1662,7 +1668,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const clientResponse = callee === "res.on";
         const event = callArgs[1] as { k?: string; text?: string; parts?: unknown[] } | undefined;
         const eventKind = event === undefined ? "" : String(fieldOf(event,"k"));
-        const eventParts = event === undefined ? [] as unknown[] : fieldOf(event,"parts") as unknown[];
+        const eventParts: unknown[] = event === undefined ? [] : fieldOf(event,"parts") as unknown[];
         let eventName = "";
         if (eventKind === "const") {
           eventName = String(fieldOf(event,"text")).replace(/^"|"$/g, "");
@@ -2338,16 +2344,16 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   const target = fieldOf(request,"target") as TargetSpec;
   const driverPath = `${workDirectory}/program.c`;
   const lowered = new Set<string>();
-  for (const body of (fieldOf(request,"loweredBodies") as string[] | undefined) ?? []) lowered.add(body);
+  for (const body of listOf(fieldOf(request,"loweredBodies"))) lowered.add(String(body));
   const shared = new Set<string>();
-  for (const body of (fieldOf(request,"sharedBodies") as string[] | undefined) ?? []) shared.add(body);
+  for (const body of listOf(fieldOf(request,"sharedBodies"))) shared.add(String(body));
   await writeFile(
     driverPath,
     generateProgramDriver(
       program as never,
-      fieldOf(request,"includeHttpHeader") === true,
+      fieldOf(request,"includeHttpHeader"),
       String(fieldOf(request,"lowering") ?? "c") as BackendKind,
-      fieldOf(request,"includeSqliteHeader") === true,
+      fieldOf(request,"includeSqliteHeader"),
       lowered,
       shared,
     ),
@@ -2359,7 +2365,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   if (runtimeObjectPath !== undefined) inputs.push(runtimeObjectPath);
   // A library the program uses is linked beside the runtime: it is a library
   // the program links, not a host the program runs on.
-  for (const objectPath of (fieldOf(request,"libraryObjectPaths") as string[] | undefined) ?? []) inputs.push(objectPath);
+  for (const objectPath of listOf(fieldOf(request,"libraryObjectPaths"))) inputs.push(String(objectPath));
   // A program computes with the maths library, so the driver links it.
   // The driver holds the program's own top-level statements, so it is tuned
   // for the same machine as every function it links, which is what a caller
@@ -2368,15 +2374,15 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   // The TLS libraries are linked only for a runtime that speaks TLS: a
   // program that serves plain HTTP carries no TLS library, so it neither
   // loads one before it runs nor carries one in its binary.
-  const tlsLibraries = fieldOf(request,"tls") === true ? ["-lssl", "-lcrypto"] : [];
+  const tlsLibraries = fieldOf(request,"tls") ? ["-lssl", "-lcrypto"] : [];
   // QNX keeps its socket calls in libsocket. Only the HTTP runtime asks for
   // them; a program without a server links no socket library.
-  const socketLibraries = fieldOf(request,"includeHttpHeader") === true && String(fieldOf(target,"os")) === "qnx" ? ["-lsocket"] : [];
+  const socketLibraries = fieldOf(request,"includeHttpHeader") && String(fieldOf(target,"os")) === "qnx" ? ["-lsocket"] : [];
   const toolchain = toolchainForTarget(target);
   const linkOptions: string[] = ["-std=c11"];
   for (const option of linkOptionsFor(toolchain, String(fieldOf(request,"mode")) as never, fieldOf(request,"objective") as never)) linkOptions.push(option);
   for (const option of cTargetOptions(target)) linkOptions.push(option);
-  for (const option of threadingOptionsFor(toolchain, ((fieldOf(request,"threads") as string[] | undefined) ?? []) as never)) linkOptions.push(option);
+  for (const option of threadingOptionsFor(toolchain, listOf(fieldOf(request,"threads")) as never)) linkOptions.push(option);
   linkOptions.push("-o", outputPath);
   for (const input of inputs) linkOptions.push(input);
   linkOptions.push("-lm");
@@ -2390,7 +2396,7 @@ export async function buildProgramDriver(request: ProgramDriverRequest): Promise
   if (fieldOf(result,"spawnError") !== undefined) {
     throw driverError("the C compiler is not available", String(fieldOf(result,"spawnError")));
   }
-  if (fieldOf(result,"code") !== 0) {
+  if (Number(fieldOf(result,"code")) !== 0) {
     throw driverError("the program driver did not link", `${fieldOf(result,"command")}\n${String(fieldOf(result,"stderr")).trim()}`);
   }
   return { command: outputPath, args: [] };

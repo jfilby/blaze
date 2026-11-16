@@ -5566,9 +5566,12 @@ class TypeScriptParser {
       case "u32":
       case "u64":
       case "usize":
+        return { k: "literal", text: "0" };
+      // A truth starts as the false it is, not as the number zero: the layout
+      // holds a bool, and the constructor writes a bool into it.
       case "boolean":
       case "bool":
-        return { k: "literal", text: "0" };
+        return { k: "literal", text: "0", boolean: true };
       case "bigint":
       case "i256":
       case "u256":

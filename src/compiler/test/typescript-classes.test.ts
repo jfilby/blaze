@@ -54,6 +54,26 @@ test("the constructor builds one layout, and a method reads it at its offsets", 
   assert.match(ir, /load_field\[f64\].* (?:Object1|Vector) x/);
 });
 
+test("a field declared as a truth starts at the zero of a truth", () => {
+  // With no initialiser, a field is written into the constructor's literal at
+  // the type it was declared at. A `boolean` field therefore starts as the
+  // false its layout holds, not as the number zero the truth is carried as:
+  // the layout is a bool, and a method that reads the field reads a bool back.
+  const source = [
+    "class Flag {",
+    "  on: boolean;",
+    "  constructor() {}",
+    "  value(): boolean { return this.on; }",
+    "}",
+    "console.log(new Flag().value());",
+    "",
+  ].join("\n");
+  const ir = irOf("typescript", { "main.ts": source }, "main.ts", "Flag_value");
+  assert.match(ir, /function Flag_value\(self: ref<Flag>\) -> bool/);
+  assert.match(ir, /field on: bool at 0/);
+  assert.match(ir, /load_field\[bool\].* Flag on/);
+});
+
 test("a field names its type in every form the language writes", () => {
   // `readonly`, an object type, a tuple and a union of string literals are all
   // annotations a field may write, and `= []` is built at the element type each
