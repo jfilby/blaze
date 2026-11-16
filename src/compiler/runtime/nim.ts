@@ -2067,7 +2067,7 @@ proc blaze_last_error*(): cstring {.exportc, cdecl.} =
 proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
-proc blaze_rt_object_copy*(base: float64): float64 {.exportc, cdecl.} = base
+proc blaze_rt_object_copy*(base: BlazeValue): BlazeValue {.exportc, cdecl.} = base
 
 ## The width of one element a type text names, which is the width the header
 ## and the layouts of the C runtime use.
@@ -2169,10 +2169,10 @@ proc blaze_rt_clone*(value: float64): float64 {.exportc, cdecl.} =
     if header[].magic == BlazeMagic and header[].descriptor != nil:
       return float64(cast[uint](blazeCloneObject(object)))
   value
-proc blaze_rt_object_set_text*(target: float64, field, value: cstring): float64 {.exportc, cdecl.} = target
-proc blaze_rt_object_set_ref*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target
-proc blaze_rt_object_set_number*(target: float64, field: cstring, value: float64): float64 {.exportc, cdecl.} = target
-proc blaze_rt_object_set_list*(target: float64, field: cstring, value: pointer): float64 {.exportc, cdecl.} = target
+proc blaze_rt_object_set_text*(target: BlazeValue, field, value: cstring): BlazeValue {.exportc, cdecl.} = target
+proc blaze_rt_object_set_ref*(target: BlazeValue, field: cstring, value: BlazeValue): BlazeValue {.exportc, cdecl.} = target
+proc blaze_rt_object_set_number*(target: BlazeValue, field: cstring, value: float64): BlazeValue {.exportc, cdecl.} = target
+proc blaze_rt_object_set_list*(target: BlazeValue, field: cstring, value: pointer): BlazeValue {.exportc, cdecl.} = target
   ## The JSON of a record at an indent is written by the C runtime a module's
   ## functions link; a program driver passes its values to no module.
 proc blaze_rt_parse_int*(text: cstring, radix: float64): float64 {.exportc, cdecl.} = 0.0

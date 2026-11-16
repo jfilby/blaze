@@ -1120,13 +1120,13 @@ entry(
     { tags: ["object"] },
   ),
   entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
-  entry("blaze_rt_object_copy", "double", [["value", "double"]], "Copies a record.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
+  entry("blaze_rt_object_copy", "BlazeValue", [["value", "BlazeValue"]], "Copies a record.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
   entry("blaze_rt_clone", "double", [["value", "double"]], "Copies a value deeply.", "A record copies its fields, a list copies its elements, a dynamic object copies its entries, and a number or a text is itself.", { tags: ["object"] }),
   entry("blaze_rt_clone_block", "void*", [["block", "void*"], ["element", "const char*"]], "Copies a block of elements deeply.", "Each element is copied at the type text the block holds, and the answer is a block of its own.", { tags: ["object"] }),
-  entry("blaze_rt_object_set_text", "double", [["object", "double"], ["field", "const char*"], ["value", "const char*"]], "Writes a text into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
-  entry("blaze_rt_object_set_ref", "double", [["object", "double"], ["field", "const char*"], ["value", "double"]], "Writes a reference into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
-  entry("blaze_rt_object_set_list", "double", [["object", "double"], ["field", "const char*"], ["value", "const void*"]], "Writes a list into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
-  entry("blaze_rt_object_set_number", "double", [["object", "double"], ["field", "const char*"], ["value", "double"]], "Writes a number into a field of a record, at the width the field states.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_text", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "const char*"]], "Writes a text into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_ref", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "BlazeValue"]], "Writes a reference into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_list", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "const void*"]], "Writes a list into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_number", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "double"]], "Writes a number into a field of a record, at the width the field states.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
   entry(
     "blaze_rt_json_object",
     "const char*",
@@ -4070,6 +4070,13 @@ static BlazeValue blaze_pointer_value(const void* pointer) {
   if (slot == 0) return blaze_value_null();
   blaze_rt_entry* entry = &blaze_rt_registry[slot - 1];
   return blaze_value_handle(entry->kind, slot, entry->generation);
+}
+
+/* The storage a typed handle names, or NULL where the handle is not one the
+   runtime registered at that kind. */
+static void* blaze_pointer_of_value(const BlazeValue* value, uint32_t kind, const char* operation) {
+  blaze_rt_entry* entry = blaze_registry_get(value, kind, operation);
+  return entry == NULL ? NULL : entry->pointer;
 }
 
 /* Registers a block of elements with the length it was allocated for. The
@@ -8291,18 +8298,22 @@ static int blaze_rt_is_block(double value) {
          blaze_value_is_handle(&held, BLAZE_HANDLE_STRING);
 }
 
-double blaze_rt_object_copy(double base) {
-  if (base == 0.0) return 0.0;
-  if (!blaze_rt_is_block(base)) {
+BlazeValue blaze_rt_object_copy(BlazeValue base) {
+  if (base.tag == BLAZE_VALUE_NULL) return base;
+  void* object = blaze_pointer_of_value(&base, BLAZE_HANDLE_RECORD, "blaze_rt_object_copy");
+  if (object == NULL) {
     blaze_rt_raise("a spread of a value that is not a record");
     return base;
   }
-  void* object = (void*)(uintptr_t)base;
   const blaze_rt_header* header = blaze_rt_header_of(object);
   void* copy = blaze_rt_object_new(header->length, header->alignment);
   memcpy(copy, object, header->length);
-  blaze_rt_header_of(copy)->descriptor = header->descriptor;
-  return (double)(uintptr_t)copy;
+  const char* descriptor = header->descriptor;
+  blaze_rt_header_of(copy)->descriptor = descriptor;
+  BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_RECORD, copy, header->length, BLAZE_ENTRY_OWNED);
+  blaze_pointer_remember(copy, blaze_value_index(&handle));
+  blaze_rt_registry[blaze_value_index(&handle) - 1].descriptor = descriptor;
+  return handle;
 }
 
 /* The type a layout names inside a slice, a ref or a ptr. */
@@ -8377,7 +8388,8 @@ static void* blaze_rt_clone_object(void* object) {
   const blaze_rt_header* header = blaze_rt_header_of(object);
   if (header->magic != BLAZE_RT_MAGIC) return object;
   if (header->descriptor == NULL) return object;
-  void* copy = (void*)(uintptr_t)blaze_rt_object_copy((double)(uintptr_t)object);
+  BlazeValue copyValue = blaze_rt_object_copy(blaze_value_from_dynamic((double)(uintptr_t)object));
+  void* copy = blaze_pointer_of_value(&copyValue, BLAZE_HANDLE_RECORD, "blaze_rt_clone");
   const char* cursor = header->descriptor;
   blaze_rt_layout_field field;
   while (blaze_rt_layout_next(&cursor, &field)) {
@@ -8449,9 +8461,9 @@ static unsigned char* blaze_rt_object_field(void* object, const char* field, con
   return (unsigned char*)object + offset;
 }
 
-double blaze_rt_object_set_text(double target, const char* field, const char* value) {
-  if (target == 0.0) return target;
-  void* object = (void*)(uintptr_t)target;
+BlazeValue blaze_rt_object_set_text(BlazeValue target, const char* field, const char* value) {
+  void* object = blaze_pointer_of_value(&target, BLAZE_HANDLE_RECORD, "blaze_rt_object_set_text");
+  if (object == NULL) return target;
   const char* type = NULL;
   unsigned char* at = blaze_rt_object_field(object, field, &type);
   if (at == NULL) return target;
@@ -8463,9 +8475,9 @@ double blaze_rt_object_set_text(double target, const char* field, const char* va
   return target;
 }
 
-double blaze_rt_object_set_ref(double target, const char* field, double value) {
-  if (target == 0.0) return target;
-  void* object = (void*)(uintptr_t)target;
+BlazeValue blaze_rt_object_set_ref(BlazeValue target, const char* field, BlazeValue value) {
+  void* object = blaze_pointer_of_value(&target, BLAZE_HANDLE_RECORD, "blaze_rt_object_set_ref");
+  if (object == NULL) return target;
   const char* type = NULL;
   unsigned char* at = blaze_rt_object_field(object, field, &type);
   if (at == NULL) return target;
@@ -8473,14 +8485,15 @@ double blaze_rt_object_set_ref(double target, const char* field, double value) {
     blaze_rt_raise("a reference written into a field that holds a text");
     return target;
   }
-  void* pointer = (void*)(uintptr_t)value;
+  void* pointer = blaze_pointer_of_value(&value, BLAZE_HANDLE_RECORD, "blaze_rt_object_set_ref");
+  if (pointer == NULL) pointer = blaze_pointer_of_value(&value, BLAZE_HANDLE_ARRAY, "blaze_rt_object_set_ref");
   memcpy(at, &pointer, sizeof pointer);
   return target;
 }
 
-double blaze_rt_object_set_list(double target, const char* field, const void* value) {
-  if (target == 0.0) return target;
-  void* object = (void*)(uintptr_t)target;
+BlazeValue blaze_rt_object_set_list(BlazeValue target, const char* field, const void* value) {
+  void* object = blaze_pointer_of_value(&target, BLAZE_HANDLE_RECORD, "blaze_rt_object_set_list");
+  if (object == NULL) return target;
   const char* type = NULL;
   unsigned char* at = blaze_rt_object_field(object, field, &type);
   if (at == NULL) return target;
@@ -8492,9 +8505,9 @@ double blaze_rt_object_set_list(double target, const char* field, const void* va
   return target;
 }
 
-double blaze_rt_object_set_number(double target, const char* field, double value) {
-  if (target == 0.0) return target;
-  void* object = (void*)(uintptr_t)target;
+BlazeValue blaze_rt_object_set_number(BlazeValue target, const char* field, double value) {
+  void* object = blaze_pointer_of_value(&target, BLAZE_HANDLE_RECORD, "blaze_rt_object_set_number");
+  if (object == NULL) return target;
   const char* type = NULL;
   unsigned char* at = blaze_rt_object_field(object, field, &type);
   if (at == NULL) return target;

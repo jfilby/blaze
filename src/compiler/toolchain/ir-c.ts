@@ -559,15 +559,15 @@ function builtinExpression(name: string, args: string[]): string {
     // reads through the shape the base did, and the answer is the handle a
     // reference is carried in.
     case "object.copy":
-      return `((double)(uintptr_t)${RUNTIME_NAME}_object_copy(${args[0]}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_object_copy(blaze_value_from_dynamic(${args[0]})))`;
     case "object.set.text":
-      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_text(${args[0]}, ${args[1]}, ${args[2]}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_object_set_text(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]}))`;
     case "object.set.ref":
-      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_ref(${args[0]}, ${args[1]}, ${args[2]}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_object_set_ref(blaze_value_from_dynamic(${args[0]}), ${args[1]}, blaze_value_from_dynamic(${args[2]})))`;
     case "object.set.list":
-      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_list(${args[0]}, ${args[1]}, ${args[2]}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_object_set_list(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]}))`;
     case "object.set.number":
-      return `((double)(uintptr_t)${RUNTIME_NAME}_object_set_number(${args[0]}, ${args[1]}, ${args[2]}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_object_set_number(blaze_value_from_dynamic(${args[0]}), ${args[1]}, ${args[2]}))`;
     // The JSON of a value the compiler cannot name is the walk of the record
     // the value is: the block's header carries the layout it was laid out
     // with, and the answer is a managed text.
