@@ -714,17 +714,18 @@ proc blazeStateIndex(key: string): int =
     if cell[0] == key: return index
   -1
 
-proc blaze_rt_state_get*(key: cstring): float64 {.exportc, cdecl.} =
-  if key == nil: return 0.0
+proc blaze_rt_state_get*(key: cstring): BlazeValue {.exportc, cdecl.} =
+  if key == nil: return blaze_null_value()
   let index = blazeStateIndex($key)
-  if index < 0: return 0.0
-  blazeStateCells[index][1]
+  if index < 0: return blaze_null_value()
+  blaze_number_value(blazeStateCells[index][1])
 
-proc blaze_rt_state_set*(key: cstring, value: float64): float64 {.exportc, cdecl.} =
-  if key == nil: return value
-  let index = blazeStateIndex($key)
-  if index < 0: blazeStateCells.add(($key, value))
-  else: blazeStateCells[index][1] = value
+proc blaze_rt_state_set*(key: cstring, value: BlazeValue): BlazeValue {.exportc, cdecl.} =
+  let number = cast[float64](value.payload)
+  if key != nil:
+    let index = blazeStateIndex($key)
+    if index < 0: blazeStateCells.add(($key, number))
+    else: blazeStateCells[index][1] = number
   value
 
 proc blaze_rt_path_extname*(path: cstring): cstring {.exportc, cdecl.} =
@@ -1961,7 +1962,10 @@ proc blaze_promise_reject*(promise: pointer, message: cstring) {.exportc, cdecl.
   ## The failure is pending, which is what a catch arm reads.
   blazeErrorSet(message)
 
-proc blaze_promise_await*(promise: pointer): float64 {.exportc, cdecl.} =
+proc nimPromisePointer(value: BlazeValue): pointer = cast[pointer](value.payload)
+
+proc blaze_promise_await*(promise: BlazeValue): float64 {.exportc, cdecl.} =
+  let promise = nimPromisePointer(promise)
   let index = blazePromiseIndex(promise)
   if index < 0: return 0.0
   let held = blazePromises[index]
@@ -1971,7 +1975,8 @@ proc blaze_promise_await*(promise: pointer): float64 {.exportc, cdecl.} =
   of promiseText: blaze_rt_to_number(blaze_rt_box_string(held.text))
   of promiseValue: blaze_rt_to_number(held.value)
 
-proc blaze_promise_await_text*(promise: pointer): cstring {.exportc, cdecl.} =
+proc blaze_promise_await_text*(promise: BlazeValue): cstring {.exportc, cdecl.} =
+  let promise = nimPromisePointer(promise)
   let index = blazePromiseIndex(promise)
   if index < 0: return blazeTextOf("")
   let held = blazePromises[index]
@@ -1982,7 +1987,8 @@ proc blaze_promise_await_text*(promise: pointer): cstring {.exportc, cdecl.} =
   of promiseNumber: blaze_rt_to_text(blazeValueFromDynamic(blaze_rt_box_number(held.value)))
   of promiseNull: blazeTextOf("")
 
-proc blaze_promise_await_value*(promise: pointer): float64 {.exportc, cdecl.} =
+proc blaze_promise_await_value*(promise: BlazeValue): BlazeValue {.exportc, cdecl.} =
+  let promise = nimPromisePointer(promise)
   let index = blazePromiseIndex(promise)
   if index < 0: return blaze_rt_box_null()
   let held = blazePromises[index]
@@ -1995,32 +2001,33 @@ proc blaze_promise_await_value*(promise: pointer): float64 {.exportc, cdecl.} =
   of promiseNumber: blaze_rt_box_number(held.value)
   of promiseNull: blaze_rt_box_null()
 
-proc blaze_promise_await_nothing*(promise: pointer) {.exportc, cdecl.} =
+proc blaze_promise_await_nothing*(promise: BlazeValue) {.exportc, cdecl.} =
+  let promise = nimPromisePointer(promise)
   let index = blazePromiseIndex(promise)
   if index < 0: return
   if blazePromises[index].failed: blazeErrorSet(blazePromises[index].message)
 
-proc blaze_promise_resolved_number*(value: float64): pointer {.exportc, cdecl.} =
+proc blaze_promise_resolved_number*(value: float64): BlazeValue {.exportc, cdecl.} =
   let promise = blaze_promise_new()
   blaze_promise_resolve(promise, value)
   promise
 
-proc blaze_promise_resolved_text*(value: cstring): pointer {.exportc, cdecl.} =
+proc blaze_promise_resolved_text*(value: cstring): BlazeValue {.exportc, cdecl.} =
   let promise = blaze_promise_new()
   blaze_promise_resolve_text(promise, value)
   promise
 
-proc blaze_promise_resolved_null*(): pointer {.exportc, cdecl.} =
+proc blaze_promise_resolved_null*(): BlazeValue {.exportc, cdecl.} =
   let promise = blaze_promise_new()
   blaze_promise_resolve_null(promise)
   promise
 
-proc blaze_promise_resolved_value*(value: float64): pointer {.exportc, cdecl.} =
+proc blaze_promise_resolved_value*(value: float64): BlazeValue {.exportc, cdecl.} =
   let promise = blaze_promise_new()
   blaze_promise_resolve_value(promise, value)
   promise
 
-proc blaze_promise_rejected*(message: cstring): pointer {.exportc, cdecl.} =
+proc blaze_promise_rejected*(message: cstring): BlazeValue {.exportc, cdecl.} =
   let promise = blaze_promise_new()
   blaze_promise_reject(promise, message)
   promise
@@ -2040,19 +2047,19 @@ proc blazePromiseFailedWith(message: cstring): pointer =
     blazePromises[index].message = message
   promise
 
-proc blaze_promise_settled_number*(value: float64): pointer {.exportc, cdecl.} =
+proc blaze_promise_settled_number*(value: float64): BlazeValue {.exportc, cdecl.} =
   if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
   else: blaze_promise_resolved_number(value)
 
-proc blaze_promise_settled_text*(value: cstring): pointer {.exportc, cdecl.} =
+proc blaze_promise_settled_text*(value: cstring): BlazeValue {.exportc, cdecl.} =
   if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
   else: blaze_promise_resolved_text(value)
 
-proc blaze_promise_settled_null*(): pointer {.exportc, cdecl.} =
+proc blaze_promise_settled_null*(): BlazeValue {.exportc, cdecl.} =
   if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
   else: blaze_promise_resolved_null()
 
-proc blaze_promise_settled_value*(value: float64): pointer {.exportc, cdecl.} =
+proc blaze_promise_settled_value*(value: float64): BlazeValue {.exportc, cdecl.} =
   if blazeErrorPending: blazePromiseFailedWith(blazeErrorMessage.cstring)
   else: blaze_promise_resolved_value(value)
 
@@ -2099,7 +2106,7 @@ proc blaze_had_error*(): float64 {.exportc, cdecl.} =
 proc blaze_last_error*(): cstring {.exportc, cdecl.} =
   blazeErrorMessage.cstring
 
-proc blaze_rt_json_parse*(text: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_json_parse*(text: BlazeValue): BlazeValue {.exportc, cdecl.} = blaze_null_value()
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
 proc blaze_rt_object_copy*(base: BlazeValue): BlazeValue {.exportc, cdecl.} = base
@@ -2196,13 +2203,12 @@ proc blazeCloneDynamic(value: float64): float64 =
 proc blaze_rt_clone_block*(block: pointer; element: cstring): pointer {.exportc, cdecl.} =
   blazeCloneBlock(block, element)
 
-proc blaze_rt_clone*(value: float64): float64 {.exportc, cdecl.} =
-  if blazeDynIndex(value) >= 0: return blazeCloneDynamic(value)
-  if value >= 4096.0:
-    let object = cast[pointer](cast[uint](value))
-    let header = headerOf(object)
-    if header[].magic == BlazeMagic and header[].descriptor != nil:
-      return float64(cast[uint](blazeCloneObject(object)))
+proc blaze_rt_clone*(value: BlazeValue): BlazeValue {.exportc, cdecl.} =
+  let handle = blazeDynamicFromValue(value)
+  if blazeDynIndex(handle) >= 0: return blazeValueFromDynamic(blazeCloneDynamic(handle))
+  if value.kind == uint32(BlazeKindRecord):
+    let object = cast[pointer](cast[uint](handle))
+    return blazeValueFromDynamic(float64(cast[uint](blazeCloneObject(object))))
   value
 proc blaze_rt_object_set_text*(target: BlazeValue, field, value: cstring): BlazeValue {.exportc, cdecl.} = target
 proc blaze_rt_object_set_ref*(target: BlazeValue, field: cstring, value: BlazeValue): BlazeValue {.exportc, cdecl.} = target

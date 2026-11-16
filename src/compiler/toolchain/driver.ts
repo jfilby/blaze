@@ -1162,8 +1162,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const jsonText = jsonArgument !== undefined &&
           (isTextType(fieldOf(jsonArgument,"type") as SemanticType) || String(fieldOf(jsonArgument,"k")) === "text");
         return jsonText
-          ? `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${argument(0)}))`
-          : `${RUNTIME_NAME}_json_parse(${argument(0)})`;
+          ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${argument(0)})))`
+          : `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${argument(0)})))`;
       }
       // One field of a dynamic object, by its name. The object is the handle
       // it is carried in, and the field is the text it is spelled with.
@@ -1569,11 +1569,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // program made is settled by the time it is read. The callee the
         // resolver chose says which value is read out of it: a string, a
         // truth, a number, a value the runtime holds, or nothing at all.
-        if (callee === "Promise.await.text") return `blaze_promise_await_text((void*)(uintptr_t)${argument(0)})`;
-        if (callee === "Promise.await.whole") return `(long long)blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
-        if (callee === "Promise.await.bool") return `(blaze_promise_await((void*)(uintptr_t)${argument(0)}) != 0.0)`;
-        if (callee === "Promise.await.value") return `blaze_promise_await_value((void*)(uintptr_t)${argument(0)})`;
-        if (callee === "Promise.await.nothing") return `(blaze_promise_await_nothing((void*)(uintptr_t)${argument(0)}), 0.0)`;
+        if (callee === "Promise.await.text") return `blaze_promise_await_text(blaze_value_from_dynamic(${argument(0)}))`;
+        if (callee === "Promise.await.whole") return `(long long)blaze_promise_await(blaze_value_from_dynamic(${argument(0)}))`;
+        if (callee === "Promise.await.bool") return `(blaze_promise_await(blaze_value_from_dynamic(${argument(0)})) != 0.0)`;
+        if (callee === "Promise.await.value") return `blaze_dynamic_from_value(blaze_promise_await_value(blaze_value_from_dynamic(${argument(0)})))`;
+        if (callee === "Promise.await.nothing") return `(blaze_promise_await_nothing(blaze_value_from_dynamic(${argument(0)})), 0.0)`;
         // A value that is not a promise is the value itself: awaiting a number
         // is the number, and awaiting a function that hands back nothing is
         // nothing.
@@ -1589,32 +1589,32 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           return `(${argument(0)}, 0.0)`;
         }
         if (kind !== null && isNumber(kind)) return argument(0);
-        return `blaze_promise_await((void*)(uintptr_t)${argument(0)})`;
+        return `blaze_promise_await(blaze_value_from_dynamic(${argument(0)}))`;
       }
       case "Promise.resolve":
-        return `(double)(uintptr_t)blaze_promise_resolved_number(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_resolved_number(${argument(0)}))`;
       case "Promise.resolve.text":
-        return `(double)(uintptr_t)blaze_promise_resolved_text(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_resolved_text(${argument(0)}))`;
       case "Promise.resolve.bool":
-        return `(double)(uintptr_t)blaze_promise_resolved_number((${argument(0)}) ? 1.0 : 0.0)`;
+        return `blaze_dynamic_from_value(blaze_promise_resolved_number((${argument(0)}) ? 1.0 : 0.0))`;
       case "Promise.resolve.value":
-        return `(double)(uintptr_t)blaze_promise_resolved_value(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_resolved_value(${argument(0)}))`;
       case "Promise.resolve.nothing":
-        return `(double)(uintptr_t)blaze_promise_resolved_null()`;
+        return `blaze_dynamic_from_value(blaze_promise_resolved_null())`;
       case "Promise.settle":
-        return `(double)(uintptr_t)blaze_promise_settled_number(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_settled_number(${argument(0)}))`;
       case "Promise.settle.text":
-        return `(double)(uintptr_t)blaze_promise_settled_text(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_settled_text(${argument(0)}))`;
       case "Promise.settle.bool":
-        return `(double)(uintptr_t)blaze_promise_settled_number((${argument(0)}) ? 1.0 : 0.0)`;
+        return `blaze_dynamic_from_value(blaze_promise_settled_number((${argument(0)}) ? 1.0 : 0.0))`;
       case "Promise.settle.value":
-        return `(double)(uintptr_t)blaze_promise_settled_value(${argument(0)})`;
+        return `blaze_dynamic_from_value(blaze_promise_settled_value(${argument(0)}))`;
       case "Promise.settle.nothing":
-        return `(double)(uintptr_t)blaze_promise_settled_null()`;
+        return `blaze_dynamic_from_value(blaze_promise_settled_null())`;
       case "Promise.failed":
-        return `blaze_promise_failed((void*)(uintptr_t)${argument(0)})`;
+        return `blaze_promise_failed(blaze_value_from_dynamic(${argument(0)})`;
       case "Promise.message":
-        return `({ const char* blaze_message = blaze_promise_message((void*)(uintptr_t)${argument(0)}); blaze_error_clear(); blaze_message; })`;
+        return `({ const char* blaze_message = blaze_promise_message(blaze_value_from_dynamic(${argument(0)}); blaze_error_clear(); blaze_message; })`;
       case "Promise.reject": {
         const arg = callArgs[0];
         const argType = arg === undefined ? null : fieldOf(arg,"type") as SemanticType;
@@ -1624,7 +1624,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           : (argKind === "text" || argKind === "const" || isTextType(argType))
             ? argument(0)
             : this.toText(argument(0), argType, null, this.style);
-        return `(double)(uintptr_t)blaze_promise_rejected(${text})`;
+        return `blaze_dynamic_from_value(blaze_promise_rejected(${text}))`;
       }
       case "resolve":
       case "onFulfilled": {

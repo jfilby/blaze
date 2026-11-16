@@ -48,8 +48,8 @@ test("the runtime reads a document and writes it back as the same document", asy
 
   /* The document a text is read as, written back as a document. */
   static const char* round_trip(const char* json) {
-    const double parsed = blaze_rt_json_parse((double)(uintptr_t)json);
-    return blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_json_stringify(parsed)));
+    const BlazeValue parsed = blaze_rt_json_parse(blaze_value_c_text(json));
+    return blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_json_stringify(blaze_dynamic_from_value(parsed))));
   }
 
   static void expect_round_trip(const char* json, const char* wanted) {
@@ -60,7 +60,7 @@ test("the runtime reads a document and writes it back as the same document", asy
      the ones the C library answers for the same text, which is the answer a
      source program is compared against. */
   static void expect_number(const char* text, double wanted) {
-    const double read = blaze_rt_to_number(blaze_rt_json_parse((double)(uintptr_t)text));
+    const double read = blaze_rt_to_number(blaze_dynamic_from_value(blaze_rt_json_parse(blaze_value_c_text(text))));
     if (memcmp(&read, &wanted, sizeof read) == 0) return;
     printf("  %s was read as %.20g and not %.20g\\n", text, read, wanted);
     failures += 1;

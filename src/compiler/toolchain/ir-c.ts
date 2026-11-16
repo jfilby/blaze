@@ -456,47 +456,47 @@ function builtinExpression(name: string, args: string[]): string {
     // function answers on its way out. The handle is the address the runtime
     // holds the promise in, carried as the number a value is.
     case "Promise.await":
-      return `blaze_promise_await((void*)(uintptr_t)(${args[0]}))`;
+      return `blaze_promise_await(blaze_value_from_dynamic(${args[0]}))`;
     case "Promise.await.text":
-      return `blaze_promise_await_text((void*)(uintptr_t)(${args[0]}))`;
+      return `blaze_promise_await_text(blaze_value_from_dynamic(${args[0]}))`;
     case "Promise.await.whole":
-      return `(long long)blaze_promise_await((void*)(uintptr_t)(${args[0]}))`;
+      return `(long long)blaze_promise_await(blaze_value_from_dynamic(${args[0]}))`;
     case "Promise.await.bool":
-      return `(blaze_promise_await((void*)(uintptr_t)(${args[0]})) != 0.0)`;
+      return `(blaze_promise_await(blaze_value_from_dynamic(${args[0]})) != 0.0)`;
     case "Promise.await.value":
-      return `blaze_promise_await_value((void*)(uintptr_t)(${args[0]}))`;
+      return `blaze_dynamic_from_value(blaze_promise_await_value(blaze_value_from_dynamic(${args[0]})))`;
     case "Promise.await.nothing":
-      return `(blaze_promise_await_nothing((void*)(uintptr_t)(${args[0]})), 0.0)`;
+      return `(blaze_promise_await_nothing(blaze_value_from_dynamic(${args[0]})), 0.0)`;
     case "Promise.resolve":
-      return `(double)(uintptr_t)blaze_promise_resolved_number(${args[0] ?? "0.0"})`;
+      return `blaze_dynamic_from_value(blaze_promise_resolved_number(${args[0] ?? "0.0"}))`;
     case "Promise.resolve.text":
-      return `(double)(uintptr_t)blaze_promise_resolved_text(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_resolved_text(${args[0]}))`;
     case "Promise.resolve.bool":
-      return `(double)(uintptr_t)blaze_promise_resolved_number((${args[0]}) ? 1.0 : 0.0)`;
+      return `blaze_dynamic_from_value(blaze_promise_resolved_number((${args[0]}) ? 1.0 : 0.0))`;
     case "Promise.resolve.value":
-      return `(double)(uintptr_t)blaze_promise_resolved_value(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_resolved_value(${args[0]}))`;
     case "Promise.resolve.nothing":
-      return `(double)(uintptr_t)blaze_promise_resolved_null()`;
+      return `blaze_dynamic_from_value(blaze_promise_resolved_null())`;
     case "Promise.settle":
-      return `(double)(uintptr_t)blaze_promise_settled_number(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_settled_number(${args[0]}))`;
     case "Promise.settle.text":
-      return `(double)(uintptr_t)blaze_promise_settled_text(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_settled_text(${args[0]}))`;
     case "Promise.settle.bool":
-      return `(double)(uintptr_t)blaze_promise_settled_number((${args[0]}) ? 1.0 : 0.0)`;
+      return `blaze_dynamic_from_value(blaze_promise_settled_number((${args[0]}) ? 1.0 : 0.0))`;
     case "Promise.settle.value":
-      return `(double)(uintptr_t)blaze_promise_settled_value(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_settled_value(${args[0]}))`;
     case "Promise.settle.nothing":
-      return `(double)(uintptr_t)blaze_promise_settled_null()`;
+      return `blaze_dynamic_from_value(blaze_promise_settled_null())`;
     case "Promise.reject":
-      return `(double)(uintptr_t)blaze_promise_rejected(${args[0]})`;
+      return `blaze_dynamic_from_value(blaze_promise_rejected(${args[0]}))`;
     case "Promise.failed":
-      return `blaze_promise_failed((void*)(uintptr_t)(${args[0]}))`;
+      return `blaze_promise_failed(blaze_value_from_dynamic(${args[0]}))`;
     // The message a failure carries, read as the failure is handled: the
     // pending error flag is what an async function's own promise settles on, so
     // an arm that took the failure clears it here, exactly as the arm of a
     // `catch` block does.
     case "Promise.message":
-      return `({ const char* blaze_message = blaze_promise_message((void*)(uintptr_t)(${args[0]})); blaze_error_clear(); blaze_message; })`;
+      return `({ const char* blaze_message = blaze_promise_message(blaze_value_from_dynamic(${args[0]})); blaze_error_clear(); blaze_message; })`;
     // The whole numbers: a magnitude, a smaller, a larger, and the three
     // roundings that answer a whole number. The `Math` builtins above answer a
     // fraction, and a whole number is written as one, so each of these is the
@@ -1330,7 +1330,7 @@ class FunctionEmitter {
     // as the number a value is.
     if (String(fieldOf(call,"callee")) === "JSON.parse" && (fieldOf(call,"args") as SemanticValue[])[0] !== undefined) {
       const text = this.expression((fieldOf(call,"args") as SemanticValue[])[0], isTextType(fieldOf((fieldOf(call,"args") as SemanticValue[])[0],"type")) ? TEXT : null, depth);
-      return `${RUNTIME_NAME}_json_parse((double)(uintptr_t)(${text}))`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${text})))`;
     }
     const args: string[] = [];
     (fieldOf(call,"args") as SemanticValue[]).forEach((argument, index) => {
@@ -1371,27 +1371,27 @@ class FunctionEmitter {
       const held = fieldOf(call,"returns");
       const pointer = String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
         || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined));
-      const stored = `${RUNTIME_NAME}_state_get(${args[0]})`;
+      const stored = `blaze_dynamic_from_value(${RUNTIME_NAME}_state_get(${args[0]}))`;
       return pointer ? `((${declaredType(held)})(uintptr_t)(${stored}))` : stored;
     }
     if (String(fieldOf(call,"callee")) === "blaze_rt_state_set") {
       const held = (fieldOf(call,"argTypes") as SemanticType[])[1] ?? fieldOf((fieldOf(call,"args") as SemanticValue[])[1] ?? {}, "type") ?? null;
       const pointer = held !== null && (String(fieldOf(held,"kind")) === "text" || String(fieldOf(held,"kind")) === "slice" || String(fieldOf(held,"kind")) === "array" || String(fieldOf(held,"kind")) === "ptr"
         || (String(fieldOf(held,"kind")) === "ref" && !(fieldOf(held,"of") === null && fieldOf(held,"name") === undefined)));
-      return `${RUNTIME_NAME}_state_set(${args[0]}, ${pointer ? `(double)(uintptr_t)(${args[1]})` : args[1] ?? "0.0"})`;
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_state_set(${args[0]}, blaze_value_from_dynamic(${pointer ? args[1] : args[1] ?? "0.0"})))`;
     }
     if (String(fieldOf(call,"callee")) === "structuredClone") {
       const argument = (fieldOf(call,"args") as SemanticValue[])[0];
       if (argument === undefined) return "0.0";
       if (String(fieldOf(fieldOf(argument,"type"),"kind")) === "primitive" || isTextType(fieldOf(argument,"type"))) return args[0] ?? "0.0";
       if (String(fieldOf(fieldOf(argument,"type"),"kind")) === "slice" || String(fieldOf(fieldOf(argument,"type"),"kind")) === "array") {
-        return `((void*)${RUNTIME_NAME}_clone_block((void*)(uintptr_t)(${args[0]}), "${contractText(fieldOf(fieldOf(argument,"type"),"of"))}"))`;
+        return `((void*)${RUNTIME_NAME}_clone_block(blaze_value_from_dynamic(${args[0]}), "${contractText(fieldOf(fieldOf(argument,"type"),"of"))}"))`;
       }
       const held = (fieldOf(call,"argTypes") as SemanticType[])[0];
       const dynamic = held === undefined || String(fieldOf(held,"kind")) !== "ref" || (fieldOf(held,"of") === null && fieldOf(held,"name") === undefined);
       return dynamic
-        ? `((double)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`
-        : `((void*)(uintptr_t)${RUNTIME_NAME}_clone((double)(uintptr_t)(${args[0]})))`;
+        ? `blaze_dynamic_from_value(${RUNTIME_NAME}_clone(blaze_value_from_dynamic(${args[0]})))`
+        : `((void*)(uintptr_t)${RUNTIME_NAME}_clone(blaze_value_from_dynamic(${args[0]})))`;
     }
     if (String(fieldOf(call,"callee")) === ARGV_LENGTH) return `${RUNTIME_NAME}_argv_count()`;
     if (String(fieldOf(call,"callee")) === "u256_from_u64x2") {

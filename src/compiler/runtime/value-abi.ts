@@ -40,6 +40,7 @@ export const EXTERNAL_KINDS = {
   ffi: 3,
   md5: 4,
   sha256: 5,
+  promise: 6,
 } as const;
 
 /** The state and ownership bits of a registry entry. */
@@ -202,6 +203,8 @@ static inline uint32_t blaze_value_generation(const BlazeValue* value) {
    registry lives. */
 BlazeValue blaze_value_from_dynamic(double value);
 double blaze_dynamic_from_value(BlazeValue value);
+/* A C string the compiler wrote out, carried as an external-buffer string. */
+BlazeValue blaze_value_c_text(const char* text);
 
 static inline double blaze_value_number_of(const BlazeValue* value) {
   double number = 0.0;

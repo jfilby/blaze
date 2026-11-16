@@ -1100,8 +1100,8 @@ entry(
   entry("blaze_rt_global_post_inc", "BlazeValue", [["slot", "double"]], "Steps a module-level number up.", "Returns the value before the step.", { tags: ["host"] }),
   entry("blaze_rt_global_post_dec", "BlazeValue", [["slot", "double"]], "Steps a module-level number down.", "Returns the value before the step.", { tags: ["host"] }),
   entry("blaze_rt_exec_path", "const char*", [], "The path of the running program.", "Returns a managed string holding the path the operating system started.", { tags: ["host"] }),
-  entry("blaze_rt_state_get", "double", [["key", "const char*"]], "Reads a named state cell.", "Returns the value the cell holds, or zero before it is written.", { tags: ["host"] }),
-  entry("blaze_rt_state_set", "double", [["key", "const char*"], ["value", "double"]], "Writes a named state cell.", "Returns the value written.", { tags: ["host"] }),
+  entry("blaze_rt_state_get", "BlazeValue", [["key", "const char*"]], "Reads a named state cell.", "Returns the value the cell holds, or zero before it is written.", { tags: ["host"] }),
+  entry("blaze_rt_state_set", "BlazeValue", [["key", "const char*"], ["value", "BlazeValue"]], "Writes a named state cell.", "Returns the value written.", { tags: ["host"] }),
   entry("blaze_rt_path_extname", "const char*", [["path", "const char*"]], "The extension of a POSIX path.", "Returns a managed string: the last dot of the last component and what follows it, or the empty text where there is none.", { tags: ["host"] }),
   entry(
     "blaze_rt_timestamp_iso",
@@ -1119,9 +1119,9 @@ entry(
     "Two numbers are the same when their bits are: -0 and 0 are different, and a NaN is the same as itself. Returns 1 or 0.",
     { tags: ["object"] },
   ),
-  entry("blaze_rt_json_parse", "double", [["text", "double"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry("blaze_rt_json_parse", "BlazeValue", [["text", "BlazeValue"]], "Parses JSON into a dynamic value.", "Returns a managed dynamic value.", { tags: ["object"] }),
   entry("blaze_rt_object_copy", "BlazeValue", [["value", "BlazeValue"]], "Copies a record.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
-  entry("blaze_rt_clone", "double", [["value", "double"]], "Copies a value deeply.", "A record copies its fields, a list copies its elements, a dynamic object copies its entries, and a number or a text is itself.", { tags: ["object"] }),
+  entry("blaze_rt_clone", "BlazeValue", [["value", "BlazeValue"]], "Copies a value deeply.", "A record copies its fields, a list copies its elements, a dynamic object copies its entries, and a number or a text is itself.", { tags: ["object"] }),
   entry("blaze_rt_clone_block", "void*", [["block", "void*"], ["element", "const char*"]], "Copies a block of elements deeply.", "Each element is copied at the type text the block holds, and the answer is a block of its own.", { tags: ["object"] }),
   entry("blaze_rt_object_set_text", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "const char*"]], "Writes a text into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
   entry("blaze_rt_object_set_ref", "BlazeValue", [["object", "BlazeValue"], ["field", "const char*"], ["value", "BlazeValue"]], "Writes a reference into a field of a record.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
@@ -1832,7 +1832,7 @@ entry(
   entry(
     "blaze_promise_await",
     "double",
-    [["promise", "void*"]],
+    [["promise", "BlazeValue"]],
     "Reads the number a promise carries.",
     "A rejected promise leaves the failure pending, and answers 0.",
     { tags: ["host"] },
@@ -1840,15 +1840,15 @@ entry(
   entry(
     "blaze_promise_await_text",
     "const char*",
-    [["promise", "void*"]],
+    [["promise", "BlazeValue"]],
     "Reads the string a promise carries.",
     "A rejected promise leaves the failure pending, and answers the empty text.",
     { tags: ["host"] },
   ),
   entry(
     "blaze_promise_await_value",
-    "double",
-    [["promise", "void*"]],
+    "BlazeValue",
+    [["promise", "BlazeValue"]],
     "Reads the dynamic value a promise carries.",
     "A rejected promise leaves the failure pending, and answers nothing as a dynamic value.",
     { tags: ["host"] },
@@ -1856,14 +1856,14 @@ entry(
   entry(
     "blaze_promise_await_nothing",
     "void",
-    [["promise", "void*"]],
+    [["promise", "BlazeValue"]],
     "Reads a promise that carries nothing.",
     "A rejected promise leaves the failure pending.",
     { tags: ["host"] },
   ),
   entry(
     "blaze_promise_resolved_number",
-    "void*",
+    "BlazeValue",
     [["value", "double"]],
     "Answers a settled promise carrying a number.",
     "Owned by the caller.",
@@ -1871,7 +1871,7 @@ entry(
   ),
   entry(
     "blaze_promise_resolved_text",
-    "void*",
+    "BlazeValue",
     [["value", "const char*"]],
     "Answers a settled promise carrying a string.",
     "Owned by the caller.",
@@ -1879,7 +1879,7 @@ entry(
   ),
   entry(
     "blaze_promise_resolved_null",
-    "void*",
+    "BlazeValue",
     [],
     "Answers a settled promise carrying nothing.",
     "Owned by the caller.",
@@ -1887,7 +1887,7 @@ entry(
   ),
   entry(
     "blaze_promise_resolved_value",
-    "void*",
+    "BlazeValue",
     [["value", "double"]],
     "Answers a settled promise carrying a dynamic value.",
     "Owned by the caller.",
@@ -1895,7 +1895,7 @@ entry(
   ),
   entry(
     "blaze_promise_rejected",
-    "void*",
+    "BlazeValue",
     [["message", "const char*"]],
     "Answers a promise that has already failed.",
     "Owned by the caller.",
@@ -1903,7 +1903,7 @@ entry(
   ),
   entry(
     "blaze_promise_settled_number",
-    "void*",
+    "BlazeValue",
     [["value", "double"]],
     "Answers a settled promise carrying a number, or a failed one when the body left a failure pending.",
     "Owned by the caller.",
@@ -1911,7 +1911,7 @@ entry(
   ),
   entry(
     "blaze_promise_settled_text",
-    "void*",
+    "BlazeValue",
     [["value", "const char*"]],
     "Answers a settled promise carrying a string, or a failed one when the body left a failure pending.",
     "Owned by the caller.",
@@ -1919,7 +1919,7 @@ entry(
   ),
   entry(
     "blaze_promise_settled_null",
-    "void*",
+    "BlazeValue",
     [],
     "Answers a settled promise carrying nothing, or a failed one when the body left a failure pending.",
     "Owned by the caller.",
@@ -1927,7 +1927,7 @@ entry(
   ),
   entry(
     "blaze_promise_settled_value",
-    "void*",
+    "BlazeValue",
     [["value", "double"]],
     "Answers a settled promise carrying a dynamic value, or a failed one when the body left a failure pending.",
     "Owned by the caller.",
@@ -3863,6 +3863,7 @@ typedef struct {
   uint64_t references;
   void* pointer;
   const char* descriptor;
+  uint32_t external;
 } blaze_rt_entry;
 
 static blaze_rt_entry* blaze_rt_registry = NULL;
@@ -3919,6 +3920,7 @@ static BlazeValue blaze_registry_register(uint32_t kind, void* pointer, uint64_t
   entry->references = 1;
   entry->pointer = pointer;
   entry->descriptor = NULL;
+  entry->external = 0;
   return blaze_value_handle(kind, index, entry->generation);
 }
 
@@ -4078,6 +4080,7 @@ static BlazeValue blaze_pointer_value(const void* pointer) {
    raw pointer, and a wrong type is refused before its storage is read. */
 static BlazeValue blaze_external_value(uint32_t kind, void* pointer) {
   BlazeValue value = blaze_registry_register(kind, pointer, 0, BLAZE_ENTRY_OWNED);
+  blaze_rt_registry[blaze_value_index(&value) - 1].external = 1;
   value.tag = BLAZE_VALUE_EXTERNAL;
   return value;
 }
@@ -4749,14 +4752,14 @@ static blaze_rt_state_cell* blaze_rt_state_cell_of(const char* key) {
   return cell;
 }
 
-double blaze_rt_state_get(const char* key) {
+BlazeValue blaze_rt_state_get(const char* key) {
   blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
-  return cell == NULL ? 0.0 : cell->value;
+  return cell == NULL ? blaze_value_null() : blaze_value_number(cell->value);
 }
 
-double blaze_rt_state_set(const char* key, double value) {
+BlazeValue blaze_rt_state_set(const char* key, BlazeValue value) {
   blaze_rt_state_cell* cell = blaze_rt_state_cell_of(key);
-  if (cell != NULL) cell->value = value;
+  if (cell != NULL) cell->value = blaze_value_number_of(&value);
   return value;
 }
 
@@ -6465,7 +6468,10 @@ static BlazeValue blaze_dyn_tagged(double h) {
   value.tag = BLAZE_VALUE_HANDLE;
   value.kind = 0;
   blaze_rt_entry* entry = blaze_registry_entry_of_payload(value.payload);
-  if (entry != NULL) value.kind = entry->kind;
+  if (entry != NULL) {
+    value.kind = entry->kind;
+    if (entry->external) value.tag = BLAZE_VALUE_EXTERNAL;
+  }
   return value;
 }
 
@@ -6492,6 +6498,10 @@ BlazeValue blaze_value_from_dynamic(double value) {
 
 double blaze_dynamic_from_value(BlazeValue value) {
   return blaze_dyn_untagged(value);
+}
+
+BlazeValue blaze_value_c_text(const char* text) {
+  return blaze_registry_register(BLAZE_HANDLE_STRING, (void*)text, text == NULL ? 0 : strlen(text) + 1, BLAZE_ENTRY_EXTERNAL);
 }
 
 static blaze_dyn* blaze_dyn_lookup(double h) {
@@ -7949,22 +7959,28 @@ static int json_parse_value(const char** p, double* out) {
   return 0;
 }
 
-double blaze_rt_json_parse(double text) {
-  /* Accept either a boxed dynamic text value or a raw string pointer, so JSON
-     that arrives on the wire (a raw C string) parses the same way as an
-     in-memory string. */
-  const char* t = NULL;
-  blaze_dyn* _jd = blaze_dyn_lookup(text);
-  if (_jd && _jd->kind == BLAZE_DYN_TEXT) t = _jd->text ? _jd->text : "";
-  else if (_jd && _jd->kind == BLAZE_DYN_NULL) t = "null";
-  else t = (const char*)(uintptr_t)text;
-  if (!t) { blaze_rt_raise("invalid JSON"); return blaze_rt_box_null(); }
+/* The bytes a tagged value holds as text. A string the runtime allocated is
+   registered by its pointer; a boxed string is registered by the dynamic value
+   that holds it. No numeric magnitude is taken for a pointer. */
+static const char* blaze_text_of_value(const BlazeValue* value, const char* operation) {
+  if (value->tag == BLAZE_VALUE_NULL) return "null";
+  if (value->tag != BLAZE_VALUE_HANDLE || value->kind != BLAZE_HANDLE_STRING) return NULL;
+  blaze_rt_entry* entry = blaze_registry_get(value, BLAZE_HANDLE_STRING, operation);
+  if (entry == NULL || entry->pointer == NULL) return NULL;
+  if (entry->ownership == BLAZE_ENTRY_EXTERNAL || blaze_pointer_find(entry->pointer) != 0) return (const char*)entry->pointer;
+  blaze_dyn* boxed = (blaze_dyn*)entry->pointer;
+  return boxed->text != NULL ? boxed->text : "";
+}
+
+BlazeValue blaze_rt_json_parse(BlazeValue text) {
+  const char* t = blaze_text_of_value(&text, "blaze_rt_json_parse");
+  if (!t) { blaze_rt_raise("invalid JSON"); return blaze_dyn_tagged(blaze_rt_box_null()); }
   const char* p = t;
   double out;
-  if (!json_parse_value(&p, &out)) { blaze_rt_raise("invalid JSON"); return blaze_rt_box_null(); }
+  if (!json_parse_value(&p, &out)) { blaze_rt_raise("invalid JSON"); return blaze_dyn_tagged(blaze_rt_box_null()); }
   json_skip_ws(&p);
-  if (*p != '\\0') { blaze_rt_raise("trailing JSON"); return blaze_rt_box_null(); }
-  return out;
+  if (*p != '\\0') { blaze_rt_raise("trailing JSON"); return blaze_dyn_tagged(blaze_rt_box_null()); }
+  return blaze_value_from_dynamic(out);
 }
 
 /* The text a walk of a value is building.
@@ -8382,7 +8398,7 @@ static void blaze_rt_clone_inner(const char* type, char* out, size_t room) {
 }
 
 void* blaze_rt_clone_block(void* block, const char* element);
-double blaze_rt_clone(double value);
+BlazeValue blaze_rt_clone(BlazeValue value);
 static void* blaze_rt_clone_object(void* object);
 
 /* One field or element copied at the type its layout states. A number and a
@@ -8406,7 +8422,7 @@ static void blaze_rt_clone_at(unsigned char* to, const unsigned char* from, cons
     if (strcmp(inner, "any") == 0) {
       double held = 0;
       memcpy(&held, from, sizeof held);
-      double copy = blaze_rt_clone(held);
+      double copy = blaze_dynamic_from_value(blaze_rt_clone(blaze_value_from_dynamic(held)));
       memcpy(to, &copy, sizeof copy);
       return;
     }
@@ -8460,7 +8476,7 @@ static double blaze_rt_clone_dynamic(double value) {
     BlazeValue copy = blaze_rt_dyn_array_new();
     if (held->items != NULL) {
       for (size_t index = 0; index < held->count; index += 1) {
-        copy = blaze_rt_array_push(copy, blaze_value_from_dynamic(blaze_rt_clone(((double*)held->items)[index])));
+        copy = blaze_rt_array_push(copy, blaze_rt_clone(blaze_value_from_dynamic(((double*)held->items)[index])));
       }
     }
     return blaze_dynamic_from_value(copy);
@@ -8479,7 +8495,7 @@ static double blaze_rt_clone_dynamic(double value) {
       made->count = held->count;
       for (size_t index = 0; index < held->count; index += 1) {
         ((double*)made->items)[index * 2] = ((double*)held->items)[index * 2];
-        ((double*)made->items)[index * 2 + 1] = blaze_rt_clone(((double*)held->items)[index * 2 + 1]);
+        ((double*)made->items)[index * 2 + 1] = blaze_dynamic_from_value(blaze_rt_clone(blaze_value_from_dynamic(((double*)held->items)[index * 2 + 1])));
       }
     }
     return copy;
@@ -8490,10 +8506,12 @@ static double blaze_rt_clone_dynamic(double value) {
 /* structuredClone(value): a record or a dynamic value copied deep. A number,
    a text and nothing are copied by being themselves, which is what the
    language's own deep copy answers for them. */
-double blaze_rt_clone(double value) {
-  if (blaze_dyn_lookup(value) != NULL) return blaze_rt_clone_dynamic(value);
-  void* object = (void*)(uintptr_t)value;
-  if (blaze_pointer_descriptor(object) != NULL) return (double)(uintptr_t)blaze_rt_clone_object(object);
+BlazeValue blaze_rt_clone(BlazeValue value) {
+  if (value.tag == BLAZE_VALUE_HANDLE && value.kind == BLAZE_HANDLE_ARRAY) {
+    return blaze_value_from_dynamic(blaze_rt_clone_dynamic(blaze_dyn_untagged(value)));
+  }
+  void* object = blaze_pointer_of_value(&value, BLAZE_HANDLE_RECORD, "blaze_rt_clone");
+  if (object != NULL) return blaze_pointer_value(blaze_rt_clone_object(object));
   return value;
 }
 
@@ -8979,16 +8997,16 @@ void blaze_promise_resolve_text(void* promise, const char* value) { blaze_promis
 void blaze_promise_resolve_null(void* promise) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_NULL; p->value = 0.0; p->text = NULL; p->message = NULL; }
 void blaze_promise_resolve_value(void* promise, double value) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 0; p->kind = BLAZE_PROMISE_VALUE; p->value = value; p->text = NULL; p->message = NULL; }
 void blaze_promise_reject(void* promise, const char* message) { blaze_promise* p = promise; if (!p) return; p->settled = 1; p->failed = 1; p->kind = BLAZE_PROMISE_NULL; p->value = 0.0/0.0; p->text = NULL; p->message = message; blaze_error_set(message); }
-double blaze_promise_await(void* promise) {
-  blaze_promise* p = promise;
+double blaze_promise_await(BlazeValue promise) {
+  blaze_promise* p = blaze_external_pointer(&promise, BLAZE_EXTERNAL_PROMISE, "blaze_promise_await");
   if (!p) return 0.0;
   if (p->failed) blaze_error_set(p->message);
   if (p->kind == BLAZE_PROMISE_VALUE) return blaze_rt_to_number(p->value);
   if (p->kind == BLAZE_PROMISE_TEXT) return blaze_rt_to_number(blaze_rt_box_string(p->text));
   return p->value;
 }
-const char* blaze_promise_await_text(void* promise) {
-  blaze_promise* p = promise;
+const char* blaze_promise_await_text(BlazeValue promise) {
+  blaze_promise* p = blaze_external_pointer(&promise, BLAZE_EXTERNAL_PROMISE, "blaze_promise_await_text");
   if (!p) return "";
   if (p->failed) blaze_error_set(p->message);
   if (p->kind == BLAZE_PROMISE_TEXT) return p->text ? p->text : "";
@@ -8996,24 +9014,24 @@ const char* blaze_promise_await_text(void* promise) {
   if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_to_text(blaze_value_number(p->value));
   return "";
 }
-double blaze_promise_await_value(void* promise) {
-  blaze_promise* p = promise;
-  if (!p) return blaze_rt_box_null();
-  if (p->failed) { blaze_error_set(p->message); return blaze_rt_box_null(); }
-  if (p->kind == BLAZE_PROMISE_VALUE) return p->value;
-  if (p->kind == BLAZE_PROMISE_TEXT) return blaze_rt_box_string(p->text);
-  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_box_number(p->value);
-  return blaze_rt_box_null();
+BlazeValue blaze_promise_await_value(BlazeValue promise) {
+  blaze_promise* p = blaze_external_pointer(&promise, BLAZE_EXTERNAL_PROMISE, "blaze_promise_await_value");
+  if (!p) return blaze_dyn_tagged(blaze_rt_box_null());
+  if (p->failed) { blaze_error_set(p->message); return blaze_dyn_tagged(blaze_rt_box_null()); }
+  if (p->kind == BLAZE_PROMISE_VALUE) return blaze_value_from_dynamic(p->value);
+  if (p->kind == BLAZE_PROMISE_TEXT) return blaze_dyn_tagged(blaze_rt_box_string(p->text));
+  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_value_number(p->value);
+  return blaze_dyn_tagged(blaze_rt_box_null());
 }
-void blaze_promise_await_nothing(void* promise) {
-  blaze_promise* p = promise;
+void blaze_promise_await_nothing(BlazeValue promise) {
+  blaze_promise* p = blaze_external_pointer(&promise, BLAZE_EXTERNAL_PROMISE, "blaze_promise_await_nothing");
   if (p && p->failed) blaze_error_set(p->message);
 }
-void* blaze_promise_resolved_number(double value) { void* p = blaze_promise_new(); blaze_promise_resolve(p, value); return p; }
-void* blaze_promise_resolved_text(const char* value) { void* p = blaze_promise_new(); blaze_promise_resolve_text(p, value); return p; }
-void* blaze_promise_resolved_null(void) { void* p = blaze_promise_new(); blaze_promise_resolve_null(p); return p; }
-void* blaze_promise_resolved_value(double value) { void* p = blaze_promise_new(); blaze_promise_resolve_value(p, value); return p; }
-void* blaze_promise_rejected(const char* message) { void* p = blaze_promise_new(); blaze_promise_reject(p, message); return p; }
+BlazeValue blaze_promise_resolved_number(double value) { void* p = blaze_promise_new(); blaze_promise_resolve(p, value); return blaze_external_value(BLAZE_EXTERNAL_PROMISE, p); }
+BlazeValue blaze_promise_resolved_text(const char* value) { void* p = blaze_promise_new(); blaze_promise_resolve_text(p, value); return blaze_external_value(BLAZE_EXTERNAL_PROMISE, p); }
+BlazeValue blaze_promise_resolved_null(void) { void* p = blaze_promise_new(); blaze_promise_resolve_null(p); return blaze_external_value(BLAZE_EXTERNAL_PROMISE, p); }
+BlazeValue blaze_promise_resolved_value(double value) { void* p = blaze_promise_new(); blaze_promise_resolve_value(p, value); return blaze_external_value(BLAZE_EXTERNAL_PROMISE, p); }
+BlazeValue blaze_promise_rejected(const char* message) { void* p = blaze_promise_new(); blaze_promise_reject(p, message); return blaze_external_value(BLAZE_EXTERNAL_PROMISE, p); }
 /* A promise a body settles on its way out. A failure the body left pending is
    what an async function rejects with: what it awaited failed, and the failure
    travels on the promise rather than only through the flag the catch arm reads.
@@ -9028,10 +9046,10 @@ static void* blaze_promise_failed_with(const char* message) {
   p->message = message;
   return p;
 }
-void* blaze_promise_settled_number(double value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_number(value); }
-void* blaze_promise_settled_text(const char* value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_text(value); }
-void* blaze_promise_settled_null(void) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_null(); }
-void* blaze_promise_settled_value(double value) { if (blaze_had_error()) return blaze_promise_failed_with(blaze_last_error()); return blaze_promise_resolved_value(value); }
+BlazeValue blaze_promise_settled_number(double value) { if (blaze_had_error()) return blaze_external_value(BLAZE_EXTERNAL_PROMISE, blaze_promise_failed_with(blaze_last_error())); return blaze_promise_resolved_number(value); }
+BlazeValue blaze_promise_settled_text(const char* value) { if (blaze_had_error()) return blaze_external_value(BLAZE_EXTERNAL_PROMISE, blaze_promise_failed_with(blaze_last_error())); return blaze_promise_resolved_text(value); }
+BlazeValue blaze_promise_settled_null(void) { if (blaze_had_error()) return blaze_external_value(BLAZE_EXTERNAL_PROMISE, blaze_promise_failed_with(blaze_last_error())); return blaze_promise_resolved_null(); }
+BlazeValue blaze_promise_settled_value(double value) { if (blaze_had_error()) return blaze_external_value(BLAZE_EXTERNAL_PROMISE, blaze_promise_failed_with(blaze_last_error())); return blaze_promise_resolved_value(value); }
 int blaze_promise_failed(void* promise) { return promise ? ((blaze_promise*)promise)->failed : 0; }
 const char* blaze_promise_message(void* promise) { blaze_promise* p = promise; return p ? p->message : NULL; }
 void blaze_promise_set_current(void* promise) { blaze_current_promise = promise; }
