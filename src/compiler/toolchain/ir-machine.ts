@@ -109,21 +109,33 @@ import {
    back in a register pair under this backend's foreign-call convention, so the
    address of a frame slot is handed over first and the payload is read from it
    after the call. */
-const TAGGED_RETURNS: ReadonlySet<string> = new Set(
+const TAGGED_RETURNS: readonly string[] = (
   (RUNTIME_ABI as readonly { symbol: string; returns: string }[])
     .filter((entry) => entry.returns === "BlazeValue")
-    .map((entry) => entry.symbol),
+    .map((entry) => entry.symbol)
 );
 
+/** Whether a list names a value. Written as a walk because the frontend this
+    compiler compiles itself with reads no membership method of a collection. */
+function namesValue(list: readonly string[], value: string): boolean {
+  for (const entry of list) if (entry === value) return true;
+  return false;
+}
+
+function positionsValue(list: readonly number[], value: number): boolean {
+  for (const entry of list) if (entry === value) return true;
+  return false;
+}
+
 /** The argument positions a runtime entry takes as a tagged value, by symbol. */
-const TAGGED_PARAMS: ReadonlyMap<string, ReadonlySet<number>> = new Map(
+const TAGGED_PARAMS: ReadonlyMap<string, readonly number[]> = new Map(
   (RUNTIME_ABI as readonly { symbol: string; params: readonly { 1: string }[] }[])
     .map((entry) => {
-      const at = new Set<number>();
-      for (const [index, param] of entry.params.entries()) if (param[1] === "BlazeValue") at.add(index);
+      const at: number[] = [];
+      for (const [index, param] of entry.params.entries()) if (param[1] === "BlazeValue") at.push(index);
       return [entry.symbol, at] as const;
     })
-    .filter(([, at]) => at.size > 0),
+    .filter(([, at]) => at.length > 0),
 );
 
 function isDynamicType(type: SemanticType | null): boolean {
@@ -11243,14 +11255,14 @@ class Machine {
       return held;
     });
     const symbol = String(fieldOf(signature, "symbol"));
-    const taggedReturn = TAGGED_RETURNS.has(symbol);
+    const taggedReturn = namesValue(TAGGED_RETURNS, symbol);
     const taggedOut = taggedReturn ? this.reserve(16) : -1;
     const args: (Held | null)[] = [];
     if (sret !== null) args.push(this.resultAddress(sret));
     else if (taggedOut >= 0) args.push(this.resultAddress({ offset: taggedOut } as Held));
     const taggedAt = TAGGED_PARAMS.get(symbol);
     for (const [at, held] of evaluated.entries()) {
-      if (held !== null && taggedAt?.has(at) === true) {
+      if (held !== null && taggedAt !== undefined && positionsValue(taggedAt, at)) {
         const [payload, tagKind] = this.taggedPair(held, types[at] ?? NUMBER);
         args.push(payload, tagKind);
       } else {
@@ -11264,7 +11276,7 @@ class Machine {
     // call without one takes, and passing the indices through would leave a
     // value the callee reads from the wrong register. A tagged value takes two
     // argument registers of its own for the same reason.
-    const shift = sret === null && taggedOut < 0 && !wideArguments && (taggedAt?.size ?? 0) === 0 ? 0 : 1;
+    const shift = sret === null && taggedOut < 0 && !wideArguments && (taggedAt === undefined || taggedAt.length === 0) ? 0 : 1;
     this.callSymbol(
       symbol,
       args,
@@ -11337,11 +11349,11 @@ class Machine {
     const taggedAt = TAGGED_PARAMS.get(symbol);
     const passed: (Held | null)[] = [];
     for (const [at, held] of args.entries()) {
-      if (taggedAt?.has(at) === true) passed.push(...this.taggedPair(held, held.type));
+      if (taggedAt !== undefined && positionsValue(taggedAt, at)) passed.push(...this.taggedPair(held, held.type));
       else passed.push(held);
     }
     this.callSymbol(symbol, passed, returns, -1, -1);
-    if (TAGGED_RETURNS.has(symbol)) {
+    if (namesValue(TAGGED_RETURNS, symbol)) {
       const answer = this.taggedAnswer();
       this.code.movRegMemSized(RAX, frame(answer[0].offset), 8, false);
     }
