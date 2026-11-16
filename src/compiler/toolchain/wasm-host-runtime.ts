@@ -428,7 +428,7 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_dyn_array_new",
     "params": [],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_is_array",
@@ -456,7 +456,7 @@ export const HOST_SERVICES: readonly HostService[] = [
     "params": [
       "f64"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_box_string",
@@ -468,7 +468,7 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_box_null",
     "params": [],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_json_get",
@@ -1190,6 +1190,18 @@ function taggedValueAt(address) {
   return { payload, tag, kind };
 }
 
+/* The other direction: a value the host answered, written into memory as the
+   same 16-byte record the module writes. */
+function writeTagged(payload, tag, kind) {
+  const address = block(16, 8, false);
+  const bytes = view();
+  if (typeof payload === "number") bytes.setFloat64(address, payload, true);
+  else bytes.setBigUint64(address, BigInt(payload), true);
+  bytes.setInt32(address + ${VALUE_LAYOUT.tag.offset}, tag, true);
+  bytes.setInt32(address + ${VALUE_LAYOUT.kind.offset}, kind, true);
+  return address;
+}
+
 function alignUp(value, at) {
   const rest = value % at;
   return rest === 0 ? value : value + (at - rest);
@@ -1898,7 +1910,7 @@ export function blaze_rt_json_get(value, field) {
     service: "blaze_rt_dyn_array_new",
     source: `
 export function blaze_rt_dyn_array_new() {
-  return dynRegister({ kind: "array", items: [] });
+  return writeTagged(dynRegister({ kind: "array", items: [] }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.array});
 }
 `,
   },
@@ -1920,7 +1932,7 @@ export function blaze_rt_is_array(value) {
     service: "blaze_rt_box_number",
     source: `
 export function blaze_rt_box_number(value) {
-  return dynRegister({ kind: "number", number: value });
+  return writeTagged(dynRegister({ kind: "number", number: value }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.number});
 }
 `,
   },
@@ -1936,7 +1948,7 @@ export function blaze_rt_box_string(value) {
     service: "blaze_rt_box_null",
     source: `
 export function blaze_rt_box_null() {
-  return dynRegister({ kind: "null" });
+  return writeTagged(dynRegister({ kind: "null" }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.nil});
 }
 `,
   },

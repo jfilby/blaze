@@ -3541,6 +3541,7 @@ class Body {
         // An empty dynamic array, which is the runtime's own and is carried in
         // the handle it answers.
         this.callService("blaze_rt_dyn_array_new");
+        this.taggedResult();
         return DYNAMIC_TYPE;
       case "array.push":
       case "blaze_rt_array_push":
@@ -3592,6 +3593,7 @@ class Body {
         } else if (isNumber(fieldOf(value,"type") as SemanticType)) {
           this.value(value, F64_TYPE);
           this.callService("blaze_rt_box_number");
+          this.taggedResult();
         } else {
           this.dynamicValue(value);
         }
@@ -3963,6 +3965,17 @@ class Body {
     this.code.varuint(2);
     this.code.varuint(0);
     this.i32(address);
+  }
+
+  /**
+   * The payload of a tagged record the host answered, read back into the
+   * carrier the lowering expects. The address the service returned is on the
+   * stack; a reference is carried in the f64 bits of its handle.
+   */
+  private taggedResult(): void {
+    this.op(0x2b); // `f64.load`
+    this.code.varuint(3);
+    this.code.varuint(0);
   }
 
   /**
