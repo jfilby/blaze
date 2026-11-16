@@ -1329,7 +1329,7 @@ entry(
   entry("blaze_rt_dict_delete_numkey", "double", [["dict", "double"], ["key", "double"]], "Removes one entry of a dictionary by a number key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
   entry("blaze_rt_dict_key_num_at", "double", [["dict", "double"], ["index", "double"]], "Reads the number key of one entry of a dictionary by its position.", "Returns the key as the number it was written as, or zero when the position names no entry.", { tags: ["object"] }),
   entry("blaze_rt_dict_delete", "double", [["dict", "double"], ["key", "const char*"]], "Removes one entry of a dictionary by its string key.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
-  entry("blaze_rt_to_text", "const char*", [["value", "double"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_to_text", "const char*", [["value", "BlazeValue"]], "Renders a dynamic value as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
     "blaze_rt_type_of",
     "const char*",
@@ -6600,17 +6600,27 @@ const char* blaze_rt_type_of(BlazeValue value) {
   if (value.kind == BLAZE_HANDLE_BOOLEAN) return "boolean";
   return "number";
 }
-const char* blaze_rt_to_text(double value) {
-  blaze_dyn* d = blaze_dyn_lookup(value);
-  if (!d) {
-    /* A string the runtime allocated is registered with its pointer and kind;
-       a value that names no such entry is a number, whatever its magnitude. */
-    const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
-    if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return (const char*)(uintptr_t)value;
-    static char buf[64];
-    snprintf(buf, 64, "%.17g", value);
-    return blaze_dyn_text(buf, strlen(buf));
+const char* blaze_rt_to_text(BlazeValue value) {
+  if (value.tag == BLAZE_VALUE_NUMBER) {
+    char* buf = (char*)blaze_rt_dyn_pool_take(64, 1);
+    size_t written = blaze_rt_format_number(blaze_value_number_of(&value), (unsigned char*)buf, 64);
+    buf[written] = '\\0';
+    return buf;
   }
+  if (value.tag == BLAZE_VALUE_BOOLEAN) return value.payload ? "true" : "false";
+  if (value.tag == BLAZE_VALUE_NULL) return blaze_rt_text_style == 1 ? "None" : "null";
+  if (value.tag != BLAZE_VALUE_HANDLE) return "null";
+  if (value.kind == BLAZE_HANDLE_STRING) {
+    blaze_rt_entry* held = blaze_registry_get(&value, BLAZE_HANDLE_STRING, "blaze_rt_to_text");
+    if (held == NULL || held->pointer == NULL) return "";
+    /* A string the runtime allocated is registered by its pointer; a string a
+       program boxed is registered by the dynamic value that holds it. */
+    if (blaze_pointer_find(held->pointer) != 0) return (const char*)held->pointer;
+    blaze_dyn* boxed = (blaze_dyn*)held->pointer;
+    return boxed->text != NULL ? boxed->text : "";
+  }
+  blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(value));
+  if (!d) return "null";
   if (d->kind == BLAZE_DYN_NUMBER) {
     /* The number is written the way the language writes it, which is the
        shortest decimal that reads back as it. */
@@ -6634,7 +6644,7 @@ const char* blaze_rt_to_text(double value) {
     for (size_t i = 0; i < d->count; i++) {
       if (i) { if (len + 2 >= cap) { cap *= 2; out = realloc(out, cap); } out[len++] = ','; }
       double h = ((double*)d->items)[i];
-      const char* t = blaze_rt_to_text(h);
+      const char* t = blaze_rt_to_text(blaze_value_from_dynamic(h));
       blaze_dyn* id = blaze_dyn_lookup(h);
       int isText = id && id->kind == BLAZE_DYN_TEXT;
       size_t tl = strlen(t);
@@ -6650,7 +6660,7 @@ const char* blaze_rt_to_text(double value) {
     return out;
   }
   if (d->kind == BLAZE_DYN_OBJECT) {
-    double s = blaze_rt_json_stringify(value);
+    double s = blaze_rt_json_stringify(blaze_dynamic_from_value(value));
     blaze_dyn* sd = blaze_dyn_lookup(s);
     return sd && sd->text ? sd->text : "{}";
   }
@@ -8924,8 +8934,8 @@ const char* blaze_promise_await_text(void* promise) {
   if (!p) return "";
   if (p->failed) blaze_error_set(p->message);
   if (p->kind == BLAZE_PROMISE_TEXT) return p->text ? p->text : "";
-  if (p->kind == BLAZE_PROMISE_VALUE) return blaze_rt_to_text(p->value);
-  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_to_text(blaze_rt_box_number(p->value));
+  if (p->kind == BLAZE_PROMISE_VALUE) return blaze_rt_to_text(blaze_value_from_dynamic(p->value));
+  if (p->kind == BLAZE_PROMISE_NUMBER) return blaze_rt_to_text(blaze_value_number(p->value));
   return "";
 }
 double blaze_promise_await_value(void* promise) {

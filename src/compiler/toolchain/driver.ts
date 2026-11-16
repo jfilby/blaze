@@ -1775,10 +1775,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const methodKind = argumentKind(1);
         const headersKind = argumentKind(2);
         const bodyKind = argumentKind(3);
-        const urlExpr = isRaw(urlKind) ? (urlKind === "ptr" ? `(const char*)(uintptr_t)${urlArg}` : urlArg) : `blaze_rt_to_text(${urlArg})`;
-        const methodExpr = isRaw(methodKind) ? (methodKind === "ptr" ? `(const char*)(uintptr_t)${methodArg}` : methodArg) : `blaze_rt_to_text(${methodArg})`;
-        const headersExpr = isRaw(headersKind) ? (headersKind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(${headersArg})`;
-        const bodyExpr = isRaw(bodyKind) ? (bodyKind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(${bodyArg})`;
+        const urlExpr = isRaw(urlKind) ? (urlKind === "ptr" ? `(const char*)(uintptr_t)${urlArg}` : urlArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${urlArg}))`;
+        const methodExpr = isRaw(methodKind) ? (methodKind === "ptr" ? `(const char*)(uintptr_t)${methodArg}` : methodArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${methodArg}))`;
+        const headersExpr = isRaw(headersKind) ? (headersKind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${headersArg}))`;
+        const bodyExpr = isRaw(bodyKind) ? (bodyKind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${bodyArg}))`;
         const bodyLen = `strlen(${bodyExpr})`;
         return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_body, blaze_http_len); })`;
       }

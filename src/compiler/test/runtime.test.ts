@@ -154,7 +154,7 @@ test("the file services write, list, move and remove what the host does", async 
     '  if (blaze_rt_file_kind("tree/one/two/one.txt") != 1.0) return 5;',
     '  if (blaze_rt_file_exists("tree/one/two/none.txt") != 0.0) return 6;',
     '  if (blaze_rt_file_write("tree/one/two/one.txt", " world", 1.0) != 1.0) return 7;',
-    '  if (strcmp(blaze_rt_to_text(blaze_rt_file_read("tree/one/two/one.txt", "utf8")), "hello world") != 0) return 8;',
+    '  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_file_read("tree/one/two/one.txt", "utf8"))), "hello world") != 0) return 8;',
     '  if (blaze_rt_file_copy("tree/one/two/one.txt", "tree/one/two/copy.txt") != 1.0) return 9;',
     '  if (blaze_rt_file_size("tree/one/two/copy.txt") != 11.0) return 10;',
     '  if (blaze_rt_file_rename("tree/one/two/copy.txt", "tree/one/moved.txt") != 1.0) return 11;',
@@ -1559,7 +1559,7 @@ test("the SHA-256 hasher answers the digest the runtime is named for", async () 
     return [
       "  hasher = blaze_rt_sha256_create();",
       `  blaze_rt_sha256_update(hasher, ${JSON.stringify(text)});`,
-      `  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "${digest}") != 0) return ${100 + length};`,
+      `  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "${digest}") != 0) return ${100 + length};`,
     ].join("\n");
   });
   const probe = [
@@ -1571,12 +1571,12 @@ test("the SHA-256 hasher answers the digest the runtime is named for", async () 
     "  /* `createHash`, one update, and the digest of the text. */",
     '  double hasher = blaze_rt_sha256_create();',
     '  blaze_rt_sha256_update(hasher, "abc");',
-    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 1;',
+    '  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 1;',
     "  /* Two updates are the update of the two texts joined. */",
     "  hasher = blaze_rt_sha256_create();",
     '  blaze_rt_sha256_update(hasher, "a");',
     '  blaze_rt_sha256_update(hasher, "bc");',
-    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 2;',
+    '  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 2;',
     ...checks,
     `  ${RUNTIME_NAME}_finalize();`,
     "  return 0;",

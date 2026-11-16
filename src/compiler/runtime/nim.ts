@@ -1272,15 +1272,15 @@ proc blaze_rt_type_of*(value: BlazeValue): cstring {.exportc, cdecl.} =
     return blazeTextOf("object")
   blazeTextOf("number")
 
-proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} =
+proc blaze_rt_to_text*(value: BlazeValue): cstring {.exportc, cdecl.} =
   ## The text a value is written as, which is the way the language writes it.
-  let index = blazeDynIndex(value)
-  if index < 0:
-    ## A value the runtime does not hold may be a string the program holds: a
-    ## pointer is a large number and a small one is a number.
-    if value >= 4096.0:
-      return cast[cstring](cast[uint](value))
-    return blazeNumberText(value)
+  if value.tag == BlazeTagNumber: return blazeNumberText(cast[float64](value.payload))
+  if value.tag == BlazeTagBoolean: return blazeTextOf(if value.payload != 0'u64: "true" else: "false")
+  if value.tag == BlazeTagNull: return blazeTextOf(if blazeTextStyle == 1: "None" else: "null")
+  if value.tag != BlazeTagHandle: return blazeTextOf("null")
+  if value.kind == uint32(BlazeKindString): return cast[cstring](cast[uint](blazeDynamicFromValue(value)))
+  let index = blazeDynIndex(blazeDynamicFromValue(value))
+  if index < 0: return blazeTextOf("null")
   let item = blazeDynValues[index]
   case item.kind
   of dynNull:
@@ -1302,7 +1302,7 @@ proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} =
       let at = blazeDynIndex(element)
       let isText = at >= 0 and blazeDynValues[at].kind == dynText
       if isText: written.add '"'
-      let text = blaze_rt_to_text(element)
+      let text = blaze_rt_to_text(blazeValueFromDynamic(element))
       if text != nil: written.add $text
       if isText: written.add '"'
     written.add "]"
@@ -1943,8 +1943,8 @@ proc blaze_promise_await_text*(promise: pointer): cstring {.exportc, cdecl.} =
   if held.failed: blazeErrorSet(held.message)
   case held.kind
   of promiseText: (if held.text == nil: blazeTextOf("") else: held.text)
-  of promiseValue: blaze_rt_to_text(held.value)
-  of promiseNumber: blaze_rt_to_text(blaze_rt_box_number(held.value))
+  of promiseValue: blaze_rt_to_text(blazeValueFromDynamic(held.value))
+  of promiseNumber: blaze_rt_to_text(blazeValueFromDynamic(blaze_rt_box_number(held.value)))
   of promiseNull: blazeTextOf("")
 
 proc blaze_promise_await_value*(promise: pointer): float64 {.exportc, cdecl.} =

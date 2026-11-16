@@ -49,7 +49,7 @@ test("the runtime reads a document and writes it back as the same document", asy
   /* The document a text is read as, written back as a document. */
   static const char* round_trip(const char* json) {
     const double parsed = blaze_rt_json_parse((double)(uintptr_t)json);
-    return blaze_rt_to_text(blaze_rt_json_stringify(parsed));
+    return blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_json_stringify(parsed)));
   }
 
   static void expect_round_trip(const char* json, const char* wanted) {
@@ -152,7 +152,7 @@ test("the runtime reads a document and writes it back as the same document", asy
     /* The digest a hasher is asked for is the digest of what was fed to it. */
     {
       const double hasher = blaze_rt_md5_update(blaze_rt_md5_create(), "the quick brown fox jumps over the lazy dog");
-      expect("md5", blaze_rt_to_text(blaze_rt_md5_digest(hasher)), "77add1d5f41223d5582fca736a5cb335");
+      expect("md5", blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_md5_digest(hasher))), "77add1d5f41223d5582fca736a5cb335");
     }
 
     blaze_rt_finalize();

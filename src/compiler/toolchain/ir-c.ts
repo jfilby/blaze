@@ -606,7 +606,7 @@ function builtinExpression(name: string, args: string[]): string {
     // The digest is the handle a text is carried in, and a call written where
     // a text is read takes the text the runtime holds out of it.
     case "blaze_rt_sha256_digest":
-      return `blaze_rt_to_text(blaze_rt_sha256_digest(${args[0]}))`;
+      return `blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(${args[0]})))`;
     case "blaze_rt_is_array":
       return `blaze_rt_is_array(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_object_has_field":
@@ -1447,7 +1447,7 @@ class FunctionEmitter {
       const method = this.expression((fieldOf(call,"args") as SemanticValue[])[1], null, depth);
       const headers = this.expression((fieldOf(call,"args") as SemanticValue[])[2], null, depth);
       const body = this.expression((fieldOf(call,"args") as SemanticValue[])[3], null, depth);
-      const bodyText = (String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "ptr" || String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "text") ? body : `blaze_rt_to_text(${body})`;
+      const bodyText = (String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "ptr" || String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "text") ? body : `blaze_rt_to_text(blaze_value_from_dynamic(${body}))`;
       return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
     }
     // `parseInt(text)` and `Number(text)` are the number a value states: a
