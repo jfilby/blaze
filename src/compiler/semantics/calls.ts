@@ -99,7 +99,7 @@ export function vectorChecked(contracts: ContractsByName): Set<string> {
  */
 function isEffectFree(contract: FunctionContract): boolean {
   const definition = fieldOf(contract, "definition");
-  return fieldOf(definition, "allocates") !== true && fieldOf(definition, "prints") !== true && fieldOf(definition, "readsArgv") !== true;
+  return !fieldOf(definition, "allocates") && !fieldOf(definition, "prints") && !fieldOf(definition, "readsArgv");
 }
 
 /**

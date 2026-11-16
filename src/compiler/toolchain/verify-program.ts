@@ -385,7 +385,7 @@ function stopFailure(binary: RunResult): string | null {
   if (runField(binary,"timedOut")) return "the delivered program did not finish";
   if (runField(binary,"signal") !== null) return `the delivered program was terminated by ${runField(binary,"signal")}`;
   if (runField(binary,"code") === null) return "the delivered program did not report an exit status";
-  if (runField(binary,"code") !== 0) return `the delivered program exited with status ${runField(binary,"code")}`;
+  if (Number(runField(binary,"code")) !== 0) return `the delivered program exited with status ${runField(binary,"code")}`;
   return null;
 }
 
@@ -421,7 +421,8 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   }
 
   // A program reads the arguments it is given, so both runs get the same ones.
-  const arguments_ = [...((fieldOf(request,"arguments") as string[] | undefined) ?? [])];
+  const writtenArguments = fieldOf(request,"arguments");
+  const arguments_: string[] = Array.isArray(writtenArguments) ? writtenArguments as string[] : [];
   // A source written for Deno is run with the command line Deno hands a
   // program, so that the oracle is the source as it was written rather than a
   // source that cannot run at all. The preludes are the ones a TypeScript
@@ -443,7 +444,7 @@ export async function verifyProgram(request: ProgramVerificationRequest): Promis
   if (runField(source,"spawnError") !== undefined) {
     throw new CompilerError("VerificationError", "verify", `${toolchain.command} is not available, so the program cannot be checked`, `${runField(source,"spawnError")}\ninstall ${toolchain.command}, or build this project as a function entry`, "", "", "");
   }
-  if (runField(source,"code") !== 0) {
+  if (Number(runField(source,"code")) !== 0) {
     throw new CompilerError("VerificationError", "verify", "the program source does not run", `${formatCommand(String(fieldOf(toolchain,"command")), [...before, sourcePath, ...arguments_])}\n${String(runField(source,"stderr")).trim()}`, "", "", "");
   }
 

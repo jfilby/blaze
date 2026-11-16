@@ -84,25 +84,37 @@ export function isNumber(type: SemanticType): type is TypeExpr & { kind: "primit
 }
 
 export function isFloat(type: SemanticType | null): boolean {
-  return type !== null && isNumber(type) && nameOf(type).startsWith("f");
+  if (type === null) return false;
+  if (!isNumber(type)) return false;
+  return nameOf(type).startsWith("f");
 }
 
 export function isUnsigned(type: SemanticType): boolean {
-  return isNumber(type) && (nameOf(type).startsWith("u") || nameOf(type) === "usize");
+  if (!isNumber(type)) return false;
+  if (nameOf(type).startsWith("u")) return true;
+  return nameOf(type) === "usize";
 }
 
 export function isBoolean(type: SemanticType): boolean {
-  return kindOf(type) === "primitive" && nameOf(type) === "bool";
+  if (kindOf(type) !== "primitive") return false;
+  return nameOf(type) === "bool";
 }
 
 /** A type a reference is held as: a pointer to an object, or a slice. */
 export function isReference(type: SemanticType): boolean {
-  return kindOf(type) === "ref" || kindOf(type) === "ptr" || kindOf(type) === "slice";
+  const kind = kindOf(type);
+  if (kind === "ref") return true;
+  if (kind === "ptr") return true;
+  return kind === "slice";
 }
 
 /** True for a type this IR knows how to read a length and an element out of. */
 export function isSequence(type: SemanticType): boolean {
-  return kindOf(type) === "array" || kindOf(type) === "slice" || kindOf(type) === "ptr" || kindOf(type) === "mask";
+  const kind = kindOf(type);
+  if (kind === "array") return true;
+  if (kind === "slice") return true;
+  if (kind === "ptr") return true;
+  return kind === "mask";
 }
 
 /** A type as the IR text names it. The contract text is the canonical form. */
@@ -240,7 +252,8 @@ export function limbsOf(name: PrimitiveTypeName): number | null {
 
 /** True when a type is one of the whole numbers wider than a machine word. */
 export function isWideType(type: SemanticType): boolean {
-  return kindOf(type) === "primitive" && WIDE_LIMBS[nameOf(type)] !== undefined;
+  if (kindOf(type) !== "primitive") return false;
+  return WIDE_LIMBS[nameOf(type)] !== undefined;
 }
 
 /** The number two numbers are computed as, a whole pair included. */
@@ -276,7 +289,8 @@ export function isWhole(type: PrimitiveTypeName): boolean {
 
 /** True when a type is a whole number, which is what a shift and a remainder are. */
 export function isInteger(type: SemanticType): boolean {
-  return isNumber(type) && isWhole(nameOf(type));
+  if (!isNumber(type)) return false;
+  return isWhole(nameOf(type));
 }
 
 /**
@@ -338,14 +352,21 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
   if (isNumber(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
-  if (isNumber(from) && isNumber(to)) return !isWideType(from) || isWideType(to);
+  if (isNumber(from) && isNumber(to)) {
+    if (!isWideType(from)) return true;
+    return isWideType(to);
+  }
   if (isTextType(from) && isTextType(to)) return true;
   if (isReference(from) && isReference(to)) return true;
   if (isSequence(from) && isSequence(to)) {
     const left = elementTypeOf(from);
     const right = elementTypeOf(to);
-    return left !== null && right !== null &&
-      (typeEquals(left, right) || (isNumber(left) && isNumber(right)) || (isReference(left) && isReference(right)));
+    if (left === null) return false;
+    if (right === null) return false;
+    if (typeEquals(left, right)) return true;
+    if (isNumber(left) && isNumber(right)) return true;
+    if (isReference(left) && isReference(right)) return true;
+    return false;
   }
   return false;
 }
@@ -563,11 +584,16 @@ function vf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** One field of a value that states a list. */
+function vfList(value: unknown, key: string): unknown[] {
+  return (value as Record<string, unknown>)[key] as unknown[];
+}
+
 export function walkValues(value: SemanticValue, visit: (value: SemanticValue) => void): void {
   visit(value);
   switch (String(vf(value,"k"))) {
     case "text":
-      for (const part of vf(value,"parts")) if (String(vf(part,"k")) === "value") walkValues(vf(part,"value"), visit);
+      for (const part of vfList(value,"parts")) if (String(vf(part,"k")) === "value") walkValues(vf(part,"value"), visit);
       return;
     case "length":
       walkValues(vf(value,"of"), visit);
@@ -592,7 +618,7 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       if (vf(value,"index") !== null) walkValues(vf(value,"index"), visit);
       return;
     case "call":
-      for (const argument of vf(vf(value,"call"),"args")) walkValues(argument, visit);
+      for (const argument of vfList(vf(value,"call"),"args")) walkValues(argument as SemanticValue, visit);
       return;
     case "arith":
     case "compare":
@@ -607,7 +633,7 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
         walkValues(vf(vf(value,"view"),"of"), visit);
         walkValues(vf(vf(value,"view"),"offset"), visit);
       }
-      for (const element of vf(value,"values")) walkValues(element, visit);
+      for (const element of vfList(value,"values")) walkValues(element as SemanticValue, visit);
       return;
     case "loadField":
       walkValues(vf(value,"object"), visit);
@@ -616,7 +642,7 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       // The fields of an object being built are values of their own: a name
       // read in one and a call written into one are both what the body reads
       // and makes, and a rule that walks a value has to see them.
-      for (const field of vf(value,"fields")) walkValues(vf(field,"value"), visit);
+      for (const field of vfList(value,"fields")) walkValues(vf(field,"value") as SemanticValue, visit);
       return;
     case "select":
       walkValues(vf(value,"condition"), visit);
@@ -627,7 +653,7 @@ export function walkValues(value: SemanticValue, visit: (value: SemanticValue) =
       // The captured values are read where the closure is built, so a call
       // written into one is a call the value makes and a name read in one is a
       // name the body reads.
-      for (const capture of vf(value,"captures")) walkValues(capture, visit);
+      for (const capture of vfList(value,"captures")) walkValues(capture as SemanticValue, visit);
       return;
     case "capture":
       walkValues(vf(value,"closure"), visit);
@@ -672,47 +698,25 @@ export function hasCall(value: SemanticValue): boolean {
  }
 
 /** Whether one value, written on its own, calls anything. */
-function makesCall(value: SemanticValue): boolean {
-  switch (String(vf(value,"k"))) {
-    case "call":
-    case "argv":
-    case "toText":
-    case "buffer":
-    case "newObject":
-    case "length":
-      return true;
-    case "closure":
-      // A closure is a block the runtime lays out, so building one is a call
-      // like any other allocation.
-      return true;
-    case "text":
-      // A string written out in the source is laid down in the object beside
-      // the code; one with anything computed in it is built at run time.
-      for (const part of vf(value,"parts") as unknown[]) {
-        if (String(vf(part,"k")) === "value") return true;
-      }
-      return false;
-    case "arith":
-      // A power is `pow`, and a multiplication or a division of a whole number
-      // wider than a machine word is the runtime kernel — there is no
-      // instruction for thirty-two bytes, so it is a call like any other and
-      // clobbers every register a call is free to.
-      if (String(vf(value,"op")) === "pow") return true;
-      // A remainder of a whole number wider than a machine word is the kernel
-      // as well, for the same reason a product and a quotient are.
-      if (String(vf(value,"op")) === "mod" && isWideType(vf(value,"type"))) return true;
-      // Two texts put together are a string built at run time: the runtime
-      // measures the two, allocates the answer and copies the parts into it,
-      // and each of those is a call. A body whose only call is a concatenation
-      // is a body that calls, and a frame that does not know it is a frame
-      // whose calls are made off the boundary the convention wants them on.
-      if (String(vf(value,"op")) === "concat" || String(vf(value,"op")) === "arrayConcat") return true;
-      return (String(vf(value,"op")) === "mul" || String(vf(value,"op")) === "div") && isWideType(vf(value,"type"));
-    case "compare":
-      return isTextType(vf(value,"operand"));
-    default:
-      return false;
+function makesCall(value: SemanticValue): any {
+  const kind = String(vf(value, "k"));
+  if (kind === "call" || kind === "argv" || kind === "toText" || kind === "buffer" || kind === "newObject" || kind === "length" || kind === "closure") return true;
+  if (kind === "text") {
+    for (const part of vfList(value, "parts")) {
+      if (String(vf(part, "k")) === "value") return true;
+    }
+    return false;
   }
+  if (kind === "arith") {
+    const op = String(vf(value, "op"));
+    if (op === "pow") return true;
+    if (op === "mod") return isWideType(vf(value, "type"));
+    if (op === "concat" || op === "arrayConcat") return true;
+    if (op === "mul" || op === "div") return isWideType(vf(value, "type"));
+    return false;
+  }
+  if (kind === "compare") return isTextType(vf(value, "operand"));
+  return false;
 }
 
 /** The names a value reads, in the order it reads them. */

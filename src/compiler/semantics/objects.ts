@@ -2,6 +2,20 @@ function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
 
+/** One field of a value that states a list. */
+function listOf(value: unknown): unknown[] {
+  return Array.isArray(value) ? value as unknown[] : [];
+}
+
+/** Whether a written whole number is one machine word wide. */
+function fitsMachineWord(text: string): boolean {
+  const unsigned = text.startsWith("-") ? text.slice(1) : text;
+  const hexadecimal = unsigned.startsWith("0x") || unsigned.startsWith("0X");
+  const digits = (hexadecimal ? unsigned.slice(2) : unsigned).replace(/^0+/, "");
+  if (hexadecimal) return digits.length <= 16;
+  return digits.length < 19 || (digits.length === 19 && digits <= "9223372036854775807");
+}
+
 /** The literal text a field is written with, where the source wrote one. */
 function writtenText(expression: Expression): string | null {
   if (String(fieldOf(expression, "k")) !== "text") return null;
@@ -138,9 +152,8 @@ function bigIntInferred(argument: Expression | undefined): TypeExpr | null {
     if (parts.length === 1 && String(fieldOf(parts[0],"k")) === "text") text = String(fieldOf(parts[0],"value"));
   }
   if (text === null) return null;
-  const value = wholeText(text);
-  if (value === null) return null;
-  return value <= 9223372036854775807n && value >= -9223372036854775808n ? I64 : U256;
+  if (wholeText(text) === null) return null;
+  return fitsMachineWord(text) ? I64 : U256;
 }
 
 export const USIZE: TypeExpr = { kind: "primitive", name: "usize" };
@@ -494,13 +507,10 @@ class BodyTypes {
   private expression(expression: Expression): Inferred {
     switch (String(String(String(fieldOf(expression,"k"))))) {
       case "literal":
-        return { kind: "type", type: fieldOf(expression,"boolean") === true ? BOOL : F64 };
+        return { kind: "type", type: fieldOf(expression,"boolean") ? BOOL : F64 };
       case "bigint": {
         const trimmed = fieldOf(expression,"text").trim();
-        let literal: bigint | null = null;
-        try { literal = BigInt(trimmed); } catch { literal = null; }
-        const outOfRange = literal === null || literal > 9223372036854775807n || literal < -9223372036854775808n;
-        return { kind: "type", type: outOfRange ? { kind: "primitive", name: "u256" } : I64 };
+        return { kind: "type", type: fitsMachineWord(trimmed) ? I64 : { kind: "primitive", name: "u256" } };
       }
       case "null":
         return { kind: "type", type: ANY_REF };
@@ -581,8 +591,11 @@ class BodyTypes {
         }
         const builtin = builtinFor(String(fieldOf(expression,"name")));
         if (builtin !== null) {
-          const allowed = (fieldOf(builtin,"arities") as number[] | undefined) ?? [(fieldOf(builtin,"arity") as number | undefined) ?? (fieldOf(builtin,"params") as unknown[]).length];
-          if (!allowed.includes(fieldOf(expression,"args").length)) {
+          const arities = fieldOf(builtin,"arities");
+          const arity = Number(fieldOf(builtin,"arity"));
+          const allowed: number[] = Array.isArray(arities) ? arities as number[] : [arity];
+          const args = listOf(fieldOf(expression,"args"));
+          if (!allowed.includes(args.length)) {
             throw objectsError(
               `${String(fieldOf(expression,"name"))} takes ${allowed.join(" or ")} argument${allowed.length === 1 && allowed[0] === 1 ? "" : "s"}`,
               `${this.path}: ${this.functionName} calls it with ${fieldOf(expression,"args").length}`,
@@ -634,20 +647,20 @@ class BodyTypes {
           this.expression(fieldOf(fieldOf(expression,"view"),"count"));
           return { kind: "type", type: { kind: "slice", of: parseType(fieldOf(expression,"element")) } };
         }
-        for (const value of fieldOf(expression,"values")) this.expression(value);
+        for (const value of listOf(fieldOf(expression,"values"))) this.expression(value as Expression);
         return {
           kind: "type",
           type: { kind: "array", of: parseType(fieldOf(expression,"element")), length: fieldOf(expression,"values").length },
         };
       case "text":
-        for (const part of fieldOf(expression,"parts")) {
+        for (const part of listOf(fieldOf(expression,"parts"))) {
           if (String(fieldOf(part,"k")) === "value") this.expression(fieldOf(part,"value"));
         }
         return { kind: "type", type: TEXT };
       case "binary": {
         const left = this.expression(fieldOf(expression,"left"));
         const right = this.expression(fieldOf(expression,"right"));
-        if (COMPARISONS[String(fieldOf(expression,"op"))] === true || LOGICAL[String(fieldOf(expression,"op"))] === true) return { kind: "type", type: BOOL };
+        if (COMPARISONS[String(fieldOf(expression,"op"))] || LOGICAL[String(fieldOf(expression,"op"))]) return { kind: "type", type: BOOL };
         // `??` is neither a comparison nor a short circuit: it hands back one
         // of its operands, so a reference stays a reference instead of
         // becoming the double every other operator is.
@@ -721,7 +734,7 @@ class BodyTypes {
         // A call of a value: the closure is read and the arguments are read,
         // and neither names a function of the program.
         this.expression(fieldOf(expression,"callee"));
-        for (const argument of fieldOf(expression,"args")) this.expression(argument);
+        for (const argument of listOf(fieldOf(expression,"args"))) this.expression(argument as Expression);
         return { kind: "type", type: fieldOf(expression,"returns") };
       case "append":
         // A push or a pop is a statement, and a statement of the body is walked
@@ -2144,10 +2157,20 @@ export function layOut(
     const one = shapeFieldList[at];
     counted.push({ field: one, at, count: counts.get(String(fieldOf(one,"name"))) ?? 0 });
   }
-  counted.sort((left, right) => {
-    const byCount = (fieldOf(right,"count") as number) - (fieldOf(left,"count") as number);
-    return byCount !== 0 ? byCount : (fieldOf(left,"at") as number) - (fieldOf(right,"at") as number);
-  });
+  // A stable insertion order: the fields a tag has written most often come
+  // first, and a tie keeps the order the declaration wrote them in.
+  for (let at = 0; at < counted.length; at += 1) {
+    for (let scan = at + 1; scan < counted.length; scan += 1) {
+      const left = counted[at];
+      const right = counted[scan];
+      const byCount = Number(fieldOf(right,"count")) - Number(fieldOf(left,"count"));
+      const swap = byCount > 0 || (byCount === 0 && Number(fieldOf(left,"at")) > Number(fieldOf(right,"at")));
+      if (swap) {
+        counted[at] = right;
+        counted[scan] = left;
+      }
+    }
+  }
   const fields: { name: string; type: string; offset: number }[] = [];
   let offset = 0;
   let align = 1;

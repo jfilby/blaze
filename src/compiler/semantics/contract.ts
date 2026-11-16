@@ -1665,7 +1665,7 @@ export function parseContract(contract: FunctionContract): ParsedContract {
     .map((expression: Expr, index: number) => ({ index, right: isResultDefinition(expression) ? fieldOf(expression, "right") as Expr : null }))
     .filter((entry: { right: Expr | null }) => fieldOf(entry, "right") !== null);
   if (definitions.length === 0) return { contract, env, requires, ensures, resultDefinition: null };
-  const distinct = new Set(definitions.map((entry: { index: number }) => ensuresText[fieldOf(entry, "index") as number]));
+  const distinct = new Set(definitions.map((entry: { index: number }) => ensuresText[Number(fieldOf(entry, "index"))]));
   if (distinct.size > 1) {
     throw contractError("contract defines the result in more than one way", [...distinct].join(" | "));
   }
