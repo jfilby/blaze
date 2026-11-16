@@ -743,7 +743,7 @@ function wholeOfNumber(value: number): Whole {
   const magnitude = Math.abs(Math.trunc(value));
   if (magnitude >= WHOLE_LIMIT) return { negative, magnitude: WHOLE_MASK };
   const text = `${magnitude}`;
-  return { negative, magnitude: wholeToBigInt(wholeFromDecimal(text)) };
+  return { negative, magnitude: wholeFromDecimal(text).magnitude };
 }
 
 /** The whole number represented by a run of decimal digits. */
@@ -1844,9 +1844,12 @@ export function referenceResult(parsed: ParsedContract, values: ReadonlyMap<stri
 }
 
 /** The host form of a whole number: its sign and its magnitude. */
-function wholeToBigInt(value: Whole): bigint {
+function wholeToBigInt(value: Whole): any {
   const magnitude = value.magnitude;
-  return value.negative ? -magnitude : magnitude;
+  // A wide whole number has no sign of its own: a negative value leaves the
+  // contract as the host number it is, the same value `formatWhole` prints.
+  if (!value.negative) return magnitude;
+  return -wholeToNumber(value);
 }
 
 /** Postconditions that the given result violates. */
@@ -1899,8 +1902,8 @@ export function valuesMatch(expected: Value, actual: Value, tolerance: number | 
     // The reference computes in the type its expression has and the candidate
     // in the type it returns, so one side is a whole number and the other a
     // double. They agree when the double is that whole number and no other.
-    if (expectedWhole !== null && typeof actual === "number") return compareWholeToFloat(expectedWhole, actual) === 0;
-    if (actualWhole !== null && typeof expected === "number") return compareWholeToFloat(actualWhole, expected) === 0;
+    if (expectedWhole !== null) return compareWholeToFloat(expectedWhole, Number(actual)) === 0;
+    if (actualWhole !== null) return compareWholeToFloat(actualWhole, Number(expected)) === 0;
     return false;
   }
   // A text result is the word it says itself: it matches the word the
@@ -1921,8 +1924,13 @@ export function valuesMatch(expected: Value, actual: Value, tolerance: number | 
   }
   if (expected === null || actual === null) return expected === actual;
   if (isBufferValue(expected) && isBufferValue(actual)) {
-    if (bufferValues(expected).length !== bufferValues(actual).length) return false;
-    return bufferValues(expected).every((value, index) => valuesMatch(value, bufferValues(actual)[index] as Value, tolerance));
+    const expectedValues = bufferValues(expected);
+    const actualValues = bufferValues(actual);
+    if (expectedValues.length !== actualValues.length) return false;
+    for (let index = 0; index < expectedValues.length; index += 1) {
+      if (!valuesMatch(expectedValues[index] as Value, actualValues[index] as Value, tolerance)) return false;
+    }
+    return true;
   }
   return false;
 }
