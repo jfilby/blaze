@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { run } from "../core/process.ts";
 import { runtimeHeaderSource, runtimeSourceSource } from "../runtime/abi.ts";
+import { generateRuntimeAdapterSource } from "../runtime/nim.ts";
 import {
   EXTERNAL_KINDS,
   HANDLE_KINDS,
@@ -41,18 +42,18 @@ test("the three declarations state the one record and the one numbers", () => {
   for (const name of Object.keys(VALUE_TAGS)) {
     const number = String((VALUE_TAGS as Record<string, number>)[name]);
     assert.match(c, new RegExp(`BLAZE_VALUE_${name.toUpperCase()} = ${number}`));
-    assert.match(nim, new RegExp(`^  ${name} = ${number},?$`, "m"));
+    assert.match(nim, new RegExp(`^  BlazeTag${name.slice(0, 1).toUpperCase()}${name.slice(1)} = ${number},?$`, "m"));
     assert.match(wasm, new RegExp(`VALUE_${name.toUpperCase()} = ${number}`));
   }
   for (const name of Object.keys(HANDLE_KINDS)) {
     const number = String((HANDLE_KINDS as Record<string, number>)[name]);
     assert.match(c, new RegExp(`BLAZE_HANDLE_${name.toUpperCase()} = ${number}`));
-    assert.match(nim, new RegExp(`^  ${name} = ${number},?$`, "m"));
+    assert.match(nim, new RegExp(`^  BlazeKind${name.slice(0, 1).toUpperCase()}${name.slice(1)} = ${number},?$`, "m"));
     assert.match(wasm, new RegExp(`HANDLE_${name.toUpperCase()} = ${number}`));
   }
   for (const name of Object.keys(EXTERNAL_KINDS)) {
     assert.match(c, new RegExp(`BLAZE_EXTERNAL_${name.toUpperCase()} = `));
-    assert.match(nim, new RegExp(`^  ${name} = `, "m"));
+    assert.match(nim, new RegExp(`^  BlazeExternal${name.slice(0, 1).toUpperCase()}${name.slice(1)} = `, "m"));
   }
 
   assert.equal(VALUE_LAYOUT.bytes, 16);
@@ -66,6 +67,15 @@ test("the header carries the value the backends generate calls against", () => {
   assert.match(header, /typedef struct \{[\s\S]*uint64_t payload;[\s\S]*uint32_t tag;[\s\S]*uint32_t kind;[\s\S]*\} BlazeValue;/);
   assert.match(header, /BlazeValue blaze_value_number\(double number\)/);
   assert.match(header, /double blaze_value_number_of\(const BlazeValue\* value\)/);
+});
+
+test("the Nim adapter declares the same value and bounds-checked globals", () => {
+  const nim = generateRuntimeAdapterSource("debug");
+  assert.match(nim, /BlazeValue \{\.packed\.\} = object[\s\S]*payload: uint64[\s\S]*tag: uint32[\s\S]*kind: uint32/);
+  assert.match(nim, /proc blaze_rt_global_get\*\(slot: float64\): BlazeValue/);
+  assert.match(nim, /proc blaze_rt_global_set\*\(slot: float64, value: BlazeValue\): BlazeValue/);
+  assert.match(nim, /global slot " & \$index & " out of range/);
+  assert.doesNotMatch(nim, /array\[4096, float64\]/);
 });
 
 test("a handle carries its slot and the generation of the slot", () => {
@@ -255,10 +265,14 @@ test("globals grow on demand and a slot past the table is an error", async () =>
   const binary = await compileRuntimeProbe(
     directory,
     "globals",
-    `  if (blaze_rt_global_set(5000.0, 17.0) != 17.0) return 1;
-     if (blaze_rt_global_get(5000.0) != 17.0) return 2;
-     if (blaze_rt_global_post_inc(5000.0) != 17.0) return 3;
-     if (blaze_rt_global_get(5000.0) != 18.0) return 4;
+    `  BlazeValue written = blaze_rt_global_set(5000.0, blaze_value_number(17.0));
+     if (blaze_value_number_of(&written) != 17.0) return 1;
+     BlazeValue read = blaze_rt_global_get(5000.0);
+     if (blaze_value_number_of(&read) != 17.0) return 2;
+     BlazeValue stepped = blaze_rt_global_post_inc(5000.0);
+     if (blaze_value_number_of(&stepped) != 17.0) return 3;
+     read = blaze_rt_global_get(5000.0);
+     if (blaze_value_number_of(&read) != 18.0) return 4;
      blaze_global_at(9999, "test");
      return 0;`,
   );

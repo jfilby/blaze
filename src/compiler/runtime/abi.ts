@@ -1095,10 +1095,10 @@ entry(
     "Returns the number.",
     { tags: ["host"] },
   ),
-  entry("blaze_rt_global_get", "double", [["slot", "double"]], "Reads a module-level number.", "Returns the value the cell holds.", { tags: ["host"] }),
-  entry("blaze_rt_global_set", "double", [["slot", "double"], ["value", "double"]], "Writes a module-level number.", "Returns the value written.", { tags: ["host"] }),
-  entry("blaze_rt_global_post_inc", "double", [["slot", "double"]], "Steps a module-level number up.", "Returns the value before the step.", { tags: ["host"] }),
-  entry("blaze_rt_global_post_dec", "double", [["slot", "double"]], "Steps a module-level number down.", "Returns the value before the step.", { tags: ["host"] }),
+  entry("blaze_rt_global_get", "BlazeValue", [["slot", "double"]], "Reads a module-level value.", "Returns the tagged value the cell holds.", { tags: ["host"] }),
+  entry("blaze_rt_global_set", "BlazeValue", [["slot", "double"], ["value", "BlazeValue"]], "Writes a module-level value.", "Returns the value written.", { tags: ["host"] }),
+  entry("blaze_rt_global_post_inc", "BlazeValue", [["slot", "double"]], "Steps a module-level number up.", "Returns the value before the step.", { tags: ["host"] }),
+  entry("blaze_rt_global_post_dec", "BlazeValue", [["slot", "double"]], "Steps a module-level number down.", "Returns the value before the step.", { tags: ["host"] }),
   entry("blaze_rt_exec_path", "const char*", [], "The path of the running program.", "Returns a managed string holding the path the operating system started.", { tags: ["host"] }),
   entry("blaze_rt_state_get", "double", [["key", "const char*"]], "Reads a named state cell.", "Returns the value the cell holds, or zero before it is written.", { tags: ["host"] }),
   entry("blaze_rt_state_set", "double", [["key", "const char*"], ["value", "double"]], "Writes a named state cell.", "Returns the value written.", { tags: ["host"] }),
@@ -4739,34 +4739,33 @@ double blaze_rt_state_set(const char* key, double value) {
   return value;
 }
 
-double blaze_rt_global_get(double slot) {
+BlazeValue blaze_rt_global_get(double slot) {
   if (slot < 0.0) {
     fprintf(stderr, "blaze: negative global slot\\n");
     exit(2);
   }
   blaze_global_grow((uint64_t)slot);
   BlazeValue* cell = blaze_global_at((uint64_t)slot, "blaze_rt_global_get");
-  return cell == NULL ? 0.0 : blaze_value_number_of(cell);
+  return cell == NULL ? blaze_value_null() : *cell;
 }
-double blaze_rt_global_set(double slot, double value) {
+BlazeValue blaze_rt_global_set(double slot, BlazeValue value) {
   if (slot < 0.0) {
     fprintf(stderr, "blaze: negative global slot\\n");
     exit(2);
   }
   blaze_global_grow((uint64_t)slot);
   BlazeValue* cell = blaze_global_at((uint64_t)slot, "blaze_rt_global_set");
-  if (cell == NULL) return value;
-  *cell = blaze_value_number(value);
+  if (cell != NULL) *cell = value;
   return value;
 }
-double blaze_rt_global_post_inc(double slot) {
-  const double before = blaze_rt_global_get(slot);
-  blaze_rt_global_set(slot, before + 1.0);
+BlazeValue blaze_rt_global_post_inc(double slot) {
+  BlazeValue before = blaze_rt_global_get(slot);
+  blaze_rt_global_set(slot, blaze_value_number(blaze_value_number_of(&before) + 1.0));
   return before;
 }
-double blaze_rt_global_post_dec(double slot) {
-  const double before = blaze_rt_global_get(slot);
-  blaze_rt_global_set(slot, before - 1.0);
+BlazeValue blaze_rt_global_post_dec(double slot) {
+  BlazeValue before = blaze_rt_global_get(slot);
+  blaze_rt_global_set(slot, blaze_value_number(blaze_value_number_of(&before) - 1.0));
   return before;
 }
 

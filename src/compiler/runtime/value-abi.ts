@@ -206,25 +206,26 @@ static inline double blaze_value_number_of(const BlazeValue* value) {
 /** The Nim declaration of the same record, with the same field order. */
 export function valueAbiNimDeclaration(): string {
   const tags = Object.keys(VALUE_TAGS).map((name) => {
-    return `  ${name} = ${String(fieldOf(VALUE_TAGS, name))}`;
+    return `  BlazeTag${name.slice(0, 1).toUpperCase()}${name.slice(1)} = ${String(fieldOf(VALUE_TAGS, name))}`;
   });
   const kinds = Object.keys(HANDLE_KINDS).map((name) => {
-    return `  ${name} = ${String(fieldOf(HANDLE_KINDS, name))}`;
+    return `  BlazeKind${name.slice(0, 1).toUpperCase()}${name.slice(1)} = ${String(fieldOf(HANDLE_KINDS, name))}`;
   });
   const resources = Object.keys(EXTERNAL_KINDS).map((name) => {
-    return `  ${name} = ${String(fieldOf(EXTERNAL_KINDS, name))}`;
+    return `  BlazeExternal${name.slice(0, 1).toUpperCase()}${name.slice(1)} = ${String(fieldOf(EXTERNAL_KINDS, name))}`;
   });
   return `# Generated from runtime/value-abi.ts.
-type BlazeValueTag {.size: sizeof(uint32).} = enum
+type
+  BlazeValueTag {.size: sizeof(uint32).} = enum
 ${tags.join(",\n")}
-type BlazeHandleKind {.size: sizeof(uint32).} = enum
+  BlazeHandleKind {.size: sizeof(uint32).} = enum
 ${kinds.join(",\n")}
-type BlazeExternalKind {.size: sizeof(uint32).} = enum
+  BlazeExternalKind {.size: sizeof(uint32).} = enum
 ${resources.join(",\n")}
-type BlazeValue {.packed.} = object
-  payload: uint64
-  tag: uint32
-  kind: uint32
+  BlazeValue {.packed.} = object
+    payload: uint64
+    tag: uint32
+    kind: uint32
 `;
 }
 

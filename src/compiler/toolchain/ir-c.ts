@@ -534,13 +534,13 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_as_uint_n":
       return `blaze_rt_as_uint_n(${args[0]}, ${args[1]})`;
     case "blaze_rt_global_get":
-      return `blaze_rt_global_get(${args[0]})`;
+      return `blaze_value_number_of(blaze_rt_global_get(${args[0]}))`;
     case "blaze_rt_global_set":
-      return `blaze_rt_global_set(${args[0]}, ${args[1]})`;
+      return `blaze_value_number_of(blaze_rt_global_set(${args[0]}, blaze_value_number(${args[1]})))`;
     case "blaze_rt_global_post_inc":
-      return `blaze_rt_global_post_inc(${args[0]})`;
+      return `blaze_value_number_of(blaze_rt_global_post_inc(${args[0]}))`;
     case "blaze_rt_global_post_dec":
-      return `blaze_rt_global_post_dec(${args[0]})`;
+      return `blaze_value_number_of(blaze_rt_global_post_dec(${args[0]}))`;
     case "blaze_rt_now_ms":
       return `blaze_rt_now_ms()`;
     case "blaze_rt_timestamp_iso":
