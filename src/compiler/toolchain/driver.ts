@@ -606,7 +606,8 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const returns = parseType(String(fieldOf(signature,"returns")));
     // The machine backend hands every reference back in a register as the
     // pointer it is; the C backend hands an unshaped one back as a double.
-    const returnType = this.lowering === "machine" && String(fieldOf(returns,"kind")) === "ref" ? "void*" : cDeclarationType(returns);
+    const dynamicReturn = String(fieldOf(returns,"kind")) === "ref" && fieldOf(returns,"of") === null && fieldOf(returns,"name") === undefined;
+    const returnType = this.lowering === "machine" && String(fieldOf(returns,"kind")) === "ref" && !dynamicReturn ? "void*" : cDeclarationType(returns);
     // A parameter name is source text that has to survive being a C
     // identifier, and a program is free to call a parameter `double`. An
     // extern declaration only needs the names to be well formed, so they are
@@ -1557,7 +1558,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           const captures = Array.isArray(rawCaptures) ? rawCaptures as any[] : [];
           invoke = `${name}(${captures.map((capture: any) => String(fieldOf(capture,"name"))).join(", ")})`;
         }
-        return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; blaze_value_ref((void*)(blaze_promise)); })`;
+        return `({ BlazeValue blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = blaze_value_null(); blaze_dynamic_from_value(blaze_promise); })`;
       }
       case "Promise.await":
       case "Promise.await.whole":
@@ -1612,9 +1613,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "Promise.settle.nothing":
         return `blaze_dynamic_from_value(blaze_promise_settled_null())`;
       case "Promise.failed":
-        return `blaze_promise_failed(blaze_value_from_dynamic(${argument(0)})`;
+        return `blaze_promise_failed(blaze_value_from_dynamic(${argument(0)}))`;
       case "Promise.message":
-        return `({ const char* blaze_message = blaze_promise_message(blaze_value_from_dynamic(${argument(0)}); blaze_error_clear(); blaze_message; })`;
+        return `({ const char* blaze_message = blaze_promise_message(blaze_value_from_dynamic(${argument(0)})); blaze_error_clear(); blaze_message; })`;
       case "Promise.reject": {
         const arg = callArgs[0];
         const argType = arg === undefined ? null : fieldOf(arg,"type") as SemanticType;
