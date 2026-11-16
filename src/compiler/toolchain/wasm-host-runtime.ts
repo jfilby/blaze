@@ -10,14 +10,16 @@
  * - a pointer is an `i32` offset into the shared memory;
  * - a `size_t` and a `long long` are an `i64`;
  * - an `int` is an `i32`;
- * - a `double` is an `f64`.
+ * - a `double` is an `f64`;
+ * - a tagged `BlazeValue` is the 16-byte record `WASM_VALUE_ABI` declares,
+ *   whose tag and kind come from the one ABI table the other backends use.
  *
  * The runtime here is the host's own: the generated `.mjs` that runs a module
  * carries the implementations of the services the module imports, and the
- * managed representation is the one the C runtime uses — a forty-eight byte
- * header in front of the payload, a reference count in it, and the payload at
- * the address the header names. A value the module holds and a value the host
- * holds are therefore the same kind of thing.
+ * managed representation is the one the C runtime uses — a typed handle into a
+ * registry whose entry states the kind, the length, the ownership and the
+ * generation of the slot. A value the module holds and a value the host holds
+ * are therefore the same kind of thing.
  *
  * The wide arithmetic is not a service of the runtime ABI but of the kernel
  * beside it, and it is here for the same reason: a module has no instruction
@@ -25,9 +27,19 @@
  * the other two backends call.
  */
 
+import { valueAbiWasmDeclaration } from "../runtime/value-abi.ts";
+
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
 }
+
+/**
+ * The tagged value layout and tag numbers for a module, generated from the one
+ * ABI table the C header and the Nim adapter use. A value in linear memory is
+ * an i64 payload followed by an i32 tag and an i32 kind; no service may infer
+ * a value's type from the size of its payload.
+ */
+export const WASM_VALUE_ABI = valueAbiWasmDeclaration();
 
 
 /** One service of the host ABI: the name a module imports it under, and its signature. */

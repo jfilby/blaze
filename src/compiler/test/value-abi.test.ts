@@ -62,6 +62,22 @@ test("the three declarations state the one record and the one numbers", () => {
   assert.match(wasm, /VALUE_BYTES = 16/);
 });
 
+test("the wasm host declares the same tags and layout as the other backends", async () => {
+  const { WASM_VALUE_ABI } = await import("../toolchain/wasm-host-runtime.ts");
+  for (const name of Object.keys(VALUE_TAGS)) {
+    const number = String((VALUE_TAGS as Record<string, number>)[name]);
+    assert.match(WASM_VALUE_ABI, new RegExp(`VALUE_${name.toUpperCase()} = ${number}`));
+  }
+  for (const name of Object.keys(HANDLE_KINDS)) {
+    const number = String((HANDLE_KINDS as Record<string, number>)[name]);
+    assert.match(WASM_VALUE_ABI, new RegExp(`HANDLE_${name.toUpperCase()} = ${number}`));
+  }
+  assert.match(WASM_VALUE_ABI, /VALUE_BYTES = 16/);
+  assert.match(WASM_VALUE_ABI, /VALUE_PAYLOAD_OFFSET = 0/);
+  assert.match(WASM_VALUE_ABI, /VALUE_TAG_OFFSET = 8/);
+  assert.match(WASM_VALUE_ABI, /VALUE_KIND_OFFSET = 12/);
+});
+
 test("the header carries the value the backends generate calls against", () => {
   const header = runtimeHeaderSource();
   assert.match(header, /typedef struct \{[\s\S]*uint64_t payload;[\s\S]*uint32_t tag;[\s\S]*uint32_t kind;[\s\S]*\} BlazeValue;/);
