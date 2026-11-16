@@ -1233,12 +1233,12 @@ entry(
     "Returns a managed string: the two paths joined by a separator and normalized as one path.",
     { tags: ["host"] },
   ),
-  entry("blaze_rt_array_push", "double", [["array", "double"], ["value", "double"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
-  entry("blaze_rt_array_get", "double", [["array", "double"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
-  entry("blaze_rt_array_length", "double", [["array", "double"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
-  entry("blaze_rt_array_set", "void", [["array", "double"], ["index", "double"], ["value", "double"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
-  entry("blaze_rt_dyn_array_new", "double", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
-  entry("blaze_rt_is_array", "double", [["value", "double"]], "Asks whether a dynamic value is an array.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_array_push", "BlazeValue", [["array", "BlazeValue"], ["value", "BlazeValue"]], "Appends a dynamic value to a dynamic array.", "Returns the array.", { tags: ["object"] }),
+  entry("blaze_rt_array_get", "BlazeValue", [["array", "BlazeValue"], ["index", "double"]], "Reads one element of a dynamic array.", "Returns the element.", { tags: ["object"] }),
+  entry("blaze_rt_array_length", "double", [["array", "BlazeValue"]], "Reads how many elements a dynamic array holds.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_array_set", "void", [["array", "BlazeValue"], ["index", "double"], ["value", "BlazeValue"]], "Writes one element of a dynamic array.", "Returns nothing.", { tags: ["object"] }),
+  entry("blaze_rt_dyn_array_new", "BlazeValue", [], "Creates an empty dynamic array.", "Returns a managed handle.", { tags: ["object"] }),
+  entry("blaze_rt_is_array", "double", [["value", "BlazeValue"]], "Asks whether a dynamic value is an array.", "Returns 1 or 0.", { tags: ["object"] }),
   entry("blaze_rt_dict_new", "double", [], "Creates an empty dictionary.", "Returns a managed handle.", { tags: ["object"] }),
   entry("blaze_rt_dict_get", "double", [["dict", "double"], ["key", "const char*"]], "Reads one value of a dictionary by its string key.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
   entry("blaze_rt_dict_set", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Writes one value of a dictionary by its string key.", "Returns the dictionary.", { tags: ["object"] }),
@@ -6399,6 +6399,38 @@ static double blaze_dyn_register(void* p) {
   memcpy(&number, &handle.payload, sizeof number);
   return number;
 }
+/* A boxed value as the tagged ABI carries it, and back. The payload is the
+   handle itself; the tag and kind are read from the registry entry the handle
+   names, so they cannot be forged by a number that happens to look similar. */
+static BlazeValue blaze_dyn_tagged(double h) {
+  BlazeValue value;
+  memcpy(&value.payload, &h, sizeof value.payload);
+  value.tag = BLAZE_VALUE_HANDLE;
+  value.kind = 0;
+  blaze_rt_entry* entry = blaze_registry_entry_of_payload(value.payload);
+  if (entry != NULL) value.kind = entry->kind;
+  return value;
+}
+
+static double blaze_dyn_untagged(BlazeValue value) {
+  double number = 0.0;
+  memcpy(&number, &value.payload, sizeof number);
+  return number;
+}
+
+/* The bridge from a lowering that still carries a value in a double. A double
+   that names a live registry entry is that entry's tagged value; anything else
+   is a number, with every bit of its IEEE-754 representation preserved. */
+BlazeValue blaze_value_from_dynamic(double value) {
+  BlazeValue tagged = blaze_dyn_tagged(value);
+  if (tagged.kind == 0) return blaze_value_number(value);
+  return tagged;
+}
+
+double blaze_dynamic_from_value(BlazeValue value) {
+  return blaze_dyn_untagged(value);
+}
+
 static blaze_dyn* blaze_dyn_lookup(double h) {
   uint64_t payload = 0;
   memcpy(&payload, &h, sizeof payload);
@@ -6549,10 +6581,10 @@ double blaze_rt_to_number(double value) {
    it does not hold is a number, or a text where the number is the pointer the
    text sits at. A null is an object in the language, and every other kind a
    program can hold is one too. */
-double blaze_rt_is_array(double value) {
-  blaze_dyn* d = blaze_dyn_lookup(value);
-  if (!d) return 0.0;
-  return d->kind == BLAZE_DYN_ARRAY ? 1.0 : 0.0;
+double blaze_rt_is_array(BlazeValue value) {
+  if (!blaze_value_is_handle(&value, BLAZE_HANDLE_ARRAY)) return 0.0;
+  blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(value));
+  return d != NULL && d->kind == BLAZE_DYN_ARRAY ? 1.0 : 0.0;
 }
 const char* blaze_rt_type_of(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
@@ -6673,49 +6705,47 @@ double blaze_rt_box_sequence(const void* block, size_t elementSize, int64_t kind
   return blaze_dyn_register(d);
 }
 
-double blaze_rt_dyn_array_new(void) {
+BlazeValue blaze_rt_dyn_array_new(void) {
   blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_ARRAY);
   d->items = NULL;
   d->count = 0;
   d->capacity = 0;
-  return blaze_dyn_register(d);
+  return blaze_dyn_tagged(blaze_dyn_register(d));
 }
-double blaze_rt_array_push(double array, double value) {
-  blaze_dyn* d = blaze_dyn_lookup(array);
+BlazeValue blaze_rt_array_push(BlazeValue array, BlazeValue value) {
+  blaze_dyn* d = blaze_value_is_handle(&array, BLAZE_HANDLE_ARRAY) ? blaze_dyn_lookup(blaze_dyn_untagged(array)) : NULL;
   if (!d || d->kind != BLAZE_DYN_ARRAY) {
     d = blaze_dyn_new(BLAZE_DYN_ARRAY);
-    array = blaze_dyn_register(d);
+    array = blaze_dyn_tagged(blaze_dyn_register(d));
   }
   if (d->count == d->capacity) {
     d->capacity = d->capacity ? d->capacity * 2 : 8;
     d->items = realloc(d->items, d->capacity * sizeof(double));
   }
-  ((double*)d->items)[d->count++] = value;
+  ((double*)d->items)[d->count++] = blaze_dyn_untagged(value);
   return array;
 }
-double blaze_rt_array_get(double array, double index) {
-  blaze_dyn* d = blaze_dyn_lookup(array);
-  if (!d || d->kind != BLAZE_DYN_ARRAY) return 0.0;
+BlazeValue blaze_rt_array_get(BlazeValue array, double index) {
+  if (!blaze_value_is_handle(&array, BLAZE_HANDLE_ARRAY)) return blaze_value_null();
+  blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(array));
+  if (!d || d->kind != BLAZE_DYN_ARRAY) return blaze_value_null();
   size_t i = (size_t)index;
-  if (i >= d->count) return 0.0;
-  return ((double*)d->items)[i];
+  if (i >= d->count) return blaze_value_null();
+  return blaze_value_from_dynamic(((double*)d->items)[i]);
 }
-double blaze_rt_array_length(double array) {
-  blaze_dyn* d = blaze_dyn_lookup(array);
-  if (!d) return 0.0;
-  /* An object holds its fields in pairs, and the count is how many fields it
-     has: the pairs are laid out in the items, two of them to a field, and the
-     count is the number of fields rather than the number of items. */
-  if (d->kind == BLAZE_DYN_OBJECT) return (double)d->count;
-  if (d->kind != BLAZE_DYN_ARRAY) return 0.0;
+double blaze_rt_array_length(BlazeValue array) {
+  if (!blaze_value_is_handle(&array, BLAZE_HANDLE_ARRAY)) return 0.0;
+  blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(array));
+  if (!d || d->kind != BLAZE_DYN_ARRAY) return 0.0;
   return (double)d->count;
 }
-void blaze_rt_array_set(double array, double index, double value) {
-  blaze_dyn* d = blaze_dyn_lookup(array);
+void blaze_rt_array_set(BlazeValue array, double index, BlazeValue value) {
+  if (!blaze_value_is_handle(&array, BLAZE_HANDLE_ARRAY)) return;
+  blaze_dyn* d = blaze_dyn_lookup(blaze_dyn_untagged(array));
   if (!d || d->kind != BLAZE_DYN_ARRAY) return;
   size_t i = (size_t)index;
   if (i >= d->count) return;
-  ((double*)d->items)[i] = value;
+  ((double*)d->items)[i] = blaze_dyn_untagged(value);
 }
 
 /* An environment variable, read by its name. The value belongs to the
@@ -8354,13 +8384,13 @@ static double blaze_rt_clone_dynamic(double value) {
   blaze_dyn* held = blaze_dyn_lookup(value);
   if (held == NULL) return value;
   if (held->kind == BLAZE_DYN_ARRAY) {
-    double copy = blaze_rt_dyn_array_new();
+    BlazeValue copy = blaze_rt_dyn_array_new();
     if (held->items != NULL) {
       for (size_t index = 0; index < held->count; index += 1) {
-        blaze_rt_array_push(copy, blaze_rt_clone(((double*)held->items)[index]));
+        copy = blaze_rt_array_push(copy, blaze_value_from_dynamic(blaze_rt_clone(((double*)held->items)[index])));
       }
     }
-    return copy;
+    return blaze_dynamic_from_value(copy);
   }
   if (held->kind == BLAZE_DYN_OBJECT) {
     blaze_dyn* made = blaze_dyn_new(BLAZE_DYN_OBJECT);

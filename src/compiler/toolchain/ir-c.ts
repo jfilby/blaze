@@ -608,23 +608,23 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_sha256_digest":
       return `blaze_rt_to_text(blaze_rt_sha256_digest(${args[0]}))`;
     case "blaze_rt_is_array":
-      return `blaze_rt_is_array(${args[0]})`;
+      return `blaze_rt_is_array(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_object_has_field":
       return `${RUNTIME_NAME}_object_has_field((const void*)(uintptr_t)(${args[0]}), ${args[1]})`;
     case "blaze_rt_date_iso":
       return `blaze_rt_date_iso(${args[0]})`;
     case "blaze_rt_array_length":
-      return `blaze_rt_array_length(${args[0]})`;
+      return `blaze_rt_array_length(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_length":
       return `blaze_rt_length(${args[0]})`;
     case "blaze_rt_dyn_array_new":
-      return `blaze_rt_dyn_array_new()`;
+      return `blaze_dynamic_from_value(blaze_rt_dyn_array_new())`;
     case "blaze_rt_array_push":
-      return `blaze_rt_array_push(${args[0]}, ${args[1]})`;
+      return `blaze_dynamic_from_value(blaze_rt_array_push(blaze_value_from_dynamic(${args[0]}), blaze_value_from_dynamic(${args[1]})))`;
     case "blaze_rt_array_get":
-      return `blaze_rt_array_get(${args[0]}, ${args[1]})`;
+      return `blaze_dynamic_from_value(blaze_rt_array_get(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
     case "blaze_rt_array_set":
-      return `blaze_rt_array_set(${args[0]}, ${args[1]}, ${args[2]})`;
+      return `blaze_rt_array_set(blaze_value_from_dynamic(${args[0]}), ${args[1]}, blaze_value_from_dynamic(${args[2]}))`;
     case "blaze_rt_json_field_key":
       return `blaze_rt_json_field_key(${args[0]}, ${args[1]})`;
     case "blaze_rt_json_field_value":

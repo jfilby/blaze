@@ -1180,6 +1180,30 @@ proc blazeDynIndex(handle: float64): int =
   if index >= blazeDynValues.len: return -1
   index
 
+proc blazeKindOfDyn(kind: BlazeDynKind): uint32 =
+  case kind
+  of dynNumber: uint32(BlazeKindNumber)
+  of dynBool: uint32(BlazeKindBoolean)
+  of dynNull: uint32(BlazeKindNil)
+  of dynText: uint32(BlazeKindString)
+  of dynArray: uint32(BlazeKindArray)
+  of dynObject: uint32(BlazeKindObject)
+  of dynDict: uint32(BlazeKindDictionary)
+  else: uint32(BlazeKindClosure)
+
+proc blazeValueFromDynamic(value: float64): BlazeValue =
+  ## A value as the tagged ABI carries it. A handle names a registry entry,
+  ## and its kind is read from that entry; a number keeps every bit of itself.
+  let index = blazeDynIndex(value)
+  if index < 0:
+    BlazeValue(payload: cast[uint64](value), tag: BlazeTagNumber, kind: 0'u32)
+  else:
+    BlazeValue(payload: uint64(index + 1), tag: BlazeTagHandle, kind: blazeKindOfDyn(blazeDynValues[index].kind))
+
+proc blazeDynamicFromValue(value: BlazeValue): float64 =
+  if value.tag == BlazeTagHandle: float64(value.payload and 0xffffffff'u64)
+  else: cast[float64](value.payload)
+
 proc blazeTextOf(text: string): cstring =
   ## A text as a block of the runtime's own, so it lives as long as the value
   ## that holds it.
@@ -1226,10 +1250,11 @@ proc blaze_rt_to_number*(value: float64): float64 {.exportc, cdecl.} =
   else:
     value
 
-proc blaze_rt_is_array*(value: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_is_array*(value: BlazeValue): float64 {.exportc, cdecl.} =
   ## Whether a dynamic value is an array: the kind the runtime registered the
   ## value as, and nothing for a value it does not hold.
-  let index = blazeDynIndex(value)
+  if value.tag != BlazeTagHandle or value.kind != uint32(BlazeKindArray): return 0.0
+  let index = blazeDynIndex(blazeDynamicFromValue(value))
   if index < 0: return 0.0
   if blazeDynValues[index].kind == dynArray: return 1.0
   return 0.0
@@ -1290,31 +1315,33 @@ proc blaze_rt_to_text*(value: float64): cstring {.exportc, cdecl.} =
   else:
     return blazeTextOf("{}")
 
-proc blaze_rt_dyn_array_new*(): float64 {.exportc, cdecl.} =
+proc blaze_rt_dyn_array_new*(): BlazeValue {.exportc, cdecl.} =
   ## An array the runtime holds, with no elements in it yet.
-  blazeDynRegister BlazeDyn(kind: dynArray)
+  blazeValueFromDynamic(blazeDynRegister BlazeDyn(kind: dynArray))
 
-proc blaze_rt_array_push*(array, value: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_array_push*(array, value: BlazeValue): BlazeValue {.exportc, cdecl.} =
   ## A value appended to the array, and the array handed back: a program that
   ## holds no array yet is given one.
-  var index = blazeDynIndex(array)
+  var index = blazeDynIndex(blazeDynamicFromValue(array))
   if index < 0 or blazeDynValues[index].kind != dynArray:
     index = blazeDynIndex(blazeDynRegister BlazeDyn(kind: dynArray))
-  blazeDynValues[index].items.add value
-  float64(index + 1)
+  blazeDynValues[index].items.add blazeDynamicFromValue(value)
+  blazeValueFromDynamic(float64(index + 1))
 
-proc blaze_rt_array_get*(array, index: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_array_get*(array: BlazeValue, index: float64): BlazeValue {.exportc, cdecl.} =
   ## One element of the array, or nothing where the array holds no such one.
-  let at = blazeDynIndex(array)
-  if at < 0 or blazeDynValues[at].kind != dynArray: return 0.0
+  if array.tag != BlazeTagHandle or array.kind != uint32(BlazeKindArray): return BlazeValue(payload: 0'u64, tag: BlazeTagNull, kind: 0'u32)
+  let at = blazeDynIndex(blazeDynamicFromValue(array))
+  if at < 0 or blazeDynValues[at].kind != dynArray: return BlazeValue(payload: 0'u64, tag: BlazeTagNull, kind: 0'u32)
   let position = int(index)
-  if position < 0 or position >= blazeDynValues[at].items.len: return 0.0
-  blazeDynValues[at].items[position]
+  if position < 0 or position >= blazeDynValues[at].items.len: return BlazeValue(payload: 0'u64, tag: BlazeTagNull, kind: 0'u32)
+  blazeValueFromDynamic(blazeDynValues[at].items[position])
 
-proc blaze_rt_array_length*(array: float64): float64 {.exportc, cdecl.} =
+proc blaze_rt_array_length*(array: BlazeValue): float64 {.exportc, cdecl.} =
   ## How many elements the array holds. An object holds its fields in pairs,
   ## so it has half as many of them as it has items.
-  let at = blazeDynIndex(array)
+  if array.tag != BlazeTagHandle: return 0.0
+  let at = blazeDynIndex(blazeDynamicFromValue(array))
   if at < 0: return 0.0
   let item = blazeDynValues[at]
   if item.kind == dynObject: return float64(item.items.len div 2)
@@ -1337,14 +1364,15 @@ proc blaze_rt_length*(value: float64): float64 {.exportc, cdecl.} =
   if counted != 0.0: return counted
   float64(blaze_rt_text_length(cast[cstring](cast[uint](value))))
 
-proc blaze_rt_array_set*(array, index, value: float64) {.exportc, cdecl.} =
+proc blaze_rt_array_set*(array: BlazeValue, index: float64, value: BlazeValue) {.exportc, cdecl.} =
   ## One element written, where the array holds it. An index that names no
   ## element writes nothing, which is what the C runtime answers.
-  let at = blazeDynIndex(array)
+  if array.tag != BlazeTagHandle or array.kind != uint32(BlazeKindArray): return
+  let at = blazeDynIndex(blazeDynamicFromValue(array))
   if at < 0 or blazeDynValues[at].kind != dynArray: return
   let position = int(index)
   if position < 0 or position >= blazeDynValues[at].items.len: return
-  blazeDynValues[at].items[position] = value
+  blazeDynValues[at].items[position] = blazeDynamicFromValue(value)
 
 proc blaze_rt_json_field_key*(obj: float64, index: float64): cstring {.exportc, cdecl.} =
   ## The key of one field of a dynamic object by its position.

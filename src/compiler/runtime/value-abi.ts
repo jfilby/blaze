@@ -194,6 +194,13 @@ static inline uint32_t blaze_value_generation(const BlazeValue* value) {
   return (uint32_t)(value->payload >> BLAZE_HANDLE_INDEX_BITS);
 }
 
+/* The bridge for a lowering that still carries a dynamic value in a double:
+   the payload is the handle the registry gave the value, or the bits of the
+   number it holds. Both directions are defined by the runtime, where the
+   registry lives. */
+BlazeValue blaze_value_from_dynamic(double value);
+double blaze_dynamic_from_value(BlazeValue value);
+
 static inline double blaze_value_number_of(const BlazeValue* value) {
   double number = 0.0;
   if (value->tag != BLAZE_VALUE_NUMBER) return number;

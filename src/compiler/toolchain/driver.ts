@@ -1175,7 +1175,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       // Whether a value the read could not type is an array: the runtime holds
       // the kind, and answers one for the array it holds and nothing otherwise.
       case "blaze_rt_is_array":
-        return `${RUNTIME_NAME}_is_array(${argument(0)})`;
+        return `${RUNTIME_NAME}_is_array(blaze_value_from_dynamic(${argument(0)}))`;
       case "JSON.stringify": {
         // An object literal is serialized where it is written: the field names
         // are the source's and the values are rendered as text one by one, so no

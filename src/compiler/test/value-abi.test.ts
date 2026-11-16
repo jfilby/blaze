@@ -260,6 +260,25 @@ test("a released pointer stops naming the object it held", async () => {
   assert.equal(result.code, 0, result.stdout + result.stderr);
 });
 
+test("dynamic arrays are created and read through tagged handles", async () => {
+  const directory = await scratch("blaze-array-abi-");
+  const binary = await compileRuntimeProbe(
+    directory,
+    "array",
+    `  BlazeValue array = blaze_rt_dyn_array_new();
+     if (!blaze_value_is_handle(&array, BLAZE_HANDLE_ARRAY)) return 1;
+     array = blaze_rt_array_push(array, blaze_value_number(7.0));
+     if (blaze_rt_array_length(array) != 1.0) return 2;
+     BlazeValue held = blaze_rt_array_get(array, 0.0);
+     if (blaze_value_number_of(&held) != 7.0) return 3;
+     if (blaze_rt_is_array(array) != 1.0) return 4;
+     if (blaze_rt_is_array(blaze_value_number(7.0)) != 0.0) return 5;
+     return 0;`,
+  );
+  const result = run(binary, [], { timeoutMs: 30_000 });
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+});
+
 test("globals grow on demand and a slot past the table is an error", async () => {
   const directory = await scratch("blaze-globals-");
   const binary = await compileRuntimeProbe(
