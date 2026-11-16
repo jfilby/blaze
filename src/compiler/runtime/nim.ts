@@ -2216,12 +2216,12 @@ proc blaze_rt_text_code_point_at*(text: cstring, at: float64): float64 {.exportc
 proc blaze_rt_text_bytes*(text: cstring): cstring {.exportc, cdecl.} = nil
 proc blaze_rt_view_load_float*(bytes: cstring, at: float64, width: float64): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_view_store_float*(bytes: cstring, at: float64, value: float64, width: float64) {.exportc, cdecl.} = discard
-proc blaze_rt_md5_create*(): float64 {.exportc, cdecl.} = 0.0
-proc blaze_rt_md5_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
-proc blaze_rt_md5_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
-proc blaze_rt_sha256_create*(): float64 {.exportc, cdecl.} = 0.0
-proc blaze_rt_sha256_update*(hasher: float64, text: cstring): float64 {.exportc, cdecl.} = hasher
-proc blaze_rt_sha256_digest*(hasher: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_md5_create*(): BlazeValue {.exportc, cdecl.} = blaze_null_value()
+proc blaze_rt_md5_update*(hasher: BlazeValue, text: cstring): BlazeValue {.exportc, cdecl.} = hasher
+proc blaze_rt_md5_digest*(hasher: BlazeValue): BlazeValue {.exportc, cdecl.} = blaze_null_value()
+proc blaze_rt_sha256_create*(): BlazeValue {.exportc, cdecl.} = blaze_null_value()
+proc blaze_rt_sha256_update*(hasher: BlazeValue, text: cstring): BlazeValue {.exportc, cdecl.} = hasher
+proc blaze_rt_sha256_digest*(hasher: BlazeValue): BlazeValue {.exportc, cdecl.} = blaze_null_value()
 proc blaze_rt_date_parse*(text: cstring): float64 {.exportc, cdecl.} = 0.0
 proc blaze_rt_file_read*(path: cstring, mode: cstring): float64 {.exportc, cdecl.} =
   ## The file's text, boxed as the dynamic value the runtime carries.

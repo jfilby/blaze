@@ -1139,12 +1139,12 @@ entry(
     { tags: ["object"] },
   ),
   entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
-  entry("blaze_rt_md5_create", "double", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
-  entry("blaze_rt_md5_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
-  entry("blaze_rt_md5_digest", "double", [["hasher", "double"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
-  entry("blaze_rt_sha256_create", "double", [], "Creates a SHA-256 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
-  entry("blaze_rt_sha256_update", "double", [["hasher", "double"], ["text", "const char*"]], "Feeds text to a SHA-256 hasher.", "Returns the hasher.", { tags: ["object"] }),
-  entry("blaze_rt_sha256_digest", "double", [["hasher", "double"]], "Finalizes and returns the SHA-256 hex digest.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_md5_create", "BlazeValue", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
+  entry("blaze_rt_md5_update", "BlazeValue", [["hasher", "BlazeValue"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
+  entry("blaze_rt_md5_digest", "BlazeValue", [["hasher", "BlazeValue"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_sha256_create", "BlazeValue", [], "Creates a SHA-256 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
+  entry("blaze_rt_sha256_update", "BlazeValue", [["hasher", "BlazeValue"], ["text", "const char*"]], "Feeds text to a SHA-256 hasher.", "Returns the hasher.", { tags: ["object"] }),
+  entry("blaze_rt_sha256_digest", "BlazeValue", [["hasher", "BlazeValue"]], "Finalizes and returns the SHA-256 hex digest.", "Returns a managed string.", { tags: ["object"] }),
   entry("blaze_rt_date_parse", "double", [["text", "const char*"]], "Reads an ISO date text to epoch milliseconds.", "Returns NaN where the text names no date.", { tags: [] }),
   entry("blaze_rt_file_read", "double", [["path", "const char*"], ["mode", "const char*"]], "Reads a file as text.", "Returns a managed string.", { tags: ["object"] }),
   entry(
@@ -4071,6 +4071,22 @@ static BlazeValue blaze_pointer_value(const void* pointer) {
   if (slot == 0) return blaze_value_null();
   blaze_rt_entry* entry = &blaze_rt_registry[slot - 1];
   return blaze_value_handle(entry->kind, slot, entry->generation);
+}
+
+/* An external resource as the tagged ABI carries it: the resource type in the
+   kind, the handle in the payload. A resource never passes as a number or a
+   raw pointer, and a wrong type is refused before its storage is read. */
+static BlazeValue blaze_external_value(uint32_t kind, void* pointer) {
+  BlazeValue value = blaze_registry_register(kind, pointer, 0, BLAZE_ENTRY_OWNED);
+  value.tag = BLAZE_VALUE_EXTERNAL;
+  return value;
+}
+
+static void* blaze_external_pointer(const BlazeValue* value, uint32_t kind, const char* operation) {
+  if (value->tag != BLAZE_VALUE_EXTERNAL || value->kind != kind) return NULL;
+  blaze_rt_entry* entry = blaze_registry_entry_of_payload(value->payload);
+  if (entry == NULL || entry->kind != kind) return NULL;
+  return entry->pointer;
 }
 
 /* The storage a typed handle names, or NULL where the handle is not one the
@@ -8684,24 +8700,20 @@ static void blaze_md5_final(unsigned char digest[16], blaze_md5_ctx* ctx) {
   blaze_md5_update(ctx, bits, 8);
   for (int i=0;i<16;i++) digest[i]=(unsigned char)((ctx->state[i>>2]>>(i&3)*8)&0xFF);
 }
-double blaze_rt_md5_create(void) {
+BlazeValue blaze_rt_md5_create(void) {
   blaze_md5_ctx* ctx = calloc(1, sizeof(blaze_md5_ctx));
   blaze_md5_init(ctx);
-  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_HASHER);
-  d->text = (char*)ctx;
-  return blaze_dyn_register(d);
+  return blaze_external_value(BLAZE_EXTERNAL_MD5, ctx);
 }
-double blaze_rt_md5_update(double hasher, const char* text) {
-  blaze_dyn* d = blaze_dyn_lookup(hasher);
-  if (!d || d->kind != BLAZE_DYN_HASHER || !text) return hasher;
-  blaze_md5_ctx* ctx = (blaze_md5_ctx*)d->text;
+BlazeValue blaze_rt_md5_update(BlazeValue hasher, const char* text) {
+  blaze_md5_ctx* ctx = (blaze_md5_ctx*)blaze_external_pointer(&hasher, BLAZE_EXTERNAL_MD5, "blaze_rt_md5_update");
+  if (ctx == NULL || text == NULL) return hasher;
   blaze_md5_update(ctx, (const unsigned char*)text, (unsigned int)strlen(text));
   return hasher;
 }
-double blaze_rt_md5_digest(double hasher) {
-  blaze_dyn* d = blaze_dyn_lookup(hasher);
-  if (!d || d->kind != BLAZE_DYN_HASHER) return blaze_rt_box_string("");
-  blaze_md5_ctx* ctx = (blaze_md5_ctx*)d->text;
+BlazeValue blaze_rt_md5_digest(BlazeValue hasher) {
+  blaze_md5_ctx* ctx = (blaze_md5_ctx*)blaze_external_pointer(&hasher, BLAZE_EXTERNAL_MD5, "blaze_rt_md5_digest");
+  if (ctx == NULL) return blaze_dyn_tagged(blaze_rt_box_string(""));
   unsigned char digest[16];
   blaze_md5_final(digest, ctx);
   /* The digest is written from a table rather than by sixteen calls to
@@ -8711,7 +8723,7 @@ double blaze_rt_md5_digest(double hasher) {
   char* hex = (char*)blaze_rt_dyn_pool_take(33, 1);
   for (int i=0;i<16;i++) { hex[i*2] = nibbles[digest[i] >> 4]; hex[i*2+1] = nibbles[digest[i] & 15]; }
   hex[32]=0;
-  return blaze_dyn_text_handle(hex, 32);
+  return blaze_dyn_tagged(blaze_dyn_text_handle(hex, 32));
 }
 
 /* SHA-256 implementation (FIPS 180-4). */
@@ -8784,31 +8796,27 @@ static void blaze_sha256_final(unsigned char digest[32], blaze_sha256_ctx* ctx) 
     digest[i*4+3] = (unsigned char)(ctx->state[i]);
   }
 }
-double blaze_rt_sha256_create(void) {
+BlazeValue blaze_rt_sha256_create(void) {
   blaze_sha256_ctx* ctx = calloc(1, sizeof(blaze_sha256_ctx));
   blaze_sha256_init(ctx);
-  blaze_dyn* d = blaze_dyn_new(BLAZE_DYN_HASHER);
-  d->text = (char*)ctx;
-  return blaze_dyn_register(d);
+  return blaze_external_value(BLAZE_EXTERNAL_SHA256, ctx);
 }
-double blaze_rt_sha256_update(double hasher, const char* text) {
-  blaze_dyn* d = blaze_dyn_lookup(hasher);
-  if (!d || d->kind != BLAZE_DYN_HASHER || !text) return hasher;
-  blaze_sha256_ctx* ctx = (blaze_sha256_ctx*)d->text;
+BlazeValue blaze_rt_sha256_update(BlazeValue hasher, const char* text) {
+  blaze_sha256_ctx* ctx = (blaze_sha256_ctx*)blaze_external_pointer(&hasher, BLAZE_EXTERNAL_SHA256, "blaze_rt_sha256_update");
+  if (ctx == NULL || text == NULL) return hasher;
   blaze_sha256_update(ctx, (const unsigned char*)text, strlen(text));
   return hasher;
 }
-double blaze_rt_sha256_digest(double hasher) {
-  blaze_dyn* d = blaze_dyn_lookup(hasher);
-  if (!d || d->kind != BLAZE_DYN_HASHER) return blaze_rt_box_string("");
-  blaze_sha256_ctx* ctx = (blaze_sha256_ctx*)d->text;
+BlazeValue blaze_rt_sha256_digest(BlazeValue hasher) {
+  blaze_sha256_ctx* ctx = (blaze_sha256_ctx*)blaze_external_pointer(&hasher, BLAZE_EXTERNAL_SHA256, "blaze_rt_sha256_digest");
+  if (ctx == NULL) return blaze_dyn_tagged(blaze_rt_box_string(""));
   unsigned char digest[32];
   blaze_sha256_final(digest, ctx);
   static const char nibbles[] = "0123456789abcdef";
   char* hex = (char*)blaze_rt_dyn_pool_take(65, 1);
   for (int i=0;i<32;i++) { hex[i*2] = nibbles[digest[i] >> 4]; hex[i*2+1] = nibbles[digest[i] & 15]; }
   hex[64]=0;
-  return blaze_dyn_text_handle(hex, 64);
+  return blaze_dyn_tagged(blaze_dyn_text_handle(hex, 64));
 }
 
 /*

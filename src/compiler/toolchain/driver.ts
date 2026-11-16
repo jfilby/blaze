@@ -1224,15 +1224,15 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "text.toUpperCase":
         return `${RUNTIME_NAME}_text_upper(${argument(0)})`;
       case "crypto.createHash":
-        return `${RUNTIME_NAME}_md5_create()`;
+        return `blaze_dynamic_from_value(${RUNTIME_NAME}_md5_create())`;
       // The frontend names the SHA-256 hasher the compiler fingerprints with,
       // and the digest is the text the runtime holds a handle for.
       case "blaze_rt_sha256_create":
-        return `${RUNTIME_NAME}_sha256_create()`;
+        return `blaze_dynamic_from_value(${RUNTIME_NAME}_sha256_create())`;
       case "blaze_rt_sha256_update":
-        return `${RUNTIME_NAME}_sha256_update(${argument(0)}, ${argument(1)})`;
+        return `blaze_dynamic_from_value(${RUNTIME_NAME}_sha256_update(blaze_value_from_dynamic(${argument(0)}), ${argument(1)}))`;
       case "blaze_rt_sha256_digest":
-        return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_sha256_digest(${argument(0)}))`;
+        return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_sha256_digest(blaze_value_from_dynamic(${argument(0)})))`;
       case "blaze_rt_own_key":
         return `${RUNTIME_NAME}_own_key(${argument(0)}, ${argument(1)})`;
       case "fs.readFileSync":
@@ -1310,9 +1310,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "posix.join":
         return `${RUNTIME_NAME}_path_join(${argument(0)}, ${argument(1)})`;
       case "hasher.update":
-        return `${RUNTIME_NAME}_md5_update(${argument(0)}, ${RUNTIME_NAME}_to_text(${argument(1)}))`;
+        return `blaze_dynamic_from_value(${RUNTIME_NAME}_md5_update(blaze_value_from_dynamic(${argument(0)}), ${RUNTIME_NAME}_to_text(${argument(1)})))`;
       case "hasher.update.digest":
-        return `${RUNTIME_NAME}_md5_digest(${argument(0)})`;
+        return `${RUNTIME_NAME}_md5_digest(blaze_value_from_dynamic(${argument(0)}))`;
       case "array.new":
         return `${RUNTIME_NAME}_dyn_array_new()`;
       case "array.push":

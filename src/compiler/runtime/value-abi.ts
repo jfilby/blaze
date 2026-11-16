@@ -38,6 +38,8 @@ export const EXTERNAL_KINDS = {
   sqlite: 1,
   file: 2,
   ffi: 3,
+  md5: 4,
+  sha256: 5,
 } as const;
 
 /** The state and ownership bits of a registry entry. */

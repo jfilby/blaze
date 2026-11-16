@@ -1558,8 +1558,8 @@ test("the SHA-256 hasher answers the digest the runtime is named for", async () 
     const text = "a".repeat(length);
     return [
       "  hasher = blaze_rt_sha256_create();",
-      `  blaze_rt_sha256_update(hasher, ${JSON.stringify(text)});`,
-      `  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "${digest}") != 0) return ${100 + length};`,
+      `  hasher = blaze_rt_sha256_update(hasher, ${JSON.stringify(text)});`,
+      `  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "${digest}") != 0) return ${100 + length};`,
     ].join("\n");
   });
   const probe = [
@@ -1569,14 +1569,14 @@ test("the SHA-256 hasher answers the digest the runtime is named for", async () 
     "int main(void) {",
     `  ${RUNTIME_NAME}_initialize();`,
     "  /* `createHash`, one update, and the digest of the text. */",
-    '  double hasher = blaze_rt_sha256_create();',
-    '  blaze_rt_sha256_update(hasher, "abc");',
-    '  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 1;',
+    '  BlazeValue hasher = blaze_rt_sha256_create();',
+    '  hasher = blaze_rt_sha256_update(hasher, "abc");',
+    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 1;',
     "  /* Two updates are the update of the two texts joined. */",
     "  hasher = blaze_rt_sha256_create();",
-    '  blaze_rt_sha256_update(hasher, "a");',
-    '  blaze_rt_sha256_update(hasher, "bc");',
-    '  if (strcmp(blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(hasher))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 2;',
+    '  hasher = blaze_rt_sha256_update(hasher, "a");',
+    '  hasher = blaze_rt_sha256_update(hasher, "bc");',
+    '  if (strcmp(blaze_rt_to_text(blaze_rt_sha256_digest(hasher)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") != 0) return 2;',
     ...checks,
     `  ${RUNTIME_NAME}_finalize();`,
     "  return 0;",

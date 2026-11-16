@@ -600,13 +600,13 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_own_key":
       return `blaze_rt_own_key(${args[0]}, ${args[1]})`;
     case "blaze_rt_sha256_create":
-      return `blaze_rt_sha256_create()`;
+      return `blaze_dynamic_from_value(blaze_rt_sha256_create())`;
     case "blaze_rt_sha256_update":
-      return `blaze_rt_sha256_update(${args[0]}, ${args[1]})`;
+      return `blaze_dynamic_from_value(blaze_rt_sha256_update(blaze_value_from_dynamic(${args[0]}), ${args[1]}))`;
     // The digest is the handle a text is carried in, and a call written where
     // a text is read takes the text the runtime holds out of it.
     case "blaze_rt_sha256_digest":
-      return `blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_sha256_digest(${args[0]})))`;
+      return `blaze_rt_to_text(blaze_rt_sha256_digest(blaze_value_from_dynamic(${args[0]})))`;
     case "blaze_rt_is_array":
       return `blaze_rt_is_array(blaze_value_from_dynamic(${args[0]}))`;
     case "blaze_rt_object_has_field":
