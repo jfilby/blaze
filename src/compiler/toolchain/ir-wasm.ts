@@ -29,6 +29,7 @@ import { CompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { boundaryProblems, bodyOf, DATA_BASE_EXPORT, generateWasmHost, generateWasmProgramHost, INSPECT_MODULE, moduleServices, readVaruint, wasmValueType } from "./wasm.ts";
 import { hostServiceBySymbol } from "./wasm-host-runtime.ts";
+import { HANDLE_KINDS, VALUE_LAYOUT, VALUE_TAGS } from "../runtime/value-abi.ts";
 import type { Runner } from "../core/types.ts";
 import { symbolOf } from "../semantics/contract.ts";
 import { rulesFor } from "../semantics/language.ts";
@@ -3638,7 +3639,7 @@ class Body {
         // The name `typeof` answers for a value the read could not type: the
         // value goes down as the handle or the number it is, and the host
         // answers the text that names its kind.
-        this.dynamicValue(argument(0));
+        this.taggedValue(argument(0));
         this.callService("blaze_rt_type_of");
         return TEXT;
       }
@@ -3916,6 +3917,52 @@ class Body {
       return;
     }
     this.value(value, F64_TYPE);
+  }
+
+  /**
+   * A value as the tagged ABI carries it: a 16-byte record in scratch with the
+   * payload, the tag and the kind written by the compiler that knows the type.
+   * The host reads the tag rather than inferring one from the payload's size.
+   */
+  private taggedValue(value: SemanticValue): void {
+    const type = fieldOf(value,"type") as SemanticType;
+    const address = this.wideScratchOf(VALUE_LAYOUT.bytes);
+    let tag = Number(fieldOf(VALUE_TAGS,"number"));
+    let kind = 0;
+    let payloadIsFloat = false;
+    if (String(fieldOf(type,"kind")) === "primitive" && fieldOf(type,"name") === "bool") {
+      tag = Number(fieldOf(VALUE_TAGS,"boolean"));
+      payloadIsFloat = true;
+    } else if (isTextType(type)) {
+      tag = Number(fieldOf(VALUE_TAGS,"handle"));
+      kind = Number(fieldOf(HANDLE_KINDS,"string"));
+    } else if (String(fieldOf(type,"kind")) === "ref" || String(fieldOf(type,"kind")) === "ptr" ||
+               String(fieldOf(type,"kind")) === "slice" || String(fieldOf(type,"kind")) === "array") {
+      tag = Number(fieldOf(VALUE_TAGS,"handle"));
+      kind = Number(fieldOf(HANDLE_KINDS,"object"));
+    }
+    this.i32(address);
+    if (payloadIsFloat || tag === Number(fieldOf(VALUE_TAGS,"number"))) {
+      this.value(value, F64_TYPE);
+      this.op(0x39);
+      this.code.varuint(3);
+    } else {
+      this.value(value, type);
+      this.op(0x36);
+      this.code.varuint(2);
+    }
+    this.code.varuint(0);
+    this.i32(address + Number(fieldOf(fieldOf(VALUE_LAYOUT,"tag"),"offset")));
+    this.i32(tag);
+    this.op(0x36);
+    this.code.varuint(2);
+    this.code.varuint(0);
+    this.i32(address + Number(fieldOf(fieldOf(VALUE_LAYOUT,"kind"),"offset")));
+    this.i32(kind);
+    this.op(0x36);
+    this.code.varuint(2);
+    this.code.varuint(0);
+    this.i32(address);
   }
 
   /**

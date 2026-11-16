@@ -27,7 +27,7 @@
  * the other two backends call.
  */
 
-import { valueAbiWasmDeclaration } from "../runtime/value-abi.ts";
+import { HANDLE_KINDS, VALUE_LAYOUT, VALUE_TAGS, valueAbiWasmDeclaration } from "../runtime/value-abi.ts";
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
@@ -447,7 +447,7 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_type_of",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "i32"
   },
@@ -1179,6 +1179,17 @@ function view() {
   return new DataView(memory.buffer);
 }
 
+/* The tagged value a module writes into linear memory. The payload, tag and
+   kind are placed there by the lowering, which knows the type of the value;
+   the host reads them instead of inferring a type from the payload. */
+function taggedValueAt(address) {
+  const bytes = view();
+  const payload = bytes.getBigUint64(address, true);
+  const tag = bytes.getInt32(address + ${VALUE_LAYOUT.tag.offset}, true);
+  const kind = bytes.getInt32(address + ${VALUE_LAYOUT.kind.offset}, true);
+  return { payload, tag, kind };
+}
+
 function alignUp(value, at) {
   const rest = value % at;
   return rest === 0 ? value : value + (at - rest);
@@ -1752,22 +1763,11 @@ export function blaze_rt_to_text(value) {
   {
     service: "blaze_rt_type_of",
     source: `
-export function blaze_rt_type_of(value) {
-  const boxed = dynLookup(value);
-  if (boxed === null) return makeText(value >= 4096 ? "string" : "number");
-  if (boxed.kind === "number") return makeText("number");
-  if (boxed.kind === "bool") return makeText("boolean");
-  if (boxed.kind === "text") return makeText("string");
-  if (boxed.kind === "value") {
-    /* A value a parse read is the JavaScript value it parsed to, so its kind
-       is the one the language would answer for that value. */
-    const inner = boxed.value;
-    if (inner === null) return makeText("object");
-    if (typeof inner === "number") return makeText("number");
-    if (typeof inner === "boolean") return makeText("boolean");
-    if (typeof inner === "string") return makeText("string");
-    return makeText("object");
-  }
+export function blaze_rt_type_of(address) {
+  const value = taggedValueAt(address);
+  if (value.tag === ${VALUE_TAGS.number} || value.kind === ${HANDLE_KINDS.number}) return makeText("number");
+  if (value.tag === ${VALUE_TAGS.boolean} || value.kind === ${HANDLE_KINDS.boolean}) return makeText("boolean");
+  if (value.kind === ${HANDLE_KINDS.string}) return makeText("string");
   return makeText("object");
 }
 `,

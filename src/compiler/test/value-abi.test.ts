@@ -78,6 +78,19 @@ test("the wasm host declares the same tags and layout as the other backends", as
   assert.match(WASM_VALUE_ABI, /VALUE_KIND_OFFSET = 12/);
 });
 
+test("the wasm host reads type_of from the tagged record, not a magnitude", async () => {
+  const { hostRuntimeSource, hostServiceBySymbol } = await import("../toolchain/wasm-host-runtime.ts");
+  const service = hostServiceBySymbol("blaze_rt_type_of");
+  assert.ok(service !== null);
+  assert.deepEqual([...service.params], ["i32"], "a tagged value crosses as a pointer to its record");
+  const source = hostRuntimeSource(["blaze_rt_type_of"]);
+  assert.match(source, /function taggedValueAt\(address\)/);
+  assert.match(source, /getBigUint64\(address, true\)/);
+  assert.match(source, /bytes\.getInt32\(address \+ 8, true\)/);
+  assert.match(source, /bytes\.getInt32\(address \+ 12, true\)/);
+  assert.doesNotMatch(source, /value >= 4096/);
+});
+
 test("the header carries the value the backends generate calls against", () => {
   const header = runtimeHeaderSource();
   assert.match(header, /typedef struct \{[\s\S]*uint64_t payload;[\s\S]*uint32_t tag;[\s\S]*uint32_t kind;[\s\S]*\} BlazeValue;/);
