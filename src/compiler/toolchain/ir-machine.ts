@@ -28,7 +28,7 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
 import { readFileSync, stat, writeFile } from "../core/platform.ts";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
-import { DEFAULT_ALIGNMENT, RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
+import { DEFAULT_ALIGNMENT, RUNTIME_NAME } from "../runtime/abi.ts";
 import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { integerLiteral } from "./c-names.ts";
 import { ARGV_LENGTH, SHARED, builtinFor } from "../semantics/builtins.ts";
@@ -103,16 +103,6 @@ import {
 /* -------------------------------------------------------------------------- */
 /* Types as the machine holds them                                              */
 /* -------------------------------------------------------------------------- */
-
-/* The runtime entries that answer a tagged value. A 16-byte record cannot come
-   back in a register pair under this backend's foreign-call convention, so the
-   address of a frame slot is handed over first and the payload is read from it
-   after the call. */
-const TAGGED_RETURNS: ReadonlySet<string> = new Set(
-  (RUNTIME_ABI as readonly { symbol: string; returns: string }[])
-    .filter((entry) => entry.returns === "BlazeValue")
-    .map((entry) => entry.symbol),
-);
 
 function isDynamicType(type: SemanticType | null): boolean {
   return type !== null && String(fieldOf(type, "kind")) === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
@@ -11230,12 +11220,8 @@ class Machine {
       if (!untouched) this.store(held);
       return held;
     });
-    const symbol = String(fieldOf(signature, "symbol"));
-    const taggedReturn = TAGGED_RETURNS.has(symbol);
-    const taggedOut = taggedReturn ? this.reserve(16) : -1;
     const args: (Held | null)[] = [];
     if (sret !== null) args.push(this.resultAddress(sret));
-    else if (taggedOut >= 0) args.push(this.resultAddress({ offset: taggedOut } as Held));
     for (const [at, held] of evaluated.entries()) {
       args.push(held);
       const length = lengths[at];
@@ -11245,21 +11231,15 @@ class Machine {
     // register the callee reads it in: the two shortcuts below are the ones a
     // call without one takes, and passing the indices through would leave a
     // value the callee reads from the wrong register.
-    const shift = sret === null && taggedOut < 0 && !wideArguments ? 0 : 1;
+    const shift = sret === null && !wideArguments ? 0 : 1;
     this.callSymbol(
-      symbol,
+      String(fieldOf(signature, "symbol")),
       args,
       returns,
       shift === 0 ? fresh : -1,
       shift === 0 ? placed : -1,
     );
     if (sret !== null) return;
-    if (taggedOut >= 0) {
-      // The record is in the frame; its first eight bytes are the payload the
-      // rest of the body carries a dynamic value in.
-      this.code.movsLoad(XMM0, frame(taggedOut), false);
-      return;
-    }
     if (wanted !== null && String(fieldOf(wanted, "kind")) !== "void") this.convert(returns, wanted);
   }
 
