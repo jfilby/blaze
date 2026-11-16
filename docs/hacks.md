@@ -15,8 +15,8 @@ in one place, and so nobody mistakes them for principles.
 > now the one typed registry, so both name values by slot and generation. What
 > remains is the ABI signature migration: dynamic values still cross the C
 > boundary as `double`. The globals, dynamic arrays, dictionary services, value
-> inspection, text rendering, record writes and hashers are migrated; 66
-> double-typed ABI entries and 62 `(double)(uintptr_t)` conversions remain,
+> inspection, text rendering, record writes and hashers are migrated; 62
+> double-typed ABI entries and 8 `(double)(uintptr_t)` conversions remain,
 > mostly in emitters that still carry a reference in a generated C local. The
 > authoritative layout and the remaining plan are in `docs/specs/value-abi.md`.
 

@@ -1448,7 +1448,7 @@ class FunctionEmitter {
       const headers = this.expression((fieldOf(call,"args") as SemanticValue[])[2], null, depth);
       const body = this.expression((fieldOf(call,"args") as SemanticValue[])[3], null, depth);
       const bodyText = (String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "ptr" || String(fieldOf(fieldOf((fieldOf(call,"args") as SemanticValue[])[3],"type"),"kind")) === "text") ? body : `blaze_rt_to_text(blaze_value_from_dynamic(${body}))`;
-      return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); })`;
+      return `({ const char *blaze_http_req_body = ${bodyText}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char*)))blaze_http_resp, blaze_http_len); })`;
     }
     // `parseInt(text)` and `Number(text)` are the number a value states: a
     // text is the number its text says, which the runtime reads out of the box
@@ -1525,7 +1525,7 @@ class FunctionEmitter {
         });
         invoke = `${fieldOf(cb,"name")}(${captures.map((capture: { name: string }) => fieldOf(capture,"name")).join(", ")})`;
       }
-      return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; (double)(uintptr_t)blaze_promise; })`;
+      return `({ void *blaze_promise = blaze_promise_new(); blaze_current_promise = blaze_promise; ${invoke}; blaze_current_promise = NULL; blaze_value_ref((void*)(blaze_promise)); })`;
     }
     // A promise executor settles the promise the runtime holds as the current
     // one: the value is a text, nothing, a reference or a number, and the
@@ -1667,7 +1667,7 @@ class FunctionEmitter {
     const headers = cstr(2);
     const body = cstr(3);
     this.write([
-      `${pad(depth)}(void)({ const char *blaze_http_req_body = ${body}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); (double)(uintptr_t)blaze_rt_string_new((const unsigned char*)blaze_http_resp, blaze_http_len); });`,
+      `${pad(depth)}(void)({ const char *blaze_http_req_body = ${body}; size_t blaze_http_req_len = strlen(blaze_http_req_body); size_t blaze_http_len = 0; const char *blaze_http_resp = blaze_http_client_request(${url}, ${method}, ${headers}, (const unsigned char*)blaze_http_req_body, blaze_http_req_len, 10000, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char*)))blaze_http_resp, blaze_http_len); });`,
     ]);
     this.externs.set(
       "blaze_http_client_request",
@@ -1793,7 +1793,7 @@ class FunctionEmitter {
         return `${RUNTIME_NAME}_box_sequence((const void*)(${written}), sizeof(${declaredType(element)}), (int64_t)${kind})`;
       }
       if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) return written;
-      if (isReference(fieldOf(value,"type"))) return `((double)(uintptr_t)(${written}))`;
+      if (isReference(fieldOf(value,"type"))) return `blaze_value_ref((void*)(${written}))`;
       return `${RUNTIME_NAME}_box_null()`;
     }
     const fromDynamic = String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined;
@@ -1830,7 +1830,7 @@ class FunctionEmitter {
     // A reference read at a number is the address it is. The runtime's handles
     // are the doubles their addresses say, so a layout question a value the
     // read could not shape is asked of a record is asked with this.
-    if (isReference(fieldOf(value,"type")) && isNumber(as)) return `(double)(uintptr_t)(${written})`;
+    if (isReference(fieldOf(value,"type")) && isNumber(as)) return `blaze_value_ref((void*)(${written}))`;
     if (isNumber(fieldOf(value,"type")) && isNumber(as)) {
       return String(fieldOf(fieldOf(value,"type"),"kind")) === "primitive" && String(fieldOf(as,"kind")) === "primitive" && String(fieldOf(fieldOf(value,"type"),"name")) === String(fieldOf(as,"name"))
         ? written
@@ -2164,7 +2164,7 @@ class FunctionEmitter {
     (fieldOf(value,"captures") as SemanticValue[]).forEach((capture, index) => {
       lines.push(`${slot}->captured[${index}] = ${this.captureEntry(capture, depth)};`);
     });
-    return `({ ${lines.join(" ")} (double)(uintptr_t)${slot}; })`;
+    return `({ ${lines.join(" ")} blaze_value_ref((void*)(${slot})); })`;
   }
 
   /** One captured value, as the block it travels in holds it. */
@@ -2193,7 +2193,7 @@ class FunctionEmitter {
     const pointer = `(${held}.pointer)`;
     if (isTextType(fieldOf(value,"type"))) return `((const char*)(uintptr_t)${pointer})`;
     if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) {
-      return `((double)(uintptr_t)${pointer})`;
+      return `blaze_value_ref((void*)(${pointer}))`;
     }
     return `((${declaredType(fieldOf(value,"type"))})(uintptr_t)${pointer})`;
   }
@@ -2242,7 +2242,7 @@ class FunctionEmitter {
     const forwarded = args.length === 0 ? "" : `, ${args.join(", ")}`;
     return (
       `({ blaze_fn_closure_t *${slot} = ${this.closurePointer(this.raw(through, depth))}; ` +
-      `((${declaredType(fieldOf(call,"returns"))} (*)(${types.join(", ")}))${slot}->code)((double)(uintptr_t)${slot}${forwarded}); })`
+      `((${declaredType(fieldOf(call,"returns"))} (*)(${types.join(", ")}))${slot}->code)(blaze_value_ref((void*)(${slot})${forwarded})); })`
     );
   }
 

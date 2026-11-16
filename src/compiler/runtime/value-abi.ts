@@ -205,6 +205,8 @@ BlazeValue blaze_value_from_dynamic(double value);
 double blaze_dynamic_from_value(BlazeValue value);
 /* A C string the compiler wrote out, carried as an external-buffer string. */
 BlazeValue blaze_value_c_text(const char* text);
+/* A reference a lowering holds as a pointer, carried as a typed handle. */
+double blaze_value_ref(void* pointer);
 
 static inline double blaze_value_number_of(const BlazeValue* value) {
   double number = 0.0;

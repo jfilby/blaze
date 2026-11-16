@@ -1169,7 +1169,7 @@ class ProgramEmitter {
         const typeKind = String(fieldOf(type, "kind"));
         const dynamic = type !== null && typeKind === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
         const boxed = fieldOf(call, "builtin") === true && dynamic && isReferenced(fieldOf(argument, "type") as SemanticType)
-          ? `((double)(uintptr_t)(${text}))`
+          ? `blaze_value_ref((void*)(${text}))`
           : String((fieldOf(this.target, "argument") as (...args: any[]) => any)(type, text));
         argumentsText.push(boxed);
       }

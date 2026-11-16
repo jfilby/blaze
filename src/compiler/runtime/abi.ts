@@ -6504,6 +6504,16 @@ BlazeValue blaze_value_c_text(const char* text) {
   return blaze_registry_register(BLAZE_HANDLE_STRING, (void*)text, text == NULL ? 0 : strlen(text) + 1, BLAZE_ENTRY_EXTERNAL);
 }
 
+double blaze_value_ref(void* pointer) {
+  if (pointer == NULL) return 0.0;
+  if (blaze_pointer_find(pointer) == 0) {
+    const uint64_t length = blaze_rt_header_of(pointer)->length;
+    BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_BUFFER, pointer, length, BLAZE_ENTRY_EXTERNAL);
+    blaze_pointer_remember(pointer, blaze_value_index(&handle));
+  }
+  return blaze_dynamic_from_value(blaze_pointer_value(pointer));
+}
+
 static blaze_dyn* blaze_dyn_lookup(double h) {
   uint64_t payload = 0;
   memcpy(&payload, &h, sizeof payload);
