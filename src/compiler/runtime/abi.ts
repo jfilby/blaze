@@ -5316,7 +5316,7 @@ static double blaze_rt_record_value(const unsigned char* at, const char* type) {
   if (strncmp(type, "ref<", 4) == 0 || strncmp(type, "slice<", 6) == 0 || strncmp(type, "ptr<", 4) == 0) {
     const void* pointer = NULL;
     memcpy(&pointer, at, sizeof pointer);
-    return (double)(uintptr_t)pointer;
+    return blaze_dynamic_from_value(blaze_pointer_value(pointer));
   }
   if (strcmp(type, "f32") == 0) { float small = 0; memcpy(&small, at, sizeof small); return blaze_rt_box_number((double)small); }
   if (strcmp(type, "f64") == 0) { double number = 0; memcpy(&number, at, sizeof number); return blaze_rt_box_number(number); }
@@ -5512,7 +5512,7 @@ double blaze_rt_dict_set_seq(BlazeValue dictValue, const char* key, void* value,
   void* copy = blaze_rt_allocate(bytes);
   if (copy == NULL) blaze_rt_raise("out of memory");
   if (bytes > 0 && value != NULL) memcpy(copy, value, bytes);
-  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)copy);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, blaze_dynamic_from_value(blaze_pointer_value(copy)));
 }
 
 void* blaze_rt_dict_get_seq(BlazeValue dictValue, const char* key) {
@@ -5550,7 +5550,7 @@ const char* blaze_rt_dict_get_text(BlazeValue dictValue, const char* key) {
 
 double blaze_rt_dict_set_text(BlazeValue dictValue, const char* key, const char* value) {
   const double dict = blaze_dyn_untagged(dictValue);
-  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)value);
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, blaze_dynamic_from_value(blaze_pointer_value(value)));
 }
 
 const char* blaze_rt_dict_key_at(BlazeValue dictValue, double index) {
@@ -5590,8 +5590,8 @@ double blaze_rt_dict_value_at(BlazeValue dictValue, double index) {
       const unsigned char* at = (const unsigned char*)(uintptr_t)dict + where;
       if (strcmp(kind, "f64") == 0) { double number = 0; memcpy(&number, at, sizeof number); return number; }
       if (strcmp(kind, "f32") == 0) { float small = 0; memcpy(&small, at, sizeof small); return (double)small; }
-      if (strcmp(kind, "text") == 0) { const char* text = NULL; memcpy(&text, at, sizeof text); return (double)(uintptr_t)text; }
-      const void* pointer = NULL; memcpy(&pointer, at, sizeof pointer); return (double)(uintptr_t)pointer;
+      if (strcmp(kind, "text") == 0) { const char* text = NULL; memcpy(&text, at, sizeof text); return blaze_dynamic_from_value(blaze_pointer_value(text)); }
+      const void* pointer = NULL; memcpy(&pointer, at, sizeof pointer); return blaze_dynamic_from_value(blaze_pointer_value(pointer));
     }
   }
   return 0.0;
@@ -5699,7 +5699,7 @@ double blaze_rt_dict_key_ref_at(BlazeValue dictValue, double index) {
   const double dict = blaze_dyn_untagged(dictValue);
   const char* key = blaze_rt_dict_key_at(blaze_value_from_dynamic(dict), index);
   if (key == NULL || key[0] == '\\0') return 0.0;
-  return (double)(uintptr_t)strtoull(key, NULL, 16);
+  return (double)strtoull(key, NULL, 16);
 }
 
 /* A number key is the number itself. The dictionary keeps a text for every
@@ -8467,7 +8467,7 @@ static void* blaze_rt_clone_object(void* object) {
   const blaze_rt_header* header = blaze_rt_header_of(object);
   if (header->magic != BLAZE_RT_MAGIC) return object;
   if (header->descriptor == NULL) return object;
-  BlazeValue copyValue = blaze_rt_object_copy(blaze_value_from_dynamic((double)(uintptr_t)object));
+  BlazeValue copyValue = blaze_rt_object_copy(blaze_pointer_value(object));
   void* copy = blaze_pointer_of_value(&copyValue, BLAZE_HANDLE_RECORD, "blaze_rt_clone");
   const char* cursor = header->descriptor;
   blaze_rt_layout_field field;
@@ -8529,7 +8529,8 @@ BlazeValue blaze_rt_clone(BlazeValue value) {
    a record is a fixed shape, and a write to a field it does not hold would add
    one no read could find. */
 static unsigned char* blaze_rt_object_field(void* object, const char* field, const char** type) {
-  if (!blaze_rt_is_block((double)(uintptr_t)object)) {
+  BlazeValue heldObject = blaze_pointer_value(object);
+  if (!blaze_value_is_handle(&heldObject, BLAZE_HANDLE_RECORD)) {
     blaze_rt_raise("a field written into a value that is not a record");
     return NULL;
   }
