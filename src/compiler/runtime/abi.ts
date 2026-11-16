@@ -9017,7 +9017,10 @@ static blaze_promise* blaze_promise_of(BlazeValue handle, const char* operation)
 
 BlazeValue blaze_promise_new(void) {
   blaze_promise* p = malloc(sizeof(blaze_promise));
-  if (p == NULL) blaze_rt_refuse("out of memory making a promise");
+  if (p == NULL) {
+    fprintf(stderr, "blaze: out of memory making a promise\\n");
+    exit(2);
+  }
   p->settled = 0;
   p->failed = 0;
   p->kind = BLAZE_PROMISE_NULL;
@@ -9091,11 +9094,11 @@ int blaze_promise_failed(BlazeValue handle) { blaze_promise* p = blaze_promise_o
 const char* blaze_promise_message(BlazeValue handle) { blaze_promise* p = blaze_promise_of(handle, "blaze_promise_message"); return p ? p->message : NULL; }
 void blaze_promise_set_current(BlazeValue promise) { blaze_current_promise = promise; }
 void blaze_promise_clear_current(void) { blaze_current_promise = blaze_value_null(); }
-void blaze_promise_resolve_current(double value) { if (blaze_value_is_handle(&blaze_current_promise, BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve(blaze_current_promise, value); }
-void blaze_promise_resolve_current_text(const char* value) { if (blaze_value_is_handle(&blaze_current_promise, BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_text(blaze_current_promise, value); }
-void blaze_promise_resolve_current_null(void) { if (blaze_value_is_handle(&blaze_current_promise, BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_null(blaze_current_promise); }
-void blaze_promise_resolve_current_value(double value) { if (blaze_value_is_handle(&blaze_current_promise, BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_value(blaze_current_promise, value); }
-void blaze_promise_reject_current(const char* message) { if (blaze_value_is_handle(&blaze_current_promise, BLAZE_EXTERNAL_PROMISE)) blaze_promise_reject(blaze_current_promise, message); }
+void blaze_promise_resolve_current(double value) { if ((blaze_current_promise.tag == BLAZE_VALUE_EXTERNAL && blaze_current_promise.kind == BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve(blaze_current_promise, value); }
+void blaze_promise_resolve_current_text(const char* value) { if ((blaze_current_promise.tag == BLAZE_VALUE_EXTERNAL && blaze_current_promise.kind == BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_text(blaze_current_promise, value); }
+void blaze_promise_resolve_current_null(void) { if ((blaze_current_promise.tag == BLAZE_VALUE_EXTERNAL && blaze_current_promise.kind == BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_null(blaze_current_promise); }
+void blaze_promise_resolve_current_value(double value) { if ((blaze_current_promise.tag == BLAZE_VALUE_EXTERNAL && blaze_current_promise.kind == BLAZE_EXTERNAL_PROMISE)) blaze_promise_resolve_value(blaze_current_promise, value); }
+void blaze_promise_reject_current(const char* message) { if ((blaze_current_promise.tag == BLAZE_VALUE_EXTERNAL && blaze_current_promise.kind == BLAZE_EXTERNAL_PROMISE)) blaze_promise_reject(blaze_current_promise, message); }
 BlazeValue blaze_current_promise = { 0, 0, 0 };
 static int blaze_error_flag = 0;
 static const char* blaze_error_message = NULL;
