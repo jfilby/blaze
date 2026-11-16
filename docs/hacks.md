@@ -13,12 +13,13 @@ in one place, and so nobody mistakes them for principles.
 > lengths, and object kinds and lengths come from registry entries rather than
 > from memory before a pointer. The boxed-value and dictionary registries are
 > now the one typed registry, so both name values by slot and generation. What
-> remains is the ABI signature migration: dynamic values still cross the C
-> boundary as `double`. The globals, dynamic arrays, dictionary services, value
-> inspection, text rendering, record writes and hashers are migrated; 62
-> double-typed ABI entries and 8 `(double)(uintptr_t)` conversions remain,
-> mostly in emitters that still carry a reference in a generated C local. The
-> authoritative layout and the remaining plan are in `docs/specs/value-abi.md`.
+> remains is the last of the ABI signature migration. The globals, dynamic
+> arrays, dictionary services, value inspection, text rendering, record writes,
+> hashers and the wasm value services are migrated. No `(double)(uintptr_t)`
+> conversions or numeric-range type probes remain. 21 double-typed ABI entries
+> are left, all host services whose `double` is a number rather than a dynamic
+> value. The authoritative layout and the remaining plan are in
+> `docs/specs/value-abi.md`.
 
 The C backend's dynamic side has a single untagged 64-bit slot. Everything —
 numbers, registry indices, texts, records — travels as an IEEE-754 `double`.
