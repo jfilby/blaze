@@ -8730,7 +8730,7 @@ class Machine {
       this.value(rightValue);
       const right = this.hold(POINTER, "blaze_array_right");
       this.store(right);
-      this.callRuntime("blaze_rt_array_join", [left, right], POINTER);
+      this.callSymbol("blaze_rt_array_join", [left, right], POINTER);
       return;
     }
     if (op === "pow") {
@@ -11328,25 +11328,6 @@ class Machine {
     return [payload, tagKind];
   }
 
-  /**
-   * A call of a runtime service, marshalling the parameters the ABI states as
-   * tagged values. A service that takes no tagged value is called exactly as
-   * before; only the entries that cross a value boundary change shape.
-   */
-  private callRuntime(symbol: string, args: readonly Held[], returns: SemanticType): void {
-    const taggedAt = TAGGED_PARAMS.get(symbol);
-    const passed: (Held | null)[] = [];
-    for (const [at, held] of args.entries()) {
-      if (taggedAt?.has(at) === true) passed.push(...this.taggedPair(held, held.type));
-      else passed.push(held);
-    }
-    this.callSymbol(symbol, passed, returns, -1, -1);
-    if (TAGGED_RETURNS.has(symbol)) {
-      const answer = this.taggedAnswer();
-      this.code.movRegMemSized(RAX, frame(answer[0].offset), 8, false);
-    }
-  }
-
   /** A foreign call whose argument and answer are both tagged values. */
   private callTagged(symbol: string, pair: readonly [Held, Held]): [Held, Held] {
     this.callSymbol(symbol, [pair[0], pair[1]], NUMBER, -1, -1);
@@ -11572,7 +11553,7 @@ class Machine {
         this.store(slot);
         held.push(slot);
       }
-      this.callRuntime(`blaze_rt_${callee.replace(/\./g, "_")}`, held, NUMBER);
+      this.callSymbol(`blaze_rt_${callee.replace(/\./g, "_")}`, held, NUMBER);
       return;
     }
     if (callee === "JSON.stringify.pretty") {
@@ -11586,7 +11567,7 @@ class Machine {
       const spaces = this.hold(NUMBER, "blaze_json_indent");
       this.at(args[1] as never, argTypes[1] ?? NUMBER);
       this.store(spaces);
-      this.callRuntime("blaze_rt_json_object", [held, spaces], TEXT);
+      this.callSymbol("blaze_rt_json_object", [held, spaces], TEXT);
       return;
     }
     if (callee === "JSON.stringify" && argument !== undefined) {
@@ -11604,7 +11585,7 @@ class Machine {
       this.at(argument, TEXT);
       const text = this.hold(TEXT, "blaze_date_text");
       this.store(text);
-      this.callRuntime("blaze_rt_date_parse", [text], NUMBER);
+      this.callSymbol("blaze_rt_date_parse", [text], NUMBER);
       return;
     }
     if (callee === "fs.readFileSync" && args[0] !== undefined && args[1] !== undefined) {
@@ -11617,14 +11598,14 @@ class Machine {
       this.at(args[1], TEXT);
       const mode = this.hold(TEXT, "blaze_file_mode");
       this.store(mode);
-      this.callRuntime("blaze_rt_file_read", [path, mode], NUMBER);
+      this.callSymbol("blaze_rt_file_read", [path, mode], NUMBER);
       this.dynamicResult();
       return;
     }
     if (callee === "blaze_rt_sha256_create") {
       // The hasher is a handle the runtime made and keeps: it answers the
       // double that names one, and the chain hands it back to the next call.
-      this.callRuntime("blaze_rt_sha256_create", [], NUMBER);
+      this.callSymbol("blaze_rt_sha256_create", [], NUMBER);
       return;
     }
     if (callee === "blaze_rt_sha256_update" && args[0] !== undefined && args[1] !== undefined) {
@@ -11634,14 +11615,14 @@ class Machine {
       this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_hash_text");
       this.store(text);
-      this.callRuntime("blaze_rt_sha256_update", [hasher, text], NUMBER);
+      this.callSymbol("blaze_rt_sha256_update", [hasher, text], NUMBER);
       return;
     }
     if (callee === "blaze_rt_sha256_digest" && argument !== undefined) {
       this.at(argument, NUMBER);
       const hasher = this.hold(NUMBER, "blaze_hasher");
       this.store(hasher);
-      this.callRuntime("blaze_rt_sha256_digest", [hasher], NUMBER);
+      this.callSymbol("blaze_rt_sha256_digest", [hasher], NUMBER);
       // The runtime answers the hex digest as the handle a text is carried in,
       // and the IR says the answer is a text: the answer is already in the
       // register the unboxing takes it from.
@@ -11652,14 +11633,14 @@ class Machine {
       this.at(argument, TEXT);
       const text = this.hold(TEXT, "blaze_path_text");
       this.store(text);
-      this.callRuntime("blaze_rt_path_dirname", [text], TEXT);
+      this.callSymbol("blaze_rt_path_dirname", [text], TEXT);
       return;
     }
     if (callee === "posix.normalize" && argument !== undefined) {
       this.at(argument, TEXT);
       const text = this.hold(TEXT, "blaze_path_text");
       this.store(text);
-      this.callRuntime("blaze_rt_path_normalize", [text], TEXT);
+      this.callSymbol("blaze_rt_path_normalize", [text], TEXT);
       return;
     }
     if (callee === "posix.join" && args[0] !== undefined && args[1] !== undefined) {
@@ -11669,7 +11650,7 @@ class Machine {
       this.at(args[1], TEXT);
       const right = this.hold(TEXT, "blaze_path_right");
       this.store(right);
-      this.callRuntime("blaze_rt_path_join", [left, right], TEXT);
+      this.callSymbol("blaze_rt_path_join", [left, right], TEXT);
       return;
     }
     if (callee === "blaze_rt_object_has_field" && args[0] !== undefined && args[1] !== undefined) {
@@ -11679,12 +11660,12 @@ class Machine {
       this.at(args[1], TEXT);
       const field = this.hold(TEXT, "blaze_has_field");
       this.store(field);
-      this.callRuntime("blaze_rt_object_has_field", [object, field], NUMBER);
+      this.callSymbol("blaze_rt_object_has_field", [object, field], NUMBER);
       return;
     }
     if (callee === "JSON.parse" && argument !== undefined) {
       const text = this.dynamicArgument(argument);
-      this.callRuntime("blaze_rt_json_parse", [text], NUMBER);
+      this.callSymbol("blaze_rt_json_parse", [text], NUMBER);
       this.dynamicResult();
       return;
     }
@@ -11693,7 +11674,7 @@ class Machine {
       this.at(args[1], TEXT);
       const field = this.hold(TEXT, "blaze_field");
       this.store(field);
-      this.callRuntime("blaze_rt_json_get", [object, field], NUMBER);
+      this.callSymbol("blaze_rt_json_get", [object, field], NUMBER);
       this.dynamicResult();
       return;
     }
@@ -11702,7 +11683,7 @@ class Machine {
       // value goes down as the handle or the number it is, and the runtime
       // answers the text that names its kind.
       const value = this.dynamicArgument(argument);
-      this.callRuntime("blaze_rt_type_of", [value], TEXT);
+      this.callSymbol("blaze_rt_type_of", [value], TEXT);
       return;
     }
     if (callee === SHARED) {
@@ -11993,7 +11974,7 @@ class Machine {
         // The bytes a text is written as: the block the service lays the bytes
         // out in, which is the address a byte array is read at.
         const bytes = text(0);
-        this.callRuntime("blaze_rt_text_bytes", [bytes], POINTER);
+        this.callSymbol("blaze_rt_text_bytes", [bytes], POINTER);
         return;
       }
       if (callee === "text.codePointAt") {
@@ -12001,13 +11982,13 @@ class Machine {
         this.at(args[1], NUMBER);
         const held = this.hold(POINTER, "blaze_code_point_at");
         this.store(held);
-        this.callRuntime("blaze_rt_text_code_point_at", [sliced, held], TEXT);
+        this.callSymbol("blaze_rt_text_code_point_at", [sliced, held], TEXT);
         return;
       }
       if (callee === "text.indexOf") {
         const left = text(0);
         const right = text(1);
-        this.callRuntime("blaze_rt_text_index_of", [left, right], TEXT);
+        this.callSymbol("blaze_rt_text_index_of", [left, right], TEXT);
         // The index answers as a whole number in the accumulator, and the
         // number the language holds is a fraction: the widening is here.
         this.code.zeroFloat(XMM0);
@@ -12027,27 +12008,27 @@ class Machine {
           stop = this.hold(POINTER, "blaze_text_stop");
           this.store(stop);
         }
-        this.callRuntime("blaze_rt_text_slice", [sliced, start, stop], TEXT);
+        this.callSymbol("blaze_rt_text_slice", [sliced, start, stop], TEXT);
         return;
       }
       const folded = text(0);
       if (callee === "text.trimStart") {
-        this.callRuntime("blaze_rt_text_trim_start", [folded], TEXT);
+        this.callSymbol("blaze_rt_text_trim_start", [folded], TEXT);
         return;
       }
       if (callee === "text.trimEnd") {
-        this.callRuntime("blaze_rt_text_trim_end", [folded], TEXT);
+        this.callSymbol("blaze_rt_text_trim_end", [folded], TEXT);
         return;
       }
       if (callee === "text.toLowerCase") {
-        this.callRuntime("blaze_rt_text_lower", [folded], TEXT);
+        this.callSymbol("blaze_rt_text_lower", [folded], TEXT);
         return;
       }
       if (callee === "text.toUpperCase") {
-        this.callRuntime("blaze_rt_text_upper", [folded], TEXT);
+        this.callSymbol("blaze_rt_text_upper", [folded], TEXT);
         return;
       }
-      this.callRuntime("blaze_rt_text_trim", [folded], TEXT);
+      this.callSymbol("blaze_rt_text_trim", [folded], TEXT);
       return;
     }
     if (callee.startsWith("blaze_rt_regex_")) {
@@ -12071,7 +12052,7 @@ class Machine {
         const flags = text(1);
         const subject = text(2);
         const replacement = text(3);
-        this.callRuntime("blaze_rt_regex_replace", [pattern, flags, subject, replacement], TEXT);
+        this.callSymbol("blaze_rt_regex_replace", [pattern, flags, subject, replacement], TEXT);
         return;
       }
       const pattern = text(0);
@@ -12088,7 +12069,7 @@ class Machine {
       this.at(args[0], TEXT);
       const name = this.hold(TEXT, "blaze_env_name");
       this.store(name);
-      this.callRuntime("blaze_rt_env_get", [name], TEXT);
+      this.callSymbol("blaze_rt_env_get", [name], TEXT);
       return;
     }
     if (callee === "readTextFile" && args[0] !== undefined && args[1] !== undefined) {
@@ -12098,14 +12079,14 @@ class Machine {
       this.at(args[1], TEXT);
       const mode = this.hold(TEXT, "blaze_read_text_mode");
       this.store(mode);
-      this.callRuntime("blaze_rt_file_read_text", [path, mode], TEXT);
+      this.callSymbol("blaze_rt_file_read_text", [path, mode], TEXT);
       return;
     }
     if (callee === "syncFile" && args[0] !== undefined) {
       this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_sync_path");
       this.store(path);
-      this.callRuntime("blaze_rt_file_sync", [path], NUMBER);
+      this.callSymbol("blaze_rt_file_sync", [path], NUMBER);
       return;
     }
     if (callee === "hostPlatformName" || callee === "hostArchName") {
@@ -12131,29 +12112,29 @@ class Machine {
       this.at(args[3], TEXT);
       const cwd = this.hold(TEXT, "blaze_run_cwd");
       this.store(cwd);
-      this.callRuntime("blaze_rt_process_run", [command, input, timeout, cwd], TEXT);
+      this.callSymbol("blaze_rt_process_run", [command, input, timeout, cwd], TEXT);
       return;
     }
     if (callee === "streamIsTTY" && args[0] !== undefined) {
       this.at(args[0], NUMBER);
       const stream = this.hold(NUMBER, "blaze_tty_stream");
       this.store(stream);
-      this.callRuntime("blaze_rt_stream_is_tty", [stream], NUMBER);
+      this.callSymbol("blaze_rt_stream_is_tty", [stream], NUMBER);
       return;
     }
     if (callee === "setExitCode" && args[0] !== undefined) {
       this.at(args[0], NUMBER);
       const code = this.hold(NUMBER, "blaze_exit_code");
       this.store(code);
-      this.callRuntime("blaze_rt_set_exit_code", [code], NUMBER);
+      this.callSymbol("blaze_rt_set_exit_code", [code], NUMBER);
       return;
     }
     if (callee === "exitCode") {
-      this.callRuntime("blaze_rt_exit_code", [], NUMBER);
+      this.callSymbol("blaze_rt_exit_code", [], NUMBER);
       return;
     }
     if (callee === "readLine") {
-      this.callRuntime("blaze_rt_read_line", [], TEXT);
+      this.callSymbol("blaze_rt_read_line", [], TEXT);
       return;
     }
     if (callee === "cwdPath" || callee === "processId" || callee === "hostProcessId" || callee === "cpuCount") {
@@ -12172,7 +12153,7 @@ class Machine {
       this.at(args[0], NUMBER);
       const milliseconds = this.hold(NUMBER, "blaze_sleep_ms");
       this.store(milliseconds);
-      this.callRuntime("blaze_rt_sleep_ms", [milliseconds], NUMBER);
+      this.callSymbol("blaze_rt_sleep_ms", [milliseconds], NUMBER);
       return;
     }
     if (callee === "removePath" && args[0] !== undefined && args[1] !== undefined) {
@@ -12182,7 +12163,7 @@ class Machine {
       this.at(args[1], NUMBER);
       const recursive = this.hold(NUMBER, "blaze_remove_recursive");
       this.store(recursive);
-      this.callRuntime("blaze_rt_path_remove", [path, recursive], NUMBER);
+      this.callSymbol("blaze_rt_path_remove", [path, recursive], NUMBER);
       return;
     }
     if (callee === "appendPath" && args[0] !== undefined && args[1] !== undefined) {
@@ -12192,7 +12173,7 @@ class Machine {
       this.at(args[1], TEXT);
       const text = this.hold(TEXT, "blaze_append_text");
       this.store(text);
-      this.callRuntime("blaze_rt_file_append", [path, text], NUMBER);
+      this.callSymbol("blaze_rt_file_append", [path, text], NUMBER);
       return;
     }
     if (callee === "copyPath" && args[0] !== undefined && args[1] !== undefined) {
@@ -12202,7 +12183,7 @@ class Machine {
       this.at(args[1], TEXT);
       const to = this.hold(TEXT, "blaze_copy_to");
       this.store(to);
-      this.callRuntime("blaze_rt_file_copy", [from, to], NUMBER);
+      this.callSymbol("blaze_rt_file_copy", [from, to], NUMBER);
       return;
     }
     if (callee === "makeDir" && args[0] !== undefined) {
@@ -12212,7 +12193,7 @@ class Machine {
       this.at({ k: "const", type: NUMBER, text: "1" }, NUMBER);
       const recursive = this.hold(NUMBER, "blaze_make_recursive");
       this.store(recursive);
-      this.callRuntime("blaze_rt_dir_make", [path, recursive], NUMBER);
+      this.callSymbol("blaze_rt_dir_make", [path, recursive], NUMBER);
       return;
     }
     if (callee === "renamePath" && args[0] !== undefined && args[1] !== undefined) {
@@ -12222,7 +12203,7 @@ class Machine {
       this.at(args[1], TEXT);
       const to = this.hold(TEXT, "blaze_rename_to");
       this.store(to);
-      this.callRuntime("blaze_rt_path_rename", [from, to], NUMBER);
+      this.callSymbol("blaze_rt_path_rename", [from, to], NUMBER);
       return;
     }
     if (callee === "dirList" && args[0] !== undefined) {
@@ -12231,7 +12212,7 @@ class Machine {
       this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_dir_path");
       this.store(path);
-      this.callRuntime("blaze_rt_dir_list", [path], TEXT);
+      this.callSymbol("blaze_rt_dir_list", [path], TEXT);
       return;
     }
     if ((callee === "pathKind" || callee === "fileSize") && args[0] !== undefined) {
@@ -12249,7 +12230,7 @@ class Machine {
       this.at(args[0], TEXT);
       const path = this.hold(TEXT, "blaze_exists_path");
       this.store(path);
-      this.callRuntime("blaze_rt_path_exists", [path], NUMBER);
+      this.callSymbol("blaze_rt_path_exists", [path], NUMBER);
       return;
     }
     if (callee === "fs.writeFileSync" && args[0] !== undefined && args[1] !== undefined) {
@@ -12264,7 +12245,7 @@ class Machine {
       this.at({ k: "const", type: NUMBER, text: "0" }, NUMBER);
       const append = this.hold(NUMBER, "blaze_file_append");
       this.store(append);
-      this.callRuntime("blaze_rt_file_write", [path, text, append], NUMBER);
+      this.callSymbol("blaze_rt_file_write", [path, text, append], NUMBER);
       return;
     }
     if (callee === "process.env") {
@@ -12326,14 +12307,14 @@ class Machine {
       this.at(args[1], NUMBER);
       const held = this.hold(POINTER, "blaze_parse_int_radix");
       this.store(held);
-      this.callRuntime("blaze_rt_parse_int", [text, held], TEXT);
+      this.callSymbol("blaze_rt_parse_int", [text, held], TEXT);
       return;
     }
     if (callee === "String.fromCodePoint") {
       this.at(argument, NUMBER);
       const held = this.hold(POINTER, "blaze_from_code_point");
       this.store(held);
-      this.callRuntime("blaze_rt_from_code_point", [held], TEXT);
+      this.callSymbol("blaze_rt_from_code_point", [held], TEXT);
       return;
     }
     const library = MATH_LIBRARY[callee];
