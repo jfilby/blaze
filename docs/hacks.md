@@ -16,10 +16,12 @@ in one place, and so nobody mistakes them for principles.
 > remains is the last of the ABI signature migration. The globals, dynamic
 > arrays, dictionary services, value inspection, text rendering, record writes,
 > hashers and the wasm value services are migrated. No `(double)(uintptr_t)`
-> conversions or numeric-range type probes remain. 21 double-typed ABI entries
-> are left, all host services whose `double` is a number rather than a dynamic
-> value. The authoritative layout and the remaining plan are in
-> `docs/specs/value-abi.md`.
+> conversions or numeric-range type probes remain, in C, Nim, WASM or the
+> machine backend. The machine backend passes a tagged value as the two integer
+> eightbytes the foreign-call convention gives a 16-byte record. 21
+> double-typed ABI entries are left, all host services whose `double` is a
+> number rather than a dynamic value. The authoritative layout and the
+> migration's history are in `docs/specs/value-abi.md`.
 
 The C backend's dynamic side has a single untagged 64-bit slot. Everything —
 numbers, registry indices, texts, records — travels as an IEEE-754 `double`.
