@@ -1296,7 +1296,7 @@ function valuesEqual(left: Value, right: Value): boolean {
   return compareValues(left, right) === 0;
 }
 
-export function evaluate(expression: Expr, context: EvalContext): Value {
+export function evaluate(expression: Expr, context: EvalContext): any {
   const e = expression as unknown as Record<string, unknown>;
   switch (String(e["t"])) {
     case "int":
@@ -1400,7 +1400,7 @@ export function evaluate(expression: Expr, context: EvalContext): Value {
       }
       const count = reductionCount(fromWhole, to, e["exclusive"] as boolean);
       const innerValues = new Map(valuesOf(context));
-      let accumulator: Value | null = null;
+      let accumulator: any = null;
       const bodyEnv = new Map(envOf(context));
       bodyEnv.set(String(e["varName"]), { kind: "primitive", name: "usize" });
       const bodyType = typeOf(e["body"] as Expr, bodyEnv);
@@ -1473,12 +1473,12 @@ function reductionCount(from: Whole, to: Value, exclusive: boolean): Whole {
   if (typeof to !== "number" || !Number.isFinite(to)) {
     throw contractError(`a reduction bound must be a finite number, got ${formatValue(to)}`);
   }
-  const remaining = to - wholeToNumber(from);
+  const remaining = Number(to) - wholeToNumber(from);
   if (exclusive) return wholeOfNumber(remaining > 0 ? Math.ceil(remaining) : 0);
   return wholeOfNumber(remaining >= 0 ? Math.floor(remaining) + 1 : 0);
 }
 
-function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: StaticType): Value {
+function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: StaticType): any {
   if (op === "min") return compareValues(value, accumulator) < 0 ? value : accumulator;
   if (op === "max") return compareValues(value, accumulator) > 0 ? value : accumulator;
   if (op === "sum") {
@@ -1493,7 +1493,7 @@ function applyReduce(op: ReduceOp, accumulator: Value, value: Value, bodyType: S
   return roundFloat(asNumber(accumulator, bodyType) * asNumber(value, bodyType), bodyType);
 }
 
-function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType): Value {
+function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType): any {
   // The reduction is held at the type it has, which is wider than the elements
   // it sums: a sum of 100 bytes of 5 is 500, and not 244.
   if (op !== "sum" && op !== "product" || kindOf(bodyType) === "null") return value;
@@ -1502,14 +1502,14 @@ function normalizeReduceResult(value: Value, op: ReduceOp, bodyType: StaticType)
     const whole = isWhole(value) ? value : typeof value === "bigint" ? wholeOfValue(value) : null;
     if (whole !== null) return wrapInteger(whole, nameOf(type));
   }
-  if (kindOf(type) === "primitive" && nameOf(type) === "f32" && typeof value === "number") {
-    return Math.fround(value);
+  if (kindOf(type) === "primitive" && nameOf(type) === "f32") {
+    return Math.fround(Number(value));
   }
   return value;
 }
 
 
-function evaluateBinary(expression: Expr, context: EvalContext): Value {
+function evaluateBinary(expression: Expr, context: EvalContext): any {
   const e = expression as unknown as Record<string, unknown>;
   const op = String(e["op"]);
   const leftExpression = e["left"] as Expr;
@@ -1628,7 +1628,8 @@ export function parseContract(contract: FunctionContract): ParsedContract {
   const promise = fieldOf(contract, "promise");
   if (promise !== undefined) parseType(promise);
   const seen = new Set<string>();
-  for (const param of fieldOf(signature, "params")) {
+  const signatureParams = fieldOf(signature, "params") as unknown[];
+  for (const param of signatureParams) {
     const paramName = String(fieldOf(param, "name"));
     const paramType = String(fieldOf(param, "type"));
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(paramName)) throw contractError(`invalid parameter name "${paramName}"`);
@@ -1684,17 +1685,18 @@ function validateDefinition(contract: FunctionContract): void {
     if (String(fieldOf(object, "name")) !== name) {
       throw contractError(`object ${name} is named "${fieldOf(object, "name") as string}"`, "the layout and the field that names it must agree");
     }
-    const size = fieldOf(object, "size") as number;
-    const align = fieldOf(object, "align") as number;
+    const size = Number(fieldOf(object, "size"));
+    const align = Number(fieldOf(object, "align"));
     if (size <= 0 || align <= 0) {
       throw contractError(`object ${name} has no size`, `size ${size}, align ${align}`);
     }
     const seen = new Set<string>();
     let expected = 0;
-    for (const field of fieldOf(object, "fields")) {
+    const objectFields = fieldOf(object, "fields") as unknown[];
+    for (const field of objectFields) {
       const fieldName = String(fieldOf(field, "name"));
       const fieldType = String(fieldOf(field, "type"));
-      const fieldOffset = fieldOf(field, "offset") as number;
+      const fieldOffset = Number(fieldOf(field, "offset"));
       const type = parseType(fieldType);
       // A field name is written into the C and Nim declarations and into the
       // prompt, verbatim, so a name that is not an identifier is refused here
@@ -1798,7 +1800,7 @@ export function isTrue(value: Value): boolean {
   if (typeof value !== "boolean") {
     throw contractError(`condition evaluated to ${formatValue(value)}, expected true or false`);
   }
-  return value;
+  return value ? true : false;
 }
 
 /** Preconditions that the given arguments violate. */

@@ -2999,8 +2999,11 @@ class FunctionBody {
     // or a number beside a reference is that and nothing more. A reference to a
     // layout says which object it is; one the source left unshaped says
     // nothing, and the other arm is then the better answer.
-    if (left.kind === "ref") return layoutOf(left) ?? (right.kind === "ref" ? layoutOf(right) ?? left : left);
-    if (right.kind === "ref") return layoutOf(right) ?? right;
+    // A reference and a number are not one value of either type: the choice is
+    // the unshaped reference a dynamic value is, and a read through it is the
+    // runtime's. Two references keep the layout they name.
+    if (left.kind === "ref") return right.kind === "ref" ? layoutOf(left) ?? layoutOf(right) ?? left : ANY_REF;
+    if (right.kind === "ref") return ANY_REF;
     throw this.error(
       `a ${typeText(left)} cannot be used where a ${typeText(right)} is`,
       line,
