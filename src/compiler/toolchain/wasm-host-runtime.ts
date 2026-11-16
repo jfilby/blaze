@@ -252,14 +252,14 @@ export const HOST_SERVICES: readonly HostService[] = [
     "params": [
       "i32"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_json_stringify",
     "params": [
-      "f64"
+      "i32"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_md5_create",
@@ -396,32 +396,32 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_array_push",
     "params": [
-      "f64",
-      "f64"
+      "i32",
+      "i32"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_array_get",
     "params": [
-      "f64",
+      "i32",
       "f64"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_array_length",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "f64"
   },
   {
     "symbol": "blaze_rt_array_set",
     "params": [
+      "i32",
       "f64",
-      "f64",
-      "f64"
+      "i32"
     ],
     "result": null
   },
@@ -433,14 +433,14 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_is_array",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "f64"
   },
   {
     "symbol": "blaze_rt_to_text",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "i32"
   },
@@ -463,7 +463,7 @@ export const HOST_SERVICES: readonly HostService[] = [
     "params": [
       "i32"
     ],
-    "result": "f64"
+    "result": "i32"
   },
   {
     "symbol": "blaze_rt_box_null",
@@ -496,7 +496,7 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_to_number",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "f64"
   },
@@ -747,7 +747,7 @@ export const HOST_SERVICES: readonly HostService[] = [
   {
     "symbol": "blaze_rt_length",
     "params": [
-      "f64"
+      "i32"
     ],
     "result": "f64"
   },
@@ -1184,10 +1184,26 @@ function view() {
    the host reads them instead of inferring a type from the payload. */
 function taggedValueAt(address) {
   const bytes = view();
-  const payload = bytes.getBigUint64(address, true);
+  const payload = bytes.getFloat64(address, true);
   const tag = bytes.getInt32(address + ${VALUE_LAYOUT.tag.offset}, true);
   const kind = bytes.getInt32(address + ${VALUE_LAYOUT.kind.offset}, true);
   return { payload, tag, kind };
+}
+
+/* The number a tagged record carries: a number or a truth keeps its IEEE bits,
+   a handle is the slot index the registry gave it. */
+function taggedPayloadAt(address) {
+  return taggedValueAt(address).payload;
+}
+
+/* A handle the host answered, stored as the integer slot in the payload. */
+function writeTaggedHandle(handle, kind) {
+  const address = block(16, 8, false);
+  const bytes = view();
+  bytes.setFloat64(address, handle, true);
+  bytes.setInt32(address + ${VALUE_LAYOUT.tag.offset}, ${VALUE_TAGS.handle}, true);
+  bytes.setInt32(address + ${VALUE_LAYOUT.kind.offset}, kind, true);
+  return address;
 }
 
 /* The other direction: a value the host answered, written into memory as the
@@ -1740,7 +1756,10 @@ export function blaze_rt_raise(message) {
   {
     service: "blaze_rt_to_text",
     source: `
-export function blaze_rt_to_text(value) {
+export function blaze_rt_to_text(address) {
+  const tagged = taggedValueAt(address);
+  if (tagged.kind === ${HANDLE_KINDS.string}) return makeText(new TextDecoder().decode(textBytes(tagged.payload)));
+  const value = tagged.payload;
   const boxed = dynLookup(value);
   if (boxed === null) return makeText(formatNumber(value));
   if (boxed.kind === "number") return makeText(formatNumber(boxed.number));
@@ -1788,6 +1807,7 @@ export function blaze_rt_type_of(address) {
     service: "blaze_rt_to_number",
     source: `
 export function blaze_rt_to_number(value) {
+  value = taggedPayloadAt(value);
   const boxed = dynLookup(value);
   if (boxed === null) return value;
   if (boxed.kind === "number" || boxed.kind === "bool") return boxed.number;
@@ -1876,10 +1896,10 @@ export function blaze_rt_argv(index) {
 export function blaze_rt_json_parse(text) {
   const source = new TextDecoder().decode(textBytes(text));
   try {
-    return dynRegister({ kind: "value", value: JSON.parse(source) });
+    return writeTaggedHandle(dynRegister({ kind: "value", value: JSON.parse(source) }), ${HANDLE_KINDS.object});
   } catch (error) {
     blaze_rt_raise("invalid JSON");
-    return dynRegister({ kind: "null" });
+    return writeTaggedHandle(dynRegister({ kind: "null" }), ${HANDLE_KINDS.nil});
   }
 }
 `,
@@ -1887,9 +1907,11 @@ export function blaze_rt_json_parse(text) {
   {
     service: "blaze_rt_json_stringify",
     source: `
-export function blaze_rt_json_stringify(value) {
+export function blaze_rt_json_stringify(address) {
+  const value = taggedPayloadAt(address);
   const boxed = dynLookup(value);
-  return dynRegister({ kind: "text", text: JSON.stringify(boxed === null ? value : plainValue(boxed)) });
+  const text = makeText(JSON.stringify(boxed === null ? value : plainValue(boxed)));
+  return writeTaggedHandle(text, ${HANDLE_KINDS.string});
 }
 `,
   },
@@ -1910,7 +1932,7 @@ export function blaze_rt_json_get(value, field) {
     service: "blaze_rt_dyn_array_new",
     source: `
 export function blaze_rt_dyn_array_new() {
-  return writeTagged(dynRegister({ kind: "array", items: [] }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.array});
+  return writeTaggedHandle(dynRegister({ kind: "array", items: [] }), ${HANDLE_KINDS.array});
 }
 `,
   },
@@ -1918,6 +1940,7 @@ export function blaze_rt_dyn_array_new() {
     service: "blaze_rt_is_array",
     source: `
 export function blaze_rt_is_array(value) {
+  value = taggedPayloadAt(value);
   const boxed = dynLookup(value);
   if (boxed === null) return 0;
   if (boxed.kind === "array") return 1;
@@ -1932,7 +1955,7 @@ export function blaze_rt_is_array(value) {
     service: "blaze_rt_box_number",
     source: `
 export function blaze_rt_box_number(value) {
-  return writeTagged(dynRegister({ kind: "number", number: value }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.number});
+  return writeTaggedHandle(dynRegister({ kind: "number", number: value }), ${HANDLE_KINDS.number});
 }
 `,
   },
@@ -1940,7 +1963,8 @@ export function blaze_rt_box_number(value) {
     service: "blaze_rt_box_string",
     source: `
 export function blaze_rt_box_string(value) {
-  return dynRegister({ kind: "text", text: new TextDecoder().decode(textBytes(value)) });
+  const handle = dynRegister({ kind: "text", text: new TextDecoder().decode(textBytes(value)) });
+  return writeTaggedHandle(handle, ${HANDLE_KINDS.string});
 }
 `,
   },
@@ -1948,41 +1972,49 @@ export function blaze_rt_box_string(value) {
     service: "blaze_rt_box_null",
     source: `
 export function blaze_rt_box_null() {
-  return writeTagged(dynRegister({ kind: "null" }), ${VALUE_TAGS.handle}, ${HANDLE_KINDS.nil});
+  return writeTaggedHandle(dynRegister({ kind: "null" }), ${HANDLE_KINDS.nil});
 }
 `,
   },
   {
     service: "blaze_rt_array_push",
     source: `
-export function blaze_rt_array_push(array, value) {
+export function blaze_rt_array_push(address, valueAddress) {
+  const array = taggedPayloadAt(address);
+  const value = taggedPayloadAt(valueAddress);
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") {
     const fresh = dynRegister({ kind: "array", items: [] });
     dynLookup(fresh).items.push(value);
-    return fresh;
+    return writeTaggedHandle(fresh, ${HANDLE_KINDS.array});
   }
   boxed.items.push(value);
-  return array;
+  return writeTaggedHandle(array, ${HANDLE_KINDS.array});
 }
 `,
   },
   {
     service: "blaze_rt_array_get",
     source: `
-export function blaze_rt_array_get(array, index) {
+export function blaze_rt_array_get(address, index) {
+  const array = taggedPayloadAt(address);
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") return 0;
   const at = Number(index);
   if (at < 0 || at >= boxed.items.length) return 0;
-  return boxed.items[at];
+  const item = boxed.items[at];
+  const inner = dynLookup(item);
+  if (inner !== null) return writeTaggedHandle(item, inner.kind === "array" ? ${HANDLE_KINDS.array} : ${HANDLE_KINDS.object});
+  return writeTagged(item, ${VALUE_TAGS.number}, 0);
 }
 `,
   },
   {
     service: "blaze_rt_array_set",
     source: `
-export function blaze_rt_array_set(array, index, value) {
+export function blaze_rt_array_set(address, index, valueAddress) {
+  const array = taggedPayloadAt(address);
+  const value = taggedPayloadAt(valueAddress);
   const boxed = dynLookup(array);
   if (boxed === null || boxed.kind !== "array") return;
   const at = Number(index);
@@ -1995,6 +2027,7 @@ export function blaze_rt_array_set(array, index, value) {
     service: "blaze_rt_length",
     source: `
 export function blaze_rt_length(value) {
+  value = taggedPayloadAt(value);
   const boxed = dynLookup(value);
   if (boxed !== null) {
     if (boxed.kind === "array") return boxed.items.length;
@@ -2015,6 +2048,7 @@ export function blaze_rt_length(value) {
     service: "blaze_rt_array_length",
     source: `
 export function blaze_rt_array_length(array) {
+  array = taggedPayloadAt(array);
   const boxed = dynLookup(array);
   if (boxed === null) return 0;
   if (boxed.kind === "object") {

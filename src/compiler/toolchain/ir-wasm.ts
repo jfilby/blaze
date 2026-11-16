@@ -1497,7 +1497,7 @@ class Body {
           return;
         }
         if (String(fieldOf(held,"kind")) === "ref" && fieldOf(held,"of") === null && fieldOf(held,"name") === undefined) {
-          this.value(fieldOf(value,"of"), DYNAMIC_TYPE);
+          this.taggedValue(fieldOf(value,"of"));
           this.callService("blaze_rt_array_length");
           this.convert(fieldOf(value,"type"), at);
           return;
@@ -1521,9 +1521,10 @@ class Body {
           // index is a count and the runtime carries a count as a double, so
           // it is written as one: a count written as a whole number is a
           // module the engine refuses, because the service takes a double.
-          this.value(fieldOf(value,"of"), DYNAMIC_TYPE);
+          this.taggedValue(fieldOf(value,"of"));
           this.value(fieldOf(value,"index"), F64_TYPE);
           this.callService("blaze_rt_array_get");
+          this.taggedResult();
           this.convert(fieldOf(value,"type"), at);
           return;
         }
@@ -2738,7 +2739,7 @@ class Body {
     }
     if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
       // A dynamic value is written by the runtime, which knows what it holds.
-      this.value(value, DYNAMIC_TYPE);
+      this.taggedValue(value);
       this.callService("blaze_rt_to_text");
       return;
     }
@@ -3545,23 +3546,25 @@ class Body {
         return DYNAMIC_TYPE;
       case "array.push":
       case "blaze_rt_array_push":
-        this.dynamicValue(argument(0));
-        this.dynamicValue(argument(1));
+        this.taggedValue(argument(0));
+        this.taggedValue(argument(1));
         this.callService("blaze_rt_array_push");
+        this.taggedResult();
         return DYNAMIC_TYPE;
       case "array.get":
       case "blaze_rt_array_get":
-        this.dynamicValue(argument(0));
-        this.dynamicValue(argument(1));
+        this.taggedValue(argument(0));
+        this.value(argument(1), F64_TYPE);
         this.callService("blaze_rt_array_get");
+        this.taggedResult();
         return F64_TYPE;
       case "array.length":
       case "blaze_rt_array_length":
-        this.dynamicValue(argument(0));
+        this.taggedValue(argument(0));
         this.callService("blaze_rt_array_length");
         return F64_TYPE;
       case "blaze_rt_length":
-        this.dynamicValue(argument(0));
+        this.taggedValue(argument(0));
         this.callService("blaze_rt_length");
         return F64_TYPE;
         return F64_TYPE;
@@ -3577,6 +3580,7 @@ class Body {
         }
         this.value(text, TEXT);
         this.callService("blaze_rt_json_parse");
+        this.taggedResult();
         return DYNAMIC_TYPE;
       }
       case "JSON.stringify": {
@@ -3590,12 +3594,12 @@ class Body {
         if (isTextType(fieldOf(value,"type") as SemanticType)) {
           this.value(value, TEXT);
           this.callService("blaze_rt_box_string");
+          this.taggedResultI32();
         } else if (isNumber(fieldOf(value,"type") as SemanticType)) {
           this.value(value, F64_TYPE);
           this.callService("blaze_rt_box_number");
-          this.taggedResult();
         } else {
-          this.dynamicValue(value);
+          this.taggedValue(value);
         }
         this.callService("blaze_rt_json_stringify");
         this.callService("blaze_rt_to_text");
@@ -3649,7 +3653,7 @@ class Body {
         // Whether a dynamic value is an array: the value goes down as the
         // handle it is carried in, and the host answers one or nothing, which
         // the source reads as the truth it compares to one.
-        this.dynamicValue(argument(0));
+        this.taggedValue(argument(0));
         this.callService("blaze_rt_is_array");
         return F64_TYPE;
       }
@@ -3665,7 +3669,7 @@ class Body {
         if (isTextType(fieldOf(text,"type") as SemanticType)) {
           this.value(text, TEXT);
         } else {
-          this.dynamicValue(text);
+          this.taggedValue(text);
           this.callService("blaze_rt_to_text");
         }
         this.callService("blaze_rt_md5_update");
@@ -3800,7 +3804,7 @@ class Body {
           this.value(value, TEXT);
           this.callService("blaze_rt_box_string");
         } else {
-          this.dynamicValue(value);
+          this.taggedValue(value);
         }
         this.callService("blaze_rt_to_number");
         return F64_TYPE;
@@ -3916,6 +3920,7 @@ class Body {
     if (isTextType(type)) {
       this.value(value, TEXT);
       this.callService("blaze_rt_box_string");
+      this.taggedResultI32();
       return;
     }
     this.value(value, F64_TYPE);
@@ -3944,15 +3949,14 @@ class Body {
       kind = Number(fieldOf(HANDLE_KINDS,"object"));
     }
     this.i32(address);
-    if (payloadIsFloat || tag === Number(fieldOf(VALUE_TAGS,"number"))) {
-      this.value(value, F64_TYPE);
-      this.op(0x39);
-      this.code.varuint(3);
+    if (isTextType(type)) {
+      this.value(value, TEXT);
+      this.op(0xb7); // `f64.convert_i32_s`
     } else {
-      this.value(value, type);
-      this.op(0x36);
-      this.code.varuint(2);
+      this.value(value, F64_TYPE);
     }
+    this.op(0x39); // `f64.store`
+    this.code.varuint(3);
     this.code.varuint(0);
     this.i32(address + Number(fieldOf(fieldOf(VALUE_LAYOUT,"tag"),"offset")));
     this.i32(tag);
@@ -3978,6 +3982,13 @@ class Body {
     this.code.varuint(0);
   }
 
+  /** The same, for a service whose answer is an i32 pointer into memory. */
+  private taggedResultI32(): void {
+    this.op(0x28); // `i32.load`
+    this.code.varuint(2);
+    this.code.varuint(0);
+  }
+
   /**
    * A text the runtime is handed, as the offset of its bytes.
    *
@@ -3997,7 +4008,7 @@ class Body {
     // goes down as that handle and the host reads the text out of the box it
     // names. A value a test narrowed to a text arrives here.
     if (String(fieldOf(fieldOf(value,"type"),"kind")) === "ref" && fieldOf(fieldOf(value,"type"),"of") === null && fieldOf(fieldOf(value,"type"),"name") === undefined) {
-      this.dynamicValue(value);
+      this.taggedValue(value);
       this.callService("blaze_rt_to_text");
       return;
     }
