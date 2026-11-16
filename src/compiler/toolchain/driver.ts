@@ -1234,7 +1234,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "blaze_rt_sha256_digest":
         return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_sha256_digest(blaze_value_from_dynamic(${argument(0)})))`;
       case "blaze_rt_own_key":
-        return `${RUNTIME_NAME}_own_key(${argument(0)}, ${argument(1)})`;
+        return `${RUNTIME_NAME}_own_key(blaze_value_from_dynamic(${argument(0)}), ${argument(1)})`;
       case "fs.readFileSync":
         return `${RUNTIME_NAME}_file_read(${argument(0)}, ${argument(1)})`;
       case "envGet":

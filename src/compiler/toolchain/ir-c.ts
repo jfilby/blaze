@@ -598,7 +598,7 @@ function builtinExpression(name: string, args: string[]): string {
     case "blaze_rt_dict_has":
       return `blaze_rt_dict_has(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_own_key":
-      return `blaze_rt_own_key(${args[0]}, ${args[1]})`;
+      return `blaze_rt_own_key(blaze_value_from_dynamic(${args[0]}), ${args[1]})`;
     case "blaze_rt_sha256_create":
       return `blaze_dynamic_from_value(blaze_rt_sha256_create())`;
     case "blaze_rt_sha256_update":

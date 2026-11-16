@@ -1491,13 +1491,14 @@ proc blaze_rt_dict_has*(dictValue: BlazeValue, key: cstring): float64 {.exportc,
   if at < 0 or key == nil: return 0.0
   if blazeDictFind(at, $key) >= 0: 1.0 else: 0.0
 
-proc blaze_rt_own_key*(value: float64, key: cstring): float64 {.exportc, cdecl.} =
+proc blaze_rt_own_key*(value: BlazeValue, key: cstring): float64 {.exportc, cdecl.} =
   ## Whether a value the compiler could not shape holds a key of its own: a
   ## dictionary the runtime made, a dynamic object the parser laid down, or a
   ## record this compiler laid out. Each is asked the way its own entries are
   ## read, and every other value answers nothing.
   if key == nil: return 0.0
-  let at = blazeDynIndex(value)
+  let handle = blazeDynamicFromValue(value)
+  let at = blazeDynIndex(handle)
   if at >= 0:
     let item = blazeDynValues[at]
     if item.kind == dynDict:
@@ -1513,11 +1514,10 @@ proc blaze_rt_own_key*(value: float64, key: cstring): float64 {.exportc, cdecl.}
         position += 2
       return 0.0
     return 0.0
-  # A record's block carries the names its layout wrote, and the handle is the
-  # address as the number it is: the same test the C runtime makes.
-  if value < 4096.0 or value >= 281474976710656.0: return 0.0
-  let header = headerOf(cast[pointer](uint(value)))
-  if header[].magic != BlazeMagic or header[].descriptor == nil: return 0.0
+  # A record is named by a typed handle; no magnitude is taken for a pointer.
+  if value.kind != uint32(BlazeKindRecord): return 0.0
+  let header = headerOf(cast[pointer](uint(handle)))
+  if header[].descriptor == nil: return 0.0
   var field = cast[cstring](header[].descriptor)
   let wanted = $key
   while field[0] != '\\0':

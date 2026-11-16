@@ -1289,7 +1289,7 @@ entry(
     "blaze_rt_own_key",
     "double",
     [
-      ["value", "double"],
+      ["value", "BlazeValue"],
       ["key", "const char*"],
     ],
     "Asks whether a value the compiler could not shape holds a key of its own.",
@@ -5413,18 +5413,24 @@ double blaze_rt_dict_has(BlazeValue dictValue, const char* key) {
    Each is asked the way its own entries are read, so the answer is one question
    whatever the value turned out to be; a number, an empty handle and a block
    that carries no layout answer no. */
-double blaze_rt_own_key(double value, const char* key) {
-  if (key == NULL) return 0.0;
-  blaze_dyn* object = NULL;
-  if (blaze_rt_dict_dynamic(value, &object)) return blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
-  blaze_rt_dict* d = blaze_rt_dict_known(value);
-  if (d != NULL) return blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
-  const char* layout = blaze_rt_record_layout(value);
-  if (layout != NULL) {
-    const int count = blaze_rt_record_count(layout);
-    for (int at = 0; at < count; at += 1) {
-      const char* name = blaze_rt_record_field(layout, at, NULL, NULL);
-      if (name != NULL && strcmp(name, key) == 0) return 1.0;
+double blaze_rt_own_key(BlazeValue value, const char* key) {
+  if (key == NULL || value.tag != BLAZE_VALUE_HANDLE) return 0.0;
+  if (value.kind == BLAZE_HANDLE_OBJECT) {
+    blaze_dyn* object = blaze_dyn_lookup(blaze_dyn_untagged(value));
+    return object != NULL && blaze_rt_dynamic_field(object, key) >= 0 ? 1.0 : 0.0;
+  }
+  if (value.kind == BLAZE_HANDLE_DICTIONARY) {
+    blaze_rt_dict* d = blaze_rt_dict_known(blaze_dyn_untagged(value));
+    return d != NULL && blaze_rt_dict_find(d, key) != NULL ? 1.0 : 0.0;
+  }
+  if (value.kind == BLAZE_HANDLE_RECORD) {
+    const char* layout = blaze_pointer_descriptor(blaze_pointer_of_value(&value, BLAZE_HANDLE_RECORD, "blaze_rt_own_key"));
+    if (layout != NULL) {
+      const int count = blaze_rt_record_count(layout);
+      for (int at = 0; at < count; at += 1) {
+        const char* name = blaze_rt_record_field(layout, at, NULL, NULL);
+        if (name != NULL && strcmp(name, key) == 0) return 1.0;
+      }
     }
   }
   return 0.0;
