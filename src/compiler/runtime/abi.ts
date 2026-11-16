@@ -22,6 +22,7 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
 }
 
 import type { BuildMode, RuntimeKind } from "../core/types.ts";
+import { valueAbiCDeclaration } from "./value-abi.ts";
 
 /** The name of the C header, the Nim adapter module and the object file. */
 export const RUNTIME_NAME = "blaze_rt";
@@ -2227,6 +2228,7 @@ const HEADER_PREAMBLE = `#ifndef BLAZE_RT_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /*
  * The managed object representation. Every value the runtime returns starts
@@ -2258,6 +2260,8 @@ typedef struct blaze_rt_header {
 /* The largest a request may be, so a product of a count and an element size
    that would wrap is refused rather than answered with a smaller block. */
 #define BLAZE_RT_MAX_ALLOCATION (1ULL << 40)
+
+${valueAbiCDeclaration()}
 
 /*
  * The canonical representation of a fixed-width wide integer.
@@ -3842,6 +3846,147 @@ static void blaze_rt_refuse(const char* what) {
   exit(2);
 }` : "/* A danger build: this runtime does not check what it is handed, so it has nothing to refuse. */"}
 
+/* The typed handle registry. A dynamic value is never a raw pointer: it is a
+   tag, a subtype and a pair of 32-bit halves naming a slot and the generation
+   of the slot. The entry holds the pointer, its length and its ownership, so
+   no operation has to guess a type from the size of a number or read a word
+   before an address. A released slot is reused only with a new generation,
+   which is what stops a stale handle from naming a later object. */
+typedef struct {
+  uint32_t kind;
+  uint32_t generation;
+  uint32_t state;
+  uint32_t ownership;
+  uint32_t next_free;
+  uint64_t length;
+  uint64_t capacity;
+  uint64_t references;
+  void* pointer;
+} blaze_rt_entry;
+
+static blaze_rt_entry* blaze_rt_registry = NULL;
+static size_t blaze_rt_registry_count = 0;
+static size_t blaze_rt_registry_capacity = 0;
+static uint32_t blaze_rt_registry_free = 0;
+
+${guarded ? `static void blaze_rt_bad_handle(const char* operation, const char* why) {
+  fprintf(stderr, "blaze: invalid handle in %s: %s\\n", operation, why);
+  exit(2);
+}` : "/* A danger build: handles are checked for shape but not for liveness. */"}
+
+/* A slot for a new object. The free list is threaded through the entries
+   themselves, so it costs no second table, and a slot taken off it comes back
+   with a generation one higher than the one its old handle carried. */
+static uint32_t blaze_registry_reserve(void) {
+  if (blaze_rt_registry_free != 0) {
+    const uint32_t index = blaze_rt_registry_free;
+    blaze_rt_entry* entry = &blaze_rt_registry[index - 1];
+    blaze_rt_registry_free = entry->next_free;
+    entry->generation += 1;
+    return index;
+  }
+  if (blaze_rt_registry_count == blaze_rt_registry_capacity) {
+    const size_t next = blaze_rt_registry_capacity == 0 ? 64 : blaze_rt_registry_capacity * 2;
+    if (next > BLAZE_RT_MAX_ALLOCATION / sizeof(blaze_rt_entry)) {
+      fprintf(stderr, "blaze: handle registry too large\\n");
+      exit(2);
+    }
+    blaze_rt_entry* grown = (blaze_rt_entry*)realloc(blaze_rt_registry, next * sizeof(blaze_rt_entry));
+    if (grown == NULL) {
+      fprintf(stderr, "blaze: out of memory growing the handle registry\\n");
+      exit(2);
+    }
+    blaze_rt_registry = grown;
+    blaze_rt_registry_capacity = next;
+  }
+  blaze_rt_registry_count += 1;
+  return (uint32_t)blaze_rt_registry_count;
+}
+
+/* Registers an object and answers the handle a program holds for it. Ownership
+   says whether a release frees the pointer: a C literal and a host buffer are
+   external and are borrowed, never freed here. */
+static BlazeValue blaze_registry_register(uint32_t kind, void* pointer, uint64_t length, uint32_t ownership) {
+  const uint32_t index = blaze_registry_reserve();
+  blaze_rt_entry* entry = &blaze_rt_registry[index - 1];
+  entry->kind = kind;
+  entry->state = BLAZE_ENTRY_LIVE;
+  entry->ownership = ownership;
+  entry->next_free = 0;
+  entry->length = length;
+  entry->capacity = length;
+  entry->references = 1;
+  entry->pointer = pointer;
+  return blaze_value_handle(kind, index, entry->generation);
+}
+
+/* The entry a handle names, validated before anything dereferences its
+   pointer. A value of the wrong tag, a subtype that does not match the
+   operation, an index out of the table, a released slot and a generation that
+   does not match are all refusals, not guesses. */
+static blaze_rt_entry* blaze_registry_get(const BlazeValue* value, uint32_t kind, const char* operation) {
+${guarded ? `  if (value->tag != BLAZE_VALUE_HANDLE) blaze_rt_bad_handle(operation, "not a handle");
+  if (value->kind != kind) blaze_rt_bad_handle(operation, "wrong handle type");` : ""}
+  const uint32_t index = blaze_value_index(value);
+  if (index == 0 || index > blaze_rt_registry_count) {
+${guarded ? `    blaze_rt_bad_handle(operation, "index out of range");` : ""}
+    return NULL;
+  }
+  blaze_rt_entry* entry = &blaze_rt_registry[index - 1];
+${guarded ? `  if (entry->state != BLAZE_ENTRY_LIVE) blaze_rt_bad_handle(operation, "released handle");
+  if (entry->generation != blaze_value_generation(value)) blaze_rt_bad_handle(operation, "stale handle");` : ""}
+  return entry;
+}
+
+static uint64_t blaze_registry_length(const BlazeValue* value, uint32_t kind, const char* operation) {
+  blaze_rt_entry* entry = blaze_registry_get(value, kind, operation);
+  return entry == NULL ? 0 : entry->length;
+}
+
+/* Releases a slot and makes every handle that named it stale. An external
+   buffer is borrowed and is never freed here. */
+static void blaze_registry_release(const BlazeValue* value, uint32_t kind, const char* operation) {
+  blaze_rt_entry* entry = blaze_registry_get(value, kind, operation);
+  if (entry == NULL) return;
+  if (entry->ownership == BLAZE_ENTRY_OWNED && entry->pointer != NULL) free(entry->pointer);
+  entry->pointer = NULL;
+  entry->length = 0;
+  entry->state = BLAZE_ENTRY_RELEASED;
+  entry->next_free = blaze_rt_registry_free;
+  blaze_rt_registry_free = blaze_value_index(value);
+}
+
+/* A dynamically sized table of module-level values. A slot past the end is an
+   error rather than the slot zero an earlier fixed array silently answered. */
+static BlazeValue* blaze_rt_globals = NULL;
+static size_t blaze_rt_global_slots = 0;
+
+static BlazeValue* blaze_global_at(uint64_t slot, const char* operation) {
+  if (slot >= blaze_rt_global_slots) {
+${guarded ? `    fprintf(stderr, "blaze: global slot %llu out of range in %s\\n", (unsigned long long)slot, operation);
+    exit(2);` : ""}
+    return NULL;
+  }
+  return &blaze_rt_globals[slot];
+}
+
+static void blaze_global_grow(uint64_t slot) {
+  if (slot < blaze_rt_global_slots) return;
+  const size_t next = (size_t)slot + 1;
+  if (next > BLAZE_RT_MAX_ALLOCATION / sizeof(BlazeValue)) {
+    fprintf(stderr, "blaze: too many global slots\\n");
+    exit(2);
+  }
+  BlazeValue* grown = (BlazeValue*)realloc(blaze_rt_globals, next * sizeof(BlazeValue));
+  if (grown == NULL) {
+    fprintf(stderr, "blaze: out of memory growing the global table\\n");
+    exit(2);
+  }
+  for (size_t at = blaze_rt_global_slots; at < next; at += 1) grown[at] = blaze_value_null();
+  blaze_rt_globals = grown;
+  blaze_rt_global_slots = next;
+}
+
 /* One subtraction and, where the guards are in, two comparisons. It is on the
    path of every retain and every release, and -ffunction-sections makes it a
    call rather than a few instructions. blaze_rt_class_of below is inlined for
@@ -4417,15 +4562,11 @@ double blaze_rt_now_ms(void) {
   return (double)parts.tv_sec * 1000.0 + (double)parts.tv_nsec / 1000000.0;
 }
 
-/* The cells a module-level number lives in. A compiled function has no
-   environment, so a file's top-level counter is a slot here and
-   every function that reads or writes it goes through these. */
-#define BLAZE_RT_GLOBALS 4096
-static double blaze_rt_globals[BLAZE_RT_GLOBALS];
-static size_t blaze_rt_global_slot(double slot) {
-  const size_t index = (size_t)slot;
-  return index < BLAZE_RT_GLOBALS ? index : 0;
-}
+/* The cells a module-level value lives in. A compiled function has no
+   environment, so a file's top-level counter is a slot here and every function
+   that reads or writes it goes through these. The table grows on demand and a
+   slot past its end is an error: the earlier fixed array answered slot zero,
+   which made one module's counter another module's value. */
 const char* blaze_rt_path_extname(const char* path) {
   if (path == NULL) return blaze_rt_string_new(NULL, 0);
   const char* base = strrchr(path, '/');
@@ -4489,22 +4630,33 @@ double blaze_rt_state_set(const char* key, double value) {
 }
 
 double blaze_rt_global_get(double slot) {
-  return blaze_rt_globals[blaze_rt_global_slot(slot)];
+  if (slot < 0.0) {
+    fprintf(stderr, "blaze: negative global slot\\n");
+    exit(2);
+  }
+  blaze_global_grow((uint64_t)slot);
+  BlazeValue* cell = blaze_global_at((uint64_t)slot, "blaze_rt_global_get");
+  return cell == NULL ? 0.0 : blaze_value_number_of(cell);
 }
 double blaze_rt_global_set(double slot, double value) {
-  blaze_rt_globals[blaze_rt_global_slot(slot)] = value;
+  if (slot < 0.0) {
+    fprintf(stderr, "blaze: negative global slot\\n");
+    exit(2);
+  }
+  blaze_global_grow((uint64_t)slot);
+  BlazeValue* cell = blaze_global_at((uint64_t)slot, "blaze_rt_global_set");
+  if (cell == NULL) return value;
+  *cell = blaze_value_number(value);
   return value;
 }
 double blaze_rt_global_post_inc(double slot) {
-  const size_t index = blaze_rt_global_slot(slot);
-  const double before = blaze_rt_globals[index];
-  blaze_rt_globals[index] = before + 1.0;
+  const double before = blaze_rt_global_get(slot);
+  blaze_rt_global_set(slot, before + 1.0);
   return before;
 }
 double blaze_rt_global_post_dec(double slot) {
-  const size_t index = blaze_rt_global_slot(slot);
-  const double before = blaze_rt_globals[index];
-  blaze_rt_globals[index] = before - 1.0;
+  const double before = blaze_rt_global_get(slot);
+  blaze_rt_global_set(slot, before - 1.0);
   return before;
 }
 
