@@ -3862,6 +3862,7 @@ typedef struct {
   uint64_t capacity;
   uint64_t references;
   void* pointer;
+  const char* descriptor;
 } blaze_rt_entry;
 
 static blaze_rt_entry* blaze_rt_registry = NULL;
@@ -3917,6 +3918,7 @@ static BlazeValue blaze_registry_register(uint32_t kind, void* pointer, uint64_t
   entry->capacity = length;
   entry->references = 1;
   entry->pointer = pointer;
+  entry->descriptor = NULL;
   return blaze_value_handle(kind, index, entry->generation);
 }
 
@@ -3985,6 +3987,102 @@ static void blaze_global_grow(uint64_t slot) {
   for (size_t at = blaze_rt_global_slots; at < next; at += 1) grown[at] = blaze_value_null();
   blaze_rt_globals = grown;
   blaze_rt_global_slots = next;
+}
+
+/* A pointer-keyed side table over the registry. A value whose bits name one of
+   these entries has a kind and a length in the entry; nothing is read before
+   the pointer and no numeric range is taken as evidence of an address. The
+   table is exact: an arbitrary number that happens to be large is not a
+   pointer, because no pointer was registered at that address. */
+typedef struct {
+  const void* pointer;
+  uint32_t slot;
+} blaze_rt_pointer_slot;
+
+static blaze_rt_pointer_slot* blaze_rt_pointer_index = NULL;
+static size_t blaze_rt_pointer_count = 0;
+static size_t blaze_rt_pointer_capacity = 0;
+
+static void blaze_pointer_remember(const void* pointer, uint32_t slot) {
+  if (pointer == NULL) return;
+  if (blaze_rt_pointer_count == blaze_rt_pointer_capacity) {
+    const size_t next = blaze_rt_pointer_capacity == 0 ? 64 : blaze_rt_pointer_capacity * 2;
+    if (next > BLAZE_RT_MAX_ALLOCATION / sizeof(blaze_rt_pointer_slot)) {
+      fprintf(stderr, "blaze: pointer index too large\\n");
+      exit(2);
+    }
+    blaze_rt_pointer_slot* grown = (blaze_rt_pointer_slot*)realloc(blaze_rt_pointer_index, next * sizeof(blaze_rt_pointer_slot));
+    if (grown == NULL) {
+      fprintf(stderr, "blaze: out of memory growing the pointer index\\n");
+      exit(2);
+    }
+    blaze_rt_pointer_index = grown;
+    blaze_rt_pointer_capacity = next;
+  }
+  blaze_rt_pointer_index[blaze_rt_pointer_count].pointer = pointer;
+  blaze_rt_pointer_index[blaze_rt_pointer_count].slot = slot;
+  blaze_rt_pointer_count += 1;
+}
+
+static uint32_t blaze_pointer_find(const void* pointer) {
+  if (pointer == NULL) return 0;
+  for (size_t at = 0; at < blaze_rt_pointer_count; at += 1) {
+    if (blaze_rt_pointer_index[at].pointer == pointer) return blaze_rt_pointer_index[at].slot;
+  }
+  return 0;
+}
+
+/* Forget one pointer, or every pointer in a range a region is about to reuse.
+   A slot left behind would name an object whose memory has gone back to the
+   allocator, which is the stale-handle bug the registry exists to prevent. */
+static void blaze_pointer_forget(const void* pointer) {
+  for (size_t at = 0; at < blaze_rt_pointer_count; at += 1) {
+    if (blaze_rt_pointer_index[at].pointer != pointer) continue;
+    blaze_rt_pointer_index[at] = blaze_rt_pointer_index[blaze_rt_pointer_count - 1];
+    blaze_rt_pointer_count -= 1;
+    return;
+  }
+}
+
+static void blaze_pointer_forget_range(const void* base, const void* end) {
+  if (base == NULL || end <= base) return;
+  size_t at = 0;
+  while (at < blaze_rt_pointer_count) {
+    const void* pointer = blaze_rt_pointer_index[at].pointer;
+    if (pointer >= base && pointer < end) {
+      blaze_rt_pointer_index[at] = blaze_rt_pointer_index[blaze_rt_pointer_count - 1];
+      blaze_rt_pointer_count -= 1;
+    } else {
+      at += 1;
+    }
+  }
+}
+
+/* The entry a pointer names, when it names one. A miss answers a null handle
+   rather than a guessed type: a C literal and an arbitrary number are both
+   values the runtime did not allocate. */
+static BlazeValue blaze_pointer_value(const void* pointer) {
+  const uint32_t slot = blaze_pointer_find(pointer);
+  if (slot == 0) return blaze_value_null();
+  blaze_rt_entry* entry = &blaze_rt_registry[slot - 1];
+  return blaze_value_handle(entry->kind, slot, entry->generation);
+}
+
+/* Registers a block of elements with the length it was allocated for. The
+   length is the one a JSON writer counts elements with, so no header is read
+   to find out how many elements a slice holds. */
+static void blaze_pointer_array(void* pointer, uint64_t bytes) {
+  if (pointer == NULL || blaze_pointer_find(pointer) != 0) return;
+  BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_ARRAY, pointer, bytes, BLAZE_ENTRY_OWNED);
+  blaze_pointer_remember(pointer, blaze_value_index(&handle));
+}
+
+/* The layout descriptor of a record, or NULL where a pointer names no record.
+   A value the runtime did not allocate has no layout, whatever its magnitude. */
+static const char* blaze_pointer_descriptor(const void* pointer) {
+  const BlazeValue value = blaze_pointer_value(pointer);
+  if (!blaze_value_is_handle(&value, BLAZE_HANDLE_RECORD)) return NULL;
+  return blaze_rt_registry[blaze_value_index(&value) - 1].descriptor;
 }
 
 /* One subtraction and, where the guards are in, two comparisons. It is on the
@@ -4296,7 +4394,10 @@ void blaze_rt_region_enter(void) {
      out a second time while the outer turn is still reading them. So a nested
      enter shares the cursor the outer region is filling rather than rewinding
      it, and the inner loop loses its own reuse and keeps its blocks sound. */
-  if (blaze_rt_region_depth++ == 0) blaze_rt_region_at = blaze_rt_region_base;
+  if (blaze_rt_region_depth++ == 0) {
+    blaze_pointer_forget_range(blaze_rt_region_base, blaze_rt_region_end);
+    blaze_rt_region_at = blaze_rt_region_base;
+  }
 }
 
 void blaze_rt_region_leave(void) {
@@ -4459,6 +4560,7 @@ void blaze_rt_release(void* pointer) {
        the slab path while the region is rewound over the same bytes, and two
        blocks would be live in one piece of it. The block is dropped instead:
        the memory is the region's, and the region is what hands it out again. */
+    blaze_pointer_forget(pointer);
     header->references = 0;
 ${guarded ? "    header->magic = 0;" : ""}
     return;
@@ -4481,10 +4583,12 @@ ${guarded ? "    header->magic = 0;" : ""}
     if (cls != 0) {
       header->base = (void*)blaze_rt_released[cls - 1];
       blaze_rt_released[cls - 1] = header;
+      blaze_pointer_forget(pointer);
 ${guarded ? "      header->magic = 0;" : ""}
       return;
     }
   }
+  blaze_pointer_forget(pointer);
 ${guarded ? "  header->magic = 0;" : ""}
   free(header->base);
 }
@@ -4493,24 +4597,26 @@ const char* blaze_rt_string_new(const unsigned char* bytes, size_t length) {
   /* The whole payload is written below, terminator included, so the block is
      not cleared first. */
   char* text = (char*)blaze_rt_allocate_uninitialized(length + 1);
+  /* The length goes into the registry, not into a word before the pointer: a
+     reader of a text never looks at memory it was not handed. */
+  BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_STRING, text, (uint64_t)length + 1, BLAZE_ENTRY_OWNED);
+  blaze_pointer_remember(text, blaze_value_index(&handle));
   if (length > 0) memcpy(text, bytes, length);
   text[length] = '\\0';
   return text;
 }
 
-/* The length of a string, in O(1) where the runtime allocated it and by
-   scanning where the compiler wrote it out as a C literal.
-
-   A managed string carries its length in the header 48 bytes in front of it, so
-   reading it is two loads. A literal has no header, and what sits in front of
-   one is whatever else the read-only section holds, so the magic word is what
-   tells the two apart. That check reads 8 bytes before the pointer, which is
-   inside the block for a managed string and inside the section for a literal;
-   a pointer that is neither is not a string this runtime handed out. */
+/* The length of a string. A string the runtime allocated has its length in its
+   registry entry; a C literal the compiler wrote out has no entry and is
+   measured by scanning the bytes it was given. Neither case reads a word before
+   the pointer, so a literal beside unrelated read-only data is still a string
+   and an arbitrary pointer is not taken for one. */
 size_t blaze_rt_text_length(const char* text) {
   if (text == NULL) return 0;
-  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)text - BLAZE_RT_HEADER_SIZE);
-  if (header->magic == BLAZE_RT_MAGIC) return header->length - 1;
+  const BlazeValue value = blaze_pointer_value((const void*)text);
+  if (blaze_value_is_handle(&value, BLAZE_HANDLE_STRING)) {
+    return blaze_registry_length(&value, BLAZE_HANDLE_STRING, "blaze_rt_text_length") - 1;
+  }
   return strlen(text);
 }
 
@@ -4973,11 +5079,17 @@ void* blaze_rt_array_new(size_t count, size_t elementSize) {
      whatever the allocator handed back. The source language answers the same
      read as nothing, so zeroing is what agrees with it, and there is no bounds
      check to answer it with: the IR holds no length for an element access. */
-  return blaze_rt_allocate(blaze_rt_array_bytes(count, elementSize${guarded ? ', "blaze_rt_array_new"' : ""}));
+  void* made = blaze_rt_allocate(blaze_rt_array_bytes(count, elementSize${guarded ? ', "blaze_rt_array_new"' : ""}));
+  blaze_pointer_array(made, (uint64_t)count * (uint64_t)elementSize);
+  return made;
 }
 
 void* blaze_rt_array_resize(void* pointer, size_t count, size_t elementSize) {
-  return blaze_rt_reallocate(pointer, blaze_rt_array_bytes(count, elementSize${guarded ? ', "blaze_rt_array_resize"' : ""}));
+  const size_t bytes = blaze_rt_array_bytes(count, elementSize${guarded ? ', "blaze_rt_array_resize"' : ""});
+  blaze_pointer_forget(pointer);
+  void* made = blaze_rt_reallocate(pointer, bytes);
+  blaze_pointer_array(made, bytes);
+  return made;
 }
 
 void* blaze_rt_object_new(size_t bytes, size_t alignment) {
@@ -4993,13 +5105,22 @@ void* blaze_rt_object_new(size_t bytes, size_t alignment) {
 void blaze_rt_object_describe(void* object, const char* descriptor) {
   if (object == NULL) return;
   ((blaze_rt_header*)((char*)object - BLAZE_RT_HEADER_SIZE))->descriptor = descriptor;
+  uint32_t slot = blaze_pointer_find(object);
+  if (slot == 0) {
+    const blaze_rt_header* header = (const blaze_rt_header*)((char*)object - BLAZE_RT_HEADER_SIZE);
+    BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_RECORD, object, header->length, BLAZE_ENTRY_OWNED);
+    slot = blaze_value_index(&handle);
+    blaze_pointer_remember(object, slot);
+  }
+  blaze_rt_registry[slot - 1].descriptor = descriptor;
 }
 
 double blaze_rt_object_has_field(const void* object, const char* field) {
   if (object == NULL || field == NULL) return 0.0;
-  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
-  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) return 0.0;
-  const char* at = header->descriptor;
+  const BlazeValue value = blaze_pointer_value(object);
+  if (!blaze_value_is_handle(&value, BLAZE_HANDLE_RECORD)) return 0.0;
+  const char* at = blaze_rt_registry[blaze_value_index(&value) - 1].descriptor;
+  if (at == NULL) return 0.0;
   while (*at != '\\0') {
     if (strcmp(at, field) == 0) return 1.0;
     /* A field is its name, the offset it sits at and the type it holds: the
@@ -5118,11 +5239,12 @@ double blaze_rt_box_string(const char* value);
    cannot name may be such a record, and its entries are the fields the layout
    names. */
 static const char* blaze_rt_record_layout(double handle) {
-  if (handle < 4096.0 || handle >= 281474976710656.0) return NULL;
-  const void* block = (const void*)(uintptr_t)handle;
-  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)block - BLAZE_RT_HEADER_SIZE);
-  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) return NULL;
-  return header->descriptor;
+  /* The pointer, if this value names one at all, is a key into the registry.
+     The kind and the descriptor are in the entry, not in a word read from the
+     memory in front of an address. */
+  const BlazeValue value = blaze_pointer_value((const void*)(uintptr_t)handle);
+  if (!blaze_value_is_handle(&value, BLAZE_HANDLE_RECORD)) return NULL;
+  return blaze_rt_registry[blaze_value_index(&value) - 1].descriptor;
 }
 
 /* How many fields the layout of a record names. */
@@ -5201,6 +5323,7 @@ void* blaze_rt_array_copy(void* block) {
   void* copy = blaze_rt_allocate(bytes);
   if (copy == NULL) blaze_rt_raise("out of memory");
   if (bytes > 0) memcpy(copy, block, bytes);
+  blaze_pointer_array(copy, bytes);
   return copy;
 }
 
@@ -5211,6 +5334,7 @@ void* blaze_rt_array_join(void* left, void* right) {
   if (joined == NULL) blaze_rt_raise("out of memory");
   if (leftBytes > 0) memcpy(joined, left, leftBytes);
   if (rightBytes > 0) memcpy((char*)joined + leftBytes, right, rightBytes);
+  blaze_pointer_array(joined, leftBytes + rightBytes);
   return joined;
 }
 
@@ -5224,6 +5348,7 @@ double* blaze_rt_dict_values(double dict) {
   double* values = (double*)blaze_rt_allocate(count * sizeof(double));
   if (values == NULL) blaze_rt_raise("out of memory");
   for (size_t at = 0; at < count; at += 1) values[at] = d->entries[at].value;
+  blaze_pointer_array(values, count * sizeof(double));
   return values;
 }
 
@@ -6280,17 +6405,13 @@ static blaze_dyn* blaze_dyn_lookup(double h) {
    The text a value holds comes out of the same cursor, because a text is
    written once and read for as long as the program runs, and the pool's
    alignment is not worth a second mechanism for it. The first text of a chunk
-   sits a header's width past the start of the chunk: blaze_rt_text_length
-   reads the header in front of a text to tell a managed string from a literal,
-   and a text at the very start of a chunk would have nothing in front of it to
-   read.
-
    The pool is per thread for the reason the slab is: a turn of a parallel loop
    that builds values of its own must not share a cursor with the turn beside
    it. That the registry itself is one list every thread appends to is a
-   separate matter, and one this pool does not make worse. */
+   separate matter, and one this pool does not make worse. There is no guard at
+   the start of a chunk: a length lives in the registry entry, so no reader ever
+   looks at bytes before a pointer. */
 #define BLAZE_RT_DYN_POOL_BYTES (64u * 1024u)
-#define BLAZE_RT_DYN_POOL_GUARD 64u
 
 static _Thread_local char* blaze_rt_dyn_pool_at = NULL;
 static _Thread_local char* blaze_rt_dyn_pool_end = NULL;
@@ -6305,17 +6426,13 @@ static void* blaze_rt_dyn_pool_take(size_t bytes, size_t alignment) {
     }
   }
   size_t room = BLAZE_RT_DYN_POOL_BYTES;
-  if (bytes + alignment + BLAZE_RT_DYN_POOL_GUARD > room) room = bytes + alignment + BLAZE_RT_DYN_POOL_GUARD;
+  if (bytes + alignment > room) room = bytes + alignment;
   /* The chunk is not cleared. Every byte a value occupies is written before it
-     is read, and the few bytes of room before the first text of it are read
-     only by the header test, which is asking whether the words in front of a
-     text are a header and not what they say. Asking the host for memory that
-     is already zero costs a pass over the chunk; asking for memory is all this
-     needs. */
+     is read, and a value's length is in its registry entry rather than in a
+     word before its address. */
   char* chunk = (char*)malloc(room);
   if (chunk == NULL) { blaze_rt_raise("out of memory"); return NULL; }
-  const char* base = chunk + BLAZE_RT_DYN_POOL_GUARD;
-  const uintptr_t aligned = ((uintptr_t)base + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
+  const uintptr_t aligned = ((uintptr_t)chunk + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
   blaze_rt_dyn_pool_at = (char*)(aligned + bytes);
   blaze_rt_dyn_pool_end = chunk + room;
   return (void*)aligned;
@@ -6416,15 +6533,12 @@ double blaze_rt_is_array(double value) {
 const char* blaze_rt_type_of(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) {
-    // A record this compiler laid out is a block whose header carries its
-    // layout, and it is the object typeof names. A text is a block too, and
-    // one with no layout is a text or a list: neither is a record, so the
-    // answer stays the string a pointer is. A number is a value no block holds.
-    if (value >= 4096.0) {
-      const blaze_rt_header* header = (const blaze_rt_header*)((const char*)(uintptr_t)value - BLAZE_RT_HEADER_SIZE);
-      if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) return "object";
-      return "string";
-    }
+    // A value that names a registered pointer has the kind the entry was
+    // registered with. Nothing is read before the address and no magnitude is
+    // taken as evidence that the value is one.
+    const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
+    if (blaze_value_is_handle(&held, BLAZE_HANDLE_RECORD)) return "object";
+    if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return "string";
     return "number";
   }
   if (d->kind == BLAZE_DYN_NUMBER) return "number";
@@ -6435,13 +6549,10 @@ const char* blaze_rt_type_of(double value) {
 const char* blaze_rt_to_text(double value) {
   blaze_dyn* d = blaze_dyn_lookup(value);
   if (!d) {
-    /* The value may be a raw string pointer (a Blaze string that is not a
-       boxed dynamic value). Treat it as one when it points at readable memory;
-       otherwise format it as a number. */
-    /* A raw string pointer is a large value; small values are numbers. */
-    if (value >= 4096.0) {
-      return (const char*)(uintptr_t)value;
-    }
+    /* A string the runtime allocated is registered with its pointer and kind;
+       a value that names no such entry is a number, whatever its magnitude. */
+    const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
+    if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return (const char*)(uintptr_t)value;
     static char buf[64];
     snprintf(buf, 64, "%.17g", value);
     return blaze_dyn_text(buf, strlen(buf));
@@ -7983,9 +8094,8 @@ static void blaze_rt_json_break(blaze_build* build, double indent, int depth) {
    with no layout is not one this compiler wrote, so it is nothing. */
 static void blaze_rt_json_reference(blaze_build* build, const void* object, double indent, int depth) {
   if (object == NULL) { blaze_build_bytes(build, "null", 4); return; }
-  const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
-  if (header->magic != BLAZE_RT_MAGIC || header->descriptor == NULL) { blaze_build_bytes(build, "null", 4); return; }
-  const char* cursor = header->descriptor;
+  const char* cursor = blaze_pointer_descriptor(object);
+  if (cursor == NULL) { blaze_build_bytes(build, "null", 4); return; }
   blaze_rt_layout_field field;
   if (!blaze_rt_layout_next(&cursor, &field)) { blaze_build_bytes(build, "{}", 2); return; }
   blaze_build_char(build, '{');
@@ -8028,9 +8138,11 @@ static void blaze_rt_json_value_at(blaze_build* build, const unsigned char* at, 
     char element[64];
     blaze_rt_layout_element(type, element, sizeof element);
     if (block == NULL) { blaze_build_bytes(build, "null", 4); return; }
-    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)block - BLAZE_RT_HEADER_SIZE);
+    const BlazeValue heldBlock = blaze_pointer_value(block);
+    const uint64_t bytes = blaze_value_is_handle(&heldBlock, BLAZE_HANDLE_ARRAY)
+      ? blaze_registry_length(&heldBlock, BLAZE_HANDLE_ARRAY, "blaze_rt_json_value_at") : 0;
     const size_t size = blaze_rt_layout_size(element);
-    const size_t count = header->magic == BLAZE_RT_MAGIC && size > 0 ? (size_t)(header->length / size) : 0;
+    const size_t count = size > 0 ? (size_t)(bytes / size) : 0;
     if (count == 0) { blaze_build_bytes(build, "[]", 2); return; }
     blaze_build_char(build, '[');
     for (size_t index = 0; index < count; index += 1) {
@@ -8070,16 +8182,12 @@ static void blaze_rt_json_value_at(blaze_build* build, const unsigned char* at, 
 
 const char* blaze_rt_json_object(double value, double indent) {
   blaze_build build = { NULL, 0, 0 };
-  const size_t address = (size_t)value;
-  if (address > 4096 && address < ((size_t)1 << 48)) {
-    const void* object = (const void*)(uintptr_t)value;
-    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)object - BLAZE_RT_HEADER_SIZE);
-    if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) {
-      blaze_rt_json_reference(&build, object, indent, 0);
-      const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
-      free(build.text);
-      return written;
-    }
+  const void* object = (const void*)(uintptr_t)value;
+  if (blaze_pointer_descriptor(object) != NULL) {
+    blaze_rt_json_reference(&build, object, indent, 0);
+    const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
+    free(build.text);
+    return written;
   }
   blaze_build_value(&build, value);
   const char* written = blaze_rt_string_new((const unsigned char*)build.text, build.length);
@@ -8115,7 +8223,10 @@ static int blaze_rt_layout_find(const char* layout, const char* field, size_t* o
 /* Whether a value is a pointer a block could be at: a handle of the dynamic
    registry is a small index, and no allocation is at an address below a page. */
 static int blaze_rt_is_block(double value) {
-  return value > 4096.0 && value < 281474976710656.0;
+  const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
+  return blaze_value_is_handle(&held, BLAZE_HANDLE_RECORD) ||
+         blaze_value_is_handle(&held, BLAZE_HANDLE_ARRAY) ||
+         blaze_value_is_handle(&held, BLAZE_HANDLE_STRING);
 }
 
 double blaze_rt_object_copy(double base) {
@@ -8254,11 +8365,8 @@ static double blaze_rt_clone_dynamic(double value) {
    language's own deep copy answers for them. */
 double blaze_rt_clone(double value) {
   if (blaze_dyn_lookup(value) != NULL) return blaze_rt_clone_dynamic(value);
-  if (value >= 4096.0) {
-    void* object = (void*)(uintptr_t)value;
-    const blaze_rt_header* header = blaze_rt_header_of(object);
-    if (header->magic == BLAZE_RT_MAGIC && header->descriptor != NULL) return (double)(uintptr_t)blaze_rt_clone_object(object);
-  }
+  void* object = (void*)(uintptr_t)value;
+  if (blaze_pointer_descriptor(object) != NULL) return (double)(uintptr_t)blaze_rt_clone_object(object);
   return value;
 }
 
@@ -9029,15 +9137,10 @@ double blaze_rt_length(double value) {
     if (d->kind == BLAZE_DYN_ARRAY || d->kind == BLAZE_DYN_OBJECT) return (double)d->count;
     return 0.0;
   }
-  if (value < 4096.0) return 0.0;
   const double counted = blaze_rt_dict_len(value);
   if (counted != 0.0) return counted;
-  {
-    const blaze_rt_header* header = (const blaze_rt_header*)((const char*)(uintptr_t)value - BLAZE_RT_HEADER_SIZE);
-    if (header->magic == BLAZE_RT_MAGIC && header->descriptor == NULL) {
-      return (double)blaze_rt_text_length((const char*)(uintptr_t)value);
-    }
-  }
+  const BlazeValue held = blaze_pointer_value((const void*)(uintptr_t)value);
+  if (blaze_value_is_handle(&held, BLAZE_HANDLE_STRING)) return (double)blaze_rt_text_length((const char*)(uintptr_t)value);
   return counted;
 }
 double blaze_rt_path_exists(const char* path) {

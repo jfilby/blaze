@@ -196,6 +196,43 @@ test("a wrong handle type and an out-of-range index are refused", async () => {
   }
 });
 
+test("string length and type come from the registry, not from a word before the pointer", async () => {
+  const directory = await scratch("blaze-no-probe-");
+  const binary = await compileRuntimeProbe(
+    directory,
+    "noprobe",
+    `  const unsigned char bytes[] = "hello";
+     const char* text = blaze_rt_string_new(bytes, 5);
+     if (blaze_rt_text_length(text) != 5) return 1;
+     if (strcmp(blaze_rt_type_of((double)(uintptr_t)text), "string") != 0) return 2;
+     void* object = blaze_rt_allocate(16);
+     blaze_rt_object_describe(object, "x\\0 0\\0 f64\\0\\0");
+     if (strcmp(blaze_rt_type_of((double)(uintptr_t)object), "object") != 0) return 3;
+     if (blaze_rt_record_layout((double)(uintptr_t)object) == NULL) return 4;
+     if (strcmp(blaze_rt_type_of(1e12), "number") != 0) return 5;
+     if (blaze_rt_is_block(1e12) != 0) return 6;
+     return 0;`,
+  );
+  const result = run(binary, [], { timeoutMs: 30_000 });
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+});
+
+test("a released pointer stops naming the object it held", async () => {
+  const directory = await scratch("blaze-release-pointer-");
+  const binary = await compileRuntimeProbe(
+    directory,
+    "released",
+    `  const unsigned char bytes[] = "hi";
+     const char* text = blaze_rt_string_new(bytes, 2);
+     blaze_rt_release((void*)text);
+     if (strcmp(blaze_rt_type_of((double)(uintptr_t)text), "number") != 0) return 1;
+     if (blaze_rt_is_block((double)(uintptr_t)text) != 0) return 2;
+     return 0;`,
+  );
+  const result = run(binary, [], { timeoutMs: 30_000 });
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+});
+
 test("globals grow on demand and a slot past the table is an error", async () => {
   const directory = await scratch("blaze-globals-");
   const binary = await compileRuntimeProbe(
