@@ -3936,10 +3936,8 @@ class Body {
     const address = this.wideScratchOf(VALUE_LAYOUT.bytes);
     let tag = Number(fieldOf(VALUE_TAGS,"number"));
     let kind = 0;
-    let payloadIsFloat = false;
     if (String(fieldOf(type,"kind")) === "primitive" && fieldOf(type,"name") === "bool") {
       tag = Number(fieldOf(VALUE_TAGS,"boolean"));
-      payloadIsFloat = true;
     } else if (isTextType(type)) {
       tag = Number(fieldOf(VALUE_TAGS,"handle"));
       kind = Number(fieldOf(HANDLE_KINDS,"string"));

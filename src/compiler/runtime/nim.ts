@@ -2108,6 +2108,7 @@ proc blaze_last_error*(): cstring {.exportc, cdecl.} =
 
 proc blaze_rt_json_parse*(text: BlazeValue): BlazeValue {.exportc, cdecl.} = blaze_null_value()
 proc blaze_rt_json_stringify*(value: float64): float64 {.exportc, cdecl.} = 0.0
+proc blaze_rt_json_stringify_value*(value: BlazeValue): BlazeValue {.exportc, cdecl.} = blaze_null_value()
 proc blaze_rt_json_object*(value, indent: float64): cstring {.exportc, cdecl.} = ""
 proc blaze_rt_object_copy*(base: BlazeValue): BlazeValue {.exportc, cdecl.} = base
 

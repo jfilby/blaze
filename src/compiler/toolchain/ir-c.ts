@@ -1323,7 +1323,10 @@ class FunctionEmitter {
         isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text" ? `${RUNTIME_NAME}_box_string(${this.expression(value, TEXT, depth)})`
           : isNumber(fieldOf(value,"type")) ? `${RUNTIME_NAME}_box_number(${this.expression(value, NUMBER, depth)})`
             : this.expression(value, null, depth);
-      return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_json_stringify(${written}))`;
+      const tagged = written.includes("_box_string(")
+        ? `blaze_value_from_text(${written})`
+        : `blaze_value_from_dynamic(${written})`;
+      return `${RUNTIME_NAME}_to_text(blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(${tagged})))`;
     }
     // `JSON.parse(text)` reads a document as the dynamic value it holds. The
     // text crosses the wall as the pointer to its bytes, which the ABI carries

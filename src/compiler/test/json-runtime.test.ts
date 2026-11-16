@@ -49,7 +49,7 @@ test("the runtime reads a document and writes it back as the same document", asy
   /* The document a text is read as, written back as a document. */
   static const char* round_trip(const char* json) {
     const BlazeValue parsed = blaze_rt_json_parse(blaze_value_c_text(json));
-    return blaze_rt_to_text(blaze_value_from_dynamic(blaze_rt_json_stringify(blaze_dynamic_from_value(parsed))));
+    return blaze_rt_to_text(blaze_rt_json_stringify_value(parsed));
   }
 
   static void expect_round_trip(const char* json, const char* wanted) {

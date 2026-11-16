@@ -1138,7 +1138,8 @@ entry(
     "A value with a layout is written field by field, at the indent the source asked for; any other value is the dynamic value it already is.",
     { tags: ["object"] },
   ),
-  entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_json_stringify", "double", [["value", "double"]], "Stringifies a dynamic value.", "The machine backend's scalar projection: a boxed string handle in a double. C and Nim use the tagged entry below.", { tags: ["object"] }),
+  entry("blaze_rt_json_stringify_value", "BlazeValue", [["value", "BlazeValue"]], "Stringifies a tagged dynamic value.", "Returns a tagged string handle.", { tags: ["object"] }),
   entry("blaze_rt_md5_create", "BlazeValue", [], "Creates an MD5 hasher.", "Returns a managed hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_update", "BlazeValue", [["hasher", "BlazeValue"], ["text", "const char*"]], "Feeds text to an MD5 hasher.", "Returns the hasher.", { tags: ["object"] }),
   entry("blaze_rt_md5_digest", "BlazeValue", [["hasher", "BlazeValue"]], "Finalizes and returns the hex digest.", "Returns a managed string.", { tags: ["object"] }),
@@ -6510,6 +6511,10 @@ BlazeValue blaze_value_c_text(const char* text) {
   return blaze_registry_register(BLAZE_HANDLE_STRING, (void*)text, text == NULL ? 0 : strlen(text) + 1, BLAZE_ENTRY_EXTERNAL);
 }
 
+BlazeValue blaze_value_from_text(const char* text) {
+  return blaze_pointer_value((const void*)text);
+}
+
 double blaze_value_ref(void* pointer) {
   if (pointer == NULL) return 0.0;
   if (blaze_pointer_find(pointer) == 0) {
@@ -8163,11 +8168,15 @@ static void blaze_build_value(blaze_build* build, double value) {
    The text the walk built is handed over as it stands rather than copied into
    the value: it is the length of the document, and copying it is the one cost
    of writing it that a walk could avoid. */
-double blaze_rt_json_stringify(double value) {
+BlazeValue blaze_rt_json_stringify_value(BlazeValue value) {
   blaze_build build = { NULL, 0, 0 };
-  blaze_build_value(&build, value);
-  if (build.text == NULL) return blaze_rt_box_string("");
-  return blaze_dyn_text_handle(build.text, build.length);
+  blaze_build_value(&build, blaze_dyn_untagged(value));
+  if (build.text == NULL) return blaze_dyn_tagged(blaze_rt_box_string(""));
+  return blaze_dyn_tagged(blaze_dyn_text_handle(build.text, build.length));
+}
+
+double blaze_rt_json_stringify(double value) {
+  return blaze_dyn_untagged(blaze_rt_json_stringify_value(blaze_value_from_dynamic(value)));
 }
 
 /* The JSON of a value a function cannot name.

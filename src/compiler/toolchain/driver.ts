@@ -1189,10 +1189,10 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         // text it says is what the source wrote `JSON.stringify` to get.
         const stringifyType = stringifyArgument === undefined ? null : fieldOf(stringifyArgument,"type") as SemanticType;
         const rendered = stringifyType !== null && isTextType(stringifyType) || stringifyArgument !== undefined && String(fieldOf(stringifyArgument,"k")) === "text"
-          ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_string(${argument(0)}))`
+          ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(blaze_value_from_text(${RUNTIME_NAME}_box_string(${argument(0)}))))`
           : stringifyType !== null && isNumber(stringifyType)
-            ? `${RUNTIME_NAME}_json_stringify(${RUNTIME_NAME}_box_number(${argument(0)}))`
-            : `${RUNTIME_NAME}_json_stringify(${argument(0)})`;
+            ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(blaze_value_from_dynamic(${RUNTIME_NAME}_box_number(${argument(0)}))))`
+            : `blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(blaze_value_from_dynamic(${argument(0)})))`;
         return `${RUNTIME_NAME}_to_text(${rendered})`;
       }
       // The text the program reads apart. A text argument is the pointer to
