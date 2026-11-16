@@ -5,66 +5,6 @@ bugs: each one works, is documented where it is used, and was chosen because the
 alternative was larger. They are collected here so the cost of each is visible
 in one place, and so nobody mistakes them for principles.
 
-## The biggest hack: every value is a double, and ≥4096 means pointer
-
-> **Status:** the range inference, magic-header probing and pool guards below
-> are gone. `runtime/value-abi.ts` now defines a tagged 16-byte `BlazeValue`,
-> the C runtime keeps a typed handle registry with generations and explicit
-> lengths, and object kinds and lengths come from registry entries rather than
-> from memory before a pointer. The boxed-value and dictionary registries are
-> now the one typed registry, so both name values by slot and generation. What
-> remains is the last of the ABI signature migration. The globals, dynamic
-> arrays, dictionary services, value inspection, text rendering, record writes,
-> hashers and the wasm value services are migrated. No `(double)(uintptr_t)`
-> conversions or numeric-range type probes remain, in C, Nim, WASM or the
-> machine backend. The machine backend passes a tagged value as the two integer
-> eightbytes the foreign-call convention gives a 16-byte record. 21
-> double-typed ABI entries are left, all host services whose `double` is a
-> number rather than a dynamic value. The authoritative layout and the
-> migration's history are in `docs/specs/value-abi.md`.
-
-The C backend's dynamic side has a single untagged 64-bit slot. Everything —
-numbers, registry indices, texts, records — travels as an IEEE-754 `double`.
-The runtime recovered meaning from the numeric range of the value and by reading
-a magic word *before* the address:
-
-- `src/compiler/runtime/abi.ts:7963-7967` — `blaze_rt_is_block`:
-  `return value > 4096.0 && value < 281474976710656.0;` — justified as "a handle
-  of the dynamic registry is a small index, and no allocation is at an address
-  below a page."
-- `src/compiler/runtime/abi.ts:6290-6291` — `blaze_rt_to_text`:
-  `if (value >= 4096.0) return (const char*)(uintptr_t)value;` — the comment
-  says "when it points at readable memory", but no such check exists.
-- `src/compiler/runtime/abi.ts:4356-4368` — a managed string carries its length
-  in a header 48 bytes in front of it. A C literal has no header, so the runtime
-  reads 8 bytes before the pointer anyway and uses a magic word to tell the two
-  apart.
-- `src/compiler/runtime/abi.ts:6130-6134, 6165` — every 64 KB pool chunk wastes
-  its first 64 bytes (`BLAZE_RT_DYN_POOL_GUARD`) so that the out-of-bounds-looking
-  header read always lands in mapped memory. A `danger` build drops even that
-  guard.
-- `src/compiler/runtime/abi.ts:3771-3776` — "the IR holds no length for an
-  element access and no backend emits a check for one, so the magic number, the
-  overflow check and the caps are what stand between a released pointer and a
-  second use of it." Bounds safety is delegated to a magic number.
-
-Three value spaces collide in one slot: small doubles (numbers), small integers
-(indices into `blaze_dyn_reg`), and raw pointers cast through 74
-`(double)(uintptr_t)` expressions across `runtime/abi.ts`, `toolchain/driver.ts`
-and `toolchain/ir-c.ts`. The consequences leak into unrelated features:
-
-- SQLite handles must be slot indices, because "the runtime renders a value it
-  does not hold and that is above 4096 as if it were a string pointer"
-  (`src/compiler/runtime/sqlite-build.ts:105-114`).
-- Module globals live in a fixed `blaze_rt_globals[4096]` array whose
-  out-of-range indices silently clamp to slot 0
-  (`src/compiler/runtime/abi.ts:4423-4427`).
-- The magic constant `0x424C415A45525400` is hand-copied into C, Nim and the
-  wasm host, which must agree byte-for-byte.
-
-Replacing this would mean redesigning the language's value model, not patching a
-function.
-
 ## Global slots discovered by regex over literal text
 
 `src/compiler/semantics/program.ts:473-551` hard-codes four call names
