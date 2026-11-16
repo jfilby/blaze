@@ -6751,7 +6751,7 @@ const char* blaze_rt_to_text(BlazeValue value) {
     return out;
   }
   if (d->kind == BLAZE_DYN_OBJECT) {
-    double s = blaze_rt_json_stringify(blaze_dynamic_from_value(value));
+    double s = blaze_dynamic_from_value(blaze_rt_json_stringify_value(value));
     blaze_dyn* sd = blaze_dyn_lookup(s);
     return sd && sd->text ? sd->text : "{}";
   }

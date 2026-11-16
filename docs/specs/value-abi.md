@@ -131,14 +131,12 @@ for its logical length.
 
 ## 7. Conformance
 
-The migration is landed in C, Nim and the wasm host for every dynamic-value
-service. The one exception is `blaze_rt_json_stringify`, which the machine
-backend still calls through a scalar projection: its argument and answer are a
-registry handle carried in a `double`, because that backend's foreign-call
-convention has no 16-byte struct return. The tagged entry
-`blaze_rt_json_stringify_value` is what C and Nim use, and the scalar entry is
-implemented in terms of it. Removing the scalar projection requires adding a
-struct-return path to the machine backend's `callSymbol`.
+The migration is landed in C, Nim, the wasm host and the machine backend for
+every dynamic-value service. A 16-byte `BlazeValue` crosses a foreign call in
+two integer eightbytes: payload bits and a packed tag/kind, derived from the IR
+type at the call. The machine backend reads those positions and the tagged
+results from `RUNTIME_ABI` rather than a hand-written list. Scalar projections
+of tagged values are gone.
 
 The C header declares `BlazeValue`, the tag and kind constants, and the
 validating accessors. The Nim adapter declares an `object` with the same field
