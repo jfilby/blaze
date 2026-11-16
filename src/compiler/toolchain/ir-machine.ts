@@ -4467,6 +4467,24 @@ class Machine {
    * still what it held — which is what lets the load of that same slot after it
    * be answered rather than written.
    */
+  /**
+   * A tagged answer comes back in RAX (payload) and RDX (tag and kind). The
+   * payload's bits are the number this backend carries a handle in.
+   */
+  private taggedAnswerToNumber(): void {
+    const at = this.reserve(8);
+    this.code.movMemRegSized(frame(at), RAX, 8);
+    this.code.movsLoad(XMM0, frame(at), false);
+  }
+
+  /** The number in XMM0 becomes the two integer words of a tagged argument. */
+  private numberToTaggedArgs(): void {
+    this.external("blaze_value_from_dynamic");
+    this.callForeign("blaze_value_from_dynamic");
+    this.code.movRegReg(RDI, RAX);
+    this.code.movRegReg(RSI, RDX);
+  }
+
   private store(held: Held): void {
     const register = fieldOf(held, "register") as number | null;
     const type = fieldOf(held, "type") as SemanticType;
@@ -11617,10 +11635,11 @@ class Machine {
       // kept as the pointer it is while the executor runs, because the call
       // that sets it as current takes a pointer, and it is turned into the
       // number the call answers with at the end.
-      const slot = this.holdSlot(POINTER, "blaze_promise");
+      this.taggedAnswerToNumber();
+      const slot = this.holdSlot(NUMBER, "blaze_promise");
       this.store(slot);
       this.load(slot);
-      this.code.movRegReg(RDI, RAX);
+      this.numberToTaggedArgs();
       this.external("blaze_promise_set_current");
       this.callForeign("blaze_promise_set_current");
       const cb = args[0];
@@ -11635,8 +11654,6 @@ class Machine {
       this.external("blaze_promise_clear_current");
       this.callForeign("blaze_promise_clear_current");
       this.load(slot);
-      this.code.zeroFloat(XMM0);
-      this.code.cvtIntToFloat(XMM0, RAX, false);
       this.accumulatorNote = null;
       return;
     }
@@ -11645,8 +11662,7 @@ class Machine {
       // reads the promise that address points at: a failed promise answers 1
       // and the message it failed with, which is a text the runtime holds.
       this.at(argument, NUMBER);
-      this.code.cvtFloatToInt(RAX, XMM0, false, true);
-      this.code.movRegReg(RDI, RAX);
+      this.numberToTaggedArgs();
       const symbol = callee === "Promise.failed" ? "blaze_promise_failed" : "blaze_promise_message";
       this.external(symbol);
       this.callForeign(symbol);
@@ -11666,8 +11682,7 @@ class Machine {
       this.at(args[0], NUMBER);
       // The handle is the number the promise's address is, and the runtime
       // reads the promise that address points at.
-      this.code.cvtFloatToInt(RAX, XMM0, false, true);
-      this.code.movRegReg(RDI, RAX);
+      this.numberToTaggedArgs();
       if (callee === "Promise.await.text") {
         this.external("blaze_promise_await_text");
         this.callForeign("blaze_promise_await_text");
@@ -11690,6 +11705,7 @@ class Machine {
       if (callee === "Promise.await.value") {
         this.external("blaze_promise_await_value");
         this.callForeign("blaze_promise_await_value");
+        this.taggedAnswerToNumber();
         return;
       }
       if (callee === "Promise.await.nothing") {
@@ -11721,16 +11737,14 @@ class Machine {
         this.external(name);
         this.callForeign(name);
       }
-      // The runtime answers the promise as the address it holds, and the
-      // language holds a handle as the number that address is.
-      this.code.cvtIntToFloat(XMM0, RAX, false);
+      this.taggedAnswerToNumber();
       return;
     }
     if (callee === "Promise.resolve.nothing" || callee === "Promise.settle.nothing") {
       const name = callee === "Promise.settle.nothing" ? "blaze_promise_settled_null" : "blaze_promise_resolved_null";
       this.external(name);
       this.callForeign(name);
-      this.code.cvtIntToFloat(XMM0, RAX, false);
+      this.taggedAnswerToNumber();
       return;
     }
     if (callee === "Promise.reject") {
@@ -11748,7 +11762,7 @@ class Machine {
       }
       this.external("blaze_promise_rejected");
       this.callForeign("blaze_promise_rejected");
-      this.code.cvtIntToFloat(XMM0, RAX, false);
+      this.taggedAnswerToNumber();
       return;
     }
     if (callee === "resolve") {

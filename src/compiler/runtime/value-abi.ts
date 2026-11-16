@@ -144,6 +144,14 @@ typedef struct {
 #define BLAZE_VALUE_BYTES ${String(VALUE_LAYOUT.bytes)}u
 #define BLAZE_HANDLE_INDEX_BITS ${String(HANDLE_INDEX_BITS)}u
 
+/* The layout is a contract, not an accident of this compiler's target. */
+_Static_assert(sizeof(BlazeValue) == ${String(VALUE_LAYOUT.bytes)}, "BlazeValue must be 16 bytes");
+_Static_assert(_Alignof(BlazeValue) == 8, "BlazeValue must be eight-byte aligned");
+_Static_assert(offsetof(BlazeValue, payload) == ${String(fieldOf(fieldOf(VALUE_LAYOUT,"payload"),"offset"))}, "payload at its stated offset");
+_Static_assert(offsetof(BlazeValue, tag) == ${String(fieldOf(fieldOf(VALUE_LAYOUT,"tag"),"offset"))}, "tag at its stated offset");
+_Static_assert(offsetof(BlazeValue, kind) == ${String(fieldOf(fieldOf(VALUE_LAYOUT,"kind"),"offset"))}, "kind at its stated offset");
+_Static_assert(BLAZE_VALUE_NUMBER == 0 && BLAZE_VALUE_EXTERNAL == 4, "tag numbers are the shared ABI");
+
 #define BLAZE_ENTRY_LIVE ${String(ENTRY_STATE.live)}u
 #define BLAZE_ENTRY_RELEASED ${String(ENTRY_STATE.released)}u
 #define BLAZE_ENTRY_OWNED ${String(ENTRY_OWNERSHIP.owned)}u

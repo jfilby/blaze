@@ -7,6 +7,25 @@
  */
 
 import { RUNTIME_ABI, TEXT_SYMBOLS, WIDE_SYMBOLS } from "./abi.ts";
+
+/* The value helpers the header declares beside the ABI. A lowering uses them
+   to cross between the carrier it holds and a tagged value. */
+const VALUE_HELPERS: Record<string, true> = {
+  blaze_value_number: true,
+  blaze_value_number_of: true,
+  blaze_value_boolean: true,
+  blaze_value_null: true,
+  blaze_value_handle: true,
+  blaze_value_is: true,
+  blaze_value_is_handle: true,
+  blaze_value_from_dynamic: true,
+  blaze_dynamic_from_value: true,
+  blaze_value_c_text: true,
+  blaze_value_from_text: true,
+  blaze_value_ref: true,
+  blaze_value_from_pointer: true,
+  blaze_value_from_promise: true,
+};
 import { HTTP_ABI } from "./http.ts";
 import { SQLITE_ABI } from "./sqlite.ts";
 import { TRITON_ABI } from "./triton.ts";
@@ -24,6 +43,7 @@ export function isRuntimeSymbol(symbol: string): boolean {
   }
   if (WIDE_SYMBOLS[symbol] === true) return true;
   if (TEXT_SYMBOLS[symbol] === true) return true;
+  if (VALUE_HELPERS[symbol] === true) return true;
   for (const item of HTTP_ABI) {
     if (String(fieldOf(item, "symbol")) === symbol) return true;
   }

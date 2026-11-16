@@ -132,7 +132,10 @@ for its logical length.
 ## 7. Conformance
 
 The migration is landed in C, Nim, the wasm host and the machine backend for
-every dynamic-value service. A 16-byte `BlazeValue` crosses a foreign call in
+every dynamic-value service. The wasm host serves no promise services: a module
+has no asynchronous host, so there is no second promise representation there to
+reconcile. Its value services use the same tagged record as every other
+backend. A 16-byte `BlazeValue` crosses a foreign call in
 two integer eightbytes: payload bits and a packed tag/kind, derived from the IR
 type at the call. The machine backend reads those positions and the tagged
 results from `RUNTIME_ABI` rather than a hand-written list. Scalar projections
