@@ -329,7 +329,7 @@ type DraftValue =
   /** The length of a string, counted the way an array length is. */
   | { k: "stringLength"; of: DraftValue }
   /** One element of an array. */
-  | { k: "element"; buffer: string; bufferType: TypeExpr; index: DraftValue; type: TypeExpr }
+  | { k: "element"; buffer: string; bufferType: TypeExpr; index: DraftValue; type: TypeExpr; length?: number | null }
   | { k: "boolean"; value: boolean }
   /** Nothing, of the type a use fixes it at. */
   | { k: "null"; type: TypeExpr | null }
@@ -4078,7 +4078,8 @@ class ProgramResolver {
         if (expect !== null) {
           this.coerce(`an element of ${bufferName}`, element, expect, line);
         }
-        return { k: "element", buffer: String(fieldOf(held, "name")), bufferType: arrayType(held), index, type: element };
+        const length = Array.isArray(fieldOf(held, "length")) ? fieldOf(held, "length").length : fieldOf(held, "length") as number | null;
+        return { k: "element", buffer: String(fieldOf(held, "name")), bufferType: arrayType(held), index, type: element, length };
       }
       case "call": {
         const folded = this.writtenBigInt(value);
@@ -6463,6 +6464,9 @@ class ProgramLowering {
           type: fieldOf(value, "type") as SemanticType,
           of: { k: "local", type: fieldOf(value, "bufferType") as TypeExpr, name: String(fieldOf(value, "buffer")) },
           index: this.value(fieldOf(value, "index") as DraftValue, USIZE, line),
+          ...(fieldOf(value, "length") === null || fieldOf(value, "length") === undefined
+            ? {}
+            : { length: { k: "const", type: USIZE, text: String(fieldOf(value, "length")) } as SemanticValue }),
         };
       case "call": {
         const call = fieldOf(value, "call") as DraftCall;

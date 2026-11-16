@@ -1528,6 +1528,28 @@ class Body {
           this.convert(fieldOf(value,"type"), at);
           return;
         }
+        const length = fieldOf(value,"length") as SemanticValue | undefined;
+        if (length !== undefined) {
+          // A length the IR carries is checked before the address is formed:
+          // an index outside it answers zero rather than a byte past the block.
+          this.value(fieldOf(value,"index"), ADDRESS);
+          this.value(length, ADDRESS);
+          this.op(0x49); // `i32.lt_u`
+          this.op(0x04);
+          this.code.byte(0x40);
+          this.push(null);
+          this.address(fieldOf(value,"of"), fieldOf(value,"index"), fieldOf(value,"type"));
+          const checked = fieldOf(facts(fieldOf(value,"type")),"load");
+          this.op(fieldOf(checked,"code"));
+          this.code.varuint(fieldOf(checked,"align"));
+          this.code.varuint(0);
+          this.pop();
+          this.op(0x05);
+          this.i32(0);
+          this.op(0x0b);
+          this.convert(fieldOf(value,"type"), at);
+          return;
+        }
         this.address(fieldOf(value,"of"), fieldOf(value,"index"), fieldOf(value,"type"));
         const load = fieldOf(facts(fieldOf(value,"type")),"load");
         this.op(fieldOf(load,"code"));

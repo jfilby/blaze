@@ -434,7 +434,12 @@ export type SemanticValue =
   /** The length of an array, a slice or a string. */
   | { k: "length"; type: SemanticType; of: SemanticValue }
   /** One element of an array or a slice. */
-  | { k: "element"; type: SemanticType; of: SemanticValue; index: SemanticValue }
+  /**
+   * One element of an array or a slice. `length` is the count the IR knows the
+   * block was built with, where one is stated; a backend checks the index
+   * against it before reading instead of relying on zero-filled memory.
+   */
+  | { k: "element"; type: SemanticType; of: SemanticValue; index: SemanticValue; length?: SemanticValue }
   /**
    * A typed array, allocated where the program wrote it out. `length` is the
    * number of elements the program wrote down and `count` the number it
