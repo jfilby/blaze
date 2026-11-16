@@ -217,6 +217,23 @@ test("string length and type come from the registry, not from a word before the 
   assert.equal(result.code, 0, result.stdout + result.stderr);
 });
 
+test("a dictionary is named by a typed handle, not by its address", async () => {
+  const directory = await scratch("blaze-dict-handle-");
+  const binary = await compileRuntimeProbe(
+    directory,
+    "dict",
+    `  const double dict = blaze_rt_dict_new();
+     if (dict <= 0.0 || dict >= 4096.0) return 1;
+     blaze_rt_dict_set(dict, "x", 7.0);
+     if (blaze_rt_dict_get(dict, "x") != 7.0) return 2;
+     blaze_rt_dict_get(1e12, "x");
+     return 0;`,
+  );
+  const result = run(binary, [], { timeoutMs: 30_000 });
+  assert.equal(result.code, 2, "a pointer-sized value is not a dictionary handle");
+  assert.match(result.stderr, /did not create/);
+});
+
 test("a released pointer stops naming the object it held", async () => {
   const directory = await scratch("blaze-release-pointer-");
   const binary = await compileRuntimeProbe(

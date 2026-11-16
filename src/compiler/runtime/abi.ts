@@ -3945,6 +3945,10 @@ static uint64_t blaze_registry_length(const BlazeValue* value, uint32_t kind, co
   return entry == NULL ? 0 : entry->length;
 }
 
+/* The entry a handle payload names, or NULL where the slot is out of range,
+   released or stale. Defined with the boxed-value registry below. */
+static blaze_rt_entry* blaze_registry_entry_of_payload(uint64_t payload);
+
 /* Releases a slot and makes every handle that named it stale. An external
    buffer is borrowed and is never freed here. */
 static void blaze_registry_release(const BlazeValue* value, uint32_t kind, const char* operation) {
@@ -5166,41 +5170,37 @@ static blaze_rt_dict* blaze_rt_dict_alloc(void) {
   return d;
 }
 
-/* The dictionaries this runtime has handed out.
-
-   A handle is the address of a dictionary carried as the number a value is, and
-   a value that was never handed out is not one: a record read through this
-   service was read as a dictionary whose count sat where a field was, and
-   an iteration over a value the compiler had not settled answered a size out of
-   whatever the block happened to hold. A handle is checked against the ones
-   this runtime made, and anything else is refused here rather than followed. */
-static blaze_rt_dict** blaze_rt_dict_registry = NULL;
-static size_t blaze_rt_dict_count = 0;
-static size_t blaze_rt_dict_capacity = 0;
+/* The dictionaries this runtime has handed out are entries of the one typed
+   registry. A handle names a slot and its generation, never the address of the
+   dictionary, so a number the runtime did not hand out is refused here rather
+   than followed into memory. */
+static double blaze_dict_handle(const blaze_rt_dict* d) {
+  const uint32_t slot = blaze_pointer_find((const void*)d);
+  if (slot == 0) return 0.0;
+  const blaze_rt_entry* entry = &blaze_rt_registry[slot - 1];
+  const uint64_t payload = ((uint64_t)entry->generation << 32) | slot;
+  double number = 0.0;
+  memcpy(&number, &payload, sizeof number);
+  return number;
+}
 
 double blaze_rt_dict_new(void) {
   blaze_rt_dict* d = blaze_rt_dict_alloc();
   if (d == NULL) return 0.0;
-  if (blaze_rt_dict_count + 1 >= blaze_rt_dict_capacity) {
-    const size_t capacity = blaze_rt_dict_capacity ? blaze_rt_dict_capacity * 2 : 64;
-    blaze_rt_dict** grown = realloc(blaze_rt_dict_registry, capacity * sizeof(blaze_rt_dict*));
-    if (grown == NULL) return (double)(uintptr_t)d;
-    blaze_rt_dict_registry = grown;
-    blaze_rt_dict_capacity = capacity;
-  }
-  blaze_rt_dict_registry[blaze_rt_dict_count] = d;
-  blaze_rt_dict_count += 1;
-  return (double)(uintptr_t)d;
+  BlazeValue handle = blaze_registry_register(BLAZE_HANDLE_DICTIONARY, d, 0, BLAZE_ENTRY_OWNED);
+  blaze_pointer_remember(d, blaze_value_index(&handle));
+  double number = 0.0;
+  memcpy(&number, &handle.payload, sizeof number);
+  return number;
 }
 
 /** The dictionary a handle names, refused where the runtime never made one. */
 static blaze_rt_dict* blaze_rt_dict_known(double handle) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)handle;
-  if (d == NULL) return NULL;
-  for (size_t index = 0; index < blaze_rt_dict_count; index += 1) {
-    if (blaze_rt_dict_registry[index] == d) return d;
-  }
-  return NULL;
+  uint64_t payload = 0;
+  memcpy(&payload, &handle, sizeof payload);
+  blaze_rt_entry* entry = blaze_registry_entry_of_payload(payload);
+  if (entry == NULL || entry->kind != BLAZE_HANDLE_DICTIONARY) return NULL;
+  return (blaze_rt_dict*)entry->pointer;
 }
 
 static blaze_rt_dict* blaze_rt_dict_of(double handle) {
@@ -5408,7 +5408,7 @@ double blaze_rt_dict_set(double dict, const char* key, double value) {
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
-  if (e != NULL) { e->value = value; return (double)(uintptr_t)d; }
+  if (e != NULL) { e->value = value; return blaze_dict_handle(d); }
   if (d->count == d->capacity) {
     size_t nc = d->capacity == 0 ? 8 : d->capacity * 2;
     blaze_rt_dict_entry* ne = (blaze_rt_dict_entry*)realloc(d->entries, nc * sizeof(blaze_rt_dict_entry));
@@ -5421,7 +5421,7 @@ double blaze_rt_dict_set(double dict, const char* key, double value) {
   strcpy(d->entries[d->count].key, key);
   d->entries[d->count].value = value;
   d->count++;
-  return (double)(uintptr_t)d;
+  return blaze_dict_handle(d);
 }
 
 double blaze_rt_dict_len(double dict) {
@@ -5452,14 +5452,14 @@ double blaze_rt_dict_delete(double dict, const char* key) {
   blaze_rt_dict* d = blaze_rt_dict_of(dict);
   if (d == NULL || key == NULL) return 0.0 / 0.0;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
-  if (e == NULL) return (double)(uintptr_t)d;
+  if (e == NULL) return blaze_dict_handle(d);
   free(e->key);
   /* The last entry takes the place of the one that went, so the block stays
      whole: no gap is left for the next lookup to walk into. */
   blaze_rt_dict_entry* last = &d->entries[d->count - 1];
   if (e != last) *e = *last;
   d->count--;
-  return (double)(uintptr_t)d;
+  return blaze_dict_handle(d);
 }
 
 /* A reference is a handle this runtime carries as a double, so the reference
@@ -5485,7 +5485,7 @@ double blaze_rt_dict_set_seq(double dict, const char* key, void* value, double c
 }
 
 void* blaze_rt_dict_get_seq(double dict, const char* key) {
-  blaze_rt_dict* d = (blaze_rt_dict*)(uintptr_t)dict;
+  blaze_rt_dict* d = blaze_rt_dict_known(dict);
   if (d == NULL || key == NULL) return NULL;
   blaze_rt_dict_entry* e = blaze_rt_dict_find(d, key);
   if (e == NULL) return NULL;
@@ -6364,27 +6364,52 @@ const char* blaze_rt_last_error(void) {
   return blaze_rt_last_message;
 }
 
-static void** blaze_dyn_reg = NULL;
-static size_t blaze_dyn_reg_n = 0;
-static size_t blaze_dyn_reg_cap = 0;
+/* The kind a boxed dynamic value is registered as. The old runtime kept a
+   second, untyped registry beside this one; the one registry now names every
+   value, with the kind and the generation in its entry. */
+static uint32_t blaze_dyn_kind_of(const blaze_dyn* d) {
+  switch (d->kind) {
+    case BLAZE_DYN_NUMBER: return BLAZE_HANDLE_NUMBER;
+    case BLAZE_DYN_BOOL: return BLAZE_HANDLE_BOOLEAN;
+    case BLAZE_DYN_NULL: return BLAZE_HANDLE_NIL;
+    case BLAZE_DYN_TEXT: return BLAZE_HANDLE_STRING;
+    case BLAZE_DYN_ARRAY: return BLAZE_HANDLE_ARRAY;
+    case BLAZE_DYN_OBJECT: return BLAZE_HANDLE_OBJECT;
+    default: return BLAZE_HANDLE_CLOSURE;
+  }
+}
+
+/* The entry a handle payload names, or NULL where the slot is out of range,
+   released stale. The payload is the index and the generation of the slot,
+   both carried in the double a program holds. */
+static blaze_rt_entry* blaze_registry_entry_of_payload(uint64_t payload) {
+  const uint32_t index = (uint32_t)(payload & 0xffffffffULL);
+  const uint32_t generation = (uint32_t)(payload >> 32);
+  if (index == 0 || index > blaze_rt_registry_count) return NULL;
+  blaze_rt_entry* entry = &blaze_rt_registry[index - 1];
+  if (entry->state != BLAZE_ENTRY_LIVE || entry->generation != generation) return NULL;
+  return entry;
+}
 
 static double blaze_dyn_register(void* p) {
-  /* Handle 0 is not a dynamic value: it is the nothing a missing field
-     answers, the way a pointer to nothing is 0. The slot stays reserved, so
-     a lookup of 0 finds nothing and a read of a field that is not there is
-     told apart from every value that is. */
-  if (blaze_dyn_reg_n + 1 >= blaze_dyn_reg_cap) {
-    blaze_dyn_reg_cap = blaze_dyn_reg_cap ? blaze_dyn_reg_cap * 2 : 64;
-    blaze_dyn_reg = realloc(blaze_dyn_reg, blaze_dyn_reg_cap * sizeof(void*));
-  }
-  blaze_dyn_reg_n += 1;
-  blaze_dyn_reg[blaze_dyn_reg_n] = p;
-  return (double)blaze_dyn_reg_n;
+  blaze_dyn* d = (blaze_dyn*)p;
+  /* The pool owns the value and never gives it back, so a registry release
+     must not free a pointer to it. Handle 0 stays the invalid handle. */
+  BlazeValue handle = blaze_registry_register(blaze_dyn_kind_of(d), p, d->count, BLAZE_ENTRY_EXTERNAL);
+  double number = 0.0;
+  memcpy(&number, &handle.payload, sizeof number);
+  return number;
 }
 static blaze_dyn* blaze_dyn_lookup(double h) {
-  size_t i = (size_t)h;
-  if (i == 0 || i > blaze_dyn_reg_n) return NULL;
-  return (blaze_dyn*)blaze_dyn_reg[i];
+  uint64_t payload = 0;
+  memcpy(&payload, &h, sizeof payload);
+  blaze_rt_entry* entry = blaze_registry_entry_of_payload(payload);
+  if (entry == NULL) return NULL;
+  const uint32_t kind = entry->kind;
+  if (kind != BLAZE_HANDLE_NUMBER && kind != BLAZE_HANDLE_BOOLEAN && kind != BLAZE_HANDLE_NIL &&
+      kind != BLAZE_HANDLE_STRING && kind != BLAZE_HANDLE_ARRAY && kind != BLAZE_HANDLE_OBJECT &&
+      kind != BLAZE_HANDLE_CLOSURE) return NULL;
+  return (blaze_dyn*)entry->pointer;
 }
 
 /* The pool a dynamic value and the text it holds are written in.

@@ -25,6 +25,12 @@ export const HANDLE_KINDS = {
   object: 4,
   closure: 5,
   buffer: 6,
+  /* The kinds a value the runtime boxes for a program holds. They are handle
+     kinds like any other, not a second numbering scheme in the same slot. */
+  number: 7,
+  boolean: 8,
+  nil: 9,
+  dictionary: 10,
 } as const;
 
 /** What an external value owns. A resource entry carries the same number. */
