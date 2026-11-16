@@ -29,7 +29,6 @@ import { readFileSync, stat, writeFile } from "../core/platform.ts";
 import { CompilerError, toCompilerError } from "../core/errors.ts";
 import { run } from "../core/process.ts";
 import { DEFAULT_ALIGNMENT, RUNTIME_ABI, RUNTIME_NAME } from "../runtime/abi.ts";
-import { HANDLE_KINDS, VALUE_TAGS } from "../runtime/value-abi.ts";
 import { isRuntimeSymbol } from "../runtime/symbols.ts";
 import { integerLiteral } from "./c-names.ts";
 import { ARGV_LENGTH, SHARED, builtinFor } from "../semantics/builtins.ts";
@@ -113,17 +112,6 @@ const TAGGED_RETURNS: ReadonlySet<string> = new Set(
   (RUNTIME_ABI as readonly { symbol: string; returns: string }[])
     .filter((entry) => entry.returns === "BlazeValue")
     .map((entry) => entry.symbol),
-);
-
-/** The argument positions a runtime entry takes as a tagged value, by symbol. */
-const TAGGED_PARAMS: ReadonlyMap<string, ReadonlySet<number>> = new Map(
-  (RUNTIME_ABI as readonly { symbol: string; params: readonly { 1: string }[] }[])
-    .map((entry) => {
-      const at = new Set<number>();
-      for (const [index, param] of entry.params.entries()) if (param[1] === "BlazeValue") at.add(index);
-      return [entry.symbol, at] as const;
-    })
-    .filter(([, at]) => at.size > 0),
 );
 
 function isDynamicType(type: SemanticType | null): boolean {
@@ -11248,23 +11236,16 @@ class Machine {
     const args: (Held | null)[] = [];
     if (sret !== null) args.push(this.resultAddress(sret));
     else if (taggedOut >= 0) args.push(this.resultAddress({ offset: taggedOut } as Held));
-    const taggedAt = TAGGED_PARAMS.get(symbol);
     for (const [at, held] of evaluated.entries()) {
-      if (held !== null && taggedAt?.has(at) === true) {
-        const [payload, tagKind] = this.taggedPair(held, types[at] ?? NUMBER);
-        args.push(payload, tagKind);
-      } else {
-        args.push(held);
-      }
+      args.push(held);
       const length = lengths[at];
       if (length !== null) args.push(length);
     }
     // A wide answer's address is the first argument, so no argument is in the
     // register the callee reads it in: the two shortcuts below are the ones a
     // call without one takes, and passing the indices through would leave a
-    // value the callee reads from the wrong register. A tagged value takes two
-    // argument registers of its own for the same reason.
-    const shift = sret === null && taggedOut < 0 && !wideArguments && (taggedAt?.size ?? 0) === 0 ? 0 : 1;
+    // value the callee reads from the wrong register.
+    const shift = sret === null && taggedOut < 0 && !wideArguments ? 0 : 1;
     this.callSymbol(
       symbol,
       args,
@@ -11288,52 +11269,6 @@ class Machine {
    * because the arguments are evaluated after it, and an argument is free to
    * use every scratch register the accumulator is.
    */
-  /**
-   * A tagged value in the two integer eightbytes the foreign-call convention
-   * hands a 16-byte record in. The payload is the bits of the number the
-   * backend carries a handle in; the tag and the kind come from the IR type,
-   * which says what the value is without asking its magnitude.
-   */
-  private taggedPair(held: Held, type: SemanticType): [Held, Held] {
-    const payload = this.hold(I64, "blaze_value_bits");
-    this.code.movRegMemSized(RAX, frame(held.offset), 8, false);
-    this.code.movMemRegSized(frame(payload.offset), RAX, 8);
-    const heldAs = String(fieldOf(type, "kind"));
-    if (heldAs === "primitive" && fieldOf(type, "name") === "bool") {
-      this.code.movRegImm(RCX, BigInt(Number(fieldOf(VALUE_TAGS, "boolean"))));
-    } else if (isNumber(type)) {
-      this.code.movRegImm(RCX, BigInt(Number(fieldOf(VALUE_TAGS, "number"))));
-    } else {
-      let kind = 0;
-      if (isTextType(type)) kind = Number(fieldOf(HANDLE_KINDS, "string"));
-      else if (heldAs === "array" || heldAs === "slice") kind = Number(fieldOf(HANDLE_KINDS, "array"));
-      else kind = Number(fieldOf(HANDLE_KINDS, "object"));
-      this.code.movRegImm(RCX, BigInt(kind) * 4294967296n + BigInt(Number(fieldOf(VALUE_TAGS, "handle"))));
-    }
-    const tagKind = this.hold(I64, "blaze_value_tag");
-    this.code.movMemRegSized(frame(tagKind.offset), RCX, 8);
-    return [payload, tagKind];
-  }
-
-  /**
-   * A foreign call whose argument and answer are tagged values, for the
-   * builtins that hold a value already worked out rather than a semantic tree.
-   */
-  /** The two eightbytes a tagged answer comes back in, after a foreign call. */
-  private taggedAnswer(): [Held, Held] {
-    const payload = this.hold(I64, "blaze_value_bits");
-    const tagKind = this.hold(I64, "blaze_value_tag");
-    this.code.movMemRegSized(frame(payload.offset), RAX, 8);
-    this.code.movMemRegSized(frame(tagKind.offset), RDX, 8);
-    return [payload, tagKind];
-  }
-
-  /** A foreign call whose argument and answer are both tagged values. */
-  private callTagged(symbol: string, pair: readonly [Held, Held]): [Held, Held] {
-    this.callSymbol(symbol, [pair[0], pair[1]], NUMBER, -1, -1);
-    return this.taggedAnswer();
-  }
-
   private resultAddress(out: Held): Held {
     const pointer = this.hold(POINTER, "blaze_wide_result_address");
     this.code.leaMemReg(mem(RSP, fieldOf(out, "offset") as number), RAX);
@@ -11572,11 +11507,10 @@ class Machine {
     }
     if (callee === "JSON.stringify" && argument !== undefined) {
       const held = this.dynamicArgument(argument);
-      const value = this.taggedPair(held, argTypes[0] ?? NUMBER);
-      const json = this.callTagged("blaze_rt_json_stringify_value", value);
-      this.callTagged("blaze_rt_to_text", json);
-      // The text answer is a pointer in the payload eightbyte, which is where
-      // a TEXT result is read from.
+      this.callSymbol("blaze_rt_json_stringify", [held], NUMBER);
+      const json = this.hold(NUMBER, "blaze_json");
+      this.store(json);
+      this.callSymbol("blaze_rt_to_text", [json], TEXT);
       return;
     }
     if (callee === "Date.parse" && argument !== undefined) {
