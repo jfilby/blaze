@@ -7,9 +7,19 @@ in one place, and so nobody mistakes them for principles.
 
 ## The biggest hack: every value is a double, and ≥4096 means pointer
 
+> **Status:** the range inference, magic-header probing and pool guards below
+> are gone. `runtime/value-abi.ts` now defines a tagged 16-byte `BlazeValue`,
+> the C runtime keeps a typed handle registry with generations and explicit
+> lengths, and object kinds and lengths come from registry entries rather than
+> from memory before a pointer. What remains is the ABI signature migration:
+> dynamic values still cross the C boundary as `double`, and 74
+> `(double)(uintptr_t)` conversions are still emitted by the backends. The
+> authoritative layout and the remaining plan are in
+> `docs/specs/value-abi.md`.
+
 The C backend's dynamic side has a single untagged 64-bit slot. Everything —
 numbers, registry indices, texts, records — travels as an IEEE-754 `double`.
-The runtime recovers meaning from the numeric range of the value and by reading
+The runtime recovered meaning from the numeric range of the value and by reading
 a magic word *before* the address:
 
 - `src/compiler/runtime/abi.ts:7963-7967` — `blaze_rt_is_block`:
