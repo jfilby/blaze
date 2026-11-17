@@ -225,12 +225,22 @@ interface ReplayFile {
   /** Unvalidated: a replay file is written by hand, and what it holds is
    *  checked where it is read rather than taken on the shape of this. */
   reviews?: unknown;
+  /**
+   * The answer for a first review at a position past the end of `reviews`. A
+   * build gives each function a block of review positions, so a fixture of
+   * no-op answers cannot know how many it needs. Repair rounds (attempt > 1)
+   * are never answered by the default: a toolchain that keeps rejecting a
+   * candidate must still fail rather than run through every candidate.
+   */
+  default?: unknown;
 }
 
 export class ReplayBackend implements AiBackend {
   readonly id: string;
   private readonly configuration: ModelConfiguration;
   private entries: string[] | null = null;
+  /** The opt-in answer for first reviews past the end of `entries`. */
+  private defaultEntry: string | null = null;
 
   constructor(configuration: ModelConfiguration) {
     this.configuration = configuration;
@@ -274,9 +284,18 @@ export class ReplayBackend implements AiBackend {
         }
         entries.push(entry as string);
       }
+      // The default is checked here, beside the reviews, so a fixture that is
+      // meant to answer every first review cannot fail halfway through a build
+      // because its fallback was not text.
+      const fallback: unknown = parsed.default;
+      if (fallback !== undefined && typeof fallback !== "string") {
+        throw reviewError(`replay file ${file} has a "default" that is not text`);
+      }
+      this.defaultEntry = typeof fallback === "string" ? fallback : null;
       this.entries = entries;
       return this.entries;
     }
+    this.defaultEntry = null;
     this.entries = [trimmed];
     return this.entries;
   }
@@ -291,16 +310,20 @@ export class ReplayBackend implements AiBackend {
     }
     // Answers are served by record position, not by a shared cursor: candidates
     // are reviewed at the same time, and a cursor would hand them out in
-    // whatever order they happened to reach the backend. Positions past the end
-    // of the file have no recorded answer: reusing the last one would make a
-    // review loop that asked for too much look sound, so the request fails.
-    if (sequence > entries.length) {
+    // whatever order they happened to reach the backend. A build gives each
+    // function a block of positions, so a first review can arrive well past the
+    // end of a short fixture. A fixture that declared a `default` opts in to
+    // answering those first reviews; repair rounds (attempt > 1) are never
+    // defaulted, so a toolchain that keeps rejecting a candidate still fails
+    // instead of grinding through every candidate.
+    const pastEnd = sequence > entries.length;
+    const entry = pastEnd ? (request.attempt === 1 ? this.defaultEntry : null) : entries[sequence - 1];
+    if (entry === null) {
       throw reviewError(
         `the replay file holds ${entries.length} ${entries.length === 1 ? "review" : "reviews"}, but the build asked for review ${sequence}`,
         `recorded in ${String((this.configuration as unknown as Record<string, unknown>)["replayFile"])}; no answer is reused when the file is exhausted`,
       );
     }
-    const entry = entries[sequence - 1];
     const parsed = reviewOrUnusable(parseReview(entry));
     if (parsed.unusable !== null) {
       throw reviewError(

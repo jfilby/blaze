@@ -40,7 +40,9 @@ const SOUND = "verdict: sound\nreason: the body computes what the contract state
 /** A review file of its own, so a test can script the answers a build is given. */
 async function reviews(directory: string, ...answers: string[]): Promise<string> {
   const path = join(directory, "reviews.json");
-  await writeFile(path, JSON.stringify({ reviews: answers }), "utf8");
+  // A build gives each function a block of review positions, so a short fixture
+  // of no-op answers declares one as the default for the positions it reaches.
+  await writeFile(path, JSON.stringify({ reviews: answers, default: SOUND }), "utf8");
   return path;
 }
 
@@ -828,7 +830,7 @@ const REFERENCE_PROGRAM = [
 async function programProject(name: string, source: string): Promise<string> {
   const directory = await scratch(`blaze-${name}-`);
   await writeProject(join(directory, "input.toml"), { ...INPUT, language: "typescript", entry: "", source });
-  await writeFile(join(directory, "reviews.json"), JSON.stringify({ reviews: [SOUND] }), "utf8");
+  await writeFile(join(directory, "reviews.json"), JSON.stringify({ reviews: [SOUND], default: SOUND }), "utf8");
   return directory;
 }
 

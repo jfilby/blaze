@@ -375,3 +375,41 @@ test("replay exhaustion fails explicitly instead of reusing the last answer", as
   );
 });
 
+test("a replay default answers first reviews past the recorded positions", async () => {
+  const directory = await scratch("blaze-replay-default-");
+  const file = join(directory, "reviews.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      reviews: ["verdict: sound\nreason: recorded answer"],
+      default: "verdict: sound\nreason: default answer",
+    }),
+    "utf8",
+  );
+  const backend = createBackend(resolveModel(`replay:${file}`, {}));
+
+  // The recorded position keeps its own answer: the default does not overwrite
+  // what a fixture explicitly wrote.
+  assert.equal((await backend.review(reviewRequest(), 1)).reason, "recorded answer");
+  // A build gives each function a block of positions, so a short fixture is
+  // asked for first reviews well past its end.
+  assert.equal((await backend.review(reviewRequest(), 2)).reason, "default answer");
+  assert.equal((await backend.review(reviewRequest(), 13)).reason, "default answer");
+
+  // A repair round means the toolchain rejected what the answer produced, so
+  // the default does not answer it: a broken loop still fails instead of
+  // running through every candidate.
+  await assert.rejects(
+    () => backend.review({ ...reviewRequest(), attempt: 2 }, 2),
+    /replay file holds 1 review, but the build asked for review 2/,
+  );
+});
+
+test("a replay default that is not text is refused when the file is read", async () => {
+  const directory = await scratch("blaze-replay-bad-default-");
+  const file = join(directory, "reviews.json");
+  await writeFile(file, JSON.stringify({ reviews: ["verdict: sound"], default: 7 }), "utf8");
+  const backend = createBackend(resolveModel(`replay:${file}`, {}));
+  await assert.rejects(() => backend.review(reviewRequest(), 1), /has a "default" that is not text/);
+});
+

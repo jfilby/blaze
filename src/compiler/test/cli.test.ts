@@ -252,7 +252,7 @@ async function libraryProject(name: string): Promise<{ directory: string; replay
     generation: { maxCandidates: 1, maxAttempts: 1 },
   });
   const replay = join(directory, "reviews.json");
-  await writeFile(replay, JSON.stringify({ reviews: [SOUND] }), "utf8");
+  await writeFile(replay, JSON.stringify({ reviews: [SOUND], default: SOUND }), "utf8");
   return { directory, replay };
 }
 
