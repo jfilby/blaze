@@ -1874,18 +1874,39 @@ function signatureEquals(left: FunctionSignature, right: FunctionSignature): boo
 }
 
 /** The contract of the function a call names, or null when there is no contract. */
-function contractedFunction(contract: ProgramContract | undefined, callee: string): FunctionContract | null {
-  if (contract === undefined) return null;
+/**
+ * The functions of a program indexed by every name a call can use: the key a
+ * file declares a function under, and the name and symbol its signature states.
+ * A program of the compiler's own size has thousands of functions and tens of
+ * thousands of call sites; scanning every function at every call site made
+ * validation quadratic and the self-build ran for minutes. The index is built
+ * once per contract and held weakly, so it lives exactly as long as the program
+ * it answers for.
+ */
+const contractedIndex = new WeakMap<ProgramContract, Map<string, FunctionContract>>();
+
+function contractedIndexFor(contract: ProgramContract): Map<string, FunctionContract> {
+  const held = contractedIndex.get(contract);
+  if (held !== undefined) return held;
+  const index = new Map<string, FunctionContract>();
   for (const file of fieldOf(contract, "files") as readonly ProgramContractFile[]) {
     const functions = fieldOf(file, "functions") as Record<string, FunctionContract>;
-    const declared = functions[callee];
-    if (declared !== undefined) return declared;
-    for (const candidate of Object.values(functions)) {
+    for (const [key, candidate] of Object.entries(functions)) {
       const signature = fieldOf(candidate, "function") as FunctionSignature;
-      if (String(fieldOf(signature, "name")) === callee || String(fieldOf(signature, "symbol")) === callee) return candidate;
+      if (!index.has(key)) index.set(key, candidate);
+      const name = String(fieldOf(signature, "name"));
+      if (!index.has(name)) index.set(name, candidate);
+      const symbol = String(fieldOf(signature, "symbol"));
+      if (!index.has(symbol)) index.set(symbol, candidate);
     }
   }
-  return null;
+  contractedIndex.set(contract, index);
+  return index;
+}
+
+function contractedFunction(contract: ProgramContract | undefined, callee: string): FunctionContract | null {
+  if (contract === undefined) return null;
+  return contractedIndexFor(contract).get(callee) ?? null;
 }
 
 /** What a call hands back is owned exactly when it is a reference to free. */
