@@ -63,8 +63,8 @@ export class RepairConvergence {
   /** Records the result of one round and decides the next step. */
   observe(state: RepairState, verified: boolean): RepairDecision {
     if (verified) return { status: "converged", reason: "the program matches its source" };
-    const fingerprint = stateFingerprint(state);
-    if (fingerprint === this.last) {
+    const fingerprint = String(stateFingerprint(state));
+    if (fingerprint === String(this.last)) {
       return { status: "incomplete", reason: "repair reached a fixed point without verifying" };
     }
     if (this.visited.has(fingerprint)) {

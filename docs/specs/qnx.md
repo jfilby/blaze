@@ -67,7 +67,7 @@ The AArch64 ladder is the same with `qcc -Vgcc_ntoaarch64le` and the AArch64
 binary on the target yet; the QNX toolchain itself exists. Every later stage is
 built on the target.
 
-The fixed point is the one in `docs/specs/self-hosting.md`: byte-for-byte
+The fixed point is the one in `docs/specs/self-building.md`: byte-for-byte
 equality of the binaries is not required, but the command exit status, stdout,
 stderr, IR text, build records, selected candidates, delivered-program output,
 and refusal messages must agree.

@@ -1,11 +1,12 @@
 /**
- * The model transport a native build carries.
+ * The model boundary a native build carries.
  *
- * The first fixed point uses `--model replay`, which the compiler answers
- * itself without a host, so this adapter refuses every provider that would need
- * the network. It is the file a native project maps `#host/model` to (the host
- * boundary of the self-hosting spec); the HTTP transport replaces it when model
- * review is ported, not before.
+ * An ordinary `blaze build` needs no model: it runs the rules alone, lowers the
+ * IR it resolved, verifies it and reviews nothing. This adapter is the file a
+ * native project maps `#host/model` to (the host boundary of the self-building
+ * spec); it refuses only a provider the caller asked for explicitly, because a
+ * native binary carries no network transport. That is not a prerequisite for
+ * self-building: compiling the compiler does not ask a model anything.
  */
 
 import { CompilerError } from "../core/errors.ts";
@@ -18,5 +19,5 @@ function fieldOf(value: unknown, key: string): any {
 
 /** The backend a provider configuration constructs on a native host. */
 export function createSdkBackend(configuration: ModelConfiguration, _options: BackendOptions = {}): AiBackend {
-  throw new CompilerError("AiReviewError", "review", `the ${String(fieldOf(configuration, "provider"))} provider needs a transport this build does not carry`, "build with --model replay; provider review is the last host service a native compiler gains", "", "", "");
+  throw new CompilerError("AiReviewError", "review", `the ${String(fieldOf(configuration, "provider"))} provider needs a transport this build does not carry`, "a native build needs no model: leave --model and AI_MODEL unset to run the rules alone; only an explicitly requested provider reaches this boundary", "", "", "");
 }

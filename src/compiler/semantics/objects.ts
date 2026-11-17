@@ -439,15 +439,31 @@ class BodyTypes {
         // object two functions build the same way is one object to the
         // program, so the build was refused over a counter.
         const from = this.expression(fieldOf(statement,"from"));
-        this.expression(fieldOf(statement,"to"));
-        const stepExpression = fieldOf(statement,"step");
-        const step = stepExpression === null ? null : this.expression(stepExpression);
+        // The index is in scope in the condition and the step of a `for`, not
+        // only in its body: `for (let i = 0; i < n && a[i] > 0; i += 1)` reads
+        // `i` in both. Walking those two before the name was bound refused the
+        // loop as using an undeclared name. The start is read before the index
+        // exists, then the name is bound at the start's type while the other
+        // two are walked, and finally at its counted type in the body.
+        const variable = String(fieldOf(statement,"variable"));
+        const provisional: Inferred = { kind: "type", type: String(fieldOf(from,"kind")) === "type" ? fieldOf(from,"type") : USIZE };
+        let step: Inferred | null = null;
+        const beforeLoop = this.environment;
+        this.environment = new Map(beforeLoop);
+        this.environment.set(variable, provisional);
+        try {
+          this.expression(fieldOf(statement,"to"));
+          const stepExpression = fieldOf(statement,"step");
+          if (stepExpression !== null) step = this.expression(stepExpression);
+        } finally {
+          this.environment = beforeLoop;
+        }
         const counted = String(fieldOf(from,"kind")) === "type"
           ? (step === null || String(fieldOf(step,"kind")) !== "type" ? fieldOf(from,"type") : numeric(from, step))
           : null;
         // A loop body is a scope, as an `if` arm is: a name declared in it is
         // not in scope after it, and the index is not in scope before it.
-        this.branch(fieldOf(statement,"body"), String(fieldOf(statement,"variable")), { kind: "type", type: counted ?? USIZE });
+        this.branch(fieldOf(statement,"body"), variable, { kind: "type", type: counted ?? USIZE });
         return;
       }
       case "if":

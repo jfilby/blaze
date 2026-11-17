@@ -1745,7 +1745,7 @@ class BlockReader {
   /** The line a line that is missing would have been written on. */
   protected after(): number {
     const line = this.at > 0 ? this.lines[this.at - 1] : null;
-    return line === null ? 1 : line.number + 1;
+    return line === null ? 1 : Number(fieldOf(line, "number")) + 1;
   }
 
   /**

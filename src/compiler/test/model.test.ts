@@ -340,3 +340,38 @@ test("a replay entry that is not a review fails the build where it was served", 
   );
 });
 
+test("replay exhaustion fails explicitly instead of reusing the last answer", async () => {
+  const directory = await scratch("blaze-replay-exhausted-");
+  const file = join(directory, "reviews.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      reviews: [
+        "verdict: sound\nreason: first answer",
+        "verdict: unsound\nreason: second answer",
+      ],
+    }),
+    "utf8",
+  );
+  const backend = createBackend(resolveModel(`replay:${file}`, {}));
+
+  // Each recorded position is served its own answer, in order.
+  assert.equal((await backend.review(reviewRequest(), 1)).reason, "first answer");
+  assert.equal((await backend.review(reviewRequest(), 2)).reason, "second answer");
+
+  // A position past the end has no answer. The old clamp served entry 2 again,
+  // which could make a broken review loop look sound; now the build fails.
+  await assert.rejects(
+    () => backend.review(reviewRequest(), 3),
+    /replay file holds 2 reviews, but the build asked for review 3/,
+  );
+  await assert.rejects(
+    () => backend.review(reviewRequest(), 4),
+    (error: unknown) => {
+      assert.ok(error instanceof CompilerError);
+      assert.match(error.detail ?? "", /no answer is reused when the file is exhausted/);
+      return true;
+    },
+  );
+});
+

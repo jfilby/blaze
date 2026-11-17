@@ -599,13 +599,16 @@ function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null
   if (params.some((param) => parseType(String(fieldOf(param, "type"))).kind === "ref")) return null;
   const test = fieldOf(request, "test") as TestConfig;
   const plans = planVerificationBatches(parsed, test);
-  const vectors = plans.flatMap((plan) => [...plan.vectors]);
+  const vectors: TestVector[] = [];
+  for (const plan of plans) {
+    for (const vector of fieldOf(plan, "vectors") as readonly TestVector[]) vectors.push(vector);
+  }
   return {
     cases: vectors,
-    seed: plans[0].seed,
-    batchSeeds: plans.map((plan) => plan.seed),
-    batchSizes: plans.map((plan) => plan.vectors.length),
-    benchmark: selectBenchmarkVector(fieldOf(request, "contract") as FunctionContract, parsed, plans[0].vectors),
+    seed: Number(fieldOf(plans[0], "seed")),
+    batchSeeds: plans.map((plan) => Number(fieldOf(plan, "seed"))),
+    batchSizes: plans.map((plan) => (fieldOf(plan, "vectors") as readonly unknown[]).length),
+    benchmark: selectBenchmarkVector(fieldOf(request, "contract") as FunctionContract, parsed, fieldOf(plans[0], "vectors") as readonly TestVector[]),
     demo: encodeRunRequest(fieldOf(request, "contract") as FunctionContract, [selectDemoVector(parsed, test)]),
   };
 }

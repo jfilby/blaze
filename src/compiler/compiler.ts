@@ -2605,7 +2605,7 @@ export async function runBuild(
     // while the program state keeps moving toward agreement. The round limit is
     // a resource budget; termination is decided by verification and by whether
     // a round produced a program state not seen before.
-    const repairsEnabled = body !== undefined && String(mode) === "build" && (fields["reuse"] as boolean) !== true;
+    const repairsEnabled = body !== undefined && String(mode) === "build" && String(fields["reuse"]) !== "true";
     const convergence = new RepairConvergence(
       repairsEnabled ? repairBudgetFor(sourceInputOf(inputFields), options) : { maxRounds: 1 },
     );

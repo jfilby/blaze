@@ -23,7 +23,7 @@
  *     constructs. It is the host's, asked for through the `#host/model`
  *     boundary: `ai/review-node.ts` carries the AI SDK for the Node compiler,
  *     and a native project maps the same name to the transport it links
- *     (the host boundary in docs/specs/self-hosting.md).
+ *     (the host boundary in docs/specs/self-building.md).
  */
 
 import { createSdkBackend } from "#host/model";
@@ -291,13 +291,20 @@ export class ReplayBackend implements AiBackend {
     }
     // Answers are served by record position, not by a shared cursor: candidates
     // are reviewed at the same time, and a cursor would hand them out in
-    // whatever order they happened to reach the backend.
-    const entry = entries[Math.min(sequence - 1, entries.length - 1)];
+    // whatever order they happened to reach the backend. Positions past the end
+    // of the file have no recorded answer: reusing the last one would make a
+    // review loop that asked for too much look sound, so the request fails.
+    if (sequence > entries.length) {
+      throw reviewError(
+        `the replay file holds ${entries.length} ${entries.length === 1 ? "review" : "reviews"}, but the build asked for review ${sequence}`,
+        `recorded in ${String((this.configuration as unknown as Record<string, unknown>)["replayFile"])}; no answer is reused when the file is exhausted`,
+      );
+    }
+    const entry = entries[sequence - 1];
     const parsed = reviewOrUnusable(parseReview(entry));
     if (parsed.unusable !== null) {
-      const at = Math.min(sequence - 1, entries.length - 1) + 1;
       throw reviewError(
-        `replay entry ${at} is not a review of the ${request.stage} of ${request.contract.function.name}: ${parsed.unusable}`,
+        `replay entry ${sequence} is not a review of the ${request.stage} of ${request.contract.function.name}: ${parsed.unusable}`,
         `recorded in ${String((this.configuration as unknown as Record<string, unknown>)["replayFile"])}`,
       );
     }

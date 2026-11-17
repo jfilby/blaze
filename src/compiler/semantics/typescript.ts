@@ -2613,10 +2613,10 @@ function unsupportedUpdateIn(statements: readonly Statement[], name: string): bo
 }
 
 /** Every read and write of `name` in a statement list, rewritten to its box. */
-function boxStatements(statements: Statement[], name: string, box: Boxed): void {
-    const rewritten: Statement[] = [];
+function boxStatements(statements: Statement[], name: string, box: Boxed, fromLine = 0): void {
+  const rewritten: Statement[] = [];
   for (const statement of statements) {
-    const one = boxStatement(statement, name, box);
+    const one = boxStatement(statement, name, box, fromLine);
     if (Array.isArray(one)) {
       for (const each of one as Statement[]) rewritten.push(each);
     } else rewritten.push(one);
@@ -2625,7 +2625,15 @@ function boxStatements(statements: Statement[], name: string, box: Boxed): void 
 }
 
 /** One statement, with every read and write of `name` rewritten to its box. */
-function boxStatement(statement: Statement, name: string, box: Boxed): Statement | Statement[] {
+function boxStatement(statement: Statement, name: string, box: Boxed, fromLine: number): Statement | Statement[] {
+  // A function can declare the same name twice, in a loop and again after it.
+  // Reads before the declaration the arrow actually captured belong to the
+  // earlier, different variable; rewriting them would use the box before it is
+  // declared. Only the nested blocks can hold a read after the declaration.
+  if (Number(fieldOf(statement, "line")) < fromLine) {
+    for (const block of nestedBlocks(statement)) boxStatements(block, name, box, fromLine);
+    return statement;
+  }
   switch (statement.kind) {
     case "declare":
       // The declaration of the name itself is the box, and the caller has
@@ -2673,8 +2681,8 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
       const settled = settleBoxUpdate((fieldOf(statement, "condition") as Expression), name, box, (fieldOf(statement, "line") as number));
       const condition = boxExpression(settled === null ? (fieldOf(statement, "condition") as Expression) : settled.value, name, box);
       setFieldOn(statement, "condition", condition);
-      boxBlock((fieldOf(statement, "then") as Statement[]), name, box);
-      boxBlock((fieldOf(statement, "otherwise") as Statement[]), name, box);
+      boxBlock((fieldOf(statement, "then") as Statement[]), name, box, fromLine);
+      boxBlock((fieldOf(statement, "otherwise") as Statement[]), name, box, fromLine);
       if (settled === null) return statement;
       const prelude = fieldOf(settled, "prelude") as Statement[];
       const out: Statement[] = [];
@@ -2685,25 +2693,25 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
     case "while":
     case "doWhile":
       setFieldOn(statement, "condition", boxExpression(fieldOf(statement, "condition") as Expression, name, box));
-      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box, fromLine);
       return statement;
     case "loop":
       setFieldOn(statement, "from", boxExpression(fieldOf(statement, "from") as Expression, name, box));
       setFieldOn(statement, "to", boxExpression(fieldOf(statement, "to") as Expression, name, box));
       const step = fieldOf(statement, "step") as Expression | null;
       setFieldOn(statement, "step", step === null ? null : boxExpression(step, name, box));
-      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box, fromLine);
       return statement;
     case "forOf":
       setFieldOn(statement, "of", String(fieldOf(statement, "of")) === name && !(fieldOf(box, "list") as boolean) ? String(fieldOf(box, "name")) : fieldOf(statement, "of"));
-      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box, fromLine);
       return statement;
     case "try":
-      boxBlock(fieldOf(statement, "body") as Statement[], name, box);
+      boxBlock(fieldOf(statement, "body") as Statement[], name, box, fromLine);
       const caught = fieldOf(statement, "catchBody") as Statement[] | null;
-      if (caught !== null) boxBlock(caught, name, box);
+      if (caught !== null) boxBlock(caught, name, box, fromLine);
       const final = fieldOf(statement, "finallyBody") as Statement[] | null;
-      if (final !== null) boxBlock(final, name, box);
+      if (final !== null) boxBlock(final, name, box, fromLine);
       return statement;
     case "break":
     case "continue":
@@ -2712,8 +2720,8 @@ function boxStatement(statement: Statement, name: string, box: Boxed): Statement
 }
 
 /** A statement list rewritten, as one statement list. */
-function boxBlock(statements: Statement[], name: string, box: Boxed): Statement[] {
-  boxStatements(statements, name, box);
+function boxBlock(statements: Statement[], name: string, box: Boxed, fromLine = 0): Statement[] {
+  boxStatements(statements, name, box, fromLine);
   return statements;
 }
 
@@ -2897,6 +2905,42 @@ function findDeclaration(
     }
   }
   return null;
+}
+
+/**
+ * The declaration of `name` an arrow at `line` writes.
+ *
+ * A function can declare the same name in a loop and again after it, as
+ * `verifyCandidate` does with its per-batch and whole-run counters. The first
+ * declaration is the wrong one for an arrow written after the loop: boxing it
+ * moved the arrow's value into a scope the arrow cannot see. Of the declarations
+ * the arrow can reach — those at or before its line — the last one is the name
+ * the arrow was written against; a shallower declaration wins a tie because it
+ * is the one still in scope where the arrow stands.
+ */
+function findDeclarationBefore(
+  statements: readonly Statement[],
+  name: string,
+  line: number,
+): Extract<Statement, { kind: "declare" }> | null {
+  let best: Extract<Statement, { kind: "declare" }> | null = null;
+  let bestLine = -1;
+  let bestDepth = Number.MAX_SAFE_INTEGER;
+  const walk = (blocks: readonly Statement[], depth: number): void => {
+    for (const statement of blocks) {
+      if (statement.kind === "declare" && statement.name === name) {
+        const at = Number(fieldOf(statement, "line"));
+        if (at <= line && (at > bestLine || (at === bestLine && depth < bestDepth))) {
+          best = statement;
+          bestLine = at;
+          bestDepth = depth;
+        }
+      }
+      for (const block of nestedBlocks(statement)) walk(block, depth + 1);
+    }
+  };
+  walk(statements, 0);
+  return best;
 }
 
 /** The statement lists a statement holds. */
@@ -15886,7 +15930,7 @@ class TypeScriptParser {
     // this body writes it: the value the arrow is handed is the box.
     for (const capture of captures.captures) {
       const entry = this.arrowBoxes.get(capture);
-      if (entry !== undefined) boxStatements(body, capture, { name: String(fieldOf(entry, "box")), list: fieldOf(entry, "list") === true });
+      if (entry !== undefined) boxStatements(body, capture, { name: String(fieldOf(entry, "box")), list: fieldOf(entry, "list") === true }, 0);
     }
     if (captures.written.length > 0 && captures.written.every((written) => this.arrowBoxes.has(written))) {
       // The box of a name the body only writes is a value the body reads, so it
@@ -16025,7 +16069,7 @@ class TypeScriptParser {
     }
     for (const name of written) {
       const entry = this.arrowBoxes.get(name);
-      if (entry !== undefined) boxStatements(body, name, { name: entry.box, list: (fieldOf(entry, "list") as boolean) });
+      if (entry !== undefined) boxStatements(body, name, { name: entry.box, list: (fieldOf(entry, "list") as boolean) }, 0);
     }
     return true;
   }
@@ -16047,7 +16091,7 @@ class TypeScriptParser {
     if (this.arrowBoxes.size === 0) return;
     for (const [name, entry] of [...this.arrowBoxes]) {
       const box = String(fieldOf(entry, "box"));
-      const held = findDeclaration(body, name);
+      const held = findDeclarationBefore(body, name, Number(fieldOf(entry, "line")));
       const parameter = params.find((one) => one.name === name);
       // A declaration in an inner body that comes after the arrow wrote the
       // name is a different variable of the same spelling: the arrow wrote
@@ -16068,8 +16112,8 @@ class TypeScriptParser {
       // the name was declared with, and that value is the one the source wrote,
       // not a read of the name the box replaces.
       const initial = (fieldOfOptional(held, "init") as Expression) ?? null;
-      boxStatements(body, name, { name: box, list: (fieldOf(entry, "list") as boolean) });
-      const declared = findDeclaration(body, name);
+      boxStatements(body, name, { name: box, list: (fieldOf(entry, "list") as boolean) }, held === null ? 0 : Number(fieldOf(held, "line")));
+      const declared = findDeclarationBefore(body, name, Number(fieldOf(entry, "line")));
       const value = initial ?? { k: "null" as const };
       const made: Expression = (fieldOf(entry, "list") as boolean)
         ? { k: "object", fields: [{ name: BOXED_FIELD, value }] }
@@ -16123,7 +16167,7 @@ class TypeScriptParser {
         const pairs: { from: string; to: string }[] = recorded === undefined ? [] : recorded;
         pairs[pairs.length] = { from: String(name), to: box };
         if (recorded === undefined) setFieldOn(lifted, "renamed", pairs);
-        boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) });
+        boxStatements(fieldOf(lifted, "body") as Statement[], name, { name: box, list: (fieldOf(entry, "list") as boolean) }, 0);
       }
       this.arrowBoxes.delete(name);
     }

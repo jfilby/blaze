@@ -1389,7 +1389,7 @@ class Body {
   private known(value: SemanticValue): boolean | null {
     const kind = String(fieldOf(value,"k"));
     if (kind === "bool") {
-      if (fieldOf(value,"value")) return true;
+      if (String(fieldOf(value,"value")) === "true") return true;
       return false;
     }
     if (kind !== "const") return null;
@@ -3966,7 +3966,7 @@ class Body {
     const address = this.wideScratchOf(VALUE_LAYOUT.bytes);
     let tag = Number(fieldOf(VALUE_TAGS,"number"));
     let kind = 0;
-    if (String(fieldOf(type,"kind")) === "primitive" && fieldOf(type,"name") === "bool") {
+    if (String(fieldOf(type,"kind")) === "primitive" && String(fieldOf(type,"name")) === "bool") {
       tag = Number(fieldOf(VALUE_TAGS,"boolean"));
     } else if (isTextType(type)) {
       tag = Number(fieldOf(VALUE_TAGS,"handle"));
@@ -4106,14 +4106,15 @@ class Body {
     // Fixups are recorded in the order their bytes were written, so one walk
     // splices every resolved immediate into the body at its own position.
     for (const entry of this.fixups) {
-      for (let at = cursor; at < entry.at; at += 1) out.push(raw[at] as number);
+      const at: number = Number(fieldOf(entry, "at"));
+      for (let index = cursor; index < at; index += 1) out.push(raw[index] as number);
       const encoded = new Bytes();
       // `i32.const` takes a signed LEB128, the same encoding `i32` writes:
       // an address with bit six of its last byte set is negative as an
       // unsigned LEB, which an engine reads as a pointer before memory.
-      encoded.varint(resolve(entry.fix) | 0);
+      encoded.varint(resolve(fieldOf(entry, "fix") as Fixup) | 0);
       out.push(...Array.from(encoded.build()));
-      cursor = entry.at + 1;
+      cursor = at + 1;
     }
     for (let at = cursor; at < raw.length; at += 1) out.push(raw[at] as number);
     return Uint8Array.from(out);

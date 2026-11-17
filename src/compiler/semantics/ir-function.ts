@@ -1136,6 +1136,20 @@ class FunctionBody {
     const stepExpression = fieldOfValue(statement, "step") as Expression | null;
     const bodyStatements = fieldOfValue(statement, "body") as Statement[];
     const from = this.typed(fromExpression, null, line);
+    const fromInferredEarly = fieldOfValue(from, "inferred") as Inferred;
+    const provisionalCounted = fromInferredEarly.kind === "type" ? fromInferredEarly.type : USIZE;
+    // The index is in scope in the bound and the step of a `for`, not only in
+    // its body: `for (let offset = 0; offset < size && at + offset < n; offset += 1)`
+    // reads it in both. Bind it at the type the start gives it while those two
+    // are typed, then put the old scope back: the body binds it again below at
+    // the counted type the start and the step settle on together.
+    const currentScope = this.scopes[this.scopes.length - 1];
+    const outerHeld = currentScope.get(variableName);
+    this.bind(variableName, {
+      name: variableName,
+      inferred: { kind: "type", type: provisionalCounted },
+      slot: { kind: "value", name: variableName, mutable: true, type: provisionalCounted },
+    });
     // What the loop counts with follows from the start and the step, so the
     // step is typed once, before the count is settled, and read twice: the
     // value the IR states is built from it and typing it again would run the
@@ -1191,6 +1205,8 @@ class FunctionBody {
     // counter that counts in fractions is compared against the bound as it is,
     // and the bound is left alone.
     const natural = this.typed(toExpression, null, line);
+    if (outerHeld === undefined) currentScope.delete(variableName);
+    else currentScope.set(variableName, outerHeld);
     const naturalInferred = fieldOfValue(natural, "inferred") as Inferred;
     const naturalValue = fieldOfValue(natural, "value") as SemanticValue;
     const wholeCounter = counted.kind === "primitive" && isWhole(counted.name);
