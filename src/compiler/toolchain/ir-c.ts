@@ -2267,7 +2267,7 @@ class FunctionEmitter {
     const forwarded = args.length === 0 ? "" : `, ${args.join(", ")}`;
     return (
       `({ blaze_fn_closure_t *${slot} = ${this.closurePointer(this.raw(through, depth))}; ` +
-      `((${declaredType(fieldOf(call,"returns"))} (*)(${types.join(", ")}))${slot}->code)(blaze_value_ref((void*)(${slot})${forwarded})); })`
+      `((${declaredType(fieldOf(call,"returns"))} (*)(${types.join(", ")}))${slot}->code)(blaze_value_ref((void*)(${slot}))${forwarded}); })`
     );
   }
 

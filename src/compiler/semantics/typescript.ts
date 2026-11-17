@@ -25522,7 +25522,11 @@ function settledBody(statements: readonly Statement[], payload: TypeExpr): State
         if (payload.kind === "void" || (fieldOf(statement, "value") as Expression) === null || (fieldOf(statement, "value") as Expression).k === "null") {
           return { kind: "result", value: { k: "call", name: "Promise.settle.nothing", args: [] }, line: Number(fieldOf(statement, "line")) };
         }
-        return { kind: "expression", value: { k: "call", name, args: [(fieldOf(statement, "value") as Expression)] }, line: Number(fieldOf(statement, "line")) };
+        // The settle call is the value the function answers, not a side effect
+        // it performs before falling through to the settle-nothing a body that
+        // ends without a return gets: keeping it as an expression made every
+        // async return answer a promise settled with nothing.
+        return { kind: "result", value: { k: "call", name, args: [(fieldOf(statement, "value") as Expression)] }, line: Number(fieldOf(statement, "line")) };
       case "if":
         return {
           kind: "if",
