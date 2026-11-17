@@ -158,16 +158,12 @@ Ordered by expected memory saved against implementation risk.
    Removes roughly 100 MB from every no-model, offline and self-build; lowest
    risk because the no-model path is already a supported mode.
 
-2. **Remove the repeated whole-tree deep copies in `record()`.** Use shared
-   structures or incremental/streamed writes instead of five deep clones per
-   repair round, and stop pretty-printing entire values just to hash them.
-
-3. **Tighten prompt and answer retention and bound concurrency.** Release
+2. **Tighten prompt and answer retention and bound concurrency.** Release
    artifacts after use, avoid rebuilding the full prompt on retry, cap response
    size locally, and bound in-flight candidates by a memory budget rather than
    a fixed product of two concurrency knobs.
 
-4. **Reduce whole-file reads and buffered child output.** Stream or redirect
+3. **Reduce whole-file reads and buffered child output.** Stream or redirect
    subprocess output, and defer reading large artifacts such as object files and
    the SQLite amalgamation until needed.
 
