@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { run } from "../core/process.ts";
 import { scratch } from "./scratch.ts";
-import { chatEndpoint } from "./model-endpoint.ts";
+import { chatEndpoint, skipWithoutModelKey } from "./model-endpoint.ts";
 import { writeProject } from "./project.ts";
 import { typeScriptFrontend } from "../semantics/typescript.ts";
 import { phaseOf } from "./phase.ts";
@@ -62,12 +62,20 @@ async function agrees(source: string, options: { backend?: "c" | "machine"; runt
   assert.equal(delivered.stdout, original.stdout);
 }
 
+/** The builds in the loop below ask a real model, which needs a credential. */
+const modelTest = (name: string, fn: () => Promise<void>): void => {
+  test(name, async (t) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn();
+  });
+};
+
 for (const backend of ["c", "machine"] as const) {
-  test(`${backend} backend awaits a number an async function answers`, async () => {
+  modelTest(`${backend} backend awaits a number an async function answers`, async () => {
     await agrees("async function add(a, b) { return a + b; }\nconsole.log(await add(2, 3));\n", { backend });
   });
 
-  test(`${backend} backend awaits a string an async function answers`, async () => {
+  modelTest(`${backend} backend awaits a string an async function answers`, async () => {
     // A parameter is what keeps the function a function of the program: a
     // function whose signature the module can state is contracted instead.
     await agrees(
@@ -76,18 +84,18 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend awaits a truth an async function answers`, async () => {
+  modelTest(`${backend} backend awaits a truth an async function answers`, async () => {
     await agrees("async function f(n) { return n > 0; }\nconsole.log(await f(1));\n", { backend });
   });
 
-  test(`${backend} backend awaits an async call inside an async function`, async () => {
+  modelTest(`${backend} backend awaits an async call inside an async function`, async () => {
     await agrees(
       "async function g(n) { return n; }\nasync function f(n) { return (await g(n)) + 1; }\nconsole.log(await f(2));\n",
       { backend },
     );
   });
 
-  test(`${backend} backend awaits a call written as a statement`, async () => {
+  modelTest(`${backend} backend awaits a call written as a statement`, async () => {
     // The answer of `await f();` is not kept, so the statement is the call and
     // not a declaration of a value: the word is an operator here and not the
     // refused keyword it is where a statement cannot start with one.
@@ -102,7 +110,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend awaits inside an expression and a loop`, async () => {
+  modelTest(`${backend} backend awaits inside an expression and a loop`, async () => {
     await agrees(
       [
         "async function f(n) { return n * 2; }",
@@ -117,11 +125,11 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend awaits a value that is not a promise as itself`, async () => {
+  modelTest(`${backend} backend awaits a value that is not a promise as itself`, async () => {
     await agrees("const x = await 3;\nconsole.log(x);\n", { backend });
   });
 
-  test(`${backend} backend carries the value a promise is settled with`, async () => {
+  modelTest(`${backend} backend carries the value a promise is settled with`, async () => {
     await agrees(
       [
         "const number = new Promise((resolve) => resolve(42));",
@@ -136,7 +144,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend resolves a value it is given`, async () => {
+  modelTest(`${backend} backend resolves a value it is given`, async () => {
     await agrees(
       [
         "const number = Promise.resolve(8);",
@@ -151,7 +159,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend awaits the promise a name was last given`, async () => {
+  modelTest(`${backend} backend awaits the promise a name was last given`, async () => {
     await agrees(
       [
         "let p = Promise.resolve(1);",
@@ -165,7 +173,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend awaits a call without reading its value`, async () => {
+  modelTest(`${backend} backend awaits a call without reading its value`, async () => {
     await agrees(
       [
         "async function f(n) { console.log(`inner`); return n; }",
@@ -178,7 +186,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend rejects the promise an async function answers`, async () => {
+  modelTest(`${backend} backend rejects the promise an async function answers`, async () => {
     // The failure an awaited call left pending is carried on the promise the
     // function answers, so the await that reads it is where it is raised.
     await agrees(
@@ -195,7 +203,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend settles a promise with nothing`, async () => {
+  modelTest(`${backend} backend settles a promise with nothing`, async () => {
     await agrees(
       [
         "async function f(n) { console.log(`work`); }",
@@ -207,7 +215,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend rejects a promise it is handed`, async () => {
+  modelTest(`${backend} backend rejects a promise it is handed`, async () => {
     await agrees(
       [
         "const p = Promise.reject(`no`);",
@@ -218,7 +226,7 @@ for (const backend of ["c", "machine"] as const) {
     );
   });
 
-  test(`${backend} backend runs a promise's executor where it is written`, async () => {
+  modelTest(`${backend} backend runs a promise's executor where it is written`, async () => {
     await agrees(
       [
         "console.log(`before`);",

@@ -1996,7 +1996,7 @@ class FunctionBody {
         value: {
           k: "call",
           type: returns,
-          call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(direct, "effects") as readonly Effect[], false, []),
+          call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(direct, "effects") as readonly Effect[], false),
         },
         inferred: asType(returns),
       };
@@ -2104,7 +2104,7 @@ class FunctionBody {
     const args = callArgs.map((argument, at) => this.typed(argument, asType(parseType(String(fieldOfValue(signatureParams[at], "type")))), line));
     const returns = parseType(String(fieldOfValue(signature, "returns")));
     return {
-      value: { k: "call", type: returns, call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(callee, "effects") as readonly Effect[], false, []) },
+      value: { k: "call", type: returns, call: this.semanticCall(String(fieldOfValue(signature, "symbol")), signature, args.map((argument) => fieldOfValue(argument, "value") as SemanticValue), returns, fieldOfValue(callee, "effects") as readonly Effect[], false) },
       inferred: asType(returns),
     };
   }

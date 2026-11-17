@@ -1326,7 +1326,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
   const reused = selectCandidate(outcomes, contract);
   if (reused !== null) {
     // Nothing was reviewed: the stored candidates are reused as they stand.
-    return { candidates, outcomes, selected: reused, benchmarkVector: fieldOf(vectors, "benchmark") as TestVector | null, modelDurationNs: BigInt(0) };
+    return { candidates, outcomes, selected: reused, benchmarkVector: vectors === null ? null : fieldOf(vectors, "benchmark") as TestVector | null, modelDurationNs: BigInt(0) };
   }
 
   const context: RepairContext = { functions: new Map(Object.entries(functions)) };
@@ -1391,7 +1391,7 @@ export async function reviewCandidates(request: CodegenRequest): Promise<Codegen
       candidates,
       outcomes,
       selected: selectCandidate(outcomes, contract),
-      benchmarkVector: fieldOf(vectors, "benchmark") as TestVector | null,
+      benchmarkVector: vectors === null ? null : fieldOf(vectors, "benchmark") as TestVector | null,
       modelDurationNs: BigInt(0),
     };
   }

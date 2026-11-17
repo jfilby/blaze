@@ -169,3 +169,22 @@ export async function chatEndpoint(
 
   return { url: `http://127.0.0.1:${port}/v1`, prompts, requests, peak: () => peak, received: arrived.promise };
 }
+
+/** Whether the one warning about a missing model credential has been written. */
+let warnedMissingKey = false;
+
+/**
+ * A build that asks a real model cannot run without a credential. Skip the test
+ * that needs one, saying so once rather than failing every such test with the
+ * same missing-key error.
+ */
+export function skipWithoutModelKey(t: TestContext): boolean {
+  const key = process.env.AI_API_KEY;
+  if (key !== undefined && key !== "") return false;
+  if (!warnedMissingKey) {
+    warnedMissingKey = true;
+    process.stderr.write("blaze: AI_API_KEY is not set; skipping tests that need a model credential\n");
+  }
+  t.skip("AI_API_KEY is not set");
+  return true;
+}

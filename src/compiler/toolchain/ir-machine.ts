@@ -3962,6 +3962,15 @@ class Machine {
     // at a time.
     for (const register of this.reserveBoundRegisters(new Set([...this.pinned.values(), ...this.spareVectors, ...weighted]))) {
       this.pinnedVectors.push({ register, offset: 0, single: false });
+      // A whole-number bound is held in the general register of this number,
+      // which the convention asks a callee to leave as it found it. The prologue
+      // has to write it down as well as the vector of the same number: without
+      // that, a call the body makes leaves the caller's register lost, which an
+      // optimized harness finds as a crash once it keeps anything in there.
+      // Only the callee-saved numbers need writing down: the caller owns the
+      // rest, and pushing one of those would take a register the allocator
+      // could have lent to a packed loop.
+      if (register >= 12 && register <= 15) this.pinnedRegisters.push(register);
       this.spareBounds.push(register);
       this.boundRegisters.push(register);
     }
@@ -10465,6 +10474,9 @@ class Machine {
       // them back into the number the convention passes.
       this.value(value);
       this.code.movdXmm(XMM0, RAX);
+      // The runtime reads a tagged value, not the bare handle this backend
+      // carries. Convert the double into the two words the convention passes.
+      this.numberToTaggedArgs();
       this.runtime("_to_text");
       return false;
     }
@@ -11895,6 +11907,7 @@ class Machine {
           // names.
           this.value(value);
           this.code.movdXmm(XMM0, RAX);
+          this.numberToTaggedArgs();
           this.runtime("_to_text");
         }
         const held = this.hold(TEXT, "blaze_text");
@@ -12879,6 +12892,7 @@ class Machine {
       // The handle's bits are in the accumulator and the service reads the
       // double they are.
       this.code.movdXmm(XMM0, RAX);
+      this.numberToTaggedArgs();
       this.runtime("_to_text");
       return;
     }

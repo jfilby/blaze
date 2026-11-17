@@ -5557,7 +5557,11 @@ const char* blaze_rt_dict_get_text(BlazeValue dictValue, const char* key) {
 
 double blaze_rt_dict_set_text(BlazeValue dictValue, const char* key, const char* value) {
   const double dict = blaze_dyn_untagged(dictValue);
-  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, blaze_dynamic_from_value(blaze_pointer_value(value)));
+  // The reader of a text field casts the stored word straight back to a
+  // pointer. A C string the caller handed over need not be a registered
+  // pointer, so asking the registry for its handle answered zero and the field
+  // read as the empty text.
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)value);
 }
 
 const char* blaze_rt_dict_key_at(BlazeValue dictValue, double index) {

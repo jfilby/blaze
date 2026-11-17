@@ -1474,27 +1474,13 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
   const bodyDeclarations = new Set<string>();
   {
     let depth = 0;
-    // Only a function or a class body makes a declared name that body's own. A
-    // plain block at the top of the file opens a scope but the name it declares
-    // is not the reason a file-level declaration of the same spelling should
-    // disappear: a program can shadow a captured name inside a block while the
-    // outer one is still the state its functions read.
-    const bodies: number[] = [];
-    let afterBody = false;
     for (let at = 0; at < tokens.length; at += 1) {
       const token = tokens[at] as Token;
       const written = mark(token);
-      if (token.text === "function" || token.text === "class") afterBody = true;
-      if (written === "{" || written === "${") {
-        depth += 1;
-        if (afterBody) {
-          bodies.push(depth);
-          afterBody = false;
-        }
-      } else if (written === "}") {
-        if (bodies[bodies.length - 1] === depth) bodies.pop();
-        depth -= 1;
-      } else if (bodies.length > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
+      if (written === "{" || written === "${") depth += 1;
+      else if (written === "}") depth -= 1;
+
+      else if (depth > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
         const name = tokens[at + 1];
         if (name?.kind === "ident") bodyDeclarations.add(name.text);
       }

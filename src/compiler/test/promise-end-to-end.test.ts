@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../compiler.ts";
 import { scratch } from "./scratch.ts";
 import { run } from "../core/process.ts";
 import { writeProject } from "./project.ts";
+import { skipWithoutModelKey } from "./model-endpoint.ts";
 
 const QUIET = () => {};
 
@@ -41,8 +42,17 @@ async function buildSource(backend: "c" | "machine", source: string, name: strin
   return outcome.outputPath as string;
 }
 
+
+/** Every build here asks a real model, which needs a credential. */
+const modelTest = (name: string, fn: (t: TestContext) => Promise<void>): void => {
+  test(name, async (t: TestContext) => {
+    if (skipWithoutModelKey(t)) return;
+    await fn(t);
+  });
+};
+
 for (const backend of ["c", "machine"] as const) {
-  test(`${backend} backend supports promise runtime`, async () => {
+  modelTest(`${backend} backend supports promise runtime`, async () => {
     const binary = await buildBinary(backend);
     const delivered = run(binary, [], { timeoutMs: 60_000 });
     assert.equal(delivered.code, 0, delivered.stderr);
@@ -51,7 +61,7 @@ for (const backend of ["c", "machine"] as const) {
 }
 
 for (const backend of ["c", "machine"] as const) {
-  test(`${backend} backend resolves with the names an executor is written by`, async () => {
+  modelTest(`${backend} backend resolves with the names an executor is written by`, async () => {
     // The executor names its resolve and reject `onFulfilled` and
     // `onRejected`, and the promise is settled by the names the source used.
     const binary = await buildSource(backend, SOURCE_NAMED, `blaze-promise-named-${backend}`);
@@ -85,7 +95,7 @@ async function buildVar(backend: "c" | "machine"): Promise<string> {
 }
 
 for (const backend of ["c", "machine"] as const) {
-  test(`${backend} backend resolves with a captured variable`, async () => {
+  modelTest(`${backend} backend resolves with a captured variable`, async () => {
     const binary = await buildVar(backend);
     const delivered = run(binary, [], { timeoutMs: 60_000 });
     assert.equal(delivered.code, 0, delivered.stderr);
@@ -111,7 +121,7 @@ const SOURCE_WRITTEN = [
 ].join("\n");
 
 for (const backend of ["c", "machine"] as const) {
-  test(`${backend} backend resolves with a captured name that was written`, async () => {
+  modelTest(`${backend} backend resolves with a captured name that was written`, async () => {
     const binary = await buildSource(backend, SOURCE_WRITTEN, `blaze-promise-written-${backend}`);
     const delivered = run(binary, [], { timeoutMs: 60_000 });
     assert.equal(delivered.code, 0, delivered.stderr);

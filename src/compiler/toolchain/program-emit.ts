@@ -459,10 +459,10 @@ class ProgramEmitter {
     opened[opened.length] = indent(1, `${RUNTIME_NAME}_set_text_style(${String(style) === "python" ? 1 : 0});`);
     const releaseNames: string[] = [];
     for (const name of fieldOf(fieldOf(program, "entry"), "releases") as readonly string[]) {
-      releaseNames[releaseNames.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
+      releaseNames[releaseNames.length] = (fieldOf(this.target, "release") as (...args: any[]) => any).call(this.target, this.names.read(name));
     }
     const closed: string[] = [];
-    for (const line of (fieldOf(this.target, "closeProgram") as (...args: any[]) => any)(releaseNames)) closed[closed.length] = indent(1, line);
+    for (const line of (fieldOf(this.target, "closeProgram") as (...args: any[]) => any).call(this.target, releaseNames)) closed[closed.length] = indent(1, line);
     const epilogue = (this.target.epilogue as unknown as (value: unknown) => string[])(undefined);
     return [
       prelude,
@@ -527,7 +527,7 @@ class ProgramEmitter {
     // What the body allocated is read by the names the body declared, so the
     // releases are written while the body is still the scope they are in.
     const releases: string[] = [];
-    for (const name of fieldOf(entry, "releases") as readonly string[]) releases[releases.length] = (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name));
+    for (const name of fieldOf(entry, "releases") as readonly string[]) releases[releases.length] = (fieldOf(this.target, "release") as (...args: any[]) => any).call(this.target, this.names.read(name));
     this.names.leave();
     const outputs: string[] = [];
     for (const line of this.target.openFunction(
@@ -739,7 +739,7 @@ class ProgramEmitter {
         const type = this.names.typeOf(name, fieldOf(value, "type") as SemanticType);
         const targetName = this.boxedTexts.has(name) ? `*${this.names.read(name)}` : this.names.read(name);
         this.write(
-          (fieldOf(this.target, "assign") as (...args: any[]) => any)(targetName, String(fieldOf(statement, "op")), this.expression(value, type), type),
+          (fieldOf(this.target, "assign") as (...args: any[]) => any).call(this.target, targetName, String(fieldOf(statement, "op")), this.expression(value, type), type),
         );
         return;
       }
@@ -753,7 +753,7 @@ class ProgramEmitter {
         }
         const value = fieldOf(statement, "value") as SemanticValue;
         this.write(
-          (fieldOf(this.target, "elementAssign") as (...args: any[]) => any)(
+          (fieldOf(this.target, "elementAssign") as (...args: any[]) => any).call(this.target,
             this.names.read(bufferName),
             this.expression(fieldOf(statement, "index") as SemanticValue, USIZE),
             String(fieldOf(statement, "op")),
@@ -763,7 +763,7 @@ class ProgramEmitter {
         return;
       }
       case "step":
-        this.write((fieldOf(this.target, "update") as (...args: any[]) => any)(this.names.read(String(fieldOf(statement, "name"))), String(fieldOf(statement, "op")), fieldOf(statement, "prefix") === true));
+        this.write((fieldOf(this.target, "update") as (...args: any[]) => any).call(this.target, this.names.read(String(fieldOf(statement, "name"))), String(fieldOf(statement, "op")), fieldOf(statement, "prefix") === true));
         return;
       case "printText": {
         const value = fieldOf(statement, "value") as SemanticValue;
@@ -803,15 +803,15 @@ class ProgramEmitter {
           const gridExpr = this.expression(grid, fieldOf(grid, "type") as SemanticType);
           this.write(`for (double blaze_grid_i = 0.0; blaze_grid_i < ${gridExpr}; blaze_grid_i += 1.0) {`);
           this.write("  blaze_triton_block_index = blaze_grid_i;");
-          this.write("  " + String((fieldOf(this.target, "discard") as (...args: any[]) => any)(this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")) + ";");
+          this.write("  " + String((fieldOf(this.target, "discard") as (...args: any[]) => any).call(this.target, this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")) + ";");
           this.write("}");
           return;
         }
-        this.write(String((fieldOf(this.target, "discard") as (...args: any[]) => any)(this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")));
+        this.write(String((fieldOf(this.target, "discard") as (...args: any[]) => any).call(this.target, this.call(call), String(fieldOf(fieldOf(call, "returns"), "kind")) === "void")));
         return;
       }
       case "if":
-        this.write((fieldOf(this.target, "openIf") as (...args: any[]) => any)(this.condition(fieldOf(statement, "condition") as SemanticValue)));
+        this.write((fieldOf(this.target, "openIf") as (...args: any[]) => any).call(this.target, this.condition(fieldOf(statement, "condition") as SemanticValue)));
         this.body(fieldOf(statement, "then") as SemanticBlock, null);
         if (fieldOf(statement, "otherwise") !== null) {
           this.write((fieldOf(this.target, "closeBody") as (value: unknown) => string | null)(undefined) ?? "");
@@ -831,7 +831,7 @@ class ProgramEmitter {
       case "fill": {
         const type = fieldOf(statement, "type") as SemanticType;
         const value = fieldOf(statement, "value") as SemanticValue;
-        for (const line of (fieldOf(this.target, "fill") as (...args: any[]) => any)(
+        for (const line of (fieldOf(this.target, "fill") as (...args: any[]) => any).call(this.target,
           this.names.read(String(fieldOf(statement, "buffer"))),
           this.names.read(String(fieldOf(statement, "index"))),
           type,
@@ -842,17 +842,17 @@ class ProgramEmitter {
         return;
       }
       case "retain":
-        this.write((fieldOf(this.target, "retain") as (...args: any[]) => any)(this.expression(fieldOf(statement, "value") as SemanticValue, fieldOf(fieldOf(statement, "value"), "type") as SemanticType)));
+        this.write((fieldOf(this.target, "retain") as (...args: any[]) => any).call(this.target, this.expression(fieldOf(statement, "value") as SemanticValue, fieldOf(fieldOf(statement, "value"), "type") as SemanticType)));
         return;
       case "raise":
-        this.write((fieldOf(this.target, "raise") as (...args: any[]) => any)(this.expression(fieldOf(statement, "message") as SemanticValue, fieldOf(fieldOf(statement, "message"), "type") as SemanticType)));
+        this.write((fieldOf(this.target, "raise") as (...args: any[]) => any).call(this.target, this.expression(fieldOf(statement, "message") as SemanticValue, fieldOf(fieldOf(statement, "message"), "type") as SemanticType)));
         return;
       case "storeField":
         this.write(
-          (fieldOf(this.target, "assignField") as (...args: any[]) => any)(
+          (fieldOf(this.target, "assignField") as (...args: any[]) => any).call(this.target,
             this.expression(fieldOf(statement, "object") as SemanticValue, fieldOf(fieldOf(statement, "object"), "type") as SemanticType),
             String(fieldOf(statement, "layout")),
-            (fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(statement, "field"))),
+            (fieldOf(this.target, "escape") as (...args: any[]) => any).call(this.target, String(fieldOf(statement, "field"))),
             this.expression(fieldOf(statement, "value") as SemanticValue, fieldOf(fieldOf(statement, "value"), "type") as SemanticType),
           ),
         );
@@ -874,7 +874,7 @@ class ProgramEmitter {
       return;
     }
     if (slotKind === "text") {
-      this.write((fieldOf(this.target, "declare") as (...args: any[]) => any)(name, null, this.expression(value, fieldOf(value, "type") as SemanticType)));
+      this.write((fieldOf(this.target, "declare") as (...args: any[]) => any).call(this.target, name, null, this.expression(value, fieldOf(value, "type") as SemanticType)));
       return;
     }
     if (slotKind === "buffer") {
@@ -883,13 +883,13 @@ class ProgramEmitter {
       // its header carries. A call states one pointer and no count, and a
       // module function lays its answer down at the bytes its header measures.
       if (value.k === "call" && isSequence(fieldOf(value, "type") as SemanticType)) {
-        for (const line of (fieldOf(this.target, "sequence") as (...args: any[]) => any)(name, element, this.expression(value, fieldOf(value, "type") as SemanticType))) this.write(line);
+        for (const line of (fieldOf(this.target, "sequence") as (...args: any[]) => any).call(this.target, name, element, this.expression(value, fieldOf(value, "type") as SemanticType))) this.write(line);
         return;
       }
       // `const b = a` names the same array again, as the language means it.
       if (value.k === "local" && isSequence(fieldOf(value, "type") as SemanticType)) {
         const localName = String(fieldOf(value, "name"));
-        for (const line of (fieldOf(this.target, "alias") as (...args: any[]) => any)(
+        for (const line of (fieldOf(this.target, "alias") as (...args: any[]) => any).call(this.target,
           name,
           element,
           this.names.read(localName),
@@ -906,7 +906,7 @@ class ProgramEmitter {
       const view = fieldOf(value, "view") as { readonly of: SemanticValue; readonly offset: SemanticValue } | null;
       const count = fieldOf(value, "count") as SemanticValue | null;
       if (view !== null) {
-        for (const line of (fieldOf(this.target, "view") as (...args: any[]) => any)(
+        for (const line of (fieldOf(this.target, "view") as (...args: any[]) => any).call(this.target,
           name,
           element,
           this.expression(fieldOf(view, "of") as SemanticValue, fieldOf(fieldOf(view, "of"), "type") as SemanticType),
@@ -918,7 +918,7 @@ class ProgramEmitter {
         return;
       }
       if (count !== null) {
-        for (const line of (fieldOf(this.target, "sized") as (...args: any[]) => any)(name, element, this.expression(count, USIZE))) {
+        for (const line of (fieldOf(this.target, "sized") as (...args: any[]) => any).call(this.target, name, element, this.expression(count, USIZE))) {
           this.write(line);
         }
         return;
@@ -927,12 +927,12 @@ class ProgramEmitter {
       const written: string[] = [];
       for (const one of items) written[written.length] = this.expression(one, element);
       const length = fieldOf(value, "length") as number | null;
-      for (const line of (fieldOf(this.target, "allocate") as (...args: any[]) => any)(name, element, length ?? 0, written)) {
+      for (const line of (fieldOf(this.target, "allocate") as (...args: any[]) => any).call(this.target, name, element, length ?? 0, written)) {
         this.write(line);
       }
       return;
     }
-    this.write((fieldOf(this.target, "declare") as (...args: any[]) => any)(name, fieldOf(slot, "type") as SemanticType, this.expression(value, fieldOf(slot, "type") as SemanticType)));
+    this.write((fieldOf(this.target, "declare") as (...args: any[]) => any).call(this.target, name, fieldOf(slot, "type") as SemanticType, this.expression(value, fieldOf(slot, "type") as SemanticType)));
   }
 
   private loop(loop: SemanticLoop): void {
@@ -971,21 +971,21 @@ class ProgramEmitter {
     // walk does not close with a brace of its own.
     let closedByDo = false;
     if (kind === "while") {
-      this.write((fieldOf(this.target, "openWhile") as (...args: any[]) => any)(this.condition(fieldOf(loop, "condition") as SemanticValue)));
+      this.write((fieldOf(this.target, "openWhile") as (...args: any[]) => any).call(this.target, this.condition(fieldOf(loop, "condition") as SemanticValue)));
       this.body(fieldOf(loop, "body") as SemanticBlock, loop);
     } else if (kind === "doWhile") {
       // The condition is asked for before the body, because a language
       // without a do-while tests it at the top of the loop.
       const condition = this.condition(fieldOf(loop, "condition") as SemanticValue);
-      for (const line of (fieldOf(this.target, "openDo") as (...args: any[]) => any)(condition)) this.write(line);
+      for (const line of (fieldOf(this.target, "openDo") as (...args: any[]) => any).call(this.target, condition)) this.write(line);
       this.body(fieldOf(loop, "body") as SemanticBlock, loop);
-      for (const line of (fieldOf(this.target, "closeDo") as (...args: any[]) => any)(condition)) this.write(line);
+      for (const line of (fieldOf(this.target, "closeDo") as (...args: any[]) => any).call(this.target, condition)) this.write(line);
       closedByDo = true;
     } else if (kind === "counted") {
       const reductions = this.combined(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>);
-      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any)(reductions)) this.write(line);
+      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any).call(this.target, reductions)) this.write(line);
       const bounds = counted as { type: SemanticType; from: string; to: string; step: string | null };
-      for (const line of (fieldOf(this.target, "openFor") as (...args: any[]) => any)(
+      for (const line of (fieldOf(this.target, "openFor") as (...args: any[]) => any).call(this.target,
         this.names.read(String(fieldOf(loop, "variable"))),
         fieldOf(bounds, "type") as SemanticType,
         String(fieldOf(bounds, "from")),
@@ -999,8 +999,8 @@ class ProgramEmitter {
       this.body(fieldOf(loop, "body") as SemanticBlock, loop);
     } else {
       const reductions = this.combined(loop as Extract<SemanticLoop, { kind: "counted" | "each" }>);
-      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any)(reductions)) this.write(line);
-      for (const line of (fieldOf(this.target, "openForOf") as (...args: any[]) => any)(
+      if (fieldOf(loop, "parallel") === true) for (const line of (fieldOf(this.target, "parallelDirective") as (...args: any[]) => any).call(this.target, reductions)) this.write(line);
+      for (const line of (fieldOf(this.target, "openForOf") as (...args: any[]) => any).call(this.target,
         this.names.read(String(fieldOf(loop, "index"))),
         this.names.read(String(fieldOf(loop, "element"))),
         fieldOf(loop, "elementType") as SemanticType,
@@ -1041,7 +1041,7 @@ class ProgramEmitter {
     const statements = fieldOf(block, "statements") as readonly SemanticStatement[];
     const blockEnd = fieldOf(block, "terminator") as SemanticTerminator;
     if (statements.length === 0 && String(fieldOf(blockEnd, "k")) === "next") {
-      const empty = (fieldOf(this.target, "emptyBody") as (...args: any[]) => any)(undefined);
+      const empty = (fieldOf(this.target, "emptyBody") as (...args: any[]) => any).call(this.target, undefined);
       if (empty !== null) this.write(String(empty));
     }
     for (const statement of statements) this.statement(statement);
@@ -1051,7 +1051,7 @@ class ProgramEmitter {
     // blocks it leaves own instead — the jump's own releases already say which.
     const endKind = String(fieldOf(blockEnd, "k"));
     if (endKind === "next" || endKind === "return") {
-      for (const name of fieldOf(block, "releases") as readonly string[]) this.lines.push(indent(this.depth, (fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name))));
+      for (const name of fieldOf(block, "releases") as readonly string[]) this.lines.push(indent(this.depth, (fieldOf(this.target, "release") as (...args: any[]) => any).call(this.target, this.names.read(name))));
     }
     this.terminator(blockEnd, loop);
     this.depth -= 1;
@@ -1080,22 +1080,22 @@ class ProgramEmitter {
       if (final && value === null) return;
       this.write(
         value === null
-          ? String((fieldOf(this.target, "returnNothing") as (...args: any[]) => any)(undefined))
-          : String((fieldOf(this.target, "returnValue") as (...args: any[]) => any)(this.expression(value, this.returns))),
+          ? String((fieldOf(this.target, "returnNothing") as (...args: any[]) => any).call(this.target, undefined))
+          : String((fieldOf(this.target, "returnValue") as (...args: any[]) => any).call(this.target, this.expression(value, this.returns))),
       );
       return;
     }
     if (k !== "jump") return;
-    for (const name of fieldOf(terminator, "releases") as readonly string[]) this.write((fieldOf(this.target, "release") as (...args: any[]) => any)(this.names.read(name)));
+    for (const name of fieldOf(terminator, "releases") as readonly string[]) this.write((fieldOf(this.target, "release") as (...args: any[]) => any).call(this.target, this.names.read(name)));
     const open = loop ?? this.loops[this.loops.length - 1];
     const target = String(fieldOf(terminator, "target"));
     if (open === undefined) throw emitError("a jump out of a block no loop is written in", target);
     if (target === String(fieldOf(open, "header"))) {
-      this.write((fieldOf(this.target, "continueLine") as (...args: any[]) => any)(undefined));
+      this.write((fieldOf(this.target, "continueLine") as (...args: any[]) => any).call(this.target, undefined));
       return;
     }
     if (target === String(fieldOf(open, "exit"))) {
-      this.write((fieldOf(this.target, "breakLine") as (...args: any[]) => any)(undefined));
+      this.write((fieldOf(this.target, "breakLine") as (...args: any[]) => any).call(this.target, undefined));
       return;
     }
     throw emitError("a jump leaves for a block no loop around it names", target);
@@ -1106,7 +1106,7 @@ class ProgramEmitter {
   /* ---------------------------------------------------------------------- */
 
   private condition(value: SemanticValue): string {
-    return String((fieldOf(this.target, "condition") as (...args: any[]) => any)(this.expression(value, fieldOf(value, "type") as SemanticType), valueKind(value), fieldOf(value, "type") as SemanticType));
+    return String((fieldOf(this.target, "condition") as (...args: any[]) => any).call(this.target, this.expression(value, fieldOf(value, "type") as SemanticType), valueKind(value), fieldOf(value, "type") as SemanticType));
   }
 
   private call(call: SemanticCall): string {
@@ -1170,7 +1170,7 @@ class ProgramEmitter {
         const dynamic = type !== null && typeKind === "ref" && fieldOf(type, "of") === null && fieldOf(type, "name") === undefined;
         const boxed = fieldOf(call, "builtin") === true && dynamic && isReferenced(fieldOf(argument, "type") as SemanticType)
           ? `blaze_value_ref((void*)(${text}))`
-          : String((fieldOf(this.target, "argument") as (...args: any[]) => any)(type, text));
+          : String((fieldOf(this.target, "argument") as (...args: any[]) => any).call(this.target, type, text));
         argumentsText.push(boxed);
       }
       // A callee's array parameter carries its length beside it, so pass the
@@ -1194,8 +1194,8 @@ class ProgramEmitter {
     }
     const expression = (value: SemanticValue, as: SemanticType | null = null): string => this.expression(value, as);
     return fieldOf(call, "builtin") === true
-      ? String((fieldOf(this.target, "builtin") as (...args: any[]) => any)(this.readCaptures(call), argumentsText, expression))
-      : String((fieldOf(this.target, "call") as (...args: any[]) => any)(call, argumentsText));
+      ? String((fieldOf(this.target, "builtin") as (...args: any[]) => any).call(this.target, this.readCaptures(call), argumentsText, expression))
+      : String((fieldOf(this.target, "call") as (...args: any[]) => any).call(this.target, call, argumentsText));
   }
 
   /**
@@ -1257,10 +1257,10 @@ class ProgramEmitter {
     const carried = fieldOf(value, "type") as SemanticType;
     const carriedDynamic = carried.kind === "ref" && fieldOf(carried, "of") === null && fieldOf(carried, "name") === undefined;
     if (asDynamic && !carriedDynamic && !isTextType(carried) && isReferenced(carried)) {
-      return String((fieldOf(this.target, "handle") as (...args: any[]) => any)(text));
+      return String((fieldOf(this.target, "handle") as (...args: any[]) => any).call(this.target, text));
     }
     if (carriedDynamic && as.kind === "ref" && fieldOf(as, "name") !== undefined) {
-      return String((fieldOf(this.target, "shaped") as (...args: any[]) => any)(as, text));
+      return String((fieldOf(this.target, "shaped") as (...args: any[]) => any).call(this.target, as, text));
     }
     // Only a number is written as another number: a reference and a string are
     // the one the value carries, and the resolver has already chosen the type
@@ -1283,13 +1283,13 @@ class ProgramEmitter {
     // conversion to a non-scalar type, which is not a C source at all. The one
     // conversion there is to a wide number is the widening, and it is the
     // kernel's.
-    if (isWideType(as)) return String((fieldOf(this.target, "widen") as (...args: any[]) => any)(text, as));
+    if (isWideType(as)) return String((fieldOf(this.target, "widen") as (...args: any[]) => any).call(this.target, text, as));
     // A number read as a length or an index is read the way the language reads
     // one: a NaN is no length at all, and it is zero. A cast would leave
     // whatever the machine made of the value there instead, which for a NaN is
     // the largest size there is, and an allocation of that ends the run.
-    if (isFloat(carried) && isUnsigned(as)) return String((fieldOf(this.target, "asLength") as (...args: any[]) => any)(text, as));
-    return String((fieldOf(this.target, "cast") as (...args: any[]) => any)(as, text));
+    if (isFloat(carried) && isUnsigned(as)) return String((fieldOf(this.target, "asLength") as (...args: any[]) => any).call(this.target, text, as));
+    return String((fieldOf(this.target, "cast") as (...args: any[]) => any).call(this.target, as, text));
   }
 
   private raw(value: SemanticValue, as: SemanticType | null): string {
@@ -1299,13 +1299,13 @@ class ProgramEmitter {
         // written as the literal of the type it initializes.
         const type = fieldOf(value, "type") as SemanticType;
         return isTextType(type)
-          ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(String(fieldOf(value, "text"))))
-          : String((fieldOf(this.target, "literal") as (...args: any[]) => any)(String(fieldOf(value, "text")), typeText(type)));
+          ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any).call(this.target, String(fieldOf(value, "text"))))
+          : String((fieldOf(this.target, "literal") as (...args: any[]) => any).call(this.target, String(fieldOf(value, "text")), typeText(type)));
       }
       case "bool":
         return fieldOf(value, "value") === true ? "true" : "false";
       case "nothing":
-        return String((fieldOf(this.target, "nullLiteral") as (...args: any[]) => any)(undefined));
+        return String((fieldOf(this.target, "nullLiteral") as (...args: any[]) => any).call(this.target, undefined));
       case "functionRef":
         return String(fieldOf(value, "name"));
       case "text":
@@ -1323,7 +1323,7 @@ class ProgramEmitter {
       case "length":
         return this.length(value as SemanticValue & { k: "length" });
       case "element":
-        return String((fieldOf(this.target, "element") as (...args: any[]) => any)(
+        return String((fieldOf(this.target, "element") as (...args: any[]) => any).call(this.target,
           this.expression(fieldOf(value, "of") as SemanticValue, fieldOf(fieldOf(value, "of"), "type") as SemanticType),
           this.expression(fieldOf(value, "index") as SemanticValue, USIZE),
         ));
@@ -1350,10 +1350,10 @@ class ProgramEmitter {
       case "call":
         return this.call(fieldOf(value, "call") as SemanticCall);
       case "loadField":
-        return String((fieldOf(this.target, "field") as (...args: any[]) => any)(
+        return String((fieldOf(this.target, "field") as (...args: any[]) => any).call(this.target,
           this.expression(fieldOf(value, "object") as SemanticValue, fieldOf(fieldOf(value, "object"), "type") as SemanticType),
           String(fieldOf(value, "layout")),
-          (fieldOf(this.target, "escape") as (...args: any[]) => any)(String(fieldOf(value, "field"))),
+          (fieldOf(this.target, "escape") as (...args: any[]) => any).call(this.target, String(fieldOf(value, "field"))),
         ));
       case "toText": {
         const of = fieldOf(value, "of") as SemanticValue;
@@ -1361,7 +1361,7 @@ class ProgramEmitter {
         // A string carried into a string is the string itself: a driver builds
         // text out of pointers, and a number is the one thing it converts.
         if (isTextType(ofType)) return this.expression(of, ofType);
-        return String((fieldOf(this.target, "toText") as (...args: any[]) => any)(
+        return String((fieldOf(this.target, "toText") as (...args: any[]) => any).call(this.target,
           this.expression(of, ofType),
           ofType,
           fieldOf(value, "digits") as number | null,
@@ -1376,12 +1376,12 @@ class ProgramEmitter {
           // method by key drops that receiver, so it has to be called with the
           // target back as `this` or it reads the style of nothing.
           ? String((fieldOf(this.target, "argvCount") as (this: unknown) => string).call(this.target))
-          : String((fieldOf(this.target, "argv") as (...args: any[]) => any)(this.expression(index, USIZE)));
+          : String((fieldOf(this.target, "argv") as (...args: any[]) => any).call(this.target, this.expression(index, USIZE)));
       }
       case "compare":
         return this.compare(value as SemanticValue & { k: "compare" });
       case "isNull":
-        return String((fieldOf(this.target, "isNull") as (...args: any[]) => any)(
+        return String((fieldOf(this.target, "isNull") as (...args: any[]) => any).call(this.target,
           this.expression(fieldOf(value, "operand") as SemanticValue, fieldOf(fieldOf(value, "operand"), "type") as SemanticType),
           fieldOf(value, "negate") === true,
         ));
@@ -1395,7 +1395,7 @@ class ProgramEmitter {
         const condition = fieldOf(value, "condition") as SemanticValue;
         const then = fieldOf(value, "then") as SemanticValue;
         const otherwise = fieldOf(value, "otherwise") as SemanticValue;
-        return String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(
+        return String((fieldOf(this.target, "conditional") as (...args: any[]) => any).call(this.target,
           this.condition(condition),
           this.expression(then, as),
           this.expression(otherwise, as),
@@ -1415,13 +1415,13 @@ class ProgramEmitter {
   /** A string the program builds, one part after another. */
   private text(value: SemanticValue & { k: "text" }): string {
     const parts = fieldOf(value, "parts") as readonly { readonly k: string; readonly value: string | SemanticValue }[];
-    if (parts.length === 0) return String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(""));
+    if (parts.length === 0) return String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any).call(this.target, ""));
     let text: string | null = null;
     for (const part of parts) {
       const piece = String(fieldOf(part, "k")) === "text"
-        ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any)(String(fieldOf(part, "value"))))
+        ? String((fieldOf(this.target, "stringLiteral") as (...args: any[]) => any).call(this.target, String(fieldOf(part, "value"))))
         : this.expression(fieldOf(part, "value") as SemanticValue, fieldOf(fieldOf(part, "value"), "type") as SemanticType);
-      text = text === null ? piece : String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any)(text, piece));
+      text = text === null ? piece : String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any).call(this.target, text, piece));
     }
     return text as string;
   }
@@ -1434,13 +1434,13 @@ class ProgramEmitter {
   private length(value: SemanticValue & { k: "length" }): string {
     const of = fieldOf(value, "of") as SemanticValue;
     const ofType = fieldOf(of, "type") as SemanticType;
-    if (isTextType(ofType)) return String((fieldOf(this.target, "stringLength") as (...args: any[]) => any)(this.expression(of, ofType)));
+    if (isTextType(ofType)) return String((fieldOf(this.target, "stringLength") as (...args: any[]) => any).call(this.target, this.expression(of, ofType)));
     if (of.k === "local") return `${this.names.read(String(fieldOf(of, "name")))}_length`;
     // A list held in a field or answered by a call has no sidecar count beside
     // a name: the header the runtime laid in front of the block is the count.
     const element = elementTypeOf(ofType);
     if (element !== null && isSequence(ofType)) {
-      return String((fieldOf(this.target, "sequenceLength") as (...args: any[]) => any)(this.expression(of, ofType), element));
+      return String((fieldOf(this.target, "sequenceLength") as (...args: any[]) => any).call(this.target, this.expression(of, ofType), element));
     }
     throw emitError("the emitter cannot write down the length of an array", `${of.k} names no allocation`);
   }
@@ -1458,16 +1458,16 @@ class ProgramEmitter {
       // "banana"` was reported as false — the two are not the same text, which
       // says nothing about which one comes first.
       if (op === "eq" || op === "ne") {
-        const equal = String((fieldOf(this.target, "stringEqual") as (...args: any[]) => any)(left, right));
-        return op === "ne" ? String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any)(equal)) : equal;
+        const equal = String((fieldOf(this.target, "stringEqual") as (...args: any[]) => any).call(this.target, left, right));
+        return op === "ne" ? String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any).call(this.target, equal)) : equal;
       }
-      return `${String((fieldOf(this.target, "stringCompare") as (...args: any[]) => any)(left, right))} ${COMPARE_OPERATORS[op as CompareOp]} 0`;
+      return `${String((fieldOf(this.target, "stringCompare") as (...args: any[]) => any).call(this.target, left, right))} ${COMPARE_OPERATORS[op as CompareOp]} 0`;
     }
     // A wide number is four limbs and C compares a struct with `==` by identity
     // and has no ordering at all, so a pair of them is the kernel's comparison
     // rather than an operator over two machine words.
     if (isWideType(operand)) {
-      return String((fieldOf(this.target, "wideCompare") as (...args: any[]) => any)(op, this.expression(leftValue, operand), this.expression(rightValue, operand), operand));
+      return String((fieldOf(this.target, "wideCompare") as (...args: any[]) => any).call(this.target, op, this.expression(leftValue, operand), this.expression(rightValue, operand), operand));
     }
     // The two sides are compared as one type, which the IR states: a whole
     // number and a literal are compared as whole numbers, not as two.
@@ -1480,15 +1480,15 @@ class ProgramEmitter {
     const op = String(fieldOf(value, "op"));
     const operand = fieldOf(value, "operand") as SemanticValue;
     const type = fieldOf(value, "type") as SemanticType;
-    if (op === "not") return String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any)(this.condition(operand)));
+    if (op === "not") return String((fieldOf(this.target, "logicalNot") as (...args: any[]) => any).call(this.target, this.condition(operand)));
     // A wide complement covers every limb, which C's `~` cannot be asked for
     // over a struct, so it is the kernel's operation rather than an operator. A
     // wide negation never arrives: the validator refuses it, because the answer
     // the language gives is below zero and a wide number holds none.
     if (op === "bitNot" && isWideType(type)) {
-      return String((fieldOf(this.target, "wideUnary") as (...args: any[]) => any)(op, this.expression(operand, type), type));
+      return String((fieldOf(this.target, "wideUnary") as (...args: any[]) => any).call(this.target, op, this.expression(operand, type), type));
     }
-    if (op === "bitNot") return String((fieldOf(this.target, "bitwiseNot") as (...args: any[]) => any)(this.expression(operand, type)));
+    if (op === "bitNot") return String((fieldOf(this.target, "bitwiseNot") as (...args: any[]) => any).call(this.target, this.expression(operand, type)));
     return `(${op === "neg" ? "-" : "+"}${this.expression(operand, type)})`;
   }
 
@@ -1498,7 +1498,7 @@ class ProgramEmitter {
     const resultType = fieldOf(value, "type") as SemanticType;
     const left = this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType);
     const leftType = fieldOf(leftValue, "type") as SemanticType;
-    const test = String((fieldOf(this.target, "condition") as (...args: any[]) => any)(left, valueKind(leftValue), leftType));
+    const test = String((fieldOf(this.target, "condition") as (...args: any[]) => any).call(this.target, left, valueKind(leftValue), leftType));
     const rightIsText = rightValue.k === "text" || (rightValue.k === "const" && isTextType(fieldOf(rightValue, "type") as SemanticType));
     const leftIsAny = leftType.kind === "ref" && fieldOf(leftType, "of") === null && fieldOf(leftType, "name") === undefined;
     const right = rightIsText && leftIsAny
@@ -1509,13 +1509,13 @@ class ProgramEmitter {
     // that number.
     const answer = (arm: SemanticValue, written: string): string => {
       const armType = fieldOf(arm, "type") as SemanticType;
-      if (isNumber(armType) && isTextType(resultType)) return String((fieldOf(this.target, "toText") as (...args: any[]) => any)(written, armType, null, this.style(), false));
+      if (isNumber(armType) && isTextType(resultType)) return String((fieldOf(this.target, "toText") as (...args: any[]) => any).call(this.target, written, armType, null, this.style(), false));
       return written;
     };
     const op = String(fieldOf(value, "op"));
     return op === "and"
-      ? String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(test, answer(rightValue, right), answer(leftValue, left)))
-      : String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(test, answer(leftValue, left), answer(rightValue, right)));
+      ? String((fieldOf(this.target, "conditional") as (...args: any[]) => any).call(this.target, test, answer(rightValue, right), answer(leftValue, left)))
+      : String((fieldOf(this.target, "conditional") as (...args: any[]) => any).call(this.target, test, answer(leftValue, left), answer(rightValue, right)));
   }
 
   private coalesce(value: SemanticValue & { k: "coalesce" }): string {
@@ -1528,8 +1528,8 @@ class ProgramEmitter {
     // and leaves a comparison that does not compile.
     const kind = valueKind(leftValue);
     if (kind === "null" || kind === "text" || kind === "reference") {
-      return String((fieldOf(this.target, "conditional") as (...args: any[]) => any)(
-        (fieldOf(this.target, "isNull") as (...args: any[]) => any)(left, false),
+      return String((fieldOf(this.target, "conditional") as (...args: any[]) => any).call(this.target,
+        (fieldOf(this.target, "isNull") as (...args: any[]) => any).call(this.target, left, false),
         this.expression(fieldOf(value, "right") as SemanticValue, type),
         left,
       ));
@@ -1544,7 +1544,7 @@ class ProgramEmitter {
     const rightValue = fieldOf(value, "right") as SemanticValue;
     if (op === "concat") {
       // A string is added to a string: the driver builds the text.
-      return String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any)(
+      return String((fieldOf(this.target, "stringConcat") as (...args: any[]) => any).call(this.target,
         this.expression(leftValue, fieldOf(leftValue, "type") as SemanticType),
         this.expression(rightValue, fieldOf(rightValue, "type") as SemanticType),
       ));
@@ -1555,10 +1555,10 @@ class ProgramEmitter {
       throw new Error("arrayConcat is not emitted by the program backend");
     }
     if (op === "min") {
-      return String((fieldOf(this.target, "min") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+      return String((fieldOf(this.target, "min") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type)));
     }
     if (op === "max") {
-      return String((fieldOf(this.target, "max") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+      return String((fieldOf(this.target, "max") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type)));
     }
     if (op === "mod") {
       // A wide remainder is four limbs and no C operator, so it is a call into
@@ -1572,27 +1572,27 @@ class ProgramEmitter {
         // the true product. Use the kernel's mul_mod which computes the full
         // product and reduces it.
         if (leftValue.k === "arith" && String(fieldOf(leftValue, "op")) === "mul") {
-          return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any)(
+          return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any).call(this.target,
             this.expression(fieldOf(leftValue, "left") as SemanticValue, type),
             this.expression(fieldOf(leftValue, "right") as SemanticValue, type),
             this.expression(rightValue, type),
             type,
           ));
         }
-        return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any)(op, this.expression(leftValue, type), this.expression(rightValue, type), type));
+        return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any).call(this.target, op, this.expression(leftValue, type), this.expression(rightValue, type), type));
       }
-      return String((fieldOf(this.target, "modulo") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+      return String((fieldOf(this.target, "modulo") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type)));
     }
     if (op === "floorDiv") {
-      return String((fieldOf(this.target, "floorDivide") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type), type));
+      return String((fieldOf(this.target, "floorDivide") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type), type));
     }
     if (op === "floorMod") {
-      return String((fieldOf(this.target, "floorModulo") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type), type));
+      return String((fieldOf(this.target, "floorModulo") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type), type));
     }
     if (op === "pow") {
       // A power is floating point even over whole numbers, and Nim spells one
       // with the operator that xors two whole numbers.
-      return String((fieldOf(this.target, "power") as (...args: any[]) => any)(this.expression(leftValue, type), this.expression(rightValue, type)));
+      return String((fieldOf(this.target, "power") as (...args: any[]) => any).call(this.target, this.expression(leftValue, type), this.expression(rightValue, type)));
     }
     // The bitwise operators are whole numbers masked whole, and the targets
     // already know how each of them is spelled.
@@ -1613,15 +1613,15 @@ class ProgramEmitter {
       // modulus discovered by the data-flow analysis.
       const modulus = this.modulusForArith.get(value) ?? this.invertModulo ?? this.modCtx;
       if (op === "mul" && modulus !== null) {
-        return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any)(left, right, modulus, type));
+        return String((fieldOf(this.target, "wideMulMod") as (...args: any[]) => any).call(this.target, left, right, modulus, type));
       }
       if ((op === "add" || op === "sub") && modulus !== null) {
         const method = op === "add" ? "wideAddMod" : "wideSubMod";
-        return String((fieldOf(this.target, method) as (...args: any[]) => any)(left, right, modulus, type));
+        return String((fieldOf(this.target, method) as (...args: any[]) => any).call(this.target, left, right, modulus, type));
       }
-      return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any)(op, left, right, type));
+      return String((fieldOf(this.target, "wideBinary") as (...args: any[]) => any).call(this.target, op, left, right, type));
     }
-    return `(${left} ${String((fieldOf(this.target, "operator") as (...args: any[]) => any)((ARITH_OPERATORS as Record<string, ProgramBinaryOp>)[op]))} ${right})`;
+    return `(${left} ${String((fieldOf(this.target, "operator") as (...args: any[]) => any).call(this.target, (ARITH_OPERATORS as Record<string, ProgramBinaryOp>)[op]))} ${right})`;
   }
 
 }

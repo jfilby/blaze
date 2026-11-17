@@ -1317,9 +1317,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "array.new":
         return `${RUNTIME_NAME}_dyn_array_new()`;
       case "array.push":
-        return `${RUNTIME_NAME}_array_push(${argument(0)}, ${argument(1)})`;
+        // A dynamic array and the value pushed into it are double handles in
+        // generated C; the runtime reads both as tagged values.
+        return `${RUNTIME_NAME}_array_push(blaze_value_from_dynamic(${argument(0)}), blaze_value_from_dynamic(${argument(1)}))`;
       case "array.get":
-        return `${RUNTIME_NAME}_array_get(${argument(0)}, ${argument(1)})`;
+        return `blaze_dynamic_from_value(${RUNTIME_NAME}_array_get(blaze_value_from_dynamic(${argument(0)}), ${argument(1)}))`;
       case "array.length":
         // A dynamic value is a double handle in generated C, and what it holds
         // need not be an array: a parsed JSON object counts its fields. The
@@ -1414,7 +1416,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
            request keeps its own. */
         const which = callee === "req.path" ? "blaze_http_req_path" : "blaze_http_req_method";
         return `({ const char *blaze_http_request_text = ${which}((void*) (uintptr_t) ${argument(0)});` +
-          ` blaze_value_ref((void*)(${RUNTIME_NAME}))_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
+          ` blaze_value_ref((void*)(${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)))); })`;
       }
       case "http.sseSubscribe": {
         /* The response becomes an event stream: the connection stays open, and
@@ -1708,12 +1710,12 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
               /* The response the request the program asked for is in the
                  handle the callback was given; read it out of the handle. */
               args.push(
-                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_resp_body((void *)(uintptr_t)${owner}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)))blaze_http_body, blaze_http_len); })`,
+                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_resp_body((void *)(uintptr_t)${owner}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len))); })`,
               );
             } else {
               /* The server side reads the request the peer sent. */
               args.push(
-                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${owner}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)))blaze_http_body, blaze_http_len); })`,
+                `(void *)(uintptr_t)({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${owner}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len))); })`,
               );
             }
           }
@@ -1730,7 +1732,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       }
       case "req.text": {
         /* Read the buffered request body and return it as a Blaze string. */
-        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${argument(0)}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)))blaze_http_body, blaze_http_len); })`;
+        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_req_body((void *)(uintptr_t)${argument(0)}, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char *)blaze_http_body, blaze_http_len))); })`;
       }
       case "req.header": {
         /* Read one header of the request, as a Blaze string. The runtime
@@ -1741,7 +1743,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
            copy it read. */
         const name = this.requestBody(callArgs[1], expression);
         return `({ const char *blaze_http_request_text = blaze_http_req_header((void *)(uintptr_t)${argument(0)}, ${name});` +
-          ` blaze_value_ref((void*)(${RUNTIME_NAME}))_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)); })`;
+          ` blaze_value_ref((void*)(${RUNTIME_NAME}_string_new((const unsigned char *) blaze_http_request_text, ${RUNTIME_NAME}_text_length(blaze_http_request_text)))); })`;
       }
       case "req.end":
         /* Client-side: the buffered request is sent here, and every handler the
@@ -1785,7 +1787,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const headersExpr = isRaw(headersKind) ? (headersKind === "ptr" ? `(const char*)(uintptr_t)${headersArg}` : headersArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${headersArg}))`;
         const bodyExpr = isRaw(bodyKind) ? (bodyKind === "ptr" ? `(const char*)(uintptr_t)${bodyArg}` : bodyArg) : `blaze_rt_to_text(blaze_value_from_dynamic(${bodyArg}))`;
         const bodyLen = `strlen(${bodyExpr})`;
-        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char*)))blaze_http_body, blaze_http_len); })`;
+        return `({ size_t blaze_http_len = 0; const char *blaze_http_body = blaze_http_client_request(${urlExpr}, ${methodExpr}, ${headersExpr}, (const unsigned char*)${bodyExpr}, ${bodyLen}, 10000, &blaze_http_len); blaze_value_ref((void*)(blaze_rt_string_new((const unsigned char*)blaze_http_body, blaze_http_len))); })`;
       }
       default:
         throw driverError(`the driver cannot write down ${callee}`);
@@ -1833,7 +1835,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
     const bound = this.callbackRef(callArgs[2], "a response, the one the callback of the request it opens reads");
     lines.push(`${bound.bundle.declaration}`);
     lines.push(`blaze_http_client_watch(blaze_http_req, 0, ${bound.trampoline}, ${bound.bundle.name}, ${bound.bundle.bytes});`);
-    lines.push("blaze_value_ref((void*)(blaze_http_req));");
+    // The request is an opaque adapter pointer held for the length of this one
+    // expression: the client that ends it takes the same pointer back. It is
+    // not a runtime block, so boxing it as a value would replace the pointer
+    // with a handle and hand the client an address it never allocated.
+    lines.push("(double)(uintptr_t)blaze_http_req;");
     return `({ ${lines.join(" ")} })`;
   }
 
