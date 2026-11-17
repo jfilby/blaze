@@ -17,10 +17,10 @@ import { selfHostGap } from "./self-host-gap.ts";
 /**
  * The gap report is a diagnostic, not a budget.
  *
- * Progress is measured by `test/self-building.test.ts`, which asks a native
- * compiler to compile this tree. This report says which sources and constructs
- * are still outside the subset when that build fails, so the queue is visible
- * without treating a historical count as an acceptance criterion.
+ * Progress is measured by a native compiler compiling this tree, as described
+ * in `docs/specs/self-building.md`. This report says which sources and
+ * constructs are still outside the subset when that build fails, so the queue
+ * is visible without treating a historical count as an acceptance criterion.
  */
 
 /** One read of the tree, shared by the tests that read the report. */
