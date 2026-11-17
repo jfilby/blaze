@@ -24801,15 +24801,22 @@ class BodyAnalysis {
       );
     }
 
-    // The index stands in its own bound: `for (let i = 0; i < n && a[i] > 0; i += 1)`
-    // reads `i` in the condition. Serializing the ends without the index bound
-    // refused a reduction the body itself states, so the context is given to
-    // both ends and then carries the ends the body's range is read with.
-    const context: LoopContext = { variable: statement.variable, lo: "", hiExclusive: "" };
-    const from = this.serialize((fieldOf(statement, "from") as Expression), context, (fieldOf(statement, "line") as number));
-    const to = this.serialize((fieldOf(statement, "to") as Expression), context, (fieldOf(statement, "line") as number));
-    context.lo = from;
-    context.hiExclusive = (fieldOf(statement, "inclusive") as boolean) ? `(${to} + 1)` : to;
+    // A bound that reads the index is not one expression over the parameters:
+    // the contract would have to name the index before the range that declares
+    // it. Such a loop states no reduction, so the body is contracted instead.
+    const fromExpression = fieldOf(statement, "from") as Expression;
+    const toExpression = fieldOf(statement, "to") as Expression;
+    const stepExpression = fieldOf(statement, "step") as Expression | null;
+    if (dependsOn(fromExpression, statement.variable) || dependsOn(toExpression, statement.variable) || (stepExpression !== null && dependsOn(stepExpression, statement.variable))) {
+      this.uncontractable("counts with a bound that reads its own index", Number(fieldOf(statement, "line")), LOOP_REMEDY);
+    }
+    const from = this.serialize(fromExpression, null, (fieldOf(statement, "line") as number));
+    const to = this.serialize(toExpression, null, (fieldOf(statement, "line") as number));
+    const context: LoopContext = {
+      variable: statement.variable,
+      lo: from,
+      hiExclusive: (fieldOf(statement, "inclusive") as boolean) ? `(${to} + 1)` : to,
+    };
 
     const body = this.serialize(inner.value, context, (fieldOf(inner, "line") as number));
     const reduceOperator = inner.op === "*=" ? "product" : "sum";

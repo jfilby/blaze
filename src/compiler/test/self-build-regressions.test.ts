@@ -24,8 +24,9 @@ function resolved(source: string, name: string) {
 
 test("a counted loop's index is in scope in its bound and its step", () => {
   // The index is read in the `to` bound and the step of this `for`, not only in
-  // its body. The object pass, the IR function and the reduction contract each
-  // used to refuse the loop as using an undeclared name.
+  // its body. The object pass, the IR function and the IR validator each used
+  // to refuse the loop as using an undeclared name; the frontend also has to
+  // give up stating a reduction whose bound names its own index.
   const source = [
     "function scan(size: number): number {",
     "  let total = 0;",
