@@ -5566,7 +5566,10 @@ double blaze_rt_dict_set_seq(BlazeValue dictValue, const char* key, void* value,
   void* copy = blaze_rt_allocate(bytes);
   if (copy == NULL) blaze_rt_raise("out of memory");
   if (bytes > 0 && value != NULL) memcpy(copy, value, bytes);
-  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, blaze_dynamic_from_value(blaze_pointer_value(copy)));
+  // The reader casts the stored word straight back to a pointer. A handle
+  // would name a registry slot instead, so the sequence would be read from the
+  // wrong address.
+  return blaze_rt_dict_set(blaze_value_from_dynamic(dict), key, (double)(uintptr_t)copy);
 }
 
 void* blaze_rt_dict_get_seq(BlazeValue dictValue, const char* key) {

@@ -1005,7 +1005,7 @@ class FunctionEmitter {
         // wide enough to hold one, as every other reference read in this
         // backend does. `self` is already a pointer and casts the same way.
         this.write([
-          `${pad(depth)}((struct ${fieldOf(statement,"layout")}*)(uintptr_t)(${this.expression(fieldOf(statement,"object"), null, depth)}))->${cMemberName(fieldOf(statement,"field"))} = ${this.expression(fieldOf(statement,"value"), null, depth)};`,
+          `${pad(depth)}((struct ${fieldOf(statement,"layout")}*)(uintptr_t)(${this.objectPointer(fieldOf(statement,"object") as SemanticValue, depth)}))->${cMemberName(fieldOf(statement,"field"))} = ${this.expression(fieldOf(statement,"value"), null, depth)};`,
         ]);
         return;
       case "if":
@@ -1961,7 +1961,7 @@ class FunctionEmitter {
       case "newObject":
         return this.buildObject(value as SemanticValue & { k: "newObject" });
       case "loadField":
-        return `((struct ${fieldOf(value,"layout")}*)(uintptr_t)(${this.raw(fieldOf(value,"object"), depth)}))->${cMemberName(fieldOf(value,"field"))}`;
+        return `((struct ${fieldOf(value,"layout")}*)(uintptr_t)(${this.objectPointer(fieldOf(value,"object") as SemanticValue, depth)}))->${cMemberName(fieldOf(value,"field"))}`;
       case "global": {
         const slot = fieldOf(value, "slot");
         if (typeof slot !== "number") throw new Error(`a global without a resolved slot: ${String(fieldOf(value, "id"))}`);
@@ -2172,9 +2172,24 @@ class FunctionEmitter {
     throw backendError(`unknown value kind ${String(fieldOf(value,"k"))}`, "the semantic IR states what a value is");
   }
 
-  /** A closure's block, read out of the double a closure value is held in. */
+  /**
+   * The pointer a layout is read through. A reference the IR left unshaped is
+   * carried as a registry handle, so reading its fields needs the pointer the
+   * handle names; a shaped reference is already that pointer.
+   */
+  private objectPointer(value: SemanticValue, depth: number): string {
+    const raw = this.raw(value, depth);
+    const type = fieldOf(value,"type") as SemanticType | undefined;
+    const dynamic = type !== undefined && String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined;
+    return dynamic ? `blaze_pointer_of_handle(${raw})` : raw;
+  }
+
+  /** A closure's block, read out of the handle a closure value is held in. */
   private closurePointer(expression: string): string {
-    return `((blaze_fn_closure_t*)(uintptr_t)(intptr_t)(${expression}))`;
+    // A closure is handed over as a registry handle, not as the bits of its
+    // address. Casting those bits back to a pointer read the code entry from a
+    // registry index, which the machine then tried to call.
+    return `((blaze_fn_closure_t*)blaze_pointer_of_handle(${expression}))`;
   }
 
   /**
