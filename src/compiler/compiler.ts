@@ -63,8 +63,8 @@ import { buildProgramHost } from "./runtime/nim-program.ts";
 import { usesSqliteSource } from "./runtime/sqlite.ts";
 import { usesTritonSource } from "./runtime/triton.ts";
 import { httpRuntimeNeeds, mentionsHttpModule } from "./runtime/http-needs.ts";
-import { resolveProgram } from "./semantics/ir-resolve.ts";
 import type { LiteralKeys } from "./semantics/program-objects.ts";
+import { resolveProgram } from "./semantics/ir-resolve.ts";
 import { resolveFunction, resolveModule, type FunctionContext } from "./semantics/ir-function.ts";
 import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeProgram, optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
@@ -1013,23 +1013,18 @@ function functionContext(phase: { program: ProgramContract; objectNames: Record<
 }
 
 /**
- * The program's own statements, resolved and with the arithmetic of a loop over
- * whole numbers computed in whole numbers.
+ * The arithmetic of a loop over whole numbers, computed over the program's own
+ * statements.
  *
- * The pass is asked of the program's statements and of the functions it is
- * handed, because what a buffer holds is what every write into it and every
- * call site of every function leaves in it — a question the program's
- * statements alone cannot answer, and one the resolved functions answer
- * together.
+ * The driver has already been resolved. `semanticFunctions` resolves it once,
+ * asks the same pass about the functions using a copy of its entry, and hands the
+ * untouched resolution here; resolving the body again to fold it was the second
+ * of two whole-program resolutions a build made, and the two answers were the
+ * same. What a buffer holds is what every write into it and every call site of
+ * every function leaves in it, so the functions are asked alongside the program
+ * statements before either is folded.
  */
-function resolvedDriver(
-  body: ProgramBody,
-  program: ProgramContract,
-  objectNames: Record<string, string>,
-  objectLayouts: Record<string, ObjectLayout>,
-  objectKeys: LiteralKeys,
-): SemanticProgram {
-  const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
+function foldDriver(driver: SemanticProgram, program: ProgramContract): SemanticProgram {
   const fields = driver as unknown as Record<string, unknown>;
   const files = (program as unknown as Record<string, unknown>)["files"] as FileContract[];
   wholeElementArithmetic(
@@ -1040,13 +1035,24 @@ function resolvedDriver(
   return driver;
 }
 
+/** The resolved functions of a build and the one resolution of its program body. */
+interface SemanticFunctions {
+  functions: Record<string, SemanticFunction>;
+  /**
+   * The program body resolved once, untouched by the whole-element pass that
+   * rewrote the functions: that pass saw a copy of this entry, so a caller may
+   * fold the entry here without applying the same rewrite twice.
+   */
+  driver: SemanticProgram | undefined;
+}
+
 function semanticFunctions(
   program: ProgramContract,
   objectNames: Record<string, string>,
   body: ProgramBody | undefined,
   objectLayouts: Record<string, ObjectLayout>,
   objectKeys: LiteralKeys,
-): Record<string, SemanticFunction> {
+): SemanticFunctions {
   const functions: Record<string, FunctionContract> = {};
   const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
   for (const file of files) {
@@ -1070,13 +1076,13 @@ function semanticFunctions(
   // every call site of every function that is handed one, so the arithmetic of a
   // loop over whole numbers is settled here rather than by a per-function pass:
   // it is asked of these bodies, which are the ones every backend is handed.
-  if (body !== undefined) {
-    const driver = resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
+  const driver = body === undefined ? undefined : resolveProgram(body, program, objectNames, objectLayouts, objectKeys);
+  if (driver !== undefined) {
     const fields = driver as unknown as Record<string, unknown>;
     const files = (program as unknown as Record<string, unknown>)["files"] as FileContract[];
     wholeElementArithmetic(
       Object.values(resolved),
-      fields["entry"] as SemanticBlock | null,
+      structuredClone(fields["entry"] as SemanticBlock | null),
       vectorChecked(contractsByName(files)),
     );
   }
@@ -1093,7 +1099,7 @@ function semanticFunctions(
       validateSemanticFunction(resolved[String(fn["symbol"])], contract, callees);
     }
   }
-  return resolved;
+  return { functions: resolved, driver };
 }
 
 /** What generation produced for one function of a build. */
@@ -2059,7 +2065,7 @@ export async function runBuild(
     const files: FileContract[] = fieldOf(program, "files") as unknown as FileContract[];
     const entry = programFields["entry"] as Record<string, unknown>;
     const units = compilationUnits(program, body !== undefined);
-    const semantics = semanticFunctions(program, objectNames, body, objectLayouts, objectKeys);
+    const { functions: semantics, driver: resolved } = semanticFunctions(program, objectNames, body, objectLayouts, objectKeys);
     // The IR of every function is resolved and checked here, before a model is
     // asked for anything: a function no backend may lower never reaches one.
     const postconditions = Object.values(semantics).reduce((total: number, fn) => {
@@ -2093,12 +2099,7 @@ export async function runBuild(
     // resolved is what the optimizer wrote.
     // Resolving a program and writing out the source the toolchain runs are
     // the same for every round: only the objects it links change.
-    const driver =
-      body === undefined
-        ? undefined
-        : optimizeSemanticProgram(
-            resolvedDriver(body as ProgramBody, program, objectNames, objectLayouts, objectKeys),
-          );
+    const driver = resolved === undefined ? undefined : optimizeSemanticProgram(foldDriver(resolved, program));
     // The IR is checked here, before a toolchain is asked for anything: a
     // program no backend may lower never reaches gcc, nim or a linker.
     if (driver !== undefined) {
@@ -3164,7 +3165,7 @@ export async function runStored(
   const objectNamesResult = resolveObjects(files);
   const objectNameFields = objectNamesResult as unknown as Record<string, unknown>;
   const names = objectNameFields["names"] as Map<string, string>;
-  const functions = semanticFunctions(program, Object.fromEntries(names), undefined, {}, new Map());
+  const { functions } = semanticFunctions(program, Object.fromEntries(names), undefined, {}, new Map());
 
   // Both records are collected as entries and written whole, the way a build
   // writes its own, so a name that is a key of neither is never half written.
@@ -3286,7 +3287,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const objectNames = phaseFields["objectNames"] as Record<string, string>;
   const objectLayouts = phaseFields["objectLayouts"] as Record<string, ObjectLayout>;
   const objectKeys = phaseFields["objectKeys"] as LiteralKeys;
-  const semantics = semanticFunctions(contract, objectNames, body, objectLayouts, objectKeys);
+  const { functions: semantics, driver: resolved } = semanticFunctions(contract, objectNames, body, objectLayouts, objectKeys);
   // A function is the unit the IR describes, so a function can be asked for by
   // name, and every function of the program can be asked for at once.
   if (fieldOf(fields, "function") !== undefined || String(fieldOf(fields, "all")) === "true") {
@@ -3312,7 +3313,7 @@ export async function runSemanticIr(inputPath: string, options: SemanticIrOption
   const callees = new Map(Object.entries(semantics));
   const program =
     fields["from"] === undefined
-      ? resolveProgram(body as ProgramBody, contract, objectNames, objectLayouts, objectKeys)
+      ? (resolved as SemanticProgram)
       : parseSemanticProgram(readFileSync(String(fields["from"]), "utf8"), contract);
   const programFields = program as unknown as Record<string, unknown>;
   const programBodies = programFields["bodies"] as SemanticFunction[];

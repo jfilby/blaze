@@ -5,6 +5,7 @@ import { reusableFiles, type CodegenWorkspace } from "../codegen.ts";
 import type { Candidate, CandidateOutcome, FunctionContract, GenerationConfig, ObjectLayout, ProgramContract } from "../core/types.ts";
 import { createJsonStore, storeWrite, storeWriteText, storeRead } from "../core/json-store.ts";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { COMPILER_VERSION, engineStamp, fingerprintSources, toolchainFingerprints } from "../core/version.ts";
 import { join } from "node:path";
 import { returns as returnsValue } from "./definition.ts";
@@ -341,6 +342,24 @@ test("the empty record a first build writes into keeps a function named __proto_
   assert.equal(record.selected, undefined, "a field name answered from the prototype");
   assert.equal(record.reviewKey, undefined, "a field name answered from the prototype");
   assert.equal(record.objectKey, undefined, "a field name answered from the prototype");
+});
+
+test("a fingerprint hashes each source once, in sorted path order", async () => {
+  // The sources are folded into the hash as they are read rather than kept in a
+  // map until the end. That is only the same hash if the order and the bytes
+  // fed to it are the same, so pin both here with an independently computed
+  // digest: the review side in sorted path order, and the lowering side apart.
+  const root = await scratch("blaze-fingerprint-order-");
+  await mkdir(join(root, "toolchain"), { recursive: true });
+  await writeFile(join(root, "a.ts"), "export const a = 1;\n", "utf8");
+  await writeFile(join(root, "b.ts"), "export const b = 2;\n", "utf8");
+  await writeFile(join(root, "toolchain/ir-c.ts"), "export const c = 3;\n", "utf8");
+
+  const digest = (text: string): string => createHash("sha256").update(text).digest("hex");
+  assert.deepEqual(await fingerprintSources(root), {
+    review: digest("a.ts export const a = 1;\n b.ts export const b = 2;\n "),
+    lowering: digest("toolchain/ir-c.ts export const c = 3;\n "),
+  });
 });
 
 test("an edit to a compiler source moves the fingerprint that decides it", async () => {

@@ -69,6 +69,19 @@ test("the code reads the words the prose carries as prose", () => {
   assert.equal(usesSqliteSource('sqlite.open(":memory:");\n'), true, "a call is a call");
 });
 
+test("a source longer than one batch is blanked exactly as a short one", () => {
+  // The walk batches characters into chunks so a long source does not grow an
+  // array entry per character. A comment, a literal and ordinary code all cross
+  // a chunk boundary here, so the test catches a batch that drops or repeats
+  // characters at the seam.
+  const comment = "// " + "x".repeat(5000) + "\n";
+  const literal = "a".repeat(6000);
+  const source = `${comment}const s = "${literal}";\nconst n = 1;\n`;
+
+  assert.equal(withoutComments(source), `${" ".repeat(3 + 5000)}\nconst s = "${literal}";\nconst n = 1;\n`);
+  assert.equal(codeOnly(source), `${" ".repeat(3 + 5000)}\nconst s = "${" ".repeat(6000)}";\nconst n = 1;\n`);
+});
+
 test("a template literal is walked as the code it interpolates", () => {
   // The text of a template is data, and the `${}` inside it is code: an
   // interpolation whose expression calls HTTP is a program that uses HTTP.

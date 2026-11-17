@@ -49,16 +49,51 @@ export function codeOnly(source: string): string {
   return scan(source, true);
 }
 
+/**
+ * Where the walk writes its answer.
+ *
+ * A source is walked a character at a time, but an array holding one entry per
+ * character is a large transient allocation for a long source: the readers here
+ * are asked about every source of a program, and a build of a large program
+ * holds those arrays, one after another, while it decides which runtime to
+ * link. Batching the characters into chunks keeps the same answer without the
+ * per-character array: `push` appends to a chunk and flushes it when it is full,
+ * and `finish` joins the few chunks that are left.
+ */
+interface Emitter {
+  push(...text: string[]): void;
+  finish(): string;
+}
+
+/** An emitter that batches characters into bounded chunks. */
+function emitter(): Emitter {
+  const chunks: string[] = [];
+  let chunk = "";
+  return {
+    push(...text: string[]): void {
+      for (const piece of text) chunk += piece;
+      if (chunk.length >= 4096) {
+        chunks.push(chunk);
+        chunk = "";
+      }
+    },
+    finish(): string {
+      if (chunk.length > 0) chunks.push(chunk);
+      return chunks.join("");
+    },
+  };
+}
+
 /** The one walk both readers share, with a flag for whether literals stay. */
 function scan(source: string, blankLiterals: boolean): string {
-  const out: string[] = [];
+  const out = emitter();
   let at = 0;
   while (at < source.length) at = scanOne(source, at, out, blankLiterals);
-  return out.join("");
+  return out.finish();
 }
 
 /** One quoted string, escapes and all. */
-function walkString(source: string, start: number, quote: string, out: string[], blank: boolean): number {
+function walkString(source: string, start: number, quote: string, out: Emitter, blank: boolean): number {
   // The quotes stay even where the bytes they surround do not: a reader of the
   // blanked source can still see that a literal was here, and the width of the
   // source is the width it was.
@@ -82,7 +117,7 @@ function walkString(source: string, start: number, quote: string, out: string[],
 }
 
 /** One template literal, whose interpolations are walked as code. */
-function walkTemplate(source: string, start: number, out: string[], blank: boolean): number {
+function walkTemplate(source: string, start: number, out: Emitter, blank: boolean): number {
   out.push("`");
   let at = start + 1;
   while (at < source.length) {
@@ -129,7 +164,7 @@ function walkTemplate(source: string, start: number, out: string[], blank: boole
  * source again for the one character it is on: a comment, a literal or a
  * character of code, with the index it stopped at.
  */
-function scanOne(source: string, at: number, out: string[], blank: boolean): number {
+function scanOne(source: string, at: number, out: Emitter, blank: boolean): number {
   const character = source.slice(at, at + 1);
   if (character === "/" && source.slice(at + 1, at + 2) === "/") {
     while (at < source.length && source.slice(at, at + 1) !== "\n") {

@@ -120,7 +120,8 @@ export interface Fingerprints {
  * neither a stored candidate nor a stored object.
  */
 export async function fingerprintSources(root: string): Promise<Fingerprints> {
-  const found = new Map<string, string>();
+  const review = createHash("sha256");
+  const lowering = createHash("sha256");
   const walk = async (directory: string): Promise<void> => {
     const entries = await readdirEntries(directory);
     entries.sort((left, right) => (String(fieldOf(left, "name")) < String(fieldOf(right, "name")) ? -1 : 1));
@@ -131,7 +132,16 @@ export async function fingerprintSources(root: string): Promise<Fingerprints> {
       if (isDirectoryPath(path)) {
         await walk(path);
       } else if (isFilePath(path) && name.endsWith(".ts")) {
-        found.set(relative(root, path).split(sep).join("/"), await readFile(path, "utf8"));
+        const sourcePath = relative(root, path).split(sep).join("/");
+        // A source is folded into the hash as soon as it is read. Holding the
+        // whole tree in a map until every file has been read costs the sum of
+        // every source as live memory at once, which is what a build of the
+        // compiler's own tree pays on every run. The walk is sorted, so hashing
+        // here feeds the two hashes the same bytes in the same order as before.
+        const contents = await readFile(path, "utf8");
+        const piece = `${sourcePath} ${contents} `;
+        if (LOWERING_ONLY[sourcePath] === true) lowering.update(piece);
+        else review.update(piece);
       }
     }
   };
@@ -142,12 +152,6 @@ export async function fingerprintSources(root: string): Promise<Fingerprints> {
       .update(`unreadable:${root}:${cause instanceof Error ? cause.message : String(cause)}`)
       .digest("hex");
     return { review: unreadable, lowering: unreadable };
-  }
-  const review = createHash("sha256");
-  const lowering = createHash("sha256");
-  for (const [path, contents] of found) {
-    if (LOWERING_ONLY[path] === true) lowering.update(`${path} ${contents} `);
-    else review.update(`${path} ${contents} `);
   }
   return { review: review.digest("hex"), lowering: lowering.digest("hex") };
 }
