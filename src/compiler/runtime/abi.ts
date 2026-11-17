@@ -2073,6 +2073,53 @@ entry(
     { tags: ["host"] },
   ),
   
+  entry("blaze_rt_json_parse_from_handle", "BlazeValue", [["dict", "double"]], "Handle-taking form of blaze_rt_json_parse.", "Returns a managed dynamic value.", { tags: ["object"] }),
+  entry("blaze_rt_object_copy_from_handle", "BlazeValue", [["dict", "double"]], "Handle-taking form of blaze_rt_object_copy.", "The copy keeps the layout the record was laid out with, and is the value a spread with a field written beside it is.", { tags: ["object"] }),
+  entry("blaze_rt_clone_from_handle", "BlazeValue", [["dict", "double"]], "Handle-taking form of blaze_rt_clone.", "A record copies its fields, a list copies its elements, a dynamic object copies its entries, and a number or a text is itself.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_text_from_handle", "BlazeValue", [["dict", "double"], ["field", "const char*"], ["value", "const char*"]], "Handle-taking form of blaze_rt_object_set_text.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_ref_from_handle", "BlazeValue", [["dict", "double"], ["field", "const char*"], ["value", "BlazeValue"]], "Handle-taking form of blaze_rt_object_set_ref.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_list_from_handle", "BlazeValue", [["dict", "double"], ["field", "const char*"], ["value", "const void*"]], "Handle-taking form of blaze_rt_object_set_list.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_object_set_number_from_handle", "BlazeValue", [["dict", "double"], ["field", "const char*"], ["value", "double"]], "Handle-taking form of blaze_rt_object_set_number.", "Returns the record. Refuses a field the record was not laid out with.", { tags: ["object"] }),
+  entry("blaze_rt_json_stringify_value_from_handle", "BlazeValue", [["dict", "double"]], "Handle-taking form of blaze_rt_json_stringify_value.", "Returns a tagged string handle.", { tags: ["object"] }),
+  entry("blaze_rt_array_push_from_handle", "BlazeValue", [["dict", "double"], ["value", "BlazeValue"]], "Handle-taking form of blaze_rt_array_push.", "Returns the array.", { tags: ["object"] }),
+  entry("blaze_rt_array_get_from_handle", "BlazeValue", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_array_get.", "Returns the element.", { tags: ["object"] }),
+  entry("blaze_rt_array_length_from_handle", "double", [["dict", "double"]], "Handle-taking form of blaze_rt_array_length.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_array_set_from_handle", "void", [["dict", "double"], ["index", "double"], ["value", "BlazeValue"]], "Handle-taking form of blaze_rt_array_set.", "Returns nothing.", { tags: ["object"] }),
+  entry("blaze_rt_is_array_from_handle", "double", [["dict", "double"]], "Handle-taking form of blaze_rt_is_array.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_from_handle", "double", [["dict", "double"], ["key", "const char*"]], "Handle-taking form of blaze_rt_dict_get.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_from_handle", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_ref_from_handle", "double", [["dict", "double"], ["key", "const char*"]], "Handle-taking form of blaze_rt_dict_get_ref.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_ref_from_handle", "double", [["dict", "double"], ["key", "const char*"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set_ref.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_text_from_handle", "const char*", [["dict", "double"], ["key", "const char*"]], "Handle-taking form of blaze_rt_dict_get_text.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_text_from_handle", "double", [["dict", "double"], ["key", "const char*"], ["value", "const char*"]], "Handle-taking form of blaze_rt_dict_set_text.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_from_handle", "double", [["dict", "double"], ["key", "const char*"]], "Handle-taking form of blaze_rt_dict_has.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_len_from_handle", "double", [["dict", "double"]], "Handle-taking form of blaze_rt_dict_len.", "Returns the count.", { tags: ["object"] }),
+  entry("blaze_rt_dict_values_from_handle", "double*", [["dict", "double"]], "Handle-taking form of blaze_rt_dict_values.", "Returns the block, in the order the keys were first written; its header states how many values it holds.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_at_from_handle", "const char*", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_key_at.", "Returns the key, or the empty text when the position names no entry. The key belongs to the dictionary and is valid until the entry is removed.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_from_handle", "double", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_value_at.", "Returns the value, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_ref_from_handle", "double", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_value_at_ref.", "Returns the reference, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_value_at_text_from_handle", "const char*", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_value_at_text.", "Returns the text, or the empty text when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set_refkey.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_refkey.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_text_from_handle", "const char*", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_refkey_text.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_refkey_ref_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_refkey_ref.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_text_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Handle-taking form of blaze_rt_dict_set_refkey_text.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_refkey_ref_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set_refkey_ref.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_refkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_has_refkey.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_refkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_delete_refkey.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_ref_at_from_handle", "double", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_key_ref_at.", "Returns the key as the handle it was written as, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set_numkey.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_numkey.", "Returns the value, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_text_from_handle", "const char*", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_numkey_text.", "Returns the text, or the empty text when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_get_numkey_ref_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_get_numkey_ref.", "Returns the reference, or NaN when the key is absent.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_text_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "const char*"]], "Handle-taking form of blaze_rt_dict_set_numkey_text.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_set_numkey_ref_from_handle", "double", [["dict", "double"], ["key", "double"], ["value", "double"]], "Handle-taking form of blaze_rt_dict_set_numkey_ref.", "Returns the dictionary.", { tags: ["object"] }),
+  entry("blaze_rt_dict_has_numkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_has_numkey.", "Returns 1 or 0.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_numkey_from_handle", "double", [["dict", "double"], ["key", "double"]], "Handle-taking form of blaze_rt_dict_delete_numkey.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
+  entry("blaze_rt_dict_key_num_at_from_handle", "double", [["dict", "double"], ["index", "double"]], "Handle-taking form of blaze_rt_dict_key_num_at.", "Returns the key as the number it was written as, or zero when the position names no entry.", { tags: ["object"] }),
+  entry("blaze_rt_dict_delete_from_handle", "double", [["dict", "double"], ["key", "const char*"]], "Handle-taking form of blaze_rt_dict_delete.", "Returns the dictionary; a key it does not hold is not an error.", { tags: ["object"] }),
+  entry("blaze_rt_to_text_from_handle", "const char*", [["dict", "double"]], "Handle-taking form of blaze_rt_to_text.", "Returns a managed string.", { tags: ["object"] }),
+  entry("blaze_rt_length_from_handle", "double", [["dict", "double"]], "Handle-taking form of blaze_rt_length.", "Returns the count.", { tags: ["object"] }),
 
 ];
 
@@ -6528,6 +6575,11 @@ double blaze_value_ref(void* pointer) {
   }
   return blaze_dynamic_from_value(blaze_pointer_value(pointer));
 }
+void* blaze_pointer_of_handle(double handle) {
+  BlazeValue value = blaze_value_from_dynamic(handle);
+  blaze_rt_entry* entry = blaze_registry_entry_of_payload(value.payload);
+  return entry == NULL ? NULL : entry->pointer;
+}
 
 static blaze_dyn* blaze_dyn_lookup(double h) {
   uint64_t payload = 0;
@@ -9490,6 +9542,149 @@ double blaze_rt_stream_is_tty(double stream) {
   const int descriptor = stream == 2.0 ? STDERR_FILENO : STDOUT_FILENO;
   return isatty(descriptor) ? 1.0 : 0.0;
 }
+/* Handle-taking forms for callers that carry a value as the bits of a double. */
+BlazeValue blaze_rt_json_parse_from_handle(double handle) {
+  return blaze_rt_json_parse(blaze_value_from_dynamic(handle));
+}
+BlazeValue blaze_rt_object_copy_from_handle(double handle) {
+  return blaze_rt_object_copy(blaze_value_from_dynamic(handle));
+}
+BlazeValue blaze_rt_clone_from_handle(double handle) {
+  return blaze_rt_clone(blaze_value_from_dynamic(handle));
+}
+BlazeValue blaze_rt_object_set_text_from_handle(double handle, const char* field, const char* value) {
+  return blaze_rt_object_set_text(blaze_value_from_dynamic(handle), field, value);
+}
+BlazeValue blaze_rt_object_set_ref_from_handle(double handle, const char* field, BlazeValue value) {
+  return blaze_rt_object_set_ref(blaze_value_from_dynamic(handle), field, value);
+}
+BlazeValue blaze_rt_object_set_list_from_handle(double handle, const char* field, const void* value) {
+  return blaze_rt_object_set_list(blaze_value_from_dynamic(handle), field, value);
+}
+BlazeValue blaze_rt_object_set_number_from_handle(double handle, const char* field, double value) {
+  return blaze_rt_object_set_number(blaze_value_from_dynamic(handle), field, value);
+}
+BlazeValue blaze_rt_json_stringify_value_from_handle(double handle) {
+  return blaze_rt_json_stringify_value(blaze_value_from_dynamic(handle));
+}
+BlazeValue blaze_rt_array_push_from_handle(double handle, BlazeValue value) {
+  return blaze_rt_array_push(blaze_value_from_dynamic(handle), value);
+}
+BlazeValue blaze_rt_array_get_from_handle(double handle, double index) {
+  return blaze_rt_array_get(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_array_length_from_handle(double handle) {
+  return blaze_rt_array_length(blaze_value_from_dynamic(handle));
+}
+void blaze_rt_array_set_from_handle(double handle, double index, BlazeValue value) {
+  return blaze_rt_array_set(blaze_value_from_dynamic(handle), index, value);
+}
+double blaze_rt_is_array_from_handle(double handle) {
+  return blaze_rt_is_array(blaze_value_from_dynamic(handle));
+}
+double blaze_rt_dict_get_from_handle(double handle, const char* key) {
+  return blaze_rt_dict_get(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_set_from_handle(double handle, const char* key, double value) {
+  return blaze_rt_dict_set(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_get_ref_from_handle(double handle, const char* key) {
+  return blaze_rt_dict_get_ref(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_set_ref_from_handle(double handle, const char* key, double value) {
+  return blaze_rt_dict_set_ref(blaze_value_from_dynamic(handle), key, value);
+}
+const char* blaze_rt_dict_get_text_from_handle(double handle, const char* key) {
+  return blaze_rt_dict_get_text(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_set_text_from_handle(double handle, const char* key, const char* value) {
+  return blaze_rt_dict_set_text(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_has_from_handle(double handle, const char* key) {
+  return blaze_rt_dict_has(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_len_from_handle(double handle) {
+  return blaze_rt_dict_len(blaze_value_from_dynamic(handle));
+}
+double* blaze_rt_dict_values_from_handle(double handle) {
+  return blaze_rt_dict_values(blaze_value_from_dynamic(handle));
+}
+const char* blaze_rt_dict_key_at_from_handle(double handle, double index) {
+  return blaze_rt_dict_key_at(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_dict_value_at_from_handle(double handle, double index) {
+  return blaze_rt_dict_value_at(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_dict_value_at_ref_from_handle(double handle, double index) {
+  return blaze_rt_dict_value_at_ref(blaze_value_from_dynamic(handle), index);
+}
+const char* blaze_rt_dict_value_at_text_from_handle(double handle, double index) {
+  return blaze_rt_dict_value_at_text(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_dict_set_refkey_from_handle(double handle, double key, double value) {
+  return blaze_rt_dict_set_refkey(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_get_refkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_refkey(blaze_value_from_dynamic(handle), key);
+}
+const char* blaze_rt_dict_get_refkey_text_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_refkey_text(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_get_refkey_ref_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_refkey_ref(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_set_refkey_text_from_handle(double handle, double key, const char* value) {
+  return blaze_rt_dict_set_refkey_text(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_set_refkey_ref_from_handle(double handle, double key, double value) {
+  return blaze_rt_dict_set_refkey_ref(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_has_refkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_has_refkey(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_delete_refkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_delete_refkey(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_key_ref_at_from_handle(double handle, double index) {
+  return blaze_rt_dict_key_ref_at(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_dict_set_numkey_from_handle(double handle, double key, double value) {
+  return blaze_rt_dict_set_numkey(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_get_numkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_numkey(blaze_value_from_dynamic(handle), key);
+}
+const char* blaze_rt_dict_get_numkey_text_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_numkey_text(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_get_numkey_ref_from_handle(double handle, double key) {
+  return blaze_rt_dict_get_numkey_ref(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_set_numkey_text_from_handle(double handle, double key, const char* value) {
+  return blaze_rt_dict_set_numkey_text(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_set_numkey_ref_from_handle(double handle, double key, double value) {
+  return blaze_rt_dict_set_numkey_ref(blaze_value_from_dynamic(handle), key, value);
+}
+double blaze_rt_dict_has_numkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_has_numkey(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_delete_numkey_from_handle(double handle, double key) {
+  return blaze_rt_dict_delete_numkey(blaze_value_from_dynamic(handle), key);
+}
+double blaze_rt_dict_key_num_at_from_handle(double handle, double index) {
+  return blaze_rt_dict_key_num_at(blaze_value_from_dynamic(handle), index);
+}
+double blaze_rt_dict_delete_from_handle(double handle, const char* key) {
+  return blaze_rt_dict_delete(blaze_value_from_dynamic(handle), key);
+}
+const char* blaze_rt_to_text_from_handle(double handle) {
+  return blaze_rt_to_text(blaze_value_from_dynamic(handle));
+}
+double blaze_rt_length_from_handle(double handle) {
+  return blaze_rt_length(blaze_value_from_dynamic(handle));
+}
+
 `;
 }
 

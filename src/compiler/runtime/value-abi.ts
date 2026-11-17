@@ -215,6 +215,8 @@ double blaze_dynamic_from_value(BlazeValue value);
 BlazeValue blaze_value_c_text(const char* text);
 /* A reference a lowering holds as a pointer, carried as a typed handle. */
 double blaze_value_ref(void* pointer);
+/* The pointer a typed handle was written from, for a shaped read of one. */
+void* blaze_pointer_of_handle(double handle);
 /* A managed string pointer as the tagged value the ABI carries. */
 BlazeValue blaze_value_from_text(const char* text);
 

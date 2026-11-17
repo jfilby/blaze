@@ -12386,8 +12386,12 @@ class Machine {
     }
     const returns = answer === "text" ? TEXT : answer === "pointer" ? POINTER : NUMBER;
     // `map.values` is the name the IR gives the service, and the runtime's own
-    // entry is the one it calls.
-    const symbol = callee === "map.values" ? "blaze_rt_dict_values" : callee;
+    // entry is the one it calls. A service that takes a BlazeValue needs the
+    // handle-taking form: this backend carries a dynamic value as the bits of a
+    // double in a vector register, while the convention passes a BlazeValue as
+    // two integer words that the callee reads as a tagged value.
+    const entry = callee === "map.values" ? "blaze_rt_dict_values" : callee;
+    const symbol = `${entry}_from_handle`;
     this.callSymbol(symbol, held, returns);
     if (answer === "dynamic") {
       if (callee === "blaze_rt_dict_key_ref_at") {

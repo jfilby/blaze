@@ -1549,7 +1549,16 @@ class FunctionEmitter {
           : `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(${args[0]}))`;
       return `(blaze_promise_reject(blaze_current_promise, ${text}), 0.0)`;
     }
-    return builtinExpression(fieldOf(call,"callee"), args);
+    const result = builtinExpression(fieldOf(call,"callee"), args);
+    // A dictionary hands back the handle a reference was stored under, while a
+    // shaped reference is the pointer itself in generated C. Reading one as the
+    // other without unwrasking the handle made a field read follow a registry
+    // index as if it were an address.
+    const returns = fieldOf(call,"returns") as SemanticType;
+    if (String(fieldOf(returns,"kind")) === "ref" && fieldOf(returns,"name") !== undefined && String(fieldOf(call,"callee")).startsWith("blaze_rt_dict_")) {
+      return `blaze_pointer_of_handle(${result})`;
+    }
+    return result;
   }
 
   /**
@@ -1856,7 +1865,7 @@ class FunctionEmitter {
         ? written
         : `(${declaredType(as)})(${written})`;
     }
-    if (isReference(fieldOf(value,"type")) && isReference(as)) return `(${declaredType(as)})(${written})`;
+    if (isReference(fieldOf(value,"type")) && isReference(as)) return `(${declaredType(as)})(uintptr_t)(${written})`;
     return written;
   }
 
