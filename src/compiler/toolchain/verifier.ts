@@ -27,10 +27,10 @@ import {
   type Value,
 } from "../semantics/contract.ts";
 import { CompilerError } from "../core/errors.ts";
-import { monotonicTimeNs } from "../core/platform.ts";
+import { monotonicTimeNs, randomUUID } from "../core/platform.ts";
 import { byName } from "../core/named-record.ts";
 import { run, GENERATED_HEAP_BYTES } from "../core/process.ts";
-import type { FunctionContract, Runner, TestConfig, TestFailure, TypeExpr, VerificationResult } from "../core/types.ts";
+import type { FunctionContract, Runner, TestConfig, TestFailure, TypeExpr, VerificationBatch, VerificationResult } from "../core/types.ts";
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
@@ -96,6 +96,54 @@ function mulberry32(seed: number): () => number {
     value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
     return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/**
+ * The seed a verification run uses. An explicit seed is honoured for
+ * reproducibility; otherwise a fresh seed is drawn from the host's
+ * cryptographically secure source, so two independent runs explore different
+ * inputs. A UUID is 122 bits of CSPRNG output, folded into the 32-bit seed the
+ * PRNG takes with an FNV-1a hash — no time or counter is trusted for
+ * randomness, and no radix parser is needed.
+ */
+export function resolveVerificationSeed(config: TestConfig): { seed: number; explicit: boolean } {
+  const given = config.seed;
+  if (given !== undefined) {
+    return { seed: Number(given) >>> 0, explicit: true };
+  }
+  const uuid = randomUUID().replace(/-/g, "");
+  let seed = 2166136261;
+  for (let index = 0; index < uuid.length; index += 1) {
+    seed = Math.imul(seed ^ uuid.charCodeAt(index), 16777619) >>> 0;
+  }
+  return { seed, explicit: false };
+}
+
+/** One independently seeded batch of vectors for a verification run. */
+export interface VerificationBatchPlan {
+  readonly seed: number;
+  readonly vectors: TestVector[];
+}
+
+/**
+ * Plans one or more independent randomized batches.
+ *
+ * With an explicit seed, batch `i` uses `seed + i`, so a whole run is
+ * reproducible while its batches still differ from each other. With no
+ * explicit seed, each batch draws its own secure seed. The first batch's
+ * vectors are exactly those `planTestVectors` would produce for the same
+ * config, so existing single-batch callers keep their behaviour.
+ */
+export function planVerificationBatches(parsed: ParsedContract, config: TestConfig): VerificationBatchPlan[] {
+  const count = Math.max(1, Math.floor(Number(config.batches ?? 1)));
+  const plans: VerificationBatchPlan[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const seed = config.seed === undefined
+      ? resolveVerificationSeed(config).seed
+      : (Number(config.seed) >>> 0) + index;
+    plans.push({ seed, vectors: planTestVectors(parsed, config, seed) });
+  }
+  return plans;
 }
 
 /** Identifiers that determine how much of a buffer is read. */
@@ -292,7 +340,7 @@ function nextRandom(source: RandomSource): number {
 }
 
 /** Fixed, boundary and randomized vectors, filtered by the preconditions. */
-export function planTestVectors(parsed: ParsedContract, config: TestConfig): TestVector[] {
+export function planTestVectors(parsed: ParsedContract, config: TestConfig, seed?: number): TestVector[] {
   const lengths = lengthParameters(parsed);
   const contract = fieldOf(parsed, "contract") as FunctionContract;
   const memory = fieldOf(contract, "memory") as { readonly reads: readonly string[]; readonly writes: readonly string[] };
@@ -316,7 +364,8 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
       }
     }
   }
-  const source = new RandomSource(Number(fieldOf(config, "seed")));
+  const chosenSeed = seed ?? resolveVerificationSeed(config).seed;
+  const source = new RandomSource(chosenSeed);
   const makeRandom = (): number => nextRandom(source);
   const maxLength = Math.max(1, Number(fieldOf(config, "maxLength")));
 
@@ -373,13 +422,20 @@ export function planTestVectors(parsed: ParsedContract, config: TestConfig): Tes
 }
 
 /**
+ * A fixed seed for the demo vector only. It is not a verification seed: the
+ * demo is a deterministic regression example, so it must not draw from the
+ * per-run secure seed that makes randomized verification explore new inputs.
+ */
+const DEMO_SEED = 0;
+
+/**
  * The vector a delivered program runs when a person starts it with no piped
  * input. It is a fixed pattern rather than a random case, so the number the
  * program prints is the same on every machine, and it is the first planned
  * vector that satisfies the preconditions.
  */
 export function selectDemoVector(parsed: ParsedContract, config: TestConfig): TestVector {
-  const source = new RandomSource(Number(fieldOf(config, "seed")));
+  const source = new RandomSource(DEMO_SEED);
   const makeRandom = (): number => nextRandom(source);
   const lengths = lengthParameters(parsed);
   const builders: VectorBuilder[] = [
@@ -392,7 +448,7 @@ export function selectDemoVector(parsed: ParsedContract, config: TestConfig): Te
     const vector = buildVector(parsed, builder, lengths, new Set<string>());
     if (preconditionFailures(parsed, vectorValues(contract, vector)).length === 0) return vector;
   }
-  return planTestVectors(parsed, { randomCases: 0, maxLength: Number(fieldOf(config, "maxLength")), seed: Number(fieldOf(config, "seed")) })[0];
+  return planTestVectors(parsed, { randomCases: 0, maxLength: Number(fieldOf(config, "maxLength")) }, DEMO_SEED)[0];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -548,8 +604,14 @@ export interface VerifyRequest {
   parsed: ParsedContract;
   runner: Runner;
   candidate: string;
-  /** The vectors planned once for the whole unit, the same every candidate is checked against. */
+  /** Every batch's vectors, concatenated in batch order. */
   vectors: readonly TestVector[];
+  /** The seed of the run, recorded on the result. */
+  seed?: number;
+  /** One seed per independent randomized batch. */
+  batchSeeds?: readonly number[];
+  /** How many vectors each batch contributed, in batch order. */
+  batchSizes?: readonly number[];
 }
 
 export function verifyCandidate(request: VerifyRequest): VerificationResult {
@@ -620,13 +682,19 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
 
   const actual = decodeRunResults(contract, String(fieldOf(execution, "stdout")), vectors.length);
   const failures: TestFailure[] = [];
+  /** Whether each vector passed, in vector order, so counts can be split by kind and batch. */
+  const passedByVector: boolean[] = [];
   expected.forEach((entry, index) => {
-    if (fieldOf(entry, "skip") === true) return;
+    if (fieldOf(entry, "skip") === true) {
+      passedByVector[index] = true;
+      return;
+    }
     const values = fieldOf(entry, "values") as ReadonlyMap<string, Value>;
     const result = fieldOf(entry, "result") as Value;
     const vector = fieldOf(entry, "vector") as TestVector;
     const tolerance = toleranceFor(parsed, values);
     if (!valuesMatch(result, actual[index], tolerance)) {
+      passedByVector[index] = false;
       failures.push({
         vector: String(fieldOf(vector, "id")),
         expected: describeValue(result),
@@ -635,19 +703,65 @@ export function verifyCandidate(request: VerifyRequest): VerificationResult {
       });
       return;
     }
-    for (const violation of postconditionFailures(parsed, values, actual[index], tolerance)) {
+    const violations = postconditionFailures(parsed, values, actual[index], tolerance);
+    passedByVector[index] = violations.length === 0;
+    for (const violation of violations) {
       failures.push({ vector: String(fieldOf(vector, "id")), expected: violation, actual: describeValue(actual[index]), reason: "postcondition" });
     }
   });
 
   const first = expected[0];
+  const batchSeeds = fieldOf(request, "batchSeeds") as readonly number[] | undefined;
+  const batchSizes = fieldOf(request, "batchSizes") as readonly number[] | undefined;
+  const batches: VerificationBatch[] = [];
+  let at = 0;
+  const sizes = batchSizes ?? (batchSeeds === undefined ? [] : [vectors.length]);
+  for (let index = 0; index < sizes.length; index += 1) {
+    const size = Number(sizes[index]);
+    let deterministicPassed = 0;
+    let randomPassed = 0;
+    const batchFailures: TestFailure[] = [];
+    for (let offset = 0; offset < size && at + offset < vectors.length; offset += 1) {
+      const position = at + offset;
+      const vector = vectors[position];
+      if (passedByVector[position] === true) {
+        if (vector.kind === "random") randomPassed += 1;
+        else deterministicPassed += 1;
+      } else {
+        batchFailures.push(...failures.filter((failure) => failure.vector === vector.id));
+      }
+    }
+    batches.push({
+      seed: Number((batchSeeds ?? [])[index] ?? 0),
+      cases: size,
+      deterministicPassed,
+      randomPassed,
+      failures: batchFailures.slice(0, 20),
+    });
+    at += size;
+  }
+
+  let deterministicPassed = 0;
+  let randomPassed = 0;
+  passedByVector.forEach((passed, index) => {
+    if (!passed) return;
+    if (vectors[index].kind === "random") randomPassed += 1;
+    else deterministicPassed += 1;
+  });
+
+  const passed = failures.length === 0;
   return {
     candidate: candidateName,
-    passed: failures.length === 0,
+    passed,
     cases: vectors.length,
     tolerance: first === undefined ? null : toleranceFor(parsed, fieldOf(first, "values") as ReadonlyMap<string, Value>),
     failures: failures.slice(0, 20),
     durationNs: Number(monotonicTimeNs() - started),
+    status: passed ? "passed" : "failed",
+    seed: Number(fieldOf(request, "seed") ?? (batchSeeds ?? [])[0] ?? 0),
+    deterministicPassed,
+    randomPassed,
+    batches,
   };
 }
 

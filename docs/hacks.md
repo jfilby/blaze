@@ -26,22 +26,6 @@ in one place, and so nobody mistakes them for principles.
 Until the native build can talk to a model, the fixed-point machinery is a
 measurement harness rather than a working self-hosted compiler.
 
-## Heuristics that decide correctness-adjacent outcomes
-
-- `src/compiler/semantics/restructure.ts:72-94` — `CALL_COST = 12`,
-  `UNKNOWN_TURNS = 8`, `MAX_ASSUMED_TURNS = 64`. Whether a call is fused out of a
-  loop, and therefore whether a build succeeds, depends on unsourced constants:
-  "eight is the middle: enough that a call inside an unknown loop is worth
-  removing… nobody is fusing a call out of a loop that runs a billion times."
-- `src/compiler/offline-build.ts:145-153` — a validator given no callees measures
-  a call as a call and refuses a loop the optimizer admitted, so passes must be
-  re-fed each other's inputs or the build fails on a verdict nothing changed.
-- `src/compiler/compiler.ts:261-268` — `PROGRAM_REPAIR_ROUNDS = 2`, "deliberately
-  small: the loop is for a program that is one mistake away from agreeing."
-- `src/compiler/core/types.ts:537` and
-  `src/compiler/toolchain/verifier.ts:91-99` — "randomized" verification uses a
-  fixed seed `0x5eed1234`, so it is deterministic by construction.
-
 ## Not a hack
 
 `private lie(held)` in `src/compiler/toolchain/ir-wasm.ts:1357-1368` sounds like

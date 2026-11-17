@@ -69,6 +69,8 @@ import { builtinFor } from "./builtins.ts";
 import { cMemberName } from "../toolchain/c-names.ts";
 import { contractText, parseType } from "./contract.ts";
 import { reductionsFor, refusalFor, type Callees } from "./parallel.ts";
+import { DEFAULT_COST_MODEL, type CostModel } from "./cost-model.ts";
+import { failed, incomplete, passed, type CompilerOutcome } from "../core/outcome.ts";
 import { refusalFor as regionRefusalFor } from "./region.ts";
 
 function fieldOf(value: unknown, key: string): any {
@@ -256,6 +258,8 @@ interface Context {
    * is a call whose body nobody has read, and a parallel loop may not make one.
    */
   callees: Callees;
+  /** The one cost model shared with the optimizer that marked the loop. */
+  cost?: CostModel;
   /** The whole program contract, where the caller has one. */
   contract?: ProgramContract;
   /** The names the body itself declares, which no other body declares. */
@@ -282,16 +286,17 @@ interface Body {
 }
 
 /** What a program body is checked against: everything the program holds. */
-function programContext(program: SemanticProgram, callees: Callees, contract?: ProgramContract): Context {
-  return { objects: fieldOf(program, "objects") as Record<string, ObjectLayout>, functions: fieldOf(program, "functions") as unknown as FunctionSignature[], callees, contract, declared: [] };
+function programContext(program: SemanticProgram, callees: Callees, contract?: ProgramContract, cost?: CostModel): Context {
+  return { objects: fieldOf(program, "objects") as Record<string, ObjectLayout>, functions: fieldOf(program, "functions") as unknown as FunctionSignature[], callees, cost, contract, declared: [] };
 }
 
 /** What a function body is checked against: what the function itself holds. */
-function functionContext(fn: SemanticFunction, callees: Callees, program?: ProgramContract): Context {
+function functionContext(fn: SemanticFunction, callees: Callees, program?: ProgramContract, cost?: CostModel): Context {
   return {
     objects: fieldOf(fn, "objects") as Record<string, ObjectLayout>,
     functions: program === undefined ? null : signaturesOf(program),
     callees,
+    cost,
     contract: program,
     declared: [String(fieldOf(fn, "name")), String(fieldOf(fn, "symbol")), ...(fieldOf(fn, "params") as readonly { name: string }[]).map((param) => String(fieldOf(param, "name")))],
   };
@@ -2225,13 +2230,14 @@ export function semanticIrProblems(
   program: SemanticProgram,
   contract?: ProgramContract,
   known?: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
 ): string[] {
   const defaultCallees = new Map<string, SemanticFunction>();
   for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) defaultCallees.set(String(fieldOf(fn, "name")), fn);
   const callees: Callees = known === undefined ? defaultCallees : known;
   const tree = readTree(program);
   const problems: string[] = [];
-  for (const one of bodyProblems(programContext(program, callees, contract), programBody(program, tree), tree)) problems.push(one);
+  for (const one of bodyProblems(programContext(program, callees, contract, model), programBody(program, tree), tree)) problems.push(one);
   for (const fn of fieldOf(program, "bodies") as readonly SemanticFunction[]) {
     const entry = fieldOf(fn, "entry") as SemanticBlock;
     const own = readFunctionTree(fn, entry);
@@ -2239,6 +2245,7 @@ export function semanticIrProblems(
       objects: fieldOf(program, "objects") as Record<string, ObjectLayout>,
       functions: fieldOf(program, "functions") as FunctionSignature[],
       callees,
+      cost: model,
       contract,
       declared: [String(fieldOf(fn, "name")), String(fieldOf(fn, "symbol")), ...(fieldOf(fn, "params") as readonly { name: string }[]).map((param) => String(fieldOf(param, "name")))],
     };
@@ -2432,7 +2439,7 @@ function parallelProblems(context: Context, tree: Tree): string[] {
     if (fieldOf(loop, "parallel") !== true) continue;
     const block = fieldOf(placed, "block") as PlacedBlock;
     const where = label(String(fieldOf(fieldOf(block, "block"), "id")), Number(fieldOf(statement, "line")));
-    const refusal = refusalFor(loop, fieldOf(context, "callees") as Callees);
+    const refusal = refusalFor(loop, fieldOf(context, "callees") as Callees, fieldOf(context, "cost") as CostModel | undefined);
     if (refusal !== null) {
       problems.push(`${where}loop is marked parallel but ${refusal}`);
     }
@@ -2623,10 +2630,11 @@ function functionProblems(
   contract: FunctionContract | undefined,
   program: ProgramContract | undefined,
   callees: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
 ): string[] {
   const entry = fieldOf(fn, "entry") as SemanticBlock;
   const tree = readFunctionTree(fn, entry);
-  const context = functionContext(fn, callees, program);
+  const context = functionContext(fn, callees, program, model);
   const found = [
     ...conditionProblems(fn),
     ...parameterProblems(fn, contract),
@@ -2652,8 +2660,30 @@ export function semanticFunctionProblems(
   fn: SemanticFunction,
   contract?: FunctionContract,
   callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
 ): string[] {
-  return functionProblems(fn, contract, undefined, callees);
+  return functionProblems(fn, contract, undefined, callees, model);
+}
+
+/**
+ * The explicit outcome of validating one function. A program a validator cannot
+ * prove because a callee body is missing is `incomplete`, not `failed`: the
+ * validator must never reject a program for a gap in information the optimizer
+ * already had.
+ */
+export function semanticFunctionOutcome(
+  fn: SemanticFunction,
+  contract: FunctionContract | undefined,
+  callees: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
+): CompilerOutcome {
+  const problems = functionProblems(fn, contract, undefined, callees, model);
+  if (problems.length === 0) return passed();
+  const gap = problems.filter((problem) => /whose body this build does not hold|no body in this build/.test(problem));
+  if (gap.length === problems.length) {
+    return incomplete(`the validator cannot prove ${String(fieldOf(fn, "symbol"))}: ${gap.join("; ")}`);
+  }
+  return failed("validate", problems.join("\n"));
 }
 
 /** The same, for every function of a file, in the order the file declares them. */
@@ -2661,6 +2691,7 @@ export function semanticModuleProblems(
   module: SemanticModule,
   program?: ProgramContract,
   callees?: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
 ): string[] {
   const defaultCallees = new Map<string, SemanticFunction>();
   const functions = fieldOf(module, "functions") as readonly SemanticFunction[];
@@ -2669,14 +2700,19 @@ export function semanticModuleProblems(
   const problems: string[] = [];
   for (const fn of functions) {
     const contract = contractedFunction(program, String(fieldOf(fn, "symbol")));
-    problems.push(...functionProblems(fn, contract ?? undefined, program, resolvedCallees));
+    problems.push(...functionProblems(fn, contract ?? undefined, program, resolvedCallees, model));
   }
   return problems;
 }
 
 /** Refuses a program that is not one. Throws one CompilerError. */
-export function validateSemanticProgram(program: SemanticProgram, contract?: ProgramContract, callees?: Callees): void {
-  refuse(`${String(fieldOf(program, "file"))} is not a program the compiler may lower`, semanticIrProblems(program, contract, callees));
+export function validateSemanticProgram(
+  program: SemanticProgram,
+  contract?: ProgramContract,
+  callees?: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
+): void {
+  refuse(`${String(fieldOf(program, "file"))} is not a program the compiler may lower`, semanticIrProblems(program, contract, callees, model));
 }
 
 /** Refuses a function that is not one. Throws one CompilerError. */
@@ -2684,13 +2720,19 @@ export function validateSemanticFunction(
   fn: SemanticFunction,
   contract?: FunctionContract,
   callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
 ): void {
-  refuse(`${String(fieldOf(fn, "symbol"))} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees));
+  refuse(`${String(fieldOf(fn, "symbol"))} is not a function the compiler may lower`, semanticFunctionProblems(fn, contract, callees, model));
 }
 
 /** Refuses a module holding a function that is not one. Throws one CompilerError. */
-export function validateSemanticModule(module: SemanticModule, program?: ProgramContract, callees?: Callees): void {
-  refuse(`${String(fieldOf(module, "path"))} is not a module the compiler may lower`, semanticModuleProblems(module, program, callees));
+export function validateSemanticModule(
+  module: SemanticModule,
+  program?: ProgramContract,
+  callees?: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
+): void {
+  refuse(`${String(fieldOf(module, "path"))} is not a module the compiler may lower`, semanticModuleProblems(module, program, callees, model));
 }
 
 /** The one error a caller is given: what it read, and everything wrong with it. */

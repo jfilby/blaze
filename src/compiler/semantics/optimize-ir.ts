@@ -52,6 +52,7 @@ import { declaredNames, freshName, isBindable, isSafeToCompute, replaceBlockIds,
 import { wholeNumberArithmetic } from "./whole-numbers.ts";
 import { restructureHotFunction } from "./restructure.ts";
 import { markParallelLoops, type Callees } from "./parallel.ts";
+import { DEFAULT_COST_MODEL, type CostModel } from "./cost-model.ts";
 import { eliminateMutualRecursion, eliminateMutualRecursionInProgram, eliminateRecursion } from "./recursion.ts";
 import { markRegionLoops } from "./region.ts";
 import type { TypeExpr, FunctionSignature, Effect } from "../core/types.ts";
@@ -3853,7 +3854,11 @@ function wholeLog2(value: number): number {
   return count;
 }
 
-export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees = new Map()): SemanticFunction {
+export function optimizeSemanticFunction(
+  fn: SemanticFunction,
+  callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
+): SemanticFunction {
   // A cycle of bodies is answered before a body's own recursion is, because a
   // body in a cycle may also call itself: the merged loop carries a call of
   // itself as a turn of the loop the same way it carries a call of any other
@@ -3865,15 +3870,15 @@ export function optimizeSemanticFunction(fn: SemanticFunction, callees: Callees 
   // recursion, commoning two values in it and counting its turns are three
   // things none of them can do while the frames are still there.
   eliminateRecursion(fn);
-  optimizeBody(fn, callees);
+  optimizeBody(fn, callees, model);
   // A call boundary the local rewrites cannot cross is the one thing left that
   // can cost more than it saves, so it is asked after the rounds have settled.
   // The rounds run again over what the fusion exposed, because a body written
   // into another is a body the folds and the commoner have not read yet.
-  const restructured = restructureHotFunction(fn, callees);
+  const restructured = restructureHotFunction(fn, callees, { costModel: model });
   if (fieldOf(restructured, "refused") !== undefined) return fn;
   const applied = fieldOf(restructured, "applied") as SemanticFunction;
-  optimizeBody(applied, callees);
+  optimizeBody(applied, callees, model);
   return applied;
 }
 
@@ -3890,8 +3895,9 @@ export function optimizeSemanticEntry(
   entry: SemanticBlock,
   callees: Callees = new Map(),
   params: readonly SemanticSlot[] = [],
+  model: CostModel = DEFAULT_COST_MODEL,
 ): SemanticBlock {
-  optimizeBody({ params, entry }, callees);
+  optimizeBody({ params, entry }, callees, model);
   return entry;
 }
 
@@ -3909,6 +3915,7 @@ export function optimizeSemanticProgram(program: SemanticProgram): SemanticProgr
 export function optimizeProgram(
   program: SemanticProgram,
   known: Callees,
+  model: CostModel = DEFAULT_COST_MODEL,
 ): SemanticProgram {
   // The callees are read before any body is marked: whether a loop may run its
   // turns at once is a question about what the functions it calls write, and a
@@ -3919,7 +3926,7 @@ export function optimizeProgram(
   const bodiesList = fieldOf(program, "bodies") as SemanticFunction[];
   for (const fn of bodiesList) defaultCallees.set(String(fieldOf(fn, "name")), fn);
   const callees: Callees = known === undefined ? defaultCallees : known;
-  optimizeSemanticEntry(fieldOf(program, "entry") as SemanticBlock, callees);
+  optimizeSemanticEntry(fieldOf(program, "entry") as SemanticBlock, callees, [], model);
   // A function the program declares is a body of its own, and the rewrites that
   // run over a program run over it: a loop invariant hoisted out of a function
   // is worth as much there as it is in the block the program starts in. What a
@@ -3947,7 +3954,7 @@ export function optimizeProgram(
   wholeNumberArithmetic(program);
   for (let index = 0; index < bodiesList.length; index += 1) {
     const fn = bodiesList[index];
-    optimizeSemanticEntry(fieldOf(fn, "entry") as SemanticBlock, bodies, fieldOf(fn, "params") as readonly SemanticSlot[]);
+    optimizeSemanticEntry(fieldOf(fn, "entry") as SemanticBlock, bodies, fieldOf(fn, "params") as readonly SemanticSlot[], model);
     // The same call-boundary rewrite a single function gets, run here over a
     // body the program declares. A body of the program has no outline to mark
     // its calls with, so this one decides: a hot call of a callee that is free
@@ -3956,12 +3963,12 @@ export function optimizeProgram(
     // functions a body calls one after another stay calls.
     // Whole-number arithmetic runs after this, so a body it has fused is one
     // the whole-number pass reads.
-    const restructured = restructureHotFunction(fn, bodies, { decideUnmarked: true });
+    const restructured = restructureHotFunction(fn, bodies, { decideUnmarked: true, costModel: model });
     if (fieldOf(restructured, "refused") !== undefined) continue;
     const applied = fieldOf(restructured, "applied") as SemanticFunction;
     bodiesList[index] = applied;
     bodies.set(String(fieldOf(fn, "name")), applied);
-    optimizeSemanticEntry(fieldOf(applied, "entry") as SemanticBlock, bodies, fieldOf(applied, "params") as readonly SemanticSlot[]);
+    optimizeSemanticEntry(fieldOf(applied, "entry") as SemanticBlock, bodies, fieldOf(applied, "params") as readonly SemanticSlot[], model);
   }
   // Whole-number arithmetic is the one rewrite here that is a question about a
   // whole program rather than about one body: what it needs to know is what
@@ -3972,7 +3979,7 @@ export function optimizeProgram(
   return program;
 }
 
-function optimizeBody(body: Body, callees: Callees): void {
+function optimizeBody(body: Body, callees: Callees, model: CostModel = DEFAULT_COST_MODEL): void {
   for (let round = 0; round < 8; round += 1) {
     let changed = false;
     if (foldAll(body)) changed = true;
@@ -4020,7 +4027,7 @@ function optimizeBody(body: Body, callees: Callees): void {
   // be claiming something about a body that has since been rewritten — a loop
   // the rounds split in two, or unrolled away entirely, is not the loop the
   // answer was about.
-  markParallelLoops(body.entry, callees);
+  markParallelLoops(body.entry, callees, model);
   markRegionLoops(body.entry, callees);
 }
 

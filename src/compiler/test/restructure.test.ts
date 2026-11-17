@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { restructureHotFunction, type FunctionProfile } from "../semantics/restructure.ts";
+import { fusionSafety, restructureHotFunction, type FunctionProfile } from "../semantics/restructure.ts";
 import { printSemanticFunction } from "../semantics/ir-text.ts";
 import type { CallEdge } from "../core/types.ts";
 import type {
@@ -324,4 +324,34 @@ test("the estimate reads a callee at its own cost, not at the cost of a name", (
   const outcome = restructureHotFunction(subject, calleesOf(nested, leaf()), { maxCalleeCost: 20 });
   assert.ok("refused" in outcome, "the body behind the call is what the estimate is reading");
   assert.match(outcome.refused, /nested costs 2[45], and removing one call is worth 12/);
+});
+
+test("fusion safety is proved from effects, not from a cost or a turn count", () => {
+  // The callee is small, called from a hot loop, and cheap. None of that makes
+  // it safe: an effect is a semantic property, and no profitability weight may
+  // overrule it.
+  const effectful: SemanticFunction = { ...helper([{ callee: "leaf", strategy: "inline" }]), effects: ["io"] };
+  const allocating: SemanticFunction = { ...helper([{ callee: "leaf", strategy: "inline" }]), allocates: true };
+  const subject = subjectCallingHelper(openLoop(turn("helper"), "n"));
+  const effectfulSafety = fusionSafety(subject, effectful, calleesOf(effectful, leaf()));
+  assert.equal(effectfulSafety.status, "unsafe");
+  assert.match(effectfulSafety.status === "unsafe" ? effectfulSafety.reason : "", /effects/);
+  const allocatingSafety = fusionSafety(subject, allocating, calleesOf(allocating, leaf()));
+  assert.equal(allocatingSafety.status, "unsafe");
+  assert.match(allocatingSafety.status === "unsafe" ? allocatingSafety.reason : "", /allocates/);
+  assert.ok("refused" in restructureHotFunction(subject, calleesOf(effectful, leaf())));
+  assert.ok("refused" in restructureHotFunction(subject, calleesOf(allocating, leaf())));
+});
+
+test("an unknown loop count is hot by structure, not by an assumed number of turns", () => {
+  // The loop's bound is a name, so no turn count can be read. A call inside it
+  // is still fused, which used to rely on assuming eight turns. The note must
+  // not claim a number the compiler never knew.
+  const subject = subjectCallingHelper(openLoop(turn("helper"), "n"));
+  const fused = applied(restructureHotFunction(subject, fusible([{ callee: "leaf", strategy: "inline" }])));
+  assert.match(printSemanticFunction(fused), /call leaf/);
+  const outcome = restructureHotFunction(subject, fusible([{ callee: "leaf", strategy: "inline" }]));
+  assert.ok("note" in outcome);
+  assert.match(outcome.note, /on every turn of its loop/);
+  assert.doesNotMatch(outcome.note, /\d+ times/);
 });

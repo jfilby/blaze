@@ -34,7 +34,8 @@ import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { contractsByName, vectorChecked } from "./semantics/calls.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
 import { printSemanticProgram } from "./semantics/ir-text.ts";
-import { semanticFunctionProblems, validateSemanticProgram } from "./semantics/ir-validate.ts";
+import { semanticFunctionOutcome, validateSemanticProgram } from "./semantics/ir-validate.ts";
+import { semanticContext } from "./semantics/semantic-context.ts";
 import { inlineCalls, type RepairContext } from "./semantics/repair.ts";
 import { buildObject as buildMachineObject } from "./toolchain/ir-machine.ts";
 import { buildProgramDriver } from "./toolchain/driver.ts";
@@ -120,15 +121,19 @@ async function main(): Promise<void> {
   // shift.
   const powerOfTwo = powerOfTwoParams(resolvedByName, resolvedProgram.entry);
   const inlinable: RepairContext = { functions: resolvedByName };
+  // One semantic context for the whole build. The optimizer and the validator
+  // are handed the same bodies and the same cost model, so a verdict cannot
+  // disagree with an optimization because one pass was given less information.
+  const shared = semanticContext(inlinable.functions);
 
   // The program, resolved and folded exactly as a build folds the driver.
-  const program = optimizeProgram(resolvedProgram, inlinable.functions);
+  const program = optimizeProgram(resolvedProgram, shared.callees, shared.cost);
   // The validator refuses rather than answers, so a program that is not one a
   // backend may lower stops here with the reason it gave. The callees are the
   // program's own bodies, the same map a build hands the validator: a loop
   // marked parallel is proved against the bodies the program holds, which are
   // the ones the backends lower.
-  validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])));
+  validateSemanticProgram(program, phase.program, new Map(program.bodies.map((fn) => [fn.name, fn])), shared.cost);
   await writeFile(join(work, "ir.program.txt"), `${printSemanticProgram(program)}\n`, "utf8");
 
   // The symbol of a function is the one its own contract names, which the
@@ -143,16 +148,17 @@ async function main(): Promise<void> {
   for (const file of phase.program.files) {
     for (const [name, contract] of Object.entries(file.functions)) {
       // A candidate is inlined and then folded, in that order, because the
-      // callee spliced in has not been through the rewrites yet.
-      const lowered = optimizeSemanticFunction(inlineCalls(resolvedByName.get(name) as SemanticFunction, inlinable), inlinable.functions);
-      // The callees are read again here because the mark the optimizer set was
-      // decided with them: a loop that calls a function is measured by what that
-      // function computes, and a validator given no callees measures it as a
-      // call and nothing more — so it refuses a loop the optimizer admitted and
-      // the build fails on a verdict nothing actually changed.
-      const here = semanticFunctionProblems(lowered, contract, inlinable.functions);
-      if (here.length > 0) {
-        for (const problem of here) console.error(`  ${name}: ${problem}`);
+      // callee spliced in has not been through the rewrites yet. The same
+      // context is handed to both passes: what the optimizer measured a loop
+      // against is exactly what the validator checks it against.
+      const lowered = optimizeSemanticFunction(inlineCalls(resolvedByName.get(name) as SemanticFunction, inlinable), shared.callees, shared.cost);
+      const outcome = semanticFunctionOutcome(lowered, contract, shared.callees, shared.cost);
+      if (outcome.status === "incomplete") {
+        console.error(`  ${name}: ${outcome.reason}`);
+        throw new Error(`${name} could not be validated: the build lacks information the validator needs`);
+      }
+      if (outcome.status === "failed") {
+        for (const error of outcome.errors) console.error(`  ${name}: ${error.message}`);
         throw new Error(`${name} did not validate`);
       }
       const result = await buildMachineObject({

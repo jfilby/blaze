@@ -68,6 +68,8 @@ import {
   type SemanticValue,
 } from "../core/semantic-ir.ts";
 import type { PrimitiveTypeName } from "../core/types.ts";
+import type { Assessment } from "../core/outcome.ts";
+import { DEFAULT_COST_MODEL, type CostModel } from "./cost-model.ts";
 
 /** Why a loop may not have its turns run at once, in terms of what its body does. */
 export type Refusal = string;
@@ -120,14 +122,18 @@ function blocksWithin(block: SemanticBlock): SemanticBlock[] {
  * rewritten since is marked again the next time this runs rather than carrying a
  * verdict about a body that is no longer there.
  */
-export function markParallelLoops(entry: SemanticBlock, callees: Callees = new Map()): void {
+export function markParallelLoops(
+  entry: SemanticBlock,
+  callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
+): void {
   for (const block of blocksWithin(entry)) {
     for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       if (statement.k !== "loop") continue;
       const loop = fieldOf(statement, "loop") as SemanticLoop;
       if (loop.kind !== "counted" && loop.kind !== "each") continue;
       if (fieldOf(loop, "parallel") === true) continue;
-      if (refusalFor(loop, callees) !== null) continue;
+      if (refusalFor(loop, callees, model) !== null) continue;
       // The accumulators go on the loop beside the mark, because that is where
       // a backend reads what to combine: a mark with nothing to combine is a
       // loop whose turns share nothing, and one whose accumulators are named is
@@ -154,7 +160,11 @@ export function markParallelLoops(entry: SemanticBlock, callees: Callees = new M
  * — which is why the callees are an argument: what a call reaches is the
  * callee's own body, and only the program knows what that body is.
  */
-export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Refusal | null {
+export function refusalFor(
+  loop: SemanticLoop,
+  callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
+): Refusal | null {
   if (loop.kind === "while") return "a while loop counts to a condition, so one turn decides whether the next runs";
   if (loop.kind === "doWhile") return "a do-while counts to a condition, so one turn decides whether the next runs";
   // The C backend asks for the turns of a parallel loop in the form OpenMP calls
@@ -165,7 +175,7 @@ export function refusalFor(loop: SemanticLoop, callees: Callees = new Map()): Re
   if (loop.kind === "counted" && !canonicalCounted(loop)) {
     return "the counter is not a whole number counting up one at a time, which is the only shape a parallel loop takes";
   }
-  const reach: Reach = { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() };
+  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() };
   if (turnIsTooCheapIn(fieldOf(loop, "body") as SemanticBlock, reach)) {
     return "a turn of this loop computes so little that a team of threads costs more than the turns it runs";
   }
@@ -322,6 +332,8 @@ export function reductionsFor(body: SemanticBlock, counter: string): Map<string,
  */
 interface Reach {
   readonly callees: Callees;
+  /** The one cost model shared by the optimizer and the validator. */
+  readonly model?: CostModel;
   /** The callees already being read, so a recursive one is not read forever. */
   readonly reading: Set<string>;
   /** What each callee was found to do, kept so a shared callee is read once. */
@@ -452,14 +464,38 @@ const MINIMUM_VALUES_PER_TURN = 8;
  * order, and a turn nobody measured is never handed to a thread on a number
  * this produced.
  */
-export function turnIsTooCheap(body: SemanticBlock, callees: Callees = new Map()): boolean {
-  return turnIsTooCheapIn(body, { callees, reading: new Set(), verdicts: new Map(), wholes: new Map() });
+export function turnIsTooCheap(body: SemanticBlock, callees: Callees = new Map(), model: CostModel = DEFAULT_COST_MODEL): boolean {
+  return turnIsTooCheapIn(body, { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() });
 }
 
 function turnIsTooCheapIn(body: SemanticBlock, reach: Reach): boolean {
-  const cost: TurnCost = { values: 0, unbounded: false };
+  const cost: TurnCost = { values: 0, unbounded: false, unresolved: 0 };
   measureTurn(body, reach, cost);
   return fieldOf(cost, "unbounded") !== true && Number(fieldOf(cost, "values")) < MINIMUM_VALUES_PER_TURN;
+}
+
+/**
+ * The explicit verdict for the cost of one turn, which a validator reads rather
+ * than the bare boolean. An unresolved call is *unknown*, not a value of one:
+ * there is no body from which to price it, and the boolean above is only the
+ * conservative lower bound a backend uses to decide whether to thread.
+ */
+export function turnCostAssessment(
+  body: SemanticBlock,
+  callees: Callees = new Map(),
+  model: CostModel = DEFAULT_COST_MODEL,
+): Assessment<number> {
+  const reach: Reach = { callees, model, reading: new Set(), verdicts: new Map(), wholes: new Map() };
+  const cost: TurnCost = { values: 0, unbounded: false, unresolved: 0 };
+  measureTurn(body, reach, cost);
+  if (fieldOf(cost, "unbounded") === true) {
+    return { status: "incomplete", reason: "a turn calls a function that reaches itself, so its cost has no bound" };
+  }
+  const unresolved = Number(fieldOf(cost, "unresolved"));
+  if (unresolved > 0) {
+    return { status: "unknown", reason: `${unresolved} call(s) in a turn have no body in this build` };
+  }
+  return { status: "known", value: Number(fieldOf(cost, "values")) };
 }
 
 /** What one turn is measured to be: how many values it computes, and whether it calls itself. */
@@ -467,24 +503,27 @@ interface TurnCost {
   values: number;
   /** True when a turn calls a function that reaches itself, which this cannot measure. */
   unbounded: boolean;
+  /** Calls whose callee this build does not hold, which are unknown rather than cheap. */
+  unresolved: number;
 }
 
 /** The values a body computes, and those the functions it calls compute. */
 function measureTurn(body: SemanticBlock, reach: Reach, cost: TurnCost): void {
+  const model: CostModel = fieldOf(reach, "model") ?? DEFAULT_COST_MODEL;
   for (const block of blocksWithin(body)) {
     // What a block ends in is as much of its work as what it does before it, and
     // for a function that computes an answer that answer is nearly all of it.
     const blockEnd = fieldOf(block, "terminator") as SemanticBlock["terminator"];
     if (String(fieldOf(blockEnd, "k")) === "return" && fieldOf(blockEnd, "value") !== null) {
       walkValues(fieldOf(blockEnd, "value") as SemanticValue, (inner) => {
-        setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + 1);
+        setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + model.operation);
         if (inner.k === "call") measureCall(String(fieldOf(fieldOf(inner, "call"), "callee")), reach, cost);
       });
     }
     for (const statement of fieldOf(block, "statements") as readonly SemanticStatement[]) {
       for (const value of statementValues(statement)) {
         walkValues(value, (inner) => {
-          setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + 1);
+          setFieldOn(cost, "values", Number(fieldOf(cost, "values")) + model.operation);
           if (inner.k !== "call") return;
           measureCall(String(fieldOf(fieldOf(inner, "call"), "callee")), reach, cost);
         });
@@ -496,7 +535,14 @@ function measureTurn(body: SemanticBlock, reach: Reach, cost: TurnCost): void {
 /** What a call a turn makes adds to what the turn is measured to be. */
 function measureCall(name: string, reach: Reach, cost: TurnCost): void {
   const callee = (fieldOf(reach, "callees") as Callees).get(name);
-  if (callee === undefined) return;
+  if (callee === undefined) {
+    // An unresolved call is recorded as unknown explicitly, rather than being
+    // silently charged as a bare call. `turnCostAssessment` surfaces it; the
+    // boolean verdict keeps the conservative lower bound for backends that
+    // have no callees at all.
+    setFieldOn(cost, "unresolved", Number(fieldOf(cost, "unresolved")) + 1);
+    return;
+  }
   const calleeName = String(fieldOf(callee, "name"));
   const reading = fieldOf(reach, "reading") as Set<string>;
   // A call already being read is this callee reaching itself, and how many

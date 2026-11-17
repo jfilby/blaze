@@ -70,6 +70,8 @@ import { validateSemanticFunction } from "./semantics/ir-validate.ts";
 import { optimizeProgram, optimizeSemanticFunction, optimizeSemanticProgram } from "./semantics/optimize-ir.ts";
 import { wholeElementArithmetic } from "./semantics/whole-elements.ts";
 import { programIsParallel } from "./semantics/parallel.ts";
+import { RepairConvergence, type RepairState } from "./semantics/repair-convergence.ts";
+import { incomplete, type CompilerOutcome } from "./core/outcome.ts";
 import type { Threading } from "./core/target.ts";
 
 import { parseSemanticFunction, printSemanticFunction, printSemanticModule } from "./semantics/ir-text.ts";
@@ -147,6 +149,8 @@ import {
   type TargetSpec,
   type VerificationMode,
   type VerificationResult,
+  DEFAULT_REPAIR_BUDGET,
+  type RepairBudget,
 } from "./core/types.ts";
 
 function fieldOf(value: unknown, key: string): any {
@@ -258,15 +262,6 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
 
 export const STATE_DIRECTORY = ".blaze";
 
-/**
- * How many times a build regenerates a program that did not print what its
- * source prints. Every round costs a full generation of the functions the
- * program is the only oracle for, so this is deliberately small: the loop is
- * for a program that is one mistake away from agreeing, not for one that is
- * not going to.
- */
-const PROGRAM_REPAIR_ROUNDS = 2;
-
 export type Reporter = (stage: string, status: "ok" | "fail" | "info", message: string) => void;
 
 export interface BuildOptions {
@@ -292,6 +287,12 @@ export interface BuildOptions {
   recompile?: boolean;
   /** Extra model requests one attempt may spend on an answer with no implementation. */
   maxRetries?: number;
+  /**
+   * Total rounds a convergence-driven program repair may spend. This is a
+   * resource budget, not a correctness criterion: exhausting it reports an
+   * incomplete build, never a successful one.
+   */
+  maxRepairRounds?: number;
   /** Candidates reviewed at the same time; 1 reviews them one at a time. */
   candidateConcurrency?: number;
   /** Functions reviewed at the same time; 1 reviews them one at a time. */
@@ -832,10 +833,14 @@ function printAnswer(dump: AnswerDump): void {
 function testConfigFor(input: SourceInput, options: BuildOptions): TestConfig {
   const test = (input as unknown as Record<string, unknown>)["test"] as Record<string, unknown> | undefined;
   const given = options as unknown as Record<string, unknown>;
+  const explicitSeed = test === undefined ? undefined : test["seed"];
   return {
     randomCases: Number(given["randomCases"] ?? (test === undefined ? undefined : test["randomCases"]) ?? fieldOf(DEFAULT_TEST, "randomCases")),
     maxLength: Number(given["maxLength"] ?? (test === undefined ? undefined : test["maxLength"]) ?? fieldOf(DEFAULT_TEST, "maxLength")),
-    seed: Number((test === undefined ? undefined : test["seed"]) ?? fieldOf(DEFAULT_TEST, "seed")),
+    // No default seed: an absent seed means a fresh secure seed per run. A
+    // seed in the project file is the explicit, reproducible choice.
+    ...(explicitSeed === undefined ? {} : { seed: Number(explicitSeed) }),
+    batches: Number((test === undefined ? undefined : test["batches"]) ?? fieldOf(DEFAULT_TEST, "batches")),
   };
 }
 
@@ -857,6 +862,21 @@ function generationConfigFor(input: SourceInput, options: BuildOptions): Generat
     functionConcurrency: pick("functionConcurrency", fieldOf(DEFAULT_GENERATION, "functionConcurrency")),
     timeoutSeconds: optional("timeoutSeconds"),
   };
+}
+
+/**
+ * The resource budget for program repair. A larger budget lets a program that
+ * needs more rounds converge; it never makes an unverified program acceptable.
+ */
+function repairBudgetFor(input: SourceInput, options: BuildOptions): RepairBudget {
+  const generation = (input as unknown as Record<string, unknown>)["generation"] as Record<string, unknown> | undefined;
+  const raw = options.maxRepairRounds ?? generation?.["maxRepairRounds"];
+  if (raw === undefined) return DEFAULT_REPAIR_BUDGET;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new CompilerError("InputError", "input", `maxRepairRounds is ${String(raw)}`, "a whole number of rounds of at least 1", "", "", "");
+  }
+  return { maxRounds: value };
 }
 
 async function writeBuildRecord(store: JsonStore, buildPath: string, build: BuildStatus): Promise<void> {
@@ -2582,11 +2602,16 @@ export async function runBuild(
     // A function whose contract states what it does is not checked on its own:
     // the program it belongs to is the only oracle it has, and only a build has
     // that program. So a build generates, links and runs, and generates again
-    // with what the program printed until the two agree or the rounds run out.
-    const programRounds =
-      body === undefined || String(mode) !== "build" || (fields["reuse"] as boolean) ? 1 : PROGRAM_REPAIR_ROUNDS + 1;
+    // while the program state keeps moving toward agreement. The round limit is
+    // a resource budget; termination is decided by verification and by whether
+    // a round produced a program state not seen before.
+    const repairsEnabled = body !== undefined && String(mode) === "build" && (fields["reuse"] as boolean) !== true;
+    const convergence = new RepairConvergence(
+      repairsEnabled ? repairBudgetFor(sourceInputOf(inputFields), options) : { maxRounds: 1 },
+    );
     let checked: ProgramVerification | undefined;
     let mismatch: ProgramMismatch | undefined;
+    let repairOutcome: CompilerOutcome | undefined;
     let selected: Record<string, string> = {};
     const programFile = body === undefined ? undefined : await programSource(base, id, project, body as ProgramBody, String(inputFields["language"]));
     // The linked program is named for the platform it was written for, and the
@@ -2599,7 +2624,7 @@ export async function runBuild(
     const programModule = join(base, "program.wasm");
     const programHost = join(base, "program.host.mjs");
     const deliveredProgram = join(String(fieldOf(project, "directory")), `${id}${EXECUTABLE_SUFFIX}`);
-    for (let round = 1; round <= programRounds; round += 1) {
+    for (let round = 1; ; round += 1) {
       await generateUnits(mismatch);
       selected = await record();
       if (driver === undefined || programFile === undefined || String(mode) !== "build") break;
@@ -2733,10 +2758,35 @@ export async function runBuild(
       // thing, so the rounds are spent on it rather than on ending the build.
       const checkedFields = checked as unknown as Record<string, unknown>;
       if (checkedFields["passed"] as boolean) break;
+      // A round that did not verify is only worth repeating if it produced a
+      // program state not seen before. The fingerprint includes the selected
+      // implementation of every unit and the shape of the disagreement, so a
+      // return to an earlier program is detected rather than spent again.
       mismatch = checkedFields["difference"] as ProgramMismatch | undefined;
-      if (round < programRounds) {
-        reporter("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again`);
+      const state: RepairState = {
+        implementations: Object.fromEntries(
+          units.map((unit) => [unitNameKey(unit, units), implementationOf(unitKey(unit)) ?? ""]),
+        ),
+        mismatch: mismatch === undefined ? undefined : `${String(mismatch.line)}:${String(mismatch.expected)}:${String(mismatch.actual)}:${String(mismatch.failure ?? "")}`,
+      };
+      const decision = convergence.observe(state, false);
+      if (decision.status === "continue") {
+        reporter("verify", "info", `${describeProgramFailure(mismatch)}; generating the functions it is the only oracle for again (round ${convergence.nextRound})`);
+        continue;
       }
+      repairOutcome = incomplete(
+        `${decision.reason}, after ${round} round(s): ${describeProgramFailure(mismatch)}`,
+      );
+      break;
+    }
+    if (repairOutcome !== undefined && repairOutcome.status === "incomplete") {
+      const difference = checked === undefined ? undefined : fieldOf(checked, "difference") as Record<string, unknown> | undefined;
+      const failureOutput = difference === undefined ? undefined : difference["failureOutput"];
+      throw new CompilerError("VerificationError", "verify", `the build is incomplete: ${repairOutcome.reason}`, [
+        ...(difference === undefined ? [] : [`line ${String(difference["line"])}: the source prints ${JSON.stringify(difference["expected"])}, the program prints ${JSON.stringify(difference["actual"])}`]),
+        ...(failureOutput === undefined ? [] : [`the program wrote to standard error:\n${String(failureOutput)}`]),
+        "an unverified program is never delivered as a success; raise maxRepairRounds to allow more convergence rounds",
+      ].join("\n"), "", "", "");
     }
     if (checked !== undefined) {
       const checkedFields = checked as unknown as Record<string, unknown>;

@@ -83,7 +83,7 @@ import { run, GENERATED_HEAP_BYTES, type RunResult } from "./core/process.ts";
 import { EXECUTABLE_SUFFIX } from "./core/target.ts";
 import type { AiBackend } from "./ai/backend.ts";
 import { parseType, type ParsedContract } from "./semantics/contract.ts";
-import { encodeRunRequest, planTestVectors, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
+import { encodeRunRequest, planVerificationBatches, selectDemoVector, verifyCandidate, type TestVector } from "./toolchain/verifier.ts";
 import type {
   BackendKind,
   BuildMode,
@@ -556,8 +556,14 @@ export interface Materialized {
 
 /** The vectors a candidate is verified and measured with. */
 interface PlannedVectors {
-  /** Every case the contract is checked against, planned once for the whole unit. */
+  /** Every batch's cases, concatenated in batch order. */
   cases: TestVector[];
+  /** The seed of the first batch, recorded on the verification result. */
+  seed: number;
+  /** One seed per independent randomized batch. */
+  batchSeeds: number[];
+  /** How many vectors each batch contributed. */
+  batchSizes: number[];
   /** The vector the benchmark runs, and the example run the harness carries. */
   benchmark: TestVector;
   demo: string;
@@ -591,11 +597,16 @@ function planVectors(request: CandidateEvaluationRequest): PlannedVectors | null
   const fn = fieldOf(contract, "function") as FunctionSignature;
   const params = fieldOf(fn, "params") as readonly { readonly type: string }[];
   if (params.some((param) => parseType(String(fieldOf(param, "type"))).kind === "ref")) return null;
-  const vectors = planTestVectors(parsed, fieldOf(request, "test") as TestConfig);
+  const test = fieldOf(request, "test") as TestConfig;
+  const plans = planVerificationBatches(parsed, test);
+  const vectors = plans.flatMap((plan) => [...plan.vectors]);
   return {
     cases: vectors,
-    benchmark: selectBenchmarkVector(fieldOf(request, "contract") as FunctionContract, parsed, vectors),
-    demo: encodeRunRequest(fieldOf(request, "contract") as FunctionContract, [selectDemoVector(parsed, fieldOf(request, "test") as TestConfig)]),
+    seed: plans[0].seed,
+    batchSeeds: plans.map((plan) => plan.seed),
+    batchSizes: plans.map((plan) => plan.vectors.length),
+    benchmark: selectBenchmarkVector(fieldOf(request, "contract") as FunctionContract, parsed, plans[0].vectors),
+    demo: encodeRunRequest(fieldOf(request, "contract") as FunctionContract, [selectDemoVector(parsed, test)]),
   };
 }
 
@@ -973,6 +984,9 @@ async function buildCandidate(
       runner,
       candidate: candidateId,
       vectors: fieldOf(vectors, "cases") as TestVector[],
+      seed: Number(fieldOf(vectors, "seed")),
+      batchSeeds: fieldOf(vectors, "batchSeeds") as number[],
+      batchSizes: fieldOf(vectors, "batchSizes") as number[],
     });
     const passed = fieldOf(verification, "passed") === true;
     if (!passed) {

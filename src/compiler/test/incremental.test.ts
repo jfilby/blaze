@@ -230,7 +230,7 @@ function entry(overrides: Partial<IncrementalEntry> = {}): IncrementalEntry {
     candidate: 1,
     round: 1,
   };
-  const outcome: CandidateOutcome = { candidate: "c1", valid: true, verification: { candidate: "c1", passed: true, cases: 4, tolerance: null, failures: [], durationNs: 1 } };
+  const outcome: CandidateOutcome = { candidate: "c1", valid: true, verification: { candidate: "c1", passed: true, cases: 4, tolerance: null, failures: [], durationNs: 1, status: "passed", seed: 7, deterministicPassed: 4, randomPassed: 0, batches: [] } };
   return {
     reviewKey: "r",
     objectKey: "o",

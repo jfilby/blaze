@@ -63,34 +63,34 @@ function setFieldOn(value: unknown, key: string, next: unknown): void {
 import type { SemanticBlock, SemanticFunction, SemanticLoop, SemanticStatement, SemanticValue } from "../core/semantic-ir.ts";
 import type { CallEdge } from "../core/types.ts";
 import { statementBlocksOf, statementValues, walkValues } from "../core/semantic-ir.ts";
-import { inlineCall, isSafeToCompute, substituteLocals } from "./repair.ts";
+import { inlineCall, inlineRefusal, isSafeToCompute, substituteLocals } from "./repair.ts";
+import { DEFAULT_COST_MODEL, resolveCallCost, type CostModel } from "./cost-model.ts";
 
 /* -------------------------------------------------------------------------- */
 /* The estimate                                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * What one call costs, against a straight-line body.
- *
- * A call is the argument moves, the frame, the return, and the spills the call
- * convention asks of everything live across it. A number is one instruction on
- * every backend, so this is the same order of magnitude as a short run of
- * arithmetic and nothing like a loop.
+ * The cost of one turn of a loop, as a structural fact rather than an assumed
+ * number. A counted loop whose ends are written out has an exact count; a loop
+ * whose count cannot be read is simply unknown, and is never taken to run any
+ * particular number of times. Both are profitability inputs only: neither can
+ * decide whether a rewrite is safe.
  */
-const CALL_COST = 12;
+type LoopActivity =
+  | { readonly kind: "counted"; readonly turns: number }
+  | { readonly kind: "unknown" };
 
 /**
- * What one turn of a loop is worth when its count is not written out.
- *
- * A loop over a bound the compiler cannot read runs an unknown number of
- * times, and an unknown number is not a licence to assume it is large. Eight
- * is the middle: enough that a call inside an unknown loop is worth removing,
- * small enough that a call outside one is not.
+ * How often a call site runs in one run of its caller. Only a counted loop with
+ * readable ends contributes a number; a call inside any loop whose count is
+ * not known is `repeated`, which is hot by structure and carries no assumed
+ * count.
  */
-const UNKNOWN_TURNS = 8;
-
-/** The most turns a counted loop is assumed to run when its count is not written out. */
-const MAX_ASSUMED_TURNS = 64;
+export type CallFrequency =
+  | { readonly kind: "once" }
+  | { readonly kind: "counted"; readonly turns: number }
+  | { readonly kind: "repeated" };
 
 /** What a function costs to run, and how much of it is code. */
 interface Estimate {
@@ -105,27 +105,33 @@ function statementCost(
   statement: SemanticStatement,
   callees: ReadonlyMap<string, SemanticFunction>,
   seen: Set<string>,
+  model: CostModel,
 ): Estimate {
-  const costs = valuesOf(statement, callees, seen);
+  const costs = valuesOf(statement, callees, seen, model);
   switch (statement.k) {
     case "call":
       // A call kept for what it does is the call plus the body behind it.
-      return { cost: CALL_COST + costs.cost, statements: 1 + costs.statements };
-    case "loop":
-      return { cost: turnsOf(fieldOf(statement, "loop")) * costs.cost, statements: 1 + costs.statements };
+      return { cost: model.call + costs.cost, statements: 1 + costs.statements };
+    case "loop": {
+      // A countable loop runs its written number of turns; an unknown one is
+      // given the profitability weight, never an assumed turn count.
+      const activity = activityOf(fieldOf(statement, "loop"));
+      const turns = activity.kind === "counted" ? activity.turns : model.unknownLoopTurn;
+      return { cost: turns * costs.cost, statements: 1 + costs.statements };
+    }
     case "setElement":
     case "fill":
     case "storeField":
       // A write that reaches memory, which a register-only body does not.
-      return { cost: 4 + costs.cost, statements: 1 + costs.statements };
+      return { cost: model.memoryWrite + costs.cost, statements: 1 + costs.statements };
     case "if":
       // One arm or the other, so the body is not run twice: what it costs is
       // what it costs to take the arm that is taken, and nothing knows which.
-      return { cost: 2 + costs.cost, statements: 1 + costs.statements };
+      return { cost: model.branch + costs.cost, statements: 1 + costs.statements };
     case "block":
       return { cost: costs.cost, statements: 1 + costs.statements };
     default:
-      return { cost: costs.cost + 1, statements: 1 + costs.statements };
+      return { cost: model.operation + costs.cost, statements: 1 + costs.statements };
   }
 }
 
@@ -134,11 +140,12 @@ function valuesOf(
   statement: SemanticStatement,
   callees: ReadonlyMap<string, SemanticFunction>,
   seen: Set<string>,
+  model: CostModel,
 ): Estimate {
   let cost = 0;
   let statements = 0;
   for (const value of statementValues(statement)) {
-    const one = valueCost(value, callees, seen);
+    const one = valueCost(value, callees, seen, model);
     cost += one.cost;
     statements += one.statements;
   }
@@ -150,21 +157,30 @@ function valueCost(
   value: SemanticValue,
   callees: ReadonlyMap<string, SemanticFunction>,
   seen: Set<string>,
+  model: CostModel,
 ): Estimate {
   if (value.k === "call") {
     // A call written inside an argument is the call plus the callee behind it,
     // and the callee behind a call is only read once: a body that reaches
     // itself has already been refused, so the walk terminates.
     const call = fieldOf(value, "call");
-    const callee = fieldOf(call, "builtin") === true ? undefined : callees.get(String(fieldOf(call, "callee")));
-    if (callee === undefined || seen.has(callee.name)) return { cost: CALL_COST, statements: 0 };
-    const inner = estimate(callee, callees, new Set([...seen, callee.name]));
-    return { cost: CALL_COST + inner.cost, statements: inner.statements };
+    const builtin = fieldOf(call, "builtin") === true;
+    const name = String(fieldOf(call, "callee"));
+    const assessed = resolveCallCost(name, callees, model, builtin);
+    const callee = builtin ? undefined : callees.get(name);
+    if (assessed.status === "unknown" || callee === undefined || seen.has(callee.name)) {
+      // An unresolved call is charged the intrinsic call cost for
+      // *profitability* only. Its safety is decided by `fusionSafety`, never
+      // by this number, so the fallback cannot decide correctness.
+      return { cost: model.call, statements: 0 };
+    }
+    const inner = estimate(callee, callees, new Set([...seen, callee.name]), model);
+    return { cost: model.call + inner.cost, statements: inner.statements };
   }
-  let cost = 1;
+  let cost = model.operation;
   let statements = 1;
   for (const child of valueChildrenOf(value)) {
-    const one = valueCost(child, callees, seen);
+    const one = valueCost(child, callees, seen, model);
     cost += one.cost;
     statements += one.statements;
   }
@@ -172,26 +188,24 @@ function valueCost(
 }
 
 /**
- * How many turns a loop is taken to run.
- *
- * A counted loop whose ends are written out is counted, which is exact. A loop
- * over a length or a condition is an unknown number of turns, which is worth
- * `UNKNOWN_TURNS` and no more, and a counted loop the compiler can count but
- * whose count is enormous is capped: nobody is fusing a call out of a loop
- * that runs a billion times because the count was large.
+ * How many turns a loop is taken to run, when that can be read from the loop
+ * itself. A counted loop whose ends are written out is counted exactly; every
+ * other loop is unknown, and is never assumed to run any particular number of
+ * times. This is a structural observation, not a profitability guess, and no
+ * correctness decision reads the number.
  */
-function turnsOf(loop: SemanticLoop): number {
-  if (loop.kind !== "counted") return UNKNOWN_TURNS;
+function activityOf(loop: SemanticLoop): LoopActivity {
+  if (loop.kind !== "counted") return { kind: "unknown" };
   const from = constantOf(fieldOf(loop, "from"));
   const to = constantOf(fieldOf(loop, "to"));
-  if (from === null || to === null) return UNKNOWN_TURNS;
+  if (from === null || to === null) return { kind: "unknown" };
   const step = loop.step === null ? (loop.down ? -1 : 1) : constantOf(loop.step);
-  if (step === null || step === 0) return UNKNOWN_TURNS;
-  if (loop.down ? step > 0 : step < 0) return 0;
+  if (step === null || step === 0) return { kind: "unknown" };
+  if (loop.down ? step > 0 : step < 0) return { kind: "counted", turns: 0 };
   const span = Math.abs(to - from);
   const turns = fieldOf(loop, "inclusive") ? Math.floor(span / Math.abs(step)) + 1 : Math.ceil(span / Math.abs(step));
-  if (!Number.isSafeInteger(turns)) return UNKNOWN_TURNS;
-  return Math.min(turns, MAX_ASSUMED_TURNS);
+  if (!Number.isSafeInteger(turns)) return { kind: "unknown" };
+  return { kind: "counted", turns };
 }
 
 /** The number a value is written as, or null when the compiler cannot read it. */
@@ -221,23 +235,32 @@ function valueChildrenOf(value: SemanticValue): readonly SemanticValue[] {
 }
 
 /** What a function costs to run, with what it calls read at its own cost. */
-export function estimateFunction(fn: SemanticFunction, callees: ReadonlyMap<string, SemanticFunction>): Estimate {
-  return estimate(fn, callees, new Set([fn.name]));
+export function estimateFunction(
+  fn: SemanticFunction,
+  callees: ReadonlyMap<string, SemanticFunction>,
+  model: CostModel = DEFAULT_COST_MODEL,
+): Estimate {
+  return estimate(fn, callees, new Set([fn.name]), model);
 }
 
 /** The estimate of one function, over a walk that has already read a set of names. */
-function estimate(fn: SemanticFunction, callees: ReadonlyMap<string, SemanticFunction>, seen: Set<string>): Estimate {
+function estimate(
+  fn: SemanticFunction,
+  callees: ReadonlyMap<string, SemanticFunction>,
+  seen: Set<string>,
+  model: CostModel,
+): Estimate {
   let cost = 0;
   let statements = 0;
   for (const block of blocksOf(fn.entry)) {
     for (const statement of fieldOf(block, "statements")) {
-      const one = statementCost(statement, callees, seen);
+      const one = statementCost(statement, callees, seen, model);
       cost += one.cost;
       statements += one.statements;
     }
     const terminator = fieldOf(block, "terminator");
     if (terminator.k === "return" && terminator.value !== null) {
-      cost += valueCost(terminator.value, callees, seen).cost;
+      cost += valueCost(terminator.value, callees, seen, model).cost;
     }
   }
   return { cost, statements };
@@ -291,18 +314,32 @@ export interface RestructureOptions {
    * marked for it would have been.
    */
   readonly decideUnmarked?: boolean;
+  /** The cost model to price the fusion with, shared with the validator. */
+  readonly costModel?: CostModel;
 }
 
-/** The default growth and cost a fusion is held to. */
+/** The default growth and cost a fusion is held to: profitability budgets only. */
 const MAX_CALLEE_STATEMENTS = 16;
 const MAX_CALLER_STATEMENTS = 96;
-const MAX_CALLEE_COST = CALL_COST * 2;
+const MAX_CALLEE_COST = DEFAULT_COST_MODEL.call * 2;
 
-/** One place a callee is called, how hot it is, and how many times it turns. */
+/** One place a callee is called, and how often it runs. */
 interface CallSite {
   readonly block: string;
-  /** How many times the call runs in one run of the caller. */
-  readonly executions: number;
+  /** How often the call runs, without assuming a count for an unknown loop. */
+  readonly frequency: CallFrequency;
+}
+
+/**
+ * Combines the activity of a loop with the frequency of the block it contains.
+ * A counted loop with a readable count multiplies a counted frequency; a loop
+ * whose count is unknown makes the site `repeated`, which carries no number.
+ */
+function withinLoop(frequency: CallFrequency, activity: LoopActivity): CallFrequency {
+  if (activity.kind === "unknown") return { kind: "repeated" };
+  if (frequency.kind === "repeated") return frequency;
+  const turns = (frequency.kind === "once" ? 1 : frequency.turns) * activity.turns;
+  return turns === 1 ? { kind: "once" } : { kind: "counted", turns };
 }
 
 /** A fusion this pass may perform, with everything it needs to judge it. */
@@ -336,6 +373,9 @@ function directCallees(fn: SemanticFunction): string[] {
   const seen = new Set<string>();
   const visit = (value: SemanticValue): void => {
     walkValues(value, (one) => {
+      // Read the call field only on a call node: a value walked from a loop
+      // header or a `select` arm is not one, and has no call to name.
+      if (one.k !== "call") return;
       // A builtin is the compiler's own rather than a function of the program,
       // so it is not a name the program's call graph states. Writing one into
       // the graph made a fused body declare `call Math.floor`, which the reader
@@ -343,7 +383,7 @@ function directCallees(fn: SemanticFunction): string[] {
       // functions of the program and never the compiler's own.
       const call = fieldOf(one, "call");
       const callee = String(fieldOf(call, "callee"));
-      if (one.k !== "call" || fieldOf(call, "builtin") === true || fieldOf(call, "through") !== undefined || seen.has(callee)) return;
+      if (fieldOf(call, "builtin") === true || fieldOf(call, "through") !== undefined || seen.has(callee)) return;
       seen.add(callee);
       names.push(callee);
     });
@@ -359,18 +399,18 @@ function directCallees(fn: SemanticFunction): string[] {
 }
 
 /**
- * The callee's every static call site, each weighted by how often it runs.
+ * The callee's every static call site, each with how often it runs.
  *
- * The weight is the product of the turns of every loop the site is inside, so
- * a call in a loop the compiler can count is worth as many executions as the
- * loop turns and a call in the caller's own entry block is worth one.
+ * A site inside loops the compiler can count is weighted by the product of
+ * their turns. A site inside any loop whose count cannot be read is `repeated`:
+ * it runs on every turn, and no number of turns is assumed.
  */
 function callSites(fn: SemanticFunction, callee: string): CallSite[] {
   const found: CallSite[] = [];
-  const walk = (block: SemanticBlock, executions: number): void => {
+  const walk = (block: SemanticBlock, frequency: CallFrequency): void => {
     const here = (value: SemanticValue): void => {
       walkValues(value, (one) => {
-        if (one.k === "call" && fieldOf(one, "call").callee === callee) found.push({ block: block.id, executions });
+        if (one.k === "call" && fieldOf(one, "call").callee === callee) found.push({ block: block.id, frequency });
       });
     };
     for (const statement of fieldOf(block, "statements")) {
@@ -379,11 +419,11 @@ function callSites(fn: SemanticFunction, callee: string): CallSite[] {
     const terminator = fieldOf(block, "terminator");
     if (terminator.k === "return" && terminator.value !== null) here(terminator.value);
     for (const statement of fieldOf(block, "statements")) {
-      const turns = statement.k === "loop" ? turnsOf(fieldOf(statement, "loop")) : 1;
-      for (const nested of statementBlocksOf(statement)) walk(nested, executions * turns);
+      const activity = statement.k === "loop" ? activityOf(fieldOf(statement, "loop")) : { kind: "counted", turns: 1 } as const;
+      for (const nested of statementBlocksOf(statement)) walk(nested, withinLoop(frequency, activity));
     }
   };
-  walk(fn.entry, 1);
+  walk(fn.entry, { kind: "once" });
   return found;
 }
 
@@ -441,16 +481,68 @@ function innerCallsLegal(fn: SemanticFunction, callees: ReadonlyMap<string, Sema
 /**
  * Whether a site is hot enough for the call it makes to be worth having.
  *
- * A loop that turns is hot by itself: the call runs on every turn. A call
- * outside every loop runs once, which is not worth a copy of anything — unless
- * a profile says the caller is called often enough that even one call per run
- * is worth having removed. No profile is the ordinary case, and the answer is
- * then no.
+ * A call inside a loop is hot by structure: it runs on every turn, and no
+ * assumed count is needed to say so. A call outside every loop runs once,
+ * which is not worth a copy of anything — unless a profile says the caller is
+ * called often enough that even one call per run is worth having removed. No
+ * profile is the ordinary case, and the answer is then no. This is a
+ * profitability decision only; it never decides whether a rewrite is safe.
  */
 function isHot(site: CallSite, profile: FunctionProfile | undefined): boolean {
-  if (site.executions > 1) return true;
+  if (site.frequency.kind === "repeated") return true;
+  if (site.frequency.kind === "counted" && site.frequency.turns > 1) return true;
   if (profile === undefined) return false;
   return (profile.callCount ?? 0) > 1 || (fieldOf(profile, "durationNs") ?? 0) > 0;
+}
+
+/**
+ * Whether a call may be fused into its caller, proved from semantic properties.
+ *
+ * This is the safety half of the decision, and it is independent of every
+ * profitability weight. A fusion is permitted only when the callee is pure
+ * (no effects, no allocation, no printing, no command-line reads), deterministic
+ * (its return is a value the caller owns, not a reference it must release), its
+ * body can be spliced without changing control flow or evaluation order, it
+ * does not recurse into itself or its caller, and every call the spliced body
+ * makes is one the caller is allowed to name. If any of that cannot be shown,
+ * the call stays where it was.
+ */
+export type FusionSafety =
+  | { readonly status: "safe" }
+  | { readonly status: "unsafe"; readonly reason: string };
+
+export function fusionSafety(
+  caller: SemanticFunction,
+  callee: SemanticFunction,
+  callees: ReadonlyMap<string, SemanticFunction>,
+): FusionSafety {
+  if (callee.effects.length > 0) {
+    return { status: "unsafe", reason: `${callee.name} has effects (${callee.effects.join(", ")})` };
+  }
+  if (callee.allocates || callee.prints || callee.readsArgv) {
+    return { status: "unsafe", reason: `${callee.name} allocates, prints or reads the command line` };
+  }
+  // A reference or a text has an owner or a lifetime the caller does not gain
+  // by splicing the body in place of the call.
+  if (callee.returns.kind === "ref" || callee.returns.kind === "text") {
+    return { status: "unsafe", reason: `${callee.name} returns a ${callee.returns.kind}, which the splice would not own` };
+  }
+  // `inlineRefusal` proves the body is one a splice can hold: one return, no
+  // releases, no control flow the caller does not own. The callee's own calls
+  // are blanked for this proof because the fused body deliberately leaves them
+  // in place; their legality is checked separately below.
+  const spliceable = structuredClone(callee);
+  setFieldOn(spliceable, "calls", []);
+  const refusal = inlineRefusal(spliceable);
+  if (refusal !== null) return { status: "unsafe", reason: `${callee.name} cannot be spliced: ${refusal}` };
+  if (reaches(callee, callees, callee.name)) return { status: "unsafe", reason: `${callee.name} reaches itself` };
+  if (reaches(callee, callees, caller.name)) {
+    return { status: "unsafe", reason: `${callee.name} reaches ${caller.name}, which is the function it would be written into` };
+  }
+  if (!innerCallsLegal(caller, callees, callee)) {
+    return { status: "unsafe", reason: `${callee.name} calls something ${caller.name} may not name` };
+  }
+  return { status: "safe" };
 }
 
 /**
@@ -468,6 +560,7 @@ function fusionOpportunity(
   const maxCalleeStatements = options.maxCalleeStatements ?? MAX_CALLEE_STATEMENTS;
   const maxCallerStatements = options.maxCallerStatements ?? MAX_CALLER_STATEMENTS;
   const maxCalleeCost = options.maxCalleeCost ?? MAX_CALLEE_COST;
+  const model = options.costModel ?? DEFAULT_COST_MODEL;
   for (const edge of fieldOf(fn, "calls")) {
     const callee = callees.get(edge.callee);
     // The program writes a callee out only when it is unverified, effect-free
@@ -502,14 +595,22 @@ function fusionOpportunity(
     if (!innerCallsLegal(fn, callees, callee)) {
       return `${callee.name} calls something ${fn.name} may not name, and writing it out would put that call here`;
     }
-    const body = estimateFunction(callee, callees);
+    // Safety is proved here, from the callee's semantic properties, before any
+    // profitability weight is consulted. A call that cannot be proved safe is
+    // left in place; no cost, turn count or budget can overrule that.
+    const safety = fusionSafety(fn, callee, callees);
+    if (safety.status === "unsafe") {
+      if (decided) continue;
+      return safety.reason;
+    }
+    const body = estimateFunction(callee, callees, model);
     if (fieldOf(body, "statements") > calleeStatements) {
       return `${callee.name} is ${fieldOf(body, "statements")} statements, and a fusion may copy at most ${calleeStatements}`;
     }
     // The one thing a fusion removes is the call. A body that costs more than
     // the call is worth is code the call was buying for nothing.
     if (body.cost > calleeCost) {
-      return `${callee.name} costs ${body.cost}, and removing one call is worth ${CALL_COST}`;
+      return `${callee.name} costs ${body.cost}, and removing one call is worth ${DEFAULT_COST_MODEL.call}`;
     }
     if (countStatements(fn.entry) + fieldOf(body, "statements") > maxCallerStatements) {
       return `${fn.name} would grow past ${maxCallerStatements} statements`;
@@ -579,8 +680,13 @@ export function restructureHotFunction(
   if (typeof fusion === "string") return { refused: fusion };
   const applied = fuse(fn, fusion);
   if (typeof applied === "string") return { refused: applied };
-  const times = fusion.site.executions;
-  const note = `fused ${fusion.calleeName} into ${fieldOf(fusion.site, "block")} in ${fn.name}, which runs ${times === 1 ? "once" : `${times} times`}`;
+  const frequency = fusion.site.frequency;
+  const howOften = frequency.kind === "counted"
+    ? `${frequency.turns} times`
+    : frequency.kind === "repeated"
+      ? "on every turn of its loop"
+      : "once";
+  const note = `fused ${fusion.calleeName} into ${fieldOf(fusion.site, "block")} in ${fn.name}, which runs ${howOften}`;
   return { applied, note };
 }
 

@@ -5,6 +5,8 @@ import {
   encodeBenchRequest,
   encodeRunRequest,
   planTestVectors,
+  planVerificationBatches,
+  resolveVerificationSeed,
   vectorValues,
 } from "../toolchain/verifier.ts";
 import { parseContract, preconditionFailures, referenceResult, valuesMatch, type BufferValue } from "../semantics/contract.ts";
@@ -134,6 +136,47 @@ test("floats survive the transfer exactly", () => {
     received.some((value) => value !== 0 && !Number.isInteger(value)),
     "the randomized vector carries values that need full precision",
   );
+});
+
+test("verification draws a fresh secure seed when none is given", () => {
+  const config: TestConfig = { randomCases: 8, maxLength: 64 };
+  const first = resolveVerificationSeed(config);
+  const second = resolveVerificationSeed(config);
+  assert.equal(first.explicit, false);
+  assert.equal(second.explicit, false);
+  assert.notEqual(first.seed, second.seed, "two independent runs explore different inputs");
+  assert.ok(Number.isInteger(first.seed) && first.seed >= 0 && first.seed <= 0xffffffff);
+});
+
+test("an explicit seed is honoured for reproducibility", () => {
+  const seed = 0x1234abcd;
+  assert.deepEqual(resolveVerificationSeed({ randomCases: 8, maxLength: 64, seed }), { seed, explicit: true });
+  assert.deepEqual(planTestVectors(parseContract(CONTRACT), { randomCases: 8, maxLength: 64, seed }), planTestVectors(parseContract(CONTRACT), { randomCases: 8, maxLength: 64, seed }));
+});
+
+test("independent batches have distinct seeds and the first matches single-batch planning", () => {
+  const parsed = parseContract(CONTRACT);
+  const config: TestConfig = { randomCases: 8, maxLength: 64, seed: 41, batches: 3 };
+  const plans = planVerificationBatches(parsed, config);
+  assert.deepEqual(plans.map((plan) => plan.seed), [41, 42, 43]);
+  assert.deepEqual(plans[0].vectors, planTestVectors(parsed, { randomCases: 8, maxLength: 64, seed: 41 }));
+  assert.notDeepEqual(plans[0].vectors, plans[1].vectors, "batches explore different inputs");
+});
+
+test("unseeded batches each draw their own seed", () => {
+  const parsed = parseContract(CONTRACT);
+  const config: TestConfig = { randomCases: 8, maxLength: 64, batches: 3 };
+  const plans = planVerificationBatches(parsed, config);
+  assert.equal(new Set(plans.map((plan) => plan.seed)).size, 3);
+});
+
+test("deterministic and randomized vectors are distinguishable by kind", () => {
+  const parsed = parseContract(CONTRACT);
+  const vectors = planTestVectors(parsed, CONFIG);
+  const fixed = vectors.filter((vector) => vector.kind === "fixed");
+  const random = vectors.filter((vector) => vector.kind === "random");
+  assert.ok(fixed.length > 0 && random.length > 0);
+  assert.ok(vectors.every((vector) => vector.kind === "random" || vector.kind === "fixed" || vector.kind === "boundary"));
 });
 
 test("a result count that does not match the request is a verification error", () => {

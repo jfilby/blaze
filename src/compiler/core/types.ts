@@ -10,6 +10,8 @@
  * by the build and reaches a backend beside the contract, never inside it.
  */
 
+import type { OutcomeStatus } from "./outcome.ts";
+
 import type { Threading } from "./target.ts";
 import type { Statement } from "./ir.ts";
 
@@ -348,13 +350,28 @@ export interface GenerationConfig {
 }
 
 export interface TestConfig {
-  /** Number of randomized test cases. */
+  /** Number of randomized test cases per batch. */
   randomCases: number;
   /** Upper bound for generated buffer lengths. */
   maxLength: number;
-  /** Seed for the deterministic PRNG used by test generation. */
-  seed: number;
+  /**
+   * Explicit PRNG seed for reproducibility. Absent means a fresh
+   * cryptographically secure seed is generated for each verification run, so
+   * independent runs explore different inputs.
+   */
+  seed?: number;
+  /** Number of independent randomized batches, each with its own seed. */
+  batches?: number;
 }
+
+/** The resource budget that bounds a convergence-driven program repair. */
+export interface RepairBudget {
+  /** Total rounds allowed, including the first generation round. */
+  readonly maxRounds: number;
+}
+
+/** The default repair budget, which keeps the historical three-round build. */
+export const DEFAULT_REPAIR_BUDGET: RepairBudget = { maxRounds: 3 };
 
 export interface BenchmarkConfig {
   /** Calls performed inside the isolated benchmark process. */
@@ -534,7 +551,7 @@ export const DEFAULT_GENERATION: GenerationConfig = {
 export const DEFAULT_TEST: TestConfig = {
   randomCases: 24,
   maxLength: 1024,
-  seed: 0x5eed1234,
+  batches: 1,
 };
 
 export const DEFAULT_BENCHMARK: BenchmarkConfig = {
@@ -610,6 +627,16 @@ export interface TestFailure {
   reason: string;
 }
 
+/** One independent randomized batch of a verification run. */
+export interface VerificationBatch {
+  /** The seed that generated this batch, recorded for reproducibility. */
+  readonly seed: number;
+  readonly cases: number;
+  readonly deterministicPassed: number;
+  readonly randomPassed: number;
+  readonly failures: readonly TestFailure[];
+}
+
 export interface VerificationResult {
   candidate: string;
   passed: boolean;
@@ -617,6 +644,16 @@ export interface VerificationResult {
   tolerance: number | null;
   failures: TestFailure[];
   durationNs: number;
+  /** The explicit outcome, which keeps incomplete apart from failed. */
+  status: OutcomeStatus;
+  /** The seed of the first batch; every batch's own seed is in `batches`. */
+  seed: number;
+  /** Fixed and boundary vectors that passed, kept distinct from randomized ones. */
+  deterministicPassed: number;
+  /** Randomized vectors that passed. */
+  randomPassed: number;
+  /** One entry per independent randomized batch. */
+  batches: readonly VerificationBatch[];
 }
 
 /**
