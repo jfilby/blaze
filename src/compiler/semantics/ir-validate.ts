@@ -2098,6 +2098,28 @@ function checkName(problems: string[], prefix: string, name: string): void {
 }
 
 /**
+ * The name problems of the program's signatures, which do not depend on the
+ * body being checked. Program validation checks every body against the same
+ * signature list; rebuilding these for each of thousands of bodies was
+ * quadratic. The list is held weakly by its signature array, so one program
+ * answers the question once.
+ */
+const programNames = new WeakMap<object, string[]>();
+
+function programNameProblems(context: Context): string[] {
+  const functions = fieldOf(context, "functions") as readonly FunctionSignature[];
+  const held = programNames.get(functions);
+  if (held !== undefined) return held;
+  const problems: string[] = [];
+  for (const signature of functions) {
+    checkName(problems, "", String(fieldOf(signature, "name")));
+    checkName(problems, "", String(fieldOf(signature, "symbol")));
+  }
+  programNames.set(functions, problems);
+  return problems;
+}
+
+/**
  * Every name a body carries is a plain identifier: no register, no stack
  * offset, no punctuation a target would have to escape before it emitted it.
  * The guarantee that the model names no target lives in the model; this is the
@@ -2149,12 +2171,8 @@ function nameProblems(context: Context, tree: Tree): string[] {
     }
   }
 
-  const functions = fieldOf(context, "functions") as readonly FunctionSignature[] | null;
-  if (functions !== null) {
-    for (const signature of functions) {
-      checkName(problems, "", String(fieldOf(signature, "name")));
-      checkName(problems, "", String(fieldOf(signature, "symbol")));
-    }
+  if (fieldOf(context, "functions") !== null) {
+    for (const problem of programNameProblems(context)) problems.push(problem);
   }
   for (const layout of Object.values(fieldOf(context, "objects") as Record<string, ObjectLayout>)) {
     checkName(problems, "", String(fieldOf(layout, "name")));
