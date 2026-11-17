@@ -533,8 +533,14 @@ class BodyTypes {
       case "null":
         return { kind: "type", type: ANY_REF };
       case "ident": {
-        const bound = this.environment.get(String(fieldOf(expression,"name")));
+        const name = String(fieldOf(expression,"name"));
+        const bound = this.environment.get(name);
         if (bound !== undefined) return bound;
+        // A function of the module can be read as a value — the handler handed
+        // to a server, for one — without being a local the body declared. It is
+        // a known name, so it is not a use before declaration; its layout is
+        // not something this walk can settle.
+        if (this.callees.has(name)) return { kind: "type", type: ANY_REF };
         throw objectsError(
           `${this.path}: ${this.functionName} uses "${String(fieldOf(expression,"name"))}" before it is declared`,
           "a compiled function declares every name it uses before it uses it",

@@ -445,6 +445,14 @@ class FunctionBody {
     this.scopes[this.scopes.length - 1].set(name, held);
   }
 
+  /** Whether a name is already bound in any of the body's scopes. */
+  private known(name: string): boolean {
+    for (let at = this.scopes.length - 1; at >= 0; at -= 1) {
+      if (this.scopes[at].has(name)) return true;
+    }
+    return false;
+  }
+
   /** The name the body reads, or a refusal where it used one it does not have. */
   private read(name: string, line: number): Held {
     for (let at = this.scopes.length - 1; at >= 0; at -= 1) {
@@ -1324,7 +1332,16 @@ class FunctionBody {
         return { value: { k: "const", type: I64, text: String(fieldOfValue(expression, "text")) }, inferred: asType(I64) };
       }
       case "ident": {
-        const held = this.read(String(fieldOfValue(expression, "name")), line);
+        const name = String(fieldOfValue(expression, "name"));
+        // A function of the module can be handed to a call as a value — the
+        // handler a server is given is one — without being a local the body
+        // declared. It is a known name, and the value it names is the function.
+        const context = fieldOfValue(this, "context") as FunctionContext;
+        if (!this.known(name) && fieldOfValue(context, "functions")?.[name] !== undefined) {
+          const symbol = String(fieldOfValue(fieldOfValue(fieldOfValue(context, "functions")[name], "function"), "symbol"));
+          return { value: { k: "functionRef", type: VOID, name: symbol, captures: [] }, inferred: ANY };
+        }
+        const held = this.read(name, line);
         return { value: { k: "local", type: slotType(fieldOfValue(held, "slot") as SemanticSlot), name: String(fieldOfValue(held, "name")) }, inferred: fieldOfValue(held, "inferred") as Inferred };
       }
       case "null":
