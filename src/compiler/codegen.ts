@@ -1168,11 +1168,16 @@ export function selectCandidate(outcomes: readonly CandidateOutcome[], contract:
   const valid = outcomes.filter((outcome) => fieldOf(outcome, "valid") === true);
   if (valid.length === 0) return null;
 
-  const bySpeed = [...valid].sort((left, right) => {
-    const leftNs = fieldOf(fieldOf(left, "benchmark"), "durationNs") as number | undefined ?? Number.POSITIVE_INFINITY;
-    const rightNs = fieldOf(fieldOf(right, "benchmark"), "durationNs") as number | undefined ?? Number.POSITIVE_INFINITY;
-    return leftNs - rightNs;
-  });
+  // A candidate the build did not time has no benchmark at all: a program the
+  // harness checks as a whole is measured there, not once per function. Guard
+  // the missing object, not just the missing field, or the sort crashes before
+  // the fallback can say a candidate that was not timed is the slower one.
+  const timedNs = (outcome: CandidateOutcome): number => {
+    const benchmark = fieldOf(outcome, "benchmark") as Record<string, unknown> | null | undefined;
+    if (benchmark === null || benchmark === undefined) return Number.POSITIVE_INFINITY;
+    return (fieldOf(benchmark, "durationNs") as number | undefined) ?? Number.POSITIVE_INFINITY;
+  };
+  const bySpeed = [...valid].sort((left, right) => timedNs(left) - timedNs(right));
   const bySize = [...valid].sort((left, right) => (fieldOf(left, "textSizeBytes") as number | undefined ?? 0) - (fieldOf(right, "textSizeBytes") as number | undefined ?? 0));
 
   const objective = String(fieldOf(fieldOf(contract, "optimize"), "primary"));

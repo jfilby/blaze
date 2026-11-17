@@ -8428,6 +8428,12 @@ class Machine {
     // overflowed.
     if (typeof right === "number") {
       this.code.aluImm("cmp", left, right, width === 8);
+    } else if (String(fieldOf(right, "register")) !== "null") {
+      // A bound held in a register of its own is compared there. Its frame
+      // offset is zero and no store ever wrote it, so reading the frame instead
+      // compared against whatever was on the top of the stack: a counted loop
+      // with a whole-number bound walked off the end of the array it indexed.
+      this.code.alu("cmp", left, fieldOf(right, "register") as number, true);
     } else if (width === 8) {
       // A whole register wide, so the read fills the register and the
       // comparison can read it where it lies rather than through a copy of it

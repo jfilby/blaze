@@ -518,7 +518,7 @@ export function encodeRunRequest(contract: FunctionContract, vectors: readonly T
 }
 
 export function decodeRunResults(contract: FunctionContract, stdout: string, expected: number): Value[] {
-  const type = parseType(String(fieldOf(contract, "returns")));
+  const type = parseType(String(fieldOf(fieldOf(contract, "function"), "returns")));
   const results: Value[] = [];
   for (const line of stdout.split("\n")) {
     if (!line.startsWith("RESULT ")) continue;

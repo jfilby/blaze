@@ -2927,13 +2927,11 @@ class ProgramResolver {
       case "boolean":
         return declare({ kind: "number", mutable, type: "bool", text: String(fieldOf(value, "value")) === "true" ? "true" : "false" });
       case "length": {
-        const lengthType = fieldOf(value, "type") as SemanticType;
-        return declare({
-          kind: "number",
-          mutable,
-          type: lengthType.kind === "primitive" ? lengthType.name : null,
-          text: "",
-        });
+        // A length draft carries the primitive name itself, not a type node. A
+        // name bound to one is a whole number, as the `lengthOf` and
+        // `stringLength` forms already say, so a whole-only operator on it is
+        // written on a whole name.
+        return declare({ kind: "number", mutable, type: fieldOf(value, "type") as PrimitiveTypeName, text: "" });
       }
       case "lengthOf":
         return declare({ kind: "number", mutable, type: "usize", text: "" });
@@ -6399,8 +6397,12 @@ class ProgramLowering {
       case "reference":
         return { k: "local", type: this.localType(fieldOf(value, "held") as Held), name: String(fieldOf(value, "name")) };
       case "text": {
-        const parts = fieldOf(value, "parts") as readonly { k: string; value: DraftValue; text?: string }[];
-        return { k: "text", type: TEXT, parts: parts.map((part) => part.k === "text" ? { k: "text" as const, value: String(fieldOf(part, "text")) } : { k: "value" as const, value: this.written(part.value, line) }) };
+        const parts = fieldOf(value, "parts") as readonly { k: string; value: DraftValue | string }[];
+        // A literal part carries its text in `value`, as the frontend writes it
+        // and as every other reader of a text part reads it. Reading a `text`
+        // field here made every literal part say "undefined", which reached the
+        // driver as a call with a pointer where a number was expected.
+        return { k: "text", type: TEXT, parts: parts.map((part) => part.k === "text" ? { k: "text" as const, value: String(part.value) } : { k: "value" as const, value: this.written(part.value as DraftValue, line) }) };
       }
       case "boolean":
         return { k: "bool", type: BOOLEAN, value: fieldOf(value, "value") === true };

@@ -8,7 +8,8 @@ import { readModuleGraph } from "../semantics/module-graph.ts";
 import { CompilerError } from "../core/errors.ts";
 import { parseContract } from "../semantics/contract.ts";
 import { contractOf, diagnostic, irOf, phaseOf, programOf, programWithSemantics, semanticsOf } from "./phase.ts";
-import { parseSemanticFunction, printSemanticFunction } from "../semantics/ir-text.ts";
+import { resolveProgram } from "../semantics/ir-resolve.ts";
+import { parseSemanticFunction, printSemanticFunction, printSemanticProgram } from "../semantics/ir-text.ts";
 import type { FunctionContract, ProgramContract } from "../core/types.ts";
 
 /**
@@ -6591,4 +6592,26 @@ test("a loop over a list the source asserted walks the list", () => {
   const ir = irOf("typescript", { "main.ts": source }, "main.ts", "total");
   assert.match(ir, /length\[usize\]/);
   assert.doesNotMatch(ir, /blaze_rt_array_length/);
+});
+
+test("a text literal passed to a call reaches the IR as the text it was written as", () => {
+  // A string a program hands to a call is a sequence of literal parts. The
+  // parts carry their text in `value`; reading a `text` field instead made every
+  // literal part say "undefined", which reached the driver as a call with a
+  // pointer where a number was expected.
+  const phase = phaseOf(
+    "typescript",
+    {
+      "main.ts": [
+        'const parsed = JSON.parse(`{"a":1}`);',
+        "console.log(parsed);",
+        "",
+      ].join("\n"),
+    },
+    "main.ts",
+  );
+  assert.ok(phase.body !== undefined);
+  const ir = printSemanticProgram(resolveProgram(phase.body, phase.program, phase.objectNames, phase.objectLayouts, phase.objectKeys));
+  assert.match(ir, /\[text "\{\\"a\\":1\}"\]/, "the IR holds the JSON the source wrote");
+  assert.doesNotMatch(ir, /\[text "undefined"\]/, "no literal part lost its text");
 });

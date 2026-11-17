@@ -1163,7 +1163,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
         const jsonText = jsonArgument !== undefined &&
           (isTextType(fieldOf(jsonArgument,"type") as SemanticType) || String(fieldOf(jsonArgument,"k")) === "text");
         return jsonText
-          ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${argument(0)})))`
+          ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_c_text(${argument(0)})))`
           : `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${argument(0)})))`;
       }
       // One field of a dynamic object, by its name. The object is the handle
@@ -1194,7 +1194,7 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           : stringifyType !== null && isNumber(stringifyType)
             ? `blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(blaze_value_from_dynamic(${RUNTIME_NAME}_box_number(${argument(0)}))))`
             : `blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(blaze_value_from_dynamic(${argument(0)})))`;
-        return `${RUNTIME_NAME}_to_text(${rendered})`;
+        return `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(${rendered}))`;
       }
       // The text the program reads apart. A text argument is the pointer to
       // the bytes it names; anything else is what the runtime renders it as,
@@ -1321,7 +1321,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       case "array.get":
         return `${RUNTIME_NAME}_array_get(${argument(0)}, ${argument(1)})`;
       case "array.length":
-        return `${RUNTIME_NAME}_array_length(${argument(0)})`;
+        // A dynamic value is a double handle in generated C, and what it holds
+        // need not be an array: a parsed JSON object counts its fields. The
+        // general length answers for every shape the runtime holds, and the
+        // handle has to cross into a BlazeValue before the runtime reads it.
+        return `${RUNTIME_NAME}_length(blaze_value_from_dynamic(${argument(0)}))`;
       // A set and a map are one handle on the runtime's dictionary: the value a
       // set holds is the number one, and the key of either is the text it was
       // written with.
@@ -2045,7 +2049,9 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       return `"${style === "python" ? "None" : "null"}"`;
     }
     if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null && fieldOf(type,"name") === undefined) {
-      return `${RUNTIME_NAME}_to_text(${value})`;
+      // A dynamic value is a double handle in generated C; the runtime renders
+      // the value it holds from a BlazeValue.
+      return `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(${value}))`;
     }
     if (String(fieldOf(type,"kind")) === "ref" && fieldOf(type,"of") === null) {
       return `(${value} == NULL ? "null" : program_integer_text((long long)(${value})))`;

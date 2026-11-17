@@ -1270,7 +1270,7 @@ class ProgramEmitter {
     // A value the runtime holds is written as the string it is when it is
     // handed to a parameter of a string: the runtime renders it, and the
     // string it answers is the text the value holds.
-    if (fromDynamic && isTextType(as)) return `${RUNTIME_NAME}_to_text(${text})`;
+    if (fromDynamic && isTextType(as)) return `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(${text}))`;
     // A string a use reads as a number is the number its text states: `+text`
     // is the spelling the language writes it by, and the runtime boxes the
     // pointer it carries and answers the number that text names.
@@ -1372,7 +1372,10 @@ class ProgramEmitter {
       case "argv": {
         const index = fieldOf(value, "index") as SemanticValue | null;
         return index === null
-          ? String((fieldOf(this.target, "argvCount") as (...args: any[]) => any)(undefined))
+          // `argvCount` asks its target for the language style. Reading the
+          // method by key drops that receiver, so it has to be called with the
+          // target back as `this` or it reads the style of nothing.
+          ? String((fieldOf(this.target, "argvCount") as (this: unknown) => string).call(this.target))
           : String((fieldOf(this.target, "argv") as (...args: any[]) => any)(this.expression(index, USIZE)));
       }
       case "compare":

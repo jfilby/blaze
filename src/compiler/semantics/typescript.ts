@@ -1474,13 +1474,27 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
   const bodyDeclarations = new Set<string>();
   {
     let depth = 0;
+    // Only a function or a class body makes a declared name that body's own. A
+    // plain block at the top of the file opens a scope but the name it declares
+    // is not the reason a file-level declaration of the same spelling should
+    // disappear: a program can shadow a captured name inside a block while the
+    // outer one is still the state its functions read.
+    const bodies: number[] = [];
+    let afterBody = false;
     for (let at = 0; at < tokens.length; at += 1) {
       const token = tokens[at] as Token;
       const written = mark(token);
-      if (written === "{" || written === "${") depth += 1;
-      else if (written === "}") depth -= 1;
-
-      else if (depth > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
+      if (token.text === "function" || token.text === "class") afterBody = true;
+      if (written === "{" || written === "${") {
+        depth += 1;
+        if (afterBody) {
+          bodies.push(depth);
+          afterBody = false;
+        }
+      } else if (written === "}") {
+        if (bodies[bodies.length - 1] === depth) bodies.pop();
+        depth -= 1;
+      } else if (bodies.length > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
         const name = tokens[at + 1];
         if (name?.kind === "ident") bodyDeclarations.add(name.text);
       }
@@ -25713,6 +25727,11 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
           wideBigint,
         };
         if (scanned.state.size > 0) setFieldOn(programAnalysis, "state", scanned.state);
+        // A contract of a function in a program reads the names of the file it
+        // captures. The module analysis this one replaced carried the file's
+        // constants; without them a captured name is neither a parameter nor a
+        // known name of the file, and contracting the body refuses it.
+        if (scanned.constants.size > 0) setFieldOn(programAnalysis, "constants", scanned.constants);
         if (parser["valueGetters"].size > 0) {
           const getterNames = new Map<string, string>();
           for (const [getterName, getter] of (parser["valueGetters"] as Map<string, { name: string }>)) getterNames.set(String(getterName), String(fieldOf(getter, "name")));
@@ -25734,6 +25753,11 @@ export function readTypeScriptModule(source: string, path: string, entry = true,
   // A file is read to the end whatever it holds, so a build names every
   // construct outside the subset instead of the first one.
   analysis.wideBigint = wideBigint;
+  // The module parse keeps its own constants but not the file's mutable state.
+  // A function of a program that captures a name of the file reads it through
+  // that state, so contracting the body needs the names the scan found even
+  // when no nested function made the program parse replace this analysis.
+  if (scanned.state.size > 0) setFieldOn(analysis, "state", scanned.state);
   return { analysis, refused: [...diagnostics.entries], count: diagnostics.count };
 }
 

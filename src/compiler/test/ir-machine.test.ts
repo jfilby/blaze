@@ -2466,6 +2466,61 @@ async function emitted(
   return run("objdump", ["-dr", "--no-show-raw-insn", objectPath], { timeoutMs: 30_000 }).stdout;
 }
 
+test("a whole-number loop bound held in a register is compared where it is held", async () => {
+  // A bound the loop holds for its whole run is kept in a callee-saved register
+  // when one is free. The comparison has to read that register: a register-held
+  // value has a frame offset of zero that no store ever wrote, so a comparison
+  // that read the frame instead tested the counter against the top of the stack
+  // and walked off the end of the array it indexed.
+  const body: SemanticBlock = {
+    id: "entry",
+    releases: [],
+    statements: [
+      { k: "let", slot: { kind: "value", name: "total", mutable: true, type: F64 }, value: number("0"), line: 1 },
+      {
+        k: "loop",
+        line: 2,
+        loop: {
+          kind: "counted",
+          variable: "i",
+          type: USIZE,
+          from: number("0", USIZE),
+          to: local("n", USIZE),
+          inclusive: false,
+          down: false,
+          step: null,
+          header: "b1",
+          exit: "entry",
+          body: {
+            id: "b2",
+            releases: [],
+            terminator: { k: "next" },
+            statements: [
+              {
+                k: "set",
+                name: "total",
+                op: "+=",
+                line: 3,
+                value: { k: "element", type: F64, of: local("a", ARRAY_OF_F64), index: local("i", USIZE) },
+              },
+            ],
+          },
+        },
+      },
+    ],
+    terminator: { k: "return", value: local("total") },
+  };
+  const fn = subject(F64, body, [
+    { kind: "value", name: "a", mutable: false, type: ARRAY_OF_F64 },
+    { kind: "value", name: "n", mutable: false, type: USIZE },
+  ]);
+  assert.equal(
+    Number(await lowered(fn, (name) => `double v[6] = {2, 5, 7, 9, 11, 13}; printf("%.17g", ${name}(v, 6, 4));`)),
+    23,
+    "the loop reads the four elements it was bounded to, not whatever the stack held",
+  );
+});
+
 test("the arithmetic under an addition is written a pair of counters at a time", async () => {
   const turns = 6;
   const a = [1, 2, 3, 4, 5, 6];
