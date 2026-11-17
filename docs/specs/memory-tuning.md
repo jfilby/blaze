@@ -158,24 +158,18 @@ Ordered by expected memory saved against implementation risk.
    Removes roughly 100 MB from every no-model, offline and self-build; lowest
    risk because the no-model path is already a supported mode.
 
-2. **Fix the frontend whole-graph lifecycle.** Release the first analysis once
-   the linked second read completes, avoid retaining every source string after
-   its hash is computed, replace the per-character `scan()` accumulation, and
-   resolve the program IR once. This is the only item that attacks the ~1.9 GB
-   peak directly, and the highest-risk item.
-
-3. **Remove the repeated whole-tree deep copies in `record()`.** Use shared
+2. **Remove the repeated whole-tree deep copies in `record()`.** Use shared
    structures or incremental/streamed writes instead of five deep clones per
    repair round, and stop pretty-printing entire values just to hash them.
 
-4. **Tighten prompt and answer retention and bound concurrency.** Release
+3. **Tighten prompt and answer retention and bound concurrency.** Release
    artifacts after use, avoid rebuilding the full prompt on retry, cap response
    size locally, and bound in-flight candidates by a memory budget rather than
    a fixed product of two concurrency knobs.
 
-5. **Reduce whole-file reads and buffered child output.** Fingerprint sources
-   incrementally, stream or redirect subprocess output, and defer reading large
-   artifacts such as object files and the SQLite amalgamation until needed.
+4. **Reduce whole-file reads and buffered child output.** Stream or redirect
+   subprocess output, and defer reading large artifacts such as object files and
+   the SQLite amalgamation until needed.
 
 ## Validation
 
