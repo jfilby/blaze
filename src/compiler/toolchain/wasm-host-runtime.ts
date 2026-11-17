@@ -28,6 +28,25 @@
  */
 
 import { HANDLE_KINDS, VALUE_LAYOUT, VALUE_TAGS, valueAbiWasmDeclaration } from "../runtime/value-abi.ts";
+import {
+  WASM_PAGE_SIZE,
+  WASM_HOST_HEADER_BYTES,
+  WASM_HOST_COUNT_BYTES,
+  WASM_HOST_OVERHEAD,
+  WASM_REGION_ALIGNMENT,
+} from "./wasm-memory.ts";
+
+/**
+ * The memory contract the compiler hands the host.
+ *
+ * `dataBase` is the first address the host may hand out, which is the plan's
+ * runtime region; `capacity` is the first address past it, where allocation
+ * must fail rather than write over memory the module owns.
+ */
+export interface WasmHostRuntimeConfig {
+  readonly dataBase: number;
+  readonly capacity: number;
+}
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
@@ -1071,13 +1090,17 @@ interface RuntimePart {
 }
 
 /**
- * The runtime, as the source of the generated host.
+ * The runtime helpers, as the source of the generated host.
  *
  * The memory is the host's and the host's allocator is the one that hands out
  * memory: a module never grows the memory itself and never writes below the
- * address the module published, except into the scratch the module owns.
+ * boundary the plan gives it, except into the scratch the module owns. A host
+ * built without a plan starts at the boundary the module publishes.
  */
-const RUNTIME_HELPERS = `
+function runtimeHelpers(config: WasmHostRuntimeConfig | undefined): string {
+  const dataBase = config === undefined ? WASM_PAGE_SIZE : config.dataBase;
+  const limit = config === undefined ? Number.MAX_SAFE_INTEGER : config.capacity;
+  return `
 /* The managed representation: a forty-eight byte header, a count word and the
    payload, in that order, so a value the module holds and a value the host
    holds are the same kind of thing.
@@ -1087,15 +1110,16 @@ const RUNTIME_HELPERS = `
    offset into the memory, so the count is written in the word the offset sits
    one before. The module reads the length of a buffer from there, and the host
    writes it there for a buffer it hands over and for one the module makes. */
-const PAGE = 65536;
-const HEADER = 64;
-const COUNT = 8;
-const OVERHEAD = HEADER + COUNT;
+const PAGE = ${WASM_PAGE_SIZE};
+const HEADER = ${WASM_HOST_HEADER_BYTES};
+const COUNT = ${WASM_HOST_COUNT_BYTES};
+const OVERHEAD = ${WASM_HOST_OVERHEAD};
 const MAGIC = 0x424c415a45525400n;
-const ALIGNMENT = 16;
+const ALIGNMENT = ${WASM_REGION_ALIGNMENT};
 
 let memory = null;
-let cursor = 65536;
+let cursor = ${dataBase};
+const ALLOC_LIMIT = ${limit};
 let textStyle = 0;
 let lastError = "";
 const freeBlocks = new Map();
@@ -1224,6 +1248,9 @@ function alignUp(value, at) {
 }
 
 function growTo(end) {
+  if (!Number.isSafeInteger(end) || end > ALLOC_LIMIT) {
+    throw new Error("blaze: the WebAssembly host has exhausted its planned memory region");
+  }
   const bytes = memory.buffer.byteLength;
   if (end > bytes) memory.grow(Math.ceil((end - bytes) / PAGE) + 1);
 }
@@ -1232,7 +1259,7 @@ function growTo(end) {
    again when one of its class is free, so a loop that builds a value per turn
    does not ask the host for a new page every turn. */
 function classOf(bytes) {
-  if (bytes > 65536) return bytes;
+  if (bytes > ${WASM_PAGE_SIZE}) return bytes;
   let size = 16;
   while (size < bytes) size *= 2;
   return size;
@@ -1467,6 +1494,7 @@ function writeError(bytes) {
   process.stderr.write(Buffer.from(bytes));
 }
 `;
+}
 
 /** The implementation of each service, as the source of the generated host. */
 const RUNTIME_SERVICES: readonly RuntimePart[] = [
@@ -2990,9 +3018,9 @@ function md5(text) {
  * The source of the runtime the host carries, with the services the module
  * imported and nothing else.
  */
-export function hostRuntimeSource(services: readonly string[]): string {
+export function hostRuntimeSource(services: readonly string[], config?: WasmHostRuntimeConfig): string {
   const wanted = new Set(services);
-  const parts: string[] = [RUNTIME_HELPERS];
+  const parts: string[] = [runtimeHelpers(config)];
   const wide = services.filter((symbol) => symbol.startsWith("blaze_rt_u256_") || symbol === "blaze_rt_print_u256");
   if (wide.length > 0) parts.push(RUNTIME_WIDE);
   const text = services.filter(

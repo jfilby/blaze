@@ -279,13 +279,23 @@ it is the part of the design that is not obvious from the code:
   arguments are converted to the types the callee takes and the answer is
   converted back to the type the call was written at.
 
-- **The module is written twice.** The count of the imports is not known
-  until every function has been lowered — a service is imported the first time
-  a function reaches for it — and the index of a function is past the imports.
-  So the module is lowered once to find out what it imports and how much
-  scratch each of its functions needs, and once to write the calls at the
-  indexes the imports leave. The two passes are the same lowering over the same
-  input, so they agree by construction.
+- **One lowering, one plan, one emission.** The count of the imports and the
+  addresses of the constants are not known until every function has been
+  lowered, so the lowering writes addresses and call indexes as symbolic
+  fixups. The same pass measures each function's scratch and the pooled static
+  bytes. `planWasmMemory` (`toolchain/wasm-memory.ts`) lays out the regions from
+  those measurements, and emission resolves every fixup against that final
+  state. Nothing is lowered twice, and no two passes have to agree by
+  convention.
+
+- **The memory plan is shared with the host.** The regions are, in order: a
+  reserved guard that keeps address zero and the host's header reads out of
+  reach of a module address, the wide scratch, the static constants, and the
+  host's allocation space. `compileWasm` returns the plan with the module and
+  its imports, and the generated host starts its allocator at the plan's
+  runtime boundary, creates the memory the plan reserves, and fails when an
+  allocation would leave the region. The module declares the minimum the plan
+  computes and publishes the same boundary in a global.
 
 ### The review artifact
 
@@ -655,9 +665,10 @@ All eight are done. What each of them added is written down below.
 - the module holds every function of the program, and a call of another
   function is a call of an index;
 - the body of the program is the entry of the module, and the host runs it;
-- the module is written twice: once to find out what it imports and how much
-  scratch each of its functions needs, and once to write the calls at the
-  indexes the imports leave;
+- the module is lowered once, with symbolic addresses and call indexes; the
+  memory plan is made from the requirements that lowering measured, and the
+  final bytes resolve those fixups against it; the host is written from the
+  same plan;
 - the scratch of the wide numbers in flight is a region of its own per
   function, so a function that computes one and then calls a function that
   computes one as well does not write over the first;

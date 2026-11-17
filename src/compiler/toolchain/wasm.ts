@@ -29,9 +29,18 @@ import {
   POW_IMPORT,
   hostRuntimeSource,
 } from "./wasm-host-runtime.ts";
+import { WASM_PAGE_SIZE, type WasmMemoryPlan } from "./wasm-memory.ts";
 
 /** The bytes a reference takes in the memory the host provides: one pointer. */
 const POINTER_SIZE = 8;
+
+/**
+ * Memory a host with no plan gives a hand-written module.
+ *
+ * A module the compiler wrote always brings a plan; this is only for the
+ * legacy host entry points that are handed a contract alone.
+ */
+const LEGACY_HOST_PAGES = 4;
 
 /**
  * The global a module exports to say where its own memory ends.
@@ -44,6 +53,33 @@ const POINTER_SIZE = 8;
  * there.
  */
 export const DATA_BASE_EXPORT = "__blaze_data_base";
+
+/**
+ * The memory setup the generated host starts with.
+ *
+ * A host given the plan allocates from the plan's runtime region and creates
+ * the memory the plan reserves. A host written without a plan still reads the
+ * boundary the module publishes, and falls back to one page for a hand-written
+ * module that publishes none.
+ */
+function memorySetup(plan: WasmMemoryPlan | undefined): { initial: number; cursor: string } {
+  if (plan !== undefined) {
+    return {
+      initial: plan.totalPages,
+      cursor: `if (memory.buffer.byteLength < ${plan.pages * WASM_PAGE_SIZE}) {
+  throw new Error("blaze: the host memory does not satisfy the module's declared minimum");
+}
+cursor = ${plan.dataBase};`,
+    };
+  }
+  return {
+    initial: LEGACY_HOST_PAGES,
+    cursor: `const published = instance.exports[${JSON.stringify(DATA_BASE_EXPORT)}];
+cursor = typeof published === "object" && published !== null && typeof published.value === "number"
+  ? published.value
+  : ${WASM_PAGE_SIZE};`,
+  };
+}
 
 /** WebAssembly value types of the contract types, keyed by contract type. */
 const WASM_TYPES: Record<string, string> = {
@@ -348,6 +384,11 @@ export interface WasmHostOptions {
    */
   readonly services?: readonly string[];
   /**
+   * The memory plan the compiler produced for the module. The host starts its
+   * allocator at the plan's boundary and fails at its capacity.
+   */
+  readonly memoryPlan?: WasmMemoryPlan;
+  /**
    * The style a value is written as text in, which is the language's own: one
    * language writes a whole number with a marker the other has no word for.
    */
@@ -381,6 +422,8 @@ export function generateWasmHost(contract: FunctionContract, options: WasmHostOp
     }
   }
   const style = Number(fieldOf(options, "style") ?? 0);
+  const plan = fieldOf(options, "memoryPlan") as WasmMemoryPlan | undefined;
+  const memory = memorySetup(plan);
 
   const headerParts: string[] = [];
   const params = fieldOf(fn, "params") as readonly { readonly name: string; readonly type: string }[];
@@ -477,7 +520,7 @@ import * as os from "node:os";
 import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 ${hashes ? 'import { createHash } from "node:crypto";' : ""}
 
-${hostRuntimeSource(services)}
+${hostRuntimeSource(services, plan === undefined ? undefined : { dataBase: plan.dataBase, capacity: plan.capacity })}
 
 const [modulePath] = process.argv.slice(2);
 const functionName = ${JSON.stringify(functionName)};
@@ -487,7 +530,7 @@ function fail(message) {
   process.exit(2);
 }
 
-memory = new WebAssembly.Memory({ initial: 4 });
+memory = new WebAssembly.Memory({ initial: ${memory.initial} });
 textStyle = ${style};
 const module = new WebAssembly.Module(readFileSync(modulePath));
 const imports = { env: { memory, pow: Math.pow } };
@@ -496,16 +539,9 @@ const instance = new WebAssembly.Instance(module, imports);
 const entry = instance.exports[functionName];
 if (typeof entry !== "function") fail("the module does not export " + functionName);
 
-// The first address above everything the module owns. The module lays its
-// scratch and its pooled constants down at fixed low addresses and publishes
-// where they end, so a vector handed out here never writes over a limb of a
-// wide number in flight. A module that publishes nothing (an older one, or a
-// hand-written candidate) is given a page of its own, which is past anything
-// the lowering reserves.
-const published = instance.exports[${JSON.stringify(DATA_BASE_EXPORT)}];
-cursor = typeof published === "object" && published !== null && typeof published.value === "number"
-  ? published.value
-  : 65536;
+// The first address above everything the module owns: the plan's runtime
+// region, or the boundary a module without a plan publishes.
+${memory.cursor}
 let sink = 0;
 
 /* A function build reads no arguments: the vectors the host reads on standard
@@ -613,6 +649,8 @@ export interface WasmProgramHostOptions {
    * module reaches for and nothing else.
    */
   readonly services?: readonly string[];
+  /** The memory plan the compiler produced for the module. */
+  readonly memoryPlan?: WasmMemoryPlan;
   /** The style a value is written as text in, which is the language's own. */
   readonly style?: number;
   /** The name the module exports the entry of the program by. */
@@ -638,6 +676,8 @@ export function generateWasmProgramHost(options: WasmProgramHostOptions): string
     }
   }
   const style = Number(fieldOf(options, "style") ?? 0);
+  const plan = fieldOf(options, "memoryPlan") as WasmMemoryPlan | undefined;
+  const memory = memorySetup(plan);
   const serviceLines: string[] = [];
   for (const service of services) serviceLines[serviceLines.length] = `imports.env[${JSON.stringify(service)}] = ${service};`;
   const serviceImports = serviceLines.join("\n");
@@ -651,7 +691,7 @@ import * as os from "node:os";
 import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 ${hashes ? 'import { createHash } from "node:crypto";' : ""}
 
-${hostRuntimeSource(services)}
+${hostRuntimeSource(services, plan === undefined ? undefined : { dataBase: plan.dataBase, capacity: plan.capacity })}
 
 const [modulePath] = process.argv.slice(2);
 const entryName = ${JSON.stringify(String(fieldOf(options, "entry")))};
@@ -661,7 +701,7 @@ function fail(message) {
   process.exit(2);
 }
 
-memory = new WebAssembly.Memory({ initial: 4 });
+memory = new WebAssembly.Memory({ initial: ${memory.initial} });
 textStyle = ${style};
 const module = new WebAssembly.Module(readFileSync(modulePath));
 const imports = { env: { memory, pow: Math.pow } };
@@ -670,14 +710,9 @@ const instance = new WebAssembly.Instance(module, imports);
 const entry = instance.exports[entryName];
 if (typeof entry !== "function") fail("the module does not export " + entryName);
 
-/* The first address above everything the module owns. The module lays its
-   scratch and its pooled constants down at fixed low addresses and publishes
-   where they end, so a value the runtime hands out here never writes over a
-   limb of a wide number in flight. */
-const published = instance.exports[${JSON.stringify(DATA_BASE_EXPORT)}];
-cursor = typeof published === "object" && published !== null && typeof published.value === "number"
-  ? published.value
-  : 65536;
+/* The first address above everything the module owns: the plan's runtime
+   region, or the boundary a module without a plan publishes. */
+${memory.cursor}
 
 /* The arguments the program was given: the ones the host was started with,
    past the host itself and the module it runs. */

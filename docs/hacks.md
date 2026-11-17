@@ -26,21 +26,6 @@ in one place, and so nobody mistakes them for principles.
 Until the native build can talk to a model, the fixed-point machinery is a
 measurement harness rather than a working self-hosted compiler.
 
-## WebAssembly memory by decree
-
-- `src/compiler/toolchain/ir-wasm.ts:452-477` — `WIDE_DATA_BASE = 4096` ("a page
-  is 65536 bytes and the import asks the host for one, so everything below this
-  is addressable whatever the host allocated") and `SCRATCH_LIMIT = 65536`.
-- `src/compiler/toolchain/wasm-host-runtime.ts:1078-1086` — the host starts its
-  cursor at `65536` and must import exactly one page for the convention to hold.
-- `docs/specs/wasm.md:282-288` — the module is lowered twice: once to discover
-  its imports and scratch needs, once to write calls at the resulting indexes.
-  This relies on "the same lowering over the same input" agreeing both times.
-
-Two modules must agree on hard-coded numbers with no shared declaration, and a
-deferred, duplicated computation is held together by convention rather than by
-structure.
-
 ## Heuristics that decide correctness-adjacent outcomes
 
 - `src/compiler/semantics/restructure.ts:72-94` — `CALL_COST = 12`,
