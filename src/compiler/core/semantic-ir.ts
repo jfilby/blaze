@@ -72,7 +72,14 @@ function nameOf(type: SemanticType): PrimitiveTypeName {
 }
 
 function ofOf(type: SemanticType): TypeExpr | null {
-  return (type as unknown as Record<string, unknown>)["of"] as TypeExpr | null;
+  if (type === undefined || type === null) return null;
+  const of = (type as unknown as Record<string, unknown>)["of"];
+  // A reference written without an element is the unshaped `ref<any>`: its
+  // missing `of` and a written `of: null` are the same type. Reading the absent
+  // one as `undefined` made it print as `ref<any>` yet fail every rule that
+  // asks whether it is, so a dynamic value was refused beside a string or a
+  // number the language lets it be read as.
+  return of === undefined ? null : of as TypeExpr | null;
 }
 
 export function isTextType(type: SemanticType): type is TextType {
@@ -352,6 +359,10 @@ export function convertibleTo(from: SemanticType, to: SemanticType): boolean {
   // the same reading the language gives `Number(v)` and `+v`, and a parsed
   // document read at a number is that reading.
   if (isNumber(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
+  // A dynamic value may hold a truth, so reading one as a bool is the same
+  // reading the runtime gives a value it holds when a body asks a yes/no
+  // question of it (`JSON.value === true`).
+  if (isBoolean(to) && kindOf(from) === "ref" && ofOf(from) === null && nameOf(from) === undefined) return true;
   if (isNumber(from) && isNumber(to)) {
     if (!isWideType(from)) return true;
     return isWideType(to);

@@ -86,6 +86,7 @@ import {
   TEXT,
   compoundAsBinary,
   commonNumber,
+  convertibleTo,
   hasCall,
   isReference,
   isSequence,
@@ -2266,7 +2267,15 @@ class FunctionBody {
     }
     if (EQUALITY.includes(op)) {
       const text = isText((fieldOfValue(left, "value") as SemanticValue).type) || isText((fieldOfValue(right, "value") as SemanticValue).type);
-      if (text && !(isText((fieldOfValue(left, "value") as SemanticValue).type) && isText((fieldOfValue(right, "value") as SemanticValue).type))) {
+      // A value the runtime holds dynamically is read as text the way an
+      // assignment to a string reads it, so a dynamic value beside a string is
+      // a text comparison and not a type disagreement. The conversion rules are
+      // the one place that says which dynamic reads are real.
+      const leftText = isText((fieldOfValue(left, "value") as SemanticValue).type) ||
+        convertibleTo((fieldOfValue(left, "value") as SemanticValue).type, TEXT);
+      const rightText = isText((fieldOfValue(right, "value") as SemanticValue).type) ||
+        convertibleTo((fieldOfValue(right, "value") as SemanticValue).type, TEXT);
+      if (text && !(leftText && rightText)) {
         throw this.error(
           `"${op}" compares a ${typeText((fieldOfValue(left, "value") as SemanticValue).type)} and a ${typeText((fieldOfValue(right, "value") as SemanticValue).type)}`,
           line,
@@ -3036,6 +3045,10 @@ class FunctionBody {
     if (isWideType(left.type)) return left.type;
     if (isWideType(right.type)) return right.type;
     if (typeEquals(left.type, right.type)) return left.type;
+    // A truth beside a dynamic value is compared as a truth: the dynamic side
+    // is read the way the runtime reads one, which `convertibleTo` states.
+    if (isBoolean(left.type) && convertibleTo(right.type, BOOLEAN)) return BOOLEAN;
+    if (isBoolean(right.type) && convertibleTo(left.type, BOOLEAN)) return BOOLEAN;
     return commonNumber(left.type, right.type) ?? F64;
   }
 

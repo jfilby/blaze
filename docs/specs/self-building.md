@@ -41,7 +41,7 @@ or one language capability that the rung below it does not need.
 |---|---|---|
 | 0 | `blaze --help`, `blaze projects` | argv, exit status, stdout and stderr, and reading a directory |
 | 1 | `blaze ir` on a project | the frontend, the contract phase, the semantic IR and JSON |
-| 2 | `blaze build --model replay` on a library | code generation, the assembler, the linker and spawning a toolchain |
+| 2 | `blaze build` on a library | code generation, the assembler, the linker and spawning a toolchain |
 | 3 | `blaze build` on a program | the program body, the runtime and running the delivered binary |
 | 4 | `blaze build` on `src/compiler` | the whole compiler, including its own module graph |
 
@@ -69,8 +69,11 @@ The pipeline the sources are written for is:
 The self-build uses the `machine` backend (C and the assembler/linker), the
 runtime in `runtime/abi.ts`, and the C toolchain. A native compiler binary is a
 program the compiler builds from this tree with `src/compiler/blaze.toml`; the
-project maps `#host/model` to the replay transport and `#host/platform` to the
-native adapter.
+project maps `#host/model` to the native adapter and `#host/platform` to the
+native adapter. Neither mapping needs a model: a build with no `[model]`, no
+`--model` and no `AI_MODEL` runs the rules alone, lowers the IR it resolved,
+verifies it and reviews nothing. Provider review, replay included, is an
+optional input to a build and never a prerequisite for self-building.
 
 ### The host boundary
 
@@ -222,8 +225,9 @@ a clean checkout; the fixed point test then compares stage 2 and stage 3.
   oracle is `node:test`, which the native runtime does not need to carry.
 - `blazeup` and `src/optimizer`. They are a separate package and a separate
   program.
-- Every model provider. The native compiler needs the replay path and one HTTP
-  transport; the rest can stay behind the Node adapter until later.
+- Every model provider. The native compiler needs no model transport at all:
+  a build that compiles the compiler runs the rules alone. Provider review,
+  including replay fixtures, stays an optional input to a build.
 - Incremental builds, if a self-build can be made deterministic without them.
   They are a performance feature, not a correctness one, and the first fixed
   point may run with `--recompile`.
@@ -232,8 +236,9 @@ a clean checkout; the fixed point test then compares stage 2 and stage 3.
 
 ## How progress is measured
 
-The only useful measure is the gap report from `test/self-host-gap.ts`. It
-answers three questions at once:
+The measure that matters is a native compiler compiling the compiler. The gap
+report from `test/self-host-gap.ts` is a diagnostic for that work, not a target
+or a budget: it answers three questions at once:
 
 - how many constructs the frontend still refuses, grouped by the reason it
   gives;
@@ -276,13 +281,18 @@ binary is made of.
 - **The text codecs are markers.** `TextEncoder`/`TextDecoder` are tracked at
   compile time; their values are the zero they hold and never a contract type.
 - **Refusals are the queue.** A gap in the frontend or the IR is reported with
-  a reason and a remedy; the report's count is the budget, not a target.
+  a reason and a remedy. The report's count is a diagnostic for the queue, not
+  a budget: progress is a native binary compiling the sources, not a smaller
+  number in a table.
 
 ## Where the self-build stands
 
-The gap report is at zero refusals: the frontend reads all 100 sources of the
-compiler; the tests and benchmarks are outside the binary. The build reaches the
-contract phase of every module in order, and these slices have landed:
+The gap report is at zero refusals: the frontend reads all 106 sources of the
+compiler; the tests and benchmarks are outside the binary. The contract and IR
+phases now read the functions that used to stop a self-build — `verifyCandidate`
+and the wasm backend's `Body` methods among them — and each fix has a small
+regression test in `test/self-build-regressions.test.ts`. These slices have
+landed:
 
 - the contract evaluator holds integers in a sign-and-magnitude 256-bit value,
   with the wraps, shifts, comparisons, reductions and the exact
@@ -313,6 +323,14 @@ contract phase of every module in order, and these slices have landed:
 - deep freezing moved behind the host boundary (`freezeValue`): the Node
   adapter keeps contracts immutable and a compiled binary, which has no freeze
   state, treats the call as a no-op.
+- the type rules agree with the value model: a reference written without an
+  element is the unshaped `ref<any>` whether its `of` field is absent or null,
+  and a value the runtime holds is read as the text, number or truth it is
+  compared with; the comparisons ask the same conversion rules an assignment
+  asks. A counted loop's index is in scope in its bound and its step in the
+  object pass, the frontend reduction and the IR validator, and an arrow's
+  boxed capture selects the declaration of the name in the scope the arrow
+  stands in.
 
 The object layout pass and the C driver build: both read their statements,
 shapes, calls, callbacks and request records through keyed reads, and the

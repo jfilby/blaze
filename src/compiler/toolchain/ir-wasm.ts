@@ -1386,27 +1386,32 @@ class Body {
    * is the one a module would be left holding. The test is asked of it at run
    * time like any other value's.
    */
-  private known(value: SemanticValue): boolean | null {
+  private known(value: SemanticValue): number {
+    // A tri-state carried as a number: 0 is "the compiler cannot know", 1 is
+    // true and 2 is false. A nullable boolean would be nicer to write, but the
+    // language states a return as one type and `null` is not one a body can
+    // answer where a bool is declared, so the answer is a number the caller
+    // reads without an optional value.
     const kind = String(fieldOf(value,"k"));
     if (kind === "bool") {
-      if (String(fieldOf(value,"value")) === "true") return true;
-      return false;
+      if (String(fieldOf(value,"value")) === "true") return 1;
+      return 2;
     }
-    if (kind !== "const") return null;
+    if (kind !== "const") return 0;
     const type = fieldOf(value,"type") as SemanticType;
-    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) return null;
+    if (String(fieldOf(type,"kind")) === "primitive" && isWide(String(fieldOf(type,"name")) as never)) return 0;
     const held = Number(fieldOf(facts(type),"held"));
     const text = String(fieldOf(value,"text"));
     if (held === I32) {
-      if ((Number(text) | 0) !== 0) return true;
-      return false;
+      if ((Number(text) | 0) !== 0) return 1;
+      return 2;
     }
     if (held === I64) {
-      if (Number(text) !== 0) return true;
-      return false;
+      if (Number(text) !== 0) return 1;
+      return 2;
     }
-    if (Number(text) !== 0) return true;
-    return false;
+    if (Number(text) !== 0) return 1;
+    return 2;
   }
 
   /**
@@ -1423,7 +1428,7 @@ class Body {
   private address(of: SemanticValue, index: SemanticValue, type: SemanticType): void {
     this.value(of, ADDRESS);
     this.value(index, ADDRESS);
-    const shift = fieldOf(facts(type),"shift");
+    const shift = Number(fieldOf(facts(type),"shift"));
     if (shift > 0) {
       this.i32(shift);
       this.op(0x74);
@@ -1642,7 +1647,8 @@ class Body {
         this.localAt(pointer);
         this.i32Addr(this.poolText((fieldOf(layout,"fields") as { name: string }[]).map((field) => `${String(fieldOf(field,"name"))}\0`).join("") + "\0"));
         this.callService("blaze_rt_object_describe");
-        for (const field of fieldOf(value,"fields")) {
+        const fields = fieldOf(value,"fields") as readonly { name: string; value: unknown }[];
+        for (const field of fields) {
           const entry = (fieldOf(layout,"fields") as { name: string; offset: number }[]).find((each) => String(fieldOf(each,"name")) === String(fieldOf(field,"name")));
           if (entry === undefined) {
             unreachable(`write the field "${fieldOf(field,"name")}" of the layout "${fieldOf(value,"layout")}"`, this.name, this.candidate);
@@ -3060,8 +3066,8 @@ class Body {
         // the block of its own that an `if` arm is, and a jump out of it is
         // the same depth it was before the arm existed.
         const known = this.known((fieldOf(statement, "condition") as SemanticValue));
-        if (known !== null) {
-          const taken = known ? (fieldOf(statement, "then") as SemanticBlock | null) : (fieldOf(statement, "otherwise") as SemanticBlock | null);
+        if (known !== 0) {
+          const taken = known === 1 ? (fieldOf(statement, "then") as SemanticBlock | null) : (fieldOf(statement, "otherwise") as SemanticBlock | null);
           if (taken !== null) this.block(taken, null);
           return;
         }

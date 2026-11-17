@@ -800,8 +800,11 @@ function valueProblems(tree: Tree): string[] {
 
     for (const value of statementValues(statement)) {
       const visible = fieldOf(scope, "visible") as Set<string>;
+      // A counted loop's bound and step are its own: the index is in scope in
+      // both, where a `let` of the same name written inside the body is not.
+      const inScope = statement.k === "loop" ? new Set<string>([...visible, ...loopSlots(fieldOf(statement, "loop") as SemanticLoop).map((slot) => String(fieldOf(slot, "name")))]) : visible;
       for (const read of localNames(value)) {
-        if (!visible.has(read)) problems.push(`${prefix}"${read}" is not declared where it is read`);
+        if (!inScope.has(read)) problems.push(`${prefix}"${read}" is not declared where it is read`);
       }
       problems.push(...readTypeProblems(prefix, value, scope));
     }
@@ -954,6 +957,11 @@ function comparableTo(side: SemanticValue, operand: SemanticType): boolean {
   if (isTextType(operand) && isReference(side.type)) return true;
   if (isNumber(side.type) && isNumber(operand)) return true;
   if (isSequence(side.type) && isReference(operand)) return true;
+  // A value the runtime holds dynamically is read at the operand's type the
+  // same way an assignment to that type reads it. The conversion rules already
+  // say which reads are real (a dynamic value as text or as a number), so the
+  // comparison asks them rather than repeating a narrower list here.
+  if (convertibleTo(side.type, operand)) return true;
   return false;
 }
 

@@ -24801,13 +24801,15 @@ class BodyAnalysis {
       );
     }
 
-    const from = this.serialize((fieldOf(statement, "from") as Expression), null, (fieldOf(statement, "line") as number));
-    const to = this.serialize((fieldOf(statement, "to") as Expression), null, (fieldOf(statement, "line") as number));
-    const context: LoopContext = {
-      variable: statement.variable,
-      lo: from,
-      hiExclusive: (fieldOf(statement, "inclusive") as boolean) ? `(${to} + 1)` : to,
-    };
+    // The index stands in its own bound: `for (let i = 0; i < n && a[i] > 0; i += 1)`
+    // reads `i` in the condition. Serializing the ends without the index bound
+    // refused a reduction the body itself states, so the context is given to
+    // both ends and then carries the ends the body's range is read with.
+    const context: LoopContext = { variable: statement.variable, lo: "", hiExclusive: "" };
+    const from = this.serialize((fieldOf(statement, "from") as Expression), context, (fieldOf(statement, "line") as number));
+    const to = this.serialize((fieldOf(statement, "to") as Expression), context, (fieldOf(statement, "line") as number));
+    context.lo = from;
+    context.hiExclusive = (fieldOf(statement, "inclusive") as boolean) ? `(${to} + 1)` : to;
 
     const body = this.serialize(inner.value, context, (fieldOf(inner, "line") as number));
     const reduceOperator = inner.op === "*=" ? "product" : "sum";
