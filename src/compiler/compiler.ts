@@ -2578,16 +2578,17 @@ export async function runBuild(
         }
         generationFunctions[key] = generationValue;
       }
-      const candidates = JSON.parse(JSON.stringify(candidateValues)) as Record<string, Candidate[]>;
-      const verification = JSON.parse(JSON.stringify(verificationValues)) as Record<string, VerificationResult[]>;
-      const benchmark = JSON.parse(JSON.stringify(benchmarkValues)) as Record<string, BenchmarkResult[]>;
-      const selected = JSON.parse(JSON.stringify(selectedValues)) as Record<string, string>;
-      await storeWrite(store, candidatesPath, candidates);
+      // The maps above are built fresh for this round and nothing writes to
+      // them after it. A store write serialises before it returns, so the file
+      // is already a snapshot of the round: copying each map with a stringify
+      // and a parse only to stringify it again on the way to disk cost five
+      // whole-tree copies per round and bought no isolation.
+      await storeWrite(store, candidatesPath, candidateValues);
       await storeWrite(store, generationPath, {
         model: String((build as unknown as Record<string, unknown>)["model"]),
         modelConfig: String((build as unknown as Record<string, unknown>)["modelConfig"]),
         compilerVersion: COMPILER_VERSION,
-        functions: JSON.parse(JSON.stringify(generationFunctions)),
+        functions: generationFunctions,
         modelDurationNs: String(
           generated.reduce((total: number, entry) => {
             const resultFields = (entry as unknown as Record<string, unknown>)["result"] as Record<string, unknown>;
@@ -2595,9 +2596,9 @@ export async function runBuild(
           }, 0),
         ),
       });
-      await storeWrite(store, verificationPath, verification);
-      await storeWrite(store, benchmarkPath, benchmark);
-      return selected;
+      await storeWrite(store, verificationPath, verificationValues);
+      await storeWrite(store, benchmarkPath, benchmarkValues);
+      return selectedValues;
     };
 
     // A function whose contract states what it does is not checked on its own:

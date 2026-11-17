@@ -17,7 +17,7 @@
  * the program, so its decisions can be tested without running a model.
  */
 
-import { hashText } from "../core/json-store.ts";
+import { hashValue } from "../core/json-store.ts";
 import type { RepairBudget } from "../core/types.ts";
 
 /** The observable state a repair round produced. */
@@ -32,7 +32,7 @@ export interface RepairState {
 export function stateFingerprint(state: RepairState): string {
   const names = Object.keys(state.implementations).sort();
   const parts = names.map((name) => `${name}=${state.implementations[name]}`);
-  return hashText(JSON.stringify({ parts, mismatch: state.mismatch ?? null }));
+  return hashValue({ parts, mismatch: state.mismatch ?? null });
 }
 
 /** What a round says should happen next. */

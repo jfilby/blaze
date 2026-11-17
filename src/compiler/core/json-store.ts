@@ -11,8 +11,10 @@
  * apart when the same field name lives in more than one layout.
  */
 
-import { createHash, readFile, mkdir, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, resolveFrom, sep, syncFile, writeFile, dirname } from "./platform.ts";
+import { createHash, appendFile, readFile, mkdir, readdirEntries, rename, rm, isAbsolute, isFilePath, normalize, processId, relative, resolve, resolveFrom, sep, syncFile, writeFile, dirname } from "./platform.ts";
 import { CompilerError } from "./errors.ts";
+
+export { hashValue } from "./structural-hash.ts";
 
 function fieldOf(value: unknown, key: string): any {
   return (value as Record<string, unknown>)[key];
@@ -26,13 +28,105 @@ export function serializeJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+/**
+ * The text `JSON.stringify(value, null, 2)` would write, in pieces.
+ *
+ * A build record can hold every candidate's full IR text. Writing it used to
+ * build the whole pretty-printed string in one allocation before the file was
+ * touched. Walking the value and yielding its parts lets the store flush a
+ * record in bounded batches, so the peak cost is a batch rather than the whole
+ * record. Scalars are formatted by JSON.stringify itself, which keeps the
+ * escaping and the number rules identical to the one-string form.
+ */
+export function* jsonChunks(value: unknown): Generator<string> {
+  yield* chunksOf(value, 0, new Set<object>());
+}
+
+function indent(level: number): string {
+  return "  ".repeat(level);
+}
+
+function* chunksOf(value: unknown, level: number, active: Set<object>): Generator<string> {
+  if (typeof value === "object" && value !== null) {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      yield* chunksOf(toJSON.call(value), level, active);
+      return;
+    }
+  }
+  if (value === null) {
+    yield "null";
+    return;
+  }
+  const type = typeof value;
+  if (type === "string" || type === "number" || type === "boolean") {
+    yield JSON.stringify(value);
+    return;
+  }
+  if (type === "bigint") throw new TypeError("Do not know how to serialize a BigInt");
+  if (type === "undefined" || type === "function" || type === "symbol") {
+    // A member of this kind is left out of an object and written as null in an
+    // array; the object writer below filters members, the array writer asks for
+    // this value directly.
+    yield "null";
+    return;
+  }
+
+  const object = value as object;
+  if (object instanceof String || object instanceof Number || object instanceof Boolean) {
+    yield JSON.stringify(object.valueOf());
+    return;
+  }
+  if (active.has(object)) throw new TypeError("Converting circular structure to JSON");
+  active.add(object);
+  try {
+    if (Array.isArray(object)) {
+      if (object.length === 0) {
+        yield "[]";
+        return;
+      }
+      yield "[\n";
+      for (let index = 0; index < object.length; index += 1) {
+        if (index > 0) yield ",\n";
+        yield indent(level + 1);
+        yield* chunksOf(index in object ? object[index] : null, level + 1, active);
+      }
+      yield "\n";
+      yield indent(level);
+      yield "]";
+      return;
+    }
+    const members = Object.keys(object).filter((key) => {
+      const member = (object as Record<string, unknown>)[key];
+      return member !== undefined && typeof member !== "function" && typeof member !== "symbol";
+    });
+    if (members.length === 0) {
+      yield "{}";
+      return;
+    }
+    yield "{\n";
+    for (let index = 0; index < members.length; index += 1) {
+      if (index > 0) yield ",\n";
+      yield indent(level + 1);
+      yield JSON.stringify(members[index]);
+      yield ": ";
+      yield* chunksOf((object as Record<string, unknown>)[members[index]], level + 1, active);
+    }
+    yield "\n";
+    yield indent(level);
+    yield "}";
+  } finally {
+    active.delete(object);
+  }
+}
+
+/** How much write text is gathered before it goes to the file. */
+const WRITE_BATCH_BYTES = 64 * 1024;
+
 export function hashText(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-export function hashValue(value: unknown): string {
-  return hashText(JSON.stringify(value));
-}
 
 /**
  * Distinguishes the temporary files of writes that overlap. It counts every
@@ -124,7 +218,17 @@ export async function storeWrite<T>(store: JsonStore, relativePath: string, valu
   // exists.
   const temporary = `${file}.${processId()}.${temporaryWrites++}.tmp`;
   try {
-    await writeFile(temporary, serializeJson(value), "utf8");
+    await writeFile(temporary, "", "utf8");
+    let batch = "";
+    for (const chunk of jsonChunks(value)) {
+      batch += chunk;
+      if (batch.length >= WRITE_BATCH_BYTES) {
+        await appendFile(temporary, batch, "utf8");
+        batch = "";
+      }
+    }
+    if (batch.length > 0) await appendFile(temporary, batch, "utf8");
+    await appendFile(temporary, "\n", "utf8");
     await syncPath(temporary);
     await rename(temporary, file);
     await syncPath(dirname(file));
