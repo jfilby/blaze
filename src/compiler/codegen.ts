@@ -668,8 +668,10 @@ export function foldedCandidate(
   // resolved from the source and has not been through them yet.
   const callees = new Map(Object.entries(functions));
   const inlined = inlineCalls(parsed, { functions: callees });
-  candidate.text = printSemanticFunction(optimizeSemanticFunction(inlined, callees));
-  return candidate;
+  // The artifact a fold produced is a new candidate: the one it was given is
+  // the resolved IR the build records, and rewriting it in place would make a
+  // second fold of the same candidate read what the first one wrote.
+  return { ...candidate, text: printSemanticFunction(optimizeSemanticFunction(inlined, callees)) };
 }
 
 /**
