@@ -2598,7 +2598,11 @@ export async function runBuild(
       });
       await storeWrite(store, verificationPath, verificationValues);
       await storeWrite(store, benchmarkPath, benchmarkValues);
-      return selectedValues;
+      // The map is built without a prototype so a function named `__proto__`
+      // is an entry rather than a prototype write. The caller's record is an
+      // ordinary object; copying the entries out keeps that distinction from
+      // leaking into the build outcome automation reads.
+      return { ...selectedValues };
     };
 
     // A function whose contract states what it does is not checked on its own:

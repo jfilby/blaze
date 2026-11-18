@@ -1009,7 +1009,7 @@ async function buildCandidate(
           textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
           objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
           threads: fieldOf(built, "threads") as Threading[],
-          verification: fieldOf(verification, "verification") as VerificationResult,
+          verification,
         },
         timing: null,
       };
@@ -1026,7 +1026,7 @@ async function buildCandidate(
         textSizeBytes: Number(fieldOf(built, "textSizeBytes")),
         objectSizeBytes: Number(fieldOf(built, "sizeBytes")),
         threads: fieldOf(built, "threads") as Threading[],
-        verification: fieldOf(verification, "verification") as VerificationResult,
+        verification,
       },
       timing: {
         contract,
