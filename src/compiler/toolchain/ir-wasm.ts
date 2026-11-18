@@ -4896,7 +4896,7 @@ function readFunction(body: Uint8Array): string[] {
     const start = at;
     const opcode = body[at] ?? 0;
     at += 1;
-    const instruction = INSTRUCTIONS[String(opcode)];
+    const instruction = INSTRUCTIONS[`0x${opcode.toString(16).padStart(2, "0")}`];
     if (instruction === undefined) {
       lines.push(`${start.toString(16).padStart(4, "0")}  (unknown opcode 0x${opcode.toString(16)})`);
       break;
