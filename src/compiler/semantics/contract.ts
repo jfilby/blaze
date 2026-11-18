@@ -1849,7 +1849,10 @@ function wholeToBigInt(value: Whole): any {
   // A wide whole number has no sign of its own: a negative value leaves the
   // contract as the host number it is, the same value `formatWhole` prints.
   if (!value.negative) return magnitude;
-  return -wholeToNumber(value);
+  // `wholeToNumber` already reads the sign from `formatWhole`, so negating it
+  // here turned a negative result into the positive magnitude and made a
+  // contract of MIN_SAFE_INTEGER expect its own negation.
+  return wholeToNumber(value);
 }
 
 /** Postconditions that the given result violates. */
