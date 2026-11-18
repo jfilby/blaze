@@ -1086,7 +1086,10 @@ function foldValue(value: SemanticValue): SemanticValue | null {
         // not written out has no type of its own to read, so the type of the
         // comparison is the only thing that says whether the answer is obvious.
         if (numberType(fieldOf(value, "right") as SemanticValue) === null) return null;
-        if (!isInteger((fieldOf(value, "operand") as SemanticValue).type)) return null;
+        // A comparison carries `left` and `right`, not an `operand`: reading a
+        // field the value does not have left the operand type undefined and the
+        // whole-number fold never taken, so a loop guard stayed a comparison.
+        if (!isInteger((fieldOf(value, "left") as SemanticValue).type)) return null;
         if (valueKey(fieldOf(value, "left") as SemanticValue) !== valueKey(fieldOf(value, "right") as SemanticValue)) return null;
         if (String(fieldOf(value, "op")) === "eq" || String(fieldOf(value, "op")) === "ge" || String(fieldOf(value, "op")) === "le") {
           return { k: "bool", type: BOOL, value: true };
