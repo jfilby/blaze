@@ -522,7 +522,7 @@ function builtinExpression(name: string, args: string[]): string {
       // call that would otherwise run twice.
       return `({ double blaze_operand = ${args[0]}; double blaze_rounded = floor(blaze_operand + 0.5); (blaze_rounded == 0.0 && blaze_operand < 0.0) ? -0.0 : blaze_rounded; })`;
     case "blaze_rt_number_same":
-      return `blaze_rt_number_same(${args[0]}, blaze_value_from_dynamic(${args[1]}))`;
+      return `blaze_rt_number_same(blaze_value_from_dynamic(${args[0]}), blaze_value_from_dynamic(${args[1]}))`;
     case "blaze_rt_text_length":
       return `((double)blaze_rt_text_length(blaze_value_from_dynamic(${args[0]})))`;
     case "encodeURIComponent":
