@@ -18057,6 +18057,15 @@ class TypeScriptParser {
       const settled = this.narrowed.get(path);
       if (settled !== undefined) return settled;
     }
+    // A list declared at a named record keeps that name when it is read: the
+    // shape alone names the element's fields but not the declaration, which
+    // would lower the element to an unshaped handle and disagree with the
+    // block the source actually built.
+    if (value.k === "ident") {
+      const declared = this.valueTypes.get(value.name);
+      const element = declared !== undefined && declared.kind === "slice" ? fieldOf(declared, "of") as TypeExpr | undefined : undefined;
+      if (element !== undefined && element.kind === "ref" && fieldOf(element, "name") !== undefined) return declared as TypeExpr;
+    }
     // A value chosen between two arms is the type the arms have in common,
     // read from what each arm answers. `a.trim() || b.trim()` is a text even
     // though the scope holds no name for either answer, so the method written
