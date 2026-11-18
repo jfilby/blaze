@@ -11441,6 +11441,27 @@ class Machine {
       this.runtime("_argv_count");
       return;
     }
+    if (callee === "blaze_rt_state_get") {
+      // A module value held in a runtime cell is read by the key the module
+      // wrote for it; the answer is the number the cell holds.
+      this.at(argument, TEXT);
+      const held = this.hold(TEXT, "blaze_state_key");
+      this.store(held);
+      this.callSymbol("blaze_rt_state_get", [held], NUMBER);
+      return;
+    }
+    if (callee === "blaze_rt_state_set") {
+      // The cell is written once, the first time its getter runs: the key is
+      // text and the value is the dynamic word the module wrote for it.
+      this.at(args[0], TEXT);
+      const key = this.hold(TEXT, "blaze_state_key");
+      this.store(key);
+      this.at(args[1], ANY_TYPE);
+      const value = this.hold(NUMBER, "blaze_state_value");
+      this.store(value);
+      this.callSymbol("blaze_rt_state_set", [key, value], NUMBER);
+      return;
+    }
     if (callee === "argv") {
       this.at(argument, USIZE);
       this.code.movRegReg(RDI, RAX);
