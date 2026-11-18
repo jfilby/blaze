@@ -2978,8 +2978,15 @@ class FunctionBody {
     const valueValue = fieldOfValue(value, "value") as SemanticValue;
     const valueInferred = fieldOfValue(value, "inferred") as Inferred;
     if (isText(valueValue.type)) return { kind: "text", name, mutable: true, boxed: true };
-    const type =
+    const inferredType =
       annotation !== null && String(fieldOfValue(valueInferred, "kind")) !== "object" ? this.typeOf(annotation, line) : this.typeOf(valueInferred, line);
+    // A text codec is no value of its own: the name holds the zero it is, so
+    // the slot is a number even though the read was typed as the codec for the
+    // method written on the name — the same reading a closure capture gives it.
+    const type = inferredType.kind === "ref" &&
+      (inferredType.name === "__TextEncoder" || inferredType.name === "__TextDecoder")
+      ? F64
+      : inferredType;
     return this.slotOf(name, type, true);
   }
 
