@@ -360,7 +360,7 @@ function builtinExpression(name: string, args: string[]): string {
       // The name `typeof` answers for a value the read could not type: the
       // runtime holds the kind, and a value it does not hold is a number or a
       // text.
-      return `${RUNTIME_NAME}_type_of(${args[0]})`;
+      return `${RUNTIME_NAME}_type_of(blaze_value_from_dynamic(${args[0]}))`;
     case "envGet":
       return `${RUNTIME_NAME}_env_get(${args[0]})`;
     case "readTextFile":
@@ -1323,17 +1323,26 @@ class FunctionEmitter {
         isTextType(fieldOf(value,"type")) || String(fieldOf(value,"k")) === "text" ? `${RUNTIME_NAME}_box_string(${this.expression(value, TEXT, depth)})`
           : isNumber(fieldOf(value,"type")) ? `${RUNTIME_NAME}_box_number(${this.expression(value, NUMBER, depth)})`
             : this.expression(value, null, depth);
-      const tagged = written.includes("_box_string(")
-        ? `blaze_value_from_text(${written})`
-        : `blaze_value_from_dynamic(${written})`;
-      return `${RUNTIME_NAME}_to_text(blaze_value_from_dynamic(blaze_dynamic_from_value(${RUNTIME_NAME}_json_stringify_value(${tagged}))))`;
+      // A text is a C string at this point, which the runtime takes directly;
+      // the boxed form is a handle and `value_from_text` does not read one.
+      // A boxed text is a dynamic string the JSON writer reads as text; a
+      // registry string handle it is not.
+      const tagged = `blaze_value_from_dynamic(${written})`;
+      // The stringify entry takes and answers a tagged value, and `to_text`
+      // reads that answer directly: converting it down to a double and back
+      // only asks the registry to rebuild a handle it already had.
+      return `${RUNTIME_NAME}_to_text(${RUNTIME_NAME}_json_stringify_value(${tagged}))`;
     }
     // `JSON.parse(text)` reads a document as the dynamic value it holds. The
     // text crosses the wall as the pointer to its bytes, which the ABI carries
     // as the number a value is.
     if (String(fieldOf(call,"callee")) === "JSON.parse" && (fieldOf(call,"args") as SemanticValue[])[0] !== undefined) {
-      const text = this.expression((fieldOf(call,"args") as SemanticValue[])[0], isTextType(fieldOf((fieldOf(call,"args") as SemanticValue[])[0],"type")) ? TEXT : null, depth);
-      return `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(blaze_value_from_dynamic(${text})))`;
+      const argument = (fieldOf(call,"args") as SemanticValue[])[0];
+      const textual = isTextType(fieldOf(argument,"type")) || String(fieldOf(argument,"k")) === "text";
+      const text = this.expression(argument, textual ? TEXT : null, depth);
+      // A text argument is the bytes themselves, which the runtime takes as a
+      // C string; only a value already held crosses as a dynamic handle.
+      return `blaze_dynamic_from_value(${RUNTIME_NAME}_json_parse(${textual ? `blaze_value_c_text(${text})` : `blaze_value_from_dynamic(${text})`}))`;
     }
     const args: string[] = [];
     (fieldOf(call,"args") as SemanticValue[]).forEach((argument, index) => {

@@ -9549,6 +9549,9 @@ double blaze_rt_stream_is_tty(double stream) {
 BlazeValue blaze_rt_json_parse_from_handle(double handle) {
   return blaze_rt_json_parse(blaze_value_from_dynamic(handle));
 }
+double blaze_rt_json_parse_handle(double text) {
+  return blaze_dynamic_from_value(blaze_rt_json_parse(blaze_value_from_dynamic(text)));
+}
 BlazeValue blaze_rt_object_copy_from_handle(double handle) {
   return blaze_rt_object_copy(blaze_value_from_dynamic(handle));
 }

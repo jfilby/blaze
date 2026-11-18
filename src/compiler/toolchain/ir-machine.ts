@@ -11622,7 +11622,9 @@ class Machine {
     }
     if (callee === "JSON.parse" && argument !== undefined) {
       const text = this.dynamicArgument(argument);
-      this.callSymbol("blaze_rt_json_parse", [text], NUMBER);
+      // A handle is passed as the double it is; the runtime's handle-taking
+      // form turns it into the tagged value the parse entry reads.
+      this.callSymbol("blaze_rt_json_parse_handle", [text], NUMBER);
       this.dynamicResult();
       return;
     }
