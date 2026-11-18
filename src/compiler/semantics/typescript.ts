@@ -838,6 +838,13 @@ function resultType(value: Expression, scope: ReadonlyMap<string, TypeExpr>): Ty
       return value.type;
     case "invoke":
       return (fieldOf(value, "returns") as TypeExpr);
+    case "call": {
+      // A call answers the type the callee declares. A builtin's is in the
+      // builtin table; other calls carry the type the parser settled on them.
+      const builtin = builtinFor(value.name);
+      if (builtin !== null) return builtin.returns;
+      return (fieldOf(value, "returns") as TypeExpr | undefined) ?? ANY_TYPE;
+    }
     case "append":
       return ANY_TYPE;
     case "arrow":
@@ -1471,7 +1478,11 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
   // The names a body declares, which are not the file's however a field or a
   // parameter of the same spelling appears elsewhere. A field key is a name
   // followed by a colon, and the wider `localNames` set carries those too.
-  const bodyDeclarations = new Set<string>();
+  // The token positions of declarations written inside a body, which the scan
+  // of the file's own values must leave to the body. Recording the position
+  // rather than the name matters: a file-level `const total` is the file's even
+  // when a block in one of its functions declares a `total` of its own.
+  const bodyDeclarations = new Set<number>();
   {
     let depth = 0;
     for (let at = 0; at < tokens.length; at += 1) {
@@ -1482,7 +1493,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
 
       else if (depth > 0 && (token.text === "const" || token.text === "let" || token.text === "var")) {
         const name = tokens[at + 1];
-        if (name?.kind === "ident") bodyDeclarations.add(name.text);
+        if (name?.kind === "ident") bodyDeclarations.add(at);
       }
     }
   }
@@ -1539,7 +1550,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
       const name = (tokens[index + 1] as Token).text;
       // A name a body declares is that body's: the file's own scope does not
       // hold it, however the scan of the text reaches the declaration.
-      if (bodyDeclarations.has(name)) {
+      if (bodyDeclarations.has(index)) {
         index += 1;
         continue;
       }
@@ -1600,7 +1611,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
             open += 1;
           }
         }
-        if (tokens[open]?.text === "(" && !bodyDeclarations.has(name)) {
+        if (tokens[open]?.text === "(" && !bodyDeclarations.has(index)) {
           collections.set(name, { start: start + 1, end: open });
         }
       }
@@ -1610,7 +1621,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
       // the addition is not the one the source wrote.
       const written = collectionLiteral(tokens, start);
       if (written !== null) {
-        if (!mutable && !bodyDeclarations.has(name) && !mutatesCollection(tokens, name)) {
+        if (!mutable && !bodyDeclarations.has(index) && !mutatesCollection(tokens, name)) {
           const writtenValues = fieldOf(written, "values") as ConstantValue[] | null;
           found.set(name, writtenValues === null
             ? { keys: (fieldOf(written, "keys") as string[]), keyKind: (fieldOf(written, "keyKind") as "number" | "text"), exported: offered }
@@ -1631,7 +1642,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
         // An array whose every element is written down is the file's constant,
         // inlined where it is read, unless a body writes the name: a value a
         // program changes is state rather than a constant.
-        if (!mutable && whole === end && constantList(tokens, start, end - 1, (one) => found.has(one) || trusted.has(one)) && !bodyDeclarations.has(name) && !writtenName(tokens, name)) {
+        if (!mutable && whole === end && constantList(tokens, start, end - 1, (one) => found.has(one) || trusted.has(one)) && !bodyDeclarations.has(index) && !writtenName(tokens, name)) {
           found.set(name, { expression: { range: { start, end } }, exported: offered });
         } else {
           state.add(name);
@@ -1650,14 +1661,14 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
         // running program holds, and a function that reads it is read where the
         // program is.
         if (!mutable && object.all) {
-          if (!bodyDeclarations.has(name)) found.set(name, { fields: object.fields, exported: offered });
+          if (!bodyDeclarations.has(index)) found.set(name, { fields: object.fields, exported: offered });
         } else {
           state.add(name);
           initializers.set(name, { start, end });
           if (offered) exportedState.add(name);
           // The values are computed, but the names are written down: a
           // question about the keys is still one the source answers.
-          if (!bodyDeclarations.has(name) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
+          if (!bodyDeclarations.has(index) && !writtenName(tokens, name)) shapes.set(name, { names: object.names });
         }
         index = end;
         continue;
@@ -1675,7 +1686,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
       // one and is never written again is as constant as a `const`: a package
       // writes its pattern once at the top of the file and reads it in every
       // function, and a pattern is two texts rather than state.
-      if (!bodyDeclarations.has(name) && tokens[start]?.kind === "regex" && end === start + 1 && !writtenName(tokens, name)) {
+      if (!bodyDeclarations.has(index) && tokens[start]?.kind === "regex" && end === start + 1 && !writtenName(tokens, name)) {
         found.set(name, { expression: { range: { start, end } }, exported: offered });
         index = end + 1;
         continue;
@@ -1692,7 +1703,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
         // A module-level counter is a number the runtime holds in a cell:
         // `let temporaryWrites = 0` is the one shape this reads, because a
         // number is the value a global cell can hold.
-        if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !bodyDeclarations.has(name)) {
+        if (mutable && tokens[start]?.kind === "number" && end === start + 1 && !bodyDeclarations.has(index)) {
           // The id travels in IR text, where a word is letters, digits, `_`,
           // `$` and `.`; the path's separators are spelled out as underscores.
           numeric.set(name, `${path.replace(/[^A-Za-z0-9_$.]/g, "_")}__${name}`);
@@ -1700,7 +1711,7 @@ function scanConstants(tokens: readonly Token[], path: string): ScannedFile {
         const element = allocationElement(tokens, start);
         if (element !== null) allocations.set(name, element);
       }
-      else if (!bodyDeclarations.has(name)) {
+      else if (!bodyDeclarations.has(index)) {
         found.set(name, { expression: { range: { start, end } }, exported: offered, ...(construction ? { constructed: true } : {}) });
         // A value the file constructs is read where the file reads it, but a
         // module that imports it cannot read the construction: it crosses as
