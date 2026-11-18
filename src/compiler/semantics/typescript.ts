@@ -15808,6 +15808,7 @@ class TypeScriptParser {
     // loop the function the arrow lifted to is not inside.
     const liftedBefore = this.arrowLifts.length;
     const savedTypes = this.valueTypes;
+    const savedParameterNames = this.parameterNames;
     const savedDeclaredValues = this.declaredValues;
     const savedShapes = this.valueShapes;
     const savedClasses = this.valueClasses;
@@ -15818,6 +15819,7 @@ class TypeScriptParser {
     const savedLoops = this.loops;
     const savedTargets = this.breakTargets;
     this.valueTypes = new Map(savedTypes);
+    this.parameterNames = new Set();
     this.declaredValues = new Map(savedDeclaredValues);
     this.valueShapes = new Map(savedShapes);
     this.valueClasses = new Map(savedClasses);
@@ -15865,6 +15867,7 @@ class TypeScriptParser {
     this.pendingValues = new Set(savedPendingValues);
     arrowParams.forEach((param, at) => {
       this.valueTypes.set(param.name, param.type);
+      this.parameterNames.add(param.name);
       const paramShape = paramShapes[at] ?? null;
       if (paramShape !== null) (fieldOf(this, "valueShapes") as Map<string, ResolvedType>).set(param.name, paramShape);
       const paramFunction = paramFunctions[at] ?? null;
@@ -15944,6 +15947,7 @@ class TypeScriptParser {
     // names are still in scope.
     const inferredReturnsShape = statedShape === null ? this.resultShapeOf(body) : null;
     this.valueTypes = savedTypes;
+    this.parameterNames = savedParameterNames;
     this.declaredValues = savedDeclaredValues;
     this.valueShapes = savedShapes;
     this.valueClasses = savedClasses;
@@ -21483,9 +21487,10 @@ class TypeScriptParser {
       }
       // A constant of the file is the value it was written with: a compiled
       // function reads the value itself, because there is no environment for
-      // it to read the file's scope from.
+      // it to read the file's scope from. A parameter or local spelled like
+      // the constant binds that name in the body and keeps it its own.
       const constant = this.constants.get(token.text);
-      if (constant !== undefined) {
+      if (constant !== undefined && !this.parameterNames.has(token.text)) {
         const expanded = this.constantValue(token.text, (fieldOf(constant, "expression") as ConstantValue | undefined));
         if (expanded !== null) return expanded;
         // An object constant read whole is the literal the file wrote: a
