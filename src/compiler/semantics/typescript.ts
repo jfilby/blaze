@@ -24199,9 +24199,26 @@ const items: TypeExpr = { kind: "slice", of: (sequence as { of: TypeExpr }).of }
       this.expect(")");
       return { k: "buffer", element, values };
     }
-    const count = this.readExpression();
+    const first = this.readExpression();
+    if (this.accept(",")) {
+      // `new Float64Array(block, offset, length)` is a window of the block,
+      // not a new allocation: no bytes are copied, and the length is the one
+      // the source wrote rather than the block the window was taken of.
+      const offset = this.readExpression();
+      this.expect(",");
+      const count = this.readExpression();
+      this.expect(")");
+      const viewed: Expression = {
+        k: "buffer",
+        element,
+        values: [],
+        view: { of: first, offset, count },
+      };
+      this.expressionTypes.set(viewed, { kind: "slice", of: parseType(element) });
+      return viewed;
+    }
     this.expect(")");
-    return { k: "sized", element, count };
+    return { k: "sized", element, count: first };
   }
 
   /**
