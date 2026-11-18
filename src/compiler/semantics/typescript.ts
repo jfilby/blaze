@@ -1948,7 +1948,15 @@ function importedRenames(tokens: readonly Token[]): Map<string, string> {
  * own functions are handed what they read of the program around them.
  */
 function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean {
-  if (state.size === 0) return false;
+  // A numeric global is read through a cell call rather than a name in the
+  // state set, so the walk still has to run when the set is empty.
+  if (state.size === 0) {
+    let cell = false;
+    walkFunction(fn, () => {}, (name) => {
+      if (name === "blaze_rt_global_get" || name === "blaze_rt_global_set" || name === "blaze_rt_global_post_inc" || name === "blaze_rt_global_post_dec") cell = true;
+    });
+    return cell;
+  }
   // A name a function declares is its own only where the scope that declares it
   // is around the read: a parameter named like a value the program holds is the
   // parameter, and a name declared inside a block is that block's. A read no
