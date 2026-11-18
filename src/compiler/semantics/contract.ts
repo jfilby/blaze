@@ -1898,6 +1898,11 @@ export function comparisonTolerance(returns: TypeExpr, terms: number): number | 
 }
 
 export function valuesMatch(expected: Value, actual: Value, tolerance: number | null): boolean {
+  // A truth is not a number, even though the host would coerce one: a result a
+  // contract states as `1n` is not the boolean `true` a candidate printed.
+  if (typeof expected === "boolean" || typeof actual === "boolean") {
+    return typeof expected === "boolean" && typeof actual === "boolean" && expected === actual;
+  }
   const expectedWhole = isWhole(expected) ? expected : typeof expected === "bigint" ? wholeOfValue(expected) : null;
   const actualWhole = isWhole(actual) ? actual : typeof actual === "bigint" ? wholeOfValue(actual) : null;
   if (expectedWhole !== null || actualWhole !== null) {
