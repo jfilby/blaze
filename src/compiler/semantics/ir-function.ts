@@ -3057,10 +3057,12 @@ class FunctionBody {
 
   /** The type two values are compared as, which is the one number they share. */
   private operand(left: SemanticValue, right: SemanticValue): SemanticType {
-    // A wide side is the width the comparison is read at, and two values of one
-    // type are compared at that type: two truths are a question about truths.
-    if (isWideType(left.type)) return left.type;
-    if (isWideType(right.type)) return right.type;
+    // Two values of one type are compared at that type: two truths are a
+    // question about truths, and two wide numbers are compared by the kernel.
+    // A wide number beside a double is read as the double, though — the
+    // comparison is a machine word one, and the demotion of the wide number is
+    // the wrong this pair is diagnosed for rather than something to hide by
+    // naming the operand after the wide side.
     if (typeEquals(left.type, right.type)) return left.type;
     // A truth beside a dynamic value is compared as a truth: the dynamic side
     // is read the way the runtime reads one, which `convertibleTo` states.
