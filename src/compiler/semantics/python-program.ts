@@ -346,8 +346,8 @@ function programValue(one: PyValue, bindings: Bindings): ProgramValue {
         }
         let idx: number;
         const index = fieldOf(one, "index");
-        const indexLeft = fieldOf(index, "left");
-        const indexArgs = fieldOf(indexLeft, "args") as readonly { readonly k: string }[];
+        const indexLeft = fieldOf(index, "left") ?? {};
+        const indexArgs = (fieldOf(indexLeft, "args") as readonly { readonly k: string }[] | undefined) ?? [];
         const indexRight = fieldOf(index, "right");
         if (index.k === "number") {
           idx = Number(fieldOf(index, "text"));
