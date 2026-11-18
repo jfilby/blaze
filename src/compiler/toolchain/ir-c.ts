@@ -1619,6 +1619,16 @@ class FunctionEmitter {
           ` blaze_http_resp_body(${handle(0)}, (const unsigned char *) blaze_http_body_text, ${RUNTIME_NAME}_text_length(blaze_http_body_text));` +
           ` blaze_http_resp_complete(${handle(0)}); })`;
       }
+      case "http.createServer": {
+        // A lifted module initializer can name the server a program body
+        // starts. The driver starts the listening server itself; what the
+        // initializer's call answers is the handle of the callback it names.
+        // No function backend starts the server: the program driver does that
+        // where `server.listen` is written, so a lifted initializer's handle is
+        // never read. Naming the callback here would add an undefined link to a
+        // standalone probe of this function; no handle is the honest answer.
+        return "0.0";
+      }
       default:
         return null;
     }

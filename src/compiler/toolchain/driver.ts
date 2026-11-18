@@ -577,8 +577,11 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
       const name = this.bridgeName(symbol);
       // A reference is the address itself in the machine backend, and the
       // double a program holds one in in the C backend.
-      const request = this.lowering === "machine" ? "request" : "blaze_value_ref((void*)(request))";
-      const response = this.lowering === "machine" ? "response" : "blaze_value_ref((void*)(response))";
+      // The adapter hands raw request and response pointers; a C handler takes
+      // them as the bits of a double. They are not runtime blocks, so wrapping
+      // them as values asked the registry for a header they do not have.
+      const request = this.lowering === "machine" ? "request" : "(double)(uintptr_t)request";
+      const response = this.lowering === "machine" ? "response" : "(double)(uintptr_t)response";
       lines.push(
         `/* The bridge between the runtime and ${symbol}, which is called with the request and the response. */`,
         `static void ${name}(void *request, void *response) {`,
@@ -1373,14 +1376,14 @@ ${httpHeader}${httpDefault}${sqliteHeader}${tritonHeader}${objects === "" ? "" :
           // A handler of another file of the program: the driver links it and
           // hands the runtime the bridge it wrote for it, which is what the
           // runtime calls.
-          trampoline = `blaze_value_ref((void*)${this.bridgeName(String(cbSymbol))})`;
+          trampoline = `(double)(uintptr_t) ${this.bridgeName(String(cbSymbol))}`;
         } else if (cb !== undefined && cbKind === "functionRef" && typeof fieldOf(cb,"name") === "string") {
           // A handler the program wrote where the call is made is an arrow, and
           // one it named is called through a trampoline of its own: what calls
           // it is not a program, and passes it two values.
           trampoline = cbName.startsWith("__arrow_")
-            ? `blaze_value_ref((void*)(__arrow_trampoline_${cbName.slice("__arrow_".length)}))`
-            : `blaze_value_ref((void*)(__callback_${cbName}))`;
+            ? `(double)(uintptr_t) __arrow_trampoline_${cbName.slice("__arrow_".length)}`
+            : `(double)(uintptr_t) __callback_${cbName}`;
           // The runtime calls the handler with the request and the response
           // and nothing else, so the names the handler captured are left where
           // the trampoline reads them from.
