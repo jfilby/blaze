@@ -2058,7 +2058,9 @@ function evaluatedOnceProblems(tree: Tree): string[] {
       if (kind !== "logical" && kind !== "coalesce") return;
       const left = fieldOf(inner, "left") as SemanticValue;
       if (!hasCall(left)) return;
-      const callee = left.k === "call" ? String(fieldOf(left, "callee")) : "a function";
+      // A call in the IR is a value holding the call, not a value whose
+      // callee is a field of itself: the name sits one level in.
+      const callee = left.k === "call" ? String(fieldOf(fieldOf(left, "call"), "callee") ?? fieldOf(left, "callee")) : "a function";
       problems.push(`${prefix}${inner.k} decides on an arm that calls ${callee}, which is written twice`);
     });
   };
