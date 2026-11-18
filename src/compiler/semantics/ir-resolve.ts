@@ -6927,7 +6927,7 @@ class ProgramLowering {
       // only where it was stated: an ordinary call has no grid, and a property
       // holding `undefined` is not the same value as one that says nothing
       // when the IR is compared against what the text reads back.
-      grid: fieldOf(call, "grid") === undefined ? undefined : this.value(fieldOf(call, "grid") as DraftValue, null, line),
+      ...(fieldOf(call, "grid") === undefined ? {} : { grid: this.value(fieldOf(call, "grid") as DraftValue, null, line) }),
     };
   }
 

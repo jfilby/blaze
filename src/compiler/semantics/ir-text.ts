@@ -438,7 +438,8 @@ export function printSemanticValue(value: SemanticValue): string {
     case "length":
       return `[length[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)}]`;
     case "element":
-      return `[element[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)} ${printSemanticValue(fieldOf(value, "index") as SemanticValue)}]`;
+      const length = fieldOf(value, "length") as SemanticValue | undefined;
+      return `[element[${typeText(fieldOf(value, "type") as SemanticType)}] ${printSemanticValue(fieldOf(value, "of") as SemanticValue)} ${printSemanticValue(fieldOf(value, "index") as SemanticValue)}${length === undefined ? "" : ` ${printSemanticValue(length)}`}]`;
     case "buffer": {
       const type = typeText(fieldOf(value, "type") as SemanticType);
       const element = typeText(fieldOf(value, "element") as SemanticType);
@@ -1434,8 +1435,15 @@ class IrScanner {
       }
       case "length":
         return this.closing(bracketed, { k: "length", type: this.typed(), of: this.value() });
-      case "element":
-        return this.closing(bracketed, { k: "element", type: this.typed(), of: this.value(), index: this.value() });
+      case "element": {
+        const type = this.typed();
+        const of = this.value();
+        const index = this.value();
+        // An element of a buffer whose length is settled at read time carries
+        // that length, which the backends use for the bounds they emit.
+        const length = this.more() ? this.value() : undefined;
+        return this.closing(bracketed, { k: "element", type, of, index, ...(length === undefined ? {} : { length }) });
+      }
       case "unary": {
         const op = this.unaryOp();
         return this.closing(bracketed, { k: "unary", op, type: this.typed(), operand: this.value() });
