@@ -6,7 +6,7 @@
  * asked of the lists themselves rather than of a table derived from them.
  */
 
-import { RUNTIME_ABI, TEXT_SYMBOLS, WIDE_SYMBOLS } from "./abi.ts";
+import { HANDLE_WRAPPER_SYMBOLS, RUNTIME_ABI, TEXT_SYMBOLS, WIDE_SYMBOLS } from "./abi.ts";
 
 /* The value helpers the header declares beside the ABI. A lowering uses them
    to cross between the carrier it holds and a tagged value. */
@@ -44,6 +44,10 @@ export function isRuntimeSymbol(symbol: string): boolean {
   if (WIDE_SYMBOLS[symbol] === true) return true;
   if (TEXT_SYMBOLS[symbol] === true) return true;
   if (VALUE_HELPERS[symbol] === true) return true;
+  // The handle-taking forms of tagged services are the compiler's own bridge
+  // for lowerings that carry a value as a double; they link against the runtime
+  // even though they are not entries of its public ABI.
+  if (HANDLE_WRAPPER_SYMBOLS.includes(symbol)) return true;
   for (const item of HTTP_ABI) {
     if (String(fieldOf(item, "symbol")) === symbol) return true;
   }

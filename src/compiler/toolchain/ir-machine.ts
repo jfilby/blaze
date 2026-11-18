@@ -12393,7 +12393,10 @@ class Machine {
     // double in a vector register, while the convention passes a BlazeValue as
     // two integer words that the callee reads as a tagged value.
     const entry = callee === "map.values" ? "blaze_rt_dict_values" : callee;
-    const symbol = `${entry}_from_handle`;
+    // A service that takes a BlazeValue has a handle-taking form. Creating a
+    // dictionary takes none and already answers a handle, so its own entry is
+    // the one the machine calls.
+    const symbol = entry === "blaze_rt_dict_new" ? entry : `${entry}_from_handle`;
     this.callSymbol(symbol, held, returns);
     if (answer === "dynamic") {
       if (callee === "blaze_rt_dict_key_ref_at") {

@@ -2216,7 +2216,7 @@ function runtimeSymbolTable(): Record<string, true> {
   return symbols;
 }
 
-const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
+export const HANDLE_WRAPPER_SYMBOLS: readonly string[] = [
   "blaze_pointer_of_handle",
   "blaze_rt_array_get_from_handle",
   "blaze_rt_array_length_from_handle",
