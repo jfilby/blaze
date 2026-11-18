@@ -713,6 +713,9 @@ export function restructureHotFunction(
  */
 function selectify(fn: SemanticFunction): void {
   const entry = fn.entry;
+  // A body the program holds may be no function with an entry block: there is
+  // nothing to turn into a select when there is no answer to guard.
+  if (entry === undefined) return;
   const terminator = fieldOf(entry, "terminator");
   const answered0 = fieldOf(terminator, "value") as SemanticValue | null;
   if (terminator.k !== "return" || answered0 === null) return;
@@ -724,7 +727,7 @@ function selectify(fn: SemanticFunction): void {
   for (const statement of statements) {
     const otherwise = fieldOf(statement, "otherwise");
     const then = fieldOf(statement, "then");
-    const thenEnd = fieldOf(then, "terminator");
+    const thenEnd = fieldOf(then ?? {}, "terminator");
     if (
       statement.k === "if" &&
       otherwise === null &&
