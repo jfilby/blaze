@@ -1962,7 +1962,16 @@ function readsState(fn: TypeScriptFunction, state: ReadonlySet<string>): boolean
     },
     // A module-level number the function reads or writes is a cell, not a name:
     // the call is the read or the write of the value the program holds.
-    (name) => {
+    (name, call) => {
+      // A read of a number the module computes is rewritten to the getter
+      // before this walk sees the body. A compiled function owns no module
+      // scope, so it belongs to the program that holds the value as a name of
+      // its own. A collection is read through its getter instead: the loop
+      // walks the shape the module wrote.
+      if (name.startsWith("__value_") && state.has(name.slice("__value_".length))) {
+        const returns = fieldOf(call, "returns") as TypeExpr | undefined;
+        if (returns !== undefined && returns.kind === "primitive") found = true;
+      }
       if (
         name === "blaze_rt_global_get" ||
         name === "blaze_rt_global_set" ||
@@ -2127,7 +2136,7 @@ function callsOf(fn: TypeScriptFunction): Set<string> {
 function walkFunction(
   fn: TypeScriptFunction,
   onName: (text: string, bound: boolean) => void,
-  onCall: (name: string) => void = () => {},
+  onCall: (name: string, call: Expression) => void = () => {},
 ): void {
   // The scopes around the read, innermost last. A parameter is in every one of
   // them; a block, a loop and a catch arm add their own.
@@ -2166,7 +2175,7 @@ function walkFunction(
         read(fieldOf(expression, "base") as Expression);
         return;
       case "call":
-        onCall((fieldOf(expression, "name")));
+        onCall((fieldOf(expression, "name")), expression);
         for (const argument of (fieldOf(expression, "args") as Expression[])) read(argument);
         return;
       case "object":
@@ -3757,6 +3766,9 @@ class TypeScriptParser {
   private valueClasses = new Map<string, string>();
   /** The type each name of the function being read is held at. */
   private valueTypes = new Map<string, TypeExpr>();
+  /** The parameters bound by the function or arrow being read: a parameter is
+   * its body's own name even where the file holds a value of the same spelling. */
+  private parameterNames = new Set<string>();
   /** The arrow each name of the function being read is bound to. */
   private valueArrows = new Map<string, ArrowBinding>();
   /**
@@ -7780,6 +7792,7 @@ class TypeScriptParser {
     this.currentClass = null;
     this.valueClasses = new Map();
     this.valueTypes = new Map();
+    this.parameterNames = new Set();
     this.declaredValues = new Map();
     this.seedStateAllocations();
     this.valueShapes = new Map();
@@ -7930,6 +7943,7 @@ class TypeScriptParser {
           shape,
         });
         this.valueTypes.set(parameter.text, mapped);
+        this.parameterNames.add(parameter.text);
         if (this.pendingNote) this.pendingValues.add(parameter.text);
         else this.pendingValues.delete(parameter.text);
         if (shape !== null) this.valueShapes.set(parameter.text, shape);
@@ -21513,9 +21527,10 @@ class TypeScriptParser {
       if (slot !== null) return this.globalRead(slot);
       // A module value is read by the getter the module offers: a compiled
       // function has no environment, so the value is computed where the module
-      // wrote it and the call answers it.
+      // wrote it and the call answers it. A parameter spelled like the value
+      // is the body's own name and stays that name here.
       const getter = this.valueGetters.get(token.text);
-      if (getter !== undefined && this.peek().text !== "(") {
+      if (getter !== undefined && !this.parameterNames.has(token.text) && this.peek().text !== "(") {
         const call: Expression = { k: "call", name: getter.name, args: [], returns: getter.type };
         this.expressionTypes.set(call, getter.type);
         const shape = this.importedValueShapes.get(token.text);

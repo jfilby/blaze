@@ -341,10 +341,9 @@ test("a name a block declares is that block's, not the whole function's", async 
     "",
   ].join("\n");
   const functions = phaseOf("typescript", { "main.ts": source }, "main.ts").program.files[0]?.functions ?? {};
-  // The block's own `total` is that block's, so the file's `total` is still the
-  // value the reader reaches: through the getter the module offers for it.
-  assert.ok(functions["read"], "the reader is a function of the module");
-  assert.match(irOf("typescript", { "main.ts": source }, "main.ts", "read"), /call\[f64\] __value_total/, "the reader reads the value the file holds");
+  // The block's own `total` is that block's, so the file's `total` is read by a
+  // function of the program, which is handed the value the program holds.
+  assert.equal(functions["read"], undefined, "the function reads the value the program holds");
   assert.equal(await agreesWithNode(source), "2\n2\n");
 });
 
