@@ -221,5 +221,5 @@ test("the header of a request is written out as one literal", () => {
 });
 
 test("the needs of a program that says nothing are the default needs", () => {
-  assert.deepEqual(defaultHttpRuntimeNeeds(), { maxConnections: DEFAULT_HTTP_MAX_CONNECTIONS, tls: false });
+  assert.deepEqual({ ...defaultHttpRuntimeNeeds() }, { maxConnections: DEFAULT_HTTP_MAX_CONNECTIONS, tls: false });
 });
