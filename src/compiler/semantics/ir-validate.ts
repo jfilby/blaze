@@ -1548,11 +1548,11 @@ function typeProblems(context: Context, tree: Tree): string[] {
     // where a string is written came out as a pointer cast to a double.
     if (statement.k === "let") {
       const declared = slotType(fieldOf(statement, "slot") as SemanticSlot);
-      if (!wordHandle((fieldOf(statement, "value") as SemanticValue).type, declared) && !convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
-        problems.push(`${prefix}"${String(fieldOf(statement, "slot", ))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
+      if (!convertibleTo((fieldOf(statement, "value") as SemanticValue).type, declared)) {
+        problems.push(`${prefix}"${String(fieldOf(fieldOf(statement, "slot"), "name"))}" holds a ${typeText(declared)}, not a ${typeText((fieldOf(statement, "value") as SemanticValue).type)}`);
       }
       const reason = wideningReason(fieldOf(statement, "value") as SemanticValue, declared);
-      if (reason !== null) problems.push(`${prefix}"${String(fieldOf(statement, "slot", ))}" is written where a ${typeText(declared)} is read, and ${reason}`);
+      if (reason !== null) problems.push(`${prefix}"${String(fieldOf(fieldOf(statement, "slot"), "name"))}" is written where a ${typeText(declared)} is read, and ${reason}`);
     }
     if (statement.k === "set" && String(fieldOf(statement, "op")) === "=") {
       const slot = slots.get(String(fieldOf(statement, "name")));
