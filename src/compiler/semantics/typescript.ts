@@ -8814,6 +8814,11 @@ class TypeScriptParser {
       this.report('expected "{"', "a function body is written in braces");
       return [];
     }
+    // A nested block must not drain the rewrites an enclosing block is waiting
+    // to apply: a function declared in the outer block has calls in the outer
+    // block, and an inner loop body read before the outer block ends would
+    // otherwise rename none of them.
+    const hoistsBefore = this.hoistRewrites.length;
     // The declarations the block writes at its own level are known before its
     // statements are read: a closure written above one reads it, because the
     // binding is hoisted to the block and the closure runs after the
@@ -8860,11 +8865,11 @@ class TypeScriptParser {
       // A function declared in the block is hoisted: the statements read before
       // it call it by the name the source wrote, and the lifted function is
       // what those calls are now.
-      if (this.hoistRewrites.length > 0) {
-        for (const rewrite of this.hoistRewrites) {
+      if (this.hoistRewrites.length > hoistsBefore) {
+        for (const rewrite of this.hoistRewrites.slice(hoistsBefore)) {
           hoistCallsIn(statements, rewrite.source, rewrite.target, (fieldOf(rewrite, "captures") as readonly string[]));
         }
-        this.hoistRewrites = [];
+        this.hoistRewrites.length = hoistsBefore;
       }
     } finally {
       this.narrowed = outer;
